@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
-use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges, compose_edges_styled, compose_edges_dual_styled};
+use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
@@ -297,7 +297,7 @@ impl LivePreview {
                     scale,
                     thickness: u32::from(inputs.settings.edge_thickness),
                 };
-                let primary_key = plane_key(inputs.settings.edge_scale);
+                let primary_key = plane_key(inputs.settings.edge_settings().primary_scale());
                 let bold_key = plane_key(prunr_core::EdgeScale::Bold);
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
                 let dispatch_kind = inputs.kind;
@@ -711,8 +711,8 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 None => (inputs.original.width(), inputs.original.height()),
             };
             let (mask, built_edge) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings);
-            // SubjectOutline: dispatch to the selected ComposeMode (with dual-scale if active).
-            // EdgesOnly: plain lines-on-transparent via compose_edges.
+            // SubjectOutline: the chosen composition over the subject.
+            // EdgesOnly: the same compose over the photo, lines only.
             let (rgba, built_bold) = if let Some(ref base_arc) = masked_base {
                 dispatch_compose(
                     &mask, base_arc, &edge_settings,
@@ -720,7 +720,13 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                     (base_arc.width(), base_arc.height()),
                 )
             } else {
-                (compose_edges(&mask, &inputs.original, edge_settings.solid_line_color), EdgePlanes::default())
+                let lines_only = prunr_core::EdgeSettings { compose_mode: prunr_core::ComposeMode::LinesOnly, ..edge_settings };
+                let owned;
+                let photo = match inputs.original.as_rgba8() {
+                    Some(rgba) => rgba,
+                    None => { owned = inputs.original.to_rgba8(); &owned }
+                };
+                dispatch_compose(&mask, photo, &lines_only, inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims)
             };
             RunOutput { rgba: Some(rgba), built_edge, built_bold, built_masked_base }
         }

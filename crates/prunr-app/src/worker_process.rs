@@ -456,10 +456,7 @@ pub fn run_worker() -> ! {
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
                                 eng_ref.infer_all_tensors(&transformed).map(|res| {
-                                    let active = &res.tensors[edge.edge_scale as usize];
-                                    let rgba_image = prunr_core::finalize_edges(
-                                        active, res.height, res.width, img, &edge,
-                                    );
+                                    let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge);
                                     edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,
@@ -478,10 +475,9 @@ pub fn run_worker() -> ! {
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
                                 eng_ref.infer_all_tensors(&transformed).map(|res| {
-                                    let active = &res.tensors[edge.edge_scale as usize];
-                                    let rgba_image = prunr_core::finalize_edges(
-                                        active, res.height, res.width, img, &edge,
-                                    );
+                                    // The chained image is a cut-out: its lines compose onto it
+                                    // like any subject's, with the chosen composition and style.
+                                    let rgba_image = prunr_core::compose_subject_outline(&res, &img.to_rgba8(), &edge);
                                     edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,

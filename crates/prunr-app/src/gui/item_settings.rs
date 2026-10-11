@@ -280,9 +280,9 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
     ItemSettings { line_mode, ..ItemSettings::default() }
 }
 
-/// Rewrite item settings saved before Contrast replaced the hard
-/// threshold: an item's `threshold` (a number when it was on) becomes
-/// `contrast` at a hard edge. Only item settings are touched: each
+/// Rewrite item settings saved by older versions: a `threshold` (a
+/// number when it was on) becomes `contrast` at a hard edge, and a retired
+/// line style becomes solid. Only item settings are touched: each
 /// preset entry's `item_settings`, and a v1 preset file, which is item
 /// settings at the top (it has no `format_version`).
 pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
@@ -291,6 +291,12 @@ pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
             if old.is_number() && !map.contains_key("contrast") {
                 map.insert("contrast".into(), serde_json::json!(ItemSettings::HARD_EDGE));
             }
+        }
+        // The Chromatic and Noise line styles are gone; their lines draw solid.
+        let retired = map.get("line_style").and_then(|v| v.as_object())
+            .is_some_and(|o| o.contains_key("chromatic") || o.contains_key("noise"));
+        if retired {
+            map.insert("line_style".into(), serde_json::json!("solid"));
         }
     }
     fn walk(value: &mut serde_json::Value) {
@@ -330,6 +336,11 @@ mod tests {
         assert_eq!((hard.contrast, hard.gamma), (1.0, 1.2));
         assert_eq!(soft.contrast, 0.0);
         assert_eq!(v["brush"]["threshold"], 0.4, "a threshold outside item settings is left alone");
+
+        let mut styled = serde_json::json!({ "item_settings": { "line_style": { "noise": { "amount": 80 } } } });
+        migrate_threshold_to_contrast(&mut styled);
+        let s: ItemSettings = serde_json::from_value(styled["item_settings"].clone()).unwrap();
+        assert_eq!(s.line_style, prunr_core::LineStyle::Solid, "a retired line style loads as solid");
 
         let mut v1 = serde_json::json!({ "gamma": 1.0, "threshold": 0.5 });
         migrate_threshold_to_contrast(&mut v1);
