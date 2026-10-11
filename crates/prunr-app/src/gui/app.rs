@@ -2623,8 +2623,8 @@ impl PrunrApp {
             scale,
             thickness: u32::from(item.settings.edge_thickness),
         };
-        let cached_edge = item.cached_edge.lookup(plane_key(item.settings.edge_scale));
-        let cached_bold = item.cached_bold.lookup(plane_key(prunr_core::EdgeScale::Bold));
+        let cached_edge = item.edge_planes.lookup(plane_key(item.settings.edge_scale));
+        let cached_bold = item.edge_planes.lookup(plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
             let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
@@ -2718,11 +2718,8 @@ impl PrunrApp {
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
-                if let Some((planes, key)) = r.new_edge {
-                    item.cached_edge.store(planes, key);
-                }
-                if let Some((planes, key)) = r.new_bold {
-                    item.cached_bold.store(planes, key);
+                for (planes, key) in r.new_edge.into_iter().chain(r.new_bold) {
+                    item.edge_planes.store(planes, key);
                 }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));

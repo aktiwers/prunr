@@ -279,8 +279,7 @@ pub(crate) struct BatchItem {
     /// Live-preview cache of the active scale's edge planes (undilated and
     /// dilated, each with its key), and of the Bold scale for dual-scale
     /// styles.
-    pub(crate) cached_edge: super::live_preview::EdgePlaneCache,
-    pub(crate) cached_bold: super::live_preview::EdgePlaneCache,
+    pub(crate) edge_planes: super::live_preview::EdgePlaneCache,
     /// The selection resampled to the segmentation tensor's size, with the
     /// selection hash it came from; see `selection_plane_at`.
     pub(crate) selection_tensor_plane: Option<(Arc<prunr_core::selection::MaskArtifact>, u64)>,
@@ -399,8 +398,7 @@ impl BatchItem {
     pub(crate) fn invalidate_edge_cache(&mut self) {
         self.cached_edge_tensors = None;
         self.volatile_edge_tensor = None;
-        self.cached_edge = Default::default();
-        self.cached_bold = Default::default();
+        self.edge_planes = Default::default();
     }
 
     /// Replaces the compressed tensor and the decoded copy tied to it.
@@ -684,8 +682,7 @@ impl BatchItem {
                 if let Some(new) = edge_cache.and_then(super::worker::CompressedEdgeTensors::from_raw) {
                     self.cached_edge_tensors = Some(new);
                     self.volatile_edge_tensor = None;
-                    self.cached_edge = Default::default();
-                    self.cached_bold = Default::default();
+                    self.edge_planes = Default::default();
                 }
                 self.cached_masked_base = None;
                 // Note: we used to null `source_rgba` / `source_texture` on
@@ -836,8 +833,7 @@ impl BatchItem {
             cached_edge_tensors: None,
             volatile_edge_tensor: None,
             volatile_seg_tensor: None,
-            cached_edge: Default::default(),
-            cached_bold: Default::default(),
+            edge_planes: Default::default(),
             selection_tensor_plane: None,
             cached_masked_base: None,
             applied_preset,
@@ -950,13 +946,13 @@ mod tests {
     fn invalidate_edge_cache_clears_both_atomically() {
         let mut item = fixture_item(1);
         // Simulate populated edge caches (minimal placeholder structs).
-        item.cached_edge.dilated = Some((Arc::new(image::GrayImage::new(1, 1)), crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }));
+        item.edge_planes.store(crate::gui::live_preview::EdgePlanes { base: None, dilated: Some(Arc::new(image::GrayImage::new(1, 1))) }, crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 });
         // (cached_edge_tensors would need a real CompressedEdgeTensors — leave None
         // here; the method should still run cleanly and clear the planes.)
-        assert!(item.cached_edge.dilated.is_some());
+        assert!(!item.edge_planes.is_empty());
         item.invalidate_edge_cache();
         assert!(item.cached_edge_tensors.is_none());
-        assert!(item.cached_edge.dilated.is_none());
+        assert!(item.edge_planes.is_empty());
     }
 
     #[test]

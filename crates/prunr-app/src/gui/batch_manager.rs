@@ -796,7 +796,7 @@ mod tests {
     fn evict_all_tensors_clears_edge_cache_too() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 100);
-        item.cached_edge.dilated = Some((Arc::new(image::GrayImage::new(1, 1)), crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 }));
+        item.edge_planes.store(crate::gui::live_preview::EdgePlanes { base: None, dilated: Some(Arc::new(image::GrayImage::new(1, 1))) }, crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 });
         bm.items.push(item);
         bm.items.push(item_with_cache(2, 100));
         bm.selected_index = 1; // selected = id=2
@@ -805,7 +805,7 @@ mod tests {
 
         // item id=1 (non-selected) gets BOTH caches cleared.
         assert!(bm.items[0].cached_tensor.is_none());
-        assert!(bm.items[0].cached_edge.dilated.is_none());
+        assert!(bm.items[0].edge_planes.is_empty());
         assert!(bm.items[0].cached_edge_tensors.is_none());
     }
 
