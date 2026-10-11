@@ -5,7 +5,7 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT,
+    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
 };
 use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
@@ -144,24 +144,24 @@ fn render_quality_chip(
 fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let pop_id = egui::Id::new("eraser_prompt_popover");
     let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.is_empty()),
+        chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.trim().is_empty()),
         "Prompt",
-        "Describe what should fill the painted area. Leave it empty for a plain fill, which can look noisy on flat areas.",
+        "Describe what should fill the painted area. Empty continues the surroundings.",
         None,
     );
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
-        let already_default = brush.sd_prompt == DEFAULT_SD_PROMPT
+        let already_default = brush.sd_prompt.is_empty()
             && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT;
-        if chip::popover_header(ui, "Prompt", Some(("Back to the shipped prompt and negative prompt", already_default))) {
-            brush.sd_prompt = DEFAULT_SD_PROMPT.to_string();
+        if chip::popover_header(ui, "Prompt", Some(("Clear the prompt and restore the shipped negative prompt", already_default))) {
+            brush.sd_prompt.clear();
             brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
             changed = true;
         }
         let p = ui.add(
             egui::TextEdit::multiline(&mut brush.sd_prompt)
-                .hint_text("e.g. wooden park bench in autumn forest")
+                .hint_text("Empty: continue the surroundings")
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
