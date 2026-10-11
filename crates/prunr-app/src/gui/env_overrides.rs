@@ -103,7 +103,6 @@ fn read_bg_effect(var: &str) -> Option<BgEffect> {
     let s = std::env::var(var).ok()?;
     match s.trim().to_ascii_lowercase().as_str() {
         "none" => Some(BgEffect::None),
-        "inverted" | "inverted_source" => Some(BgEffect::InvertedSource),
         "desaturated" | "desaturated_source" => Some(BgEffect::DesaturatedSource),
         // BlurredSource{radius} not exposed — needs a parameter; defer.
         _ => None,
