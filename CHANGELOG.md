@@ -60,6 +60,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Lines no longer mix modes: in Full a Pre-filter change no longer produces a subject outline, and going Full → Off → Subject traces the subject again instead of reusing lines from the whole photo.
 - Compare after an upscale shows the original at the result's size instead of a quarter of it, and the B key follows the same rule as the button.
 - The model chip's hint describes the selected kind of model; it said LaMa for every eraser and talked about Sketch with No model selected.
 - The Mask Feather is continuous: values under half a pixel used to do nothing and the rest moved in whole-pixel steps.

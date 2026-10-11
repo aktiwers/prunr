@@ -1699,7 +1699,9 @@ impl PrunrApp {
                     tiers.tier1.insert(item.id);
                 }
                 RequiredTier::AddEdgeInference => {
-                    if item.cached_tensor.is_some() {
+                    // Adding lines composes them onto the cached cut-out, so
+                    // only a run that uses one (Subject) may; Full redraws.
+                    if item.cached_tensor.is_some() && current_recipe.inference.uses_segmentation {
                         tiers.tier_add_edge.insert(item.id);
                     } else {
                         tiers.tier1.insert(item.id);
@@ -4397,6 +4399,25 @@ mod timeline_contract_tests {
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
+    }
+
+    /// A Full-lines run draws on the whole photo: a Pre-filter change must
+    /// run the lines again, never compose them onto a cut-out left in the
+    /// cache by an earlier Off run.
+    #[test]
+    fn a_full_lines_rerun_never_composes_onto_an_old_cutout() {
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        let item = &mut app.batch.items[0];
+        item.record_origin(Engine::Segment, None);
+        item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
+        item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+        item.settings.input_transform = prunr_core::InputTransform::Grayscale;
+        let ids = std::collections::HashSet::from([1]);
+        let tiers = app.classify_candidates(&ids, prunr_core::ModelKind::Silueta);
+        assert!(tiers.tier_add_edge.is_empty(), "no lines composed onto the cached cut-out");
+        assert!(tiers.tier1.contains(&1), "the lines run again on the whole photo");
     }
 
     /// An erase lands as one step that shows the filled image without its

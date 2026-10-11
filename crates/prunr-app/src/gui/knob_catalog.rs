@@ -397,7 +397,9 @@ pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
         (Off, EdgesOnly) => s(FullPipeline, EdgeCache, SubprocessFullPipeline),
         (SubjectOutline, Off) => s(MaskRerun, Nothing, LivePreviewMask),
         (SubjectOutline, EdgesOnly) => s(FullPipeline, EdgeCache, SubprocessFullPipeline),
-        (EdgesOnly, Off) => s(FullPipeline, Nothing, SubprocessFullPipeline),
+        // The cached lines were traced from the whole photo; Subject later
+        // must not reuse them.
+        (EdgesOnly, Off) => s(FullPipeline, EdgeCache, SubprocessFullPipeline),
         (EdgesOnly, SubjectOutline) => s(FullPipeline, EdgeCache, SubprocessFullPipeline),
     }
 }
@@ -660,7 +662,7 @@ mod tests {
             (Off, EdgesOnly, false, EdgeCache, SubprocessFullPipeline),
             (SubjectOutline, Off, false, Nothing, LivePreviewMask),
             (SubjectOutline, EdgesOnly, false, EdgeCache, SubprocessFullPipeline),
-            (EdgesOnly, Off, false, Nothing, SubprocessFullPipeline),
+            (EdgesOnly, Off, false, EdgeCache, SubprocessFullPipeline),
             (EdgesOnly, SubjectOutline, false, EdgeCache, SubprocessFullPipeline),
         ];
         for (old, new, cached, cache, dispatch) in cases {
