@@ -1057,8 +1057,6 @@ impl PrunrApp {
             sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
             sd_seed: bs.sd_seed,
-            sd_strength: bs.sd_strength,
-            sd_use_karras_sigmas: bs.sd_use_karras_sigmas,
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,

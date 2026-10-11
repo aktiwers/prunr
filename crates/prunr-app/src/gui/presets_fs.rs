@@ -728,14 +728,14 @@ mod tests {
         let path = dir.path().join("Foo.json");
 
         let lcm_bundle = SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 8, guidance_scale: 1.5,
         };
         let ddim_bundle_old = SdSchedulerBundle {
-            steps: 20, guidance_scale: 7.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 20, guidance_scale: 7.5,
         };
         let mut schedulers_seed = HashMap::new();
         schedulers_seed.insert(SdScheduler::Lcm, lcm_bundle);
-        schedulers_seed.insert(SdScheduler::Ddim, ddim_bundle_old);
+        schedulers_seed.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_old);
         let seed_sd = SdPreset {
             prompt: "old".into(),
             negative_prompt: "old-neg".into(),
@@ -754,16 +754,16 @@ mod tests {
 
         // Save-merge: caller only touched DDIM. LCM must survive.
         let ddim_bundle_new = SdSchedulerBundle {
-            steps: 30, guidance_scale: 8.0, use_karras_sigmas: true, strength: 0.85,
+            steps: 30, guidance_scale: 8.0,
         };
         let mut new_schedulers = HashMap::new();
-        new_schedulers.insert(SdScheduler::Ddim, ddim_bundle_new);
+        new_schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_new);
         let new_sd = SdPreset {
             prompt: "new".into(),
             negative_prompt: "new-neg".into(),
             use_taesd: Some(true),
             seed: Some(99),
-            active_scheduler: SdScheduler::Ddim,
+            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             schedulers: new_schedulers,
         };
         let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
@@ -783,11 +783,11 @@ mod tests {
         // it, with no silent rewrite. (Cross-MODEL preservation is
         // pinned by `save_merged_preserves_other_model_entries`.)
         assert_eq!(
-            sd_back.schedulers.get(&SdScheduler::Ddim).copied(),
+            sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied(),
             Some(ddim_bundle_new),
-            "Ddim bundle equals the freshly-merged values",
+            "Quality bundle equals the freshly-merged values",
         );
-        assert_eq!(sd_back.active_scheduler, SdScheduler::Ddim);
+        assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(sd_back.prompt, "new");
         assert_eq!(sd_back.negative_prompt, "new-neg");
         assert_eq!(sd_back.use_taesd, Some(true));
@@ -884,9 +884,7 @@ mod tests {
         base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
         base.sd_steps = 17;
         base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::Ddim;
-        base.sd_use_karras_sigmas = true;
-        base.sd_strength = 0.66;
+        base.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
         base.sd_seed = Some(13579);
         base.sd_use_taesd = Some(true);
 
