@@ -244,3 +244,26 @@ fn the_sketch_flyout_names_every_control_in_every_mode() {
         }
     }
 }
+
+/// The Background flyout names every control for each choice it can show.
+#[test]
+fn the_background_flyout_names_every_control_for_each_choice() {
+    use super::tree_tests::assert_all_controls_named;
+    use prunr_core::BgEffect;
+    let set: [(&str, fn(&mut crate::gui::item::BatchItem)); 6] = [
+        ("transparent", |_| {}),
+        ("solid", |i| i.settings.bg = Some([10, 20, 30, 255])),
+        ("image", |i| i.set_bg_image(image::DynamicImage::new_rgba8(4, 4), None)),
+        ("blurred", |i| i.settings.bg_effect = BgEffect::BlurredSource { radius: 5 }),
+        ("inverted", |i| i.settings.bg_effect = BgEffect::InvertedSource),
+        ("black and white", |i| i.settings.bg_effect = BgEffect::DesaturatedSource),
+    ];
+    for (name, apply) in set {
+        let mut h = loaded();
+        apply(&mut h.state_mut().batch.items[0]);
+        settle(&mut h);
+        click(&mut h, "Background");
+        assert!(egui::Popup::is_any_open(&h.ctx), "{name}: the Background flyout opened");
+        assert_all_controls_named(&h, &format!("background flyout, {name}"));
+    }
+}
