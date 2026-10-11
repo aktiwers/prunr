@@ -473,7 +473,7 @@ fn sam_request(
         prompt,
         mode,
         source_dims,
-        confidence: app.settings.brush.magic_confidence_threshold,
+        reading: app.settings.brush.magic_reading(),
     }
 }
 

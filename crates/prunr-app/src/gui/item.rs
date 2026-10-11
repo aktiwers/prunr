@@ -364,7 +364,7 @@ pub(crate) struct LastDecode {
     pub(crate) mode: prunr_core::selection::BrushMode,
     /// The selection hash the stroke committed.
     pub(crate) committed_hash: u64,
-    pub(crate) confidence: f32,
+    pub(crate) reading: prunr_core::MaskReading,
 }
 
 /// A selection overlay texture and what it was built from. `shown` is

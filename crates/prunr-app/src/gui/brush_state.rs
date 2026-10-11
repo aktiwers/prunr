@@ -110,6 +110,10 @@ pub struct BrushSettings {
     /// BrushSettings like the other per-tool knobs.
     #[serde(default = "default_magic_confidence_threshold")]
     pub magic_confidence_threshold: f32,
+    /// Magic Brush only: drop specks and fill pinholes in what the model
+    /// returns.
+    #[serde(default = "default_magic_remove_specks")]
+    pub magic_remove_specks: bool,
 }
 
 /// SD eraser scheduler choice. Wired into `SdInpaintRequest` at
@@ -366,6 +370,7 @@ fn default_outline_thickness() -> f32 { 2.0 }
 fn default_outline_opacity() -> f32 { 1.0 }
 fn default_fill_opacity() -> f32 { 0.15 }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
+fn default_magic_remove_specks() -> bool { true }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
 /// 2.0 per Diffusers LCM guidance — community consensus is values
 /// \>2.0 degrade LCM output quality). For Standard SD via DDIM /
@@ -445,6 +450,11 @@ impl BrushSettings {
         self.radius = next.round().clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end());
     }
 
+    /// How Magic Brush reads the model's output under these settings.
+    pub fn magic_reading(&self) -> prunr_core::MaskReading {
+        prunr_core::MaskReading { confidence: self.magic_confidence_threshold, remove_specks: self.magic_remove_specks }
+    }
+
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
         self.radius = source.radius;
         self.hardness = source.hardness;
@@ -480,6 +490,7 @@ impl Default for BrushSettings {
             outline_opacity: default_outline_opacity(),
             fill_opacity: default_fill_opacity(),
             magic_confidence_threshold: default_magic_confidence_threshold(),
+            magic_remove_specks: default_magic_remove_specks(),
         }
     }
 }
@@ -1009,6 +1020,7 @@ mod tests {
             outline_opacity: 0.5,
             fill_opacity: 0.8,
             magic_confidence_threshold: 0.7,
+            magic_remove_specks: false,
         };
         s.reset_popover_fields_from(&BrushSettings::default());
 
