@@ -192,40 +192,7 @@ fn tensor_to_mask_core(
         (v * 255.0) as u8
     };
 
-    if let Some(corr) = correction {
-        // Brush correction needs the [0, 1] f32 buffer alive for the
-        // multiplicative apply step.
-        let mut normalized: Vec<f32> = if let Some(uv) = uniform_val {
-            vec![uv; sw * sh]
-        } else if sw * sh >= ROW_PAR_THRESHOLD {
-            let mut buf = vec![0.0f32; sw * sh];
-            buf.par_iter_mut()
-                .zip(pred_slice.par_iter())
-                .for_each(|(dst, &src)| {
-                    *dst = normalize(src);
-                });
-            buf
-        } else {
-            let mut buf = vec![0.0f32; sw * sh];
-            for i in 0..sh * sw {
-                buf[i] = normalize(pred_slice[i]);
-            }
-            buf
-        };
-        corr.apply_to_mask(&mut normalized, sw, sh);
-        if sw * sh >= ROW_PAR_THRESHOLD {
-            mask_buf
-                .par_iter_mut()
-                .zip(normalized.par_iter())
-                .for_each(|(dst, &src)| {
-                    *dst = finalise(src);
-                });
-        } else {
-            for i in 0..sh * sw {
-                mask_buf[i] = finalise(normalized[i]);
-            }
-        }
-    } else if let Some(uv) = uniform_val {
+    if let Some(uv) = uniform_val {
         mask_buf.fill(finalise(uv));
     } else if sw * sh >= ROW_PAR_THRESHOLD {
         // Fused walk skips a ~410 KB f32 scratch (4 MB at BiRefNet 1024²)
@@ -269,6 +236,12 @@ fn tensor_to_mask_core(
     // Running feather first and then refine would have them fight each other.
     if mask_settings.feather >= 0.1 {
         feather_mask(&mut mask, mask_settings.feather);
+    }
+
+    // Strokes go last, at full resolution: they are exact intent, and
+    // refining or feathering them would pull them onto nearby edges.
+    if let Some(corr) = correction {
+        corr.apply_to_alpha(&mut mask, ow as usize, oh as usize);
     }
 
     mask
@@ -849,6 +822,30 @@ mod tests {
         // effect). The 1/255 residue is imperceptible.
         assert!(center_after <= 1, "subtract stroke should drive painted pixel to ~0, got {}", center_after);
         assert_eq!(edge_after, baseline.get_pixel(10, 10)[0], "untouched pixels should match baseline");
+    }
+
+    /// A stroke is the user's exact intent: it lands pixel for pixel where
+    /// it was painted, after edge refinement, which would otherwise pull
+    /// its outline onto nearby image edges.
+    #[test]
+    fn a_stroke_lands_exactly_where_painted_even_with_refined_edges() {
+        let (w, h) = (64u32, 64u32);
+        let tensor = Array4::from_shape_fn((1, 1, 16, 16), |(_, _, y, _)| if y < 4 { 10.0 } else { -10.0 });
+        let original = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, _| if x < 32 { Rgb([10, 10, 10]) } else { Rgb([240, 240, 240]) }));
+        let mask_settings = MaskSettings { refine_edges: true, ..MaskSettings::default() };
+        let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
+        let block = |x: u32, y: u32| (10..50).contains(&x) && (42..56).contains(&y);
+        let cells = (0..w * h).map(|i| if block(i % w, i / w) { crate::selection::FULL } else { 0 }).collect();
+        let restore = MaskArtifact::from_cells(w, h, cells);
+
+        let mask = tensor_to_mask(tensor.view(), &original, &opts.with_correction(Some(&restore)));
+
+        for y in 36..62 {
+            for x in 0..w {
+                let expected = if block(x, y) { 255 } else { 0 };
+                assert_eq!(mask.get_pixel(x, y)[0], expected, "pixel ({x}, {y})");
+            }
+        }
     }
 
     #[test]
