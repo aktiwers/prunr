@@ -185,7 +185,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let facts = super::tool_strip::StripFacts {
             is_inpaint: app.settings.model.is_inpaint(),
             encoder_pending: app.magic_brush_preparing(),
-            apply: app.settings.model.is_inpaint().then_some(app.strokes_waiting_for_apply()),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
         app.apply_brush_change(change);

@@ -212,19 +212,3 @@ fn escape_closes_a_modal_before_touching_the_selection() {
     settle(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
-
-
-#[test]
-fn the_strip_offers_apply_for_the_erasers_region() {
-    use super::tree_tests::names;
-    let mut h = loaded();
-    {
-        let app = h.state_mut();
-        app.settings.model = crate::gui::settings::SettingsModel::Inpaint;
-        app.brush_state.toggle();
-        app.batch.items[0].selection_mask =
-            Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
-    }
-    settle(&mut h);
-    assert!(names(&h).iter().any(|n| n == "Apply strokes"), "{:?}", names(&h));
-}

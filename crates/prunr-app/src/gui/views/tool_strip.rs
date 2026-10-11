@@ -6,7 +6,6 @@ use egui_material_icons::icons::ICON_MORE_HORIZ;
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
 use crate::gui::theme;
-use crate::gui::views::shortcuts::Action;
 
 use super::brush_chip::{self, BrushChipOutcome, BRUSH_SHAPES};
 use super::{chip, fmt, magic_brush_chip};
@@ -44,9 +43,6 @@ impl Tool {
 pub(crate) struct StripFacts {
     pub is_inpaint: bool,
     pub encoder_pending: bool,
-    /// The eraser shows Apply strokes, enabled while a region waits.
-    /// Always present there, so the strip never changes width mid-drag.
-    pub apply: Option<bool>,
 }
 
 pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
@@ -68,12 +64,6 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         Tool::Paint => paint_knobs(ui, brush, facts.is_inpaint),
                         Tool::Magic => magic_knobs(ui, brush, facts.is_inpaint),
                     };
-                    if let Some(enabled) = facts.apply {
-                        ui.separator();
-                        let apply = ui.add_enabled_ui(enabled, |ui| chip::button(ui, chip::ButtonKind::Primary, "Apply strokes")).inner;
-                        let apply = chip::tooltip(apply, "Apply strokes", "Erase the painted region.", Some(Action::Process));
-                        change.apply_requested |= apply.clicked();
-                    }
                     ui.separator();
                     let dots = chip::tooltip(
                         chip::icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, theme::BG_SECONDARY),
