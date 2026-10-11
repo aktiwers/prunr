@@ -67,3 +67,32 @@ fn terminate_aborts_a_running_tile() {
     );
     assert!(matches!(result, Err(CoreError::Cancelled)), "expected Cancelled, got {result:?}");
 }
+
+/// Wall-clock of a whole 1024² upscale, the other side of the tile-size
+/// trade: smaller tiles cancel sooner and cost more overlap. Run with
+///   cargo test -p prunr-core --test upscale_cancel_latency full_run -- --ignored --nocapture
+#[test]
+#[ignore = "needs an installed upscale model and measures wall-clock"]
+fn full_run_time() {
+    if skip_if_no_ort("upscale_full_run") {
+        return;
+    }
+    let (id, kind) = (ModelId::FourXNmkdSiaxCx, ModelKind::FourXNmkdSiaxCx);
+    if !is_available(id) {
+        eprintln!("SKIP: {id:?} not installed");
+        return;
+    }
+    let descriptor = prunr_models::descriptor(id).expect("registry entry");
+    let engine = OrtEngine::new_with_optimization_level(kind, 2, pick_optimization_level(descriptor)).expect("engine");
+    let input = image::RgbaImage::from_fn(1024, 1024, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+    });
+    let started = Instant::now();
+    let tiles = std::sync::atomic::AtomicU32::new(0);
+    let out = upscale_rgba_with_engine(&input, &engine, id, 4, |_, total| { tiles.store(total, Ordering::Relaxed); }, None, None)
+        .expect("upscale");
+    eprintln!(
+        "{} on {}: {} tiles in {:?}",
+        out.width(), engine.active_provider(), tiles.load(Ordering::Relaxed), started.elapsed()
+    );
+}

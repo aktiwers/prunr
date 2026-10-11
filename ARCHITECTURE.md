@@ -336,7 +336,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 - **Alpha** bypasses the 3-channel model. It is Lanczos3-resampled from the source and recombined at the end.
 - **Output scale.** The model runs at its native scale, and `fit_to_scale` Lanczos3-resamples to the requested 2×, 3× or 4× whenever the two differ. 4× two-pass chains x2plus twice and is offered only on Real-ESRGAN x4plus once x2plus is installed.
 - **Knobs.** Denoise and Brightness lift run before the model, so changing either is an `UpscaleRerun`: live preview refuses it, and the user commits with Process. Sharpen (default 0.2), AI blend (toward a cached CatmullRom resize), Saturation and Color match run after the model as `UpscaleTier2` and preview live on the cached output.
-- **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms; OpenVINO checks only between tiles.
+- **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms. OpenVINO checks only between tiles, so its tiles are capped at 256: on an HD 530 a cancel lands in 11 s instead of 51 s, for 5 % more run time.
 - **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
 
 ## Edge Detection (DexiNed)
