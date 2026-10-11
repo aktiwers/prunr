@@ -11,7 +11,7 @@ use egui::{Color32, Painter, Pos2, Rect, TextureId};
 use crate::gui::theme;
 
 /// Seconds a new result takes to reveal.
-pub(crate) const REVEAL_SECS: f64 = 0.9;
+pub(crate) const REVEAL_SECS: f64 = 0.6;
 
 /// The whole texture, for `Painter::image`.
 pub(crate) const UNIT_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
