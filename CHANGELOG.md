@@ -59,6 +59,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Compare after an upscale shows the original at the result's size instead of a quarter of it, and the B key follows the same rule as the button.
+- The model chip's hint describes the selected kind of model; it said LaMa for every eraser and talked about Sketch with No model selected.
 - The Mask Feather is continuous: values under half a pixel used to do nothing and the rest moved in whole-pixel steps.
 - A Sketch "Full" result is no longer replaced by a cut-out when a Mask setting differs from its default, and a settings change on an eraser or upscale result no longer paints the original photo over it.
 - Feather softens what the brushes do to a cut-out, not only Delete / Copy / Cut, and brush edits keep their edge at full resolution instead of following the model's coarser grid. The selection on the image now shows feathered edges and strokes under 50 % opacity.

@@ -316,7 +316,7 @@ impl PrunrApp {
                 }
             }
             Action::BeforeAfter => {
-                if app_state == AppState::Done {
+                if self.can_compare_intent() {
                     self.show_original = !self.show_original;
                 }
             }
@@ -978,6 +978,12 @@ impl PrunrApp {
     /// Selection actions act on the latest result or, before processing,
     /// on the source. Shared by the action bar, the keyboard shortcuts and
     /// the actions themselves.
+    /// Compare shows the original in place of a result, so it needs one.
+    /// The toolbar button and the B key both read this.
+    pub(crate) fn can_compare_intent(&self) -> bool {
+        self.batch.selected_item().is_some_and(|i| i.has_result())
+    }
+
     pub(crate) fn can_selection_action(&self) -> bool {
         shows(self.settings.model, Surface::Brushes)
             && self.batch.selected_item().is_some_and(|i| {
@@ -3592,6 +3598,7 @@ impl PrunrApp {
             .exact_size(height)
             .frame(panel_frame)
             .show_inside(ui, |ui| {
+                let can_compare = self.can_compare_intent();
                 // Split borrow: app.settings and app.batch are disjoint
                 // fields of PrunrApp, and within the batch item its
                 // `settings` and `applied_preset` are disjoint fields too.
@@ -3622,7 +3629,7 @@ impl PrunrApp {
                     has_selection: item.selection_mask.is_some(),
                     installed: self.hardware_install_cache,
                     show_original: self.show_original,
-                    has_result: item.has_result(),
+                    has_result: can_compare,
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
