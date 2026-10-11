@@ -140,12 +140,19 @@ fn the_tool_strip_follows_the_magic_brush() {
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Size", "Confidence", "Circle", "Square", "Line", "More Magic Brush settings"] {
+    for knob in ["Confidence", "More Magic Brush settings"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
+    }
+    // Magic Brush picks objects; size, hardness and shape would change nothing.
+    for knob in ["Size", "Hardness", "Circle", "Square", "Line"] {
+        assert!(!present.iter().any(|n| n == knob), "{knob} on the Magic Brush strip: {present:?}");
     }
     assert_all_controls_named(&h, "magic brush strip");
     click(&mut h, "More Magic Brush settings");
     assert!(egui::Popup::is_any_open(&h.ctx));
+    let panel = names(&h);
+    assert!(!panel.iter().any(|n| n == "Size" || n == "Hardness"), "{panel:?}");
+    assert!(panel.iter().any(|n| n == "Remove specks"), "{panel:?}");
     assert_all_controls_named(&h, "magic brush panel");
 }
 
