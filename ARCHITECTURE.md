@@ -57,7 +57,7 @@ Every popover, panel and dialog is one of five kinds, chosen by how the user wor
 | Kind | Mechanism | Used for |
 |---|---|---|
 | Tool strip | `egui::Area` over the canvas top while a brush is on; the tool's toggle removes it | Knobs touched every stroke (mode, size, hardness or confidence, opacity or expand/blend) |
-| Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Lines, Fill style, Background, Refine, the strip's full panels |
+| Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Sketch, Effect, Background, Refine, the strip's full panels |
 | Popover | `chip::popup_for`; a click outside or a pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
 | Modal | `theme::standard_modal_window`, listed in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, help references, Save preset |
 | Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, toasts |
