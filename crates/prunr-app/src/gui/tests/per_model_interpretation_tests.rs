@@ -417,6 +417,50 @@ fn a_chain_mode_stroke_undo_brings_the_archived_result_back() {
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == recut), "redo restores the re-cut");
 }
 
+/// A Process run that lands with the selection kept applies it within
+/// the run's own step. Undo then walks back exactly: first the run, to
+/// the corrected image it replaced (selection still on), then the stroke,
+/// to the image before it. Re-cutting the landed result as if it were a
+/// fresh stroke archived the raw cut and re-marked the old stroke, so the
+/// first undo showed the raw cut under a selection it no longer matched.
+#[test]
+fn a_process_run_with_a_kept_selection_undoes_in_order() {
+    use crate::gui::history_manager::HistoryManager;
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
+    let mut app = app_with_model(SettingsModel::BiRefNetLite);
+    app.settings.chain_mode = true;
+    let item = push_test_item(&mut app, 9);
+    item.dimensions = (8, 8);
+    item.status = crate::gui::item::BatchStatus::Done;
+    item.source_rgba = Some(Arc::new(px(0)));
+    item.result_rgba = Some(Arc::new(px(1)));
+    give_tensor(item);
+
+    app.commit_selection_and_dispatch(9, make_mask(8, 8));
+    app.batch.items[0].result_rgba = Some(Arc::new(px(2))); // the stroke's re-cut
+
+    // Process: archive the current result, then the run lands raw.
+    HistoryManager::archive_current_result(&mut app.batch.items[0], 10, true);
+    app.batch.items[0].status = crate::gui::item::BatchStatus::Processing;
+    app.batch.items[0].result_rgba = Some(Arc::new(px(3)));
+    app.batch.items[0].status = crate::gui::item::BatchStatus::Done;
+    app.apply_kept_selection_to_new_result(9);
+    assert!(app.processor.live_preview.is_pending_for(9), "the kept selection re-cuts the new result");
+    app.batch.items[0].result_rgba = Some(Arc::new(px(4))); // that re-cut lands
+
+    app.handle_undo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(2)), "undoing the run brings back the corrected image it replaced");
+    assert!(item.selection_mask.is_some(), "the selection belongs to the stroke, not the run");
+
+    app.handle_undo(&ctx);
+    let item = &app.batch.items[0];
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "undoing the stroke brings back the image before it");
+    assert!(item.selection_mask.is_none());
+}
+
 /// Undoing back to the original keeps the model output cached; a stroke
 /// there edits the selection only and must not re-cut, which would bring
 /// the undone result back.
