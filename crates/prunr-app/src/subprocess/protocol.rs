@@ -204,25 +204,6 @@ pub enum SubprocessEvent {
         item_id: u64,
         error: String,
     },
-    /// Per-step progress during a long inpaint stroke. Fired between
-    /// SD UNet steps; `total = num_inference_steps`. LaMa / MI-GAN
-    /// don't fire this (single-pass, sub-second on GPU).
-    ///
-    /// `outer_current` / `outer_total` carry the tile-of-stroke counter
-    /// for SD inpaints that split a long stroke into multiple 512²
-    /// patches. `outer_total == 0` means single-tile (no nesting) —
-    /// inner is the full picture, same as the original 3-field shape.
-    /// Reading code that needs the legacy `(current, total)` pair
-    /// ignores the outer fields when `outer_total == 0`.
-    InpaintProgress {
-        item_id: u64,
-        current: u32,
-        total: u32,
-        #[serde(default)]
-        outer_current: u32,
-        #[serde(default)]
-        outer_total: u32,
-    },
     /// Current RSS of the subprocess (sent after each image).
     RssUpdate {
         rss_bytes: u64,
@@ -710,23 +691,6 @@ mod tests {
         p.step(prunr_core::Step::FindingSubject);
         assert_eq!(rx.try_recv().unwrap(), SubprocessEvent::Report {
             item_id: 4, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject),
-        });
-    }
-
-    #[test]
-    fn event_inpaint_progress_roundtrip() {
-        roundtrip(&SubprocessEvent::InpaintProgress {
-            item_id: 12, current: 0, total: 20, outer_current: 0, outer_total: 0,
-        });
-        roundtrip(&SubprocessEvent::InpaintProgress {
-            item_id: 12, current: 7, total: 20, outer_current: 0, outer_total: 0,
-        });
-        roundtrip(&SubprocessEvent::InpaintProgress {
-            item_id: 12, current: 20, total: 20, outer_current: 0, outer_total: 0,
-        });
-        // Multi-tile stroke: outer dimensions populated.
-        roundtrip(&SubprocessEvent::InpaintProgress {
-            item_id: 12, current: 5, total: 8, outer_current: 2, outer_total: 3,
         });
     }
 

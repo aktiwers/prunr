@@ -202,17 +202,6 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
     }
 }
 
-/// Pure predicate for the inpaint-progress pump: should we emit
-/// a new `InpaintProgress` event given the previous and current
-/// signatures? Signature is `(inner_current, outer_current)`.
-/// Returns true when EITHER dimension advanced — a tile boundary
-/// (inner resets to 0, outer bumps) lands as a single observable
-/// transition. Extracted as a free function so the contract can
-/// be unit-tested without standing up the pump thread.
-fn pump_signature_advanced(prev: (u32, u32), curr: (u32, u32)) -> bool {
-    prev != curr
-}
-
 /// Entry point for `prunr --worker`.
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
@@ -955,17 +944,14 @@ pub fn run_worker() -> ! {
                 let evt_tx = evt_tx.clone();
                 let inpaint_cancels = cancel_flags.clone();
                 let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
-                let inpaint_progress = Arc::new(prunr_core::inpaint::InpaintProgress::new());
-                let progress_for_pump = inpaint_progress.clone();
-                let evt_tx_for_pump = evt_tx.clone();
-                let pump_done = Arc::new(AtomicBool::new(false));
-                let pump_done_for_thread = pump_done.clone();
+                // Reports go out on this stroke's own thread, ahead of its
+                // InpaintDone on the same channel.
+                let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(inpaint_cancel.clone());
                 let in_flight_for_thread = in_flight.clone();
                 // Clones reserved for the spawn-failure unwind path
                 // — the closure below moves the originals.
                 let evt_tx_on_spawn_err = evt_tx.clone();
                 let inpaint_cancels_on_err = inpaint_cancels.clone();
-                let pump_done_on_err = pump_done.clone();
                 // Pre-clone the parent-written PNG paths so the spawn-
                 // failure path can delete them. Without this, a thread-
                 // exhaustion error left ~20 MB of `inpaint-img-*` /
@@ -980,45 +966,13 @@ pub fn run_worker() -> ! {
                 // the CHILD's pid, leaking an orphan dir per spawn (no
                 // cleanup ever sweeps it because the child exits).
                 let ipc_dir_for_spawn = ipc_dir.clone();
-                // Progress pump: 4 Hz poll matches SD's per-step cadence on
-                // CPU (1-3 s/step). Acquire reads pair with the worker's
-                // Release writes in `process_inpaint_with`.
-                let pump_handle = std::thread::spawn(move || {
-                    let mut last_signature: (u32, u32) = (u32::MAX, u32::MAX);
-                    loop {
-                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
-                        let ((outer_current, outer_total), (current, total)) =
-                            progress_for_pump.read_nested();
-                        // Re-check after the read but before the send. Without
-                        // this, the worker could flip pump_done between the
-                        // top-of-loop check and the send, putting an
-                        // `InpaintProgress` on the wire AHEAD of the
-                        // `InpaintDone` the worker is about to send. The
-                        // Cleanup::drop's `join()` blocks until this iteration
-                        // finishes, so the pre-send re-check is the only way
-                        // to honour the "no Progress after Done" invariant
-                        // documented above.
-                        if pump_done_for_thread.load(Ordering::Acquire) { break; }
-                        let signature = (current, outer_current);
-                        if pump_signature_advanced(last_signature, signature) {
-                            let _ = evt_tx_for_pump.send(SubprocessEvent::InpaintProgress {
-                                item_id, current, total, outer_current, outer_total,
-                            });
-                            last_signature = signature;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                    }
-                });
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
                     .spawn(move || {
-                    // RAII guard: stops pump + clears registry + decrements
-                    // in_flight on Drop. Runs even if the inference closure
-                    // panics — without this the pump thread loops forever
-                    // holding evt_tx and the parent's cancel flag is never
-                    // reclaimed. Joining the pump before any final send
-                    // closes the "stale Progress after Done" race: pump
-                    // can't be mid-iteration when InpaintDone goes on the wire.
+                    // RAII guard: clears the cancel registry and decrements
+                    // in_flight on Drop, even if the inference closure
+                    // panics; otherwise the parent's cancel flag is never
+                    // reclaimed.
                     //
                     // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
                     // so a `Shutdown` waiting on `in_flight == 0` never
@@ -1035,17 +989,11 @@ pub fn run_worker() -> ! {
                     // can't insert a fresh flag between the body's remove and
                     // the guard's drop — no accidental re-registration.
                     struct Cleanup {
-                        pump_done: Arc<AtomicBool>,
-                        pump_handle: Option<std::thread::JoinHandle<()>>,
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
                         cancel_guard: CancelMapGuard,
                     }
                     impl Drop for Cleanup {
                         fn drop(&mut self) {
-                            self.pump_done.store(true, Ordering::Release);
-                            if let Some(h) = self.pump_handle.take() {
-                                let _ = h.join();
-                            }
                             self.cancel_guard.map.lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .remove(&self.cancel_guard.item_id);
@@ -1053,8 +1001,6 @@ pub fn run_worker() -> ! {
                         }
                     }
                     let _cleanup = Cleanup {
-                        pump_done: pump_done.clone(),
-                        pump_handle: Some(pump_handle),
                         in_flight: in_flight_for_thread,
                         cancel_guard: CancelMapGuard {
                             item_id,
@@ -1083,18 +1029,14 @@ pub fn run_worker() -> ! {
                                 .map_err(|e| format!("decode mask: {e}"))?
                                 .to_luma8()
                         };
-                        let hooks = prunr_core::inpaint::InpaintHooks {
-                            cancel: Some(inpaint_cancel.clone()),
-                            progress: Some(inpaint_progress.clone()),
-                        };
                         let raw = prunr_core::inpaint::process_inpaint_with(
-                            &image, &mask, model_id, sd_req.clone(), &hooks,
+                            &image, &mask, model_id, sd_req.clone(), &progress,
                         ).map_err(|e| format!("inpaint: {e:?}"))?;
+                        progress.step(prunr_core::Step::Blending);
                         Ok(prunr_core::inpaint_blend::finalize_inpaint(
                             &raw, &image, &mask, feather_px, sharpen,
                         ))
                     })();
-                    // Drop _cleanup HERE so InpaintDone goes after pump join.
                     drop(_cleanup);
                     match result {
                         Ok(rgba) => {
@@ -1140,7 +1082,6 @@ pub fn run_worker() -> ! {
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                     // Drops on scope exit, removing the cancel-map entry.
                     let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
-                    pump_done_on_err.store(true, Ordering::Release);
                     // The healthy path's `read_and_delete` inside the
                     // spawned closure never ran — clean the parent-
                     // written temps here before the InpaintError lands
@@ -1286,40 +1227,5 @@ mod tests {
         assert!(max_live.load(std::sync::atomic::Ordering::Acquire) >= 4,
             "expected at least 4 concurrent small acquirers, got {}",
             max_live.load(std::sync::atomic::Ordering::Acquire));
-    }
-
-    /// `pump_signature_advanced` returns true when either dimension of
-    /// the `(inner, outer)` signature changes — including the tile-
-    /// boundary case where inner resets to 0 while outer bumps. Pinning
-    /// this contract means a future refactor that compares only one
-    /// dimension (or the wrong dimension) fails loudly.
-    #[test]
-    fn pump_signature_advanced_static_signature_does_not_emit() {
-        assert!(!pump_signature_advanced((0, 0), (0, 0)));
-        assert!(!pump_signature_advanced((0, 1), (0, 1)));
-        assert!(!pump_signature_advanced((7, 3), (7, 3)));
-    }
-
-    #[test]
-    fn pump_signature_advanced_inner_step_emits() {
-        assert!(pump_signature_advanced((0, 0), (1, 0)));
-        assert!(pump_signature_advanced((4, 2), (5, 2)));
-    }
-
-    #[test]
-    fn pump_signature_advanced_outer_bump_with_inner_reset_emits() {
-        // Tile boundary: inner counter resets to 0 as outer (tile idx)
-        // advances. Both move on the same observation — must still
-        // register as an advance, not be silently masked by the inner
-        // reset.
-        assert!(pump_signature_advanced((8, 0), (0, 1)));
-        assert!(pump_signature_advanced((19, 2), (0, 3)));
-    }
-
-    #[test]
-    fn pump_signature_advanced_outer_only_emits() {
-        // Same inner index, outer bumps (rare but possible if a tile
-        // boundary lands exactly on a same-step inner): still emits.
-        assert!(pump_signature_advanced((5, 1), (5, 2)));
     }
 }

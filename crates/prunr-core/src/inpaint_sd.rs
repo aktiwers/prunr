@@ -247,35 +247,22 @@ pub fn process_inpaint(
     process_inpaint_with(
         image, mask, id,
         SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
-        &crate::inpaint::InpaintHooks::default(),
+        &crate::progress::Progress::none(),
     )
 }
 
 /// Full-knob entry. The `inpaint::process_inpaint` shim calls this with
 /// defaults; future text-prompt + CFG surfaces wire through here.
-/// See `inpaint::process_inpaint_with` for the hooks contract.
+/// See `inpaint::process_inpaint_with` for the progress contract.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     mut req: SdInpaintRequest,
-    hooks: &crate::inpaint::InpaintHooks,
+    progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    use std::sync::atomic::Ordering;
+    use crate::progress::{Step, TileRect, Unit};
     check_ram_for(id, &mut req.tuning).map_err(CoreError::Inference)?;
-    let cancel = hooks.cancel.as_ref();
-    let progress = hooks.progress.as_ref();
-    if let Some(p) = progress {
-        // Inner = per-tile UNet step budget. Outer (total tile count
-        // across all components) is set below once `mask_components`
-        // has run; pre-seeded to 0 here so a render between dispatch
-        // and the outer-total set doesn't show a stale value from a
-        // previous stroke.
-        p.set_total(req.num_inference_steps);
-        p.set_step(0);
-        p.set_outer_total(0);
-        p.set_outer_step(0);
-    }
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "sd inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -302,11 +289,18 @@ pub fn process_inpaint_with(
     let max_side = if req.tuning.tall_crop { SD_CROP_MAX } else { SD_TILE };
     let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
     let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
-    if let Some(p) = progress {
-        p.set_outer_total(outer_total);
-        p.set_outer_step(0);
-    }
+    // The crops and tiles, in the order they run: the tile map's layout.
+    progress.tiles(plans.iter().flat_map(|plan| match plan {
+        RegionPlan::Crop { x, y, w, h } => vec![TileRect::of_pixels(*x, *y, *w, *h, img_w, img_h)],
+        RegionPlan::Tiles(tiles) => tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, img_w, img_h)).collect(),
+    }).collect());
     let mut tile_idx: u32 = 0;
+    // One crop or tile starts: the outer count, and the tile map's cell.
+    let start = |idx: u32| {
+        progress.outer(idx, outer_total, Unit::Crop);
+        progress.tile(idx, false);
+    };
+    progress.step(Step::LoadingModel);
 
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
@@ -328,21 +322,21 @@ pub fn process_inpaint_with(
         None => VaeBackend::Standard(&bundle),
     };
     let mut out = image.clone();
-    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
 
     for (component, plan) in components.iter().zip(plans) {
-        if is_cancelled() { return Err(CoreError::Cancelled); }
+        if progress.is_cancelled() { return Err(CoreError::Cancelled); }
         let tiles = match plan {
             RegionPlan::Crop { x: cx, y: cy, w: cw, h: ch } => {
-                tile_idx += 1;
-                if let Some(p) = progress { p.set_outer_step(tile_idx); }
+                start(tile_idx);
                 let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-                match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
+                match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
                     Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
                     Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                     Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
                 }
+                progress.tile(tile_idx, true);
+                tile_idx += 1;
                 continue;
             }
             RegionPlan::Tiles(tiles) => tiles,
@@ -354,19 +348,21 @@ pub fn process_inpaint_with(
             "SD: tiling oversized component",
         );
         for tile in tiles {
-            if is_cancelled() { return Err(CoreError::Cancelled); }
-            tile_idx += 1;
-            if let Some(p) = progress { p.set_outer_step(tile_idx); }
+            if progress.is_cancelled() { return Err(CoreError::Cancelled); }
+            start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, hooks) {
+            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
             }
+            progress.tile(tile_idx, true);
+            tile_idx += 1;
         }
     }
-    if is_cancelled() { return Err(CoreError::Cancelled); }
+    if progress.is_cancelled() { return Err(CoreError::Cancelled); }
+    progress.outer(outer_total, outer_total, Unit::Crop);
     tracing::info!(
         tiles = tile_idx, session_ms, run_ms = run_started.elapsed().as_millis() as u64,
         tuning = ?req.tuning,
@@ -659,10 +655,9 @@ fn run_one_tile(
     image: &RgbaImage,
     mask: &GrayImage,
     req: &SdInpaintRequest,
-    hooks: &crate::inpaint::InpaintHooks,
+    progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    let cancel = hooks.cancel.as_ref();
-    let progress = hooks.progress.as_ref();
+    use crate::progress::{Step, Unit};
     let (w, h) = image.dimensions();
     let (pw, ph) = padded_dims(w, h);
     let padded_image = pad_to(image, pw, ph);
@@ -679,6 +674,7 @@ fn run_one_tile(
     // Pre-loop independent ops in parallel: text encode (cond + uncond
     // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
     // distinct session mutex (or none) so they run concurrently.
+    progress.step(Step::ReadingPrompt);
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
@@ -747,11 +743,11 @@ fn run_one_tile(
         let skipped = ((1.0 - strength) * total_steps as f32).floor() as usize;
         skipped.min(total_steps - 1)
     };
-    // Override the entry-level total so the user sees the actual
-    // step count being run, not the pre-strength budget.
-    if let Some(p) = progress {
-        p.set_total((total_steps - t_start) as u32);
-    }
+    // Counted over the steps actually run, so a 50%-strength 10-step
+    // run reads "step 1 of 5", not "step 6 of 10".
+    let steps_to_run = (total_steps - t_start) as u32;
+    progress.step(Step::Denoising);
+    progress.inner(0, steps_to_run, Unit::Step);
 
     // Hold denoising state as Vec<f32> + captured dim. f16 conversion
     // uses ArrayView4::from_shape (zero-copy on the f32 side); the
@@ -784,9 +780,6 @@ fn run_one_tile(
     // Without CFG: just one UNet pass with cond.
     let timesteps = scheduler.timesteps().to_vec();
     let scale = req.guidance_scale;
-    let is_cancelled = || cancel.is_some_and(|c| {
-        c.load(std::sync::atomic::Ordering::Acquire)
-    });
     let needs_precondition = scheduler.requires_preconditioning();
     let mut precond_buf: Vec<f32> = Vec::new();
     // Scratch buffer for step output — hoisted outside the loop so
@@ -797,14 +790,8 @@ fn run_one_tile(
     for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
-        if is_cancelled() {
+        if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
-        }
-        // Progress is reported relative to the steps actually run
-        // (total_steps - t_start) so the user sees "step 1 of 5" on
-        // a 50%-strength 10-step run, not "step 6 of 10".
-        if let Some(p) = progress {
-            p.set_step(((i - t_start) as u32) + 1);
         }
         let latent_f16 = if needs_precondition {
             scheduler.scale_model_input_into(&latent_buf, i, &mut precond_buf);
@@ -836,6 +823,7 @@ fn run_one_tile(
         // latent_buf becomes current and step_out_buf is the stale
         // scratch (overwritten next iteration).
         std::mem::swap(&mut latent_buf, &mut step_out_buf);
+        progress.inner((i - t_start) as u32 + 1, steps_to_run, Unit::Step);
     }
 
     let unet_ms = timer.lap();
@@ -843,6 +831,7 @@ fn run_one_tile(
     // VAE decode — wrap final buf into Array4 (no extra allocation).
     let final_array = ndarray::Array4::from_shape_vec(latent_dim, latent_buf)
         .expect("latent_dim matches latent_buf length by construction");
+    progress.step(Step::DecodingResult);
     let painted = vae_decode(vae, &final_array)?;
     let decode_ms = timer.lap();
     let out = composite(image, &painted, mask, w, h);
