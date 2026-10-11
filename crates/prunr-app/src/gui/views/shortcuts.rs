@@ -25,7 +25,7 @@ pub(crate) fn is_subtract_modifier(m: &egui::Modifiers) -> bool {
 /// The Magic Brush toggle's tooltip for this model.
 pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
     let mac = cfg!(target_os = "macos");
-    match (role == ModelRole::Cutout, mac) {
+    match (role.edits_cutout(), mac) {
         (false, true) => "Click or stroke an object to add it to the selection; Alt takes it away.",
         (false, false) => "Click or stroke an object to add it to the selection; Alt or Ctrl takes it away.",
         (true, true) => "Click or stroke an object to restore it; Alt erases it.",
@@ -38,7 +38,7 @@ pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
 /// other selection is added to or subtracted from.
 pub(crate) fn modifier_hints(role: ModelRole) -> (&'static str, &'static str) {
     let mac = cfg!(target_os = "macos");
-    match (role == ModelRole::Cutout, mac) {
+    match (role.edits_cutout(), mac) {
         (false, true) => ("Shift = add", "Alt = subtract"),
         (false, false) => ("Shift = add", "Alt/Ctrl = subtract"),
         (true, true) => ("Shift = restore", "Alt = erase"),

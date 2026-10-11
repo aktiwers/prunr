@@ -283,8 +283,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        let signed = app.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout;
-        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask, signed);
+        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask, app.settings.model.edits_cutout());
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
         app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);

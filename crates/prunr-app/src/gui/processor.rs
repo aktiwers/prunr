@@ -245,8 +245,14 @@ pub(crate) fn merge_stroke(
     stroke: prunr_core::selection::MaskArtifact,
     signed: bool,
 ) -> prunr_core::selection::MaskArtifact {
-    let existing = existing.unwrap_or_else(|| Arc::new(prunr_core::selection::MaskArtifact::new_empty(stroke.width, stroke.height)));
-    existing.merge_stroke(&stroke, signed).unwrap_or(stroke)
+    let Some(existing) = existing else { return stroke.into_selection(signed) };
+    match existing.merge_stroke(&stroke, signed) {
+        Ok(merged) => merged,
+        Err(err) => {
+            tracing::warn!(%err, "stroke size differs from the selection; keeping the stroke alone");
+            stroke.into_selection(signed)
+        }
+    }
 }
 
 /// One Magic Brush click or stroke, captured at request time so a chip

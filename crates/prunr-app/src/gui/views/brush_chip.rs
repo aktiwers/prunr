@@ -4,7 +4,7 @@
 use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
-use crate::gui::knob_catalog::{shows, ModelRole, Surface};
+use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use prunr_core::brush::BrushShape;
 use prunr_core::selection::BrushMode;
@@ -45,10 +45,10 @@ pub(super) const REGION_MODES: [chip::Choice<BrushMode>; 2] = [
 
 /// Restore / Erase on a cut-out; Add / Subtract on a selection or region.
 pub(super) fn mode_choices(model: SettingsModel) -> &'static [chip::Choice<BrushMode>; 2] {
-    if model.role() == ModelRole::Cutout { &CUTOUT_MODES } else { &REGION_MODES }
+    if model.edits_cutout() { &CUTOUT_MODES } else { &REGION_MODES }
 }
 
-pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
+const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
     chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
     chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
     chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },

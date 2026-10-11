@@ -213,15 +213,14 @@ impl BackgroundIO {
 }
 
 /// Narrowest outline, in screen points, the overlay draws at any zoom.
-pub(crate) const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
+const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
 
-/// The style knobs a selection texture bakes in. All four apply on
-/// commit: the overlay is a single textured quad drawn untinted.
+/// What a selection texture bakes in; the overlay is a single textured
+/// quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SelectionStyle {
     pub(crate) fill_opacity: f32,
-    pub(crate) outline_opacity: f32,
-    /// Outline width in image pixels.
+    /// Outline width in image pixels; 0 draws no outline.
     pub(crate) outline_thickness: f32,
     pub(crate) edge_feather_px: u32,
 }
@@ -233,17 +232,20 @@ impl SelectionStyle {
     pub(crate) fn from_settings(s: &super::settings::Settings) -> Self {
         Self {
             fill_opacity: s.selection_fill,
-            outline_opacity: if s.selection_outline { 1.0 } else { 0.0 },
-            outline_thickness: Self::OUTLINE_PX,
+            outline_thickness: if s.selection_outline { Self::OUTLINE_PX } else { 0.0 },
             edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
         }
     }
 
-    /// The mask as the user sees it: feathered against `source` when the
-    /// feather knob is on and a source is available. Both the texture
-    /// build and Delete / Copy / Cut go through here.
-    /// The feathered selection, or `None` when this style shows `mask`
-    /// as it is (no feather, or no photo to feather against).
+    /// The default outline and no feather, with `fill_opacity`.
+    #[cfg(test)]
+    pub(crate) fn with_fill(fill_opacity: f32) -> Self {
+        Self { fill_opacity, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0 }
+    }
+
+    /// The feathered selection, or `None` when this style shows `mask` as
+    /// it is (no feather, or no photo to feather against). The texture
+    /// build, the re-cut and Delete / Copy / Cut all go through here.
     pub(crate) fn feather(
         &self,
         mask: &prunr_core::selection::MaskArtifact,
@@ -280,7 +282,7 @@ impl SelectionStyle {
     /// Dilation radius for the outline band: thickness 1 → the boundary
     /// pixels only, 10 → an 11 px band. `None` when no outline is drawn.
     fn band_radius(&self) -> Option<u32> {
-        if self.outline_thickness < 0.5 || Self::alpha(self.outline_opacity) == 0 {
+        if self.outline_thickness < 0.5 {
             return None;
         }
         Some(((self.outline_thickness - 1.0) / 2.0).round().max(0.0) as u32)
@@ -289,7 +291,7 @@ impl SelectionStyle {
 
 /// ACCENT-tinted image: each cell at the fill alpha scaled by its
 /// coverage, so a feathered edge or a faint stroke shows as such, and
-/// the outline band stamped over it at the outline alpha.
+/// the outline band stamped over it.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,
@@ -299,16 +301,11 @@ pub(crate) fn build_selection_image(
     let accent = super::theme::ACCENT;
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
     let fill_alpha = SelectionStyle::alpha(style.fill_opacity) as f32;
-    let mut pixels: Vec<egui::Color32> = mask
-        .cells()
-        .iter()
-        .map(|&v| match (fill_alpha * MaskArtifact::coverage(v)).round() as u8 {
-            0 => egui::Color32::TRANSPARENT,
-            a => paint(a),
-        })
-        .collect();
+    // A cell's colour depends only on its value: one per value.
+    let lut: [egui::Color32; 256] = std::array::from_fn(|i| paint((fill_alpha * MaskArtifact::coverage(i as u8 as i8)).round() as u8));
+    let mut pixels: Vec<egui::Color32> = mask.cells().iter().map(|&v| lut[v as u8 as usize]).collect();
     if let Some(r) = style.band_radius() {
-        let outline = paint(SelectionStyle::alpha(style.outline_opacity));
+        let outline = paint(255);
         let r = r as usize;
         for (x, y) in prunr_core::selection::refine::outline_polyline(mask) {
             let (x, y) = (x as usize, y as usize);
@@ -357,18 +354,6 @@ fn sub_rect<T: Copy>(src: &[T], stride: usize, x: usize, y: usize, w: usize, h: 
 #[cfg(test)]
 mod tests {
 
-    /// A faint or feathered cell shows faintly: the fill is scaled by
-    /// coverage, so strokes under half coverage are visible too.
-    #[test]
-    fn the_overlay_fill_follows_coverage() {
-        use prunr_core::selection::{MaskArtifact, FULL};
-        let mask = MaskArtifact::from_cells(3, 1, vec![FULL, -(FULL / 4), 0]);
-        let no_outline = SelectionStyle { fill_opacity: 0.8, outline_opacity: 0.0, outline_thickness: 0.0, edge_feather_px: 0 };
-        let img = build_selection_image(&mask, no_outline);
-        let (full, faint, none) = (img.pixels[0].a(), img.pixels[1].a(), img.pixels[2].a());
-        assert!(faint > 0 && faint < full, "a quarter-coverage stroke shows, fainter ({faint} vs {full})");
-        assert_eq!(none, 0);
-    }
     use super::*;
     use prunr_core::selection::{MaskArtifact, FULL};
 
@@ -382,8 +367,21 @@ mod tests {
         MaskArtifact::from_cells(8, 8, data)
     }
 
-    fn style(fill: f32, outline: f32, thickness: f32) -> SelectionStyle {
-        SelectionStyle { fill_opacity: fill, outline_opacity: outline, outline_thickness: thickness, edge_feather_px: 0 }
+    fn style(fill: f32, thickness: f32) -> SelectionStyle {
+        SelectionStyle { outline_thickness: thickness, ..SelectionStyle::with_fill(fill) }
+    }
+
+    /// A faint or feathered cell shows faintly: the fill is scaled by
+    /// coverage, so strokes under half coverage are visible too.
+    #[test]
+    fn the_overlay_fill_follows_coverage() {
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let mask = MaskArtifact::from_cells(3, 1, vec![FULL, -(FULL / 4), 0]);
+        let no_outline = SelectionStyle { outline_thickness: 0.0, ..SelectionStyle::with_fill(0.8) };
+        let img = build_selection_image(&mask, no_outline);
+        let (full, faint, none) = (img.pixels[0].a(), img.pixels[1].a(), img.pixels[2].a());
+        assert!(faint > 0 && faint < full, "a quarter-coverage stroke shows, fainter ({faint} vs {full})");
+        assert_eq!(none, 0);
     }
 
     /// At fit zoom on a big image a 2 px outline is half a screen pixel and
@@ -392,35 +390,31 @@ mod tests {
     /// few times.
     #[test]
     fn the_outline_stays_visible_when_zoomed_out() {
-        let s = style(0.15, 1.0, 2.0);
+        let s = style(0.15, 2.0);
         assert_eq!(s.at_zoom(1.0).outline_thickness, 2.0, "at 1:1 the setting holds");
         assert_eq!(s.at_zoom(0.75).outline_thickness, 2.0);
         assert_eq!(s.at_zoom(0.25).outline_thickness, 7.0, "6 px needed, next odd band");
         assert!(s.at_zoom(0.25).outline_thickness * 0.25 >= MIN_OUTLINE_SCREEN_PX);
         assert_eq!(s.at_zoom(0.26), s.at_zoom(0.27), "nearby zooms share one texture");
-        assert_eq!(style(0.15, 0.0, 2.0).at_zoom(0.25).outline_thickness, 2.0, "an outline turned off stays off");
-        assert_eq!(style(0.15, 1.0, 0.0).at_zoom(0.25).outline_thickness, 0.0);
-        assert_eq!(style(0.15, 1.0, 9.0).at_zoom(0.25).outline_thickness, 9.0, "a wider setting wins");
+        assert_eq!(style(0.15, 0.0).at_zoom(0.25).outline_thickness, 0.0, "an outline turned off stays off");
+        assert_eq!(style(0.15, 9.0).at_zoom(0.25).outline_thickness, 9.0, "a wider setting wins");
     }
 
     #[test]
     fn texture_bakes_fill_and_outline_alpha() {
-        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 1.0));
+        let img = build_selection_image(&centre_block(), style(0.15, 1.0));
         assert_eq!(img.pixels[2 * 8 + 2].a(), 255, "boundary pixel carries the outline alpha");
         assert_eq!(img.pixels[3 * 8 + 3].a(), 38, "interior carries the fill alpha (0.15)");
         assert_eq!(img.pixels[0].a(), 0, "outside is transparent");
 
-        let img = build_selection_image(&centre_block(), style(0.5, 0.25, 1.0));
+        let img = build_selection_image(&centre_block(), style(0.5, 1.0));
         assert_eq!(img.pixels[3 * 8 + 3].a(), 128);
-        assert_eq!(img.pixels[2 * 8 + 2].a(), 64);
     }
 
     #[test]
-    fn zero_thickness_or_invisible_outline_bakes_no_band() {
-        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 0.0));
+    fn an_outline_turned_off_bakes_no_band() {
+        let img = build_selection_image(&centre_block(), style(0.15, 0.0));
         assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "no band: boundary pixel is plain fill");
-        let img = build_selection_image(&centre_block(), style(0.15, 0.0, 4.0));
-        assert_eq!(img.pixels[2 * 8 + 2].a(), 38, "invisible outline: boundary pixel is plain fill");
     }
 
     /// The patch must reproduce the full build inside its region, and
@@ -434,7 +428,7 @@ mod tests {
         let mut mask = base.clone();
         paint_circle(&mut mask, 20.0, 14.0, 5.0, Stamp { hardness: 0.5, strength: 1.0, mode: BrushMode::Add });
         for thickness in [0.0, 1.0, 3.0, 7.0] {
-            let style = style(0.3, 0.8, thickness);
+            let style = style(0.3, thickness);
             let (pos, patch) = build_selection_patch(&base, &mask, style).expect("masks differ");
             let before = build_selection_image(&base, style);
             let after = build_selection_image(&mask, style);
@@ -450,12 +444,12 @@ mod tests {
                 }
             }
         }
-        assert!(build_selection_patch(&base, &base, style(0.3, 0.8, 1.0)).is_none(), "identical planes: nothing to patch");
+        assert!(build_selection_patch(&base, &base, style(0.3, 1.0)).is_none(), "identical planes: nothing to patch");
     }
 
     #[test]
     fn thickness_widens_the_band_outward_in_image_pixels() {
-        let img = build_selection_image(&centre_block(), style(0.15, 1.0, 3.0));
+        let img = build_selection_image(&centre_block(), style(0.15, 3.0));
         // radius 1: the band reaches one pixel outside the block.
         assert_eq!(img.pixels[9].a(), 255); // (1, 1)
         assert_eq!(img.pixels[0].a(), 0);
