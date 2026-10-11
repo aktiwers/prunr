@@ -134,7 +134,6 @@ impl Default for ToolbarChange {
 
 // Starting values for knobs whose factory default is "off": the slider
 // or picker needs something to show the moment the user switches them on.
-const THRESHOLD_FALLBACK: f32 = 0.5;
 const BG_COLOR_FALLBACK: [u8; 4] = [255, 255, 255, 255];
 const LINE_COLOR_FALLBACK: [u8; 3] = [0, 0, 0];
 
@@ -353,7 +352,7 @@ const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::Gamma), differs: |s, d| differs(s.gamma, d.gamma), reset: |s, d| s.gamma = d.gamma },
-    chip::Field { knob: Some(StaticKnob::Threshold), differs: |s, d| s.threshold.is_some() != d.threshold.is_some(), reset: |s, d| s.threshold = d.threshold },
+    chip::Field { knob: Some(StaticKnob::Contrast), differs: |s, d| differs(s.contrast, d.contrast), reset: |s, d| s.contrast = d.contrast },
     chip::Field { knob: Some(StaticKnob::EdgeShift), differs: |s, d| differs(s.edge_shift, d.edge_shift), reset: |s, d| s.edge_shift = d.edge_shift },
     chip::Field { knob: Some(StaticKnob::RefineEdges), differs: |s, d| s.refine_edges != d.refine_edges, reset: |s, d| s.refine_edges = d.refine_edges },
     chip::Field { knob: Some(StaticKnob::GuidedRadius), differs: |s, d| s.refine_edges && s.guided_radius != d.guided_radius, reset: |s, d| s.guided_radius = d.guided_radius },
@@ -411,19 +410,11 @@ fn render_mask_group(
         hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the edge.");
         ui.add_space(theme::SPACE_XS);
 
-        let mut hard = s.threshold.is_some();
-        let t = chip::toggle_row(ui, "Hard threshold", &mut hard);
-        if t.changed {
-            s.threshold = hard.then_some(THRESHOLD_FALLBACK);
-        }
-        aggregate_knob(t, StaticKnob::Threshold, change);
-        if let Some(v) = s.threshold.as_mut() {
-            aggregate_knob(
-                chip::slider_row_f32(ui, "Cutoff", v, 0.001..=0.999, false, fmt::percent_tenths),
-                StaticKnob::Threshold, change,
-            );
-        }
-        hint(ui, "Snap every pixel to fully kept or fully removed at the cutoff.");
+        aggregate_knob(
+            chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
+            StaticKnob::Contrast, change,
+        );
+        hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
         ui.add_space(theme::SPACE_XS);
 
         aggregate_knob(

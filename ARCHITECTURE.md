@@ -295,9 +295,10 @@ check_large_image      → error above 8000 px per side (CLI --large-image overr
 preprocess             → NCHW f32: Silueta/U2Net 320², ÷ max pixel; BiRefNet 1024², ÷ 255; ImageNet norm
 infer                  → raw [1,1,S,S]                                ← Tier 1
 postprocess            → RGBA                                         ← Tier 2 starts here
-  normalize (min-max; BiRefNet: sigmoid, then min-max) → selection correction
-  → gamma / threshold → Lanczos3 to source size → edge shift → guided filter → feather
-  → alpha into the one RGBA buffer → fill style → source backdrop
+  normalize (min-max; BiRefNet: sigmoid, then min-max) → gamma
+  → Lanczos3 to source size → edge shift → guided filter → feather → contrast
+  → selection correction (full resolution) → alpha into the one RGBA buffer
+  → fill style → source backdrop
 ```
 
 Feather runs after the guided filter: sharpen to colour edges first, then soften. The full pipeline postprocesses the output while it is still borrowed from ORT's `IoBinding` buffer, so the tensor is never copied. Tier 2 (`postprocess_from_flat`) starts from a cached tensor and skips inference entirely.

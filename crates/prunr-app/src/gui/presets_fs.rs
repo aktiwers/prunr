@@ -164,7 +164,8 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
 /// `format_version: 2`) deserializes directly; anything else is
 /// attempted as a v1 `ItemSettings` migration. Returns `None` when
 /// neither path succeeds; the caller decides whether to log + skip.
-fn parse_preset_value(value: serde_json::Value) -> Option<PresetFile> {
+fn parse_preset_value(mut value: serde_json::Value) -> Option<PresetFile> {
+    super::item_settings::migrate_threshold_to_contrast(&mut value);
     if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
         serde_json::from_value(value).ok()
     } else {

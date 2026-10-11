@@ -118,7 +118,7 @@ pub fn tensor_to_mask_from_flat(
 }
 
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
-/// Applies normalization, gamma, threshold, resize, edge shift, and guided filter.
+/// Applies normalization, gamma, resize, edge shift, guided filter, feather and contrast.
 pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> GrayImage {
     // Materializing rgba here is wasteful when refine_edges is false; callers on
     // the hot path should use `postprocess()` which shares the RGBA buffer.
@@ -179,16 +179,12 @@ fn tensor_to_mask_core(
     let norm = SegNormaliser::new(lo, hi, model);
     let uniform_val = norm.uniform;
     let gamma = mask_settings.gamma;
-    let threshold = mask_settings.threshold;
 
     let mut mask_buf = vec![0u8; sw * sh];
     let normalize = |raw_val: f32| norm.stretch(raw_val);
     let finalise = |val: f32| -> u8 {
         let mut v = val;
         if gamma != 1.0 { v = v.powf(gamma); }
-        if let Some(t) = threshold {
-            v = if v >= t { 1.0 } else { 0.0 };
-        }
         (v * 255.0) as u8
     };
 
@@ -238,6 +234,10 @@ fn tensor_to_mask_core(
         feather_mask(&mut mask, mask_settings.feather);
     }
 
+    if mask_settings.contrast > 0.0 {
+        apply_contrast(&mut mask, mask_settings.contrast);
+    }
+
     // Strokes go last, at full resolution: they are exact intent, and
     // refining or feathering them would pull them onto nearby edges.
     if let Some(corr) = correction {
@@ -245,6 +245,21 @@ fn tensor_to_mask_core(
     }
 
     mask
+}
+
+/// Steepen the mask's edge around half coverage at full resolution:
+/// `contrast` 0 leaves it, 1 cuts it hard, like Select and Mask's
+/// Contrast in Photoshop.
+pub fn apply_contrast(mask: &mut GrayImage, contrast: f32) {
+    let c = contrast.clamp(0.0, 1.0);
+    let lut: [u8; 256] = std::array::from_fn(|v| {
+        if c >= 1.0 {
+            return if v >= 128 { 255 } else { 0 };
+        }
+        let a = v as f32 / 255.0;
+        (((a - 0.5) / (1.0 - c) + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8
+    });
+    mask.as_mut().par_iter_mut().for_each(|v| *v = lut[*v as usize]);
 }
 
 /// Apply a grayscale mask as the alpha channel on the original image (Tier 3).
@@ -702,6 +717,22 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Contrast steepens the edge around half coverage and leaves the
+    /// rest: 0 changes nothing, 100 % cuts it hard at full resolution.
+    #[test]
+    fn contrast_steepens_the_edge_and_cuts_it_at_full() {
+        let ramp = || GrayImage::from_raw(5, 1, vec![0, 64, 128, 192, 255]).unwrap();
+        let mut none = ramp();
+        apply_contrast(&mut none, 0.0);
+        assert_eq!(none.as_raw(), ramp().as_raw());
+        let mut half = ramp();
+        apply_contrast(&mut half, 0.5);
+        assert!(half.as_raw()[1] < 64 && half.as_raw()[3] > 192, "steeper: {:?}", half.as_raw());
+        let mut hard = ramp();
+        apply_contrast(&mut hard, 1.0);
+        assert_eq!(hard.as_raw(), &[0, 0, 255, 255, 255]);
+    }
     use super::*;
 
     use image::{DynamicImage, RgbImage, Rgb};
