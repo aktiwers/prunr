@@ -118,11 +118,6 @@ pub struct MaskSettings {
     /// How the subject RGB is transformed after masking and before compose.
     #[serde(default)]
     pub fill_style: FillStyle,
-    /// Backdrop effect baked into the output where the mask was transparent.
-    /// `None` preserves transparency (solid bg colour still renders via the
-    /// GPU-rect fast path at display time).
-    #[serde(default)]
-    pub bg_effect: BgEffect,
 }
 
 impl MaskSettings {
@@ -145,7 +140,6 @@ impl Default for MaskSettings {
             guided_epsilon: 1e-4,
             feather: 0.0,
             fill_style: FillStyle::default(),
-            bg_effect: BgEffect::default(),
         }
     }
 }
@@ -502,14 +496,10 @@ impl ChannelSwapVariant {
     }
 }
 
-/// Backdrop effect composited behind the masked subject. Unlike the solid
-/// `bg` color (rendered as a GPU rect at display time — instant), effects
-/// need pixels, so they're baked into the output RGBA by `postprocess`.
-/// Changing an effect re-runs the postprocess tier.
-///
-/// `None` preserves the transparent-output + GPU-rect-bg-color render path;
-/// any other variant hands the pipeline a derived backdrop built from the
-/// source image.
+/// A picture made from the photo, shown behind the result the way a
+/// background image is: under whatever the result leaves transparent,
+/// never baked into the result itself, so lines and compositions keep
+/// their own transparency.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash,
     serde::Serialize, serde::Deserialize, Default,

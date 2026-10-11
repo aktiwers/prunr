@@ -316,20 +316,10 @@ fn paint_thumbnail(
     let fitted = tex_size * scale;
     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
 
-    // Render-time bg fill: result thumbs are transparent where pixels were
-    // removed; paint the bg behind so the sidebar matches the canvas.
-    // Gate on `Done` (not `result_rgba.is_some()`) so the bg still shows
-    // for background items whose `result_rgba` was evicted to disk by
-    // `evict_result_rgba_for_background_items` — the thumbnail texture
-    // is still cached and was built from the result. Image bg wins over
-    // color bg, mirroring the canvas mutual-exclusion rule.
+    // Gate on `Done`, not `result_rgba`: a background item's result may be
+    // released while its thumbnail, built from the result, stays.
     if matches!(item.status, BatchStatus::Done) {
-        if let Some(tex) = item.bg_image_texture.as_ref() {
-            super::canvas::paint_bg_image(ui, thumb_rect, tex, item.settings.bg_image_fit);
-        } else if let Some(bg) = item.settings.bg_rgb() {
-            ui.painter()
-                .rect_filled(thumb_rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
-        }
+        super::canvas::paint_backdrop(ui, thumb_rect, item);
     }
 
     // Dim to ~40% while being dragged out to an external app.

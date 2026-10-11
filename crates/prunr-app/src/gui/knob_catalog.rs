@@ -349,8 +349,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::GuidedRadius
         | StaticKnob::GuidedEpsilon
         | StaticKnob::Feather
-        | StaticKnob::FillStyle
-        | StaticKnob::BgEffect => s(MaskRerun, Nothing, LivePreviewMask, true),
+        | StaticKnob::FillStyle => s(MaskRerun, Nothing, LivePreviewMask, true),
 
         StaticKnob::LineStrength
         | StaticKnob::EdgeThickness
@@ -360,6 +359,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::LineStyle => s(EdgeRerun, Nothing, LivePreviewEdge, true),
 
         StaticKnob::BgColor
+        | StaticKnob::BgEffect
         | StaticKnob::BgImageFit => s(CompositeOnly, Nothing, Render, true),
 
         // Model: user must click Process.
