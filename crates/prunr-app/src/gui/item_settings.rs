@@ -281,11 +281,11 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
 }
 
 /// Rewrite item settings saved by older versions: a `threshold` (a
-/// number when it was on) becomes `contrast` at a hard edge, and a retired
-/// line style becomes solid. Only item settings are touched: each
+/// number when it was on) becomes `contrast` at a hard edge, a retired
+/// line style becomes solid and a retired composition lines only. Only item settings are touched: each
 /// preset entry's `item_settings`, and a v1 preset file, which is item
 /// settings at the top (it has no `format_version`).
-pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
+pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
     fn item(map: &mut serde_json::Map<String, serde_json::Value>) {
         if let Some(old) = map.remove("threshold") {
             if old.is_number() && !map.contains_key("contrast") {
@@ -297,6 +297,10 @@ pub(crate) fn migrate_threshold_to_contrast(value: &mut serde_json::Value) {
             .is_some_and(|o| o.contains_key("chromatic") || o.contains_key("noise"));
         if retired {
             map.insert("line_style".into(), serde_json::json!("solid"));
+        }
+        // Inverse mask is gone; Lines only is the nearest composition.
+        if map.get("compose_mode").and_then(|v| v.as_str()) == Some("inverse_mask") {
+            map.insert("compose_mode".into(), serde_json::json!("lines_only"));
         }
     }
     fn walk(value: &mut serde_json::Value) {
@@ -330,7 +334,7 @@ mod tests {
         let mut v = serde_json::json!({ "models": { "silueta": { "item_settings": { "gamma": 1.2, "threshold": 0.3 } },
                                                      "birefnet": { "item_settings": { "gamma": 1.0, "threshold": null } } } });
         v["brush"] = serde_json::json!({ "threshold": 0.4 });
-        migrate_threshold_to_contrast(&mut v);
+        migrate_old_item_settings(&mut v);
         let hard: ItemSettings = serde_json::from_value(v["models"]["silueta"]["item_settings"].clone()).unwrap();
         let soft: ItemSettings = serde_json::from_value(v["models"]["birefnet"]["item_settings"].clone()).unwrap();
         assert_eq!((hard.contrast, hard.gamma), (1.0, 1.2));
@@ -338,12 +342,16 @@ mod tests {
         assert_eq!(v["brush"]["threshold"], 0.4, "a threshold outside item settings is left alone");
 
         let mut styled = serde_json::json!({ "item_settings": { "line_style": { "noise": { "amount": 80 } } } });
-        migrate_threshold_to_contrast(&mut styled);
+        migrate_old_item_settings(&mut styled);
         let s: ItemSettings = serde_json::from_value(styled["item_settings"].clone()).unwrap();
         assert_eq!(s.line_style, prunr_core::LineStyle::Solid, "a retired line style loads as solid");
+        let mut inverse = serde_json::json!({ "item_settings": { "compose_mode": "inverse_mask" } });
+        migrate_old_item_settings(&mut inverse);
+        let s: ItemSettings = serde_json::from_value(inverse["item_settings"].clone()).unwrap();
+        assert_eq!(s.compose_mode, prunr_core::ComposeMode::LinesOnly, "a retired composition loads as lines only");
 
         let mut v1 = serde_json::json!({ "gamma": 1.0, "threshold": 0.5 });
-        migrate_threshold_to_contrast(&mut v1);
+        migrate_old_item_settings(&mut v1);
         assert_eq!(v1["contrast"], 1.0, "a v1 preset is item settings at the top");
     }
 

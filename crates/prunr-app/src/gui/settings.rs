@@ -187,7 +187,7 @@ impl Settings {
                 return Self::default();
             }
         };
-        super::item_settings::migrate_threshold_to_contrast(&mut value);
+        super::item_settings::migrate_old_item_settings(&mut value);
 
         let mut settings: Self = match serde_json::from_value(value.clone()) {
             Ok(s) => s,
