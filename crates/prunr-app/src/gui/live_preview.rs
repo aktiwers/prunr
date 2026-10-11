@@ -439,32 +439,59 @@ pub struct EdgePlanes {
     pub dilated: Option<Arc<GrayImage>>,
 }
 
-/// An item's cache of one edge scale, each plane with the key it was
-/// built with. A thickness drag keeps the base and redoes the dilation
-/// only; a colour or compose drag keeps both.
+/// Edge scales an item keeps planes for: the two a dual-scale style draws
+/// (the shown scale and Bold), or the last two scales shown.
+const EDGE_PLANE_SLOTS: usize = 2;
+
+/// An item's edge planes per scale, most recently built first, each plane
+/// with the key it was built with. A thickness drag keeps the base and
+/// redoes the dilation only; a colour or compose drag keeps both.
 #[derive(Default)]
 pub(crate) struct EdgePlaneCache {
-    pub(crate) base: Option<(Arc<GrayImage>, EdgeBaseKey)>,
-    pub(crate) dilated: Option<(Arc<GrayImage>, EdgePlaneKey)>,
+    slots: std::collections::VecDeque<ScalePlanes>,
+}
+
+struct ScalePlanes {
+    scale: prunr_core::EdgeScale,
+    base: Option<(Arc<GrayImage>, EdgeBaseKey)>,
+    dilated: Option<(Arc<GrayImage>, EdgePlaneKey)>,
 }
 
 impl EdgePlaneCache {
     /// The planes usable for `key`.
     pub(crate) fn lookup(&self, key: EdgePlaneKey) -> EdgePlanes {
+        let Some(slot) = self.slots.iter().find(|s| s.scale == key.scale) else { return EdgePlanes::default() };
         EdgePlanes {
-            base: self.base.as_ref().filter(|(_, k)| *k == key.base_key()).map(|(m, _)| Arc::clone(m)),
-            dilated: self.dilated.as_ref().filter(|(_, k)| *k == key).map(|(m, _)| Arc::clone(m)),
+            base: slot.base.as_ref().filter(|(_, k)| *k == key.base_key()).map(|(m, _)| Arc::clone(m)),
+            dilated: slot.dilated.as_ref().filter(|(_, k)| *k == key).map(|(m, _)| Arc::clone(m)),
         }
     }
 
-    /// Keep what a dispatch built.
+    /// Keep what a dispatch built for `key`'s scale.
     pub(crate) fn store(&mut self, built: EdgePlanes, key: EdgePlaneKey) {
+        let mut slot = match self.slots.iter().position(|s| s.scale == key.scale) {
+            Some(i) => self.slots.remove(i).unwrap_or_else(|| ScalePlanes::empty(key.scale)),
+            None => ScalePlanes::empty(key.scale),
+        };
         if let Some(b) = built.base {
-            self.base = Some((b, key.base_key()));
+            slot.base = Some((b, key.base_key()));
         }
         if let Some(d) = built.dilated {
-            self.dilated = Some((d, key));
+            slot.dilated = Some((d, key));
         }
+        self.slots.push_front(slot);
+        self.slots.truncate(EDGE_PLANE_SLOTS);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+impl ScalePlanes {
+    fn empty(scale: prunr_core::EdgeScale) -> Self {
+        Self { scale, base: None, dilated: None }
     }
 }
 
@@ -743,6 +770,25 @@ fn resolve_edge_mask(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn edge_planes_are_kept_per_scale_for_the_two_latest_scales() {
+        use prunr_core::EdgeScale::{Balanced, Bold, Fine};
+        let key = |scale, thickness| EdgePlaneKey { strength_bits: 1, scale, thickness };
+        let plane = || Some(Arc::new(GrayImage::new(1, 1)));
+        let built = || EdgePlanes { base: plane(), dilated: plane() };
+        let mut cache = EdgePlaneCache::default();
+        cache.store(built(), key(Fine, 2));
+        cache.store(built(), key(Bold, 2));
+        assert!(cache.lookup(key(Fine, 2)).dilated.is_some(), "a dual-scale style keeps both layers");
+        assert!(cache.lookup(key(Bold, 2)).dilated.is_some());
+        let thicker = cache.lookup(key(Fine, 3));
+        assert!(thicker.base.is_some() && thicker.dilated.is_none(), "a thickness change keeps only the base");
+        cache.store(built(), key(Balanced, 2));
+        assert!(cache.lookup(key(Fine, 2)).base.is_none(), "the oldest scale gives way");
+        assert!(cache.lookup(key(Bold, 2)).base.is_some() && cache.lookup(key(Balanced, 2)).base.is_some());
+    }
+
     use super::*;
     use std::sync::Mutex;
 
