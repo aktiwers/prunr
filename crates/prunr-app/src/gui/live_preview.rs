@@ -1229,7 +1229,7 @@ mod tests {
                 cached_bold: EdgePlanes::default(),
                 cached_masked_base: None,
                 correction: None,
-                upscale: Some(crate::gui::item::UpscaleCache { raw: raw_arc.clone(), input: raw_arc.clone(), reference: None }),
+                upscale: Some(crate::gui::item::UpscaleCache::new(raw_arc.clone(), raw_arc.clone(), None)),
                 upscale_tier2_knobs: Some(knobs),
             },
             &cancel,
