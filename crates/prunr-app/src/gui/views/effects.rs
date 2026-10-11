@@ -68,7 +68,7 @@ fn reveal_at(p: f32, order: f32) -> (f32, f32) {
 
 /// A `GRID × GRID` mesh over `rect` with `texture` mapped across it and
 /// each vertex coloured by `color(u, v, vertex index)`.
-fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32, usize) -> Color32) {
+pub(crate) fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32, usize) -> Color32) {
     let mut mesh = Mesh::with_texture(texture);
     mesh.reserve_vertices((GRID + 1) * (GRID + 1));
     mesh.reserve_triangles(2 * GRID * GRID);

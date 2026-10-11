@@ -456,13 +456,12 @@ fn lines_in_photo_colors(s: &ItemSettings) -> bool {
     s.line_style == prunr_core::LineStyle::Solid && s.solid_line_color.is_none()
 }
 
-fn contrast_step_name(percent: u16) -> &'static str {
-    match percent { 125 => "125%", 150 => "150%", 200 => "200%", _ => "300%" }
+const fn step<T>(value: T, name: &'static str) -> chip::Choice<T> {
+    chip::Choice { value, name, description: "", enabled: true }
 }
 
-fn level_step_name(levels: u8) -> &'static str {
-    match levels { 2 => "2", 3 => "3", 4 => "4", 6 => "6", _ => "8" }
-}
+const CONTRAST_STEPS: [chip::Choice<u16>; 4] = [step(125, "125%"), step(150, "150%"), step(200, "200%"), step(300, "300%")];
+const LEVEL_STEPS: [chip::Choice<u8>; 5] = [step(2, "2"), step(3, "3"), step(4, "4"), step(6, "6"), step(8, "8")];
 
 /// What a line color style looks like, for its row in the list.
 fn line_style_description(style: &prunr_core::LineStyle) -> &'static str {
@@ -553,12 +552,10 @@ fn render_lines_group(
                 match &mut s.input_transform {
                     InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
                     InputTransform::ContrastBoost { percent } => {
-                        let steps = [125u16, 150, 200, 300].map(|p| chip::Choice { value: p, name: contrast_step_name(p), description: "", enabled: true });
-                        filter_changed |= chip::choice_row(ui, "Contrast", &steps, percent);
+                        filter_changed |= chip::choice_row(ui, "Contrast", &CONTRAST_STEPS, percent);
                     }
                     InputTransform::Posterize { levels } => {
-                        let steps = [2u8, 3, 4, 6, 8].map(|n| chip::Choice { value: n, name: level_step_name(n), description: "", enabled: true });
-                        filter_changed |= chip::choice_row(ui, "Levels", &steps, levels);
+                        filter_changed |= chip::choice_row(ui, "Levels", &LEVEL_STEPS, levels);
                     }
                 }
                 if filter_changed {
