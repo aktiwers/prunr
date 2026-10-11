@@ -10,22 +10,6 @@ use super::item_settings::ItemSettings;
 /// values are `ItemSettings::default()` regardless of what's in the map.
 pub const PRUNR_PRESET: &str = "Prunr";
 
-/// User preference for the dispatch-progress visual style. Both
-/// variants read the same `DispatchProgress` data; only the
-/// painting layout differs (top strip vs centered pill).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProgressStyle {
-    /// Top-of-canvas 44 px strip with inline Cancel button.
-    /// Minimal canvas obscuring; flat counter only.
-    Banner,
-    /// Centered pill with animated headline + nested counter +
-    /// rich step label + Esc hint. Default — carries more info
-    /// per frame and matches the legacy seg-pipeline modal feel.
-    #[default]
-    Modal,
-}
-
 /// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
 /// live on `BatchItem.settings: ItemSettings` instead. New images inherit
 /// whichever preset `default_preset` points at; the adjustments toolbar
@@ -55,11 +39,6 @@ pub struct Settings {
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
-    /// Visual style for the dispatch-progress overlay (banner across
-    /// the top of the canvas vs centered modal pill). Both read the
-    /// same data; users pick which form they prefer.
-    #[serde(default)]
-    pub progress_style: ProgressStyle,
     /// Drag-out and Save emit subject/lines/mask PNGs instead of a single
     /// composite. Single toggle, both export paths.
     #[serde(default)]
@@ -655,7 +634,6 @@ impl Default for Settings {
             dark_checker: false,
             live_preview: true,
             auto_hide_adjustments: false,
-            progress_style: ProgressStyle::default(),
             export_split_layers: false,
             shortcuts: HashMap::new(),
             presets: HashMap::new(),
@@ -679,46 +657,6 @@ mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
     use prunr_core::LineMode;
-
-    #[test]
-    fn progress_style_default_is_modal() {
-        assert_eq!(ProgressStyle::default(), ProgressStyle::Modal);
-    }
-
-    #[test]
-    fn progress_style_round_trips_both_variants() {
-        for style in [ProgressStyle::Banner, ProgressStyle::Modal] {
-            let json = serde_json::to_string(&style).unwrap();
-            let back: ProgressStyle = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, style, "round-trip of {style:?}");
-        }
-    }
-
-    #[test]
-    fn progress_style_uses_snake_case_on_wire() {
-        // Pinned because the user's settings.json carries this string;
-        // a `rename_all` regression would silently land users on the
-        // default and quietly lose their saved preference.
-        assert_eq!(serde_json::to_string(&ProgressStyle::Banner).unwrap(), "\"banner\"");
-        assert_eq!(serde_json::to_string(&ProgressStyle::Modal).unwrap(), "\"modal\"");
-    }
-
-    #[test]
-    fn settings_without_progress_style_falls_back_to_modal() {
-        // Forward-compat: settings.json saved before `progress_style`
-        // existed has no key. `#[serde(default)]` + `Default::default()`
-        // resolve to Modal.
-        let json = r#"{
-            "model": "BiRefNetLite",
-            "auto_process_on_import": false,
-            "parallel_jobs": 4,
-            "history_depth": 10,
-            "chain_mode": true,
-            "default_preset": "Prunr"
-        }"#;
-        let settings: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(settings.progress_style, ProgressStyle::Modal);
-    }
 
     #[test]
     fn v1_migration_parses_all_per_image_fields() {
@@ -799,7 +737,6 @@ mod tests {
         assert!(!s.dark_checker);
         assert!(s.live_preview);
         assert!(!s.auto_hide_adjustments);
-        assert_eq!(s.progress_style, ProgressStyle::Modal);
         assert!(!s.export_split_layers);
         assert!(s.shortcuts.is_empty());
         assert!(s.presets.is_empty());
@@ -897,6 +834,14 @@ mod tests {
         assert!(!restored.force_cpu);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settings_file_from_before_the_progress_capsule_still_loads() {
+        let mut json = serde_json::to_value(Settings { parallel_jobs: 5, ..Settings::default() }).unwrap();
+        json["progress_style"] = serde_json::json!("banner");
+        let restored: Settings = serde_json::from_value(json).expect("an old key is ignored");
+        assert_eq!(restored.parallel_jobs, 5);
     }
 
     #[test]

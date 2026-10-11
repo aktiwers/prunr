@@ -84,6 +84,30 @@ fn loaded_item_names_every_control() {
 }
 
 #[test]
+fn a_run_in_flight_names_its_cancel_button() {
+    use crate::gui::dispatch_progress::DispatchProgress;
+    use prunr_core::{ProgressUpdate, Step, TileRect};
+    let mut harness = harness();
+    {
+        let app = harness.state_mut();
+        let item = push_test_item(app, 1);
+        item.status = BatchStatus::Done;
+        app.batch.select_item(0);
+        let mut progress = DispatchProgress::upscale(1, 2, Step::Upscaling.label());
+        progress.apply(&ProgressUpdate::Tiles(vec![
+            TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 },
+            TileRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 },
+        ]));
+        progress.apply(&ProgressUpdate::Tile { index: 1, done: false });
+        app.processor.show_progress_for_test(progress);
+    }
+    settle(&mut harness);
+    assert_all_controls_named(&harness, "run in flight");
+    let names = names(&harness);
+    assert!(names.iter().any(|n| n == "Cancel"), "the capsule's Cancel is named: {names:?}");
+}
+
+#[test]
 fn settings_tabs_name_every_control() {
     let mut harness = harness();
     settle(&mut harness);
