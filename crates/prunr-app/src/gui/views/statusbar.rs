@@ -24,10 +24,8 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         let batch_total = counts.batch_total();
         let inpaint_busy = app.processor.any_inpaint_in_flight();
 
-        // The canvas banner / modal carries the live tile + step counter
-        // for whichever dispatch is in flight (seg, eraser, SD, upscale).
-        // The statusbar text below is the terse fallback shown when the
-        // user's eyes are off the canvas — short verbs, no counters.
+        // The canvas capsule carries the step and counts; this text is
+        // the terse fallback for eyes off the canvas, without counters.
         let status_text = if app.processor.is_upscale_in_flight() {
             "Upscaling\u{2026}".to_string()
         } else if inpaint_busy {

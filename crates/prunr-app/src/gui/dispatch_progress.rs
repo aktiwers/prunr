@@ -14,38 +14,23 @@
 //! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
 /// Which dispatch is publishing; decides what Cancel stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressKind {
-    /// Background-removal segmentation pipeline (BiRefNet, Silueta, …).
+    /// Background removal (BiRefNet, Silueta, …).
     Seg,
-    /// Small inpaint models running in-process (LaMa, BigLaMa, MIGAN).
-    Eraser,
-    /// Stable Diffusion inpaint via the subprocess bridge.
-    SdInpaint,
+    /// Any eraser: LaMa family in-process, Stable Diffusion via its bridge.
+    Inpaint,
     /// Super-resolution upscale (Real-ESRGAN, HAT-L).
     Upscale,
 }
 
-pub mod step_labels {
-    /// Cancel was requested but the EP finishes its current tile first
-    /// (OpenVINO ignores `RunOptions::terminate` mid-run).
-    pub const CANCELLING: &str = "Finishing the current tile";
-}
-
-/// What a banner-Cancel click should target, derived purely from the
-/// snapshot's `kind` plus an optional selected-item handle. Surfaces
-/// the routing as data so the canvas closure can stay a one-line
-/// `match`, and the four arms are unit-testable without a fixture
-/// `PrunrApp`.
-///
-/// `Eraser` / `SdInpaint` need the item handle (per-stroke cancel);
-/// when none is supplied the routing returns `None` (the banner
-/// click is a no-op rather than collateral-damaging another item).
+/// What Cancel stops. An eraser run needs the item it runs on; without
+/// one the click does nothing rather than stop another item's stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTarget {
     InpaintForItem(u64),
@@ -53,21 +38,16 @@ pub enum CancelTarget {
     SegBatchAndReset,
 }
 
-/// Pure routing: given the slot's `kind` and the active inpaint
-/// item (if any), what should the banner Cancel button target?
 pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
     match kind {
-        ProgressKind::Eraser | ProgressKind::SdInpaint => {
-            active_inpaint_item.map(CancelTarget::InpaintForItem)
-        }
+        ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
     }
 }
 
-/// Snapshot of a single in-flight dispatch. Cheap to clone — only the
-/// step_label can be a heap `String`, and short labels live as
-/// `Cow::Borrowed(&'static str)`.
+/// Snapshot of a single in-flight dispatch, cloned once per frame: the
+/// tile layout is shared, the rest is small.
 #[derive(Debug, Clone)]
 pub struct DispatchProgress {
     pub kind: ProgressKind,
@@ -78,15 +58,15 @@ pub struct DispatchProgress {
     /// Step counter inside the current outer unit. `(0, 0)` means
     /// "indeterminate" — widgets render the spinner-only form.
     pub inner: (u32, u32),
-    /// What the current step is doing, in human prose. Short fragments
-    /// ("Decode", "Inference") are `Borrowed`; valued text
-    /// ("Denoising at sigma 0.42") is `Owned`.
+    /// The current step, in the words the user reads.
     pub step_label: Cow<'static, str>,
+    /// Cancel was asked for; the run finishes its current tile or step.
+    pub cancelling: bool,
     /// What the counts count, as the pipeline reported it.
     pub outer_unit: Option<prunr_core::Unit>,
     pub inner_unit: Option<prunr_core::Unit>,
-    /// The tile map: where the work happens, and how far each tile is.
-    /// Tile cells, overlaps split down the middle so they tile the image.
+    /// The tile map: cells with overlaps split down the middle, and how
+    /// far each one is.
     pub tiles: Arc<[prunr_core::TileRect]>,
     pub tile_states: Vec<TileState>,
     /// When work started moving and how far along it was then.
@@ -111,6 +91,7 @@ impl DispatchProgress {
             outer: None,
             inner: (0, 0),
             step_label: step_label.into(),
+            cancelling: false,
             outer_unit: None,
             inner_unit: None,
             tiles: Arc::new([]),
@@ -127,9 +108,7 @@ impl DispatchProgress {
     pub(crate) fn apply_at(&mut self, update: &prunr_core::ProgressUpdate, now: Instant) {
         use prunr_core::ProgressUpdate;
         match update {
-            // A cancelling run keeps saying so until it ends.
-            ProgressUpdate::Step(step) if !self.is_cancelling() => self.step_label = Cow::Borrowed(step.label()),
-            ProgressUpdate::Step(_) => {}
+            ProgressUpdate::Step(step) => self.step_label = Cow::Borrowed(step.label()),
             &ProgressUpdate::Outer { done, total, unit } => {
                 self.outer = Some((done, total));
                 self.outer_unit = Some(unit);
@@ -166,7 +145,7 @@ impl DispatchProgress {
 
     /// Time left at the pace since counting started; `None` until there
     /// is enough of it to say.
-    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+    fn remaining(&self, now: Instant) -> Option<Duration> {
         let (since, at_start) = self.pace?;
         let f = self.fraction()?;
         let elapsed = now.saturating_duration_since(since);
@@ -189,24 +168,12 @@ impl DispatchProgress {
         })
     }
 
-    /// A cancel was requested and the run is finishing its current step.
-    pub fn is_cancelling(&self) -> bool {
-        self.step_label == step_labels::CANCELLING
-    }
-
     /// Builder for the seg / batch pipeline. `step` is whatever
     /// `BatchManager::progress().stage` reports ("Processing 3/5").
     pub fn seg(done: u32, total: u32, step: impl Into<Cow<'static, str>>) -> Self {
         let mut p = Self::new(ProgressKind::Seg, step);
         p.set_inner(done, total, prunr_core::Unit::Image, Instant::now());
         p
-    }
-
-    /// Builder for the upscale dispatch. `tile_total = 0` is OK at the
-    /// "loading model" pre-dispatch point — the counter is then
-    /// indeterminate.
-    pub fn upscale(tile_done: u32, tile_total: u32, label: &'static str) -> Self {
-        Self { inner: (tile_done, tile_total), ..Self::new(ProgressKind::Upscale, label) }
     }
 
     /// Flattened `(current, total)` across the outer × inner space.
@@ -321,7 +288,7 @@ impl DispatchProgressSlot {
     }
 
     /// A progress handle for a run starting now, with its cancel flag.
-    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<std::sync::atomic::AtomicBool>) -> (prunr_core::Progress, RunSink) {
+    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<AtomicBool>) -> (prunr_core::Progress, RunSink) {
         let sink = self.begin(initial);
         (prunr_core::Progress::new(Arc::new(sink.clone())).with_cancel(cancel), sink)
     }
@@ -336,10 +303,6 @@ impl DispatchProgressSlot {
         *guard = progress;
     }
 
-    /// Mutate the active progress in place. The closure runs with
-    /// `&mut Option<DispatchProgress>` so callers can patch fields
-    /// without rebuilding the whole struct (typical: bump `inner.0`
-    /// and refresh `step_label`).
     pub fn update(&self, f: impl FnOnce(&mut Option<DispatchProgress>)) {
         let mut guard = self
             .inner
@@ -359,9 +322,6 @@ impl DispatchProgressSlot {
     }
 }
 
-/// Capitalise the first ASCII char — small helper for the nested-form
-/// outer noun ("tile" → "Tile"). Stays inside the module rather than
-/// pulling in a `heck`-style dependency for one site.
 /// Trim each tile where it overlaps a neighbour, at the middle of the
 /// overlap, so overlapping tiles paint as cells that meet edge to edge.
 fn split_overlaps(rects: &[prunr_core::TileRect]) -> Vec<prunr_core::TileRect> {
@@ -405,7 +365,7 @@ mod tests {
 
     /// `outer` is (done, total), as the pipelines report it.
     fn sd_nested(outer: (u32, u32), inner: (u32, u32)) -> DispatchProgress {
-        DispatchProgress { outer: Some(outer), inner, ..DispatchProgress::new(ProgressKind::SdInpaint, prunr_core::Step::Denoising.label()) }
+        DispatchProgress { outer: Some(outer), inner, ..DispatchProgress::new(ProgressKind::Inpaint, prunr_core::Step::Denoising.label()) }
     }
 
     #[test]
@@ -465,7 +425,7 @@ mod tests {
 
     #[test]
     fn fraction_handles_zero_outer_total_gracefully() {
-        let p = DispatchProgress { outer: Some((0, 0)), inner: (1, 8), ..DispatchProgress::new(ProgressKind::SdInpaint, "Denoising") };
+        let p = DispatchProgress { outer: Some((0, 0)), inner: (1, 8), ..DispatchProgress::new(ProgressKind::Inpaint, "Denoising") };
         assert!(p.fraction().is_none(),
             "zero outer_total is invalid input — must not divide by zero");
     }
@@ -507,15 +467,6 @@ mod tests {
         let p = DispatchProgress::seg(3, 5, stage);
         assert_eq!(p.inner, (3, 5));
         assert_eq!(p.step_label.as_ref(), "Processing 3 of 5");
-    }
-
-    #[test]
-    fn upscale_builder_uses_borrowed_label() {
-        let p = DispatchProgress::upscale(12, 49, prunr_core::Step::Upscaling.label());
-        assert_eq!(p.kind, ProgressKind::Upscale);
-        assert_eq!(p.outer, None);
-        assert_eq!(p.inner, (12, 49));
-        assert_eq!(p.step_label.as_ref(), "Upscaling");
     }
 
     #[test]
@@ -579,24 +530,8 @@ mod tests {
 
     #[test]
     fn cancel_target_eraser_needs_active_item() {
-        assert_eq!(
-            cancel_target_for(ProgressKind::Eraser, Some(42)),
-            Some(CancelTarget::InpaintForItem(42)),
-        );
-        assert_eq!(
-            cancel_target_for(ProgressKind::Eraser, None),
-            None,
-            "no active item → click is a no-op (the inpaint isn't ours to cancel)",
-        );
-    }
-
-    #[test]
-    fn cancel_target_sd_inpaint_needs_active_item() {
-        assert_eq!(
-            cancel_target_for(ProgressKind::SdInpaint, Some(7)),
-            Some(CancelTarget::InpaintForItem(7)),
-        );
-        assert_eq!(cancel_target_for(ProgressKind::SdInpaint, None), None);
+        assert_eq!(cancel_target_for(ProgressKind::Inpaint, Some(42)), Some(CancelTarget::InpaintForItem(42)));
+        assert_eq!(cancel_target_for(ProgressKind::Inpaint, None), None, "another item's stroke is not ours to stop");
     }
 
     /// A run that was replaced, or has ended, can still have a report in
@@ -625,19 +560,9 @@ mod tests {
         p.apply(&ProgressUpdate::Inner { done: 3, total: 48, unit: Unit::Tile });
         p.apply(&ProgressUpdate::Outer { done: 1, total: 2, unit: Unit::Pass });
         assert_eq!((p.step_label.as_ref(), p.inner, p.outer), ("Upscaling", (3, 48), Some((1, 2))));
-        p.step_label = std::borrow::Cow::Borrowed(step_labels::CANCELLING);
+        p.cancelling = true;
         p.apply(&ProgressUpdate::Step(Step::Finishing));
-        assert!(p.is_cancelling(), "a late step name must not hide the cancel");
-    }
-
-    /// The upscale cancel says so through its step label; the widgets
-    /// read the same fact to swap the headline and drop the Esc hint.
-    #[test]
-    fn a_cancelling_run_reads_as_cancelling() {
-        let mut p = upscale((1, 48));
-        assert!(!p.is_cancelling());
-        p.step_label = std::borrow::Cow::Borrowed(step_labels::CANCELLING);
-        assert!(p.is_cancelling());
+        assert!(p.cancelling, "a late step must not hide the cancel");
     }
 
     #[test]
@@ -656,8 +581,8 @@ mod tests {
 
     #[test]
     fn cancel_target_seg_routes_to_batch_reset() {
-        // Seg banner Cancel → batch cancel, not an inpaint cancel.
-        // Pins the H1 audit fix: a future refactor that maps
+        // Seg Cancel → batch cancel, not an inpaint cancel.
+        // A future refactor that maps
         // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
         // fails this assertion before users see a dropped click.
         assert_eq!(
