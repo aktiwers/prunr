@@ -303,15 +303,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 p[2] = 255 - p[2];
             });
         }
-        FillStyle::Duotone { dark, light } => {
-            apply_pixelwise(rgba, |p| {
-                let t = luma_u8(p[0], p[1], p[2]) as u16;
-                let inv = 255 - t;
-                p[0] = ((dark[0] as u16 * inv + light[0] as u16 * t) / 255) as u8;
-                p[1] = ((dark[1] as u16 * inv + light[1] as u16 * t) / 255) as u8;
-                p[2] = ((dark[2] as u16 * inv + light[2] as u16 * t) / 255) as u8;
-            });
-        }
+        FillStyle::Duotone { dark, light } => gradient_map(rgba, &[dark, light]),
         FillStyle::Sepia => {
             apply_pixelwise(rgba, |p| {
                 let (r, g, b) = (p[0] as u32, p[1] as u32, p[2] as u32);
@@ -476,26 +468,25 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 rgba.as_mut().chunks_mut(row_stride).enumerate().for_each(process_row);
             }
         }
-        FillStyle::GradientMap { stops } => {
-            // Map luma 0..=255 through 4 colour stops at 0, 85, 170, 255.
-            // Linear interp between adjacent stops.
-            apply_pixelwise(rgba, |p| {
-                let y = luma_u8(p[0], p[1], p[2]) as u16;
-                let (lo, hi, t) = if y <= 85 {
-                    (stops[0], stops[1], y * 255 / 85)
-                } else if y <= 170 {
-                    (stops[1], stops[2], (y - 85) * 255 / 85)
-                } else {
-                    (stops[2], stops[3], (y - 170) * 255 / 85)
-                };
-                let t = t.min(255);
-                let inv = 255 - t;
-                p[0] = ((lo[0] as u16 * inv + hi[0] as u16 * t) / 255) as u8;
-                p[1] = ((lo[1] as u16 * inv + hi[1] as u16 * t) / 255) as u8;
-                p[2] = ((lo[2] as u16 * inv + hi[2] as u16 * t) / 255) as u8;
-            });
-        }
+        FillStyle::GradientMap { stops } => gradient_map(rgba, &stops),
     }
+}
+
+/// Map each pixel's luma through `stops` spaced evenly from black (the
+/// first) to white (the last), blending linearly between neighbours.
+fn gradient_map(rgba: &mut RgbaImage, stops: &[[u8; 3]]) {
+    debug_assert!(stops.len() >= 2);
+    let segments = (stops.len() - 1) as u16;
+    let span = 255 / segments;
+    apply_pixelwise(rgba, |p| {
+        let y = luma_u8(p[0], p[1], p[2]) as u16;
+        let i = (y / span).min(segments - 1) as usize;
+        let t = ((y - i as u16 * span) * 255 / span).min(255);
+        let (lo, hi, inv) = (stops[i], stops[i + 1], 255 - t);
+        for c in 0..3 {
+            p[c] = ((lo[c] as u16 * inv + hi[c] as u16 * t) / 255) as u8;
+        }
+    });
 }
 
 /// Rec. 709 luma of an 8-bit RGB triple. Used by every grayscale / duotone /
@@ -1131,6 +1122,31 @@ mod tests {
         let blur = effect_backdrop(&photo, BgEffect::BlurredSource { radius: 2 }).unwrap();
         let (left, right) = (blur.get_pixel(3, 2).0[2], blur.get_pixel(4, 2).0[2]);
         assert!(left > 40 && right < 220, "the two halves bleed into each other: {left} {right}");
+    }
+
+    /// Duotone and Gradient map share one evenly-spaced gradient map; at
+    /// every grey level it gives what each computed on its own before.
+    #[test]
+    fn duotone_and_gradient_map_match_their_former_formulas() {
+        let blend = |lo: [u8; 3], hi: [u8; 3], t: u16| -> [u8; 3] {
+            let inv = 255 - t;
+            std::array::from_fn(|c| ((lo[c] as u16 * inv + hi[c] as u16 * t) / 255) as u8)
+        };
+        let (dark, light) = ([10, 20, 30], [240, 200, 100]);
+        let stops = [[0, 0, 80], [200, 0, 120], [255, 140, 0], [255, 255, 200]];
+        for y in 0..=255u8 {
+            let mut img = RgbaImage::from_pixel(1, 1, image::Rgba([y, y, y, 255]));
+            gradient_map(&mut img, &[dark, light]);
+            assert_eq!(img.get_pixel(0, 0).0[..3], blend(dark, light, y as u16), "duotone at {y}");
+
+            let y16 = y as u16;
+            let (lo, hi, t) = if y16 <= 85 { (stops[0], stops[1], y16 * 255 / 85) }
+                else if y16 <= 170 { (stops[1], stops[2], (y16 - 85) * 255 / 85) }
+                else { (stops[2], stops[3], (y16 - 170) * 255 / 85) };
+            let mut img = RgbaImage::from_pixel(1, 1, image::Rgba([y, y, y, 255]));
+            gradient_map(&mut img, &stops);
+            assert_eq!(img.get_pixel(0, 0).0[..3], blend(lo, hi, t.min(255)), "gradient map at {y}");
+        }
     }
 }
 
