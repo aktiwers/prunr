@@ -2817,7 +2817,8 @@ impl PrunrApp {
     /// Outline the subject a run has just found on the shown image, while
     /// its edges are refined. A 128 px hint costs well under a millisecond.
     fn show_subject(&mut self, item_id: u64, hint: &prunr_core::SubjectHint, ctx: &egui::Context) {
-        if !self.batch.is_selected(item_id) {
+        let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.status == BatchStatus::Processing && i.job_is_current());
+        if !self.batch.is_selected(item_id) || !awaited {
             return;
         }
         let Some((image, order)) = super::views::effects::subject_glow(hint) else { return };
@@ -2885,6 +2886,8 @@ impl PrunrApp {
             item.finish_job();
         } else {
             item.job = None;
+            item.reveal = None;
+            item.subject = None;
         }
         // Single completion event — useful for `RUST_LOG=prunr=debug` bug
         // reports (when did inference actually finish?) and as a stable
