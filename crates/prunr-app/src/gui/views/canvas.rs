@@ -755,7 +755,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let img_rect =
             compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-        paint_backdrop(ui, img_rect, it);
+        paint_backdrop(ui, img_rect, it, shown.size_vec2());
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         draw_selection(ui, app, it, img_rect);
         painted = Some(img_rect);
@@ -812,7 +812,7 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
 
 /// What sits behind `item`'s result, painted into `rect` under it. Until a
 /// picture's texture lands, nothing (the checkerboard) shows.
-pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem) {
+pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem, image_px: Vec2) {
     use crate::gui::item_settings::Backdrop;
     let backdrop = item.settings.backdrop();
     match backdrop {
@@ -824,9 +824,17 @@ pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item:
             let Some((_, tex)) = item.backdrop_texture.as_ref() else { return };
             // An effect is made from the photo itself, so it covers exactly.
             let fit = if matches!(backdrop, Backdrop::Image(_)) { item.settings.bg_image_fit } else { prunr_core::BgImageFit::Cover };
-            paint_bg_image(ui, rect, tex, fit);
+            paint_bg_image(ui, rect, tex, fit, image_px);
         }
     }
+}
+
+/// The UV span that repeats a `tex_px` picture at its own pixel size over
+/// an image of `image_px` pixels, as export tiles it: the number of tiles
+/// follows the image, not the zoom. Over 1 it wraps (the texture is
+/// uploaded with `WrapMode::Repeat`).
+fn tile_uv(image_px: Vec2, tex_px: Vec2) -> Rect {
+    Rect::from_min_max(Pos2::ZERO, Pos2::new(image_px.x / tex_px.x, image_px.y / tex_px.y))
 }
 
 /// Paint `tex` into `bounds` per `fit` — UV-only math (no texture
@@ -837,6 +845,7 @@ pub(super) fn paint_bg_image(
     bounds: Rect,
     tex: &TextureHandle,
     fit: prunr_core::BgImageFit,
+    image_px: Vec2,
 ) {
     use prunr_core::BgImageFit;
     let tex_size = tex.size_vec2();
@@ -860,27 +869,14 @@ pub(super) fn paint_bg_image(
             };
             ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
         }
-        BgImageFit::Stretch => {
-            ui.painter().image(tex.id(), bounds, super::effects::UNIT_UV, Color32::WHITE);
-        }
         BgImageFit::Contain => {
             let scale = (bw / tw).min(bh / th);
             let inner = egui::vec2(tw * scale, th * scale);
             let inner_rect = Rect::from_center_size(bounds.center(), inner);
             ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
         }
-        BgImageFit::Center => {
-            // 1:1 native size centred. May overflow `bounds` but the
-            // canvas painter clips to the painter's clip rect (egui's
-            // panel clipping handles overflow).
-            let inner_rect = Rect::from_center_size(bounds.center(), egui::vec2(tw, th));
-            ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
-        }
         BgImageFit::Tile => {
-            // UV scaled by bounds/tex_size triggers WrapMode::Repeat in
-            // egui — the bg texture is uploaded with that wrap mode set.
-            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(bw / tw, bh / th));
-            ui.painter().image(tex.id(), bounds, uv, Color32::WHITE);
+            ui.painter().image(tex.id(), bounds, tile_uv(image_px, tex_size), Color32::WHITE);
         }
     }
 }
@@ -913,6 +909,15 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tile repeats a picture at its own pixel size over the image, as
+    /// export does: the count follows the image, whatever the zoom.
+    #[test]
+    fn tiling_counts_tiles_in_image_pixels() {
+        let uv = tile_uv(Vec2::new(800.0, 600.0), Vec2::new(200.0, 300.0));
+        assert_eq!(uv.max, Pos2::new(4.0, 2.0));
+        assert_eq!(uv.min, Pos2::ZERO);
+    }
 
     #[test]
     fn only_points_on_the_image_become_source_pixels() {

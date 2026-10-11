@@ -116,8 +116,8 @@ pub struct Cli {
     pub bg_image: Option<std::path::PathBuf>,
 
     /// How the background image is positioned: cover (default — fills both
-    /// dims, may crop), contain (fits inside, may letterbox), stretch
-    /// (distort to fill), tile (repeat at native size), center (1:1 native).
+    /// dims, may crop), contain (fits inside, may letterbox), tile (repeat
+    /// at native size).
     #[arg(long, default_value_t = prunr_core::BgImageFit::Cover)]
     pub bg_image_fit: prunr_core::BgImageFit,
 

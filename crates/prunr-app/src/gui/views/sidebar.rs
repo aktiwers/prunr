@@ -319,7 +319,8 @@ fn paint_thumbnail(
     // Gate on `Done`, not `result_rgba`: a background item's result may be
     // released while its thumbnail, built from the result, stays.
     if matches!(item.status, BatchStatus::Done) {
-        super::canvas::paint_backdrop(ui, thumb_rect, item);
+        let (w, h) = item.dimensions;
+        super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32));
     }
 
     // Dim to ~40% while being dragged out to an external app.
