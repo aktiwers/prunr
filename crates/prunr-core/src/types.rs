@@ -192,7 +192,7 @@ impl std::str::FromStr for EdgeScale {
     }
 }
 
-/// Controls for the edge-detection postprocess (`finalize_edges`).
+/// Controls for drawing the detected lines.
 /// `line_mode` is kept separate — it picks whether edges run at all.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeSettings {

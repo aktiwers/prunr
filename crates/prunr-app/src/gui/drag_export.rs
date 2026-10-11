@@ -150,11 +150,9 @@ fn render_layer(
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Lines => {
-            let et = item.cached_edge_tensors.as_ref()?;
-            let tensor = et.decompress(item.settings.edge_scale)?;
-            let rgba = prunr_core::finalize_edges(
-                &tensor, et.height, et.width, original, &item.settings.edge_settings(),
-            );
+            let edge = item.settings.edge_settings();
+            let tensors = item.cached_edge_tensors.as_ref()?.for_compose(&edge)?;
+            let rgba = prunr_core::compose_whole_photo(&tensors, original, &edge);
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Mask => {
@@ -380,4 +378,37 @@ mod tests {
             assert!(render_layer(&item, kind, &blank, None).is_none());
         }
     }
+
+    /// The exported Lines layer draws what the canvas draws: Dual scale
+    /// layers Fine and Bold, whatever single scale is stored.
+    #[test]
+    fn the_lines_layer_matches_the_whole_photo_compose_for_dual_scale() {
+        use crate::gui::item::{BatchItem, ImageSource};
+        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache};
+        use prunr_core::{EdgeScale, LineStyle};
+        use std::sync::Arc;
+
+        let (h, w) = (8u32, 8u32);
+        let tensor = |on: bool| vec![if on { 10.0_f32 } else { -10.0 }; (h * w) as usize];
+        let raw = EdgeTensorCache { tensors: [tensor(true), tensor(false), tensor(false), tensor(false)], height: h, width: w };
+        let all_scales = prunr_core::EdgeInferenceResult { tensors: raw.tensors.clone(), height: h, width: w };
+        let settings = ItemSettings {
+            line_mode: LineMode::EdgesOnly,
+            edge_scale: EdgeScale::Bold,
+            line_style: LineStyle::DualScale { fine_color: [255, 0, 0], bold_color: [0, 0, 255] },
+            ..ItemSettings::default()
+        };
+        let mut item = BatchItem::new(1, "x.png".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (16, 16), settings, String::new());
+        item.cached_edge_tensors = CompressedEdgeTensors::from_raw(raw);
+        let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
+
+        let Some(LayerOutput::Rgba(layer)) = render_layer(&item, LayerKind::Lines, &photo, None) else {
+            panic!("the Lines layer renders from the cached lines");
+        };
+        let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings());
+        assert_eq!(layer.as_raw(), canvas.as_raw());
+        assert_eq!(layer.get_pixel(8, 8).0[..3], [255, 0, 0], "Fine lines draw in the fine color");
+    }
 }
+
