@@ -13,6 +13,9 @@ pub struct StateDump {
     pub model: String,
     pub tool: &'static str,
     pub selected: Option<u64>,
+    /// Work still owed to the screen: a preview, an upscale, a run, or a
+    /// decode or texture. A script waits for this to clear.
+    pub busy: bool,
     pub items: Vec<ItemDump>,
     pub show_original: bool,
     pub sidebar_hidden: bool,
@@ -55,6 +58,9 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             "none"
         },
         selected: app.batch.selected_item().map(|it| it.id),
+        busy: app.processor.live_preview.is_busy()
+            || app.processor.is_upscale_in_flight()
+            || app.batch.items.iter().any(|it| it.status == crate::gui::item::BatchStatus::Processing || it.has_pending_work()),
         items: app
             .batch
             .items
