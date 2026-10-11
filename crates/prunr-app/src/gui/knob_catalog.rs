@@ -25,7 +25,7 @@ use crate::gui::settings::SettingsModel;
 pub enum StaticKnob {
     // Mask tier — cached seg tensor reused.
     Gamma,
-    Threshold,
+    Contrast,
     EdgeShift,
     RefineEdges,
     GuidedRadius,
@@ -55,7 +55,7 @@ impl StaticKnob {
     const fn ordinal(self) -> u8 {
         match self {
             StaticKnob::Gamma => 0,
-            StaticKnob::Threshold => 1,
+            StaticKnob::Contrast => 1,
             StaticKnob::EdgeShift => 2,
             StaticKnob::RefineEdges => 3,
             StaticKnob::GuidedRadius => 4,
@@ -78,7 +78,7 @@ impl StaticKnob {
     /// All variants, for table-driven tests and catalog validation.
     pub const ALL: &'static [StaticKnob] = &[
         StaticKnob::Gamma,
-        StaticKnob::Threshold,
+        StaticKnob::Contrast,
         StaticKnob::EdgeShift,
         StaticKnob::RefineEdges,
         StaticKnob::GuidedRadius,
@@ -211,7 +211,7 @@ impl StaticKnob {
     pub fn requirement(self) -> KnobRequirement {
         match self {
             StaticKnob::Gamma
-            | StaticKnob::Threshold
+            | StaticKnob::Contrast
             | StaticKnob::EdgeShift
             | StaticKnob::RefineEdges
             | StaticKnob::GuidedRadius
@@ -343,7 +343,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
 
     match knob {
         StaticKnob::Gamma
-        | StaticKnob::Threshold
+        | StaticKnob::Contrast
         | StaticKnob::EdgeShift
         | StaticKnob::RefineEdges
         | StaticKnob::GuidedRadius
@@ -474,7 +474,7 @@ mod tests {
         use KnobRequirement::*;
         let expected: &[(StaticKnob, KnobRequirement)] = &[
             (StaticKnob::Gamma, MaskProduced),
-            (StaticKnob::Threshold, MaskProduced),
+            (StaticKnob::Contrast, MaskProduced),
             (StaticKnob::EdgeShift, MaskProduced),
             (StaticKnob::RefineEdges, MaskProduced),
             (StaticKnob::GuidedRadius, MaskProduced),
@@ -714,7 +714,7 @@ mod tests {
         let mut new = base;
         match knob {
             StaticKnob::Gamma => new.gamma = base.gamma + 0.5,
-            StaticKnob::Threshold => new.threshold = Some(base.threshold.unwrap_or(0.5) + 0.1),
+            StaticKnob::Contrast => new.contrast = base.contrast + 0.1,
             StaticKnob::EdgeShift => new.edge_shift = base.edge_shift + 1.0,
             StaticKnob::RefineEdges => new.refine_edges = !base.refine_edges,
             StaticKnob::GuidedRadius => new.guided_radius = base.guided_radius + 1,
@@ -881,8 +881,7 @@ mod tests {
         #[test]
         fn identity_recipe_is_skip(
             gamma in 0.01f32..10.0,
-            threshold_on in proptest::prelude::any::<bool>(),
-            threshold_val in 0.001f32..0.999,
+            contrast in 0.0f32..=1.0,
             edge_shift in -50.0f32..50.0,
             line_mode in proptest::prelude::prop_oneof![
                 proptest::prelude::Just(LineMode::Off),
@@ -892,7 +891,7 @@ mod tests {
         ) {
             let s = crate::gui::item_settings::ItemSettings {
                 gamma,
-                threshold: if threshold_on { Some(threshold_val) } else { None },
+                contrast,
                 edge_shift,
                 line_mode,
                 ..Default::default()

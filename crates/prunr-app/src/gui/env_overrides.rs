@@ -16,7 +16,7 @@ use super::item_settings::ItemSettings;
 /// in a harness script doesn't kill the launch.
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read_f32("PRUNR_GAMMA") { item.gamma = v; }
-    if let Some(v) = read_f32("PRUNR_THRESHOLD") { item.threshold = Some(v); }
+    if let Some(v) = read_f32("PRUNR_CONTRAST") { item.contrast = v; }
     if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = v; }
     if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
     if let Some(v) = read_f32("PRUNR_FEATHER") { item.feather = v; }
@@ -135,15 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn gamma_threshold_edge_shift_parse() {
+    fn gamma_contrast_edge_shift_parse() {
         with_env(
-            &[("PRUNR_GAMMA", "2.5"), ("PRUNR_THRESHOLD", "0.4"),
+            &[("PRUNR_GAMMA", "2.5"), ("PRUNR_CONTRAST", "0.4"),
               ("PRUNR_EDGE_SHIFT", "-3")],
             || {
                 let mut item = ItemSettings::default();
                 apply_to_item_settings(&mut item);
                 assert_eq!(item.gamma, 2.5);
-                assert_eq!(item.threshold, Some(0.4));
+                assert_eq!(item.contrast, 0.4);
                 assert_eq!(item.edge_shift, -3.0);
             },
         );

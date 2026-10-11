@@ -21,6 +21,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **Contrast replaces Hard threshold** in the Mask panel: one slider that sharpens the cut-out's edge at the photo's full size, where 100% is a hard edge. Hard threshold cut at the model's lower resolution, so its edge was never really hard. Saved presets with it on load as Contrast 100%. On the command line `--contrast` replaces `--threshold`.
 - Magic Brush shows only what changes its result (mode, Confidence, Remove specks) and draws a small fixed cursor; its size, hardness and shape only ever changed the cursor.
 - How a selection looks on the image is one app setting (Settings › Behavior: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
 - Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.

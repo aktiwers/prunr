@@ -515,7 +515,7 @@ mod tests {
 
         let r = resolve_preset_for_model(&file, ModelId::Silueta, None);
         assert!((r.item_settings.gamma - 2.5).abs() < f32::EPSILON);
-        assert_eq!(r.item_settings.threshold, ItemSettings::default().threshold);
+        assert_eq!(r.item_settings.contrast, ItemSettings::default().contrast);
         assert_eq!(r.brush, BrushSettings::default());
     }
 

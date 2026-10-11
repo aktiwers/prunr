@@ -10,7 +10,7 @@ use super::item_settings::ItemSettings;
 /// values are `ItemSettings::default()` regardless of what's in the map.
 pub const PRUNR_PRESET: &str = "Prunr";
 
-/// Global app config. Per-image knobs (gamma, threshold, line mode, bg, ...)
+/// Global app config. Per-image knobs (gamma, contrast, line mode, bg, ...)
 /// live on `BatchItem.settings: ItemSettings` instead. New images inherit
 /// whichever preset `default_preset` points at; the adjustments toolbar
 /// edits the current image's `ItemSettings` directly.
@@ -180,13 +180,14 @@ impl Settings {
 
         // Parse to Value first so we can migrate v1 fields regardless of
         // whether strict struct parsing succeeds.
-        let value: serde_json::Value = match serde_json::from_str(&data) {
+        let mut value: serde_json::Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(%e, "settings.json is corrupt; falling back to defaults");
                 return Self::default();
             }
         };
+        super::item_settings::migrate_threshold_to_contrast(&mut value);
 
         let mut settings: Self = match serde_json::from_value(value.clone()) {
             Ok(s) => s,
@@ -421,10 +422,9 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
 
     let mut s = ItemSettings::default();
     if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) { s.gamma = x as f32; }
+    // The old hard threshold was a binary cut: full contrast.
     if v.get("mask_threshold_enabled").and_then(|x| x.as_bool()) == Some(true) {
-        if let Some(x) = v.get("mask_threshold").and_then(|x| x.as_f64()) {
-            s.threshold = Some(x as f32);
-        }
+        s.contrast = 1.0;
     }
     if let Some(x) = v.get("edge_shift").and_then(|x| x.as_f64()) { s.edge_shift = x as f32; }
     if let Some(x) = v.get("refine_edges").and_then(|x| x.as_bool()) { s.refine_edges = x; }
@@ -690,7 +690,7 @@ mod tests {
         });
         let migrated = migrate_v1_item_settings(&v1_json);
         assert_eq!(migrated.gamma, 1.5);
-        assert_eq!(migrated.threshold, Some(0.3));
+        assert_eq!(migrated.contrast, 1.0, "the old hard threshold is a hard edge");
         assert_eq!(migrated.edge_shift, 2.0);
         assert!(migrated.refine_edges);
         assert_eq!(migrated.line_mode, LineMode::SubjectOutline);
@@ -706,7 +706,7 @@ mod tests {
             "mask_threshold_enabled": false,
         });
         let migrated = migrate_v1_item_settings(&v1_json);
-        assert_eq!(migrated.threshold, None);
+        assert_eq!(migrated.contrast, 0.0);
     }
 
     #[test]
