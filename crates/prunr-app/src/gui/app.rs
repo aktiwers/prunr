@@ -1473,12 +1473,12 @@ impl PrunrApp {
     /// (brush, undo/redo) act on the selected item; widening to the
     /// full batch would do per-frame work for items the user isn't
     /// editing for no current benefit.
-    fn recipe_drift_tripwire(&mut self) {
+    pub(crate) fn recipe_drift_tripwire(&mut self) {
         use crate::gui::live_preview::PreviewKind;
-        // Inpaint strokes commit via the inpaint subprocess; firing
-        // a seg preview here would clobber `result_rgba` with the raw
+        // Only a cut-out or the filters apply the mask settings; firing a
+        // preview over an erase or an upscale would clobber it with the
         // source through `run_preview`'s no-tensor fallback.
-        if self.settings.model.is_inpaint() {
+        if !shows(self.settings.model, Surface::Effect) {
             return;
         }
         if self.processor.live_preview.has_in_flight() {
@@ -1492,7 +1492,10 @@ impl PrunrApp {
         if self.last_drift_check == Some((id, current_settings)) {
             return;
         }
-        let current = prunr_core::MaskRecipe::from(&current_settings);
+        // The mask as the run applies it: pinned to the defaults where the
+        // run uses none (Sketch on Full), so its settings never drift.
+        let model = self.settings.model.to_model_kind().unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        let current = item.settings.current_recipe(model).mask;
         if applied.mask == current {
             self.last_drift_check = Some((id, current_settings));
             return;
@@ -2308,7 +2311,7 @@ impl PrunrApp {
         // mutably so `build_preview_inputs` can lazily cache an
         // `Arc<DynamicImage>` on the item (built once, reused across every
         // subsequent dispatch of the drag session — see `source_dyn`).
-        let is_filter_only = self.settings.model.to_model_kind().is_none();
+        let is_filter_only = self.settings.model == super::settings::SettingsModel::None;
         let style = self.selection_style();
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {

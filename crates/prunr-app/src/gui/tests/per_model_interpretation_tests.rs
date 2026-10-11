@@ -581,3 +581,27 @@ fn magic_brush_keeps_the_shown_and_the_previous_embedding_only() {
     let kept: Vec<bool> = app.batch.items.iter().map(|i| i.magic_brush_embedding.is_some()).collect();
     assert_eq!(kept, [false, true, true], "A dropped; B (previous) and C (shown) kept");
 }
+
+/// The drift check re-applies the mask only where a mask was applied:
+/// a Full-lines result, or an eraser or upscale result, with non-default
+/// mask settings must stay as it is.
+#[test]
+fn the_drift_check_never_recuts_a_result_that_used_no_mask() {
+    use std::sync::Arc;
+    for (model, line_mode) in [
+        (SettingsModel::Silueta, prunr_core::LineMode::EdgesOnly),
+        (SettingsModel::RealEsrganUpscale, prunr_core::LineMode::Off),
+    ] {
+        let mut app = app_with_model(model);
+        let item = push_test_item(&mut app, 7);
+        give_cutout(item);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        item.settings.line_mode = line_mode;
+        item.settings.gamma = 1.5;
+        let kind = model.to_model_kind().unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        item.applied_recipe = Some(item.settings.current_recipe(kind));
+        app.batch.select_item(0);
+        app.recipe_drift_tripwire();
+        assert!(!app.processor.live_preview.is_pending_for(7), "{model:?} {line_mode:?}: no mask was applied, nothing to re-apply");
+    }
+}
