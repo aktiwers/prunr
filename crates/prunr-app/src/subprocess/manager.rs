@@ -560,8 +560,7 @@ fn apply_event_state(
 ) {
     match evt {
         // Terminal events: the item is no longer being worked on. Every
-        // Done/Error variant must land here. `InpaintProgress` is NOT
-        // terminal — it's a mid-stroke tick during a long SD inpaint.
+        // Done/Error variant must land here; progress reports are not.
         SubprocessEvent::ImageDone { item_id, .. }
         | SubprocessEvent::ImageError { item_id, .. }
         | SubprocessEvent::InpaintDone { item_id, .. }
@@ -581,7 +580,6 @@ fn apply_event_state(
         SubprocessEvent::Ready { .. }
         | SubprocessEvent::Report { .. }
         | SubprocessEvent::Progress { .. }
-        | SubprocessEvent::InpaintProgress { .. }
         | SubprocessEvent::Finished
         | SubprocessEvent::InitError { .. } => {}
     }
@@ -671,16 +669,6 @@ mod tests {
                 pct: 0.5,
             },
         );
-        step(
-            (&mut in_flight, &mut rss_paused),
-            &SubprocessEvent::InpaintProgress {
-                item_id: 2,
-                current: 5,
-                total: 20,
-                outer_current: 0,
-                outer_total: 0,
-            },
-        );
 
         step(
             (&mut in_flight, &mut rss_paused),
@@ -688,7 +676,6 @@ mod tests {
         );
 
         assert!(in_flight.contains(&1), "Progress is mid-flight — in_flight must NOT change");
-        assert!(in_flight.contains(&2), "InpaintProgress is mid-flight — in_flight must NOT change");
     }
 
     /// One-off lifecycle variants don't carry an `item_id` (or shouldn't

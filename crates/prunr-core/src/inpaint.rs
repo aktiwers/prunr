@@ -6,7 +6,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use image::{GrayImage, RgbaImage};
@@ -14,74 +13,8 @@ use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
 use crate::engine::{apply_ort_graph_cache, EpKind};
+use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
-
-/// Cross-thread progress channel for an in-flight inpaint stroke.
-///
-/// The worker writes `current` between scheduler steps (SD UNet) or
-/// at tile boundaries (LaMa); the GUI reads on its render thread to
-/// show "Erasing — step N of M". Writes are `Release` and reads are
-/// `Acquire` so a banner in the middle of a frame never sees a
-/// partial update. `total == 0` means "indeterminate" — the banner
-/// falls back to the spinner-only form.
-///
-/// `outer_current` / `outer_total` carry the per-tile (or per-component
-/// × per-tile, flattened) outer counter for dispatches that split a
-/// stroke into multiple sub-regions. SD inpaint at a large stroke runs
-/// the full denoise loop on each 512² patch; without the outer counter,
-/// the inner `current` resets to 0 at every tile boundary and the
-/// banner appears to start over. `outer_total == 0` means
-/// "no outer dimension" — the LaMa-class small inpaint path stays
-/// at 0/0 because it processes the full image at once.
-#[derive(Debug, Default)]
-pub struct InpaintProgress {
-    pub current: AtomicU32,
-    pub total: AtomicU32,
-    pub outer_current: AtomicU32,
-    pub outer_total: AtomicU32,
-}
-
-impl InpaintProgress {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn set_total(&self, total: u32) {
-        self.total.store(total, Ordering::Release);
-    }
-    pub fn set_step(&self, step: u32) {
-        self.current.store(step, Ordering::Release);
-    }
-    pub fn set_outer_total(&self, total: u32) {
-        self.outer_total.store(total, Ordering::Release);
-    }
-    pub fn set_outer_step(&self, step: u32) {
-        self.outer_current.store(step, Ordering::Release);
-    }
-    /// Returns `((outer_current, outer_total), (inner_current, inner_total))`.
-    /// `outer_total == 0` means the dispatch has no outer dimension
-    /// (LaMa-style single-pass); widgets render inner-only.
-    pub fn read_nested(&self) -> ((u32, u32), (u32, u32)) {
-        (
-            (
-                self.outer_current.load(Ordering::Acquire),
-                self.outer_total.load(Ordering::Acquire),
-            ),
-            (
-                self.current.load(Ordering::Acquire),
-                self.total.load(Ordering::Acquire),
-            ),
-        )
-    }
-}
-
-/// Cross-cutting hooks for an in-flight inpaint stroke.
-/// Bundles `cancel` + `progress` so callers don't grow `process_inpaint_with`
-/// past the 6-param alarm as more hooks land.
-#[derive(Default)]
-pub struct InpaintHooks {
-    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub progress: Option<std::sync::Arc<InpaintProgress>>,
-}
 
 /// LaMa input/output side length in pixels.
 pub const TILE: u32 = 512;
@@ -322,26 +255,21 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None, &InpaintHooks::default())
+    process_inpaint_with(image, mask, id, None, &Progress::none())
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
-/// (prompt / negative prompt / guidance_scale / steps) and a `hooks`
-/// bundle (cancel flag + progress sink). Cancel is checked between
-/// LaMa tiles and between SD UNet steps — ORT has no per-op cancel
-/// hook so worst-case latency on cancel is one tile (LaMa) or one
-/// UNet step (SD). Progress (when supplied) is updated between SD
-/// UNet steps; LaMa keeps the spinner-only form because per-tile
-/// updates are noisy and most strokes are a single tile.
+/// (prompt / negative prompt / guidance_scale / steps) and the run's
+/// progress handle. Cancel is checked between LaMa tiles and between
+/// SD UNet steps — ORT has no per-op cancel hook so worst-case latency
+/// on cancel is one tile (LaMa) or one UNet step (SD).
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
     id: prunr_models::ModelId,
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
-    hooks: &InpaintHooks,
+    progress: &Progress,
 ) -> Result<RgbaImage, CoreError> {
-    use std::sync::atomic::Ordering;
-    let cancel = hooks.cancel.as_ref();
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -361,25 +289,16 @@ pub fn process_inpaint_with(
             tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         });
-        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, hooks);
+        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
+    progress.step(Step::LoadingModel);
     let session = LamaSession::get(id)?;
-    let is_cancelled = || cancel.is_some_and(|c| c.load(Ordering::Acquire));
-    let composed = tile_compose(image, mask, |tile_rgba, tile_mask| {
-        // When cancelled, short-circuit each remaining tile to a no-op.
-        // The outer Cancelled error below discards the partial result.
-        if is_cancelled() {
-            return tile_rgba.clone();
-        }
+    tile_compose(image, mask, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
             tile_rgba.clone()
         })
-    })?;
-    if is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
-    Ok(composed)
+    })
 }
 
 /// One LaMa session per process — see `LamaSession::get`. Tiles run
@@ -862,6 +781,16 @@ fn decode_tile(
 
 /// True when every pixel of `mask` is zero. O(n) scan; cheap relative
 /// to inference, and short-circuits the entire pipeline.
+/// No masked pixel inside `tile`, read in place.
+fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
+    let w = mask.width() as usize;
+    let raw = mask.as_raw();
+    (tile.y..tile.y + tile.h).all(|y| {
+        let start = y as usize * w + tile.x as usize;
+        raw[start..start + tile.w as usize].iter().all(|&v| v == 0)
+    })
+}
+
 fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
@@ -952,6 +881,7 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 pub fn tile_compose<F>(
     image: &RgbaImage,
     mask: &GrayImage,
+    progress: &Progress,
     mut inpaint_tile: F,
 ) -> Result<RgbaImage, CoreError>
 where
@@ -977,14 +907,22 @@ where
     // space, quantised back to u8 at the end.
     let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; bbox_n];
 
-    for tile in plan_tiles(w, h) {
-        let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-        if mask_is_empty(&tile_mask) {
-            continue;
+    // Only tiles that touch the mask run; they are the tile map's layout.
+    let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect();
+    let total = work.len() as u32;
+    progress.step(Step::Erasing);
+    progress.tiles(work.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, w, h)).collect());
+    for (i, tile) in work.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(CoreError::Cancelled);
         }
+        progress.tile(i as u32, false);
+        let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
-        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, &tile, bbox);
+        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
+        progress.inner(i as u32 + 1, total, Unit::Tile);
+        progress.tile(i as u32, true);
     }
 
     // Resolve accumulated tiles into the bbox region of `out`. Pixels
@@ -1138,31 +1076,26 @@ mod tests {
     use super::*;
     use image::{Luma, Rgba};
 
+    /// LaMa's tiler reports a contract-clean run over only the tiles
+    /// the mask touches, and a cancel stops it before the next tile.
     #[test]
-    fn inpaint_progress_read_nested_returns_set_values() {
-        // Pure-function unit test for the InpaintProgress atomic
-        // round-trip — CLAUDE.md `## Test expectations` requires new
-        // prunr-core pure fns to earn a test in the same file.
-        let p = InpaintProgress::new();
-        // Indeterminate when nothing's been written.
-        assert_eq!(p.read_nested(), ((0, 0), (0, 0)));
+    fn tile_compose_reports_the_masked_tiles() {
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
+        let img = RgbaImage::from_pixel(1200, 600, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(1200, 600);
+        mask.put_pixel(100, 100, Luma([255]));
+        mask.put_pixel(1100, 500, Luma([255]));
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        tile_compose(&img, &mask, &Progress::new(sink.clone()), |t, _| t.clone()).unwrap();
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        let layout = updates.iter().find_map(|u| match u { ProgressUpdate::Tiles(t) => Some(t.len()), _ => None });
+        assert!(layout.is_some_and(|n| n >= 2 && n < plan_tiles(1200, 600).len()), "only the masked tiles: {layout:?}");
 
-        p.set_total(8);
-        p.set_step(5);
-        // No outer set — outer slots stay 0.
-        assert_eq!(p.read_nested(), ((0, 0), (5, 8)));
-
-        p.set_outer_total(3);
-        p.set_outer_step(2);
-        // Both dimensions populated.
-        assert_eq!(p.read_nested(), ((2, 3), (5, 8)));
-
-        // Setting outer_total back to 0 = "no nesting" sentinel.
-        // outer_current is unchanged (the consumer reads the tuple as
-        // a whole; the `outer_from_atomics` helper in gui ignores
-        // current when total is 0).
-        p.set_outer_total(0);
-        assert_eq!(p.read_nested(), ((2, 0), (5, 8)));
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ran = std::cell::Cell::new(false);
+        let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); t.clone() });
+        assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
     }
 
     #[test]
@@ -1457,7 +1390,7 @@ mod tests {
             }
         }
         let mask = GrayImage::new(128, 128); // all-zero
-        let out = tile_compose(&img, &mask, |t, _| t.clone()).unwrap();
+        let out = tile_compose(&img, &mask, &Progress::none(), |t, _| t.clone()).unwrap();
         assert_eq!(out, img);
     }
 
@@ -1662,7 +1595,7 @@ mod tests {
             }
         }
         // Inpaint closure paints the masked region pure red.
-        let out = tile_compose(&img, &mask, |tile, tile_mask| {
+        let out = tile_compose(&img, &mask, &Progress::none(), |tile, tile_mask| {
             let mut t = tile.clone();
             for y in 0..tile.height() {
                 for x in 0..tile.width() {

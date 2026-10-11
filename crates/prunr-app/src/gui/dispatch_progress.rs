@@ -1,12 +1,8 @@
 //! Unified progress signal for in-flight dispatches.
 //!
-//! One shared shape so the seg, eraser/SD, and upscale paths all
-//! publish progress through the same struct, and one set of widgets
-//! (banner / modal) renders it. Replaces three independent surfaces:
-//!
-//!   - `app.status.{pct, stage}` (seg / batch)
-//!   - `prunr_core::inpaint::InpaintProgress` (eraser / SD)
-//!   - `Processor::upscale_tile_progress` (upscale)
+//! Every pipeline reports through `prunr_core::Progress`; a run started
+//! with `DispatchProgressSlot::begin` folds those reports into one
+//! `DispatchProgress` that one set of widgets renders.
 //!
 //! Two-level counter: `outer` counts a per-stroke / per-batch unit
 //! (SD tile-of-stroke, batch image-of-N); `inner` counts steps inside
@@ -21,6 +17,7 @@
 //! each `outer` boundary, hiding the rest of the stroke.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Which dispatch is publishing — drives the headline label and the
@@ -197,9 +194,7 @@ impl DispatchProgress {
         }
     }
 
-    /// Builder for the in-process LaMa dispatch (read-time synthesise
-    /// from `InpaintProgress` in the canvas, since LaMa doesn't go
-    /// through the subprocess bridge that publishes the slot).
+    /// Builder for the in-process LaMa dispatch.
     pub fn lama_inpaint(outer_current: u32, outer_total: u32, inner: (u32, u32)) -> Self {
         Self {
             kind: ProgressKind::Eraser,
@@ -287,11 +282,38 @@ impl DispatchProgress {
 #[derive(Debug, Clone, Default)]
 pub struct DispatchProgressSlot {
     inner: Arc<Mutex<Option<DispatchProgress>>>,
+    /// Bumped by `begin`, so a finished run's late reports cannot
+    /// reach the run that replaced it.
+    run: Arc<AtomicU64>,
 }
 
-impl prunr_core::ProgressSink for DispatchProgressSlot {
+/// The listener `begin` hands a run: its reports reach the slot only
+/// while the slot still shows that run.
+#[derive(Clone)]
+pub struct RunSink {
+    slot: DispatchProgressSlot,
+    run: u64,
+}
+
+impl RunSink {
+    fn current(&self) -> bool {
+        self.slot.run.load(Ordering::Acquire) == self.run
+    }
+
+    /// The run is over: clear the slot unless a newer run took it.
+    pub fn end(&self) {
+        if self.current() {
+            self.slot.set(None);
+        }
+    }
+}
+
+impl prunr_core::ProgressSink for RunSink {
     fn report(&self, update: prunr_core::ProgressUpdate) {
-        self.update(|p| {
+        if !self.current() {
+            return;
+        }
+        self.slot.update(|p| {
             if let Some(p) = p {
                 p.apply(&update);
             }
@@ -302,6 +324,19 @@ impl prunr_core::ProgressSink for DispatchProgressSlot {
 impl DispatchProgressSlot {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Start showing a run and get the listener its pipeline reports to.
+    pub fn begin(&self, initial: DispatchProgress) -> RunSink {
+        let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        self.set(Some(initial));
+        RunSink { slot: self.clone(), run }
+    }
+
+    /// A progress handle for a run starting now, with its cancel flag.
+    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<std::sync::atomic::AtomicBool>) -> (prunr_core::Progress, RunSink) {
+        let sink = self.begin(initial);
+        (prunr_core::Progress::new(Arc::new(sink.clone())).with_cancel(cancel), sink)
     }
 
     /// Replace the active progress snapshot. Pass `None` to clear when
@@ -580,6 +615,24 @@ mod tests {
             Some(CancelTarget::InpaintForItem(7)),
         );
         assert_eq!(cancel_target_for(ProgressKind::SdInpaint, None), None);
+    }
+
+    /// A run that was replaced, or has ended, can still have a report in
+    /// flight; it must not land on whatever the slot shows next.
+    #[test]
+    fn a_late_report_never_reaches_the_next_run() {
+        use prunr_core::{ProgressSink, ProgressUpdate, Unit};
+        let slot = DispatchProgressSlot::new();
+        let first = slot.begin(upscale((0, 4)));
+        let second = slot.begin(upscale((0, 48)));
+        first.report(ProgressUpdate::Inner { done: 4, total: 4, unit: Unit::Tile });
+        assert_eq!(slot.read().unwrap().inner, (0, 48), "the replaced run is ignored");
+        second.report(ProgressUpdate::Inner { done: 3, total: 48, unit: Unit::Tile });
+        assert_eq!(slot.read().unwrap().inner, (3, 48));
+        first.end();
+        assert!(slot.read().is_some(), "ending a replaced run leaves the current one");
+        second.end();
+        assert!(slot.read().is_none());
     }
 
     #[test]
