@@ -90,7 +90,9 @@ Common flags:
 | `--refine-edges` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |
 | `--lines-after-bg` | Remove the background, then draw lines on the result |
-| `--line-strength <N>` | Line sensitivity, 0.0–1.0 (default 0.5) |
+| `--line-detail <N>` | How much detail becomes lines, 0.0–1.0 (default 0.5); `--line-strength` still works |
+| `--line-width <N>` | Line width in pixels, 0–20 |
+| `--line-composition <M>` | With `--lines-after-bg`: `lines-only`, `subject-filled`, `engraving`, `ghost` |
 | `--line-scale <S>` | `fine`, `balanced`, `bold`, `fused` (default) |
 | `--line-color <HEX>` | Paint all lines one colour |
 | `--large-image <P>` | Images above 8000 px: `downscale` (default, to 4096 px) or `process` (keep the original size) |

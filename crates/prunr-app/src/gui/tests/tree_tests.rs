@@ -91,7 +91,7 @@ fn each_model_toolbar_shows_only_its_chips() {
     use crate::gui::settings::SettingsModel;
     let chips: &[(&str, Surface)] = &[
         ("Mask", Surface::Mask),
-        ("Lines", Surface::Lines),
+        ("Sketch", Surface::Lines),
         ("Fill style", Surface::Effect),
         ("Background", Surface::Background),
         ("Scale", Surface::Upscale),

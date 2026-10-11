@@ -169,7 +169,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
 const FILTERS: [(&str, Option<ModelCategory>); 5] = [
     ("All", None),
     ("Background", Some(ModelCategory::Segmentation)),
-    ("Lines", Some(ModelCategory::EdgeDetection)),
+    ("Sketch", Some(ModelCategory::EdgeDetection)),
     ("Eraser", Some(ModelCategory::Inpaint)),
     ("Upscale", Some(ModelCategory::Upscale)),
 ];

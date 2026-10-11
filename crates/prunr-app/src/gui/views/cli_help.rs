@@ -16,7 +16,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             let tab_id = egui::Id::new("cli_help_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
 
-            super::chip::tab_strip(ui, &["Quick start", "Lines", "Mask", "Eraser", "Advanced"], &mut tab);
+            super::chip::tab_strip(ui, &["Quick start", "Sketch", "Mask", "Eraser", "Advanced"], &mut tab);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
@@ -73,7 +73,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--lines", "Extract lines only (skip BG removal)");
                             opt_row(ui, "--lines-after-bg", "Remove BG first, then extract lines");
-                            opt_row(ui, "--line-strength <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
+                            opt_row(ui, "--line-detail <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
+                            opt_row(ui, "--line-width <px>", "Line width, 0\u{2013}20 px (default 0)");
+                            opt_row(ui, "--line-composition <mode>", "With --lines-after-bg: lines-only / subject-filled / engraving / ghost");
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
                             opt_row(ui, "--line-scale <scale>", "Output scale: fine / balanced / bold / fused (default)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
@@ -87,7 +89,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Black line art on transparent background");
                     example_row(ui, toasts, "prunr --lines-after-bg graffiti.jpg",
                         "Remove wall, then extract outlines");
-                    example_row(ui, toasts, "prunr --lines --line-strength 0.8 photo.jpg",
+                    example_row(ui, toasts, "prunr --lines --line-detail 0.8 photo.jpg",
                         "Fine detail lines (more edges)");
                     example_row(ui, toasts, "prunr --lines --line-color 333333 --bg-color eeeeee sketch.jpg",
                         "Dark gray lines on light gray background");

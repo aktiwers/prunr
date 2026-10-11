@@ -22,6 +22,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- The lines feature is called **Sketch** everywhere, with modes Off, Subject and Whole photo (was Full). Picking No model with Sketch on Subject switches to Whole photo, so the lines stay. A greyed-out Subject says why. On the command line `--line-detail` names `--line-strength`, and `--line-width` and `--line-composition` are new.
 - The Inverse mask composition is gone: it only ever drew a ring just outside the subject. Presets that used it load as Lines only.
 - Picking Subject filled while lines are in the photo's own colors switches them to black, since those lines are invisible on the filled subject.
 - Line color styles work with Sketch on Full (gradients, Rainbow, Dual scale), and Dual scale's preview matches Process. The Chromatic and Noise styles are gone; presets that used them draw solid lines. Every style in the list says what it looks like.
