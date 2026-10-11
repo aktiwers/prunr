@@ -175,7 +175,7 @@ pub(crate) fn render(
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims);
+            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.processing);
         }
         if shows(model, Surface::SdChips) {
             let outcome = super::eraser_chip::render(ui, app_settings, state.installed);

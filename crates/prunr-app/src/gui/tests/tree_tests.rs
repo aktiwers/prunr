@@ -264,3 +264,27 @@ fn control_socket_clicks_by_name_and_reports_state() {
     assert!(modals.iter().any(|m| m == "settings"), "{state}");
     assert_eq!(missing["ok"], false);
 }
+
+/// While an upscale runs, Scale and Refine can't be touched: a change
+/// would make the landing run stale and throw it away.
+#[test]
+fn an_upscale_run_holds_its_scale_and_refine_chips() {
+    use crate::gui::settings::SettingsModel;
+    for running in [false, true] {
+        let mut harness = harness();
+        {
+            let app = harness.state_mut();
+            app.settings.model = SettingsModel::RealEsrganUpscale;
+            push_test_item(app, 1).status = BatchStatus::Done;
+            app.batch.select_item(0);
+            app.processor.set_upscale_in_flight_for_test(running);
+        }
+        settle(&mut harness);
+        let tree = tree(&harness);
+        for chip in ["Scale", "Refine"] {
+            let node = tree.iter().find(|n| n.name.as_deref() == Some(chip)).unwrap_or_else(|| panic!("{chip} shown"));
+            assert_eq!(node.disabled, running, "{chip} while running: {running}");
+        }
+    }
+}
+
