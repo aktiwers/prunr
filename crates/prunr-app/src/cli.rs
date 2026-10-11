@@ -121,6 +121,12 @@ pub struct Cli {
     #[arg(long, default_value_t = prunr_core::BgImageFit::Cover)]
     pub bg_image_fit: prunr_core::BgImageFit,
 
+    /// Fill transparent background with a copy of the photo: `blur`
+    /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
+    /// over `--bg-image` and `--bg-color`, as in the app.
+    #[arg(long, value_name = "blur[:N]|bw", value_parser = parse_bg_effect)]
+    pub bg_effect: Option<prunr_core::BgEffect>,
+
     /// Force CPU inference even when GPU is available.
     #[arg(long)]
     pub cpu: bool,
@@ -196,6 +202,50 @@ use prunr_core::{
 
 use crate::gui::settings::LineMode;
 
+/// What goes behind each result, from `--bg-effect`, `--bg-image` and
+/// `--bg-color`.
+enum CliBackdrop {
+    Transparent,
+    Color([u8; 3]),
+    Image(std::sync::Arc<image::DynamicImage>, prunr_core::BgImageFit),
+    Effect(prunr_core::BgEffect),
+}
+
+impl CliBackdrop {
+    /// Put the backdrop under `result`; an effect is made from the photo
+    /// at `photo_path`.
+    fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path) {
+        match self {
+            CliBackdrop::Transparent => {}
+            CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
+            CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
+            CliBackdrop::Effect(effect) => {
+                let picture = prunr_core::load_image_from_path(photo_path)
+                    .ok()
+                    .and_then(|photo| prunr_core::effect_backdrop(&photo.to_rgba8(), *effect));
+                match picture {
+                    Some(p) => prunr_core::apply_background_image(result, &image::DynamicImage::ImageRgba8(p), prunr_core::BgImageFit::Cover),
+                    None => tracing::warn!(path = %photo_path.display(), "bg effect: photo unreadable"),
+                }
+            }
+        }
+    }
+}
+
+/// `blur`, `blur:N` (1-64 px) or `bw`.
+fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
+    use prunr_core::BgEffect;
+    match s.split_once(':') {
+        None if s == "blur" => Ok(BgEffect::BlurredSource { radius: 12 }),
+        None if s == "bw" => Ok(BgEffect::DesaturatedSource),
+        Some(("blur", n)) => match n.parse::<u32>() {
+            Ok(radius @ 1..=64) => Ok(BgEffect::BlurredSource { radius }),
+            _ => Err(format!("'{n}' is not a blur radius from 1 to 64")),
+        },
+        _ => Err(format!("'{s}' is not one of blur, blur:N, bw")),
+    }
+}
+
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
     if s.len() != 6 { return None; }
@@ -267,6 +317,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         if args.line_color.is_some() { conflicts.push("--line-color"); }
         if args.bg_color.is_some() { conflicts.push("--bg-color"); }
         if args.bg_image.is_some() { conflicts.push("--bg-image"); }
+        if args.bg_effect.is_some() { conflicts.push("--bg-effect"); }
         if args.contrast > 0.0 { conflicts.push("--contrast"); }
         if !conflicts.is_empty() {
             eprintln!(
@@ -590,7 +641,13 @@ fn run_batch(args: &Cli) -> i32 {
         },
         None => None,
     };
-    let bg_image_fit = args.bg_image_fit;
+    // The app's rule: an effect wins over an image, an image over a colour.
+    let backdrop = match (args.bg_effect, bg_image, bg_color) {
+        (Some(effect), _, _) => CliBackdrop::Effect(effect),
+        (None, Some(image), _) => CliBackdrop::Image(image, args.bg_image_fit),
+        (None, None, Some(color)) => CliBackdrop::Color(color),
+        (None, None, None) => CliBackdrop::Transparent,
+    };
 
     let edge = prunr_core::EdgeSettings {
         line_strength: args.line_strength,
@@ -603,7 +660,7 @@ fn run_batch(args: &Cli) -> i32 {
     };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, edge, bg_color, bg_image.clone(), bg_image_fit,
+        line_mode, edge, &backdrop,
         &spinners_arc, &inputs_arc, quiet,
     );
 
@@ -712,9 +769,7 @@ fn run_batch_subprocess(
     force_cpu: bool,
     line_mode: LineMode,
     edge: prunr_core::EdgeSettings,
-    bg_color: Option<[u8; 3]>,
-    bg_image: Option<std::sync::Arc<image::DynamicImage>>,
-    bg_image_fit: prunr_core::BgImageFit,
+    backdrop: &CliBackdrop,
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
     quiet: bool,
@@ -807,12 +862,7 @@ fn run_batch_subprocess(
                             .ok()
                             .and_then(|data| image::RgbaImage::from_raw(width, height, data))
                             .map(|mut rgba_image| {
-                                // Image bg wins over color bg — matches GUI mutual exclusion.
-                                if let Some(bg) = bg_image.as_deref() {
-                                    prunr_core::apply_background_image(&mut rgba_image, bg, bg_image_fit);
-                                } else if let Some(bg) = bg_color {
-                                    prunr_core::apply_background_color(&mut rgba_image, bg);
-                                }
+                                backdrop.apply(&mut rgba_image, &inputs[orig_idx]);
                                 prunr_core::ProcessResult {
                                     rgba_image,
                                     active_provider: String::new(),
@@ -986,6 +1036,32 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    #[test]
+    fn bg_effect_reads_blur_with_a_radius_and_bw() {
+        use super::parse_bg_effect;
+        use prunr_core::BgEffect;
+        assert_eq!(parse_bg_effect("blur"), Ok(BgEffect::BlurredSource { radius: 12 }));
+        assert_eq!(parse_bg_effect("blur:30"), Ok(BgEffect::BlurredSource { radius: 30 }));
+        assert_eq!(parse_bg_effect("bw"), Ok(BgEffect::DesaturatedSource));
+        for bad in ["blur:0", "blur:65", "blur:x", "invert", ""] {
+            assert!(parse_bg_effect(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// The effect is made from the input photo and fills what the result
+    /// leaves transparent; the result's own pixels stay.
+    #[test]
+    fn a_bg_effect_fills_the_transparent_part_from_the_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("photo.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
+        let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource).apply(&mut result, &photo);
+        assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
+        let p = result.get_pixel(3, 3).0;
+        assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");
+    }
 
     /// `--edge-shift` reads like the GUI's Shift edge: + grows the subject,
     /// which the pipeline stores as a negative (dilating) shift.
