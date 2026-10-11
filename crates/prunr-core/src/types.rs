@@ -328,6 +328,18 @@ impl std::fmt::Display for ComposeMode {
     }
 }
 
+/// Accepts the display name in any case, with `-` or a space between
+/// words: `lines-only`, `Subject filled`.
+impl std::str::FromStr for ComposeMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let wanted = s.replace('-', " ");
+        Self::ALL.iter().copied().find(|m| m.to_string().eq_ignore_ascii_case(&wanted)).ok_or_else(|| {
+            format!("'{s}' is not one of lines-only, subject-filled, engraving, ghost")
+        })
+    }
+}
+
 impl ComposeMode {
     /// The output alpha for a subject alpha `s` and an edge value `e`,
     /// both 0..=255. Inlined into the row loops of the edge compositions.
@@ -729,6 +741,17 @@ mod tests {
     fn edge_scale_default_is_fused() {
         // Default must keep current behaviour (block_cat / fused output).
         assert_eq!(EdgeScale::default(), EdgeScale::Fused);
+    }
+
+    #[test]
+    fn compose_mode_parses_every_display_name_in_cli_form() {
+        use std::str::FromStr;
+        for mode in ComposeMode::ALL {
+            let cli = mode.to_string().to_ascii_lowercase().replace(' ', "-");
+            assert_eq!(ComposeMode::from_str(&cli), Ok(*mode));
+        }
+        assert_eq!(ComposeMode::from_str("Subject filled"), Ok(ComposeMode::SubjectFilled));
+        assert!(ComposeMode::from_str("inverse-mask").is_err(), "retired");
     }
 
     #[test]
