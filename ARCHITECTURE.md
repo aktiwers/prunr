@@ -186,7 +186,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 
 ### Undo timeline
 
-Each item has one undo timeline over three kinds of step, each with its own stack: `Stroke` (selection snapshots, capped at 32 since each is a full plane), `Result` (the result history; see Memory Management) and `PresetApply`. Every push appends its type to `actions_undo`; Cmd+Z pops the newest marker and steps that stack, whatever tool is active.
+Each item has one undo timeline over three kinds of step, each with its own stack: `Stroke` (selection snapshots, 32 deep; only the newest is a full plane, older ones keep just the cells that differ from the one above, `gui/stroke_history.rs`), `Result` (the result history; see Memory Management) and `PresetApply`. Every push appends its type to `actions_undo`; Cmd+Z pops the newest marker and steps that stack, whatever tool is active.
 
 A stroke is one step. Undoing it steps the selection back, then: if its re-cut archived the pre-stroke image (chain mode, where the re-cut replaces the chain input; `StrokeSnapshot.result_archived`) that image returns; otherwise a stroke on a cut-out re-cuts from the tensor; an eraser region stroke moves nothing else, because each erase result is its own `Result` step. An erase cancelled before it lands rolls back its stroke and marker.
 

@@ -45,6 +45,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The LCM eraser bundle (1.0.1) is re-exported with dynamic batch and size axes: a guided step is one UNet call instead of two, and it takes the single tall crop too. Existing installs download the new bundle, 2.1 GB.
 - Cancelling an upscale on OpenVINO takes effect about five times sooner (11 s instead of 51 s on an Intel HD 530), for about 5 percent more upscale time.
 - Magic Brush holds its image data for the shown image and the one before it, instead of 16 MB for every image visited, and paging quickly through images no longer prepares each one on the way.
+- Stroke undo keeps only the area each stroke changed: a small stroke on a 4K image costs kilobytes instead of 8 MB, so 32 undo steps no longer hold up to a quarter gigabyte per image.
 - One ONNX Runtime init and one session builder for the whole app: a missing or broken runtime now fails with a message instead of hanging.
 
 ### Fixed
