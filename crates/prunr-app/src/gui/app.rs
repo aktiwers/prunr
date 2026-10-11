@@ -1578,9 +1578,11 @@ impl PrunrApp {
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
             .map(|i| (i.id, i.source.clone()))
             .collect();
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &dispatches.iter().map(|(id, _)| *id).collect());
+        }
         for (id, source) in dispatches {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
-            item.settings = settings;
             item.status = BatchStatus::Processing;
             item.start_job(step, Engine::Segment);
             let input = item.job_input();
@@ -1869,10 +1871,8 @@ impl PrunrApp {
             .chain(tier2_items.iter().map(|ti| ti.item_id))
             .chain(add_edge_items.iter().map(|ai| ai.item_id))
             .collect();
-        for item in &mut self.batch.items {
-            if process_ids.contains(&item.id) {
-                item.settings = current_settings;
-            }
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &process_ids);
         }
 
         let recipe = current_settings.current_recipe(model);
