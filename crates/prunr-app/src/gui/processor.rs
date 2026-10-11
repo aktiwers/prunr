@@ -211,7 +211,7 @@ fn ensure_sam_sessions(slot: &SamSessionSlot) -> Result<Arc<SamSessions>, String
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
     pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) confidence: f32,
+    pub(crate) reading: prunr_core::MaskReading,
     pub(crate) result: Result<DecodedSelection, String>,
 }
 
@@ -231,7 +231,7 @@ pub(crate) struct SamRethresholdRequest {
     pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
-    pub(crate) confidence: f32,
+    pub(crate) reading: prunr_core::MaskReading,
     /// The selection the stroke was merged onto.
     pub(crate) base: Option<Arc<prunr_core::selection::MaskArtifact>>,
 }
@@ -257,7 +257,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
-    pub(crate) confidence: f32,
+    pub(crate) reading: prunr_core::MaskReading,
 }
 
 /// Result delivered from a background upscale thread back to the main thread.
@@ -1380,11 +1380,11 @@ impl Processor {
             let result = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
-                    let mask = prunr_core::sam::decode_to_mask_artifact(&out, w, h, req.confidence, req.mode);
+                    let mask = prunr_core::sam::decode_to_mask_artifact(&out, w, h, req.reading, req.mode);
                     DecodedSelection::Fresh { mask, output: Arc::new(out) }
                 });
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, mode: req.mode, confidence: req.confidence, result,
+                item_id: req.item_id, mode: req.mode, reading: req.reading, result,
             });
         });
     }
@@ -1396,11 +1396,11 @@ impl Processor {
         let tx = self.sam_decoder_tx.clone();
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
-            let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.confidence, req.mode);
+            let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
             let merged = Arc::new(merge_stroke(req.base, mask));
             let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, mode: req.mode, confidence: req.confidence,
+                item_id: req.item_id, mode: req.mode, reading: req.reading,
                 result: Ok(DecodedSelection::Retuned { merged, hash }),
             });
         });
@@ -1629,7 +1629,7 @@ mod sam_dispatch_tests {
         tx.send(SamDecoderResult {
             item_id: 77,
             mode: prunr_core::selection::BrushMode::Add,
-            confidence: 0.5,
+            reading: prunr_core::MaskReading { confidence: 0.5, remove_specks: true },
             result: Err("decoder test".to_string()),
         }).unwrap();
         let out = rx.try_recv().unwrap();

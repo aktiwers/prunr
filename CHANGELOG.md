@@ -65,6 +65,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Undo steps older than half an hour no longer vanish, and two open Prunr windows no longer clear each other's undo files.
 - With the Stable Diffusion eraser kept loaded, later erases keep the faster single crop instead of falling back to tiles.
 - Ctrl+click also subtracts with Magic Brush on Linux and Windows, where window managers often take Alt+click.
+- Magic Brush no longer leaves a grid of specks where the model is unsure: its output is smoothed and tiny islands and pinholes are removed. A Remove specks switch in its settings panel (on by default) turns this off.
 - Magic Brush is ready on first use: its sessions warm at startup and the selected image is encoded in the background.
 - The "Click or stroke to select" text is no longer painted over the image.
 - Big-LaMa downloads load again (the release asset was an unpatched export).
