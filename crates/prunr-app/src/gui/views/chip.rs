@@ -605,6 +605,20 @@ pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChan
     ChipChange { changed, commit: changed }
 }
 
+/// The hue wheel unrolled, with the hues within `tolerance` degrees of
+/// `hue` bright and the rest dimmed: which colors a color splash keeps.
+pub(super) fn kept_hues(ui: &mut Ui, hue: u16, tolerance: u16) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.spacing().slider_width, 10.0), egui::Sense::hover());
+    let kept = |u: f32| {
+        let d = (u * 360.0 - hue as f32).rem_euclid(360.0);
+        d.min(360.0 - d) <= tolerance as f32
+    };
+    paint_mesh(ui.painter(), rect, TextureId::default(), |u, _, _| {
+        let color: Color32 = Hsva::new(u, 1.0, 1.0, 1.0).into();
+        if kept(u) { color } else { color.gamma_multiply(0.2) }
+    });
+}
+
 /// Inline RGB picker for a `[u8; 3]` inside a parent popover: a
 /// saturation/brightness square, a hue strip and Red / Green / Blue
 /// fields, each named. Inline because a picker in its own popup reads as

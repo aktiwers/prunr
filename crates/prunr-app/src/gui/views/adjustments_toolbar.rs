@@ -810,6 +810,7 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
         FillStyle::ColorSplash { keep_hue, tolerance } => {
             changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
             changed |= chip::slider_row(ui, "Tolerance (degrees)", tolerance, 0..=180).changed;
+            chip::kept_hues(ui, *keep_hue, *tolerance);
         }
         FillStyle::Pixelate { block_size } => {
             changed |= chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed;
