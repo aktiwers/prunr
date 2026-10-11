@@ -10,7 +10,6 @@
 //! - Admission controller state during streaming batches.
 //! - The dispatch-time recipe snapshot (used to attribute completed results
 //!   to the settings that produced them, even if the user keeps editing).
-//! - The periodic history-cleanup timestamp.
 //!
 //! Does NOT own:
 //! - The worker bridge thread itself — that's spawned by `worker::spawn_worker`

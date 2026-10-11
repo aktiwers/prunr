@@ -899,7 +899,7 @@ impl PrunrApp {
 
     /// A selection authored before this result, or kept across Process, is
     /// applied now there is a tensor to correct: as part of the run that
-    /// produced the result, so it archives nothing and marks no stroke.
+    /// produced the result, so it adds no step of its own.
     pub(crate) fn apply_kept_selection_to_new_result(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let item = &self.batch.items[idx];
@@ -942,11 +942,11 @@ impl PrunrApp {
     /// have a live selection.
     ///
     /// - Delete: scales alpha by coverage inside the selection on
-    ///   `result_rgba`, archiving the previous result first so Cmd+Z can
+    ///   `result_rgba`, as one undo step so Cmd+Z can
     ///   restore it.
     /// - Copy: copies selection-masked pixels to the system clipboard. No
-    ///   history entry — non-destructive read.
-    /// - Cut: Copy + Delete in one step (one history entry, not two).
+    ///   undo step — non-destructive read.
+    /// - Cut: Copy + Delete in one undo step, not two.
     /// - Invert: replaces the selection mask with its complement and
     ///   commits it like any other author.
     /// - Clear: removes the selection mask entirely.
@@ -1017,9 +1017,7 @@ impl PrunrApp {
     }
 
     /// Cut the selection out of `base` and publish it as the item's result,
-    /// archiving the previous state so Cmd+Z restores it. An unprocessed
-    /// image first seeds its history with the source so there is a state
-    /// to go back to.
+    /// one undo step.
     fn apply_selection_cut(
         &mut self,
         idx: usize,
@@ -1202,9 +1200,6 @@ impl PrunrApp {
                         bicubic.as_ref(),
                     );
                     let new_rgba = Arc::new(displayed);
-                    // Archive happened at dispatch time via seed_history_for_reprocess;
-                    // here we just stamp the new result. result_rgba was already
-                    // taken (chain_mode replanted it; non-chain left it None).
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
@@ -1787,11 +1782,10 @@ impl PrunrApp {
         use super::memory::{AdmissionController, ImageMemCost};
 
         let mut ctrl = AdmissionController::new(model, jobs);
-        let history_depth = self.settings.history_depth;
         let costs: Vec<ImageMemCost> = self.batch.items.iter()
             .filter(|i| tier1_ids.contains(&i.id))
             .map(|i| AdmissionController::estimate_cost(
-                i.id, i.dimensions, i.source.estimated_size(), history_depth,
+                i.id, i.dimensions, i.source.estimated_size(), super::memory::RESIDENT_HISTORY_STEPS,
             ))
             .collect();
         ctrl.enqueue(costs);
@@ -2645,9 +2639,8 @@ impl PrunrApp {
     }
 
     /// For every item that is not selected: drop the decoded tensors kept
-    /// for slider drags, and park the full-resolution result of Done items
-    /// on top of history (`BatchItem::park_result`); the batch compresses
-    /// it off thread like any other history entry.
+    /// for slider drags, and release the full-resolution result of Done
+    /// items (`BatchItem::park_result`); the timeline keeps it compressed.
     fn evict_background_item_caches(&mut self, selected_idx: usize) {
         for (i, item) in self.batch.items.iter_mut().enumerate() {
             if i == selected_idx {
@@ -2851,8 +2844,7 @@ impl PrunrApp {
         if matches!(result.as_ref(), Err(e) if e == crate::subprocess::protocol::CANCELLED_ERR_MSG) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if item.status == BatchStatus::Processing {
-                    item.job = None;
-                    item.status = if item.result_rgba.is_some() || item.result_parked { BatchStatus::Done } else { BatchStatus::Pending };
+                    item.abandon_job();
                 }
             }
             self.admission_release_and_admit(item_id);
@@ -3282,7 +3274,7 @@ impl PrunrApp {
         while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             match result {
-                Ok(_) if !item.job_is_current() => continue,
+                _ if !item.job_is_current() => continue,
                 Ok(rgba) => {
                     item.unpark_result();
                     item.result_rgba = Some(rgba);
@@ -4594,7 +4586,7 @@ mod selection_action_tests {
     /// Cut through the real action path: the result is cut like Delete and
     /// copy + cut is one undo step.
     #[test]
-    fn cut_action_through_the_real_path_archives_once() {
+    fn cut_through_the_real_path_is_one_step() {
         use crate::gui::views::selection_action_bar::SelectionAction;
         let mut app = super::PrunrApp::new_for_test();
         let mut item = make_item_done();

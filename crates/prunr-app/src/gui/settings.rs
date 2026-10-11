@@ -23,8 +23,6 @@ pub struct Settings {
     #[serde(alias = "auto_remove_on_import")]
     pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
-    /// Maximum number of undo steps per image.
-    pub history_depth: usize,
     /// When true, Process uses the current result as input instead of the
     /// original. Defaults ON — the common workflow (seg → upscale, mask →
     /// erase → upscale) stacks naturally; opting *out* is the rare case.
@@ -629,7 +627,6 @@ impl Default for Settings {
             model: SettingsModel::BiRefNetLite,
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
-            history_depth: 10,
             chain_mode: default_chain_mode(),
             dark_checker: false,
             live_preview: true,
@@ -732,7 +729,6 @@ mod tests {
         assert!(!s.auto_process_on_import);
         assert!(s.parallel_jobs >= 1,
             "parallel_jobs must clamp to >= 1 even on a single-core host");
-        assert_eq!(s.history_depth, 10);
         assert!(s.chain_mode, "chain_mode default flipped to true in Phase 30");
         assert!(!s.dark_checker);
         assert!(s.live_preview);
@@ -816,7 +812,6 @@ mod tests {
         let original = Settings {
             parallel_jobs: 7,
             auto_process_on_import: true,
-            history_depth: 25,
             chain_mode: true,
             ..Settings::default()
         };
@@ -826,7 +821,6 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
         assert_eq!(restored.parallel_jobs, 7);
         assert!(restored.auto_process_on_import);
-        assert_eq!(restored.history_depth, 25);
         assert!(restored.chain_mode);
         // `force_cpu` and `active_backend` are #[serde(skip)] by design
         // (machine-specific runtime state, reset on every launch). The

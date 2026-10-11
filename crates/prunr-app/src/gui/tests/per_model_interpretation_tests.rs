@@ -344,9 +344,8 @@ fn bg_removal_without_tensor_waits_until_a_result_lands() {
 
 // ── Strokes undo and redo on their own ──────────────────────────────────────
 //
-// A stroke is one step in the one history whatever the model and whether
-// or not a result exists yet. Only a stroke that archived a pre-stroke
-// result (chain mode) brings that result back with it.
+// A stroke is one step on the timeline whatever the model and whether or
+// not a result exists yet; undoing it shows the state before it.
 
 #[test]
 fn a_stroke_before_the_first_result_undoes_and_redoes() {
