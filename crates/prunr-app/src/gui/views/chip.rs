@@ -13,7 +13,7 @@
 //! so callers can invalidate textures or kick off live preview.
 
 use egui::{Color32, RichText, Response, Ui};
-use egui::widgets::color_picker::{color_picker_color32, Alpha};
+use egui::ecolor::Hsva;
 use egui_material_icons::icons::*;
 
 use std::borrow::Cow;
@@ -603,20 +603,76 @@ pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChan
     ChipChange { changed, commit: changed }
 }
 
-/// Inline RGB picker primitive used wherever a `[u8; 3]` needs to be
-/// edited inside a parent popover. Uses egui's `color_picker_color32`
-/// (the inline hue ring + sliders) rather than `color_edit_button_srgb`
-/// (which opens its own popup — the parent popover's `CloseOnClickOutside`
-/// treats that as "outside" and dismisses on first click).
-/// Returns `true` when the user changed the color.
+/// Inline RGB picker for a `[u8; 3]` inside a parent popover: a
+/// saturation/brightness square, a hue strip and Red / Green / Blue
+/// fields. Inline because a picker in its own popup reads as a click
+/// outside the parent popover and closes it. Ours rather than egui's so
+/// every part carries a name. Returns `true` when the user changed the
+/// color.
 pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
-    let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    if color_picker_color32(ui, &mut c, Alpha::Opaque) {
-        *rgb = [c.r(), c.g(), c.b()];
-        true
-    } else {
-        false
+    let width = ui.spacing().slider_width;
+    let (square, square_resp) = ui.allocate_exact_size(egui::vec2(width, width * 0.6), egui::Sense::drag());
+    // Hue and saturation are kept across frames: a grey or black RGB holds
+    // neither, so recomputing them from RGB would snap the hue to red.
+    let memo = square_resp.id.with("hsv");
+    let mut hsv = ui
+        .data(|d| d.get_temp::<([u8; 3], Hsva)>(memo))
+        .filter(|(seen, _)| seen == rgb)
+        .map_or_else(|| Hsva::from_srgb(*rgb), |(_, hsv)| hsv);
+    let before = hsv;
+    if let Some(p) = square_resp.interact_pointer_pos() {
+        hsv.s = ((p.x - square.left()) / square.width()).clamp(0.0, 1.0);
+        hsv.v = 1.0 - ((p.y - square.top()) / square.height()).clamp(0.0, 1.0);
     }
+    paint_gradient(ui.painter(), square, |u, v| Hsva::new(hsv.h, u, 1.0 - v, 1.0).into());
+    let marker = egui::pos2(square.left() + hsv.s * square.width(), square.top() + (1.0 - hsv.v) * square.height());
+    ui.painter().circle_stroke(marker, 4.0, egui::Stroke::new(1.5, Color32::WHITE));
+    named(square_resp, "Saturation and brightness");
+
+    let (strip, strip_resp) = ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::drag());
+    if let Some(p) = strip_resp.interact_pointer_pos() {
+        hsv.h = ((p.x - strip.left()) / strip.width()).clamp(0.0, 1.0);
+    }
+    paint_gradient(ui.painter(), strip, |u, _| Hsva::new(u, 1.0, 1.0, 1.0).into());
+    let x = strip.left() + hsv.h * strip.width();
+    ui.painter().vline(x, strip.y_range(), egui::Stroke::new(2.0, Color32::WHITE));
+    named(strip_resp, "Hue");
+
+    let mut channels = if hsv == before { *rgb } else { hsv.to_srgb() };
+    let mut typed = false;
+    ui.horizontal(|ui| {
+        for (value, (name, prefix)) in channels.iter_mut().zip([("Red", "R "), ("Green", "G "), ("Blue", "B ")]) {
+            let resp = ui.add(egui::DragValue::new(value).speed(0.5).prefix(prefix));
+            typed |= named(resp, name).changed();
+        }
+    });
+    if typed {
+        hsv = Hsva::from_srgb(channels);
+    }
+    ui.data_mut(|d| d.insert_temp(memo, (channels, hsv)));
+    let changed = channels != *rgb;
+    *rgb = channels;
+    changed
+}
+
+/// Fills `rect` with `color(u, v)` sampled on a grid, `u` and `v` in 0..1.
+fn paint_gradient(painter: &egui::Painter, rect: egui::Rect, color: impl Fn(f32, f32) -> Color32) {
+    const CELLS: u32 = 16;
+    let mut mesh = egui::Mesh::default();
+    for j in 0..=CELLS {
+        for i in 0..=CELLS {
+            let (u, v) = (i as f32 / CELLS as f32, j as f32 / CELLS as f32);
+            mesh.colored_vertex(rect.lerp_inside(egui::vec2(u, v)), color(u, v));
+        }
+    }
+    for j in 0..CELLS {
+        for i in 0..CELLS {
+            let a = j * (CELLS + 1) + i;
+            mesh.add_triangle(a, a + 1, a + CELLS + 1);
+            mesh.add_triangle(a + 1, a + CELLS + 2, a + CELLS + 1);
+        }
+    }
+    painter.add(mesh);
 }
 
 #[cfg(test)]

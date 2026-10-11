@@ -219,3 +219,28 @@ fn escape_closes_a_modal_before_touching_the_selection() {
     settle(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
+
+/// The Sketch flyout names every control in each mode, for each line
+/// style (its color pickers) and each pre-filter (its steps).
+#[test]
+fn the_sketch_flyout_names_every_control_in_every_mode() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    use prunr_core::{InputTransform, LineMode, LineStyle};
+    for mode in [LineMode::SubjectOutline, LineMode::EdgesOnly] {
+        for (i, style) in LineStyle::ALL.iter().enumerate() {
+            let mut h = loaded();
+            {
+                let s = &mut h.state_mut().batch.items[0].settings;
+                s.line_mode = mode;
+                s.line_style = *style;
+                s.input_transform = InputTransform::ALL[i % InputTransform::ALL.len()];
+            }
+            settle(&mut h);
+            click(&mut h, "Sketch");
+            assert!(egui::Popup::is_any_open(&h.ctx), "the Sketch flyout opened");
+            let present = names(&h);
+            assert!(present.iter().any(|n| n == "Line width (px)"), "{mode:?}: {present:?}");
+            assert_all_controls_named(&h, &format!("sketch flyout {mode:?} {style:?}"));
+        }
+    }
+}
