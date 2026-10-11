@@ -41,12 +41,8 @@ pub struct BrushSettings {
     /// fills; erosion preserves more original detail at the boundary.
     #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
-    /// SD-only: text prompt for the inpainted region. Defaults to a
-    /// generic "match surroundings + quality nudge" string suited to
-    /// eraser use; user can rewrite in the brush popover. Empty =
-    /// unconditional (high-variance output, often produces text-shape
-    /// glyphs on textured regions — see `inpaint_sd` module docs).
-    #[serde(default = "default_sd_prompt")]
+    /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.
+    #[serde(default, deserialize_with = "own_prompt")]
     pub sd_prompt: String,
     /// SD-only: negative prompt — content to push *away* from.
     /// Defaults to the standard SD-1.5 anti-failure-mode list (text,
@@ -167,7 +163,13 @@ pub const DEFAULT_SD_PROMPT: &str =
 pub const DEFAULT_SD_NEGATIVE_PROMPT: &str =
     "text, letters, words, watermark, signature, logo, blurry, distorted, \
      low quality, oversaturated, jpeg artifacts";
-fn default_sd_prompt() -> String { DEFAULT_SD_PROMPT.to_string() }
+
+/// A saved prompt, with a saved copy of the shipped one read as none of
+/// the user's own.
+pub(crate) fn own_prompt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let prompt = String::deserialize(d)?;
+    Ok(if prompt == DEFAULT_SD_PROMPT { String::new() } else { prompt })
+}
 fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
@@ -253,6 +255,14 @@ impl BrushSettings {
         self.sd_use_taesd = source.sd_use_taesd;
     }
 
+    /// The prompt a fill runs with: the user's, or the shipped one when
+    /// the field is empty. Unconditioned SD 1.5 draws text-like glyphs on
+    /// texture, so a fill never runs without one.
+    pub fn sd_prompt_for_run(&self) -> String {
+        let own = self.sd_prompt.trim();
+        if own.is_empty() { DEFAULT_SD_PROMPT } else { own }.to_string()
+    }
+
     /// A quality's sampler settings only: picking Fast or Quality keeps
     /// the prompt and seed.
     pub fn take_sd_quality_from(&mut self, source: &Self) {
@@ -290,7 +300,7 @@ impl Default for BrushSettings {
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
-            sd_prompt: default_sd_prompt(),
+            sd_prompt: String::new(),
             sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
             sd_scheduler: default_sd_scheduler(),
@@ -541,6 +551,31 @@ mod tests {
         assert!(!s.has_active_stroke());
     }
 
+    /// An empty prompt runs the shipped one, so the field and the chip
+    /// show only what the user wrote.
+    #[test]
+    fn an_empty_prompt_runs_the_shipped_prompt() {
+        let mut s = BrushSettings::default();
+        assert!(s.sd_prompt.is_empty(), "ships empty");
+        assert_eq!(s.sd_prompt_for_run(), DEFAULT_SD_PROMPT);
+        s.sd_prompt = "  ".into();
+        assert_eq!(s.sd_prompt_for_run(), DEFAULT_SD_PROMPT);
+        s.sd_prompt = "a red brick wall".into();
+        assert_eq!(s.sd_prompt_for_run(), "a red brick wall");
+    }
+
+    /// A saved copy of the shipped prompt is no prompt of the user's own.
+    #[test]
+    fn a_saved_shipped_prompt_loads_as_empty() {
+        let json = format!(r#"{{"sd_prompt":"{DEFAULT_SD_PROMPT}"}}"#);
+        let s: BrushSettings = serde_json::from_str(&json).unwrap();
+        assert!(s.sd_prompt.is_empty());
+        let s: BrushSettings = serde_json::from_str(r#"{"sd_prompt":"mine"}"#).unwrap();
+        assert_eq!(s.sd_prompt, "mine");
+        let p: crate::gui::presets::SdPreset = serde_json::from_str(&json.replace("sd_prompt", "prompt")).unwrap();
+        assert!(p.prompt.is_empty());
+    }
+
     /// Settings saved with a retired sampler open on Quality.
     #[test]
     fn retired_samplers_load_as_quality() {
@@ -604,7 +639,7 @@ mod tests {
         assert_eq!(s.sd_steps, 8);
         assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
         assert!((s.sd_guidance_scale - 1.5).abs() < f32::EPSILON);
-        assert_eq!(s.sd_prompt, DEFAULT_SD_PROMPT);
+        assert!(s.sd_prompt.is_empty());
         assert_eq!(s.sd_negative_prompt, DEFAULT_SD_NEGATIVE_PROMPT);
         assert!((s.inpaint_feather - 4.0).abs() < f32::EPSILON);
         assert!((s.inpaint_grow - 2.0).abs() < f32::EPSILON);
