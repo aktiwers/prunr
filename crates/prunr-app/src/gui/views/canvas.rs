@@ -624,6 +624,13 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
+/// A reveal under way: the image it reveals over, and how far it has come.
+fn reveal_progress(item: &crate::gui::item::BatchItem) -> Option<(&egui::TextureHandle, f32)> {
+    let (from, at) = item.reveal.as_ref()?;
+    let p = (at.elapsed().as_secs_f64() / super::effects::REVEAL_SECS) as f32;
+    (p < 1.0).then_some((from, p))
+}
+
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
@@ -635,12 +642,18 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         );
         let alpha = (fade * 255.0) as u8;
         if fade < 1.0 { ui.ctx().request_repaint(); }
-        ui.painter().image(
-            texture.id(),
-            img_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
-        );
+        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        match app.batch.selected_item().and_then(reveal_progress) {
+            // Undone back to the original: the source reveals over the cut.
+            Some((from, p)) => {
+                draw_checkerboard(ui, img_rect, app.settings.dark_checker);
+                super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p);
+                ui.ctx().request_repaint();
+            }
+            None => {
+                ui.painter().image(texture.id(), img_rect, full_uv, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+            }
+        }
 
         // Selection overlay — same call as `render_done`. Required here too
         // because Magic Brush authors selections directly on the source
@@ -712,15 +725,6 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-
-    // Crossfade: result fades in over 0.4s when processing completes
-    let fade = ui.ctx().animate_bool_with_time(
-        egui::Id::new(("result_fade", app.result_switch_id)),
-        true,
-        0.4,
-    );
-    if fade < 1.0 { ui.ctx().request_repaint(); }
-
     let item = app.batch.selected_item();
     let mut painted = None;
     if app.show_original {
@@ -733,11 +737,8 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            // Selection overlay also renders in show_original — the user
-            // is reviewing the source pre-mask, and the selection is
-            // authored against source coordinates, so it should be visible
-            // here too. Per 33-UI-SPEC §"Selection Visualization — Render
-            // gating".
+            // The selection is authored against the source, so it shows
+            // while comparing too.
             if let Some(it) = item {
                 super::selection_overlay::render_selection_overlay(
                     ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
@@ -745,59 +746,34 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             }
             painted = Some(img_rect);
         }
-    } else if let Some(result_tex) = item.and_then(|i| i.result_texture.as_ref()) {
+    } else if let Some(it) = item {
+        // Until the new result's texture lands, the image it replaces stays.
+        let shown = it.result_texture.as_ref().or(it.reveal_from.as_ref())?;
         let img_rect =
-            compute_img_rect(canvas_rect, result_tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-
-        // During crossfade: show source fading out behind checkerboard + result fading in
-        if fade < 1.0 {
-            if let Some(source_tex) = item.and_then(|i| i.source_texture.as_ref()) {
-                let src_alpha = ((1.0 - fade) * 255.0) as u8;
-                ui.painter().image(
-                    source_tex.id(),
-                    img_rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, src_alpha),
-                );
+            compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+        // A partially transparent bg lets the checkerboard show through,
+        // the way the exported PNG would read.
+        draw_checkerboard(ui, img_rect, app.settings.dark_checker);
+        // Image bg wins over color bg when both are set — they're mutually
+        // exclusive in the UI but a stale bg color could remain on the recipe.
+        if let Some(tex) = it.bg_image_texture.as_ref() {
+            paint_bg_image(ui, img_rect, tex, it.settings.bg_image_fit);
+        } else if let Some(bg) = it.settings.bg {
+            ui.painter().rect_filled(img_rect, 0.0, Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+        }
+        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        match (it.result_texture.as_ref(), reveal_progress(it)) {
+            (Some(new), Some((from, p))) => {
+                super::effects::paint_reveal(ui.painter(), img_rect, from.id(), new.id(), p);
+                ui.ctx().request_repaint();
+            }
+            _ => {
+                ui.painter().image(shown.id(), img_rect, full_uv, Color32::WHITE);
             }
         }
-
-        if fade >= 1.0 {
-            // Always paint the checkerboard underneath. Bg color (if set)
-            // composites over it — so a partially-transparent bg lets the
-            // checkerboard show through, mirroring how PNG transparency
-            // would read the canvas.
-            draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-            // Image bg wins over color bg when both are set — they're
-            // mutually exclusive in the UI but a stale bg color could
-            // remain on the recipe.
-            if let Some(it) = app.batch.selected_item() {
-                if let Some(tex) = it.bg_image_texture.as_ref() {
-                    paint_bg_image(ui, img_rect, tex, it.settings.bg_image_fit);
-                } else if let Some(bg) = it.settings.bg {
-                    ui.painter().rect_filled(
-                        img_rect,
-                        0.0,
-                        Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]),
-                    );
-                }
-            }
-        }
-        let result_alpha = (fade * 255.0) as u8;
-        ui.painter().image(
-            result_tex.id(),
-            img_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::from_rgba_unmultiplied(255, 255, 255, result_alpha),
+        super::selection_overlay::render_selection_overlay(
+            ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
         );
-
-        // Selection overlay: one pre-built texture, RENDER-ONLY — no I/O,
-        // no decode, no GPU upload here.
-        if let Some(it) = app.batch.selected_item() {
-            super::selection_overlay::render_selection_overlay(
-                ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
-            );
-        }
         painted = Some(img_rect);
     }
 
