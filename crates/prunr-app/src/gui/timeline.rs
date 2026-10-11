@@ -1,0 +1,458 @@
+//! One undo timeline per image: the states it has been in, and which one
+//! is shown. A list and a cursor, the shape every editor converges on.
+//! Undo and redo move the cursor; any other edit cuts the redo tail and
+//! appends. Each state is complete (result, recipe, selection, settings),
+//! so stepping back shows a stored image instead of re-running a model.
+//! The version, bumped on every move, lets a background job land only on
+//! the state it started from.
+//!
+//! Payloads are shared: a stroke step points at the same stored result as
+//! the step before it. A stored payload stays as-is while anything else
+//! holds it (the canvas, a job), is compressed off-thread once nothing
+//! does, and moves to disk under memory pressure.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use prunr_core::selection::MaskArtifact;
+
+use super::item_settings::ItemSettings;
+
+/// Steps kept per image; the oldest go first.
+pub(crate) const TIMELINE_DEPTH: usize = 64;
+
+/// Knob changes closer together than this are one step: a slider drag,
+/// or a few clicks on a stepper.
+const ADJUST_MERGE_WINDOW: Duration = Duration::from_millis(1200);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepKind {
+    Original,
+    Process,
+    Stroke,
+    Selection,
+    Edit,
+    Erase,
+    Upscale,
+    Preset,
+    Adjust,
+}
+
+impl StepKind {
+    /// What the step did, for "Stroke undone" / "Erase redone".
+    pub(crate) fn noun(self) -> &'static str {
+        match self {
+            StepKind::Original => "Original",
+            StepKind::Process => "Processing",
+            StepKind::Stroke => "Stroke",
+            StepKind::Selection => "Selection change",
+            StepKind::Edit => "Edit",
+            StepKind::Erase => "Erase",
+            StepKind::Upscale => "Upscale",
+            StepKind::Preset => "Preset",
+            StepKind::Adjust => "Adjustment",
+        }
+    }
+}
+
+/// A value a timeline stores and can compress.
+pub(crate) trait Payload: Send + Sync + Sized + 'static {
+    fn encode(&self) -> std::io::Result<Vec<u8>>;
+    fn decode(bytes: &[u8]) -> std::io::Result<Self>;
+}
+
+impl Payload for image::RgbaImage {
+    fn encode(&self) -> std::io::Result<Vec<u8>> {
+        super::history_disk::compress_to_ram(self).map(|e| e.data)
+    }
+
+    fn decode(bytes: &[u8]) -> std::io::Result<Self> {
+        super::history_disk::decompress_from_bytes(bytes)
+    }
+}
+
+impl Payload for MaskArtifact {
+    fn encode(&self) -> std::io::Result<Vec<u8>> {
+        let mut raw = Vec::with_capacity(8 + self.cells().len());
+        raw.extend_from_slice(&self.width.to_le_bytes());
+        raw.extend_from_slice(&self.height.to_le_bytes());
+        raw.extend(self.cells().iter().map(|&c| c as u8));
+        zstd::encode_all(raw.as_slice(), 1)
+    }
+
+    fn decode(bytes: &[u8]) -> std::io::Result<Self> {
+        let raw = zstd::decode_all(bytes)?;
+        let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "selection plane does not match its size");
+        let (head, cells) = raw.split_at_checked(8).ok_or_else(bad)?;
+        let w = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
+        let h = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+        if cells.len() != (w as usize) * (h as usize) {
+            return Err(bad());
+        }
+        Ok(MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect()))
+    }
+}
+
+enum Tier<T> {
+    Plain(Arc<T>),
+    /// Being compressed off-thread; still usable meanwhile.
+    Compressing(Arc<T>),
+    Compressed(Arc<Vec<u8>>),
+    OnDisk(PathBuf),
+}
+
+/// One stored payload, shared by every state that has it.
+pub(crate) struct Stored<T: Payload> {
+    tier: Mutex<Tier<T>>,
+}
+
+enum Encoded {
+    Bytes(Arc<Vec<u8>>),
+    File(PathBuf),
+}
+
+impl<T: Payload> Stored<T> {
+    pub(crate) fn new(value: Arc<T>) -> Arc<Self> {
+        Arc::new(Self { tier: Mutex::new(Tier::Plain(value)) })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Tier<T>> {
+        self.tier.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The payload, decoded when stored compressed. `None` only when a
+    /// decode fails (a disk file removed under us).
+    pub(crate) fn load(&self) -> Option<Arc<T>> {
+        let encoded = match &*self.lock() {
+            Tier::Plain(v) | Tier::Compressing(v) => return Some(Arc::clone(v)),
+            Tier::Compressed(b) => Encoded::Bytes(Arc::clone(b)),
+            Tier::OnDisk(p) => Encoded::File(p.clone()),
+        };
+        let decoded = match encoded {
+            Encoded::Bytes(b) => T::decode(&b),
+            Encoded::File(p) => std::fs::read(&p).and_then(|b| T::decode(&b)),
+        };
+        decoded
+            .map(Arc::new)
+            .map_err(|err| tracing::warn!(%err, "a stored undo state could not be read"))
+            .ok()
+    }
+
+    /// True when `value` is the payload this cell holds as-is.
+    pub(crate) fn holds(&self, value: &Arc<T>) -> bool {
+        matches!(&*self.lock(), Tier::Plain(v) | Tier::Compressing(v) if Arc::ptr_eq(v, value))
+    }
+
+    /// The payload to compress, when nothing besides this cell uses it.
+    fn begin_compress(&self) -> Option<Arc<T>> {
+        let mut tier = self.lock();
+        let Tier::Plain(v) = &*tier else { return None };
+        if Arc::strong_count(v) != 1 {
+            return None;
+        }
+        let v = Arc::clone(v);
+        *tier = Tier::Compressing(Arc::clone(&v));
+        Some(v)
+    }
+
+    fn finish_compress(&self, encoded: std::io::Result<Vec<u8>>) {
+        let mut tier = self.lock();
+        let Tier::Compressing(v) = &*tier else { return };
+        *tier = match encoded {
+            Ok(bytes) => Tier::Compressed(Arc::new(bytes)),
+            // Kept as-is; the next sweep tries again.
+            Err(_) => Tier::Plain(Arc::clone(v)),
+        };
+    }
+
+    /// Compress on a worker thread when nothing else uses the payload.
+    /// `slots` caps how many encoders run at once.
+    pub(crate) fn compress_when_idle(self: &Arc<Self>, slots: &Arc<super::background_io::DecodeSlots>) {
+        let Some(value) = self.begin_compress() else { return };
+        let cell = Arc::clone(self);
+        let slots = Arc::clone(slots);
+        std::thread::spawn(move || {
+            let _slot = slots.acquire();
+            cell.finish_compress(value.encode());
+        });
+    }
+
+    /// Move a compressed payload to disk; true when it moved.
+    pub(crate) fn demote_to_disk(&self) -> bool {
+        let bytes = match &*self.lock() {
+            Tier::Compressed(b) => Arc::clone(b),
+            _ => return false,
+        };
+        let Ok(path) = super::history_disk::write_blob(&bytes) else { return false };
+        let mut tier = self.lock();
+        match &*tier {
+            Tier::Compressed(b) if Arc::ptr_eq(b, &bytes) => {
+                *tier = Tier::OnDisk(path);
+                true
+            }
+            _ => {
+                let _ = std::fs::remove_file(&path);
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_compressed(&self) -> bool {
+        matches!(&*self.lock(), Tier::Compressed(_) | Tier::OnDisk(_))
+    }
+}
+
+impl<T: Payload> Drop for Stored<T> {
+    fn drop(&mut self) {
+        if let Tier::OnDisk(path) = &*self.lock() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) type StoredImage = Arc<Stored<image::RgbaImage>>;
+pub(crate) type StoredSelection = Arc<Stored<MaskArtifact>>;
+
+/// Everything undo restores about an image.
+#[derive(Clone)]
+pub(crate) struct DocState {
+    pub(crate) kind: StepKind,
+    /// `None`: the unprocessed image.
+    pub(crate) result: Option<StoredImage>,
+    pub(crate) recipe: Option<prunr_core::ProcessingRecipe>,
+    pub(crate) selection: Option<StoredSelection>,
+    pub(crate) settings: ItemSettings,
+    pub(crate) applied_preset: String,
+    pub(crate) at: Instant,
+}
+
+pub(crate) struct Timeline {
+    states: VecDeque<DocState>,
+    cursor: usize,
+    version: u64,
+}
+
+impl Timeline {
+    pub(crate) fn new(original: DocState) -> Self {
+        Self { states: VecDeque::from([original]), cursor: 0, version: 0 }
+    }
+
+    pub(crate) fn current(&self) -> &DocState {
+        &self.states[self.cursor]
+    }
+
+    /// Fill in the shown state as a job it started lands: no new step.
+    pub(crate) fn current_mut(&mut self) -> &mut DocState {
+        &mut self.states[self.cursor]
+    }
+
+    /// Changes on every step, undo and redo; a job compares it with the
+    /// value it started at before it lands.
+    pub(crate) fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Make every running job's result stale without moving.
+    pub(crate) fn bump(&mut self) {
+        self.version += 1;
+    }
+
+    /// A new step after the shown one; any redo tail goes. A knob change
+    /// right after another knob change joins it instead.
+    pub(crate) fn push(&mut self, state: DocState) {
+        let at_end = self.cursor + 1 == self.states.len();
+        let top = &self.states[self.cursor];
+        if state.kind == StepKind::Adjust
+            && top.kind == StepKind::Adjust
+            && at_end
+            && state.at.saturating_duration_since(top.at) < ADJUST_MERGE_WINDOW
+        {
+            self.states[self.cursor] = state;
+            return;
+        }
+        self.states.truncate(self.cursor + 1);
+        self.states.push_back(state);
+        while self.states.len() > TIMELINE_DEPTH {
+            self.states.pop_front();
+        }
+        self.cursor = self.states.len() - 1;
+        self.version += 1;
+    }
+
+    /// Step back; returns what the undone step did.
+    pub(crate) fn undo(&mut self) -> Option<StepKind> {
+        let undone = self.can_undo().then(|| self.states[self.cursor].kind)?;
+        self.cursor -= 1;
+        self.version += 1;
+        Some(undone)
+    }
+
+    /// Step forward; returns what the redone step did.
+    pub(crate) fn redo(&mut self) -> Option<StepKind> {
+        if !self.can_redo() {
+            return None;
+        }
+        self.cursor += 1;
+        self.version += 1;
+        Some(self.states[self.cursor].kind)
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        self.cursor > 0
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        self.cursor + 1 < self.states.len()
+    }
+
+    /// Steps an undo can walk back.
+    pub(crate) fn undo_steps(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn stored_images(&self) -> impl Iterator<Item = &StoredImage> {
+        self.states.iter().filter_map(|s| s.result.as_ref())
+    }
+
+    pub(crate) fn stored_selections(&self) -> impl Iterator<Item = &StoredSelection> {
+        self.states.iter().filter_map(|s| s.selection.as_ref())
+    }
+}
+
+/// `value` stored, reusing `previous` when it already holds the same
+/// payload, so an unchanged result or selection costs nothing per step.
+pub(crate) fn store<T: Payload>(value: Option<&Arc<T>>, previous: Option<&Arc<Stored<T>>>) -> Option<Arc<Stored<T>>> {
+    let value = value?;
+    Some(match previous {
+        Some(p) if p.holds(value) => Arc::clone(p),
+        _ => Stored::new(Arc::clone(value)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(kind: StepKind, gamma: f32) -> DocState {
+        DocState {
+            kind,
+            result: None,
+            recipe: None,
+            selection: None,
+            settings: super::super::item_settings::item_with_gamma(gamma),
+            applied_preset: String::new(),
+            at: Instant::now(),
+        }
+    }
+
+    fn gamma(t: &Timeline) -> f32 {
+        t.current().settings.gamma
+    }
+
+    #[test]
+    fn undo_and_redo_move_the_cursor_and_a_new_step_cuts_the_redo_tail() {
+        let mut t = Timeline::new(state(StepKind::Original, 1.0));
+        t.push(state(StepKind::Process, 2.0));
+        t.push(state(StepKind::Stroke, 3.0));
+        assert_eq!((t.undo(), gamma(&t)), (Some(StepKind::Stroke), 2.0));
+        assert_eq!((t.undo(), gamma(&t)), (Some(StepKind::Process), 1.0));
+        assert_eq!(t.undo(), None, "the original is the floor");
+        assert_eq!((t.redo(), gamma(&t)), (Some(StepKind::Process), 2.0));
+        t.push(state(StepKind::Erase, 4.0));
+        assert_eq!(t.redo(), None, "a new step drops the undone ones");
+        assert_eq!(t.undo_steps(), 2);
+    }
+
+    #[test]
+    fn every_move_changes_the_version_and_a_fill_in_does_not() {
+        let mut t = Timeline::new(state(StepKind::Original, 1.0));
+        let v0 = t.version();
+        t.push(state(StepKind::Process, 2.0));
+        let v1 = t.version();
+        t.current_mut().recipe = None;
+        assert_eq!(t.version(), v1, "filling in the shown state keeps jobs valid");
+        t.undo();
+        let v2 = t.version();
+        t.redo();
+        assert!(v0 < v1 && v1 < v2 && v2 < t.version());
+    }
+
+    #[test]
+    fn knob_changes_in_quick_succession_are_one_step() {
+        let mut t = Timeline::new(state(StepKind::Original, 1.0));
+        let start = Instant::now();
+        for (i, g) in [1.1, 1.2, 1.3].into_iter().enumerate() {
+            t.push(DocState { at: start + Duration::from_millis(100 * i as u64), ..state(StepKind::Adjust, g) });
+        }
+        assert_eq!((t.undo_steps(), gamma(&t)), (1, 1.3));
+        t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.5) });
+        assert_eq!(t.undo_steps(), 2, "a pause starts a new step");
+        t.undo();
+        t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.6) });
+        assert_eq!(t.undo_steps(), 2, "after an undo a knob change is its own step");
+    }
+
+    #[test]
+    fn the_oldest_steps_go_first_and_the_cursor_follows() {
+        let mut t = Timeline::new(state(StepKind::Original, 0.0));
+        for i in 1..=(TIMELINE_DEPTH + 5) {
+            t.push(state(StepKind::Process, i as f32));
+        }
+        assert_eq!(t.undo_steps(), TIMELINE_DEPTH - 1);
+        assert_eq!(gamma(&t), (TIMELINE_DEPTH + 5) as f32);
+        while t.undo().is_some() {}
+        assert_eq!(gamma(&t), 6.0);
+    }
+
+    #[test]
+    fn a_payload_compresses_only_once_nothing_else_holds_it() {
+        let img = Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255])));
+        let cell = Stored::new(Arc::clone(&img));
+        assert!(cell.begin_compress().is_none(), "the canvas still holds it");
+        drop(img);
+        let value = cell.begin_compress().expect("only the cell holds it");
+        assert!(cell.load().is_some(), "usable while compressing");
+        cell.finish_compress(value.encode());
+        assert!(cell.is_compressed());
+        assert_eq!(*cell.load().unwrap(), image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255])));
+    }
+
+    #[test]
+    fn a_disk_payload_reads_back_and_its_file_goes_with_it() {
+        let cell = Stored::new(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]))));
+        let value = cell.begin_compress().unwrap();
+        cell.finish_compress(value.encode());
+        drop(value);
+        assert!(cell.demote_to_disk());
+        let path = match &*cell.lock() {
+            Tier::OnDisk(p) => p.clone(),
+            _ => unreachable!("just demoted"),
+        };
+        assert_eq!(cell.load().unwrap().get_pixel(3, 3), &image::Rgba([9, 9, 9, 255]));
+        drop(cell);
+        assert!(!path.exists(), "the file is removed with its last state");
+    }
+
+    #[test]
+    fn a_selection_plane_round_trips_through_compression() {
+        let mut cells = vec![0i8; 64];
+        cells[9] = prunr_core::selection::FULL;
+        cells[20] = -40;
+        let plane = MaskArtifact::from_cells(8, 8, cells);
+        assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane);
+    }
+
+    #[test]
+    fn an_unchanged_payload_is_shared_between_steps() {
+        let img = Arc::new(image::RgbaImage::new(2, 2));
+        let first = store(Some(&img), None).unwrap();
+        let again = store(Some(&img), Some(&first)).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let other = store(Some(&Arc::new(image::RgbaImage::new(2, 2))), Some(&first)).unwrap();
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(store::<image::RgbaImage>(None, Some(&first)).is_none());
+    }
+}

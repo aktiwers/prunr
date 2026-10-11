@@ -48,7 +48,12 @@ pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<CompressedEnt
 
 /// Decompress an in-RAM compressed entry back to an RgbaImage.
 pub fn decompress_from_ram(entry: &CompressedEntry) -> std::io::Result<image::RgbaImage> {
-    let mut decoder = zstd::Decoder::new(entry.data.as_slice())?;
+    decompress_from_bytes(&entry.data)
+}
+
+/// Decompress a `compress_to_ram` buffer back to an RgbaImage.
+pub fn decompress_from_bytes(bytes: &[u8]) -> std::io::Result<image::RgbaImage> {
+    let mut decoder = zstd::Decoder::new(bytes)?;
     let mut header = [0u8; 8];
     decoder.read_exact(&mut header)?;
     let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
@@ -72,6 +77,16 @@ pub fn demote_to_disk(entry: &CompressedEntry, item_id: u64, seq: usize) -> std:
     let path = cache_dir().join(format!("{item_id}_{seq}.zraw"));
     std::fs::write(&path, &entry.data)?;
     Ok(DiskHistoryEntry { path })
+}
+
+/// Write an already-compressed undo payload to its own file in this
+/// session's history directory.
+pub fn write_blob(bytes: &[u8]) -> std::io::Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = cache_dir().join(format!("state_{n}.zst"));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 fn history_root() -> PathBuf {
