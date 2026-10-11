@@ -440,7 +440,7 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
 
     // Process: the run lands raw, then the kept selection re-cuts it.
     let item = &mut app.batch.items[0];
-    item.start_job(Some(StepKind::Process));
+    item.start_job(Some(StepKind::Process), crate::gui::item::Engine::Segment);
     item.result_rgba = Some(Arc::new(px(3)));
     item.finish_job();
     app.apply_kept_selection_to_new_result(9);

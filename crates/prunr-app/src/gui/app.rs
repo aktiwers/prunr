@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc};
 use egui::ViewportCommand;
 
 use super::drag_export_state::DragExportState;
-use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::item::{BatchItem, BatchStatus, Engine, ImageSource};
 use super::background_io::TexTarget;
 use super::timeline::StepKind;
 use super::settings::Settings;
@@ -744,7 +744,7 @@ impl PrunrApp {
         let recipe = item.settings.current_recipe(model_kind, self.settings.chain_mode);
         tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
-            item.start_job(Some(StepKind::Upscale));
+            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         }
         self.processor.dispatch_upscale(item_id, input, model_id, output_scale, intra_threads, recipe);
     }
@@ -850,12 +850,10 @@ impl PrunrApp {
         if item.status != BatchStatus::Processing && item.job.is_none() {
             return;
         }
-        self.processor.cancels.request_item_cancel(item_id);
-        if self.processor.is_inpaint_in_flight(item_id) {
-            self.processor.cancel_inpaint(item_id);
-        }
-        if item.job.is_some_and(|j| j.step == Some(StepKind::Upscale)) {
-            self.processor.cancel_upscale();
+        match item.job.map(|j| j.engine) {
+            Some(Engine::Erase) => self.cancel_inpaint_for(item_id),
+            Some(Engine::Upscale) => self.processor.cancel_upscale(),
+            Some(Engine::Segment) | None => self.processor.cancels.request_item_cancel(item_id),
         }
     }
 
@@ -1078,7 +1076,7 @@ impl PrunrApp {
             )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
-        self.batch.items[idx].start_job(Some(StepKind::Erase));
+        self.batch.items[idx].start_job(Some(StepKind::Erase), Engine::Erase);
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
@@ -1555,7 +1553,7 @@ impl PrunrApp {
 
         for id in tiers.all_process_ids() {
             if let Some(item) = self.batch.find_by_id_mut(id) {
-                item.start_job(step);
+                item.start_job(step, Engine::Segment);
             }
         }
 
@@ -1582,7 +1580,7 @@ impl PrunrApp {
         for (id, source, fill_style) in dispatches {
             if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.status = BatchStatus::Processing;
-                item.start_job(step);
+                item.start_job(step, Engine::Segment);
             }
             self.batch.request_filter_only(id, &source, fill_style);
         }
@@ -4410,7 +4408,7 @@ mod upscale_tier2_routing_tests {
 mod timeline_contract_tests {
     use std::sync::Arc;
     use super::PrunrApp;
-    use crate::gui::item::BatchStatus;
+    use crate::gui::item::{BatchStatus, Engine};
     use crate::gui::settings::SettingsModel;
     use crate::gui::tests::fixtures::push_test_item;
     use crate::gui::timeline::StepKind;
@@ -4449,7 +4447,7 @@ mod timeline_contract_tests {
         let ctx = egui::Context::default();
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
-        app.batch.items[0].start_job(Some(StepKind::Erase));
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
         app.processor.land_inpaint_for_test(1, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
 
@@ -4469,7 +4467,7 @@ mod timeline_contract_tests {
         let ctx = egui::Context::default();
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
-        app.batch.items[0].start_job(Some(StepKind::Erase));
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
         app.handle_undo(&ctx);
         app.processor.land_inpaint_for_test(1, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
@@ -4484,7 +4482,7 @@ mod timeline_contract_tests {
         let ctx = egui::Context::default();
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
-        item.start_job(Some(StepKind::Process));
+        item.start_job(Some(StepKind::Process), Engine::Segment);
         item.status = BatchStatus::Processing;
         app.handle_undo(&ctx);
         assert!(app.processor.cancels.is_cancelled(1), "the run is asked to stop");
@@ -4501,7 +4499,7 @@ mod timeline_contract_tests {
         let ctx = egui::Context::default();
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
-        item.start_job(Some(StepKind::Process));
+        item.start_job(Some(StepKind::Process), Engine::Segment);
         item.status = BatchStatus::Processing;
         let fresh = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.on_batch_item_done(&ctx, 1, Ok(fresh), None, None);
