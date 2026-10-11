@@ -736,8 +736,11 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let mut painted = None;
     if app.show_original {
         if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
+            // Drawn where the result is, at its size: after an upscale the
+            // original covers the same area instead of a quarter of it.
+            let frame = item.and_then(|i| i.result_texture.as_ref()).unwrap_or(texture);
             let img_rect =
-                compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+                compute_img_rect(canvas_rect, frame.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
             ui.painter().image(
                 texture.id(),
                 img_rect,
