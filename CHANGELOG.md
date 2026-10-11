@@ -29,6 +29,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Chain mode defaults on; switching to an upscale model turns it on so the cut-out feeds the upscaler.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
 - Line color choices (Original, Solid color, styles) live in one list.
+- The window can be made narrower: 1020 px minimum, down from 1100.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Apply strokes.
 
 ### Performance
