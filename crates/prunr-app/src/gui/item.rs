@@ -96,9 +96,12 @@ pub(crate) struct BatchItem {
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
     pub(crate) result_tex_pending: bool,
-    /// The next result texture crossfades in: a finished erase or upscale,
-    /// as against a slider re-cut, which must swap at once.
-    pub(crate) result_fades_in: bool,
+    /// The image on screen before a discrete change (a run, an edit, an
+    /// undo), kept so the canvas shows it until the new one can reveal
+    /// over it. A slider re-cut sets none and swaps at once.
+    pub(crate) reveal_from: Option<egui::TextureHandle>,
+    /// A reveal under way: the image it reveals over, and its start.
+    pub(crate) reveal: Option<(egui::TextureHandle, std::time::Instant)>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -400,8 +403,23 @@ impl BatchItem {
         *self.timeline.current_mut() = state;
     }
 
+    /// Keep what is on screen to reveal the next image over.
+    pub(crate) fn hold_for_reveal(&mut self) {
+        if self.reveal_from.is_none() {
+            self.reveal_from = self.result_texture.clone().or_else(|| self.source_texture.clone());
+        }
+    }
+
+    /// The new result's texture has landed: reveal it over the held image.
+    pub(crate) fn start_reveal(&mut self) {
+        if let Some(from) = self.reveal_from.take() {
+            self.reveal = Some((from, std::time::Instant::now()));
+        }
+    }
+
     /// Make the working copy the shown state again.
     pub(crate) fn restore(&mut self) {
+        self.hold_for_reveal();
         let shown = self.timeline.current().clone();
         self.result_parked = false;
         self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
@@ -416,6 +434,10 @@ impl BatchItem {
         self.status = if self.result_rgba.is_some() { BatchStatus::Done } else { BatchStatus::Pending };
         self.job = None;
         self.reset_result_caches();
+        if self.result_rgba.is_none() {
+            // Back to the original: the source is already on the GPU.
+            self.start_reveal();
+        }
     }
 
     /// Step back one state; returns what the undone step did.
@@ -665,7 +687,8 @@ impl BatchItem {
             result_texture: None,
             source_tex_pending: false,
             result_tex_pending: false,
-            result_fades_in: false,
+            reveal_from: None,
+            reveal: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,

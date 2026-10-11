@@ -183,7 +183,6 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
         img_rect.min + Vec2::new(r.x * img_rect.width(), r.y * img_rect.height()),
         Vec2::new(r.w * img_rect.width(), r.h * img_rect.height()),
     );
-    let s = breath(t);
     for (cell, state) in progress.tiles.iter().zip(progress.tile_states.iter()) {
         let r = to_screen(cell);
         match state {
@@ -191,22 +190,12 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
                 painter.rect(r, 0.0, theme::TILE_WAITING, Stroke::new(0.5, theme::TILE_GRID), StrokeKind::Inside);
             }
             TileState::Running => {
-                // The frame breathes out and back in, slowly.
-                let frame = r.expand(1.0 + 3.0 * s);
-                for (width, alpha) in [(12.0, 0.04 + 0.08 * s), (6.0, 0.10 + 0.14 * s)] {
-                    painter.rect_stroke(frame, 0.0, Stroke::new(width, theme::ACCENT_BRIGHT.gamma_multiply(alpha)), StrokeKind::Outside);
-                }
-                painter.rect(frame, 0.0, theme::ACCENT_BRIGHT.gamma_multiply(0.05 + 0.09 * s), Stroke::new(2.0, theme::ACCENT_BRIGHT), StrokeKind::Inside);
+                super::effects::paint_working(painter, r, t);
+                super::effects::paint_working_frame(painter, r);
             }
             TileState::Done => {}
         }
     }
-}
-
-/// 0 → 1 → 0 over one slow breath, for anything that shows work under way.
-pub(crate) fn breath(t: f32) -> f32 {
-    const PERIOD_SECS: f32 = 4.5;
-    0.5 - 0.5 * (t * TAU / PERIOD_SECS).cos()
 }
 
 /// A ring filled to `fraction` from twelve o'clock, or a turning arc

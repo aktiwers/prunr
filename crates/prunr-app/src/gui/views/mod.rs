@@ -22,6 +22,7 @@ pub(crate) mod upscale_chip;
 pub(crate) mod upscale_toolbar;
 pub(crate) mod refinement_row;
 pub(crate) mod progress_widget;
+pub(crate) mod effects;
 pub(crate) mod selection_overlay;
 pub(crate) mod selection_action_bar;
 
