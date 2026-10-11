@@ -1324,7 +1324,7 @@ impl PrunrApp {
                     let existing = self.batch
                         .find_by_id(result.item_id)
                         .and_then(|i| i.selection_mask.clone());
-                    let final_mask = merge_stroke(existing, mask);
+                    let final_mask = merge_stroke(existing, mask, self.settings.model.role() == ModelRole::Cutout);
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
                     self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
@@ -1363,6 +1363,7 @@ impl PrunrApp {
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
             item_id, output: Arc::clone(&ld.output), mode: ld.mode,
             source_dims, reading: want, base,
+            signed: self.settings.model.role() == ModelRole::Cutout,
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }

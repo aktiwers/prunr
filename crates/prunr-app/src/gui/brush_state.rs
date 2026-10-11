@@ -402,13 +402,12 @@ impl BrushSettings {
         Stamp { hardness: self.hardness, strength: self.strength, mode: self.mode }
     }
 
-    /// Stamp for region-only consumers (inpaint). The Strength and
-    /// Add/Subtract chips are hidden there, so the hidden values must not
-    /// leak into the stroke: full strength, direction pinned to Subtract
-    /// (an erased region reads as "remove" if the selection later meets a
-    /// segmentation model).
-    pub fn region_stamp(&self) -> Stamp {
-        Stamp { hardness: self.hardness, strength: 1.0, mode: BrushMode::Subtract }
+    /// Stamp for the eraser's region. Its Opacity and Mode chips are
+    /// hidden, so their values must not leak in: full strength, adding to
+    /// the region unless the subtract modifier is held.
+    pub fn region_stamp(&self, subtract: bool) -> Stamp {
+        let mode = if subtract { BrushMode::Subtract } else { BrushMode::Add };
+        Stamp { hardness: self.hardness, strength: 1.0, mode }
     }
 
     #[cfg(test)]
@@ -471,7 +470,7 @@ impl Default for BrushSettings {
             radius: 24.0,
             hardness: 0.7,
             strength: 1.0,
-            mode: BrushMode::Subtract,
+            mode: BrushMode::Add,
             shape: BrushShape::Circle,
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
