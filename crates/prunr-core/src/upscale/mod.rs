@@ -20,7 +20,7 @@ use ort::session::{NoSelectedOutputs, RunOptions};
 use ort::value::TensorElementType;
 
 use crate::CoreError;
-use crate::engine::{GraphOptimizationLevel, OrtEngine};
+use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
 use crate::types::ModelKind;
 
 /// Shared `RunOptions` handle used by callers that want to terminate a
@@ -118,6 +118,21 @@ fn pack_output(
     }
 }
 
+/// OpenVINO honours `RunOptions::terminate` only between tiles, so its
+/// tile sets the cancel latency: 51 s at 512 on an HD 530. Other EPs
+/// abort mid-tile and keep the model's tile. A multiple of 16, so window
+/// attention models stay aligned.
+const OPENVINO_TILE_CAP: u32 = 256;
+
+fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
+    #[cfg(not(target_os = "macos"))]
+    if provider == crate::engine::EpKind::OpenVino.as_str() {
+        return recommended.min(OPENVINO_TILE_CAP);
+    }
+    let _ = provider;
+    recommended
+}
+
 /// Run a model at its native output scale (no downscale). Internal only.
 ///
 /// `native_scale` is the number of times larger the model output is than
@@ -142,6 +157,7 @@ where
 {
     let tile_size = descriptor
         .recommended_tile
+        .map(|tile| tile_for_provider(tile, engine.active_provider()))
         .ok_or_else(|| CoreError::Inference(format!(
             "model {:?} has no recommended_tile -- upscale cannot dispatch",
             descriptor.id
@@ -490,6 +506,19 @@ pub fn x4twopass_available(model_id: prunr_models::ModelId) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn openvino_tiles_cap_at_256_for_a_prompt_cancel() {
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(tile_for_provider(512, "OpenVINO"), 256);
+            assert_eq!(tile_for_provider(256, "OpenVINO"), 256);
+        }
+        assert_eq!(tile_for_provider(512, "CPU"), 512);
+        assert_eq!(tile_for_provider(512, "CUDA"), 512);
+        assert_eq!(OPENVINO_TILE_CAP % 16, 0, "window-attention models need a multiple of 16");
+    }
+
     use super::*;
 
     /// `pick_optimization_level` gates Level2 on `tile_size_multiple.is_some()`.
