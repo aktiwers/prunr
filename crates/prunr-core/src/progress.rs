@@ -17,8 +17,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Step {
     LoadingModel,
-    /// The GPU is still compiling the model; the CPU works meanwhile.
-    WarmingUpGpu,
     ReadingImage,
     FindingSubject,
     RefiningEdges,
@@ -37,7 +35,6 @@ impl Step {
     pub fn label(self) -> &'static str {
         match self {
             Step::LoadingModel => "Loading the model",
-            Step::WarmingUpGpu => "Using the CPU while the GPU warms up",
             Step::ReadingImage => "Reading the image",
             Step::FindingSubject => "Finding the subject",
             Step::RefiningEdges => "Refining the edges",

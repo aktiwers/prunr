@@ -42,7 +42,6 @@ mod test_common;
 use image::RgbaImage;
 use prunr_core::{
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine, PostprocessOpts,
-    ProgressStage,
 };
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::{Path, PathBuf}};
@@ -380,7 +379,7 @@ fn bootstrap_local_real_fixtures(root: &Path) {
             }
         };
 
-        let result = match infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None) {
+        let result = match infer_only(&img, &engine, &prunr_core::Progress::none()) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[bootstrap-local] {}: inference failed: {e:?}", dir.display());

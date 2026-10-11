@@ -579,7 +579,6 @@ fn apply_event_state(
         // Non-terminal / one-off variants — no state change here.
         SubprocessEvent::Ready { .. }
         | SubprocessEvent::Report { .. }
-        | SubprocessEvent::Progress { .. }
         | SubprocessEvent::Finished
         | SubprocessEvent::InitError { .. } => {}
     }
@@ -588,7 +587,6 @@ fn apply_event_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prunr_core::ProgressStage;
     use std::path::PathBuf;
 
     fn fresh_state() -> (HashSet<u64>, bool) {
@@ -660,15 +658,6 @@ mod tests {
     #[test]
     fn apply_event_state_does_not_decrement_on_progress_variants() {
         let (mut in_flight, mut rss_paused) = fresh_state();
-
-        step(
-            (&mut in_flight, &mut rss_paused),
-            &SubprocessEvent::Progress {
-                item_id: 1,
-                stage: ProgressStage::Infer,
-                pct: 0.5,
-            },
-        );
 
         step(
             (&mut in_flight, &mut rss_paused),

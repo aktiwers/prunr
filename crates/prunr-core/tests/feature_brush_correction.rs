@@ -11,7 +11,7 @@ use prunr_core::{
     brush::{paint_circle, Stamp},
     selection::{BrushMode, MaskArtifact},
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
-    PostprocessOpts, ProgressStage,
+    PostprocessOpts,
 };
 use test_common::{multi_subject_canary, skip_if_no_ort};
 
@@ -28,7 +28,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 
     // Step 1: run inference once; reuse the tensor for both postprocess
     // passes (changing only the correction between them).
-    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None)
+    let ir = infer_only(&img, &engine, &prunr_core::Progress::none())
         .expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
@@ -96,7 +96,7 @@ fn brush_correction_is_deterministic_across_runs() {
         .expect("OrtEngine::new_cpu_only(Silueta)");
     let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
-    let ir = infer_only(&img, &engine, None::<fn(ProgressStage, f32)>, None)
+    let ir = infer_only(&img, &engine, &prunr_core::Progress::none())
         .expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
