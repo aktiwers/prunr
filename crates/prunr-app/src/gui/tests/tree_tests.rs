@@ -79,6 +79,8 @@ fn loaded_item_names_every_control() {
     }
     settle(&mut harness);
     assert_all_controls_named(&harness, "loaded item");
+    // A screen reader, and the control socket, pick an image by its name.
+    assert!(names(&harness).iter().any(|n| n == "test1.png"), "the sidebar row is named after its file");
 }
 
 #[test]

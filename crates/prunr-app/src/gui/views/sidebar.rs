@@ -164,6 +164,10 @@ fn render_item_row(
     if item_rect.max.y < ctx.visible_rect.min.y || item_rect.min.y > ctx.visible_rect.max.y {
         return;
     }
+    let filename = &app.batch.items[i].filename;
+    item_response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, is_selected, filename)
+    });
 
     paint_item_background(ui, item_rect, is_selected);
 
