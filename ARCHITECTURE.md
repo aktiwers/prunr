@@ -151,6 +151,8 @@ The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on 
 
 **Batch vs interactive Tier 2.** Batch reruns go through the subprocess (a mask rerun with lines on takes the AddEdge path so the outline is recomposed; edge reruns run the full pipeline). Interactive reruns of the selected item run in-process; see [Live Preview](#live-preview).
 
+**What each model shows.** A model has a role (cut-out, filters, erase, upscale), and `knob_catalog::shows(model, Surface)` is the one table of which chips and brush controls appear for it: only those that act on that model's image. The toolbar, the brush strip and panels, the selection overlay and the selection actions all read it; a test renders the toolbar for every model against the table. A control that is shown but idle under another setting (Mask while Sketch is Full) is greyed with its reason instead.
+
 **Two sources of tier truth, one test.** `resolve_tier` compares whole recipes; `gui/knob_catalog.rs` maps each toolbar knob to `(tier, cache impact, dispatch)`, with context-aware specs for knobs whose cost depends on what is cached (Off → Subject outline is a live recompose with the edge tensor warm, an AddEdge run otherwise). A test mutates every knob and asserts the two agree.
 
 ## Per-Image Settings

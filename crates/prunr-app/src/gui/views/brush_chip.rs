@@ -4,6 +4,8 @@
 use egui::{Color32, Sense, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
+use crate::gui::knob_catalog::{shows, ModelRole, Surface};
+use crate::gui::settings::SettingsModel;
 use prunr_core::brush::BrushShape;
 use prunr_core::selection::BrushMode;
 
@@ -44,14 +46,15 @@ pub(super) const CUTOUT_MODES: [chip::Choice<BrushMode>; 2] = [
     chip::Choice { value: BrushMode::Subtract, name: "Erase", description: "Remove what the model left behind", enabled: true },
 ];
 
-/// On the eraser a stroke shapes the region to fill.
+/// Elsewhere a stroke shapes the selection or the region to fill.
 pub(super) const REGION_MODES: [chip::Choice<BrushMode>; 2] = [
-    chip::Choice { value: BrushMode::Add, name: "Add", description: "Add to the region", enabled: true },
-    chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Take away from the region", enabled: true },
+    chip::Choice { value: BrushMode::Add, name: "Add", description: "Add to the selection", enabled: true },
+    chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Take away from the selection", enabled: true },
 ];
 
-pub(super) fn mode_choices(is_inpaint: bool) -> &'static [chip::Choice<BrushMode>; 2] {
-    if is_inpaint { &REGION_MODES } else { &CUTOUT_MODES }
+/// Restore / Erase on a cut-out; Add / Subtract on a selection or region.
+pub(super) fn mode_choices(model: SettingsModel) -> &'static [chip::Choice<BrushMode>; 2] {
+    if model.role() == ModelRole::Cutout { &CUTOUT_MODES } else { &REGION_MODES }
 }
 
 pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
@@ -60,22 +63,23 @@ pub(super) const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
     chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
 ];
 
-pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, is_inpaint_mode: bool) -> BrushChipOutcome {
+pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     if chip::popover_header(ui, "Brush", Some(("Reset size, hardness, expand, edge blend, sharpen and shape", false))) {
         outcome.reset_brush_requested = true;
     }
     outcome.committed |= render_cursor_section(ui, s);
     ui.add_space(4.0);
-    if !is_inpaint_mode {
-        // The eraser binarizes the region and paints in one direction,
-        // so opacity and mode would have no effect there.
+    if shows(model, Surface::BrushOpacity) {
         let st = chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent);
         outcome.committed |= st.commit;
         super::hint(ui, "How strongly each stroke changes the selection.");
         ui.add_space(6.0);
-        outcome.committed |= chip::choice_row(ui, "Mode", &CUTOUT_MODES, &mut s.mode);
-    } else {
+    }
+    if shows(model, Surface::PaintMode) {
+        outcome.committed |= chip::choice_row(ui, "Mode", mode_choices(model), &mut s.mode);
+    }
+    if shows(model, Surface::FillRegionKnobs) {
         let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
         outcome.committed |= g.commit;
         super::hint(ui, "Grow or shrink the painted region before the fill.");

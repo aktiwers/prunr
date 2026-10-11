@@ -83,6 +83,40 @@ fn loaded_item_names_every_control() {
     assert!(names(&harness).iter().any(|n| n == "test1.png"), "the sidebar row is named after its file");
 }
 
+/// The real toolbar, per model, shows exactly the chips the surface
+/// table says act on that model's image.
+#[test]
+fn each_model_toolbar_shows_only_its_chips() {
+    use crate::gui::knob_catalog::{shows, Surface};
+    use crate::gui::settings::SettingsModel;
+    let chips: &[(&str, Surface)] = &[
+        ("Mask", Surface::Mask),
+        ("Lines", Surface::Lines),
+        ("Fill style", Surface::Effect),
+        ("Background", Surface::Background),
+        ("Scale", Surface::Scale),
+        ("Refine", Surface::Refine),
+        ("Prompt", Surface::SdChips),
+        ("Paint Brush", Surface::Brushes),
+        ("Magic Brush", Surface::Brushes),
+    ];
+    for model in SettingsModel::ALL {
+        let mut harness = harness();
+        {
+            let app = harness.state_mut();
+            app.settings.model = model;
+            let item = push_test_item(app, 1);
+            item.status = BatchStatus::Done;
+            app.batch.select_item(0);
+        }
+        settle(&mut harness);
+        let names = names(&harness);
+        for &(chip, surface) in chips {
+            assert_eq!(names.iter().any(|n| n == chip), shows(model, surface), "{model:?}: {chip}");
+        }
+    }
+}
+
 #[test]
 fn a_run_in_flight_names_its_cancel_button() {
     use crate::gui::dispatch_progress::DispatchProgress;

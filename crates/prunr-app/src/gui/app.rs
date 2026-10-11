@@ -977,7 +977,8 @@ impl PrunrApp {
     /// on the source. Shared by the action bar, the keyboard shortcuts and
     /// the actions themselves.
     pub(crate) fn can_selection_action(&self) -> bool {
-        self.batch.selected_item().is_some_and(|i| {
+        super::knob_catalog::shows(self.settings.model, super::knob_catalog::Surface::Brushes)
+            && self.batch.selected_item().is_some_and(|i| {
             i.selection_mask.is_some() && (i.result_rgba.is_some() || i.source_rgba.is_some())
         })
     }
