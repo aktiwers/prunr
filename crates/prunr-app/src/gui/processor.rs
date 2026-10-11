@@ -304,7 +304,7 @@ impl UpscaleInput {
     fn load(self) -> Result<Arc<image::RgbaImage>, prunr_core::CoreError> {
         match self {
             UpscaleInput::Decoded(img) => Ok(img),
-            UpscaleInput::Source(source) => source.decode().map(|img| Arc::new(img.into_rgba8())).map_err(prunr_core::CoreError::ImageFormat),
+            UpscaleInput::Source(source) => source.decode_rgba().map_err(prunr_core::CoreError::ImageFormat),
         }
     }
 }
@@ -1146,7 +1146,7 @@ impl Processor {
                 return;
             }
         };
-        let cache_descriptor = match prunr_models::REGISTRY.iter().find(|d| d.id == model_id) {
+        let cache_descriptor = match prunr_models::descriptor(model_id) {
             Some(d) => d,
             None => {
                 tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
@@ -1315,7 +1315,11 @@ impl Processor {
 
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
     /// at startup so the first Magic Brush use never waits for them.
+    /// Load the Magic Brush sessions in the background unless they are.
     pub(crate) fn warm_sam_sessions(&self) {
+        if self.sam_sessions_ready() {
+            return;
+        }
         let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
             if let Err(err) = ensure_sam_sessions(&sessions) {
