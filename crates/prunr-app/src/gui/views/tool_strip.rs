@@ -52,7 +52,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
         .pivot(Align2::CENTER_TOP)
         .fixed_pos(egui::pos2(canvas_rect.center().x, canvas_rect.top() + TOP_INSET))
         .show(ui.ctx(), |ui| {
-            let available = canvas_rect.width() - 2.0 * TOP_INSET;
+            let available = (canvas_rect.width() - 2.0 * TOP_INSET).max(0.0);
             ui.set_max_width(available);
             theme::strip_frame().show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {

@@ -84,3 +84,23 @@ fn narrowest_toolbar() {
         eprintln!("{model:?}: fits down to {width} ({:?} below)", toolbar_clash(width - 10.0, model));
     }
 }
+
+/// A window with no room (the screen asleep, a minimised compositor
+/// surface) still renders with a brush on: nothing asks egui for a
+/// negative width.
+#[test]
+fn a_window_with_no_room_renders_with_a_brush_on() {
+    let mut harness = harness_sized(egui::vec2(MIN_WINDOW_SIZE[0], MIN_WINDOW_SIZE[1]));
+    {
+        let app = harness.state_mut();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        let item = push_test_item(app, 1);
+        item.dimensions = (64, 64);
+        item.status = BatchStatus::Done;
+        app.batch.select_item(0);
+        app.brush_state.toggle();
+    }
+    settle(&mut harness);
+    harness.set_size(egui::vec2(1.0, 1.0));
+    settle(&mut harness);
+}
