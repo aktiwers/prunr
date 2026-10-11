@@ -1439,10 +1439,11 @@ fn run_sam_encoder_inline(
 ) -> Result<prunr_core::sam::SamEmbedding, String> {
     use ort::{inputs, value::Tensor};
 
-    let mut session = sessions.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    // prunr_core::sam::preprocess is ORT-free pure math.
+    // Preprocess before taking the lock: it runs on the rayon pool, and a
+    // rayon wait while holding the lock can pick up a queued encode that
+    // then blocks on this same lock. Do NOT move rayon work under it.
     let input_vec = prunr_core::sam::preprocess::preprocess_for_sam(source);
+    let mut session = sessions.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Shape: [1, 3, 1024, 1024] — NCHW, ImageNet-normalized f32.
     let arr = ndarray::Array4::from_shape_vec([1, 3, 1024, 1024], input_vec)
         .map_err(|e| format!("encoder input shape: {e}"))?;

@@ -53,9 +53,10 @@ impl MagicBrushState {
         } else { false }
     }
 
+    /// Turn the tool off. An encode in flight keeps its flag until its
+    /// result lands, so no second encode of the same image starts.
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.encoder_pending = false;
         self.clear_stroke();
     }
 
@@ -143,13 +144,16 @@ mod tests {
         assert!(!m.activate());  // second call returns false (no change)
     }
 
+    /// An encode in flight stays in flight when the tool turns off (Paint
+    /// Brush turns Magic off): clearing the flag let the next frame start
+    /// a second encode of the same image, and two encodes deadlocked.
     #[test]
-    fn deactivate_clears_pending_flag() {
+    fn turning_the_tool_off_keeps_an_encode_in_flight() {
         let mut m = MagicBrushState::default();
         m.activate();
         m.set_encoder_pending(true);
         m.deactivate();
-        assert!(!m.has_pending_encoder());
+        assert!(m.has_pending_encoder(), "the encode is still running");
         assert!(!m.is_active());
     }
 
