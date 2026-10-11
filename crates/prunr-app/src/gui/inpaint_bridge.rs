@@ -29,6 +29,12 @@ use prunr_models::ModelId;
 /// should get it back if they switched away."
 const IDLE_RELEASE: Duration = Duration::from_secs(5 * 60);
 
+/// Whether the idle eraser subprocess goes now: nothing in flight, idle
+/// past the window, and the user did not ask to keep it loaded.
+fn idle_release_due(no_in_flight: bool, idle: Duration, keep_loaded: bool) -> bool {
+    no_in_flight && idle > IDLE_RELEASE && !keep_loaded
+}
+
 /// Below this much free RAM the watchdog force-kills the worker.
 /// 1 GB sits below Linux's aggressive-reclaim band and above macOS's
 /// "compressed memory pressure" warning, so kicks before the kernel
@@ -135,6 +141,7 @@ enum SubState {
 fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBridgeResult>) {
     let mut sub_state = SubState::Idle;
     let mut last_used = Instant::now();
+    let mut keep_loaded = false;
     // Per-item dispatch generation. Threaded onto `Done` events so the
     // GUI's drain path can drop a stale stroke's result if a fresher
     // stroke superseded it while this one was in flight. The IPC
@@ -179,6 +186,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             match msg {
                 InpaintBridgeMsg::Dispatch { item_id, gen, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
                     last_used = Instant::now();
+                    keep_loaded = sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
                     inflight_gens.insert(item_id, gen);
                     let _ = gen;
                     let params = PendingDispatch {
@@ -256,12 +264,8 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             }
         }
 
-        // Idle eviction: drop the subprocess after IDLE_RELEASE of no
-        // dispatches. The `no_in_flight` gate protects long strokes;
-        // only consider eviction in Ready state.
         if let SubState::Ready(s) = &mut sub_state {
-            let no_in_flight = s.in_flight_items().is_empty();
-            if no_in_flight && last_used.elapsed() > IDLE_RELEASE {
+            if idle_release_due(s.in_flight_items().is_empty(), last_used.elapsed(), keep_loaded) {
                 if let SubState::Ready(mut owned) = std::mem::replace(&mut sub_state, SubState::Idle) {
                     let _ = owned.shutdown_with_timeout(Duration::from_secs(2));
                     tracing::info!("inpaint subprocess released after idle window");
@@ -480,5 +484,21 @@ fn kill_ready_and_drain(
             item_id: id,
             error: error_msg.into(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Keep the Stable Diffusion eraser loaded" holds it until quit; only
+    /// without it does an idle eraser go after the window.
+    #[test]
+    fn an_idle_eraser_goes_unless_kept_loaded() {
+        let long = IDLE_RELEASE + Duration::from_secs(1);
+        assert!(idle_release_due(true, long, false));
+        assert!(!idle_release_due(true, long, true), "kept loaded: stays");
+        assert!(!idle_release_due(false, long, false), "a fill in flight: stays");
+        assert!(!idle_release_due(true, Duration::from_secs(1), false), "not idle long enough");
     }
 }
