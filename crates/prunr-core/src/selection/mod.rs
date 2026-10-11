@@ -124,7 +124,7 @@ impl PartialEq for MaskArtifact {
     }
 }
 
-/// Returned by add_mask / subtract_mask when dimensions disagree.
+/// Returned by add_mask / merge_stroke when dimensions disagree.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
     #[error("mask dimension mismatch: lhs={lhs:?}, rhs={rhs:?}")]
@@ -253,12 +253,20 @@ impl MaskArtifact {
         self.map_with(other, merge_cell)
     }
 
-    /// Region difference: `|self| - |other|` clamped at zero, keeping
-    /// `self`'s sign. Alt modifier.
-    pub fn subtract_mask(&self, other: &Self) -> Result<Self, SelectionError> {
-        self.map_with(other, |a, b| {
-            let mag = a.unsigned_abs().saturating_sub(b.unsigned_abs()) as i8;
-            if a < 0 { -mag } else { mag }
+    /// `stroke` combined with this selection. On a cut-out (`signed`) a
+    /// stroke's sign is its direction, restore or erase, and the newer
+    /// one wins where it lands. Elsewhere the selection is only how much
+    /// is selected: an Add stroke grows it and a Subtract stroke carves it
+    /// away. It is kept negative there, so it reads as an erase if a
+    /// background-removal model later uses it.
+    pub fn merge_stroke(&self, stroke: &Self, signed: bool) -> Result<Self, SelectionError> {
+        if signed {
+            return self.add_mask(stroke);
+        }
+        self.map_with(stroke, |a, b| {
+            let held = a.unsigned_abs();
+            let mag = if b >= 0 { held.max(b as u8) } else { held.saturating_sub(b.unsigned_abs()) };
+            -(mag as i8)
         })
     }
 
@@ -392,6 +400,20 @@ mod tests {
     }
 
 
+    /// On a cut-out the newer stroke's direction wins; on a selection Add
+    /// grows it, Subtract carves it away, and what stays is stored as an
+    /// erase.
+    #[test]
+    fn a_stroke_merges_by_direction_on_a_cutout_and_by_amount_elsewhere() {
+        let held = mask(4, 1, vec![-127, -127, -60, 0]);
+        let add = mask(4, 1, vec![0, 100, 100, 127]);
+        let sub = mask(4, 1, vec![-127, -100, 0, -127]);
+        assert_eq!(held.merge_stroke(&add, true).unwrap().cells(), &[-127, 100, 100, 127], "restore wins where it lands");
+        assert_eq!(held.merge_stroke(&add, false).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
+        assert_eq!(held.merge_stroke(&sub, false).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
+        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub, false).unwrap().has_selected_region(), "nothing to carve");
+    }
+
     #[test]
     fn blank_plane_is_a_no_op_correction() {
         let c = MaskArtifact::new_empty(10, 10);
@@ -488,14 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn subtract_mask_reduces_magnitude_and_keeps_sign() {
-        let a = mask(3, 1, vec![100, -40, 60]);
-        let b = mask(3, 1, vec![30, 127, -60]);
-        let r = a.subtract_mask(&b).unwrap();
-        assert_eq!(r.cells(), &[70, 0, 0]);
-    }
-
-    #[test]
     fn invert_flips_coverage_with_requested_sign() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
         assert_eq!(m.invert(BrushMode::Subtract).cells(), &[-127, -63, 0, -95]);
@@ -535,11 +549,11 @@ mod tests {
     }
 
     #[test]
-    fn subtract_mask_dimension_mismatch_returns_err() {
+    fn merge_stroke_dimension_mismatch_returns_err() {
         let a = MaskArtifact::new_empty(4, 4);
         let b = MaskArtifact::new_empty(2, 8);
         assert!(matches!(
-            a.subtract_mask(&b),
+            a.merge_stroke(&b, false),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
     }
