@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProgressStage, ProcessResult, EDGE_SCALE_COUNT};
+use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::SubprocessManager;
@@ -201,11 +201,6 @@ pub enum WorkerResult {
     Report {
         item_id: u64,
         update: prunr_core::ProgressUpdate,
-    },
-    BatchProgress {
-        item_id: u64,
-        stage: ProgressStage,
-        pct: f32,
     },
     BatchItemDone {
         item_id: u64,
@@ -470,10 +465,9 @@ fn emit_loading_status(
         .or_else(|| state.pending_tier2.front().map(|t| t.item_id))
         .or_else(|| state.pending_add_edge.front().map(|a| a.item_id));
     if let Some(fid) = first_id {
-        let _ = res_tx.send(WorkerResult::BatchProgress {
+        let _ = res_tx.send(WorkerResult::Report {
             item_id: fid,
-            stage: ProgressStage::LoadingModel,
-            pct: 0.0,
+            update: prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel),
         });
         ctx.request_repaint();
     }
@@ -692,10 +686,6 @@ fn handle_subprocess_event(
     match event {
         SubprocessEvent::Report { item_id, update } => {
             let _ = res_tx.send(WorkerResult::Report { item_id, update });
-            ctx.request_repaint();
-        }
-        SubprocessEvent::Progress { item_id, stage, pct } => {
-            let _ = res_tx.send(WorkerResult::BatchProgress { item_id, stage, pct });
             ctx.request_repaint();
         }
         SubprocessEvent::ImageDone {

@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use prunr_core::{
     create_engine_pool,
-    OrtEngine, ProcessResult, ProgressStage, EdgeEngine,
+    OrtEngine, ProcessResult, EdgeEngine,
 };
 
 use prunr_app::subprocess::protocol::*;
@@ -429,6 +429,8 @@ pub fn run_worker() -> ! {
                     // Guard releases on drop (panic-safe).
                     let weight = pixel_weight(&img_bytes);
                     let _sem_guard = sem.acquire(weight);
+                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(seg_cancel.clone());
+                    progress.step(prunr_core::Step::ReadingImage);
 
                     // For LineMode::Off we use the split pipeline (infer_only +
                     // tensor_to_mask + apply_mask) to capture the raw tensor for
@@ -449,6 +451,7 @@ pub fn run_worker() -> ! {
                                 }
                             };
                             img_ref.and_then(|img| {
+                                progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
@@ -470,6 +473,7 @@ pub fn run_worker() -> ! {
                                 // Chain: chain input is already a masked RGBA from a prior
                                 // tier, so run DexiNed on it directly. No seg cache — we
                                 // don't have the seg tensor that produced the chain input.
+                                progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
@@ -512,15 +516,8 @@ pub fn run_worker() -> ! {
                                 if let Some(err) = prunr_core::check_large_image(original) {
                                     Err(err)
                                 } else {
-                                    let infer_evt_tx = evt_tx.clone();
-                                    let infer_progress = move |stage: ProgressStage, pct: f32| {
-                                        let _ = infer_evt_tx.send(SubprocessEvent::Progress {
-                                            item_id, stage, pct,
-                                        });
-                                    };
-                                    prunr_core::infer_only(
-                                        original, eng, Some(infer_progress), Some(seg_cancel.clone()),
-                                    ).and_then(|ir| {
+                                    prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                        progress.step(prunr_core::Step::RefiningEdges);
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
@@ -532,6 +529,7 @@ pub fn run_worker() -> ! {
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
                                         tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
                                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
+                                        progress.step(prunr_core::Step::DrawingLines);
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let transformed = prunr_core::apply_input_transform(&masked_img, edge.input_transform);
@@ -577,20 +575,8 @@ pub fn run_worker() -> ! {
                             if let Some(err) = prunr_core::check_large_image(original) {
                                 Err(err)
                             } else {
-                                // Progress callback for infer_only
-                                let infer_evt_tx = evt_tx.clone();
-                                let infer_progress = move |stage: ProgressStage, pct: f32| {
-                                    let _ = infer_evt_tx.send(SubprocessEvent::Progress {
-                                        item_id, stage, pct,
-                                    });
-                                };
-
-                                prunr_core::infer_only(
-                                    original, eng, Some(infer_progress), Some(seg_cancel.clone()),
-                                ).and_then(|ir| {
-                                    let _ = evt_tx.send(SubprocessEvent::Progress {
-                                        item_id, stage: ProgressStage::Postprocess, pct: 0.8,
-                                    });
+                                prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                    progress.step(prunr_core::Step::RefiningEdges);
 
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
@@ -617,10 +603,6 @@ pub fn run_worker() -> ! {
                                         item_id, w, h, a_min, a_max, a_mean,
                                         "worker postprocess result alpha stats",
                                     );
-
-                                    let _ = evt_tx.send(SubprocessEvent::Progress {
-                                        item_id, stage: ProgressStage::Alpha, pct: 0.95,
-                                    });
 
                                     // Stash tensor for cache output
                                     tensor_for_cache = Some((
@@ -749,6 +731,7 @@ pub fn run_worker() -> ! {
                     // Conservative weight — postprocess upscales tensor to original resolution
                     // which allocates significant memory for Lanczos3 + guided filter
                     let _sem_guard = sem.acquire(10);
+                    let progress = ipc_progress(item_id, evt_tx.clone());
 
                     // Read tensor from temp file
                     let tensor_result = (|| -> Result<image::RgbaImage, String> {
@@ -759,6 +742,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to read original: {e}"))?;
                         let original = prunr_core::load_image_from_bytes(&img_bytes)
                             .map_err(|e| format!("Failed to decode original: {e}"))?;
+                        progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&repost_mask, model),
@@ -835,6 +819,7 @@ pub fn run_worker() -> ! {
                         return;
                     }
                     let _sem_guard = sem.acquire(10);
+                    let progress = ipc_progress(item_id, evt_tx.clone());
 
                     // seg_tensor_path is both our input and the output we hand
                     // back as tensor_cache_path — the parent's read_tensor_cache
@@ -849,12 +834,14 @@ pub fn run_worker() -> ! {
                         let original = prunr_core::load_image_from_bytes(&img_bytes)
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
+                        progress.step(prunr_core::Step::RefiningEdges);
                         let masked_rgba = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&mask_settings, cmd_model),
                         ).map_err(|e| e.to_string())?;
 
                         let masked_img = image::DynamicImage::ImageRgba8(masked_rgba.clone());
+                        progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
                         let transformed = prunr_core::apply_input_transform(&masked_img, edge_settings.input_transform);

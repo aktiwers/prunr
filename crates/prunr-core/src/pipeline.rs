@@ -1,6 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use image::DynamicImage;
 use ort::{inputs, value::Tensor};
 
@@ -9,7 +6,8 @@ use crate::{
     formats::{check_large_image, load_image_from_bytes},
     postprocess::{postprocess, PostprocessOpts},
     preprocess::preprocess,
-    types::{CoreError, MaskSettings, ProcessResult, ProgressStage},
+    progress::{Progress, Step},
+    types::{CoreError, MaskSettings, ProcessResult},
 };
 
 /// Process a single image: remove background and return a transparent PNG.
@@ -17,46 +15,25 @@ use crate::{
 /// # Arguments
 /// - `img_bytes`: Raw image bytes (PNG, JPEG, WebP, or BMP)
 /// - `engine`: OrtEngine with a loaded session. Create once, reuse across images.
-/// - `progress`: Optional progress callback. Called at each pipeline stage.
-///   Signature: `|stage: ProgressStage, pct: f32|`
-///   Stages (in order): Decode(0.0) → Resize(0.2) → Normalize(0.4) → Infer(0.5)
-///   → Postprocess(0.8) → Alpha(0.95)
+/// - `progress`: the run's progress handle; reports Reading the image,
+///   Finding the subject and Refining the edges, and carries cancel.
 ///
 /// # Errors
 /// - `CoreError::LargeImage` if the image exceeds 8000px in either dimension
 /// - `CoreError::ImageFormat` if the bytes cannot be decoded as a supported format
 /// - `CoreError::Inference` if ORT inference fails
-pub fn process_image<F>(
-    img_bytes: &[u8],
-    engine: &OrtEngine,
-    progress: Option<F>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<ProcessResult, CoreError>
-where
-    F: Fn(ProgressStage, f32),
-{
-    process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress, cancel)
+pub fn process_image(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) -> Result<ProcessResult, CoreError> {
+    process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress)
 }
 
 /// Process a single image with custom mask settings.
-pub fn process_image_with_mask<F>(
+pub fn process_image_with_mask(
     img_bytes: &[u8],
     engine: &OrtEngine,
     mask: &MaskSettings,
-    progress: Option<F>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<ProcessResult, CoreError>
-where
-    F: Fn(ProgressStage, f32),
-{
-    let report = |stage: ProgressStage, pct: f32| {
-        if let Some(ref cb) = progress {
-            cb(stage, pct);
-        }
-    };
-
-    // Stage 1: Decode
-    report(ProgressStage::Decode, 0.0);
+    progress: &Progress,
+) -> Result<ProcessResult, CoreError> {
+    progress.step(Step::ReadingImage);
     let img = load_image_from_bytes(img_bytes)?;
 
     // Large image guard — return error before allocating a huge tensor
@@ -64,7 +41,7 @@ where
         return Err(err);
     }
 
-    process_image_from_decoded(&img, engine, mask, progress, cancel)
+    process_image_from_decoded(&img, engine, mask, progress)
 }
 
 /// Process a single image without the large-image size guard.
@@ -73,86 +50,51 @@ where
 /// (e.g., `--large-image=process` CLI flag). Skips the 8000px dimension guard
 /// and proceeds directly to inference on the original image.
 ///
-/// # Arguments
-/// - `img_bytes`: Raw image bytes (PNG, JPEG, WebP, or BMP)
-/// - `engine`: OrtEngine with a loaded session. Create once, reuse across images.
-/// - `progress`: Optional progress callback. Called at each pipeline stage.
-///
 /// # Errors
 /// - `CoreError::ImageFormat` if the bytes cannot be decoded as a supported format
 /// - `CoreError::Inference` if ORT inference fails
-pub fn process_image_unchecked<F>(
-    img_bytes: &[u8],
-    engine: &OrtEngine,
-    progress: Option<F>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<ProcessResult, CoreError>
-where
-    F: Fn(ProgressStage, f32),
-{
+pub fn process_image_unchecked(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) -> Result<ProcessResult, CoreError> {
+    progress.step(Step::ReadingImage);
     let img = load_image_from_bytes(img_bytes)?;
-    process_image_from_decoded(&img, engine, &MaskSettings::default(), progress, cancel)
+    process_image_from_decoded(&img, engine, &MaskSettings::default(), progress)
 }
 
 /// Run the full pipeline on an already-decoded image.
 ///
 /// Use this when the image is already in memory (e.g., chain mode) to
 /// avoid an unnecessary encode→decode round-trip through bytes.
-pub fn process_image_from_decoded<F>(
+pub fn process_image_from_decoded(
     img: &DynamicImage,
     engine: &OrtEngine,
     mask: &MaskSettings,
-    progress: Option<F>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<ProcessResult, CoreError>
-where
-    F: Fn(ProgressStage, f32),
-{
-    let is_cancelled = || {
-        cancel
-            .as_ref()
-            .is_some_and(|c| c.load(Ordering::Acquire))
-    };
-
-    let report = |stage: ProgressStage, pct: f32| {
-        if let Some(ref cb) = progress {
-            cb(stage, pct);
-        }
-    };
-
-    // Stage 2: Resize (happens inside preprocess)
-    report(ProgressStage::Resize, 0.2);
-    if is_cancelled() {
+    progress: &Progress,
+) -> Result<ProcessResult, CoreError> {
+    if progress.is_cancelled() {
         return Err(CoreError::Cancelled);
     }
-
-    // Stage 3: Normalize (happens inside preprocess, reported before the call)
-    report(ProgressStage::Normalize, 0.4);
     let model = engine.model_kind();
     let input_array = preprocess(img, model);
 
-    if is_cancelled() {
+    if progress.is_cancelled() {
         return Err(CoreError::Cancelled);
     }
 
-    // Stage 4: Inference + Postprocess in one IoBinding scope.
+    // Inference + postprocess in one IoBinding scope.
     //
     // The output tensor view is borrowed from ORT's bound CPU buffer;
     // postprocess consumes it in-place inside the closure so we never
     // pay the `try_extract_array().to_owned()` clone (4 MB at BiRefNet
     // 1024² — was ~11.9% of CLI batch wall time in the perf trace).
-    report(ProgressStage::Infer, 0.5);
+    progress.step(Step::FindingSubject);
 
     let postprocess_opts = PostprocessOpts::new(mask, model);
     let rgba_image = engine.infer_into(input_array, |view| {
-        if is_cancelled() {
+        if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        report(ProgressStage::Postprocess, 0.8);
+        progress.step(Step::RefiningEdges);
         Ok(postprocess(view, img, &postprocess_opts))
     })?;
-
-    report(ProgressStage::Alpha, 0.95);
 
     Ok(ProcessResult {
         rgba_image,
@@ -162,22 +104,9 @@ where
 
 /// Run inference only (Tier 1). Returns the raw model tensor without postprocessing.
 /// Use with `postprocess::tensor_to_mask()` + `postprocess::apply_mask()` for the full pipeline.
-pub fn infer_only<F>(
-    img: &DynamicImage,
-    engine: &OrtEngine,
-    progress: Option<F>,
-    cancel: Option<Arc<AtomicBool>>,
-) -> Result<crate::types::InferenceResult, CoreError>
-where
-    F: Fn(ProgressStage, f32),
-{
-    let is_cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire));
-    let report = |stage: ProgressStage, pct: f32| { if let Some(ref cb) = progress { cb(stage, pct); } };
-
-    report(ProgressStage::Resize, 0.2);
-    if is_cancelled() { return Err(CoreError::Cancelled); }
-
-    report(ProgressStage::Normalize, 0.4);
+/// Reports Finding the subject; the caller reports the steps it runs next.
+pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -> Result<crate::types::InferenceResult, CoreError> {
+    if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     let model = engine.model_kind();
     let input_array = preprocess(img, model);
     // Diagnostic stats walk the full preprocessed tensor (~16 MB at
@@ -193,9 +122,9 @@ where
         );
     }
 
-    if is_cancelled() { return Err(CoreError::Cancelled); }
+    if progress.is_cancelled() { return Err(CoreError::Cancelled); }
 
-    report(ProgressStage::Infer, 0.5);
+    progress.step(Step::FindingSubject);
     let raw_output = engine.with_session(|session| {
         let input_name = session.inputs()[0].name().to_string();
         let input_tensor = Tensor::from_array(input_array)
@@ -328,7 +257,7 @@ mod tests {
             .expect("Need downloaded models — run `cargo xtask fetch-models`");
 
         let png_bytes = make_png(64, 64);
-        let result = process_image(&png_bytes, &engine, None::<fn(ProgressStage, f32)>, None);
+        let result = process_image(&png_bytes, &engine, &Progress::none());
         assert!(result.is_ok(), "process_image failed: {:?}", result.err());
         let pr = result.unwrap();
         assert!(pr.rgba_image.width() > 0, "output image must have width");
@@ -339,24 +268,20 @@ mod tests {
     #[test]
     fn test_process_image_progress_stages_called() {
         use crate::{engine::OrtEngine, types::ModelKind};
-        use std::sync::{Arc, Mutex};
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
 
         let engine = OrtEngine::new(ModelKind::Silueta, 1)
             .expect("Need downloaded models");
-
-        let stages: Arc<Mutex<Vec<ProgressStage>>> = Arc::new(Mutex::new(Vec::new()));
-        let stages_clone = stages.clone();
-
+        let sink = std::sync::Arc::new(RecordingSink::default());
         let png_bytes = make_png(64, 64);
-        let _ = process_image(&png_bytes, &engine, Some(move |stage, _pct| {
-            stages_clone.lock().unwrap().push(stage);
-        }), None);
+        process_image(&png_bytes, &engine, &Progress::new(sink.clone())).expect("process_image");
 
-        let recorded = stages.lock().unwrap();
-        assert!(
-            recorded.len() >= 5,
-            "Expected at least 5 progress callbacks, got {}",
-            recorded.len()
-        );
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        assert_eq!(updates, vec![
+            ProgressUpdate::Step(Step::ReadingImage),
+            ProgressUpdate::Step(Step::FindingSubject),
+            ProgressUpdate::Step(Step::RefiningEdges),
+        ]);
     }
 }

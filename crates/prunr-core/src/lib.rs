@@ -26,7 +26,7 @@ pub mod progress;
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
 pub use types::{
-    CoreError, ModelKind, ProgressStage, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
+    CoreError, ModelKind, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
     InferenceResult, LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
 };
 pub use pipeline::{process_image, process_image_from_decoded, process_image_unchecked, process_image_with_mask, infer_only};

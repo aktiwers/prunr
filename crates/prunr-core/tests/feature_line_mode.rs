@@ -12,7 +12,7 @@ mod test_common;
 use prunr_core::{
     compose_subject_outline, process_image_from_decoded, ComposeMode, EdgeEngine,
     EdgeScale, EdgeSettings, InputTransform, LineStyle, MaskSettings, ModelKind,
-    OrtEngine, ProgressStage,
+    OrtEngine,
 };
 use test_common::{multi_subject_canary, skip_if_no_ort};
 
@@ -39,7 +39,7 @@ fn line_mode_off_runs_seg_only() {
     let img = multi_subject_canary();
     let result = process_image_from_decoded(
         &img, &engine, &MaskSettings::default(),
-        None::<fn(ProgressStage, f32)>, None,
+        &prunr_core::Progress::none(),
     ).expect("Off pipeline should succeed");
     assert_eq!(result.rgba_image.dimensions(), (256, 256));
 }
@@ -69,7 +69,7 @@ fn line_mode_subject_outline_combines_seg_and_edge() {
     // Step 1: segmentation produces masked RGBA.
     let masked = process_image_from_decoded(
         &img, &seg_engine, &MaskSettings::default(),
-        None::<fn(ProgressStage, f32)>, None,
+        &prunr_core::Progress::none(),
     ).expect("seg pipeline").rgba_image;
 
     // Step 2: edge inference + compose_subject_outline overlays lines.
@@ -109,7 +109,7 @@ fn line_style_solid_and_dual_scale_compose() {
     let img = multi_subject_canary();
     let masked = process_image_from_decoded(
         &img, &seg_engine, &MaskSettings::default(),
-        None::<fn(ProgressStage, f32)>, None,
+        &prunr_core::Progress::none(),
     ).expect("seg").rgba_image;
     let edge_res = edge_engine.infer_all_tensors(&img).expect("infer_all_tensors");
 

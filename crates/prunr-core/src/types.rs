@@ -87,20 +87,6 @@ pub enum LineMode {
     SubjectOutline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ProgressStage {
-    Decode,
-    Resize,
-    Normalize,
-    Infer,
-    Postprocess,
-    Alpha,
-    /// Loading and compiling the AI model (can be slow on first run with GPU backends)
-    LoadingModel,
-    /// GPU is still compiling; processing on CPU in the meantime
-    LoadingModelCpuFallback,
-}
-
 #[derive(Debug)]
 pub struct ProcessResult {
     /// Raw RGBA pixels of the output image with background removed
@@ -733,27 +719,6 @@ mod tests {
         assert_eq!(model_id, prunr_models::ModelId::RealEsrganX2Plus);
         let roundtrip = ModelKind::try_from(prunr_models::ModelId::RealEsrganX2Plus).unwrap();
         assert_eq!(roundtrip, ModelKind::RealEsrganX2Plus);
-    }
-
-    #[test]
-    fn test_progress_stage_variants() {
-        let stages = [
-            ProgressStage::Decode,
-            ProgressStage::Resize,
-            ProgressStage::Normalize,
-            ProgressStage::Infer,
-            ProgressStage::Postprocess,
-            ProgressStage::Alpha,
-            ProgressStage::LoadingModel,
-            ProgressStage::LoadingModelCpuFallback,
-        ];
-        // All variants compile and implement Debug + Clone + Copy
-        for stage in &stages {
-            let _ = format!("{:?}", stage);
-            let _cloned = *stage;
-            let _copied: ProgressStage = *stage;
-        }
-        assert_eq!(stages.len(), 8);
     }
 
     #[test]
