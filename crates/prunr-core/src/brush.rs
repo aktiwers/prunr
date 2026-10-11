@@ -94,9 +94,8 @@ pub fn paint_square(target: &mut MaskArtifact, cx: f32, cy: f32, half_size: f32,
     stamp_with(target, cx, cy, half_size, stamp, |dx, dy| dx.abs().max(dy.abs()));
 }
 
-/// Thick line from `(x1, y1)` to `(x2, y2)`. Caller is responsible
-/// for invocation cadence — the Line tool calls this once at
-/// `commit_stroke`, not per pointer event.
+/// Thick line from `(x1, y1)` to `(x2, y2)`: the Line tool's one
+/// segment, and a Circle stroke between two pointer samples.
 pub fn paint_line(
     target: &mut MaskArtifact,
     x1: f32, y1: f32,
@@ -104,17 +103,34 @@ pub fn paint_line(
     radius: f32,
     stamp: Stamp,
 ) {
+    along((x1, y1), (x2, y2), radius, stamp, |x, y| paint_circle(target, x, y, radius, stamp));
+}
+
+/// Square stamps from `(x1, y1)` to `(x2, y2)`: a Square stroke between
+/// two pointer samples.
+pub fn paint_square_line(
+    target: &mut MaskArtifact,
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+    half_size: f32,
+    stamp: Stamp,
+) {
+    along((x1, y1), (x2, y2), half_size, stamp, |x, y| paint_square(target, x, y, half_size, stamp));
+}
+
+/// Stamp centres from `a` to `b` half a radius apart. Overlapping stamps
+/// keep the stronger cell, so the spacing never darkens a stroke.
+fn along(a: (f32, f32), b: (f32, f32), radius: f32, stamp: Stamp, mut paint: impl FnMut(f32, f32)) {
     if radius <= 0.0 || stamp.strength <= 0.0 {
         return;
     }
-    let dx = x2 - x1;
-    let dy = y2 - y1;
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len = (dx * dx + dy * dy).sqrt();
     let step = (radius * 0.5).max(0.5);
     let n = ((len / step).ceil() as i32).max(1);
     for i in 0..=n {
         let t = i as f32 / n as f32;
-        paint_circle(target, x1 + dx * t, y1 + dy * t, radius, stamp);
+        paint(a.0 + dx * t, a.1 + dy * t);
     }
 }
 
