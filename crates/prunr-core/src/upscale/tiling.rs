@@ -19,8 +19,7 @@
 //! working_set_mb admission gate refuses to dispatch when free RAM is
 //! below this peak.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::progress::{Progress, Step, TileRect, Unit};
 
 use image::{RgbImage, RgbaImage};
 
@@ -120,21 +119,17 @@ pub fn plan_upscale_tiles(
 /// Alpha is upscaled independently via Lanczos3 and merged into the final
 /// `RgbaImage`.
 ///
-/// `on_tile_done(done, total)` is called after each tile completes.
-///
-/// If `cancel` is set and its flag becomes `true`, returns
-/// `Err(CoreError::Cancelled)` before the next tile's inference.
-pub fn upscale_tiled<F, G>(
+/// Reports the tile layout and each tile through `progress`, and returns
+/// `Err(CoreError::Cancelled)` before the next tile once it is cancelled.
+pub fn upscale_tiled<F>(
     input: &RgbaImage,
     scale: u32,
     cfg: TilingConfig,
     run_tile: F,
-    on_tile_done: G,
-    cancel: Option<Arc<AtomicBool>>,
+    progress: &Progress,
 ) -> Result<RgbaImage, CoreError>
 where
     F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
-    G: Fn(u32, u32),
 {
     let TilingConfig { overlap, .. } = cfg;
     let (in_w, in_h) = input.dimensions();
@@ -143,6 +138,8 @@ where
 
     let tiles = plan_upscale_tiles(in_w, in_h, cfg);
     let total = tiles.len() as u32;
+    progress.step(Step::Upscaling);
+    progress.tiles(tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, in_w, in_h)).collect());
 
     // RGB f32 accumulator (channels interleaved: R, G, B per pixel).
     let pixel_count = (out_w as usize) * (out_h as usize);
@@ -153,9 +150,10 @@ where
     // rayon inside the subprocess worker path has caused deadlocks
     // historically (see `apply_background_color` for the same rule).
     for (tile_idx, tile) in tiles.iter().enumerate() {
-        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+        if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        progress.tile(tile_idx as u32, false);
 
         let rgb_tile = extract_rgb_tile(input, tile);
         let padded_tile = if tile.padded_w != tile.w || tile.padded_h != tile.h {
@@ -198,8 +196,10 @@ where
             }
         }
 
-        on_tile_done(tile_idx as u32 + 1, total);
+        progress.inner(tile_idx as u32 + 1, total, Unit::Tile);
+        progress.tile(tile_idx as u32, true);
     }
+    progress.step(Step::Finishing);
 
     let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
 
@@ -321,7 +321,7 @@ mod tests {
         };
 
         let input = RgbaImage::from_pixel(250, 200, image::Rgba([128, 64, 32, 255]));
-        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0 }, run_tile, |_, _| {}, None)
+        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0 }, run_tile, &Progress::none())
             .expect("upscale_tiled failed");
 
         assert_eq!(result.width(), 250 * scale);
@@ -345,7 +345,7 @@ mod tests {
             Ok(out)
         };
 
-        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 }, run_tile, |_, _| {}, None)
+        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 }, run_tile, &Progress::none())
             .expect("upscale_tiled failed");
 
         assert_eq!(result.width(), 512 * scale);
@@ -373,36 +373,39 @@ mod tests {
         }
     }
 
-    /// `on_tile_done` must be called exactly N times with (1,N), (2,N), ..., (N,N).
+    /// The tiler reports a contract-clean run: the step, the layout of
+    /// every tile inside the image, and each tile started, counted and
+    /// finished in order.
     #[test]
-    fn upscale_tiled_emits_correct_tile_progress() {
+    fn upscale_tiled_reports_every_tile() {
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
         let scale = 4u32;
         let input = RgbaImage::from_pixel(512, 512, image::Rgba([0, 0, 0, 255]));
-
-        let tiles = plan_upscale_tiles(512, 512, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 });
-        let expected_total = tiles.len() as u32;
-
-        let calls = std::cell::RefCell::new(Vec::new());
-
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 };
+        let expected_total = plan_upscale_tiles(512, 512, cfg).len() as u32;
         let run_tile = |rgb: &RgbImage, pw: u32, ph: u32| -> Result<RgbImage, CoreError> {
-            Ok(RgbImage::from_fn(scale * pw, scale * ph, |x, y| {
-                *rgb.get_pixel(x / scale, y / scale)
-            }))
+            Ok(RgbImage::from_fn(scale * pw, scale * ph, |x, y| *rgb.get_pixel(x / scale, y / scale)))
         };
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        upscale_tiled(&input, scale, cfg, run_tile, &Progress::new(sink.clone())).expect("upscale_tiled failed");
 
-        upscale_tiled(
-            &input, scale,
-            TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 },
-            run_tile,
-            |done, total| calls.borrow_mut().push((done, total)),
-            None,
-        ).expect("upscale_tiled failed");
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        let counts: Vec<u32> = updates.iter().filter_map(|u| match u {
+            ProgressUpdate::Inner { done, total, .. } if *total == expected_total => Some(*done),
+            _ => None,
+        }).collect();
+        assert_eq!(counts, (1..=expected_total).collect::<Vec<_>>());
+        assert!(updates.iter().any(|u| matches!(u, ProgressUpdate::Tiles(t) if t.len() as u32 == expected_total)));
+    }
 
-        let calls = calls.into_inner();
-        assert_eq!(calls.len() as u32, expected_total, "on_tile_done call count mismatch");
-        for (i, &(done, total)) in calls.iter().enumerate() {
-            assert_eq!(done, i as u32 + 1, "done counter incorrect at step {i}");
-            assert_eq!(total, expected_total, "total incorrect at step {i}");
-        }
+    #[test]
+    fn a_cancelled_tiler_stops_before_the_next_tile() {
+        let input = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]));
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ran = std::cell::Cell::new(false);
+        let run_tile = |rgb: &RgbImage, _: u32, _: u32| { ran.set(true); Ok(rgb.clone()) };
+        let result = upscale_tiled(&input, 1, TilingConfig { tile_size: 32, tile_multiple: None, overlap: 0 }, run_tile, &Progress::none().with_cancel(flag));
+        assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
     }
 }

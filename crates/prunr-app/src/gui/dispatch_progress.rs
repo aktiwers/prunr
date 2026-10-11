@@ -289,6 +289,16 @@ pub struct DispatchProgressSlot {
     inner: Arc<Mutex<Option<DispatchProgress>>>,
 }
 
+impl prunr_core::ProgressSink for DispatchProgressSlot {
+    fn report(&self, update: prunr_core::ProgressUpdate) {
+        self.update(|p| {
+            if let Some(p) = p {
+                p.apply(&update);
+            }
+        });
+    }
+}
+
 impl DispatchProgressSlot {
     pub fn new() -> Self {
         Self::default()

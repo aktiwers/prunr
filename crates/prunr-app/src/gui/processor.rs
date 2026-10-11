@@ -1233,23 +1233,12 @@ impl Processor {
                     return;
                 }
             };
-            let progress_slot_for_callback = progress_slot.clone();
-            let on_tile = move |done, total| {
-                progress_slot_for_callback.update(|p| {
-                    if let Some(p) = p {
-                        p.inner = (done, total);
-                        p.step_label = std::borrow::Cow::Borrowed(
-                            super::dispatch_progress::step_labels::TILE_INFERENCE,
-                        );
-                    }
-                });
-            };
+            let progress = prunr_core::Progress::new(Arc::new(progress_slot.clone())).with_cancel(cancel_flag);
             let result = if use_two_pass {
                 prunr_core::upscale::upscale_two_pass_with_engine(
                     &input_for_inference,
                     &engine_for_thread,
-                    on_tile,
-                    Some(cancel_flag),
+                    &progress,
                     Some(&run_options_for_thread),
                 )
             } else {
@@ -1258,8 +1247,7 @@ impl Processor {
                     &engine_for_thread,
                     model_id,
                     scale_factor,
-                    on_tile,
-                    Some(cancel_flag),
+                    &progress,
                     Some(&run_options_for_thread),
                 )
             };
