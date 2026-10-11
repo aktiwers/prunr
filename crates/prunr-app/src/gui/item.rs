@@ -419,18 +419,27 @@ impl BatchItem {
         *self.timeline.current_mut() = state;
     }
 
-    /// Keep what is on screen to reveal the next image over.
+    /// Keep what is on screen to reveal the next image over, when memory
+    /// allows; otherwise the next image replaces it outright.
     pub(crate) fn hold_for_reveal(&mut self) {
         if !matches!(self.reveal, Some(Reveal::Held(_))) {
-            self.reveal = self.result_texture.clone().or_else(|| self.source_texture.clone()).map(Reveal::Held);
+            self.reveal = self.result_texture.clone()
+                .or_else(|| self.source_texture.clone())
+                .filter(|t| super::views::effects::reveal_fits(t.byte_size(), crate::hardware::available_ram_bytes_throttled()))
+                .map(Reveal::Held);
         }
     }
 
     /// The new result's texture has landed: reveal it over the held image.
     pub(crate) fn start_reveal(&mut self) {
-        if let Some(Reveal::Held(from)) = self.reveal.take() {
-            let order = self.subject.as_ref().map(|s| Arc::clone(&s.order));
-            self.reveal = Some(Reveal::Running(from, std::time::Instant::now(), order));
+        match self.reveal.take() {
+            Some(Reveal::Held(from)) => {
+                let order = self.subject.as_ref().map(|s| Arc::clone(&s.order));
+                self.reveal = Some(Reveal::Running(from, std::time::Instant::now(), order));
+            }
+            // Nothing held to reveal over: the outline has no reveal to fade with.
+            None => self.subject = None,
+            running => self.reveal = running,
         }
     }
 
