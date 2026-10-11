@@ -563,6 +563,11 @@ impl Processor {
         self.dispatch_progress.read()
     }
 
+    #[cfg(test)]
+    pub(crate) fn show_progress_for_test(&self, progress: super::dispatch_progress::DispatchProgress) {
+        self.dispatch_progress.set(Some(progress));
+    }
+
     /// Keep the background-removal run's image counts current; called
     /// whenever batch state could have changed. The step the worker last
     /// reported stays; `label` shows until the first step arrives. With

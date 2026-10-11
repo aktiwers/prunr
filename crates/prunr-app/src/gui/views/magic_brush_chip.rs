@@ -12,7 +12,7 @@ use super::brush_chip::BrushChipOutcome;
 /// Wider than a popover so the two-column cursor block fits.
 const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
-/// `encoder_pending` shows the "Preparing…" spinner while the encoder runs.
+/// `encoder_pending` shows a spinner while the encoder runs.
 pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool, is_inpaint: bool) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
@@ -22,7 +22,7 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(
-                egui::RichText::new("Preparing\u{2026}")
+                egui::RichText::new(prunr_core::Step::LoadingMagicBrush.label())
                     .color(theme::TEXT_SECONDARY)
                     .size(theme::FONT_SIZE_BODY),
             );
