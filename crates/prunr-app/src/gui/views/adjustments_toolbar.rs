@@ -173,13 +173,13 @@ pub(crate) fn render(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
 
-        // Picking "No model" while Sketch is Subject would be an invalid
-        // combination (no mask to outline); fall back to Off.
+        // Without a background-removal model there is no subject to
+        // outline; the nearest working mode keeps the lines: Whole photo.
         if change.model_changed
             && !app_settings.model.uses_segmentation()
             && item_settings.line_mode == LineMode::SubjectOutline
         {
-            item_settings.line_mode = LineMode::Off;
+            item_settings.line_mode = LineMode::EdgesOnly;
         }
 
         let model = app_settings.model;
@@ -193,7 +193,7 @@ pub(crate) fn render(
             }
         }
         if shows(model, Surface::Mask) {
-            let mask_reason = (!mask_active).then_some("Sketch is set to Full, so the subject mask is not used.");
+            let mask_reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out.");
             chip::gated(ui, mask_reason, |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);
             });
@@ -204,7 +204,7 @@ pub(crate) fn render(
         if shows(model, Surface::Effect) {
             // Fill works without a mask (filter-only mode); only Full sketch
             // has no subject to fill.
-            let fill_reason = (!fill_style_active).then_some("Sketch is set to Full, so there is no subject to fill.");
+            let fill_reason = (!fill_style_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
             chip::gated(ui, fill_reason, |ui| {
                 let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
@@ -503,7 +503,7 @@ fn render_lines_group(
     let group = chip::GroupChip {
         id_salt: "lines",
         icon: ICON_DRAW.codepoint,
-        label: "Lines",
+        label: "Sketch",
         summary: mode_label(s.line_mode),
         tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
         tuned,
@@ -523,11 +523,14 @@ fn render_lines_group(
                 ui.set_min_width(LINES_LEFT_COLUMN_WIDTH);
                 ui.set_max_width(LINES_LEFT_COLUMN_WIDTH);
 
-                let modes = [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly].map(|m| chip::Choice {
-                    value: m,
-                    name: mode_label(m),
-                    description: mode_description(m),
-                    enabled: m != LineMode::SubjectOutline || subject_available,
+                let modes = [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly].map(|m| {
+                    let enabled = m != LineMode::SubjectOutline || subject_available;
+                    chip::Choice {
+                        value: m,
+                        name: mode_label(m),
+                        description: if enabled { mode_description(m) } else { "Needs a background-removal model to find the subject" },
+                        enabled,
+                    }
                 });
                 // The caller records the mode transition after the render.
                 chip::choice_row(ui, "Sketch", &modes, &mut s.line_mode);
@@ -1172,7 +1175,7 @@ pub(super) fn render_model_dropdown(
         // The chip is always named "Model"; the hint says what this one does.
         use crate::gui::knob_catalog::ModelRole;
         let body = match app_settings.model.role() {
-            ModelRole::Cutout if !mask_active => "Sketch is set to Full, so the lines are drawn over the whole photo and nothing is cut out. Set Sketch to Off or Subject to cut out the subject again.",
+            ModelRole::Cutout if !mask_active => "Sketch is on Whole photo, so the lines cover the whole photo and nothing is cut out. Set Sketch to Off or Subject to cut out the subject again.",
             ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and download size.",
             ModelRole::Erase => "Removes what you paint over and fills the area in. Paint with the brush, then Process.",
             ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",

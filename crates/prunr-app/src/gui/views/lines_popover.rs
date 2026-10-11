@@ -6,7 +6,7 @@ use prunr_core::{ComposeMode, EdgeScale, LineMode};
 pub(super) fn mode_label(mode: LineMode) -> &'static str {
     match mode {
         LineMode::Off => "Off",
-        LineMode::EdgesOnly => "Full",
+        LineMode::EdgesOnly => "Whole photo",
         LineMode::SubjectOutline => "Subject",
     }
 }
