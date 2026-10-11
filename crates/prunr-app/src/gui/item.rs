@@ -704,12 +704,9 @@ impl BatchItem {
         // Callers that actually invalidate the tensor (model swap, crash
         // retry) set `cached_tensor = None` explicitly.
         //
-        // Same rule for `upscale`: the upscale
-        // buffer is a function of (input × upscale_model × output_scale ×
-        // pre_denoise). Tier-2 knobs (sharpen / ai_blend / color_match)
-        // reprocess FROM this cached buffer;
-        // clearing it here would force a full re-upscale on every Tier-2
-        // tweak — exactly the cost the cache exists to avoid. Tier-1
+        // Same rule for the kept upscale run: Tier-2 knobs (sharpen /
+        // ai_blend / color_match) re-finish FROM it, so clearing it here
+        // would force a full re-upscale on every Tier-2 tweak. Tier-1
         // invalidation paths call `invalidate_upscale_cache()` explicitly.
         self.result_texture = None;
         self.thumb_texture = None;

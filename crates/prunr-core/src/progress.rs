@@ -57,7 +57,6 @@ pub enum Unit {
     Tile,
     Step,
     Crop,
-    Pass,
     Image,
 }
 
@@ -68,7 +67,6 @@ impl Unit {
             Unit::Tile => ("tile", "tiles"),
             Unit::Step => ("step", "steps"),
             Unit::Crop => ("crop", "crops"),
-            Unit::Pass => ("pass", "passes"),
             Unit::Image => ("image", "images"),
         };
         if n == 1 { one } else { many }
@@ -97,7 +95,7 @@ impl TileRect {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProgressUpdate {
     Step(Step),
-    /// The outer count: crops of a stroke, passes of a multi-pass run.
+    /// The outer count: crops of a stroke, images of a batch.
     Outer { done: u32, total: u32, unit: Unit },
     /// The count inside the current outer unit: tiles, denoising steps.
     Inner { done: u32, total: u32, unit: Unit },

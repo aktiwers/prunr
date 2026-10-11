@@ -375,9 +375,9 @@ mod tests {
         use prunr_core::Unit;
         let mut p = sd_nested((1, 3), (5, 8));
         assert_eq!(p.counter_text().as_deref(), Some("Crop 2 of 3 \u{b7} step 5 of 8"), "units default per level");
-        p.outer_unit = Some(Unit::Pass);
+        p.outer_unit = Some(Unit::Image);
         p.inner_unit = Some(Unit::Tile);
-        assert_eq!(p.counter_text().as_deref(), Some("Pass 2 of 3 \u{b7} tile 5 of 8"));
+        assert_eq!(p.counter_text().as_deref(), Some("Image 2 of 3 \u{b7} tile 5 of 8"));
         assert_eq!(sd_nested((0, 1), (5, 8)).counter_text().as_deref(), Some("Step 5 of 8"));
         let one_image = DispatchProgress { outer: Some((0, 1)), ..DispatchProgress::new(ProgressKind::Seg, "x") };
         assert_eq!(one_image.counter_text(), None);
@@ -529,7 +529,7 @@ mod tests {
         let mut p = upscale((0, 48));
         p.apply(&ProgressUpdate::Step(Step::Upscaling));
         p.apply(&ProgressUpdate::Inner { done: 3, total: 48, unit: Unit::Tile });
-        p.apply(&ProgressUpdate::Outer { done: 1, total: 2, unit: Unit::Pass });
+        p.apply(&ProgressUpdate::Outer { done: 1, total: 2, unit: Unit::Crop });
         assert_eq!((p.step_label.as_ref(), p.inner, p.outer), ("Upscaling", (3, 48), Some((1, 2))));
         p.cancelling = true;
         p.apply(&ProgressUpdate::Step(Step::Finishing));
