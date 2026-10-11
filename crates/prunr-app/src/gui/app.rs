@@ -7,6 +7,7 @@ use egui::ViewportCommand;
 
 use super::drag_export_state::DragExportState;
 use super::item::{BatchItem, BatchStatus, Engine, ImageSource};
+use super::knob_catalog::{shows, ModelRole, Surface};
 use super::background_io::TexTarget;
 use super::timeline::StepKind;
 use super::settings::Settings;
@@ -862,22 +863,10 @@ impl PrunrApp {
     /// dispatch rules from drifting between input surfaces.
     pub(crate) fn apply_selection_to_active_model(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
-        let category = self.settings.model.to_model_id()
-            .and_then(prunr_models::descriptor)
-            .map(|d| d.category);
-        match category {
-            Some(prunr_models::ModelCategory::Segmentation) => self.rerun_with_strokes(idx),
-            Some(prunr_models::ModelCategory::Inpaint) => {
-                // Selection IS the inpaint region; user clicks Process.
-            }
-            Some(prunr_models::ModelCategory::Selection) => {
-                // Magic Brush model itself; no downstream action.
-            }
-            Some(prunr_models::ModelCategory::Upscale)
-            | Some(prunr_models::ModelCategory::EdgeDetection)
-            | None => {
-                // Mask-only actions work; no model dispatch.
-            }
+        // A cut-out re-cuts at once; the eraser's region waits for Process;
+        // elsewhere the selection only feeds Delete / Copy / Cut.
+        if self.settings.model.role() == ModelRole::Cutout {
+            self.rerun_with_strokes(idx);
         }
     }
 
@@ -887,7 +876,7 @@ impl PrunrApp {
     pub(crate) fn apply_kept_selection_to_new_result(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let item = &self.batch.items[idx];
-        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.uses_segmentation() {
+        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.role() == ModelRole::Cutout {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -977,7 +966,7 @@ impl PrunrApp {
     /// on the source. Shared by the action bar, the keyboard shortcuts and
     /// the actions themselves.
     pub(crate) fn can_selection_action(&self) -> bool {
-        super::knob_catalog::shows(self.settings.model, super::knob_catalog::Surface::Brushes)
+        shows(self.settings.model, Surface::Brushes)
             && self.batch.selected_item().is_some_and(|i| {
             i.selection_mask.is_some() && (i.result_rgba.is_some() || i.source_rgba.is_some())
         })
@@ -3634,13 +3623,10 @@ impl PrunrApp {
         }
         if toolbar_change.model_changed {
             self.settings.on_model_change_resolve_brush();
-            // Upscale has no brush surface — force-off so a leftover
-            // enabled state from seg/inpaint doesn't leak into a mode
-            // where the brush canvas overlay is hidden.
-            if self.settings.model.is_upscale() {
+            // A model without brushes turns them off, so a tool left on
+            // doesn't keep encoding every selected image.
+            if !shows(self.settings.model, Surface::Brushes) {
                 self.brush_state.disable();
-                // No Magic toggle in the upscale row either; leaving the
-                // tool active would keep encoding every selected image.
                 self.deactivate_magic_brush();
             }
             // Cancel any in-flight upscale dispatch when the user

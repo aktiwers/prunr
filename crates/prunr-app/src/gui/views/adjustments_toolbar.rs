@@ -182,7 +182,7 @@ pub(crate) fn render(
         }
 
         let model = app_settings.model;
-        if shows(model, Surface::Scale) {
+        if shows(model, Surface::Upscale) {
             super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.installed.x2plus);
         }
         if shows(model, Surface::SdChips) {
@@ -241,7 +241,7 @@ pub(crate) fn render(
                 }
             });
 
-            if !shows(app_settings.model, Surface::Brushes) {
+            if !shows(model, Surface::Brushes) {
                 return;
             }
 
