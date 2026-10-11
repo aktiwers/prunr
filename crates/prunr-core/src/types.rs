@@ -310,9 +310,6 @@ pub enum ComposeMode {
     /// Faded subject with strong lines (`alpha ≈ 0.3 · subject + 0.8 · edge`).
     /// Ghostly see-through body with a sharp outline.
     Ghost,
-    /// Lines in the background, subject stays transparent
-    /// (`alpha = (255 − subject) × edge / 255`). Negative-space outlines.
-    InverseMask,
 }
 
 impl std::fmt::Display for ComposeMode {
@@ -322,7 +319,6 @@ impl std::fmt::Display for ComposeMode {
             ComposeMode::SubjectFilled => "Subject filled",
             ComposeMode::Engraving => "Engraving",
             ComposeMode::Ghost => "Ghost",
-            ComposeMode::InverseMask => "Inverse mask",
         };
         f.write_str(s)
     }
@@ -340,7 +336,6 @@ impl ComposeMode {
             // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
             // saturates to fully opaque where subject AND edge both contribute.
             ComposeMode::Ghost => ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
-            ComposeMode::InverseMask => ((255 - s) * e / 255) as u8,
         }
     }
 
@@ -349,7 +344,6 @@ impl ComposeMode {
         Self::SubjectFilled,
         Self::Engraving,
         Self::Ghost,
-        Self::InverseMask,
     ];
 }
 
