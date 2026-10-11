@@ -308,7 +308,8 @@ pub(crate) fn item_with_line_mode(line_mode: prunr_core::LineMode) -> ItemSettin
 
 /// Rewrite item settings saved by older versions: a `threshold` (a
 /// number when it was on) becomes `contrast` at a hard edge, a retired
-/// line style becomes solid and a retired composition lines only. Only
+/// line style becomes solid, a retired composition lines only and a
+/// retired effect none. Only
 /// item settings are touched: each preset entry's `item_settings`, and a
 /// v1 preset file, which is item settings at the top (it has no
 /// `format_version`).
@@ -328,6 +329,10 @@ pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
         // Inverse mask is gone; Lines only is the nearest composition.
         if map.get("compose_mode").and_then(|v| v.as_str()) == Some("inverse_mask") {
             map.insert("compose_mode".into(), serde_json::json!("lines_only"));
+        }
+        // The Channel swap effect is gone.
+        if map.get("fill_style").and_then(|v| v.as_object()).is_some_and(|o| o.contains_key("channel_swap")) {
+            map.insert("fill_style".into(), serde_json::json!("none"));
         }
     }
     fn walk(value: &mut serde_json::Value) {
@@ -399,6 +404,10 @@ mod tests {
         migrate_old_item_settings(&mut inverse);
         let s: ItemSettings = serde_json::from_value(inverse["item_settings"].clone()).unwrap();
         assert_eq!(s.compose_mode, prunr_core::ComposeMode::LinesOnly, "a retired composition loads as lines only");
+        let mut swapped = serde_json::json!({ "item_settings": { "fill_style": { "channel_swap": { "variant": "grb" } } } });
+        migrate_old_item_settings(&mut swapped);
+        let s: ItemSettings = serde_json::from_value(swapped["item_settings"].clone()).unwrap();
+        assert_eq!(s.fill_style, prunr_core::FillStyle::None, "a retired effect loads as none");
 
         let mut v1 = serde_json::json!({ "gamma": 1.0, "threshold": 0.5 });
         migrate_old_item_settings(&mut v1);

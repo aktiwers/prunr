@@ -422,20 +422,6 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 p[2] = ((p[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
             });
         }
-        FillStyle::ChannelSwap { variant } => {
-            use crate::types::ChannelSwapVariant;
-            apply_pixelwise(rgba, |p| {
-                let [r, g, b, _] = [p[0], p[1], p[2], p[3]];
-                let (nr, ng, nb) = match variant {
-                    ChannelSwapVariant::Grb => (g, r, b),
-                    ChannelSwapVariant::Brg => (b, r, g),
-                    ChannelSwapVariant::Rbg => (r, b, g),
-                    ChannelSwapVariant::Bgr => (b, g, r),
-                    ChannelSwapVariant::Gbr => (g, b, r),
-                };
-                p[0] = nr; p[1] = ng; p[2] = nb;
-            });
-        }
         FillStyle::Halftone { dot_spacing } => {
             let spacing = dot_spacing.clamp(2, 32) as i32;
             let (w, h) = rgba.dimensions();

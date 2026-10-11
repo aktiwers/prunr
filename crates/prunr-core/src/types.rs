@@ -456,8 +456,6 @@ pub enum FillStyle {
     /// Split-tone: map shadow pixels toward `shadow`, highlight pixels toward
     /// `highlight`. Classic filmic cross-process look.
     CrossProcess { shadow: [u8; 3], highlight: [u8; 3] },
-    /// Permute RGB channels. Cheap surreal palette flip.
-    ChannelSwap { variant: ChannelSwapVariant },
     /// Newspaper halftone dots. `dot_spacing` is pixel pitch; dots shrink
     /// where luma is bright, grow where dark.
     Halftone { dot_spacing: u32 },
@@ -465,35 +463,6 @@ pub enum FillStyle {
     /// mid-tones follow the middle stops so an orange→pink→purple→blue
     /// gradient reads as a continuous sky rather than a hard mix.
     GradientMap { stops: [[u8; 3]; 4] },
-}
-
-/// Channel permutation. Values are the new position for each input channel —
-/// `Grb` means `output = (g, r, b)`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize, Default,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelSwapVariant {
-    #[default]
-    Grb,
-    Brg,
-    Rbg,
-    Bgr,
-    Gbr,
-}
-
-impl ChannelSwapVariant {
-    pub const ALL: &'static [Self] = &[Self::Grb, Self::Brg, Self::Rbg, Self::Bgr, Self::Gbr];
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Grb => "GRB",
-            Self::Brg => "BRG",
-            Self::Rbg => "RBG",
-            Self::Bgr => "BGR",
-            Self::Gbr => "GBR",
-        }
-    }
 }
 
 /// A picture made from the photo, shown behind the result the way a
@@ -617,7 +586,6 @@ impl FillStyle {
         FillStyle::Pixelate { block_size: 12 },
         FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
         FillStyle::CrossProcess { shadow: [30, 60, 110], highlight: [245, 220, 180] },
-        FillStyle::ChannelSwap { variant: ChannelSwapVariant::Grb },
         FillStyle::Halftone { dot_spacing: 8 },
         FillStyle::GradientMap { stops: [[20, 20, 60], [120, 60, 140], [240, 120, 80], [255, 230, 180]] },
     ];
@@ -637,7 +605,6 @@ impl FillStyle {
             FillStyle::ColorSplash { .. } => "Color splash",
             FillStyle::Pixelate { .. } => "Pixelate",
             FillStyle::CrossProcess { .. } => "Cross-process",
-            FillStyle::ChannelSwap { .. } => "Channel swap",
             FillStyle::Halftone { .. } => "Halftone",
             FillStyle::GradientMap { .. } => "Gradient map",
         }

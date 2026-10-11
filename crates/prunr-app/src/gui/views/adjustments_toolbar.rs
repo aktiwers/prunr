@@ -822,21 +822,6 @@ fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
             changed |= rgb_picker_row(ui, "Shadow", shadow);
             changed |= rgb_picker_row(ui, "Highlight", highlight);
         }
-        FillStyle::ChannelSwap { variant } => {
-            use prunr_core::ChannelSwapVariant;
-            ui.label(RichText::new("Channel order").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-            // 5 three-letter codes fit comfortably on one horizontal row —
-            // a stacked column wasted the right-hand column of the popover.
-            ui.horizontal_wrapped(|ui| {
-                for option in ChannelSwapVariant::ALL {
-                    let selected = *variant == *option;
-                    if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                        *variant = *option;
-                        changed = true;
-                    }
-                }
-            });
-        }
         FillStyle::Halftone { dot_spacing } => {
             changed |= chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed;
         }
