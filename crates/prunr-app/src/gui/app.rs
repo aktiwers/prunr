@@ -1524,7 +1524,7 @@ impl PrunrApp {
         // so falls through to the normal path with a dummy ModelKind — the
         // seg engine won't spawn because needs_segmentation is false.)
         let is_pure_filter = self.settings.model.to_model_kind().is_none()
-            && self.batch.items.iter().all(|i| i.settings.line_mode == prunr_core::LineMode::Off);
+            && self.run_settings().line_mode == prunr_core::LineMode::Off;
         if is_pure_filter {
             self.process_filter_only(filter, step);
             return;
@@ -1573,16 +1573,18 @@ impl PrunrApp {
     /// UI stays responsive on large batches. Results land on
     /// `bg_io.filter_only_rx`, drained in `drain_background_channels`.
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
-        let dispatches: Vec<(u64, ImageSource, prunr_core::FillStyle)> = self.batch.items.iter()
+        let settings = self.run_settings();
+        let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
-            .map(|i| (i.id, i.source.clone(), i.settings.fill_style))
+            .map(|i| (i.id, i.source.clone()))
             .collect();
-        for (id, source, fill_style) in dispatches {
+        for (id, source) in dispatches {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
+            item.settings = settings;
             item.status = BatchStatus::Processing;
             item.start_job(step, Engine::Segment);
             let input = item.job_input();
-            self.batch.request_filter_only(id, &source, input, fill_style);
+            self.batch.request_filter_only(id, &source, input, settings.fill_style);
         }
     }
 
@@ -1842,6 +1844,12 @@ impl PrunrApp {
         self.dispatch_batch(items, tier2_work, add_edge_work, model, jobs, None);
     }
 
+    /// The settings a batch runs with: the shown image's — what you see
+    /// is what you process. Factory defaults on an empty batch.
+    fn run_settings(&self) -> super::item_settings::ItemSettings {
+        self.batch.selected_idx_clamped().map(|i| self.batch.items[i].settings).unwrap_or_default()
+    }
+
     /// Build and send a WorkerMessage::BatchProcess with current settings.
     fn dispatch_batch(
         &mut self,
@@ -1854,13 +1862,7 @@ impl PrunrApp {
     ) {
         self.processor.cancels.reset();
 
-        // Use the currently-viewed item's settings for the batch — matches
-        // "what you see is what you process." Fallback to factory defaults
-        // only if the batch is somehow empty at dispatch time (defensive).
-        let idx = self.batch.selected_index.min(self.batch.items.len().saturating_sub(1));
-        let current_settings = self.batch.items.get(idx)
-            .map(|b| b.settings)
-            .unwrap_or_default();
+        let current_settings = self.run_settings();
 
         // Broadcast: every item about to be processed inherits current.settings
         // so their `applied_recipe` ends up consistent with what ran.
@@ -4401,6 +4403,19 @@ mod timeline_contract_tests {
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
+    }
+
+    /// A batch runs with the selected image's settings, so the No-model
+    /// filter path is chosen from those: another image's lines must not
+    /// send the whole batch to a cut-out model.
+    #[test]
+    fn no_model_with_no_lines_selected_runs_the_filter_for_the_batch() {
+        let mut app = app_with_processed_item(SettingsModel::None);
+        push_test_item(&mut app, 2).settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        app.batch.select_item(0);
+        app.process_items(|_| true, Some(StepKind::Process));
+        assert!(app.batch.items.iter().all(|i| matches!(i.status, BatchStatus::Processing)), "both run as filters");
+        assert_eq!(app.batch.items[1].settings.line_mode, prunr_core::LineMode::Off, "and show the settings they ran with");
     }
 
     /// A Full-lines run draws on the whole photo: a Pre-filter change must
