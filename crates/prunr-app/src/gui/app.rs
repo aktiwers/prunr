@@ -1946,7 +1946,7 @@ impl PrunrApp {
                 // No cached tensors — fall back to composite PNG so the user
                 // still lands a file per target.
                 if let Some(rgba) = item.result_rgba.as_ref() {
-                    let baked = item.bake_export_bg(rgba);
+                    let baked = item.export_bg().bake(rgba);
                     if let Ok(bytes) = prunr_core::encode_rgba_png(&baked) {
                         let stem = Path::new(&item.filename)
                             .file_stem().and_then(|s| s.to_str()).unwrap_or("image");
@@ -2139,7 +2139,7 @@ impl PrunrApp {
         let Some(rgba) = rgba_to_copy else { return };
         // Bake bg into the clipboard image so it matches the canvas.
         let rgba = self.batch.selected_item()
-            .map(|item| item.bake_export_bg(&rgba))
+            .map(|item| item.export_bg().bake(&rgba))
             .unwrap_or(rgba);
 
         if self.system.copy_image(&rgba) {
