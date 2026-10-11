@@ -645,7 +645,7 @@ mod tests {
             sharpen: 0.3,
             ai_blend: 0.6,
             color_match: true,
-            output_scale: prunr_core::OutputScale::X4TwoPass,
+            output_scale: prunr_core::OutputScale::X2,
             ..ItemSettings::default()
         };
         let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(r.upscale.sharpen_bits, 0.3_f32.to_bits());
         assert_eq!(r.upscale.ai_blend_bits, 0.6_f32.to_bits());
         assert!(r.upscale.color_match);
-        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X4TwoPass);
+        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
     }
 
     #[test]
@@ -663,7 +663,7 @@ mod tests {
             sharpen: 0.3,
             ai_blend: 0.6,
             color_match: true,
-            output_scale: prunr_core::OutputScale::X4TwoPass,
+            output_scale: prunr_core::OutputScale::X2,
             ..ItemSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();

@@ -112,10 +112,7 @@ impl std::hash::Hash for MaskRecipe {
     }
 }
 
-/// User-facing output scale choice for upscale dispatches.
-///
-/// `X4TwoPass` is Real-ESRGAN-only (runs `RealEsrganX2Plus` twice);
-/// the dispatch layer rejects it for non-x4plus models. `#[repr(u8)]`
+/// User-facing output scale choice for upscale dispatches. `#[repr(u8)]`
 /// keeps the enum at 1 byte so it fits inside the `ItemSettings`
 /// cache-line budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -123,8 +120,9 @@ impl std::hash::Hash for MaskRecipe {
 pub enum OutputScale {
     X2 = 0,
     X3 = 1,
+    /// Settings saved with the retired two-pass 4x load as 4x.
+    #[serde(alias = "X4TwoPass")]
     X4 = 2,
-    X4TwoPass = 3,
 }
 
 impl Default for OutputScale {
@@ -133,21 +131,19 @@ impl Default for OutputScale {
 }
 
 impl OutputScale {
-    /// User-facing multiplicative output factor. `X4TwoPass` runs the model
-    /// twice but still produces a 4× image — the factor is the *display*
-    /// factor the user sees, not the inference count.
-    #[inline]
     /// The unsharp-mask radius, in output pixels, for detail the size of
     /// one source pixel: half the enlargement.
     pub fn sharpen_sigma(self) -> f32 {
         self.factor() as f32 / 2.0
     }
 
+    /// User-facing multiplicative output factor.
+    #[inline]
     pub fn factor(self) -> u32 {
         match self {
             OutputScale::X2 => 2,
             OutputScale::X3 => 3,
-            OutputScale::X4 | OutputScale::X4TwoPass => 4,
+            OutputScale::X4 => 4,
         }
     }
 }
@@ -775,11 +771,13 @@ mod tests {
 
     #[test]
     fn output_scale_serde_roundtrip() {
-        for variant in [OutputScale::X2, OutputScale::X3, OutputScale::X4, OutputScale::X4TwoPass] {
+        for variant in [OutputScale::X2, OutputScale::X3, OutputScale::X4] {
             let json = serde_json::to_string(&variant).unwrap();
             let recovered: OutputScale = serde_json::from_str(&json).unwrap();
             assert_eq!(variant, recovered, "{variant:?}");
         }
+        let retired: OutputScale = serde_json::from_str("\"X4TwoPass\"").unwrap();
+        assert_eq!(retired, OutputScale::X4, "the retired two-pass loads as 4x");
     }
 
     #[test]
