@@ -460,6 +460,11 @@ fn render_mask_group(
     });
 }
 
+/// Lines take the photo's own colors: the "Original" line color.
+fn lines_in_photo_colors(s: &ItemSettings) -> bool {
+    s.line_style == prunr_core::LineStyle::Solid && s.solid_line_color.is_none()
+}
+
 /// What a line color style looks like, for its row in the list.
 fn line_style_description(style: &prunr_core::LineStyle) -> &'static str {
     use prunr_core::LineStyle;
@@ -588,10 +593,15 @@ fn render_lines_group(
                 if s.line_mode == LineMode::SubjectOutline {
                     let compositions = [
                         ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
-                        ComposeMode::Ghost, ComposeMode::InverseMask,
+                        ComposeMode::Ghost,
                     ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
                     let changed = chip::choice_row(ui, "Composition", &compositions, &mut s.compose_mode);
                     aggregate_bool(changed, StaticKnob::ComposeMode, change);
+                    // Lines in the photo's own colors vanish on a filled subject.
+                    if changed && s.compose_mode == ComposeMode::SubjectFilled && lines_in_photo_colors(s) {
+                        s.solid_line_color = Some([0, 0, 0]);
+                        aggregate_bool(true, StaticKnob::SolidLineColor, change);
+                    }
                     ui.add_space(theme::SPACE_XS);
                 }
 
@@ -605,7 +615,7 @@ fn render_lines_group(
                 ui.set_min_width(LINES_COLOR_LIST_WIDTH);
                 chip::section_label(ui, "Line color");
                 let is_solid = matches!(s.line_style, LineStyle::Solid);
-                if chip::picker_row(ui, is_solid && s.solid_line_color.is_none(), "Original", "the photo's own colors").clicked() {
+                if chip::picker_row(ui, lines_in_photo_colors(s), "Original", "the photo's own colors").clicked() {
                     s.line_style = LineStyle::Solid;
                     s.solid_line_color = None;
                     aggregate_bool(true, StaticKnob::LineStyle, change);
@@ -646,7 +656,6 @@ fn compose_label(mode: prunr_core::ComposeMode) -> &'static str {
         ComposeMode::SubjectFilled => "Subject filled",
         ComposeMode::Engraving => "Engraving",
         ComposeMode::Ghost => "Ghost",
-        ComposeMode::InverseMask => "Inverse mask",
     }
 }
 
