@@ -7,7 +7,7 @@ use prunr_core::brush::{paint_circle, paint_line, paint_square, paint_square_lin
 use prunr_core::selection::{BrushMode, MaskArtifact};
 use serde::{Deserialize, Serialize};
 
-/// Brush radius in source pixels, for the sliders and the size keys.
+/// Brush radius in screen points, for the sliders and the size keys.
 pub const BRUSH_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1.0..=200.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
