@@ -76,7 +76,7 @@ pub enum PreviewKind {
     Mask,
     /// line_strength / solid_line_color → Tier 2 edge rerun.
     Edge,
-    /// sharpen / ai_blend / saturation / color_match → Tier-2 upscale postprocess
+    /// sharpen / ai_blend / color_match → Tier-2 upscale postprocess
     /// on the cached upscale_raw buffer. No ORT inference — snapshot provides
     /// the cached buffer directly.
     UpscaleTier2,
@@ -87,8 +87,13 @@ pub enum PreviewKind {
 pub struct UpscaleTier2Knobs {
     pub sharpen: f32,
     pub ai_blend: f32,
-    pub saturation: f32,
     pub color_match: bool,
+}
+
+impl UpscaleTier2Knobs {
+    pub fn of(s: &crate::gui::item_settings::ItemSettings) -> Self {
+        Self { sharpen: s.sharpen, ai_blend: s.ai_blend, color_match: s.color_match }
+    }
 }
 
 /// A completed Tier 2 rerun delivered back to the UI thread.
@@ -305,7 +310,7 @@ impl LivePreview {
                 let seg_model = inputs.seg_tensor.as_ref().map(|s| s.model);
                 // Capture Tier-2 knob values at dispatch time. When the result
                 // lands, apply_completed_previews patches only the 4 Tier-2
-                // fields (sharpen/ai_blend/saturation/color_match) on
+                // fields (sharpen/ai_blend/color_match) on
                 // applied_recipe.upscale so the next resolve_tier diff sees Skip
                 // instead of UpscaleTier2, stopping the per-frame mark_tweak loop
                 // after the user stops dragging.
@@ -597,20 +602,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             height = h,
             sharpen = knobs.sharpen,
             ai_blend = knobs.ai_blend,
-            saturation = knobs.saturation,
             color_match = knobs.color_match,
             "run_preview: starting Tier-2 postprocess"
         );
         let t0 = std::time::Instant::now();
         let mut out = (**raw).clone();
-        super::app::apply_tier2_postprocess(
-            &mut out,
-            knobs.sharpen,
-            knobs.ai_blend,
-            knobs.saturation,
-            knobs.color_match,
-            bicubic,
-        );
+        super::app::apply_tier2_postprocess(&mut out, &knobs, bicubic);
         let elapsed_ms = t0.elapsed().as_millis();
         tracing::debug!(
             event = "upscale_tier2_run_done",
@@ -1163,7 +1160,6 @@ mod tests {
         let knobs = UpscaleTier2Knobs {
             sharpen: 0.0,
             ai_blend: 1.0,
-            saturation: 1.0,
             color_match: false,
         };
 

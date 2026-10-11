@@ -159,16 +159,12 @@ pub struct UpscaleRecipe {
     // ----- Tier-1 knobs (re-inference) -----
     /// Pre-inference denoise blend strength, range [0.0, 1.0].
     pub pre_denoise_bits: u32,
-    /// Pre-inference EV-stop exposure adjustment, range [-2.0, 2.0].
-    pub brightness_lift_bits: u32,
     // ----- Tier-2 knobs (postprocess only) -----
     /// Unsharp-mask strength, range [-1.0, 1.0]. Negative = blur.
     pub sharpen_bits: u32,
     /// Lerp weight toward AI output vs bicubic source, range [0.0, 1.0].
     /// 1.0 = full AI (default), 0.0 = pure bicubic.
     pub ai_blend_bits: u32,
-    /// HSL-space saturation adjustment, range [-1.0, 1.0].
-    pub saturation_bits: u32,
     /// Reinhard Lab mean+stddev color match against source.
     pub color_match: bool,
 }
@@ -184,10 +180,8 @@ impl Default for UpscaleRecipe {
             model: None,
             output_scale: OutputScale::X4,
             pre_denoise_bits: 0_u32,
-            brightness_lift_bits: 0_u32,
             sharpen_bits: DEFAULT_SHARPEN.to_bits(),
             ai_blend_bits: 1.0_f32.to_bits(), // 0 = pure bicubic (disables AI output)
-            saturation_bits: 0_u32,
             color_match: false,
         }
     }
@@ -195,10 +189,8 @@ impl Default for UpscaleRecipe {
 
 impl UpscaleRecipe {
     #[inline] pub fn pre_denoise(&self) -> f32 { f32::from_bits(self.pre_denoise_bits) }
-    #[inline] pub fn brightness_lift(&self) -> f32 { f32::from_bits(self.brightness_lift_bits) }
     #[inline] pub fn sharpen(&self) -> f32 { f32::from_bits(self.sharpen_bits) }
     #[inline] pub fn ai_blend(&self) -> f32 { f32::from_bits(self.ai_blend_bits) }
-    #[inline] pub fn saturation(&self) -> f32 { f32::from_bits(self.saturation_bits) }
 }
 
 /// Tier 3: compositing settings (bg color, bg image, bg effect).
@@ -242,7 +234,7 @@ pub enum RequiredTier {
     Skip,
     /// Only compositing changed (bg_color) — parent-local, instant.
     CompositeOnly,
-    /// Only Tier-2 upscale fields (sharpen / ai_blend / saturation /
+    /// Only Tier-2 upscale fields (sharpen / ai_blend /
     /// color_match) changed — re-apply postprocess on the cached
     /// `upscale_raw` buffer; no re-inference needed.
     UpscaleTier2,
@@ -262,7 +254,7 @@ pub enum RequiredTier {
 }
 
 /// True when two `UpscaleRecipe` values differ ONLY in Tier-2 fields
-/// (sharpen, ai_blend, saturation, color_match). Used by `resolve_tier`
+/// (sharpen, ai_blend, color_match). Used by `resolve_tier`
 /// to pick between `UpscaleTier2` (cheap, postprocess-only) and
 /// `UpscaleRerun` (re-inference).
 fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
@@ -270,7 +262,6 @@ fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
     old.model == new.model
         && old.output_scale == new.output_scale
         && old.pre_denoise_bits == new.pre_denoise_bits
-        && old.brightness_lift_bits == new.brightness_lift_bits
 }
 
 /// Determine what processing tier is needed when changing from old to new recipe.
@@ -790,10 +781,8 @@ mod tests {
         let r = UpscaleRecipe::default();
         assert_eq!(r.output_scale, OutputScale::X4);
         assert_eq!(r.pre_denoise_bits, 0_u32);
-        assert_eq!(r.brightness_lift_bits, 0_u32);
         assert_eq!(r.sharpen_bits, 0.2_f32.to_bits());
         assert_eq!(r.ai_blend_bits, 1.0_f32.to_bits());
-        assert_eq!(r.saturation_bits, 0_u32);
         assert!(!r.color_match);
     }
 
@@ -839,14 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn brightness_lift_change_returns_upscale_rerun() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.brightness_lift_bits = (-0.5_f32).to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
-    }
-
-    #[test]
     fn output_scale_change_returns_upscale_rerun() {
         let a = make_upscale_recipe_with_model();
         let mut b = a.clone();
@@ -867,14 +848,6 @@ mod tests {
         let a = make_upscale_recipe_with_model();
         let mut b = a.clone();
         b.upscale.ai_blend_bits = 0.4_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
-    }
-
-    #[test]
-    fn saturation_change_returns_upscale_tier2() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.saturation_bits = 0.3_f32.to_bits();
         assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
     }
 

@@ -285,48 +285,13 @@ pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
 }
 
-/// Build the input image for upscale inference, applying Tier-1 pre-process
-/// knobs in the correct order: denoise FIRST, brightness_lift SECOND.
-///
-/// Order rationale: denoise runs on the raw input so the bilateral filter's
-/// edge-preserving math sees the noise statistics it was tuned for; brightness
-/// lift runs after so any subsequent amplification operates on the
-/// already-smoothed signal (otherwise the lift would amplify whatever noise
-/// the denoise was about to remove).
-///
-/// When neither knob is active (`pre_denoise == 0.0` and `brightness_lift == 0.0`),
-/// returns an `Arc::clone` of the input — no allocation, no clone of the pixels.
-/// The caller can verify this property with `Arc::ptr_eq` when both are zero.
-pub(crate) fn build_inference_input(
-    input: &Arc<image::RgbaImage>,
-    pre_denoise: f32,
-    brightness_lift: f32,
-) -> Arc<image::RgbaImage> {
-    if pre_denoise > 0.0 || brightness_lift != 0.0 {
-        // ONE pixel clone covers both pre-process steps; both steps mutate
-        // the scratch buffer in-place so no further allocation is needed.
-        let mut scratch: image::RgbaImage = (**input).clone();
-        if pre_denoise > 0.0 {
-            scratch = prunr_core::denoise::apply_denoise(&scratch, pre_denoise);
-        }
-        if brightness_lift != 0.0 {
-            prunr_core::denoise::apply_brightness_lift(&mut scratch, brightness_lift);
-        }
-        Arc::new(scratch)
+/// The image the upscale model reads: the input, denoised first when
+/// `pre_denoise` is above 0, else the same `Arc` (no copy).
+pub(crate) fn build_inference_input(input: &Arc<image::RgbaImage>, pre_denoise: f32) -> Arc<image::RgbaImage> {
+    if pre_denoise > 0.0 {
+        Arc::new(prunr_core::denoise::apply_denoise(input, pre_denoise))
     } else {
-        // No pre-process knobs active: no clone, no allocation.
         Arc::clone(input)
-    }
-}
-
-/// Apply the reciprocal brightness-lift transform to the upscaled output.
-/// The lift was applied pre-inference to give the model more dark-region
-/// signal; the inverse here restores the user's intended exposure.
-///
-/// No-op when `brightness_lift == 0.0`.
-pub(crate) fn apply_post_inference(img: &mut image::RgbaImage, brightness_lift: f32) {
-    if brightness_lift != 0.0 {
-        prunr_core::denoise::apply_brightness_lift_inverse(img, brightness_lift);
     }
 }
 
@@ -1146,11 +1111,7 @@ impl Processor {
         // row-parallel rayon inside apply_denoise is not nested in the inference
         // thread pool (the nested-rayon pattern that deadlocked apply_background_color
         // in b2306bb). Do not move this below upscale_active.store(true).
-        let pre_denoise = recipe.upscale.pre_denoise();
-        let brightness_lift = recipe.upscale.brightness_lift();
-        let input_for_inference: Arc<image::RgbaImage> = build_inference_input(
-            &input, pre_denoise, brightness_lift,
-        );
+        let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
 
         // Resolve ModelKind + optimization level so we can look up the
         // warm-engine cache. X4TwoPass always routes through RealEsrganX2Plus;
@@ -1244,13 +1205,6 @@ impl Processor {
                     Some(&run_options_for_thread),
                 )
             };
-            // Tier-1 post-inference: undo the brightness lift so the final
-            // image has the user's intended exposure. Denoise has no inverse
-            // — smoothing the input noise is the permanent intent.
-            let result = result.map(|mut img| {
-                apply_post_inference(&mut img, brightness_lift);
-                img
-            });
             // Send the result BEFORE clearing the active flag. Reversed
             // ordering would let the UI thread observe `is_in_flight=false`
             // and enable Process before the previous result has landed in
@@ -2061,7 +2015,7 @@ mod tests {
 
 #[cfg(test)]
 mod upscale_dispatch_tests {
-    use super::{build_inference_input, apply_post_inference};
+    use super::build_inference_input;
     use std::sync::Arc;
 
     fn grey_image(w: u32, h: u32, v: u8) -> image::RgbaImage {
@@ -2070,10 +2024,9 @@ mod upscale_dispatch_tests {
 
     #[test]
     fn dispatch_pre_process_no_knobs_returns_same_arc() {
-        // When neither pre_denoise nor brightness_lift is active, the returned
-        // Arc is the same pointer as the input (no clone, no allocation).
+        // With Denoise off the returned Arc is the input itself (no copy).
         let input = Arc::new(grey_image(4, 4, 128));
-        let out = build_inference_input(&input, 0.0, 0.0);
+        let out = build_inference_input(&input, 0.0);
         assert!(Arc::ptr_eq(&input, &out),
             "no-op path must return the same Arc (no pixel clone)");
     }
@@ -2082,50 +2035,11 @@ mod upscale_dispatch_tests {
     fn dispatch_pre_process_denoise_positive_returns_different_arc() {
         // With pre_denoise > 0, a new buffer is allocated and processed.
         let input = Arc::new(grey_image(4, 4, 100));
-        let out = build_inference_input(&input, 0.5, 0.0);
+        let out = build_inference_input(&input, 0.5);
         assert!(!Arc::ptr_eq(&input, &out),
             "denoise path must return a new Arc (different buffer)");
     }
 
-    #[test]
-    fn dispatch_pre_process_brightness_lift_nonzero_returns_different_arc() {
-        // With brightness_lift != 0, a new buffer is allocated.
-        let input = Arc::new(grey_image(4, 4, 100));
-        let out = build_inference_input(&input, 0.0, 1.0);
-        assert!(!Arc::ptr_eq(&input, &out),
-            "brightness_lift path must return a new Arc");
-        // The lifted output should be brighter than the input.
-        let mean_in: f64 = input.pixels().map(|p| p[0] as f64).sum::<f64>() / (4.0 * 4.0);
-        let mean_out: f64 = out.pixels().map(|p| p[0] as f64).sum::<f64>() / (4.0 * 4.0);
-        assert!(mean_out > mean_in,
-            "positive EV lift must produce brighter pixels (mean_in={mean_in}, mean_out={mean_out})");
-    }
-
-    #[test]
-    fn dispatch_post_process_brightness_lift_inverse_roundtrip() {
-        // apply_brightness_lift then apply_brightness_lift_inverse should
-        // recover the original within 2/255 for non-saturated pixels.
-        let original = grey_image(4, 4, 100);
-        let mut lifted = original.clone();
-        prunr_core::denoise::apply_brightness_lift(&mut lifted, 1.0);
-        apply_post_inference(&mut lifted, 1.0);
-        for (orig_px, out_px) in original.pixels().zip(lifted.pixels()) {
-            let diff = (orig_px[0] as i32 - out_px[0] as i32).unsigned_abs();
-            // Skip pixels that clipped during the forward lift (orig=100 with 1 EV
-            // won't clip, but be defensive).
-            assert!(diff <= 2,
-                "brightness_lift round-trip must recover within 2/255 (diff={diff})");
-        }
-    }
-
-    #[test]
-    fn dispatch_post_process_noop_when_lift_zero() {
-        let original = grey_image(4, 4, 128);
-        let mut img = original.clone();
-        apply_post_inference(&mut img, 0.0);
-        assert_eq!(img.as_raw(), original.as_raw(),
-            "apply_post_inference must be a no-op when brightness_lift=0");
-    }
 }
 
 // ── Warm-engine cache boundary contract ──────────────────────────────────────

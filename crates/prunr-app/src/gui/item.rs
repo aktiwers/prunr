@@ -187,9 +187,8 @@ pub(crate) struct BatchItem {
     /// pump_upscale_results after a successful upscale dispatch.
     /// Mirrors `cached_tensor`'s contract: NOT cleared by
     /// `reset_result_caches()`; only cleared explicitly on Tier-1
-    /// invalidation (model swap, output_scale / pre_denoise /
-    /// brightness_lift change). Holds the raw model output BEFORE
-    /// any postprocess (sharpen, ai_blend, saturation, color_match) —
+    /// invalidation (model swap, output_scale / pre_denoise change). Holds the raw model output BEFORE
+    /// any postprocess (sharpen, ai_blend, color_match) —
     /// the postprocess functions are re-run on every Tier-2 dispatch.
     ///
     /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB.
@@ -670,8 +669,8 @@ impl BatchItem {
         //
         // Same rule for `upscale_raw` and `bicubic_source`: the upscale
         // buffer is a function of (input × upscale_model × output_scale ×
-        // pre_denoise × brightness_lift). Tier-2 knobs (sharpen / ai_blend /
-        // saturation / color_match) reprocess FROM this cached buffer;
+        // pre_denoise). Tier-2 knobs (sharpen / ai_blend / color_match)
+        // reprocess FROM this cached buffer;
         // clearing it here would force a full re-upscale on every Tier-2
         // tweak — exactly the cost the cache exists to avoid. Tier-1
         // invalidation paths call `invalidate_upscale_cache()` explicitly.
