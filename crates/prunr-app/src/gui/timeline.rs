@@ -65,7 +65,7 @@ pub(crate) trait Payload: Send + Sync + Sized + 'static {
 
 impl Payload for image::RgbaImage {
     fn encode(&self) -> std::io::Result<Vec<u8>> {
-        super::history_disk::compress_to_ram(self).map(|e| e.data)
+        super::history_disk::compress_to_ram(self)
     }
 
     fn decode(bytes: &[u8]) -> std::io::Result<Self> {
@@ -101,6 +101,10 @@ enum Tier<T> {
     Compressing(Arc<T>),
     Compressed(Arc<Vec<u8>>),
     OnDisk(PathBuf),
+    /// Read back for use; every reader gets this one value, so an
+    /// unchanged payload is recognised and shared, and once nothing uses
+    /// it the stored form is kept again without re-encoding.
+    Loaded(Arc<T>, Encoded),
 }
 
 /// One stored payload, shared by every state that has it.
@@ -108,9 +112,26 @@ pub(crate) struct Stored<T: Payload> {
     tier: Mutex<Tier<T>>,
 }
 
+#[derive(Clone, PartialEq)]
 enum Encoded {
     Bytes(Arc<Vec<u8>>),
     File(PathBuf),
+}
+
+impl Encoded {
+    fn read(&self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Encoded::Bytes(b) => Ok(b.to_vec()),
+            Encoded::File(p) => std::fs::read(p),
+        }
+    }
+
+    fn into_tier<T>(self) -> Tier<T> {
+        match self {
+            Encoded::Bytes(b) => Tier::Compressed(b),
+            Encoded::File(p) => Tier::OnDisk(p),
+        }
+    }
 }
 
 impl<T: Payload> Stored<T> {
@@ -126,35 +147,48 @@ impl<T: Payload> Stored<T> {
     /// decode fails (a disk file removed under us).
     pub(crate) fn load(&self) -> Option<Arc<T>> {
         let encoded = match &*self.lock() {
-            Tier::Plain(v) | Tier::Compressing(v) => return Some(Arc::clone(v)),
+            Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) => return Some(Arc::clone(v)),
             Tier::Compressed(b) => Encoded::Bytes(Arc::clone(b)),
             Tier::OnDisk(p) => Encoded::File(p.clone()),
         };
-        let decoded = match encoded {
-            Encoded::Bytes(b) => T::decode(&b),
-            Encoded::File(p) => std::fs::read(&p).and_then(|b| T::decode(&b)),
-        };
-        decoded
+        let value = encoded.read().and_then(|b| T::decode(&b))
             .map(Arc::new)
             .map_err(|err| tracing::warn!(%err, "a stored undo state could not be read"))
-            .ok()
+            .ok()?;
+        let mut tier = self.lock();
+        let unchanged = match &*tier {
+            Tier::Compressed(b) => encoded == Encoded::Bytes(Arc::clone(b)),
+            Tier::OnDisk(p) => encoded == Encoded::File(p.clone()),
+            _ => false,
+        };
+        if unchanged {
+            *tier = Tier::Loaded(Arc::clone(&value), encoded);
+        }
+        Some(value)
     }
 
-    /// True when `value` is the payload this cell holds as-is.
+    /// True when `value` is the payload this cell hands out.
     pub(crate) fn holds(&self, value: &Arc<T>) -> bool {
-        matches!(&*self.lock(), Tier::Plain(v) | Tier::Compressing(v) if Arc::ptr_eq(v, value))
+        matches!(&*self.lock(), Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) if Arc::ptr_eq(v, value))
     }
 
-    /// The payload to compress, when nothing besides this cell uses it.
+    /// The payload to compress, when nothing besides this cell uses it. A
+    /// read-back payload nobody uses returns to its stored form at once.
     fn begin_compress(&self) -> Option<Arc<T>> {
         let mut tier = self.lock();
-        let Tier::Plain(v) = &*tier else { return None };
-        if Arc::strong_count(v) != 1 {
-            return None;
+        match &*tier {
+            Tier::Loaded(v, encoded) if Arc::strong_count(v) == 1 => {
+                let stored = encoded.clone().into_tier();
+                *tier = stored;
+                None
+            }
+            Tier::Plain(v) if Arc::strong_count(v) == 1 => {
+                let v = Arc::clone(v);
+                *tier = Tier::Compressing(Arc::clone(&v));
+                Some(v)
+            }
+            _ => None,
         }
-        let v = Arc::clone(v);
-        *tier = Tier::Compressing(Arc::clone(&v));
-        Some(v)
     }
 
     fn finish_compress(&self, encoded: std::io::Result<Vec<u8>>) {
@@ -207,7 +241,7 @@ impl<T: Payload> Stored<T> {
 
 impl<T: Payload> Drop for Stored<T> {
     fn drop(&mut self) {
-        if let Tier::OnDisk(path) = &*self.lock() {
+        if let Tier::OnDisk(path) | Tier::Loaded(_, Encoded::File(path)) = &*self.lock() {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -229,6 +263,22 @@ pub(crate) struct DocState {
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
     pub(crate) at: Instant,
+}
+
+impl DocState {
+    /// The image as imported: no result, no selection.
+    pub(crate) fn original(settings: ItemSettings, applied_preset: String) -> Self {
+        Self {
+            kind: StepKind::Original,
+            result: None,
+            recipe: None,
+            selection: None,
+            selection_hash: None,
+            settings,
+            applied_preset,
+            at: Instant::now(),
+        }
+    }
 }
 
 pub(crate) struct Timeline {
@@ -421,6 +471,24 @@ mod tests {
         cell.finish_compress(value.encode());
         assert!(cell.is_compressed());
         assert_eq!(*cell.load().unwrap(), image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255])));
+    }
+
+    /// A payload read back is the one value every reader gets, so the next
+    /// step recognises it as unchanged; unused again, it returns to its
+    /// stored bytes without re-encoding.
+    #[test]
+    fn a_read_back_payload_is_shared_and_returns_to_its_stored_form() {
+        let cell = Stored::new(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([4, 4, 4, 255]))));
+        let value = cell.begin_compress().unwrap();
+        cell.finish_compress(value.encode());
+        drop(value);
+        let shown = cell.load().unwrap();
+        assert!(cell.holds(&shown));
+        assert!(Arc::ptr_eq(&store(Some(&shown), Some(&cell)).unwrap(), &cell), "the next step shares the cell");
+        assert!(cell.begin_compress().is_none() && !cell.is_compressed(), "still in use");
+        drop(shown);
+        assert!(cell.begin_compress().is_none(), "nothing to encode");
+        assert!(cell.is_compressed());
     }
 
     #[test]

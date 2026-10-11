@@ -1,14 +1,10 @@
-//! Persist undo/redo history entries to disk as zstd-compressed raw RGBA.
+//! Undo payloads at rest: zstd framing for images, and the session's
+//! directory where stored states spill under memory pressure. Files live
+//! in the platform cache dir (`~/.cache/prunr/...` on Linux, avoiding a
+//! tmpfs `/tmp`), one directory per process.
 //!
-//! This keeps RAM usage bounded during large batch processing while
-//! preserving Ctrl+Z / Ctrl+Y functionality. Files are written to the
-//! platform cache directory (`~/.cache/prunr/history/` on Linux,
-//! `%LOCALAPPDATA%/prunr/history/` on Windows, `~/Library/Caches/prunr/history/`
-//! on macOS) to avoid tmpfs-backed `/tmp` on Linux.
-//!
-//! Temp file lifecycle mirrors `drag_export.rs`:
-//! - Stale cleanup (>30 min old) at app start.
-//! - Full cleanup on graceful exit.
+//! Lifecycle mirrors `drag_export.rs`: dead sessions' dirs are swept at
+//! start, this session's files on graceful exit.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -20,19 +16,8 @@ const HISTORY_SUBDIR: &str = "prunr-history";
 const STALE_AGE: Duration = Duration::from_secs(30 * 60);
 const ZSTD_LEVEL: i32 = 1; // fastest compression, ~3:1 on RGBA data
 
-/// A reference to a history entry stored on disk.
-pub struct DiskHistoryEntry {
-    pub path: PathBuf,
-}
-
-/// An RGBA image compressed in RAM (Tier 2: warm cache).
-/// ~3-4x smaller than raw RGBA, ~8ms to decompress.
-pub struct CompressedEntry {
-    pub data: Vec<u8>, // zstd frame containing [u32 w][u32 h][pixels]
-}
-
 /// Compress an RgbaImage to a zstd buffer in RAM.
-pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<CompressedEntry> {
+pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<Vec<u8>> {
     let (w, h) = (rgba.width(), rgba.height());
     // zstd-level-1 on natural-image RGBA hits ~2:1 in practice (the
     // earlier `/3` was optimistic). Right-sizing avoids 1–2 reallocs
@@ -43,12 +28,7 @@ pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<CompressedEnt
     encoder.write_all(&h.to_le_bytes())?;
     encoder.write_all(rgba.as_raw())?;
     encoder.finish()?;
-    Ok(CompressedEntry { data: raw })
-}
-
-/// Decompress an in-RAM compressed entry back to an RgbaImage.
-pub fn decompress_from_ram(entry: &CompressedEntry) -> std::io::Result<image::RgbaImage> {
-    decompress_from_bytes(&entry.data)
+    Ok(raw)
 }
 
 /// Decompress a `compress_to_ram` buffer back to an RgbaImage.
@@ -70,13 +50,6 @@ pub fn decompress_from_bytes(bytes: &[u8]) -> std::io::Result<image::RgbaImage> 
             "pixel data does not match dimensions",
         )
     })
-}
-
-/// Write a CompressedEntry to disk (demote Tier 2 → Tier 3).
-pub fn demote_to_disk(entry: &CompressedEntry, item_id: u64, seq: usize) -> std::io::Result<DiskHistoryEntry> {
-    let path = cache_dir().join(format!("{item_id}_{seq}.zraw"));
-    std::fs::write(&path, &entry.data)?;
-    Ok(DiskHistoryEntry { path })
 }
 
 /// Write an already-compressed undo payload to its own file in this
@@ -103,59 +76,6 @@ fn cache_dir() -> &'static PathBuf {
         let _ = std::fs::create_dir_all(&dir);
         dir
     })
-}
-
-/// Write an RgbaImage to disk as zstd-compressed raw RGBA.
-/// Format: [u32 LE width][u32 LE height][zstd-compressed RGBA pixels]
-/// Uses streaming compression to avoid an intermediate Vec allocation.
-pub fn write_history(
-    item_id: u64,
-    seq: usize,
-    rgba: &image::RgbaImage,
-) -> std::io::Result<DiskHistoryEntry> {
-    let (w, h) = (rgba.width(), rgba.height());
-    let path = cache_dir().join(format!("{item_id}_{seq}.zraw"));
-
-    let file = std::fs::File::create(&path)?;
-    let mut encoder = zstd::Encoder::new(file, ZSTD_LEVEL)?;
-    // Write dimensions as header before compressed data.
-    // The encoder wraps the file, so header goes into the zstd stream.
-    // We decode dimensions from the stream on read.
-    encoder.write_all(&w.to_le_bytes())?;
-    encoder.write_all(&h.to_le_bytes())?;
-    encoder.write_all(rgba.as_raw())?;
-    encoder.finish()?;
-
-    Ok(DiskHistoryEntry { path })
-}
-
-/// Read a history entry back from disk and decompress via streaming decoder.
-pub fn read_history(entry: &DiskHistoryEntry) -> std::io::Result<image::RgbaImage> {
-    let file = std::fs::File::open(&entry.path)?;
-    let mut decoder = zstd::Decoder::new(file)?;
-
-    let mut header = [0u8; 8];
-    decoder.read_exact(&mut header)?;
-    let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-    let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-
-    // Pre-size: same rationale as `decompress_from_ram` — skips the
-    // ~25 doublings + peak ~100 MB transient mid-grow at 4 K.
-    let expected = (w as usize) * (h as usize) * 4;
-    let mut pixels = Vec::with_capacity(expected);
-    decoder.read_to_end(&mut pixels)?;
-
-    image::RgbaImage::from_raw(w, h, pixels).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "pixel data does not match dimensions",
-        )
-    })
-}
-
-/// Delete a specific history file. Silent on error (best-effort).
-pub fn delete_entry(entry: &DiskHistoryEntry) {
-    let _ = std::fs::remove_file(&entry.path);
 }
 
 /// Startup housekeeping: drop the history dirs of instances that are no
@@ -190,30 +110,17 @@ pub fn cleanup_all() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn roundtrip_write_read() {
-        let rgba = image::RgbaImage::from_pixel(100, 80, image::Rgba([255, 0, 128, 255]));
-        let entry = write_history(99999, 0, &rgba).unwrap();
-        assert!(entry.path.exists());
-        let recovered = read_history(&entry).unwrap();
-        assert_eq!(rgba.dimensions(), recovered.dimensions());
-        assert_eq!(rgba.as_raw(), recovered.as_raw());
-        delete_entry(&entry);
-        assert!(!entry.path.exists());
-    }
-
-    /// A session's own cold history is in use for as long as the session
-    /// runs, however old the file: the sweep must leave it alone.
+    /// A session's own spilled states are in use for as long as the
+    /// session runs, however old the file: the sweep must leave them.
     #[test]
     fn the_sweep_keeps_this_session_s_history_however_old() {
-        let rgba = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
-        let entry = write_history(99998, 0, &rgba).unwrap();
+        let path = write_blob(b"state").unwrap();
         let hours_ago = SystemTime::now() - Duration::from_secs(2 * 3600);
-        std::fs::File::options().write(true).open(&entry.path).unwrap().set_modified(hours_ago).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(hours_ago).unwrap();
         cleanup_stale();
-        assert!(entry.path.exists(), "an undo step still pointing at this file would be lost");
-        assert!(entry.path.parent().unwrap().ends_with(std::process::id().to_string()), "files live in a per-process dir");
-        delete_entry(&entry);
+        assert!(path.exists(), "an undo step still pointing at this file would be lost");
+        assert!(path.parent().unwrap().ends_with(std::process::id().to_string()), "files live in a per-process dir");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -228,36 +135,15 @@ mod tests {
         let rgba = image::RgbaImage::from_fn(50, 40, |x, y| {
             image::Rgba([x as u8, y as u8, ((x + y) & 0xFF) as u8, 255])
         });
-        let compressed = compress_to_ram(&rgba).unwrap();
-        let recovered = decompress_from_ram(&compressed).unwrap();
+        let recovered = decompress_from_bytes(&compress_to_ram(&rgba).unwrap()).unwrap();
         assert_eq!(rgba.dimensions(), recovered.dimensions());
         assert_eq!(rgba.as_raw(), recovered.as_raw());
     }
 
-    #[test]
-    fn demote_compressed_to_disk_and_read_back() {
-        let rgba = image::RgbaImage::from_pixel(30, 30, image::Rgba([100, 150, 200, 250]));
-        let compressed = compress_to_ram(&rgba).unwrap();
-        // Use distinct ids / seq so the path is unique even if tests run in
-        // parallel with other disk-history tests.
-        let entry = demote_to_disk(&compressed, 987_654_321, 42).unwrap();
-        assert!(entry.path.exists());
-        let recovered = read_history(&entry).unwrap();
-        assert_eq!(rgba.as_raw(), recovered.as_raw());
-        delete_entry(&entry);
-        assert!(!entry.path.exists());
-    }
-
-    /// Smallest realistic case: 1×1 image. Pre-sized capacity heuristic
-    /// (`len/2 + 64`) and the read-side `Vec::with_capacity(w*h*4)` must
-    /// both produce a usable buffer. Catches any off-by-one when the
-    /// expected pixel count is tiny.
     #[test]
     fn compress_decompress_roundtrip_1x1() {
         let rgba = image::RgbaImage::from_pixel(1, 1, image::Rgba([42, 17, 200, 99]));
-        let compressed = compress_to_ram(&rgba).unwrap();
-        let recovered = decompress_from_ram(&compressed).unwrap();
-        assert_eq!(rgba.dimensions(), recovered.dimensions());
+        let recovered = decompress_from_bytes(&compress_to_ram(&rgba).unwrap()).unwrap();
         assert_eq!(rgba.as_raw(), recovered.as_raw());
     }
 }

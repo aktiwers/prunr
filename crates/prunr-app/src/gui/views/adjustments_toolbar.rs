@@ -43,7 +43,7 @@ pub struct ToolbarChange {
     /// The model dropdown flipped — triggers settings save + toast. Does
     /// not auto-reprocess; user must click Process.
     pub model_changed: bool,
-    /// A preset was applied — archive the pre-apply snapshot for undo.
+    /// A preset was applied; the app records it as an undo step.
     /// The dispatcher resolves subprocess vs skip from the recipe diff.
     pub preset_applied: bool,
     /// Previous `line_mode` when it changed this frame. Drives the

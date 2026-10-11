@@ -10,7 +10,7 @@
 //!
 //! Does NOT own:
 //! - Inference dispatch (worker channels, admission, live-preview) — `Processor`
-//! - History mutation logic — `HistoryManager` (no own state) handles that
+//! - Undo — each item's own `timeline`
 //! - Drag-out lifecycle — `DragExportState`
 
 use std::sync::Arc;
@@ -71,13 +71,22 @@ pub(crate) struct BatchManager {
     pub(crate) selected_index: usize,
     pub(crate) next_id: u64,
     pub(crate) bg_io: BackgroundIO,
+    last_history_sweep: std::time::Instant,
 }
+
+const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl BatchManager {
     /// Compress every stored undo state nothing else holds, off-thread,
     /// behind the decode slots so a burst can't fan out N zstd encoders.
     /// Doing it inline cost ~0.1-0.6 s per switch, undo or redo.
-    pub(crate) fn compress_history_off_thread(&self) {
+    pub(crate) fn compress_history_off_thread(&mut self) {
+        // A few times a second is plenty; every frame walked every step.
+        let now = std::time::Instant::now();
+        if now.saturating_duration_since(self.last_history_sweep) < HISTORY_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_history_sweep = now;
         let slots = &self.bg_io.decode_slots;
         for item in &self.items {
             item.timeline.stored_images().for_each(|c| c.compress_when_idle(slots));
@@ -100,6 +109,7 @@ impl BatchManager {
             selected_index: 0,
             next_id: 0,
             bg_io: BackgroundIO::new(),
+            last_history_sweep: std::time::Instant::now(),
         }
     }
 
@@ -295,8 +305,7 @@ impl BatchManager {
     pub(crate) fn reset_processing_to_pending(&mut self) {
         for item in &mut self.items {
             if item.status == BatchStatus::Processing {
-                item.job = None;
-                item.status = if item.result_rgba.is_some() || item.result_parked { BatchStatus::Done } else { BatchStatus::Pending };
+                item.abandon_job();
             }
         }
     }
