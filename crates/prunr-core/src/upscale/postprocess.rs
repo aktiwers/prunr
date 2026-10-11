@@ -117,84 +117,24 @@ fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     (r, g, b)
 }
 
-// ── Gaussian blur (separable 5-tap, σ ≈ 1.0) ──────────────────────────────
-
-/// Separable 5-tap Gaussian kernel weights (σ ≈ 1.0).
-/// Computed from the standard Gaussian; pinned here so live-preview
-/// feel is stable across refactors.
-const GAUSS5: [f32; 5] = [0.061, 0.245, 0.388, 0.245, 0.061];
-
-/// Horizontal 5-tap Gaussian pass on a single-channel f32 buffer.
-/// Replicates border pixels for edge handling.
-fn gauss_h(src: &[f32], dst: &mut [f32], w: usize, h: usize) {
-    for row in 0..h {
-        for col in 0..w {
-            let mut acc = 0.0_f32;
-            for (ki, &kw) in GAUSS5.iter().enumerate() {
-                let c = (col as isize + ki as isize - 2).clamp(0, w as isize - 1) as usize;
-                acc += kw * src[row * w + c];
-            }
-            dst[row * w + col] = acc;
-        }
-    }
-}
-
-/// Vertical 5-tap Gaussian pass on a single-channel f32 buffer.
-fn gauss_v(src: &[f32], dst: &mut [f32], w: usize, h: usize) {
-    for row in 0..h {
-        for col in 0..w {
-            let mut acc = 0.0_f32;
-            for (ki, &kw) in GAUSS5.iter().enumerate() {
-                let r = (row as isize + ki as isize - 2).clamp(0, h as isize - 1) as usize;
-                acc += kw * src[r * w + col];
-            }
-            dst[row * w + col] = acc;
-        }
-    }
-}
-
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/// Unsharp-mask sharpen. `strength` in [-1.0, 1.0]:
-///   - 0.0 = no-op (early return).
-///   - Positive → `out = in + strength * (in - blur(in))` (sharpens).
-///   - Negative → `out = lerp(in, blur(in), |strength|)` (blurs).
+/// Unsharp mask. `strength` in [-1.0, 1.0]: 0 changes nothing, positive
+/// sharpens (`in + strength · (in − blur)`), negative blends toward the
+/// blur. `sigma` is the blur radius in output pixels; detail narrower
+/// than it is left alone. Alpha is unchanged.
 ///
-/// Blur kernel: 5-tap separable Gaussian, σ ≈ 1.0.
-/// Alpha is copied unchanged.
-pub fn apply_sharpen(img: &mut RgbaImage, strength: f32) {
+/// Peak working set: one blurred copy of the image (w·h·4 bytes).
+pub fn apply_sharpen(img: &mut RgbaImage, strength: f32, sigma: f32) {
     if strength == 0.0 {
         return;
     }
-    let w = img.width() as usize;
-    let h = img.height() as usize;
-    let n = w * h;
-
-    let mut ch_f32 = vec![0.0_f32; n];
-    let mut blur_tmp = vec![0.0_f32; n];
-    let mut blur_out = vec![0.0_f32; n];
-
-    for c in 0..3usize {
-        let raw_ro = img.as_raw();
-        for i in 0..n {
-            ch_f32[i] = raw_ro[i * 4 + c] as f32;
-        }
-
-        gauss_h(&ch_f32, &mut blur_tmp, w, h);
-        gauss_v(&blur_tmp, &mut blur_out, w, h);
-
-        let raw = img.as_mut();
-        if strength > 0.0 {
-            for i in 0..n {
-                let v = ch_f32[i] + strength * (ch_f32[i] - blur_out[i]);
-                raw[i * 4 + c] = v.clamp(0.0, 255.0) as u8;
-            }
-        } else {
-            let t = -strength; // lerp weight toward blur
-            for i in 0..n {
-                let v = ch_f32[i] + t * (blur_out[i] - ch_f32[i]);
-                raw[i * 4 + c] = v.clamp(0.0, 255.0) as u8;
-            }
+    let blurred = image::imageops::fast_blur(img, sigma.max(0.3));
+    for (p, b) in img.pixels_mut().zip(blurred.pixels()) {
+        for c in 0..3 {
+            let (v, bv) = (p.0[c] as f32, b.0[c] as f32);
+            let out = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
+            p.0[c] = out.round().clamp(0.0, 255.0) as u8;
         }
     }
 }
@@ -333,11 +273,25 @@ mod tests {
 
     // ── apply_sharpen ─────────────────────────────────────────────────────
 
+    /// A wider radius sharpens detail as wide as itself: after a 4x
+    /// upscale that is ~4 output pixels, not the per-pixel grain a 1 px
+    /// radius picks out. The halo reaches farther from an edge.
+    #[test]
+    fn a_wider_sharpen_radius_reaches_farther_from_an_edge() {
+        let step = || RgbaImage::from_fn(32, 4, |x, _| if x < 16 { Rgba([60, 60, 60, 255]) } else { Rgba([180, 180, 180, 255]) });
+        let (mut narrow, mut wide) = (step(), step());
+        apply_sharpen(&mut narrow, 1.0, 0.5);
+        apply_sharpen(&mut wide, 1.0, 2.0);
+        let three_px_out = |img: &RgbaImage| img.get_pixel(12, 1).0[0];
+        assert_eq!(three_px_out(&narrow), 60, "a narrow radius leaves it alone");
+        assert!(three_px_out(&wide) < 60, "a wide radius darkens the dark side 3 px out: {}", three_px_out(&wide));
+    }
+
     #[test]
     fn apply_sharpen_zero_strength_is_identity() {
         let orig = gradient_image(32, 32);
         let mut img = orig.clone();
-        apply_sharpen(&mut img, 0.0);
+        apply_sharpen(&mut img, 0.0, 1.0);
         assert_eq!(img.as_raw(), orig.as_raw());
     }
 
@@ -348,7 +302,7 @@ mod tests {
         for p in img.pixels_mut() {
             p.0[3] = 192;
         }
-        apply_sharpen(&mut img, 0.7);
+        apply_sharpen(&mut img, 0.7, 1.0);
         for p in img.pixels() {
             assert_eq!(p.0[3], 192, "alpha must be preserved after sharpen");
         }
@@ -361,7 +315,7 @@ mod tests {
         let mut img = make_image(7, 7, [10, 10, 10, 255]);
         img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
         let center_before = img.get_pixel(3, 3).0[0];
-        apply_sharpen(&mut img, -1.0);
+        apply_sharpen(&mut img, -1.0, 1.0);
         let center_after = img.get_pixel(3, 3).0[0];
         let neighbor_after = img.get_pixel(3, 2).0[0];
         assert!(
@@ -381,7 +335,7 @@ mod tests {
         let mut img = make_image(7, 7, [10, 10, 10, 255]);
         img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
         let center_before = img.get_pixel(3, 3).0[0];
-        apply_sharpen(&mut img, 1.0);
+        apply_sharpen(&mut img, 1.0, 1.0);
         let center_after = img.get_pixel(3, 3).0[0];
         // After sharpening the center is boosted (clamped at 255) and
         // neighbours are pulled down.
