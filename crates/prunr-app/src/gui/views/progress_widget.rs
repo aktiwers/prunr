@@ -222,27 +222,15 @@ fn render_cancel_button(ui: &mut egui::Ui, canvas_rect: Rect, center_y: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::dispatch_progress::{step_labels, ProgressKind};
-    use std::borrow::Cow;
+    use crate::gui::dispatch_progress::ProgressKind;
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
-        // Test fixtures reference the `step_labels` constants so a rename
-        // there can't quietly leave tests asserting against a stale string.
-        DispatchProgress {
-            kind: ProgressKind::Upscale,
-            outer: None,
-            inner,
-            step_label: Cow::Borrowed(step_labels::TILE_INFERENCE),
-        }
+        DispatchProgress { inner, ..DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()) }
     }
 
+    /// `outer` is (done, total).
     fn sd_nested(outer: (u32, u32), inner: (u32, u32)) -> DispatchProgress {
-        DispatchProgress {
-            kind: ProgressKind::SdInpaint,
-            outer: Some(outer),
-            inner,
-            step_label: Cow::Borrowed(step_labels::DENOISING),
-        }
+        DispatchProgress { outer: Some(outer), inner, ..DispatchProgress::new(ProgressKind::SdInpaint, prunr_core::Step::Denoising.label()) }
     }
 
     #[test]
@@ -256,7 +244,7 @@ mod tests {
     #[test]
     fn banner_label_uses_flat_counter_for_nested() {
         // 24-tile-stroke version of the user's example.
-        let p = sd_nested((2, 3), (5, 8));
+        let p = sd_nested((1, 3), (5, 8));
         let label = banner_label(&p, false);
         assert!(label.contains("Erasing"), "got: {label}");
         assert!(label.contains("step 13 of 24"), "got: {label}");
@@ -271,20 +259,15 @@ mod tests {
 
     #[test]
     fn banner_label_indeterminate_uses_step_label() {
-        let p = DispatchProgress {
-            kind: ProgressKind::Seg,
-            outer: None,
-            inner: (0, 0),
-            step_label: Cow::Borrowed(step_labels::LOADING_MODEL),
-        };
+        let p = DispatchProgress::new(ProgressKind::Seg, prunr_core::Step::LoadingModel.label());
         let label = banner_label(&p, false);
         assert!(label.contains("Processing"), "got: {label}");
-        assert!(label.contains(step_labels::LOADING_MODEL), "got: {label}");
+        assert!(label.contains(prunr_core::Step::LoadingModel.label()), "got: {label}");
     }
 
     #[test]
     fn modal_counter_prefers_nested_when_outer_set() {
-        let p = sd_nested((2, 3), (5, 8));
+        let p = sd_nested((1, 3), (5, 8));
         let counter = modal_counter_text(&p).expect("nested has counter");
         assert!(counter.contains("Tile 2 of 3"), "got: {counter}");
         assert!(counter.contains("step 5 of 8"), "got: {counter}");

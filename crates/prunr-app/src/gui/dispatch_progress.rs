@@ -18,6 +18,7 @@
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
 /// Which dispatch is publishing — drives the headline label and the
@@ -71,18 +72,10 @@ impl ProgressKind {
     }
 }
 
-/// Per-dispatch step-label strings. Defined once here so the dispatch
-/// sites + tests + comments don't drift independently — a rename here
-/// is a one-site edit, and grep-finding a label landing in the wrong
-/// widget is trivial.
 pub mod step_labels {
-    pub const LOADING_MODEL: &str = "Loading model";
-    pub const TILE_INFERENCE: &str = "Tile inference";
     /// Cancel was requested but the EP finishes its current tile first
     /// (OpenVINO ignores `RunOptions::terminate` mid-run).
     pub const CANCELLING: &str = "Cancelling… finishing current tile";
-    pub const DENOISING: &str = "Denoising";
-    pub const INPAINTING: &str = "Inpainting";
 }
 
 /// What a banner-Cancel click should target, derived purely from the
@@ -113,15 +106,6 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
     }
 }
 
-/// Translate the IPC sentinel `outer_total == 0` (= "no nesting") into
-/// the `Option<(current, total)>` shape `DispatchProgress.outer` wants.
-/// Only consumed by the two `DispatchProgress` builders in this module
-/// — `pub(crate)` so the unit tests can pin the sentinel meaning, but
-/// not part of the public surface.
-pub(crate) fn outer_from_atomics(outer_current: u32, outer_total: u32) -> Option<(u32, u32)> {
-    (outer_total > 0).then_some((outer_current, outer_total))
-}
-
 /// Snapshot of a single in-flight dispatch. Cheap to clone — only the
 /// step_label can be a heap `String`, and short labels live as
 /// `Cow::Borrowed(&'static str)`.
@@ -139,19 +123,110 @@ pub struct DispatchProgress {
     /// ("Decode", "Inference") are `Borrowed`; valued text
     /// ("Denoising at sigma 0.42") is `Owned`.
     pub step_label: Cow<'static, str>,
+    /// What the counts count, as the pipeline reported it.
+    pub outer_unit: Option<prunr_core::Unit>,
+    pub inner_unit: Option<prunr_core::Unit>,
+    /// The tile map: where the work happens, and how far each tile is.
+    pub tiles: Vec<prunr_core::TileRect>,
+    pub tile_states: Vec<TileState>,
+    /// When work started moving and how far along it was then.
+    pub pace: Option<(Instant, f32)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileState {
+    Waiting,
+    Running,
+    Done,
+}
+
+/// Below this share done, or this long counting, an estimate is noise.
+const PACE_MIN_SHARE: f32 = 0.02;
+const PACE_MIN_TIME: Duration = Duration::from_secs(2);
+
 impl DispatchProgress {
+    pub fn new(kind: ProgressKind, step_label: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            kind,
+            outer: None,
+            inner: (0, 0),
+            step_label: step_label.into(),
+            outer_unit: None,
+            inner_unit: None,
+            tiles: Vec::new(),
+            tile_states: Vec::new(),
+            pace: None,
+        }
+    }
+
     /// Fold one pipeline report into the snapshot the widgets draw.
     pub fn apply(&mut self, update: &prunr_core::ProgressUpdate) {
+        self.apply_at(update, Instant::now());
+    }
+
+    pub(crate) fn apply_at(&mut self, update: &prunr_core::ProgressUpdate, now: Instant) {
         use prunr_core::ProgressUpdate;
-        match *update {
+        match update {
             // A cancelling run keeps saying so until it ends.
             ProgressUpdate::Step(step) if !self.is_cancelling() => self.step_label = Cow::Borrowed(step.label()),
-            ProgressUpdate::Outer { done, total, .. } => self.outer = Some((done, total)),
-            ProgressUpdate::Inner { done, total, .. } => self.inner = (done, total),
-            ProgressUpdate::Step(_) | ProgressUpdate::Tiles(_) | ProgressUpdate::Tile { .. } => {}
+            ProgressUpdate::Step(_) => {}
+            &ProgressUpdate::Outer { done, total, unit } => {
+                self.outer = Some((done, total));
+                self.outer_unit = Some(unit);
+                self.note_pace(now);
+            }
+            &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
+            ProgressUpdate::Tiles(rects) => {
+                self.tiles = rects.clone();
+                self.tile_states = vec![TileState::Waiting; rects.len()];
+            }
+            &ProgressUpdate::Tile { index, done } => {
+                if let Some(state) = self.tile_states.get_mut(index as usize) {
+                    *state = if done { TileState::Done } else { TileState::Running };
+                }
+            }
         }
+    }
+
+    pub(crate) fn set_inner(&mut self, done: u32, total: u32, unit: prunr_core::Unit, now: Instant) {
+        self.inner = (done, total);
+        self.inner_unit = Some(unit);
+        self.note_pace(now);
+    }
+
+    /// Pace runs from the last moment the share done still stood at its
+    /// first value, so time spent before any work moves is never counted.
+    fn note_pace(&mut self, now: Instant) {
+        let Some(f) = self.fraction() else { return };
+        match self.pace {
+            Some((_, at_start)) if at_start != f => {}
+            _ => self.pace = Some((now, f)),
+        }
+    }
+
+    /// Time left at the pace since counting started; `None` until there
+    /// is enough of it to say.
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        let (since, at_start) = self.pace?;
+        let f = self.fraction()?;
+        let elapsed = now.saturating_duration_since(since);
+        let gained = f - at_start;
+        if gained < PACE_MIN_SHARE || elapsed < PACE_MIN_TIME {
+            return None;
+        }
+        Some(elapsed.mul_f32((1.0 - f) / gained))
+    }
+
+    /// "a few seconds left", "about 40 s left", "about 2 min left".
+    pub fn remaining_text(&self, now: Instant) -> Option<String> {
+        let secs = self.remaining(now)?.as_secs_f32();
+        Some(if secs < 10.0 {
+            "a few seconds left".to_string()
+        } else if secs < 60.0 {
+            format!("about {} s left", ((secs / 10.0).round() * 10.0) as u32)
+        } else {
+            format!("about {} min left", (secs / 60.0).ceil() as u32)
+        })
     }
 
     /// A cancel was requested and the run is finishing its current step.
@@ -162,50 +237,18 @@ impl DispatchProgress {
     /// Builder for the seg / batch pipeline. `step` is whatever
     /// `BatchManager::progress().stage` reports ("Processing 3/5").
     pub fn seg(done: u32, total: u32, step: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            kind: ProgressKind::Seg,
-            outer: None,
-            inner: (done, total),
-            step_label: step.into(),
-        }
+        let mut p = Self::new(ProgressKind::Seg, step);
+        p.set_inner(done, total, prunr_core::Unit::Image, Instant::now());
+        p
     }
 
     /// Builder for the upscale dispatch. `tile_total = 0` is OK at the
     /// "loading model" pre-dispatch point — the counter is then
     /// indeterminate.
     pub fn upscale(tile_done: u32, tile_total: u32, label: &'static str) -> Self {
-        Self {
-            kind: ProgressKind::Upscale,
-            outer: None,
-            inner: (tile_done, tile_total),
-            step_label: Cow::Borrowed(label),
-        }
+        Self { inner: (tile_done, tile_total), ..Self::new(ProgressKind::Upscale, label) }
     }
 
-    /// Builder for the SD inpaint subprocess pump. Wraps the
-    /// `outer_total == 0 → None` sentinel translation so call sites
-    /// don't have to repeat it.
-    pub fn sd_inpaint(outer_current: u32, outer_total: u32, inner: (u32, u32)) -> Self {
-        Self {
-            kind: ProgressKind::SdInpaint,
-            outer: outer_from_atomics(outer_current, outer_total),
-            inner,
-            step_label: Cow::Borrowed(step_labels::DENOISING),
-        }
-    }
-
-    /// Builder for the in-process LaMa dispatch.
-    pub fn lama_inpaint(outer_current: u32, outer_total: u32, inner: (u32, u32)) -> Self {
-        Self {
-            kind: ProgressKind::Eraser,
-            outer: outer_from_atomics(outer_current, outer_total),
-            inner,
-            step_label: Cow::Borrowed(step_labels::INPAINTING),
-        }
-    }
-}
-
-impl DispatchProgress {
     /// Render the counter in the flat form: `"step 13 of 24"` (counting
     /// inner across outer iterations). Returns `None` when there's no
     /// meaningful counter yet — widgets fall back to the spinner-only
@@ -231,8 +274,9 @@ impl DispatchProgress {
         // dispatch site) — fall back to "outer" for visibility.
         let outer_noun = capitalise_first(self.kind.outer_noun().unwrap_or("outer"));
         let inner_noun = self.kind.inner_noun();
+        let running = (oc + 1).min(ot);
         Some(format!(
-            "{outer_noun} {oc} of {ot} \u{2014} {inner_noun} {ic} of {it}",
+            "{outer_noun} {running} of {ot} \u{2014} {inner_noun} {ic} of {it}",
         ))
     }
 
@@ -247,15 +291,13 @@ impl DispatchProgress {
         match self.outer {
             // No nesting: inner is the full picture.
             None => Some((ic, it)),
-            // Nested: total steps = outer_total * inner_total.
-            // current = completed outer units × inner_total + current inner.
-            // (outer_current is 1-based per convention; the completed
-            // count is outer_current - 1.)
+            // Nested: total steps = outer_total * inner_total; `oc` is
+            // the outer units already done.
             Some((oc, ot)) => {
                 if ot == 0 {
                     return None;
                 }
-                let completed_outer = oc.saturating_sub(1);
+                let completed_outer = oc;
                 let total_steps = ot.saturating_mul(it);
                 let current_step = completed_outer.saturating_mul(it).saturating_add(ic);
                 Some((current_step.min(total_steps), total_steps))
@@ -388,23 +430,12 @@ mod tests {
     use super::*;
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
-        DispatchProgress {
-            kind: ProgressKind::Upscale,
-            outer: None,
-            inner,
-            step_label: Cow::Borrowed("Real-ESRGAN forward pass"),
-        }
+        DispatchProgress { inner, ..DispatchProgress::new(ProgressKind::Upscale, "Upscaling") }
     }
 
+    /// `outer` is (done, total), as the pipelines report it.
     fn sd_nested(outer: (u32, u32), inner: (u32, u32)) -> DispatchProgress {
-        DispatchProgress {
-            kind: ProgressKind::SdInpaint,
-            outer: Some(outer),
-            inner,
-            // Use the constant rather than a literal so a `step_labels`
-            // rename keeps both production and test in lockstep.
-            step_label: Cow::Borrowed(step_labels::DENOISING),
-        }
+        DispatchProgress { outer: Some(outer), inner, ..DispatchProgress::new(ProgressKind::SdInpaint, prunr_core::Step::Denoising.label()) }
     }
 
     #[test]
@@ -416,16 +447,15 @@ mod tests {
 
     #[test]
     fn flat_counter_for_nested_dispatch_accumulates_across_outer() {
-        // Tile 2 of 3, step 5 of 8 → completed_outer = 1 tile (= 8 steps),
-        // plus 5 current-tile steps = 13. Total = 3 × 8 = 24.
-        let p = sd_nested((2, 3), (5, 8));
+        // One tile of three done (8 steps) plus 5 steps of the next = 13 of 24.
+        let p = sd_nested((1, 3), (5, 8));
         assert_eq!(p.flat_counter(), Some((13, 24)));
         assert_eq!(p.flat_counter_text().as_deref(), Some("step 13 of 24"));
     }
 
     #[test]
     fn nested_counter_text_uses_outer_noun_capitalised() {
-        let p = sd_nested((2, 3), (5, 8));
+        let p = sd_nested((1, 3), (5, 8));
         assert_eq!(
             p.nested_counter_text().as_deref(),
             Some("Tile 2 of 3 \u{2014} step 5 of 8"),
@@ -454,9 +484,9 @@ mod tests {
         // (Tile 2 step 0 is "0 completed in current tile" → still
         // exactly 8 steps done overall.) Verify the next step inside
         // tile 2 advances: (9, 24) → 0.375.
-        let end_of_t1 = sd_nested((1, 3), (8, 8));
-        let start_of_t2 = sd_nested((2, 3), (0, 8));
-        let mid_t2 = sd_nested((2, 3), (1, 8));
+        let end_of_t1 = sd_nested((0, 3), (8, 8));
+        let start_of_t2 = sd_nested((1, 3), (0, 8));
+        let mid_t2 = sd_nested((1, 3), (1, 8));
         let f_end = end_of_t1.fraction().unwrap();
         let f_start = start_of_t2.fraction().unwrap();
         let f_mid = mid_t2.fraction().unwrap();
@@ -470,18 +500,13 @@ mod tests {
 
     #[test]
     fn fraction_clamps_to_one_at_completion() {
-        let p = sd_nested((3, 3), (8, 8));
+        let p = sd_nested((3, 3), (0, 8));
         assert!((p.fraction().unwrap() - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn fraction_handles_zero_outer_total_gracefully() {
-        let p = DispatchProgress {
-            kind: ProgressKind::SdInpaint,
-            outer: Some((0, 0)),
-            inner: (1, 8),
-            step_label: Cow::Borrowed("Denoising"),
-        };
+        let p = DispatchProgress { outer: Some((0, 0)), inner: (1, 8), ..DispatchProgress::new(ProgressKind::SdInpaint, "Denoising") };
         assert!(p.fraction().is_none(),
             "zero outer_total is invalid input — must not divide by zero");
     }
@@ -538,19 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn outer_from_atomics_translates_sentinel() {
-        // outer_total == 0 is the IPC sentinel for "no nesting"; the
-        // GUI layer converts it to None via this helper. Both call
-        // sites (SD pump + LaMa fallback) must agree on the sentinel
-        // meaning — that's what this test pins.
-        assert_eq!(outer_from_atomics(2, 3), Some((2, 3)));
-        assert_eq!(outer_from_atomics(0, 0), None);
-        // outer_current is ignored when outer_total is 0 — the sentinel
-        // is solely on outer_total.
-        assert_eq!(outer_from_atomics(99, 0), None);
-    }
-
-    #[test]
     fn seg_builder_accepts_owned_string_for_dynamic_stage() {
         // `BatchManager::progress()` returns `stage: String`. The
         // builder must accept that without forcing the caller into a
@@ -563,36 +575,56 @@ mod tests {
 
     #[test]
     fn upscale_builder_uses_borrowed_label() {
-        let p = DispatchProgress::upscale(12, 49, step_labels::TILE_INFERENCE);
+        let p = DispatchProgress::upscale(12, 49, prunr_core::Step::Upscaling.label());
         assert_eq!(p.kind, ProgressKind::Upscale);
         assert_eq!(p.outer, None);
         assert_eq!(p.inner, (12, 49));
-        assert_eq!(p.step_label.as_ref(), "Tile inference");
+        assert_eq!(p.step_label.as_ref(), "Upscaling");
     }
 
     #[test]
-    fn sd_inpaint_builder_lifts_outer_sentinel() {
-        // outer_total > 0 → outer is Some.
-        let p = DispatchProgress::sd_inpaint(2, 3, (5, 8));
-        assert_eq!(p.outer, Some((2, 3)));
-        // outer_total == 0 → outer is None (single-tile stroke).
-        let p_single = DispatchProgress::sd_inpaint(0, 0, (5, 8));
-        assert_eq!(p_single.outer, None);
-        assert_eq!(p_single.step_label.as_ref(), step_labels::DENOISING);
+    fn the_tile_map_follows_tile_reports() {
+        use prunr_core::{ProgressUpdate, TileRect};
+        let mut p = upscale((0, 0));
+        let half = |x| TileRect { x, y: 0.0, w: 0.5, h: 1.0 };
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.0), half(0.5)]));
+        assert_eq!(p.tile_states, [TileState::Waiting; 2]);
+        p.apply(&ProgressUpdate::Tile { index: 0, done: false });
+        p.apply(&ProgressUpdate::Tile { index: 7, done: true });
+        assert_eq!(p.tile_states, [TileState::Running, TileState::Waiting]);
+        p.apply(&ProgressUpdate::Tile { index: 0, done: true });
+        assert_eq!(p.tile_states, [TileState::Done, TileState::Waiting]);
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        assert_eq!(p.tile_states, [TileState::Waiting], "a new layout starts over");
     }
 
     #[test]
-    fn lama_inpaint_builder_sets_kind_label_and_outer() {
-        // Tile-of-stroke nested: outer surfaces as Some.
-        let p = DispatchProgress::lama_inpaint(1, 2, (3, 4));
-        assert_eq!(p.kind, ProgressKind::Eraser);
-        assert_eq!(p.outer, Some((1, 2)));
-        assert_eq!(p.inner, (3, 4));
-        assert_eq!(p.step_label.as_ref(), step_labels::INPAINTING);
+    fn the_estimate_leaves_out_the_wait_before_work_moves() {
+        use prunr_core::Unit;
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut p = DispatchProgress::new(ProgressKind::Seg, "Loading the model");
+        p.set_inner(0, 10, Unit::Image, t0);
+        p.set_inner(0, 10, Unit::Image, t0 + s(30));
+        p.set_inner(1, 10, Unit::Image, t0 + s(31));
+        assert_eq!(p.remaining(t0 + s(31)), None, "one second is too soon to say");
+        p.set_inner(2, 10, Unit::Image, t0 + s(40));
+        // 20% in the 10 s since work started: 80% takes 40 s more.
+        assert_eq!(p.remaining(t0 + s(40)), Some(s(40)));
+        assert_eq!(p.remaining_text(t0 + s(40)).as_deref(), Some("about 40 s left"));
+    }
 
-        // Single-pass (no outer dim): outer is None.
-        let p_single = DispatchProgress::lama_inpaint(0, 0, (0, 0));
-        assert_eq!(p_single.outer, None);
+    #[test]
+    fn the_estimate_reads_like_a_person_would_say_it() {
+        let t0 = Instant::now();
+        let at = |done, total, secs| {
+            let p = DispatchProgress { inner: (done, total), pace: Some((t0, 0.0)), ..upscale((0, 0)) };
+            p.remaining_text(t0 + Duration::from_secs(secs))
+        };
+        assert_eq!(at(1, 2, 5).as_deref(), Some("a few seconds left"));
+        assert_eq!(at(1, 5, 5).as_deref(), Some("about 20 s left"));
+        assert_eq!(at(1, 10, 20).as_deref(), Some("about 3 min left"));
+        assert_eq!(at(0, 10, 20), None, "nothing done, nothing to go on");
     }
 
     #[test]
