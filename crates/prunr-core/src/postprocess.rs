@@ -518,15 +518,6 @@ pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Op
         // fast_blur is a 3-pass box approximation of a Gaussian, ~3-4x
         // faster than imageops::blur and alike at these radii.
         BgEffect::BlurredSource { radius } => image::imageops::fast_blur(source, radius.clamp(1, 64) as f32),
-        BgEffect::InvertedSource => {
-            let mut img = source.clone();
-            for p in img.pixels_mut() {
-                p.0[0] = 255 - p.0[0];
-                p.0[1] = 255 - p.0[1];
-                p.0[2] = 255 - p.0[2];
-            }
-            img
-        }
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
             for p in img.pixels_mut() {
