@@ -173,15 +173,6 @@ pub(crate) fn render(
     ui.horizontal(|ui| {
         render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
 
-        // Without a background-removal model there is no subject to
-        // outline; the nearest working mode keeps the lines: Whole photo.
-        if change.model_changed
-            && !app_settings.model.uses_segmentation()
-            && item_settings.line_mode == LineMode::SubjectOutline
-        {
-            item_settings.line_mode = LineMode::EdgesOnly;
-        }
-
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
             super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.installed.x2plus);

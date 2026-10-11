@@ -576,6 +576,18 @@ impl BatchManager {
         item.invalidate_magic_brush_embedding();
         any
     }
+
+    /// Without a background-removal model there is no subject to outline,
+    /// so Subject lines draw over the whole photo, the nearest mode that
+    /// still has lines.
+    pub fn fit_line_modes_to(&mut self, model: super::settings::SettingsModel) {
+        if model.uses_segmentation() {
+            return;
+        }
+        for item in self.items.iter_mut().filter(|i| i.settings.line_mode == prunr_core::LineMode::SubjectOutline) {
+            item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        }
+    }
 }
 
 /// Compute dimensions that fit within `max_w` × `max_h` preserving aspect ratio.
@@ -643,6 +655,25 @@ mod tests {
             item.set_cached_tensor(CompressedTensor::from_raw(cache));
         }
         item
+    }
+
+    /// Every image in the batch, not just the one on screen: an image left
+    /// on Subject would otherwise run a cut-out under No model.
+    #[test]
+    fn without_a_cutout_model_every_subject_line_mode_becomes_whole_photo() {
+        use crate::gui::settings::SettingsModel;
+        use prunr_core::LineMode;
+        let mut batch = fixture();
+        for (id, mode) in [(1, LineMode::SubjectOutline), (2, LineMode::Off), (3, LineMode::SubjectOutline)] {
+            let mut item = item_with_cache(id, 0);
+            item.settings.line_mode = mode;
+            batch.items.push(item);
+        }
+        batch.fit_line_modes_to(SettingsModel::Silueta);
+        assert_eq!(batch.items[0].settings.line_mode, LineMode::SubjectOutline, "a cut-out model keeps Subject");
+        batch.fit_line_modes_to(SettingsModel::None);
+        let modes: Vec<_> = batch.items.iter().map(|i| i.settings.line_mode).collect();
+        assert_eq!(modes, [LineMode::EdgesOnly, LineMode::Off, LineMode::EdgesOnly]);
     }
 
     // ── new + selected_item ─────────────────────────────────────────────
