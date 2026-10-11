@@ -577,6 +577,17 @@ impl BatchManager {
         any
     }
 
+    /// Give the images in `ids` the settings of the image at `from`, with
+    /// its background picture: a run applies what is shown to the batch.
+    pub fn share_settings(&mut self, from: usize, ids: &std::collections::HashSet<u64>) {
+        let Some(source) = self.items.get(from) else { return };
+        let (settings, bg_image) = (source.settings, source.bg_image.clone());
+        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+            item.settings = settings;
+            item.bg_image = bg_image.clone();
+        }
+    }
+
     /// Without a background-removal model there is no subject to outline,
     /// so Subject lines draw over the whole photo, the nearest mode that
     /// still has lines.
@@ -674,6 +685,26 @@ mod tests {
         batch.fit_line_modes_to(SettingsModel::None);
         let modes: Vec<_> = batch.items.iter().map(|i| i.settings.line_mode).collect();
         assert_eq!(modes, [LineMode::EdgesOnly, LineMode::Off, LineMode::EdgesOnly]);
+    }
+
+    /// A run gives every image the shown image's settings, and with them
+    /// its background image: the bytes, not just the settings' reference
+    /// to them, or the others would show and save no background.
+    #[test]
+    fn a_run_shares_the_shown_images_background_picture() {
+        let mut batch = fixture();
+        for id in 1..=3 {
+            batch.items.push(item_with_cache(id, 0));
+        }
+        batch.items[0].set_bg_image(image::DynamicImage::new_rgba8(4, 4), None);
+        batch.items[0].settings.gamma = 1.7;
+        batch.share_settings(0, &std::collections::HashSet::from([1, 2]));
+        let shared = &batch.items[1];
+        assert_eq!(shared.settings.gamma, 1.7);
+        assert!(shared.bg_image.is_some(), "the picture came along");
+        assert_eq!(shared.bg_image.as_ref().map(|b| b.hash), shared.settings.bg_image_hash.map(|h| h.get()));
+        assert_eq!(batch.items[2].settings.gamma, ItemSettings::default().gamma, "an image outside the run is untouched");
+        assert!(batch.items[2].bg_image.is_none());
     }
 
     // ── new + selected_item ─────────────────────────────────────────────
