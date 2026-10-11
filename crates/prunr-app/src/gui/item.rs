@@ -126,9 +126,6 @@ pub(crate) struct BatchItem {
     pub(crate) timeline: Timeline,
     /// The run (Process, erase, upscale) whose result this item awaits.
     pub(crate) job: Option<Job>,
-    /// The result is released while the item is in the background; the
-    /// timeline holds it.
-    pub(crate) result_parked: bool,
     pub(crate) status: BatchStatus,
     pub(crate) selected: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
@@ -473,7 +470,6 @@ impl BatchItem {
         self.hold_for_reveal();
         self.subject = None;
         let shown = self.timeline.current().clone();
-        self.result_parked = false;
         self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
         self.applied_recipe = shown.recipe;
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
@@ -526,7 +522,7 @@ impl BatchItem {
         self.job = None;
         self.reveal = None;
         self.subject = None;
-        let has_result = self.result_rgba.is_some() || self.result_parked;
+        let has_result = self.result_rgba.is_some() || self.result_parked();
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
 
@@ -662,7 +658,7 @@ impl BatchItem {
     /// Release the working result while the item is in the background;
     /// the timeline keeps it and compresses it once nothing else holds it.
     pub(crate) fn park_result(&mut self) -> bool {
-        if self.result_parked || self.status != BatchStatus::Done {
+        if self.status != BatchStatus::Done {
             return false;
         }
         let Some(rgba) = self.result_rgba.as_ref() else { return false };
@@ -670,17 +666,20 @@ impl BatchItem {
             self.amend();
         }
         self.result_rgba = None;
-        self.result_parked = true;
         true
     }
 
     /// Bring a parked result back from the timeline. Every result reader
     /// and writer calls this first; a result that landed meanwhile wins.
     pub(crate) fn unpark_result(&mut self) {
-        if !std::mem::take(&mut self.result_parked) || self.result_rgba.is_some() {
-            return;
+        if self.result_parked() {
+            self.result_rgba = self.timeline.current().result.as_ref().and_then(|r| r.load());
         }
-        self.result_rgba = self.timeline.current().result.as_ref().and_then(|r| r.load());
+    }
+
+    /// The shown state has a result that the working copy has released.
+    fn result_parked(&self) -> bool {
+        self.result_rgba.is_none() && self.timeline.current().result.is_some()
     }
 
     /// What `enforce_tensor_budget` can free: the compressed segmentation
@@ -746,7 +745,6 @@ impl BatchItem {
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
-            result_parked: false,
             status: BatchStatus::Pending,
             selected: false,
             settings,
@@ -1131,8 +1129,15 @@ mod tests {
         item.commit(StepKind::Process);
         assert!(item.park_result());
         assert!(item.result_rgba.is_none());
+        item.start_job(None);
+        item.abandon_job();
+        assert_eq!(item.status, BatchStatus::Done, "a parked result still counts as shown");
         item.unpark_result();
         assert_eq!((shown(&item), item.timeline.undo_steps()), (Some(3), 1));
+
+        item.undo_step();
+        item.unpark_result();
+        assert_eq!(shown(&item), None, "the original has no result to bring back");
     }
 
     #[test]
