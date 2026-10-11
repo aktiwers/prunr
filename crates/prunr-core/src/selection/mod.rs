@@ -103,7 +103,7 @@ fn merge_cell(existing: i8, newer: i8) -> i8 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MaskArtifact {
     pub width: u32,
     pub height: u32,
@@ -114,6 +114,14 @@ pub struct MaskArtifact {
     /// plane: at build, or on first query after painting (painting
     /// resets it). Always exact, O(1) after the first read.
     flags: OnceLock<(bool, bool)>,
+}
+
+/// Equal by size and cells; the flags are derived from the cells and may
+/// not have been computed yet.
+impl PartialEq for MaskArtifact {
+    fn eq(&self, other: &Self) -> bool {
+        (self.width, self.height) == (other.width, other.height) && self.data == other.data
+    }
 }
 
 /// Returned by add_mask / subtract_mask when dimensions disagree.
@@ -200,7 +208,8 @@ impl MaskArtifact {
             let start = y as usize * w + r.x0 as usize;
             cells[start..start + cw].copy_from_slice(&patch.data[row * cw..(row + 1) * cw]);
         }
-        Self::from_cells(self.width, self.height, cells)
+        // Flags on first query: an undo that is not read again skips the scan.
+        Self { width: self.width, height: self.height, data: Arc::new(cells), flags: OnceLock::new() }
     }
 
     #[inline]

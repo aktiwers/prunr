@@ -23,115 +23,108 @@ pub(crate) struct StrokeSnapshot {
     pub(crate) result_archived: bool,
 }
 
+/// An entry below the top, relative to the plane of the entry above it.
 enum Delta {
     Whole(Option<Arc<MaskArtifact>>),
-    /// The cells at `rect` as they were, over the plane of the entry above.
+    /// The cells at `rect` as they were.
     Patch { rect: CellRect, cells: MaskArtifact },
-    /// The plane of the entry above, unchanged.
     Same,
-}
-
-struct Entry {
-    delta: Delta,
-    result_archived: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct StrokeStack {
-    entries: VecDeque<Entry>,
+    top: Option<StrokeSnapshot>,
+    below: VecDeque<(Delta, bool)>,
 }
 
 impl StrokeStack {
     /// Push a snapshot; returns `true` when the oldest one was dropped to
     /// stay within `STROKE_HISTORY_DEPTH`.
     pub(crate) fn push(&mut self, snap: StrokeSnapshot) -> bool {
-        if let Some(top) = self.entries.back_mut() {
-            compact(top, snap.plane.as_deref());
+        if let Some(old) = self.top.replace(snap) {
+            let above = self.top.as_ref().and_then(|s| s.plane.as_ref());
+            self.below.push_back((compact(old.plane, above), old.result_archived));
         }
-        self.entries.push_back(Entry { delta: Delta::Whole(snap.plane), result_archived: snap.result_archived });
         let mut dropped = false;
-        while self.entries.len() > STROKE_HISTORY_DEPTH {
-            self.entries.pop_front();
+        while self.below.len() + 1 > STROKE_HISTORY_DEPTH {
+            self.below.pop_front();
             dropped = true;
         }
         dropped
     }
 
     pub(crate) fn pop(&mut self) -> Option<StrokeSnapshot> {
-        let top = self.entries.pop_back()?;
-        let plane = match top.delta {
-            Delta::Whole(plane) => plane,
-            // `push` and `pop` keep the top whole.
-            Delta::Patch { .. } | Delta::Same => unreachable!("the top of a stroke stack is always whole"),
-        };
-        if let Some(next) = self.entries.back_mut() {
-            expand(next, plane.as_ref());
-        }
-        Some(StrokeSnapshot { plane, result_archived: top.result_archived })
+        let top = self.top.take()?;
+        self.top = self.below.pop_back().map(|(delta, result_archived)| StrokeSnapshot {
+            plane: expand(delta, top.plane.as_ref()),
+            result_archived,
+        });
+        Some(top)
     }
 
     /// The newest snapshot's plane.
     pub(crate) fn top_plane(&self) -> Option<Arc<MaskArtifact>> {
-        match &self.entries.back()?.delta {
-            Delta::Whole(plane) => plane.clone(),
-            Delta::Patch { .. } | Delta::Same => None,
-        }
+        self.top.as_ref()?.plane.clone()
     }
 
     pub(crate) fn mark_top_archived(&mut self) {
-        if let Some(top) = self.entries.back_mut() {
+        if let Some(top) = self.top.as_mut() {
             top.result_archived = true;
         }
     }
 
     pub(crate) fn clear(&mut self) {
-        self.entries.clear();
+        self.top = None;
+        self.below.clear();
     }
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.top.is_none()
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.top.as_ref().map_or(0, |_| 1 + self.below.len())
     }
 
     /// Cells held by the stack; full planes count once per entry.
     #[cfg(test)]
     fn cells_held(&self) -> usize {
-        self.entries.iter().map(|e| match &e.delta {
-            Delta::Whole(p) => p.as_ref().map_or(0, |p| p.cells().len()),
-            Delta::Patch { cells, .. } => cells.cells().len(),
-            Delta::Same => 0,
-        }).sum()
+        let whole = |p: &Option<Arc<MaskArtifact>>| p.as_ref().map_or(0, |p| p.cells().len());
+        self.top.as_ref().map_or(0, |t| whole(&t.plane))
+            + self.below.iter().map(|(d, _)| match d {
+                Delta::Whole(p) => whole(p),
+                Delta::Patch { cells, .. } => cells.cells().len(),
+                Delta::Same => 0,
+            }).sum::<usize>()
     }
 }
 
-/// Turn a whole entry into its difference from `above`, the plane pushed
-/// on top of it. Planes of another size, or a missing one, stay whole.
-fn compact(entry: &mut Entry, above: Option<&MaskArtifact>) {
-    let (Delta::Whole(Some(plane)), Some(above)) = (&entry.delta, above) else { return };
-    if (plane.width, plane.height) != (above.width, above.height) {
-        return;
+/// `plane` as its difference from `above`, the plane pushed on top of it.
+/// Planes of another size, or a missing one, stay whole.
+fn compact(plane: Option<Arc<MaskArtifact>>, above: Option<&Arc<MaskArtifact>>) -> Delta {
+    let (Some(p), Some(above)) = (plane.as_ref(), above) else { return Delta::Whole(plane) };
+    if Arc::ptr_eq(p, above) {
+        return Delta::Same;
     }
-    entry.delta = match plane.diff_bbox(above) {
-        Some(rect) => Delta::Patch { rect, cells: plane.crop(rect) },
+    if (p.width, p.height) != (above.width, above.height) {
+        return Delta::Whole(plane);
+    }
+    match p.diff_bbox(above) {
+        Some(rect) => Delta::Patch { rect, cells: p.crop(rect) },
         None => Delta::Same,
-    };
+    }
 }
 
 /// Inverse of `compact`, once `above` is the top again.
-fn expand(entry: &mut Entry, above: Option<&Arc<MaskArtifact>>) {
-    let delta = std::mem::replace(&mut entry.delta, Delta::Same);
-    entry.delta = match (delta, above) {
-        (Delta::Patch { rect, cells }, Some(above)) => Delta::Whole(Some(Arc::new(above.paste(rect, &cells)))),
-        (Delta::Same, above) => Delta::Whole(above.cloned()),
-        (whole @ Delta::Whole(_), _) => whole,
+fn expand(delta: Delta, above: Option<&Arc<MaskArtifact>>) -> Option<Arc<MaskArtifact>> {
+    match delta {
+        Delta::Whole(plane) => plane,
+        Delta::Same => above.cloned(),
         // `compact` makes a patch only against a present plane.
-        (Delta::Patch { .. }, None) => unreachable!("a patch always has a plane above it"),
-    };
+        Delta::Patch { rect, cells } => above.map(|a| Arc::new(a.paste(rect, &cells))),
+    }
 }
 
 #[cfg(test)]
