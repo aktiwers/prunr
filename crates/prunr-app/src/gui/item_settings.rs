@@ -104,10 +104,6 @@ pub struct ItemSettings {
     /// 0.0 = no denoise (output bit-identical to the un-touched source).
     #[serde(default)]
     pub pre_denoise: f32,
-    /// Pre-inference exposure adjustment in EV stops, range [-2.0, 2.0].
-    /// 0.0 = no change.
-    #[serde(default)]
-    pub brightness_lift: f32,
     /// Unsharp-mask strength applied after inference, range [-1.0, 1.0].
     /// Negative = blur, 0.0 = no-op, positive = sharpen.
     #[serde(default = "default_sharpen")]
@@ -117,9 +113,6 @@ pub struct ItemSettings {
     /// the no-op state where the upscale model's output passes through.
     #[serde(default = "default_ai_blend")]
     pub ai_blend: f32,
-    /// HSL-space saturation adjustment, range [-1.0, 1.0]. 0.0 = no-op.
-    #[serde(default)]
-    pub saturation: f32,
     /// Reinhard Lab mean+stddev color match against source RGB.
     #[serde(default)]
     pub color_match: bool,
@@ -153,10 +146,8 @@ impl Default for ItemSettings {
             bg_image_fit: BgImageFit::default(),
             output_scale: prunr_core::OutputScale::X4,
             pre_denoise: 0.0,
-            brightness_lift: 0.0,
             sharpen: prunr_core::DEFAULT_SHARPEN,
             ai_blend: 1.0,
-            saturation: 0.0,
             color_match: false,
         }
     }
@@ -290,10 +281,8 @@ impl ItemSettings {
                 },
                 output_scale: self.output_scale,
                 pre_denoise_bits: self.pre_denoise.to_bits(),
-                brightness_lift_bits: self.brightness_lift.to_bits(),
                 sharpen_bits: self.sharpen.to_bits(),
                 ai_blend_bits: self.ai_blend.to_bits(),
-                saturation_bits: self.saturation.to_bits(),
                 color_match: self.color_match,
             },
         }
@@ -537,10 +526,8 @@ mod tests {
             bg_image_fit: prunr_core::BgImageFit::Tile,
             output_scale: prunr_core::OutputScale::X2,
             pre_denoise: 0.4,
-            brightness_lift: 0.7,
             sharpen: 0.3,
             ai_blend: 0.6,
-            saturation: -0.2,
             color_match: true,
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -640,10 +627,8 @@ mod tests {
     fn new_knobs_default_values() {
         let s = ItemSettings::default();
         assert_eq!(s.pre_denoise, 0.0);
-        assert_eq!(s.brightness_lift, 0.0);
         assert_eq!(s.sharpen, prunr_core::DEFAULT_SHARPEN);
         assert_eq!(s.ai_blend, 1.0);
-        assert_eq!(s.saturation, 0.0);
         assert!(!s.color_match);
     }
 
@@ -657,20 +642,16 @@ mod tests {
     fn current_recipe_wires_all_new_fields() {
         let s = ItemSettings {
             pre_denoise: 0.4,
-            brightness_lift: 0.7,
             sharpen: 0.3,
             ai_blend: 0.6,
-            saturation: -0.2,
             color_match: true,
             output_scale: prunr_core::OutputScale::X4TwoPass,
             ..ItemSettings::default()
         };
         let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
         assert_eq!(r.upscale.pre_denoise_bits, 0.4_f32.to_bits());
-        assert_eq!(r.upscale.brightness_lift_bits, 0.7_f32.to_bits());
         assert_eq!(r.upscale.sharpen_bits, 0.3_f32.to_bits());
         assert_eq!(r.upscale.ai_blend_bits, 0.6_f32.to_bits());
-        assert_eq!(r.upscale.saturation_bits, (-0.2_f32).to_bits());
         assert!(r.upscale.color_match);
         assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X4TwoPass);
     }
@@ -679,10 +660,8 @@ mod tests {
     fn serde_roundtrip_all_phase32_fields() {
         let s = ItemSettings {
             pre_denoise: 0.4,
-            brightness_lift: 0.7,
             sharpen: 0.3,
             ai_blend: 0.6,
-            saturation: -0.2,
             color_match: true,
             output_scale: prunr_core::OutputScale::X4TwoPass,
             ..ItemSettings::default()
@@ -713,11 +692,17 @@ mod tests {
         }"#;
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.pre_denoise, 0.0);
-        assert_eq!(loaded.brightness_lift, 0.0);
         assert_eq!(loaded.sharpen, prunr_core::DEFAULT_SHARPEN);
         assert_eq!(loaded.ai_blend, 1.0);
-        assert_eq!(loaded.saturation, 0.0);
         assert!(!loaded.color_match);
+    }
+
+    /// Brightness lift and Saturation are gone; presets that saved them
+    /// still load, ignoring both.
+    #[test]
+    fn presets_with_the_retired_upscale_knobs_still_load() {
+        let loaded: ItemSettings = serde_json::from_str(r#"{ "sharpen": 0.4, "brightness_lift": 1.5, "saturation": -0.3 }"#).unwrap();
+        assert_eq!(loaded.sharpen, 0.4);
     }
 
     #[test]

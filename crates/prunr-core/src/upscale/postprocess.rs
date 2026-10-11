@@ -1,13 +1,12 @@
 //! Tier-2 postprocess operations applied to the cached `upscale_raw`
-//! RGBA buffer. Four pure functions operate in-place; they do NOT
+//! RGBA buffer. Pure functions operating in-place; they do NOT
 //! re-allocate the image (the caller's RAM accounting depends on
 //! this).
 //!
-//! All four operate on STRAIGHT (un-premultiplied) sRGB u8 per
+//! All operate on STRAIGHT (un-premultiplied) sRGB u8 per
 //! CLAUDE.md ## Numerical & color invariants. Internal math uses
 //! f32 working buffers; clamp+cast at the u8 boundary.
 //!
-//! HSL (not HSV) for saturation.
 //! Reinhard Lab (not LMS) for color match, with proper IEC 61966-2-1
 //! linearisation and D65 XYZ→Lab pipeline.
 
@@ -115,62 +114,6 @@ fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     let r = (linear_to_srgb(lr) * 255.0).clamp(0.0, 255.0) as u8;
     let g = (linear_to_srgb(lg) * 255.0).clamp(0.0, 255.0) as u8;
     let b = (linear_to_srgb(lb) * 255.0).clamp(0.0, 255.0) as u8;
-    (r, g, b)
-}
-
-// ── HSL helpers ────────────────────────────────────────────────────────────
-
-/// sRGB u8 → HSL (H in [0,360), S in [0,1], L in [0,1]).
-/// Operates on gamma-encoded sRGB values directly — no linearisation.
-#[inline(always)]
-fn srgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let r = r as f32 / 255.0;
-    let g = g as f32 / 255.0;
-    let b = b as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let chroma = max - min;
-    let l = (max + min) / 2.0;
-    let s = if chroma < 1e-10 {
-        0.0
-    } else {
-        chroma / (1.0 - (2.0 * l - 1.0).abs())
-    };
-    let h = if chroma < 1e-10 {
-        0.0
-    } else if max == r {
-        60.0 * (((g - b) / chroma).rem_euclid(6.0))
-    } else if max == g {
-        60.0 * ((b - r) / chroma + 2.0)
-    } else {
-        60.0 * ((r - g) / chroma + 4.0)
-    };
-    (h, s, l)
-}
-
-/// HSL → sRGB u8.
-#[inline(always)]
-fn hsl_to_srgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
-    let chroma = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let h_prime = h / 60.0;
-    let x = chroma * (1.0 - (h_prime.rem_euclid(2.0) - 1.0).abs());
-    let (r1, g1, b1) = if h_prime < 1.0 {
-        (chroma, x, 0.0)
-    } else if h_prime < 2.0 {
-        (x, chroma, 0.0)
-    } else if h_prime < 3.0 {
-        (0.0, chroma, x)
-    } else if h_prime < 4.0 {
-        (0.0, x, chroma)
-    } else if h_prime < 5.0 {
-        (x, 0.0, chroma)
-    } else {
-        (chroma, 0.0, x)
-    };
-    let m = l - chroma / 2.0;
-    let r = ((r1 + m) * 255.0).clamp(0.0, 255.0) as u8;
-    let g = ((g1 + m) * 255.0).clamp(0.0, 255.0) as u8;
-    let b = ((b1 + m) * 255.0).clamp(0.0, 255.0) as u8;
     (r, g, b)
 }
 
@@ -286,37 +229,6 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
             raw[i * 4 + c] = (ai * w + src * (1.0 - w)).clamp(0.0, 255.0) as u8;
         }
         // channel 3 (alpha): from the AI input unchanged
-    }
-}
-
-/// HSL-space saturation adjustment. `amount` in [-1.0, 1.0]:
-///   - 0.0 = no-op.
-///   - Negative = desaturate toward grey (amount=-1.0 → S=0).
-///   - Positive = saturate (amount=+1.0 → S=1).
-///
-/// HSL (NOT HSV) — preserves luminance better.
-/// Alpha unchanged.
-pub fn apply_saturation(img: &mut RgbaImage, amount: f32) {
-    if amount == 0.0 {
-        return;
-    }
-    let n = (img.width() * img.height()) as usize;
-    let raw = img.as_mut();
-    for i in 0..n {
-        let r = raw[i * 4];
-        let g = raw[i * 4 + 1];
-        let b = raw[i * 4 + 2];
-        let (h, s, l) = srgb_to_hsl(r, g, b);
-        let s_new = if amount >= 0.0 {
-            (s + amount * (1.0 - s)).clamp(0.0, 1.0)
-        } else {
-            (s * (1.0 + amount)).clamp(0.0, 1.0)
-        };
-        let (ro, go, bo) = hsl_to_srgb(h, s_new, l);
-        raw[i * 4] = ro;
-        raw[i * 4 + 1] = go;
-        raw[i * 4 + 2] = bo;
-        // raw[i * 4 + 3]: alpha unchanged
     }
 }
 
@@ -530,79 +442,6 @@ mod tests {
         let src = make_image(8, 8, [0, 0, 0, 255]);
         let mut ai = make_image(4, 4, [255, 0, 0, 255]);
         apply_ai_blend(&mut ai, &src, 0.5);
-    }
-
-    // ── apply_saturation ─────────────────────────────────────────────────
-
-    #[test]
-    fn apply_saturation_zero_is_identity() {
-        let orig = gradient_image(16, 16);
-        let mut img = orig.clone();
-        apply_saturation(&mut img, 0.0);
-        assert_eq!(img.as_raw(), orig.as_raw());
-    }
-
-    #[test]
-    fn apply_saturation_negative_desaturates() {
-        // Pure red [255, 0, 0] fully desaturated → grey (R == G == B ≈ luminance).
-        let mut img = make_image(4, 4, [255, 0, 0, 255]);
-        apply_saturation(&mut img, -1.0);
-        for p in img.pixels() {
-            let [r, g, b, _] = p.0;
-            assert!(
-                (r as i32 - g as i32).abs() < 10,
-                "desaturated: |R-G| should be < 10, got R={r} G={g}"
-            );
-            assert!(
-                (r as i32 - b as i32).abs() < 10,
-                "desaturated: |R-B| should be < 10, got R={r} B={b}"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_saturation_positive_saturates() {
-        // Muted red [200, 100, 100]: after positive saturation, gap widens.
-        let mut img = make_image(4, 4, [200, 100, 100, 255]);
-        let gap_before = {
-            let p = img.get_pixel(0, 0);
-            p.0[0] as i32 - p.0[1].max(p.0[2]) as i32
-        };
-        apply_saturation(&mut img, 1.0);
-        let gap_after = {
-            let p = img.get_pixel(0, 0);
-            p.0[0] as i32 - p.0[1].max(p.0[2]) as i32
-        };
-        assert!(
-            gap_after > gap_before,
-            "positive saturation must widen the dominant-channel gap: before={gap_before} after={gap_after}"
-        );
-    }
-
-    #[test]
-    fn apply_saturation_preserves_alpha() {
-        let mut img = make_image(8, 8, [200, 100, 50, 192]);
-        apply_saturation(&mut img, 0.5);
-        for p in img.pixels() {
-            assert_eq!(p.0[3], 192, "alpha must be preserved after saturation");
-        }
-    }
-
-    #[test]
-    fn apply_saturation_hsl_not_hsv() {
-        // HSL at amount=-0.5 on pure red [255,0,0]:
-        //   HSL S of pure red = 1.0 → new S = 1.0 * (1 - 0.5) = 0.5
-        //   At S=0.5, L=0.5 → the pixel should be noticeably de-saturated
-        //   (not full red). Output R must be < 240 to distinguish from HSV
-        //   (which would keep R near 255 since HSV saturates differently).
-        let mut img = make_image(4, 4, [255, 0, 0, 255]);
-        apply_saturation(&mut img, -0.5);
-        let r = img.get_pixel(0, 0).0[0];
-        assert!(
-            r < 240,
-            "HSL desaturation at -0.5 should produce R < 240 (got {r}); \
-             HSV would keep near 255 — this distinguishes the two"
-        );
     }
 
     // ── apply_color_match ────────────────────────────────────────────────
