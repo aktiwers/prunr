@@ -1073,9 +1073,8 @@ impl Processor {
     /// result back via `upscale_result_rx`. The caller is responsible for
     /// having verified that the model is installed before dispatching.
     ///
-    /// Routing: `OutputScale::X4TwoPass` dispatches through `upscale_two_pass`
-    /// (chains RealEsrganX2Plus twice for net 4× output); all other variants
-    /// dispatch through `upscale_rgba` with the user-selected model.
+    /// `model_id` is the model to run (`upscale::model_for_scale`), which
+    /// may be Real-ESRGAN's 2x model for a 2x Real-ESRGAN upscale.
     ///
     /// Pre-flight admission check refuses the dispatch when free RAM is
     /// below `descriptor.working_set_mb`; a warning is logged and the
@@ -1104,7 +1103,6 @@ impl Processor {
             }
         }
 
-        let use_two_pass = matches!(output_scale, prunr_core::OutputScale::X4TwoPass);
         let scale_factor = output_scale.factor();
 
         // Tier-1 pre-inference pass — runs OUTSIDE the ORT session, so the
@@ -1114,25 +1112,18 @@ impl Processor {
         let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
 
         // Resolve ModelKind + optimization level so we can look up the
-        // warm-engine cache. X4TwoPass always routes through RealEsrganX2Plus;
-        // other variants use the user-selected model.
-        let cache_model_kind = if use_two_pass {
-            prunr_core::ModelKind::RealEsrganX2Plus
-        } else {
-            match prunr_core::ModelKind::try_from(model_id) {
-                Ok(k) => k,
-                Err(id) => {
-                    tracing::error!(
-                        model = ?id,
-                        "upscale dispatch: ModelKind mapping missing — refusing dispatch"
-                    );
-                    return;
-                }
+        // warm-engine cache.
+        let cache_model_kind = match prunr_core::ModelKind::try_from(model_id) {
+            Ok(k) => k,
+            Err(id) => {
+                tracing::error!(
+                    model = ?id,
+                    "upscale dispatch: ModelKind mapping missing — refusing dispatch"
+                );
+                return;
             }
         };
-        let cache_descriptor = match prunr_models::REGISTRY.iter().find(|d| {
-            d.id == if use_two_pass { prunr_models::ModelId::RealEsrganX2Plus } else { model_id }
-        }) {
+        let cache_descriptor = match prunr_models::REGISTRY.iter().find(|d| d.id == model_id) {
             Some(d) => d,
             None => {
                 tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
@@ -1188,23 +1179,14 @@ impl Processor {
                     return;
                 }
             };
-            let result = if use_two_pass {
-                prunr_core::upscale::upscale_two_pass_with_engine(
-                    &input_for_inference,
-                    &engine_for_thread,
-                    &progress,
-                    Some(&run_options_for_thread),
-                )
-            } else {
-                prunr_core::upscale::upscale_rgba_with_engine(
-                    &input_for_inference,
-                    &engine_for_thread,
-                    model_id,
-                    scale_factor,
-                    &progress,
-                    Some(&run_options_for_thread),
-                )
-            };
+            let result = prunr_core::upscale::upscale_rgba_with_engine(
+                &input_for_inference,
+                &engine_for_thread,
+                model_id,
+                scale_factor,
+                &progress,
+                Some(&run_options_for_thread),
+            );
             // Send the result BEFORE clearing the active flag. Reversed
             // ordering would let the UI thread observe `is_in_flight=false`
             // and enable Process before the previous result has landed in
@@ -1225,8 +1207,7 @@ impl Processor {
     ///    ORT, which `classify_run_error` maps to `CoreError::Cancelled`.
     /// 2. The atomic flag still gets set as a safety net — it handles
     ///    the case where the worker happens to be BETWEEN tiles when
-    ///    cancel fires (no running session.run to terminate), and it
-    ///    pins the two-pass mid-pass checks in `upscale_two_pass_with_engine`.
+    ///    cancel fires (no running session.run to terminate).
     ///
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
