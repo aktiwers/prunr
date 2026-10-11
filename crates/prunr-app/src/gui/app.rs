@@ -1159,26 +1159,13 @@ impl PrunrApp {
             let item_id = r.item_id;
             let result_recipe = r.recipe.clone();
             match r.result {
-                Ok(raw_rgba) => {
-                    // Cache the raw upscale output (pre-Tier-2-postprocess) so
-                    // Tier-2 tweaks can reprocess without re-inferring.
-                    let raw_arc = Arc::new(raw_rgba);
+                Ok(output) => {
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
                     if !item.job_is_current() {
                         continue;
                     }
-                    item.upscale_raw = Some(raw_arc.clone());
-                    // Invalidate the stale bicubic_source — the upscale output
-                    // dimensions changed (new Tier-1 run), so any prior bicubic
-                    // cache at the old dimensions is wrong.
-                    item.bicubic_source = None;
-                    // Apply Tier-2 postprocess to produce the displayed result.
-                    // The source for ai_blend / color_match is the original input
-                    // upscaled bicubically to match upscale_raw's dimensions.
-                    let bicubic = build_or_reuse_bicubic(item, &raw_arc);
-                    let mut displayed = (*raw_arc).clone();
-                    apply_tier2_postprocess(&mut displayed, &super::live_preview::UpscaleTier2Knobs::of(&item.settings), bicubic.as_ref());
-                    let new_rgba = Arc::new(displayed);
+                    item.upscale = Some(output.run);
+                    let new_rgba = output.shown;
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
@@ -2392,12 +2379,11 @@ impl PrunrApp {
             .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
             .flatten();
         // UpscaleTier2: short-circuit the seg/edge path entirely. We need only
-        // upscale_raw + bicubic_source + knob snapshot. Return None if there is
-        // no cached upscale output yet (Tier-1 must run first).
+        // the kept upscale run + knob snapshot. Return None if there is no
+        // upscale run yet (Tier-1 must run first).
         if matches!(kind, PreviewKind::UpscaleTier2) {
             use super::live_preview::UpscaleTier2Knobs;
-            let upscale_raw = item.upscale_raw.as_ref()?.clone();
-            let bicubic_arc = build_or_reuse_bicubic(item, &upscale_raw);
+            let upscale = item.upscale.clone()?;
             let knobs = UpscaleTier2Knobs::of(&item.settings);
             return Some(DispatchInputs {
                 version,
@@ -2412,8 +2398,7 @@ impl PrunrApp {
                 cached_bold: Default::default(),
                 cached_masked_base: None,
                 correction: None,
-                upscale_raw: Some(upscale_raw),
-                bicubic_source: Some(bicubic_arc),
+                upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
             });
         }
@@ -2446,8 +2431,7 @@ impl PrunrApp {
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
             correction,
-            upscale_raw: None,
-            bicubic_source: None,
+            upscale: None,
             upscale_tier2_knobs: None,
         })
     }
@@ -2531,6 +2515,9 @@ impl PrunrApp {
                 }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
+                }
+                if let (Some(reference), Some(run)) = (r.new_reference, item.upscale.as_mut()) {
+                    run.reference = Some(reference);
                 }
                 // Mark the dispatched MaskRecipe as applied so the
                 // recipe-drift tripwire doesn't immediately re-fire on
@@ -3679,7 +3666,7 @@ impl PrunrApp {
             // changes model mid-run — the result would land on the
             // wrong selection otherwise.
             self.processor.cancel_upscale();
-            // Drop every item's upscale_raw / bicubic_source — the buffers
+            // Drop every item's kept upscale run — the buffers
             // were produced by the previous model. A subsequent Tier-2
             // preview tick would otherwise display the old model's output
             // under the new model's knobs.
@@ -3795,7 +3782,7 @@ impl PrunrApp {
         // UpscaleTier2 — fire mark_tweak so the debounced postprocess kicks in.
         if self.settings.live_preview && self.settings.model.is_upscale() {
             let item = &self.batch.items[idx];
-            let has_raw = item.upscale_raw.is_some();
+            let has_raw = item.upscale.is_some();
             let has_applied = item.applied_recipe.is_some();
             tracing::debug!(
                 event = "upscale_tier2_check",
@@ -4171,55 +4158,21 @@ impl ClassifiedTiers {
 /// exists after the blend; color_match snaps global statistics last so it
 /// operates on the fully-sharpened result.
 ///
-/// `bicubic_source` is the original source image upscaled bicubically to match
-/// `img`'s dimensions. Used by `apply_ai_blend` (blending baseline) and
-/// `apply_color_match` (reference for Lab statistics).
+/// `reference` is the upscale's input enlarged to `img`'s size: AI blend's
+/// baseline and Color match's statistics. `None` when neither is on.
 pub(crate) fn apply_tier2_postprocess(
     img: &mut image::RgbaImage,
     knobs: &super::live_preview::UpscaleTier2Knobs,
-    bicubic_source: &image::RgbaImage,
+    reference: Option<&image::RgbaImage>,
 ) {
     use prunr_core::upscale::{apply_sharpen, apply_ai_blend, apply_color_match};
-    if knobs.ai_blend < 1.0 - f32::EPSILON {
-        apply_ai_blend(img, bicubic_source, knobs.ai_blend);
+    if let Some(reference) = reference.filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON) {
+        apply_ai_blend(img, reference, knobs.ai_blend);
     }
     apply_sharpen(img, knobs.sharpen, knobs.sharpen_sigma);
-    if knobs.color_match {
-        apply_color_match(img, bicubic_source);
+    if let Some(reference) = reference.filter(|_| knobs.color_match) {
+        apply_color_match(img, reference);
     }
-}
-
-/// Return the bicubic-resized source for the upscale postprocess pipeline.
-/// Builds the resize if `item.bicubic_source` is absent; stores it for reuse.
-///
-/// `upscale_raw` provides the target dimensions. The source is taken from
-/// `item.source_rgba` (original decoded image). When the source is unavailable,
-/// falls back to a copy of `upscale_raw` so the color_match stage sees an
-/// uninformative but safe reference (no NaN from zero-dimension division).
-pub(crate) fn build_or_reuse_bicubic(
-    item: &mut super::item::BatchItem,
-    upscale_raw: &Arc<image::RgbaImage>,
-) -> Arc<image::RgbaImage> {
-    if let Some(cached) = item.bicubic_source.as_ref() {
-        if cached.width() == upscale_raw.width() && cached.height() == upscale_raw.height() {
-            return Arc::clone(cached);
-        }
-    }
-    // Build from the original source. Falls back to the upscale_raw itself
-    // (zero-information color_match) when source_rgba is unavailable.
-    let bicubic = if let Some(src) = item.source_rgba.as_ref() {
-        prunr_core::formats::resize_rgba(
-            src,
-            upscale_raw.width(),
-            upscale_raw.height(),
-            prunr_core::formats::ResizeFilter::CatmullRom,
-        )
-    } else {
-        (**upscale_raw).clone()
-    };
-    let arc = Arc::new(bicubic);
-    item.bicubic_source = Some(Arc::clone(&arc));
-    arc
 }
 
 /// Install-state is NOT a parameter — the model dropdown filter already
