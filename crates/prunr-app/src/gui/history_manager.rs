@@ -58,8 +58,8 @@ impl HistoryManager {
     }
 
     /// Seed history with the source RGBA as an initial no-recipe entry.
-    /// No-op if either stack is non-empty (history already exists) or the
-    /// source hasn't been decoded yet.
+    /// No-op if history already exists or the source hasn't been decoded
+    /// yet.
     pub(crate) fn seed_with_source(item: &mut BatchItem) {
         if Self::seed_floor(item) {
             // First Process action — push a Result marker so undo can
@@ -76,10 +76,13 @@ impl HistoryManager {
     /// Process step's: the stroke's own marker is the undo step.
     /// Returns whether the seed was pushed.
     pub(crate) fn seed_floor(item: &mut BatchItem) -> bool {
-        if !item.history.is_empty() || !item.redo_stack.is_empty() {
+        if !item.history.is_empty() {
             return false;
         }
         let Some(src_rgba) = item.source_rgba.clone() else { return false };
+        // Undone back to the original, earlier results wait on redo; a new
+        // result branches the timeline, so they go.
+        drain_redo(item);
         item.history.push_back(HistoryEntry::new(src_rgba, None));
         true
     }
@@ -475,6 +478,28 @@ mod tests {
         let mut item = fixture(1);
         item.status = BatchStatus::Pending;
         assert!(!HistoryManager::undo_result(&mut item));
+    }
+
+    /// Undone back to the original, the old results wait on the redo
+    /// stack. A new Process or Delete branches the timeline: it must seed
+    /// the original as its undo step and drop the stale redo, or it is
+    /// not undoable at all.
+    #[test]
+    fn a_new_result_after_undoing_everything_is_undoable() {
+        let mut item = fixture(1);
+        item.source_rgba = Some(rgba(1));
+        HistoryManager::seed_with_source(&mut item);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(rgba(7));
+        assert!(HistoryManager::undo_result(&mut item));
+        assert_eq!(item.status, BatchStatus::Pending);
+        assert!(!item.redo_stack.is_empty());
+
+        let markers = item.actions_undo.len();
+        HistoryManager::seed_with_source(&mut item);
+        assert_eq!(item.actions_undo.len(), markers + 1, "the new result gets its undo step");
+        assert_eq!(item.history.len(), 1, "with the original to return to");
+        assert!(item.redo_stack.is_empty(), "the old branch is gone");
     }
 
     #[test]
