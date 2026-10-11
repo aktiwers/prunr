@@ -13,7 +13,9 @@
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
 //! Versioned by `CARGO_PKG_VERSION` — when the app updates, the cache
-//! invalidates because the loaded ORT may have new EP capabilities.
+//! invalidates because the loaded ORT may have new EP capabilities. A
+//! downloaded model's entry also names its files' checksums, so a new
+//! download of it is tried again.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,11 +37,19 @@ fn cache_path() -> Option<PathBuf> {
     prunr_models::data_dir().map(|d| d.join("ep_compat.json"))
 }
 
-/// JSON-key shape pinned to the historic `Display` strings ("OpenVINO",
-/// "CUDA", "CoreML", "DirectML") so existing user caches survive the
-/// `EpKind` typing refactor.
+/// `"{ep}::{model}"`, plus `"@{tag}"` for a downloaded model so a failure
+/// sticks to the files that failed (`prunr_models::content_tag`). The EP
+/// part keeps the historic `Display` strings ("OpenVINO", "CUDA",
+/// "CoreML", "DirectML").
 fn key(ep: EpKind, model: prunr_models::ModelId) -> String {
-    format!("{ep}::{model:?}")
+    key_with(ep, model, prunr_models::content_tag(model))
+}
+
+fn key_with(ep: EpKind, model: prunr_models::ModelId, tag: Option<u64>) -> String {
+    match tag {
+        Some(tag) => format!("{ep}::{model:?}@{tag:016x}"),
+        None => format!("{ep}::{model:?}"),
+    }
 }
 
 fn cache() -> &'static Mutex<HashMap<String, String>> {
@@ -113,10 +123,8 @@ mod tests {
             key(EpKind::OpenVino, prunr_models::ModelId::Silueta),
             "OpenVINO::Silueta",
         );
-        assert_eq!(
-            key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16),
-            "CUDA::SdV15InpaintFp16",
-        );
+        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16)
+            .starts_with("CUDA::SdV15InpaintFp16@"));
     }
 
     #[cfg(target_os = "macos")]
@@ -131,10 +139,23 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn key_format_is_stable_directml() {
-        assert_eq!(
-            key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16),
-            "DirectML::SdV15InpaintFp16",
-        );
+        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16)
+            .starts_with("DirectML::SdV15InpaintFp16@"));
+    }
+
+    /// A failure belongs to the files that failed: a fixed or re-exported
+    /// download of the same model is a different key, so it gets tried
+    /// again instead of staying on the CPU for good.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_new_download_of_a_model_is_a_new_key() {
+        let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
+        let old = key_with(EpKind::OpenVino, lcm, Some(1));
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Some(2)));
+        assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
+        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, None), "OpenVINO::Silueta",
+            "built-in models keep the historic key; the app version scopes them");
+        assert_eq!(key(EpKind::OpenVino, lcm), key_with(EpKind::OpenVino, lcm, prunr_models::content_tag(lcm)));
     }
 
     #[test]
