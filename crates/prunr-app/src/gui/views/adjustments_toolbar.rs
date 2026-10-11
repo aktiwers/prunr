@@ -444,7 +444,7 @@ fn render_mask_group(
         ui.add_space(theme::SPACE_XS);
 
         aggregate_knob(
-            chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 1))),
+            chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
             StaticKnob::Feather, change,
         );
         hint(ui, "Soften the mask edge. Runs last.");
