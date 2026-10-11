@@ -600,5 +600,17 @@ mod tests {
         assert_eq!(p[3], 128);
         assert!((p[0] as i32 - 200).abs() <= 1 && (p[1] as i32 - 100).abs() <= 1, "not darkened: {p:?}");
     }
+
+    /// A colour fills what is transparent, blends under what is partly
+    /// covered, and leaves what is opaque alone; the result is opaque.
+    #[test]
+    fn a_background_colour_fills_under_the_result() {
+        let mut img = RgbaImage::from_vec(3, 1, vec![10, 20, 30, 255, 200, 200, 200, 128, 0, 0, 0, 0]).unwrap();
+        apply_background_color(&mut img, [0, 0, 100]);
+        assert_eq!(img.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        let half = img.get_pixel(1, 0).0;
+        assert!(half[3] == 255 && (99..=101).contains(&half[0]) && (148..=150).contains(&half[2]), "{half:?}");
+        assert_eq!(img.get_pixel(2, 0).0, [0, 0, 100, 255]);
+    }
 }
 

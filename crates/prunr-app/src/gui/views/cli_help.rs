@@ -79,6 +79,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
                             opt_row(ui, "--line-scale <scale>", "Output scale: fine / balanced / bold / fused (default)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
+                            opt_row(ui, "--bg-image <path>", "Fill background with an image");
+                            opt_row(ui, "--bg-image-fit <fit>", "cover (default) / contain / tile");
+                            opt_row(ui, "--bg-effect <effect>", "Blurred or black-and-white photo behind: blur, blur:N (1\u{2013}64), bw");
                         });
 
                     ui.add_space(theme::SPACE_MD);
