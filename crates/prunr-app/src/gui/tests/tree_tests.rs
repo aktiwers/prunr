@@ -93,7 +93,7 @@ fn a_run_in_flight_names_its_cancel_button() {
         let item = push_test_item(app, 1);
         item.status = BatchStatus::Done;
         app.batch.select_item(0);
-        let mut progress = DispatchProgress::upscale(1, 2, Step::Upscaling.label());
+        let mut progress = DispatchProgress { inner: (1, 2), ..DispatchProgress::new(crate::gui::dispatch_progress::ProgressKind::Upscale, Step::Upscaling.label()) };
         progress.apply(&ProgressUpdate::Tiles(vec![
             TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 },
             TileRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 },

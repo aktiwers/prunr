@@ -454,11 +454,6 @@ pub(crate) struct Processor {
     /// drain path ignores the result. Cancel button + Esc key both
     /// flip the flag for the currently-selected item.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// Per-item progress sink for the in-flight stroke. Worker writes
-    /// `current` step between SD UNet iterations; the canvas banner
-    /// reads `(current, total)` to show "Erasing — step N of M". Same
-    /// lifetime as `inpaint_cancels` — both are replaced on every
-    /// dispatch.
     /// The progress run each in-flight eraser stroke reports to.
     inpaint_runs: HashMap<u64, super::dispatch_progress::RunSink>,
     /// Channels to the dedicated SD-inpaint subprocess bridge thread.
@@ -490,11 +485,8 @@ pub(crate) struct Processor {
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
-    /// Unified progress slot. One source of truth for the banner /
-    /// modal widgets across every dispatch kind. Written by
-    /// `dispatch_upscale`, `pump_inpaint_subprocess`, and the seg
-    /// path's `refresh_batch_progress_status`; `None` when no dispatch
-    /// is in flight.
+    /// The one progress snapshot every dispatch kind reports into; `None`
+    /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
     /// Warm-cached upscale engine: kept alive across consecutive upscale
     /// dispatches so the second click skips the 1-3s graph-optimization
@@ -555,10 +547,6 @@ impl Processor {
         }
     }
 
-    /// Unified progress reader for the canvas overlay
-    /// (`progress_widget::render_banner` / `render_modal`). `None`
-    /// when no dispatch is in flight. Single source of truth across
-    /// the seg, eraser, SD, and upscale paths.
     pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
         self.dispatch_progress.read()
     }
@@ -597,9 +585,7 @@ impl Processor {
     }
 
     /// `true` while an upscale dispatch is in flight. The intent
-    /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this;
-    /// the live tile counter is on `dispatch_progress` (the canvas
-    /// banner / modal shows it directly).
+    /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this.
     pub fn is_upscale_in_flight(&self) -> bool {
         self.upscale_active.load(Ordering::Acquire)
     }
@@ -623,11 +609,10 @@ impl Processor {
         // Replace any prior cancel flag + progress sink — the new
         // dispatch supersedes its predecessor anyway, so wiring fresh
         // ones avoids a stale earlier-stroke cancel firing the moment
-        // a new stroke starts (and avoids the banner showing the prior
+        // a new stroke starts (and avoids the capsule showing the prior
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let kind = if tuning.backend.is_sd_family() { super::dispatch_progress::ProgressKind::SdInpaint } else { super::dispatch_progress::ProgressKind::Eraser };
-        let initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label());
+        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Inpaint, prunr_core::Step::LoadingModel.label());
         let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
         self.inpaint_runs.insert(item_id, run.clone());
@@ -705,7 +690,7 @@ impl Processor {
     }
 
     /// Cancel any in-flight inpaint stroke for `item_id`. The local
-    /// flag drives the "Cancelling…" banner state immediately; for SD
+    /// flag and the capsule's "Stopping" show at once; for SD
     /// strokes the bridge also forwards `CancelItem` to the subprocess
     /// so its inference loop sees the flag too. Latency to actually-
     /// stopping is one tile (LaMa) or one UNet step (SD); ORT has no
@@ -715,6 +700,16 @@ impl Processor {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+        self.mark_cancelling(super::dispatch_progress::ProgressKind::Inpaint);
+    }
+
+    /// Show that a run of `kind` is stopping, until it ends.
+    fn mark_cancelling(&self, kind: super::dispatch_progress::ProgressKind) {
+        self.dispatch_progress.update(|p| {
+            if let Some(p) = p.as_mut().filter(|p| p.kind == kind) {
+                p.cancelling = true;
+            }
+        });
     }
 
     /// Tell the inpaint bridge to drop its cached subprocess. Idempotent;
@@ -1025,15 +1020,6 @@ impl Processor {
         self.inpaint_pending.values().any(|&c| c > 0)
     }
 
-    /// True after Cancel/Esc clicked but before the worker's atomic
-    /// Acquire load observes the flag. Drives the "Cancelling…" banner
-    /// state — without this signal the click looks unacknowledged
-    /// during the multi-second latency to the next worker checkpoint.
-    pub(crate) fn is_inpaint_cancelling(&self, item_id: u64) -> bool {
-        self.inpaint_cancels.get(&item_id)
-            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Acquire))
-    }
-
     /// Register a batch's recipe + the IDs that should deliver against it.
     /// Replaces any prior in-flight state — callers ensure prior batches
     /// have completed before firing a new dispatch.
@@ -1201,7 +1187,7 @@ impl Processor {
         let _ = run_options.unterminate();
         // The run shows "Loading the model" until the first tile reports.
         let (progress, run) = self.dispatch_progress.progress_for(
-            super::dispatch_progress::DispatchProgress::upscale(0, 0, prunr_core::Step::LoadingModel.label()),
+            super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Upscale, prunr_core::Step::LoadingModel.label()),
             Arc::clone(&self.upscale_cancel),
         );
 
@@ -1294,13 +1280,7 @@ impl Processor {
         // Not every EP honours terminate mid-run: OpenVINO measured 54 s
         // from terminate() to return on a cold 512 px tile (it only checks
         // the between-tiles flag). Say so instead of looking frozen.
-        self.dispatch_progress.update(|p| {
-            if let Some(p) = p {
-                p.step_label = std::borrow::Cow::Borrowed(
-                    super::dispatch_progress::step_labels::CANCELLING,
-                );
-            }
-        });
+        self.mark_cancelling(super::dispatch_progress::ProgressKind::Upscale);
         tracing::debug!(terminate_ok, "upscale cancel requested");
     }
 
@@ -1671,7 +1651,7 @@ mod tests {
 
         p.set_seg_counts(None, String::new());
         assert!(p.dispatch_progress().is_none());
-        let _upscale = p.dispatch_progress.begin(DispatchProgress::upscale(0, 4, "Upscaling"));
+        let _upscale = p.dispatch_progress.begin(DispatchProgress::new(crate::gui::dispatch_progress::ProgressKind::Upscale, "Upscaling"));
         p.set_seg_counts(None, String::new());
         assert!(p.dispatch_progress().is_some(), "an upscale run is not the batch's to clear");
     }
@@ -2023,7 +2003,7 @@ mod tests {
     // If is_inpaint_in_flight returns true for the selected item, brush_active
     // must be false — so handle_brush_input is never entered. This test pins
     // the Processor half of that contract so a future decoupling of
-    // is_inpaint_in_flight / is_inpaint_cancelling doesn't silently break the gate.
+    // is_inpaint_in_flight doesn't silently break the gate.
 
     #[test]
     fn inpaint_in_flight_blocks_brush_gate_for_selected_item() {
@@ -2039,15 +2019,16 @@ mod tests {
     }
 
     #[test]
-    fn inpaint_cancelling_is_independent_of_in_flight_count() {
-        // Cancelling starts before the worker has seen the flag; is_inpaint_in_flight
-        // is still true during this window. A future refactor that decouples them
-        // must not remove the separate is_inpaint_cancelling check.
+    fn a_cancel_marks_only_its_own_kind_of_run_as_stopping() {
+        use super::super::dispatch_progress::{DispatchProgress, ProgressKind};
         let mut p = fixture();
         *p.inpaint_pending.entry(7).or_insert(0) += 1;
-        p.inpaint_cancels.insert(7, Arc::new(AtomicBool::new(true)));
-        assert!(p.is_inpaint_in_flight(7), "in-flight must still be true during cancel");
-        assert!(p.is_inpaint_cancelling(7), "cancelling must reflect the atomic flag");
+        let _run = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing"));
+        p.mark_cancelling(ProgressKind::Upscale);
+        assert!(!p.dispatch_progress().unwrap().cancelling, "an upscale cancel leaves the eraser run alone");
+        p.cancel_inpaint(7);
+        assert!(p.dispatch_progress().unwrap().cancelling);
+        assert!(p.is_inpaint_in_flight(7), "the stroke stays in flight until the worker stops");
     }
 
     #[test]

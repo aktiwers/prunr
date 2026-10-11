@@ -2325,19 +2325,14 @@ impl PrunrApp {
         self.handle_cancel();
         self.processor.clear_admission();
         self.batch.reset_processing_to_pending();
-        // Clear the unified progress slot so the canvas banner/modal
-        // disappears with the batch reset. Without this, the seg
-        // dispatch_progress lingers from before the cancel and the
-        // overlay keeps painting on top of the idle canvas — the
-        // legacy `render_processing` was AppState-gated so it
-        // disappeared automatically; the unified widget reads the
-        // slot directly and needs an explicit clear.
+        // The capsule reads the slot, not the app state, so the reset
+        // has to clear it.
         self.processor.set_seg_counts(None, String::new());
         self.status.text = "Cancelled".to_string();
     }
 
     /// Cancel only the in-flight inpaint stroke for `item_id`. Used by
-    /// the canvas banner's Cancel button — `handle_cancel` cancels
+    /// the capsule's Cancel button — `handle_cancel` cancels
     /// everything (batch + all inpaint), this scopes to one stroke.
     pub fn cancel_inpaint_for(&mut self, item_id: u64) {
         if self.processor.is_inpaint_in_flight(item_id) {
