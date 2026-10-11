@@ -352,12 +352,12 @@ const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::Gamma), differs: |s, d| differs(s.gamma, d.gamma), reset: |s, d| s.gamma = d.gamma },
-    chip::Field { knob: Some(StaticKnob::Contrast), differs: |s, d| differs(s.contrast, d.contrast), reset: |s, d| s.contrast = d.contrast },
     chip::Field { knob: Some(StaticKnob::EdgeShift), differs: |s, d| differs(s.edge_shift, d.edge_shift), reset: |s, d| s.edge_shift = d.edge_shift },
     chip::Field { knob: Some(StaticKnob::RefineEdges), differs: |s, d| s.refine_edges != d.refine_edges, reset: |s, d| s.refine_edges = d.refine_edges },
     chip::Field { knob: Some(StaticKnob::GuidedRadius), differs: |s, d| s.refine_edges && s.guided_radius != d.guided_radius, reset: |s, d| s.guided_radius = d.guided_radius },
     chip::Field { knob: Some(StaticKnob::GuidedEpsilon), differs: |s, d| s.refine_edges && differs(s.guided_epsilon, d.guided_epsilon), reset: |s, d| s.guided_epsilon = d.guided_epsilon },
     chip::Field { knob: Some(StaticKnob::Feather), differs: |s, d| differs(s.feather, d.feather), reset: |s, d| s.feather = d.feather },
+    chip::Field { knob: Some(StaticKnob::Contrast), differs: |s, d| differs(s.contrast, d.contrast), reset: |s, d| s.contrast = d.contrast },
 ];
 
 /// Every line knob except the mode, which the chip face shows instead.
@@ -410,12 +410,6 @@ fn render_mask_group(
         hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the edge.");
         ui.add_space(theme::SPACE_XS);
 
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
-            StaticKnob::Contrast, change,
-        );
-        hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
-        ui.add_space(theme::SPACE_XS);
 
         // Shown as every editor shows it, + grows the subject; stored as
         // the pipeline's shift, + erodes.
@@ -432,14 +426,19 @@ fn render_mask_group(
         hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
         if s.refine_edges {
             let mut radius = s.guided_radius as u32;
-            let r = chip::slider_row(ui, "Refine radius (px)", &mut radius, 1..=64);
+            let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
             s.guided_radius = radius.min(255) as u8;
             aggregate_knob(r, StaticKnob::GuidedRadius, change);
-            aggregate_knob(
-                chip::slider_row_f32(ui, "Refine precision", &mut s.guided_epsilon, 1e-6..=1e-2, true, |v| format!("{v:.1e}")),
-                StaticKnob::GuidedEpsilon, change,
-            );
-            hint(ui, "Lower follows finer color edges.");
+            hint(ui, "How far from the edge refinement looks for hair and detail.");
+            egui::CollapsingHeader::new("Advanced").id_salt("refine_advanced").show(ui, |ui| {
+                let mut detail = detail_from_epsilon(s.guided_epsilon);
+                let d = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
+                if d.changed {
+                    s.guided_epsilon = epsilon_from_detail(detail);
+                }
+                aggregate_knob(d, StaticKnob::GuidedEpsilon, change);
+                hint(ui, "Higher follows finer color edges.");
+            });
         }
         ui.add_space(theme::SPACE_XS);
 
@@ -447,10 +446,28 @@ fn render_mask_group(
             chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
             StaticKnob::Feather, change,
         );
-        hint(ui, "Soften the mask edge. Runs last.");
+        hint(ui, "Soften the mask edge.");
+        ui.add_space(theme::SPACE_XS);
+
+        aggregate_knob(
+            chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
+            StaticKnob::Contrast, change,
+        );
+        hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
         ui.add_space(theme::SPACE_SM);
+
         hint(ui, "Press F3 for the pipeline diagram.");
     });
+}
+
+/// Refine's precision (the guided filter's epsilon, 1e-2 to 1e-6 on a log
+/// scale) as a 0-1 Detail amount: more detail is a smaller epsilon.
+fn detail_from_epsilon(epsilon: f32) -> f32 {
+    ((-epsilon.max(1e-6).log10() - 2.0) / 4.0).clamp(0.0, 1.0)
+}
+
+fn epsilon_from_detail(detail: f32) -> f32 {
+    10f32.powf(-2.0 - 4.0 * detail.clamp(0.0, 1.0))
 }
 
 /// Sketch mode plus every line knob, in processing order; the line color
@@ -1196,6 +1213,17 @@ pub(super) fn render_model_dropdown(
 
 #[cfg(test)]
 mod tests {
+
+    /// Detail maps the guided filter's epsilon onto 0-100 % and back.
+    #[test]
+    fn refine_detail_round_trips_through_epsilon() {
+        assert!((detail_from_epsilon(1e-2) - 0.0).abs() < 1e-4);
+        assert!((detail_from_epsilon(1e-6) - 1.0).abs() < 1e-4);
+        assert!((detail_from_epsilon(1e-4) - 0.5).abs() < 1e-4, "the default sits mid-way");
+        for d in [0.0, 0.25, 0.5, 0.9, 1.0] {
+            assert!((detail_from_epsilon(epsilon_from_detail(d)) - d).abs() < 1e-4);
+        }
+    }
     use super::*;
 
     #[test]

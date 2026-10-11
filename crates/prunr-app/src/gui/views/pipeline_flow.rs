@@ -31,10 +31,10 @@ const PIPELINES: [Pipeline; 4] = [
         output: "Final mask, applied as transparency",
         stages: &[
             Stage { icon: ICON_TONALITY.codepoint, title: "Gamma", tagline: "How hard the mask cuts. Every step below works on this result, so a higher gamma hands them a darker silhouette." },
-            Stage { icon: ICON_BOLT.codepoint, title: "Hard threshold", tagline: "Optional. Snaps every pixel to kept or removed. The steps below then see hard edges: Refine can only clean stair-steps and Feather blurs a step." },
-            Stage { icon: ICON_SWAP_HORIZ.codepoint, title: "Edge shift", tagline: "Erodes or dilates the mask boundary. Refine edges then snaps the shifted boundary to the photo's color edges." },
+            Stage { icon: ICON_SWAP_HORIZ.codepoint, title: "Shift edge", tagline: "Grows or shrinks the mask boundary. Refine edges then snaps the shifted boundary to the photo's color edges." },
             Stage { icon: ICON_AUTO_FIX_HIGH.codepoint, title: "Refine edges", tagline: "Optional. Uses the photo's colors to snap the mask to real edges. A tighter input gives a tighter result." },
-            Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Feather", tagline: "Softens the finished mask. Runs last on purpose: sharpen first, then soften." },
+            Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Feather", tagline: "Softens the refined mask: sharpen first, then soften." },
+            Stage { icon: ICON_BOLT.codepoint, title: "Contrast", tagline: "Sharpens the finished edge at full size; 100% cuts it hard. Your brush edits are applied after it." },
         ],
     },
     Pipeline {
