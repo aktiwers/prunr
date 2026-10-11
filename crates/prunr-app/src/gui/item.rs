@@ -8,6 +8,48 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// A result's background for export, baked by `bake` (in a save thread
+/// where there is one: an effect blurs the full photo).
+#[derive(Clone)]
+pub(crate) struct ExportBg {
+    backdrop: super::item_settings::Backdrop,
+    image: Option<Arc<BgImage>>,
+    fit: prunr_core::BgImageFit,
+    photo: Option<Arc<image::RgbaImage>>,
+    source: ImageSource,
+}
+
+impl ExportBg {
+    pub(crate) fn bake(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
+        use super::item_settings::Backdrop;
+        let mut copy = (**rgba).clone();
+        match self.backdrop {
+            Backdrop::Transparent => return Arc::clone(rgba),
+            Backdrop::Color(c) => prunr_core::apply_background_color(&mut copy, c),
+            Backdrop::Image(_) => {
+                let Some(bg) = self.image.as_ref() else { return Arc::clone(rgba) };
+                prunr_core::apply_background_image(&mut copy, &bg.image, self.fit);
+            }
+            Backdrop::Effect(effect) => {
+                let Some(picture) = self.photo().and_then(|p| prunr_core::effect_backdrop(&p, effect)) else {
+                    return Arc::clone(rgba);
+                };
+                // Same aspect as the result (its photo), so Cover fills exactly.
+                let picture = image::DynamicImage::ImageRgba8(picture);
+                prunr_core::apply_background_image(&mut copy, &picture, prunr_core::BgImageFit::Cover);
+            }
+        }
+        Arc::new(copy)
+    }
+
+    fn photo(&self) -> Option<Arc<image::RgbaImage>> {
+        self.photo.clone().or_else(|| {
+            let bytes = self.source.load_bytes().ok()?;
+            prunr_core::load_image_from_bytes(&bytes).ok().map(|img| Arc::new(img.to_rgba8()))
+        })
+    }
+}
+
 /// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
 /// save worker each take a handle) is a refcount bump, not a memcpy of
 /// up to ~48 MB.
@@ -191,12 +233,12 @@ pub(crate) struct BatchItem {
     /// the only writers that keep `settings.bg_image_hash` in lockstep,
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
     pub(crate) bg_image: Option<Arc<BgImage>>,
-    pub(crate) bg_image_texture: Option<egui::TextureHandle>,
-    /// True while a background thread is building the bg-image
-    /// `ColorImage` so the UI thread doesn't kick a duplicate spawn
-    /// the next frame. Cleared by the drain in
-    /// `drain_background_channels`.
-    pub(crate) bg_image_tex_pending: bool,
+    /// The picture behind the result (a background image or an effect
+    /// made from the photo) and its `Backdrop::picture_key`.
+    pub(crate) backdrop_texture: Option<(u64, egui::TextureHandle)>,
+    /// The key of the picture a background thread is building, so the
+    /// next frame doesn't start the same one again.
+    pub(crate) backdrop_tex_pending: Option<u64>,
 
     /// Shared selection mask. Both Paint Brush and Magic Brush write
     /// here. Signed i8 plane at source image resolution.
@@ -341,7 +383,7 @@ impl BatchItem {
     /// or a thumbnail.
     pub(crate) fn has_pending_work(&self) -> bool {
         self.result_tex_pending || self.source_tex_pending || self.decode_pending
-            || self.thumb_pending || self.bg_image_tex_pending
+            || self.thumb_pending || self.backdrop_tex_pending.is_some()
             || self.selection_tex_pending.is_some()
     }
 
@@ -823,8 +865,8 @@ impl BatchItem {
             cached_masked_base: None,
             applied_preset,
             bg_image: None,
-            bg_image_texture: None,
-            bg_image_tex_pending: false,
+            backdrop_texture: None,
+            backdrop_tex_pending: None,
             selection_mask: None,
             selection_hash: None,
             selection_tex_pending: None,
@@ -837,11 +879,6 @@ impl BatchItem {
 
     /// Lockstep writer for `bg_image` + `settings.bg_image_hash`. Going
     /// through this path is the invariant the recipe diff relies on.
-    /// Callers must follow up with
-    /// `PrunrApp::kick_bg_image_tex_prep(item_id, ctx)` so the bg-image
-    /// texture is built off-thread; the on-thread render path reads
-    /// `bg_image_texture` directly and renders the placeholder bg color
-    /// until the texture lands.
     pub(crate) fn set_bg_image(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>) {
         let hash = bg_image_content_hash(&img);
         self.bg_image = Some(Arc::new(BgImage {
@@ -849,15 +886,11 @@ impl BatchItem {
             image: Arc::new(img),
             hash,
         }));
-        self.bg_image_texture = None;
-        self.bg_image_tex_pending = false;
         self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
     }
 
     pub(crate) fn clear_bg_image(&mut self) {
         self.bg_image = None;
-        self.bg_image_texture = None;
-        self.bg_image_tex_pending = false;
         self.settings.bg_image_hash = None;
     }
 
@@ -875,24 +908,21 @@ impl BatchItem {
             .or_else(|| self.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())))
     }
 
-    /// Bake the per-item background into a result image for save / clipboard /
-    /// drag-out. Image bg wins over color bg (matches the canvas-paint rule).
-    /// Returns the cloned Arc unchanged when neither is set.
-    pub(crate) fn bake_export_bg(
-        &self,
-        rgba: &Arc<image::RgbaImage>,
-    ) -> Arc<image::RgbaImage> {
-        if let Some(bg) = self.bg_image.as_ref() {
-            let mut copy = (**rgba).clone();
-            prunr_core::apply_background_image(&mut copy, &bg.image, self.settings.bg_image_fit);
-            Arc::new(copy)
-        } else if let Some(c) = self.settings.bg_rgb() {
-            let mut copy = (**rgba).clone();
-            prunr_core::apply_background_color(&mut copy, c);
-            Arc::new(copy)
-        } else {
-            rgba.clone()
+    /// What export puts behind this item's result: only shared handles,
+    /// so it can travel to a save thread and bake there.
+    pub(crate) fn export_bg(&self) -> ExportBg {
+        ExportBg {
+            backdrop: self.settings.backdrop(),
+            image: self.bg_image.clone(),
+            fit: self.settings.bg_image_fit,
+            photo: self.source_rgba.clone(),
+            source: self.source.clone(),
         }
+    }
+
+    /// The result with its background baked in, for clipboard and drag-out.
+    pub(crate) fn bake_export_bg(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
+        self.export_bg().bake(rgba)
     }
 
 }
@@ -919,6 +949,27 @@ mod tests {
             ItemSettings::default(),
             String::new(),
         )
+    }
+
+    /// An effect is a picture of the photo put under whatever the result
+    /// leaves transparent: lines over the whole photo keep their pixels
+    /// and gain the backdrop around them.
+    #[test]
+    fn export_puts_the_effect_picture_under_the_result() {
+        let mut item = fixture_item(1);
+        let photo = image::RgbaImage::from_fn(4, 2, |x, _| image::Rgba([200, 100, x as u8 * 50, 255]));
+        item.source_rgba = Some(Arc::new(photo));
+        item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
+        let line = image::Rgba([255, 0, 0, 255]);
+        let result = Arc::new(image::RgbaImage::from_fn(4, 2, |x, _| if x == 0 { line } else { image::Rgba([0, 0, 0, 0]) }));
+        let out = item.export_bg().bake(&result);
+        assert_eq!(*out.get_pixel(0, 0), line, "the result's own pixels stay");
+        let behind = out.get_pixel(3, 1).0;
+        assert_eq!(behind[3], 255, "the transparent part gets the picture");
+        assert!(behind[0] == behind[1] && behind[1] == behind[2], "a black-and-white photo: {behind:?}");
+
+        item.settings.bg_effect = prunr_core::BgEffect::None;
+        assert!(Arc::ptr_eq(&item.export_bg().bake(&result), &result), "nothing behind, nothing baked");
     }
 
     #[test]

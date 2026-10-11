@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use image::DynamicImage;
-use prunr_core::{BgEffect, FillStyle, MaskSettings};
+use prunr_core::{FillStyle, MaskSettings};
 
 use super::item::BatchItem;
 use super::settings::LineMode;
@@ -133,12 +133,11 @@ fn render_layer(
     match kind {
         LayerKind::Subject => {
             let seg = seg?;
-            // Strip user's fill_style + bg_effect so the receiving app gets
-            // a clean transparent subject. Keep every other mask knob so
-            // their guided-filter / feather / edge_shift refinements survive.
+            // Strip the user's fill_style so the receiving app gets a clean
+            // subject. Keep every other mask knob so their guided-filter /
+            // feather / edge_shift refinements survive.
             let mask = MaskSettings {
                 fill_style: FillStyle::None,
-                bg_effect: BgEffect::None,
                 ..item.settings.mask_settings()
             };
             let rgba = prunr_core::postprocess_from_flat(

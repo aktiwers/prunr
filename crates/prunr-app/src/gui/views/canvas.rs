@@ -19,11 +19,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let canvas_rect = ui.available_rect_before_wrap();
 
-    // Bg-image texture is built off-thread by `kick_bg_image_tex_prep`
-    // (called from the file-pick + preset paths). The render path
-    // reads `bg_image_texture` directly; if it's still pending the
-    // existing bg-color fallback paints below.
-
     let modal_open = app.any_modal_open();
     // A click-outside popover holds the canvas still, so the press that
     // dismisses it (and the drag after it) never pans or paints. A pinned
@@ -759,16 +754,8 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let shown = it.result_texture.as_ref().or(it.held_texture())?;
         let img_rect =
             compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-        // A partially transparent bg lets the checkerboard show through,
-        // the way the exported PNG would read.
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-        // Image bg wins over color bg when both are set — they're mutually
-        // exclusive in the UI but a stale bg color could remain on the recipe.
-        if let Some(tex) = it.bg_image_texture.as_ref() {
-            paint_bg_image(ui, img_rect, tex, it.settings.bg_image_fit);
-        } else if let Some(bg) = it.settings.bg {
-            ui.painter().rect_filled(img_rect, 0.0, Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
-        }
+        paint_backdrop(ui, img_rect, it);
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         draw_selection(ui, app, it, img_rect);
         painted = Some(img_rect);
@@ -820,6 +807,25 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
             let (light, dark) = theme::CHECKER_LIGHT_MODE;
             ctx.load_texture("checker_light", build_checker_image(light, dark), TextureOptions::NEAREST)
         }).clone()
+    }
+}
+
+/// What sits behind `item`'s result, painted into `rect` under it. Until a
+/// picture's texture lands, nothing (the checkerboard) shows.
+pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem) {
+    use crate::gui::item_settings::Backdrop;
+    let backdrop = item.settings.backdrop();
+    match backdrop {
+        Backdrop::Transparent => {}
+        Backdrop::Color([r, g, b]) => {
+            ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(r, g, b));
+        }
+        Backdrop::Image(_) | Backdrop::Effect(_) => {
+            let Some((_, tex)) = item.backdrop_texture.as_ref() else { return };
+            // An effect is made from the photo itself, so it covers exactly.
+            let fit = if matches!(backdrop, Backdrop::Image(_)) { item.settings.bg_image_fit } else { prunr_core::BgImageFit::Cover };
+            paint_bg_image(ui, rect, tex, fit);
+        }
     }
 }
 

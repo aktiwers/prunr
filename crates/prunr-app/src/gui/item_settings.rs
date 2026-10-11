@@ -74,9 +74,7 @@ pub struct ItemSettings {
     /// RGB transformation applied to the masked subject before compose.
     #[serde(default)]
     pub fill_style: prunr_core::FillStyle,
-    /// Backdrop composited behind the masked subject in the output RGBA.
-    /// Orthogonal to `bg` — effects win when non-`None`, solid colour is
-    /// the render-time fallback via the GPU rect behind the texture.
+    /// A picture made from the photo, shown behind the result.
     #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
     /// Transform applied to the image before DexiNed inference. A change
@@ -164,14 +162,50 @@ impl Default for ItemSettings {
     }
 }
 
+/// What sits behind a result: shown under it on screen and baked in on
+/// export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backdrop {
+    Transparent,
+    Color([u8; 3]),
+    Image(std::num::NonZeroU64),
+    Effect(prunr_core::BgEffect),
+}
+
+impl Backdrop {
+    /// What a picture backdrop shows, to tell whether a built texture is
+    /// still current; `None` for no picture.
+    pub fn picture_key(self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        match self {
+            Backdrop::Image(hash) => Some(hash.get()),
+            Backdrop::Effect(effect) => {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                effect.hash(&mut h);
+                Some(h.finish())
+            }
+            Backdrop::Transparent | Backdrop::Color(_) => None,
+        }
+    }
+}
+
 impl ItemSettings {
     /// Contrast for a hard edge, what the old hard threshold was.
     pub const HARD_EDGE: f32 = 1.0;
 
-    /// bg color as RGB triple (alpha stripped) for pipeline/compositing.
-    /// `None` when bg is disabled.
-    pub fn bg_rgb(&self) -> Option<[u8; 3]> {
-        self.bg.map(|[r, g, b, _]| [r, g, b])
+    /// What sits behind the result. One choice; settings saved while the
+    /// fields could hold several read an effect first, then an image,
+    /// then a colour.
+    pub fn backdrop(&self) -> Backdrop {
+        if self.bg_effect != prunr_core::BgEffect::None {
+            Backdrop::Effect(self.bg_effect)
+        } else if let Some(hash) = self.bg_image_hash {
+            Backdrop::Image(hash)
+        } else if let Some([r, g, b, _]) = self.bg {
+            Backdrop::Color([r, g, b])
+        } else {
+            Backdrop::Transparent
+        }
     }
 
     /// Convert mask-related fields into the core `MaskSettings`.
@@ -185,7 +219,6 @@ impl ItemSettings {
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
             fill_style: self.fill_style,
-            bg_effect: self.bg_effect,
         }
     }
 
@@ -210,20 +243,12 @@ impl ItemSettings {
     pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;
-        let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
-
-        let mut mask = if uses_segmentation {
+        let mask = if uses_segmentation {
             prunr_core::MaskRecipe::from(&self.mask_settings())
         } else {
             prunr_core::MaskRecipe::from(&MaskSettings::default())
         };
-        // bg_color and bg_effect are mutually exclusive in the chip UI but
-        // the underlying fields are independent — a preset round-trip could
-        // restore both. Pin bg_effect to default when bg_color wins so the
-        // recipe-layer contract matches what the chip enforces.
-        if bg_rgb.is_some() {
-            mask.bg_effect = prunr_core::BgEffect::default();
-        }
+        let backdrop = self.backdrop();
 
         let mut edge = prunr_core::EdgeRecipe::from(&self.edge_settings());
         // compose_mode only affects SubjectOutline (combine subject + line
@@ -246,9 +271,10 @@ impl ItemSettings {
             edge,
             mask,
             composite: prunr_core::CompositeRecipe {
-                bg_color: bg_rgb,
-                bg_image_hash: self.bg_image_hash.map(|nz| nz.get()),
+                bg_color: match backdrop { Backdrop::Color(c) => Some(c), _ => None },
+                bg_image_hash: match backdrop { Backdrop::Image(h) => Some(h.get()), _ => None },
                 bg_image_fit: self.bg_image_fit,
+                bg_effect: self.bg_effect,
             },
             upscale: prunr_core::UpscaleRecipe {
                 model: match model {
@@ -327,6 +353,29 @@ pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is behind a result is one choice. Settings saved while the
+    /// fields could hold several read an effect first, then an image,
+    /// then a colour, and the recipe records only that one.
+    #[test]
+    fn the_backdrop_is_one_choice() {
+        use prunr_core::BgEffect;
+        let image = std::num::NonZeroU64::new(7);
+        let blur = BgEffect::BlurredSource { radius: 9 };
+        let rows = [
+            (None, None, BgEffect::None, Backdrop::Transparent),
+            (Some([1, 2, 3, 255]), None, BgEffect::None, Backdrop::Color([1, 2, 3])),
+            (Some([1, 2, 3, 255]), image, BgEffect::None, Backdrop::Image(image.unwrap())),
+            (Some([1, 2, 3, 255]), image, blur, Backdrop::Effect(blur)),
+        ];
+        for (bg, bg_image_hash, bg_effect, want) in rows {
+            let s = ItemSettings { bg, bg_image_hash, bg_effect, ..ItemSettings::default() };
+            assert_eq!(s.backdrop(), want);
+            let c = s.current_recipe(prunr_core::ModelKind::Silueta).composite;
+            assert_eq!(c.bg_color.is_some(), matches!(want, Backdrop::Color(_)), "{want:?}");
+            assert_eq!(c.bg_image_hash.is_some(), matches!(want, Backdrop::Image(_)), "{want:?}");
+        }
+    }
 
     /// A preset saved with the hard threshold on loads as a hard edge;
     /// one saved with it off loads soft.

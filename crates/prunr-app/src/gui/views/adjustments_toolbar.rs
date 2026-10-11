@@ -16,7 +16,7 @@ use super::selection_action_bar::{render_selection_actions, SelectionAction};
 use super::shortcuts::Action;
 
 use crate::gui::brush_state::BrushState;
-use crate::gui::item_settings::ItemSettings;
+use crate::gui::item_settings::{Backdrop, ItemSettings};
 use crate::gui::knob_catalog::{
     self, shows, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob, Surface,
 };
@@ -204,7 +204,9 @@ pub(crate) fn render(
         if shows(model, Surface::Background) {
             let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
             chip::gated(ui, bg_reason, |ui| {
+                let backdrop = item_settings.backdrop();
                 render_background_chip(ui, BgChipState {
+                    backdrop,
                     bg: &mut item_settings.bg,
                     bg_effect: &mut item_settings.bg_effect,
                     bg_image_fit: &mut item_settings.bg_image_fit,
@@ -894,28 +896,17 @@ impl BgKind {
         }
     }
 
-    /// Derive the current kind from the underlying fields. Effects win over
-    /// solid color (render-time precedence); image bg sits between effects
-    /// and solid — picking image clears bg_color and effect, picking effect
-    /// or color clears the image (mutual exclusion enforced by the chip).
-    fn current(bg: &Option<[u8; 4]>, effect: &prunr_core::BgEffect, has_image: bool) -> Self {
+    fn of(backdrop: Backdrop) -> Self {
         use prunr_core::BgEffect;
-        match effect {
-            BgEffect::BlurredSource { .. } => Self::BlurredSource,
-            BgEffect::InvertedSource => Self::InvertedSource,
-            BgEffect::DesaturatedSource => Self::DesaturatedSource,
-            BgEffect::None => {
-                if has_image { Self::Image }
-                else if bg.is_some() { Self::Solid }
-                else { Self::Transparent }
-            }
+        match backdrop {
+            Backdrop::Transparent => Self::Transparent,
+            Backdrop::Color(_) => Self::Solid,
+            Backdrop::Image(_) => Self::Image,
+            Backdrop::Effect(BgEffect::BlurredSource { .. }) => Self::BlurredSource,
+            Backdrop::Effect(BgEffect::InvertedSource) => Self::InvertedSource,
+            Backdrop::Effect(BgEffect::DesaturatedSource) => Self::DesaturatedSource,
+            Backdrop::Effect(BgEffect::None) => Self::Transparent,
         }
-    }
-
-    /// Effects require a postprocess rerun (baked into the output RGBA);
-    /// Transparent / Solid / Image only change the render-time bg fill.
-    fn needs_postprocess(self) -> bool {
-        matches!(self, Self::BlurredSource | Self::InvertedSource | Self::DesaturatedSource)
     }
 }
 
@@ -925,6 +916,7 @@ impl BgKind {
 /// chip needs three live-edit fields plus image-availability metadata —
 /// past the param-count alarm without this grouping.
 struct BgChipState<'a> {
+    backdrop: Backdrop,
     bg: &'a mut Option<[u8; 4]>,
     bg_effect: &'a mut prunr_core::BgEffect,
     bg_image_fit: &'a mut prunr_core::BgImageFit,
@@ -939,6 +931,7 @@ fn render_background_chip(
     change: &mut ToolbarChange,
 ) {
     let BgChipState {
+        backdrop,
         bg,
         bg_effect,
         bg_image_fit,
@@ -949,7 +942,7 @@ fn render_background_chip(
     use egui::widgets::color_picker::{color_picker_color32, Alpha};
     use prunr_core::BgEffect;
 
-    let current = BgKind::current(bg, bg_effect, has_bg_image);
+    let current = BgKind::of(backdrop);
     let accent = current != BgKind::Transparent;
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
@@ -966,8 +959,7 @@ fn render_background_chip(
             if has_bg_image {
                 change.clear_bg_image = true;
             }
-            let knob = if current.needs_postprocess() { StaticKnob::BgEffect } else { StaticKnob::BgColor };
-            aggregate_bool(true, knob, change);
+            aggregate_bool(true, StaticKnob::BgColor, change);
         }
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -978,20 +970,10 @@ fn render_background_chip(
                         // Image is owned by BatchItem (Arc bytes don't fit in
                         // the Copy ItemSettings) — emit an intent and let the
                         // app handle the file dialog + decode side effects.
-                        // We ALSO clear bg + bg_effect here, mirroring the
-                        // clear_bg_image branch below: BgKind::current
-                        // resolves bg_effect first, so leaving the previous
-                        // effect set would keep the result texture's baked-in
-                        // effect masking the freshly-loaded image.
                         if matches!(kind, BgKind::Image) {
                             *bg = None;
                             *bg_effect = prunr_core::BgEffect::None;
-                            let knob = if current.needs_postprocess() {
-                                StaticKnob::BgEffect
-                            } else {
-                                StaticKnob::BgColor
-                            };
-                            aggregate_bool(true, knob, change);
+                            aggregate_bool(true, StaticKnob::BgColor, change);
                             change.pick_bg_image = true;
                             continue;
                         }
@@ -1001,12 +983,7 @@ fn render_background_chip(
                             // the new choice owns the bg surface alone.
                             change.clear_bg_image = true;
                         }
-                        let knob = if kind.needs_postprocess() || current.needs_postprocess() {
-                            StaticKnob::BgEffect
-                        } else {
-                            StaticKnob::BgColor
-                        };
-                        aggregate_bool(true, knob, change);
+                        aggregate_bool(true, StaticKnob::BgColor, change);
                     }
                 }
             });
@@ -1075,10 +1052,8 @@ fn render_background_chip(
 const BACKGROUND_POPOVER_WIDTH: f32 = 480.0;
 const BACKGROUND_LIST_WIDTH: f32 = 150.0;
 
-/// Mutate the two bg fields to match `kind`. Transparent clears both; Solid
-/// sets `bg` (picking up an existing color if present, falling back to the
-/// default) and clears the effect; effects set `bg_effect` without touching
-/// `bg` so the user's color survives a round-trip through an effect.
+/// Set the two bg fields to `kind` alone: the background is one choice.
+/// Solid keeps a colour picked earlier, or starts from the default.
 fn apply_bg_kind(
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
@@ -1096,12 +1071,15 @@ fn apply_bg_kind(
             *bg_effect = BgEffect::None;
         }
         BgKind::BlurredSource => {
+            *bg = None;
             *bg_effect = BgEffect::BlurredSource { radius: 12 };
         }
         BgKind::InvertedSource => {
+            *bg = None;
             *bg_effect = BgEffect::InvertedSource;
         }
         BgKind::DesaturatedSource => {
+            *bg = None;
             *bg_effect = BgEffect::DesaturatedSource;
         }
         // Image bg lives on BatchItem, not on these two ItemSettings fields —

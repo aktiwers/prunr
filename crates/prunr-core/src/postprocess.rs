@@ -39,7 +39,6 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, opts: &Postpro
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     apply_mask_inplace(&mut rgba, &mask);
     apply_fill_style(&mut rgba, opts.mask_settings.fill_style);
-    apply_bg_effect(&mut rgba, original, opts.mask_settings.bg_effect);
     rgba
 }
 
@@ -506,26 +505,21 @@ fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8
 }
 
-/// Composite a derived backdrop into the transparent areas of `rgba` per the
-/// selected `effect`. Output becomes fully opaque where the effect applies.
-/// Always allocates a scratch backdrop the size of the source — acceptable
-/// cost because bg effects only run at postprocess tier, never on the
-/// per-tick live-preview path (live preview keeps transparency so the
-/// canvas's GPU-rect bg render stays instant).
-pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crate::types::BgEffect) {
+/// The picture `effect` makes from `source`, opaque, at the source's
+/// size; `None` for no effect. It goes behind a result like a background
+/// image does.
+///
+/// Peak working set: the source as RGBA plus the output (2 × w·h·4 bytes;
+/// 96 MB at 12 MP).
+pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Option<RgbaImage> {
     use crate::types::BgEffect;
-    let backdrop: RgbaImage = match effect {
-        BgEffect::None => return,
-        BgEffect::BlurredSource { radius } => {
-            // image::imageops::blur is a single-threaded Gaussian — slow
-            // on multi-MP sources. fast_blur is a 3-pass box-filter
-            // approximation: ~3-4× faster, visually near-identical at
-            // typical UI radii. Sigma ≈ radius for the API's expectation.
-            let sigma = radius.clamp(1, 64) as f32;
-            image::imageops::fast_blur(&source.to_rgba8(), sigma)
-        }
+    let mut img = match effect {
+        BgEffect::None => return None,
+        // fast_blur is a 3-pass box approximation of a Gaussian, ~3-4x
+        // faster than imageops::blur and alike at these radii.
+        BgEffect::BlurredSource { radius } => image::imageops::fast_blur(source, radius.clamp(1, 64) as f32),
         BgEffect::InvertedSource => {
-            let mut img = source.to_rgba8();
+            let mut img = source.clone();
             for p in img.pixels_mut() {
                 p.0[0] = 255 - p.0[0];
                 p.0[1] = 255 - p.0[1];
@@ -534,7 +528,7 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
             img
         }
         BgEffect::DesaturatedSource => {
-            let mut img = source.to_rgba8();
+            let mut img = source.clone();
             for p in img.pixels_mut() {
                 let y = luma_u8(p.0[0], p.0[1], p.0[2]);
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
@@ -542,41 +536,10 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, source: &DynamicImage, effect: crat
             img
         }
     };
-
-    // Alpha-blend foreground over backdrop, force fully opaque output where
-    // the subject mask left partial alpha. Anywhere the subject was fully
-    // opaque already, the formula reduces to a no-op.
-    debug_assert_eq!(rgba.dimensions(), backdrop.dimensions());
-    let width = rgba.width() as usize;
-    let height = rgba.height() as usize;
-    let row_bytes = width * 4;
-    let raw = rgba.as_mut();
-    let bd = backdrop.as_raw();
-
-    let blend_pixel = |px: &mut [u8], bd_chunk: &[u8]| {
-        let a = px[3] as u16;
-        if a == 255 { return; }
-        let inv = 255 - a;
-        px[0] = ((px[0] as u16 * a + bd_chunk[0] as u16 * inv) / 255) as u8;
-        px[1] = ((px[1] as u16 * a + bd_chunk[1] as u16 * inv) / 255) as u8;
-        px[2] = ((px[2] as u16 * a + bd_chunk[2] as u16 * inv) / 255) as u8;
-        px[3] = 255;
-    };
-
-    // Rows are write-disjoint; par_chunks_mut is safe.
-    if width * height >= ROW_PAR_THRESHOLD {
-        raw.par_chunks_mut(row_bytes)
-            .zip(bd.par_chunks(row_bytes))
-            .for_each(|(px_row, bd_row)| {
-                for (px, bd_px) in px_row.chunks_exact_mut(4).zip(bd_row.chunks_exact(4)) {
-                    blend_pixel(px, bd_px);
-                }
-            });
-    } else {
-        for (px, bd_px) in raw.chunks_exact_mut(4).zip(bd.chunks_exact(4)) {
-            blend_pixel(px, bd_px);
-        }
+    for p in img.pixels_mut() {
+        p.0[3] = 255;
     }
+    Some(img)
 }
 
 /// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.
@@ -1158,4 +1121,25 @@ mod tests {
         assert!(got_min <= 2,  "min after sigmoid stretch should be ≈0, got {got_min}");
         assert!(got_max >= 253, "max after sigmoid stretch should be ≈255, got {got_max}");
     }
+
+    #[test]
+    fn an_effect_backdrop_is_an_opaque_picture_of_the_photo() {
+        use crate::types::BgEffect;
+        let photo = RgbaImage::from_fn(8, 4, |x, _| {
+            if x < 4 { image::Rgba([200, 40, 40, 0]) } else { image::Rgba([20, 20, 220, 255]) }
+        });
+        assert!(effect_backdrop(&photo, BgEffect::None).is_none());
+        for effect in BgEffect::ALL.iter().filter(|e| **e != BgEffect::None) {
+            let b = effect_backdrop(&photo, *effect).expect("an effect makes a picture");
+            assert_eq!(b.dimensions(), (8, 4));
+            assert!(b.pixels().all(|p| p.0[3] == 255), "{effect:?} is opaque");
+        }
+        let grey = effect_backdrop(&photo, BgEffect::DesaturatedSource).unwrap();
+        let p = grey.get_pixel(6, 1).0;
+        assert!(p[0] == p[1] && p[1] == p[2], "black and white");
+        let blur = effect_backdrop(&photo, BgEffect::BlurredSource { radius: 2 }).unwrap();
+        let (left, right) = (blur.get_pixel(3, 2).0[2], blur.get_pixel(4, 2).0[2]);
+        assert!(left > 40 && right < 220, "the two halves bleed into each other: {left} {right}");
+    }
 }
+

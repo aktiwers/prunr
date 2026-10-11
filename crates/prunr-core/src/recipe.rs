@@ -68,7 +68,6 @@ pub struct MaskRecipe {
     guided_epsilon_bits: u32,
     feather_bits: u32,
     pub fill_style: FillStyle,
-    pub bg_effect: BgEffect,
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -82,7 +81,6 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
             feather_bits: m.feather.to_bits(),
             fill_style: m.fill_style,
-            bg_effect: m.bg_effect,
         }
     }
 }
@@ -97,7 +95,6 @@ impl PartialEq for MaskRecipe {
             && self.guided_epsilon_bits == other.guided_epsilon_bits
             && self.feather_bits == other.feather_bits
             && self.fill_style == other.fill_style
-            && self.bg_effect == other.bg_effect
     }
 }
 impl Eq for MaskRecipe {}
@@ -112,7 +109,6 @@ impl std::hash::Hash for MaskRecipe {
         self.guided_epsilon_bits.hash(state);
         self.feather_bits.hash(state);
         self.fill_style.hash(state);
-        self.bg_effect.hash(state);
     }
 }
 
@@ -205,7 +201,7 @@ impl UpscaleRecipe {
     #[inline] pub fn saturation(&self) -> f32 { f32::from_bits(self.saturation_bits) }
 }
 
-/// Tier 3: compositing settings (bg color, bg image).
+/// Tier 3: compositing settings (bg color, bg image, bg effect).
 /// These can be applied without re-running inference or masking.
 ///
 /// `solid_line_color` deliberately lives in `EdgeRecipe`, not here — a
@@ -224,6 +220,8 @@ pub struct CompositeRecipe {
     /// change with the same image still flips the recipe.
     #[serde(default)]
     pub bg_image_fit: crate::types::BgImageFit,
+    #[serde(default)]
+    pub bg_effect: BgEffect,
 }
 
 /// Complete recipe — the full fingerprint of settings that produced a result.
@@ -373,6 +371,7 @@ mod tests {
                 bg_color: bg,
                 bg_image_hash: None,
                 bg_image_fit: crate::types::BgImageFit::default(),
+                bg_effect: BgEffect::None,
             },
             upscale: UpscaleRecipe::default(),
         }
@@ -612,6 +611,11 @@ mod tests {
         let cases: Vec<(&str, ProcessingRecipe, ProcessingRecipe, RequiredTier)> = vec![
             ("identical", base.clone(), base.clone(), RequiredTier::Skip),
             ("bg only", base.clone(), with_bg([255, 0, 0]), RequiredTier::CompositeOnly),
+            ("bg effect only → composite", base.clone(), {
+                let mut r = base.clone();
+                r.composite.bg_effect = BgEffect::BlurredSource { radius: 12 };
+                r
+            }, RequiredTier::CompositeOnly),
             ("gamma only", base.clone(), with_gamma(1.5), RequiredTier::MaskRerun),
             ("line only", base.clone(), with_line(0.9), RequiredTier::EdgeRerun),
             ("model only", base.clone(), make_recipe(ModelKind::BiRefNetLite, 1.0, None), RequiredTier::FullPipeline),

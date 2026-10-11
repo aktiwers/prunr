@@ -616,7 +616,7 @@ impl PrunrApp {
                     Some(item.id)
                 } else { None };
                 if let Some(id) = kick_id {
-                    self.kick_bg_image_tex_prep(id, ctx);
+                    self.kick_backdrop_tex_prep(id, ctx);
                     ctx.request_repaint();
                 }
             }
@@ -655,7 +655,7 @@ impl PrunrApp {
             Ok(img) => {
                 item.set_bg_image(img, Some(path));
                 let id = item.id;
-                self.kick_bg_image_tex_prep(id, ctx);
+                self.kick_backdrop_tex_prep(id, ctx);
             }
             Err(err) => {
                 item.clear_bg_image();
@@ -1976,8 +1976,8 @@ impl PrunrApp {
             .and_then(|s| s.to_str())
             .map(|stem| format!("{stem}.prunr.png"))
             .unwrap_or_else(|| "result.prunr.png".to_string());
-        let baked = item.bake_export_bg(&rgba);
-        self.save_rgba_with_dialog(baked, &default_name);
+        let bg = item.export_bg();
+        self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
 
     /// Save one specific batch item (by index) via a save-as dialog. Used by
@@ -1985,24 +1985,25 @@ impl PrunrApp {
     /// entry point into the same encode-on-background pipeline as
     /// `save_current_to_file`.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let (baked, default_name) = {
+        let (rgba, bg, default_name) = {
             let Some(item) = self.batch.items.get(idx) else { return };
-            let Some(rgba) = item.result_rgba.as_ref() else { return };
+            let Some(rgba) = item.result_rgba.clone() else { return };
             let stem = Path::new(&item.filename)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image");
-            (item.bake_export_bg(rgba), format!("{stem}.prunr.png"))
+            (rgba, item.export_bg(), format!("{stem}.prunr.png"))
         };
-        self.save_rgba_with_dialog(baked, &default_name);
+        self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
 
     /// Shared tail for the two single-item save paths: open the PNG save-as
-    /// dialog, kick off the encode+write on a background thread. The caller
-    /// has already baked any per-item bg into the rgba.
+    /// dialog, then bake the background, encode and write on a background
+    /// thread.
     fn save_rgba_with_dialog(
         &mut self,
         rgba: Arc<image::RgbaImage>,
+        bg: super::item::ExportBg,
         default_name: &str,
     ) {
         let Some(path) = self.system.save_png_dialog(
@@ -2011,18 +2012,15 @@ impl PrunrApp {
         ) else { return };
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving...");
-        spawn_save_single(path, rgba, tx);
+        spawn_save_single(path, rgba, bg, tx);
     }
 
     /// One or more sidebar checkboxes selected — pick a folder, write each
     /// as `<source-stem>.prunr.png`. Encode + write run on a background thread.
     fn save_selected_to_folder(&mut self) {
-        let items: Vec<(String, Arc<image::RgbaImage>)> = self.batch.items.iter()
-            .filter(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some())
-            .filter_map(|item| {
-                let rgba = item.result_rgba.as_ref()?;
-                Some((item.filename.clone(), item.bake_export_bg(rgba)))
-            })
+        let items: Vec<(String, Arc<image::RgbaImage>, super::item::ExportBg)> = self.batch.items.iter()
+            .filter(|i| i.selected && i.status == BatchStatus::Done)
+            .filter_map(|item| Some((item.filename.clone(), item.result_rgba.clone()?, item.export_bg())))
             .collect();
         let Some(folder) = self.system.pick_folder_dialog(
             self.last_open_dir.as_deref(),
@@ -2630,7 +2628,7 @@ impl PrunrApp {
             self.batch.items[idx].settle_reveal();
             self.ensure_selected_source_decoded(idx);
             self.request_selected_textures(idx, ctx);
-            self.kick_bg_image_tex_prep(id, ctx);
+            self.kick_backdrop_tex_prep(id, ctx);
         }
         let style = self.selection_style();
         self.batch.ensure_selection_texture(style, ctx);
@@ -2648,6 +2646,10 @@ impl PrunrApp {
             item.drop_hot_tensors();
             item.reveal = None;
             item.subject = None;
+            // A full-size picture made from the photo; rebuilt when shown.
+            if matches!(item.settings.backdrop(), super::item_settings::Backdrop::Effect(_)) {
+                item.backdrop_texture = None;
+            }
             // 16 MB each: the shown image keeps its embedding, and with the
             // tool on so does the one shown before it.
             if !self.magic_brush_state.keeps_embedding(item.id) {
@@ -2660,30 +2662,40 @@ impl PrunrApp {
         }
     }
 
-    /// Kick off-thread bg-image texture prep: `to_rgba8()` + the
-    /// `ColorImage::from_rgba_unmultiplied` clone happen on a worker;
-    /// `drain_background_channels` does the `ctx.load_texture` upload
-    /// when the result lands. Idempotent — re-entry while a prep is
-    /// already in flight is a no-op via the `bg_image_tex_pending`
-    /// flag (cleared by the drain).
-    pub(crate) fn kick_bg_image_tex_prep(&mut self, item_id: u64, ctx: &egui::Context) {
+    /// Build the picture behind the result off the UI thread: the
+    /// background image, or the effect made from the photo (once it is
+    /// decoded). `drain_background_channels` uploads it. A no-op while
+    /// the shown or pending picture is the current one.
+    pub(crate) fn kick_backdrop_tex_prep(&mut self, item_id: u64, ctx: &egui::Context) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if item.bg_image_tex_pending || item.bg_image_texture.is_some() { return; }
-        let Some(bg) = item.bg_image.as_ref().cloned() else { return };
-        item.bg_image_tex_pending = true;
-        let id = item.id;
+        let backdrop = item.settings.backdrop();
+        let Some(key) = backdrop.picture_key() else {
+            item.backdrop_texture = None;
+            return;
+        };
+        if item.backdrop_tex_pending == Some(key) || item.backdrop_texture.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let build: Box<dyn FnOnce() -> Option<image::RgbaImage> + Send> = match backdrop {
+            super::item_settings::Backdrop::Image(_) => {
+                let Some(bg) = item.bg_image.clone() else { return };
+                Box::new(move || Some(bg.image.to_rgba8()))
+            }
+            super::item_settings::Backdrop::Effect(effect) => {
+                let Some(photo) = item.source_rgba.clone() else { return };
+                Box::new(move || prunr_core::effect_backdrop(&photo, effect))
+            }
+            super::item_settings::Backdrop::Transparent | super::item_settings::Backdrop::Color(_) => return,
+        };
+        item.backdrop_tex_pending = Some(key);
         let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
         let slots = self.batch.bg_io.decode_slots.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
-            let rgba = bg.image.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-            let ci = egui::ColorImage::from_rgba_unmultiplied(
-                [w as usize, h as usize],
-                rgba.as_raw(),
-            );
-            let _ = tx.send((id, bg.hash, ci));
+            let Some(rgba) = build() else { return };
+            let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+            let _ = tx.send((item_id, key, ci));
             ctx.request_repaint();
         });
     }
@@ -3379,14 +3391,14 @@ impl PrunrApp {
             self.recut_with_selection(id);
         }
 
-        // Drain bg-image texture preps. Hash match guards against a
-        // user pick that swapped to a different bg image while the
-        // worker was running — in that case the stale ColorImage is
-        // dropped and a fresh kick is already in flight.
-        while let Ok((item_id, hash, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+        // A picture that is no longer the item's backdrop (changed while it
+        // was built) is dropped; the next kick builds the current one.
+        while let Ok((item_id, key, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            item.bg_image_tex_pending = false;
-            if item.bg_image.as_ref().map(|b| b.hash) != Some(hash) { continue; }
+            if item.backdrop_tex_pending == Some(key) {
+                item.backdrop_tex_pending = None;
+            }
+            if item.settings.backdrop().picture_key() != Some(key) { continue; }
             // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0
             // wraps); other fits keep UVs in [0, 1] so the wrap is a
             // no-op. LINEAR for smooth scale modes (Cover/Contain
@@ -3398,8 +3410,8 @@ impl PrunrApp {
                 wrap_mode: egui::TextureWrapMode::Repeat,
                 mipmap_mode: None,
             };
-            let tex = ctx.load_texture(format!("bg_image_{:x}", hash), ci, opts);
-            item.bg_image_texture = Some(tex);
+            let tex = ctx.load_texture(format!("backdrop_{key:x}"), ci, opts);
+            item.backdrop_texture = Some((key, tex));
         }
 
 
@@ -4066,9 +4078,9 @@ fn is_supported_image_ext(path: &Path) -> bool {
 /// Encode + write one PNG on a background thread, then send the result toast
 /// text on `tx`. Stays at module scope so neither save method needs `&mut self`
 /// once they've kicked off the work.
-fn spawn_save_single(path: PathBuf, rgba: Arc<image::RgbaImage>, tx: mpsc::Sender<String>) {
+fn spawn_save_single(path: PathBuf, rgba: Arc<image::RgbaImage>, bg: super::item::ExportBg, tx: mpsc::Sender<String>) {
     std::thread::spawn(move || {
-        let msg = match prunr_core::encode_rgba_png(&rgba) {
+        let msg = match prunr_core::encode_rgba_png(&bg.bake(&rgba)) {
             Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
                 Ok(()) => "Saved".into(),
                 Err(e) => format!("Save failed: {e}"),
@@ -4105,19 +4117,19 @@ fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<Str
 /// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
-    items: Vec<(String, Arc<image::RgbaImage>)>,
+    items: Vec<(String, Arc<image::RgbaImage>, super::item::ExportBg)>,
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
-        for (filename, rgba) in items {
+        for (filename, rgba, bg) in items {
             let stem = Path::new(&filename)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image");
             let out_path = folder.join(format!("{stem}.prunr.png"));
-            match prunr_core::encode_rgba_png(&rgba) {
+            match prunr_core::encode_rgba_png(&bg.bake(&rgba)) {
                 Ok(png_bytes) => match std::fs::write(&out_path, &png_bytes) {
                     Ok(()) => saved += 1,
                     Err(_) => failed += 1,
