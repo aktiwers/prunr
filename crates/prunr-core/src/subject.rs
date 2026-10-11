@@ -18,29 +18,21 @@ pub struct SubjectHint {
 }
 
 /// The hint for a raw `tensor_h × tensor_w` segmentation output, read the
-/// way the mask is: sigmoid for BiRefNet, then stretched to 0..1.
+/// way the mask is (`SegNormaliser`), over the sampled values.
 pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: ModelKind) -> SubjectHint {
     let scale = (SUBJECT_HINT_SIDE as f32 / tensor_h.max(tensor_w).max(1) as f32).min(1.0);
     let (w, h) = (((tensor_w as f32 * scale) as usize).max(1), ((tensor_h as f32 * scale) as usize).max(1));
-    let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
     let samples: Vec<f32> = (0..h)
         .flat_map(|y| (0..w).map(move |x| (y, x)))
         .map(|(y, x)| {
             let ty = (y * tensor_h / h).min(tensor_h - 1);
             let tx = (x * tensor_w / w).min(tensor_w - 1);
-            let v = tensor.get(ty * tensor_w + tx).copied().unwrap_or(0.0);
-            if use_sigmoid { 1.0 / (1.0 + (-v).exp()) } else { v }
+            tensor.get(ty * tensor_w + tx).copied().unwrap_or(0.0)
         })
         .collect();
     let (lo, hi) = samples.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    let range = hi - lo;
-    let coverage = samples
-        .iter()
-        .map(|&v| {
-            let n = if range > 1e-6 { (v - lo) / range } else if hi > 0.5 { 1.0 } else { 0.0 };
-            (n.clamp(0.0, 1.0) * 255.0) as u8
-        })
-        .collect();
+    let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
+    let coverage = samples.iter().map(|&v| (norm.apply(v) * 255.0) as u8).collect();
     SubjectHint { width: w as u32, height: h as u32, coverage }
 }
 
