@@ -121,6 +121,13 @@ pub struct Cli {
     #[arg(long, default_value_t = prunr_core::BgImageFit::Cover)]
     pub bg_image_fit: prunr_core::BgImageFit,
 
+    /// Restyle the subject's colors, with the effect's default settings:
+    /// desaturate, invert, duotone, sepia, threshold, posterize, solarize,
+    /// hue-shift, saturate, color-splash, pixelate, cross-process,
+    /// halftone or gradient-map.
+    #[arg(long, value_name = "NAME", value_parser = str::parse::<prunr_core::FillStyle>)]
+    pub effect: Option<prunr_core::FillStyle>,
+
     /// Fill transparent background with a copy of the photo: `blur`
     /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
     /// over `--bg-image` and `--bg-color`, as in the app.
@@ -264,6 +271,7 @@ impl Cli {
             refine_edges: self.refine_edges,
             guided_radius: self.edge_width.clamp(1, 64),
             feather: self.feather.max(0.0),
+            fill_style: self.effect.unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -318,6 +326,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         if args.bg_color.is_some() { conflicts.push("--bg-color"); }
         if args.bg_image.is_some() { conflicts.push("--bg-image"); }
         if args.bg_effect.is_some() { conflicts.push("--bg-effect"); }
+        if args.effect.is_some() { conflicts.push("--effect"); }
         if args.contrast > 0.0 { conflicts.push("--contrast"); }
         if !conflicts.is_empty() {
             eprintln!(

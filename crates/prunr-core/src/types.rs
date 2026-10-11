@@ -617,6 +617,19 @@ impl std::fmt::Display for FillStyle {
     }
 }
 
+/// Reads a display name in CLI form (`hue-shift`, `Color splash`), giving
+/// that effect with its default settings.
+impl std::str::FromStr for FillStyle {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let cli = |name: &str| name.to_ascii_lowercase().replace(' ', "-");
+        Self::ALL.iter().copied().find(|f| cli(f.name()) == cli(s)).ok_or_else(|| {
+            let names: Vec<String> = Self::ALL.iter().map(|f| cli(f.name())).collect();
+            format!("'{s}' is not one of {}", names.join(", "))
+        })
+    }
+}
+
 /// Raw inference result (Tier 1 output) — the model tensor before postprocessing.
 pub struct InferenceResult {
     /// Raw f32 tensor data in row-major order [1, 1, H, W].
@@ -703,6 +716,17 @@ mod tests {
 
     /// Stretch and Center are retired: saved settings load as the nearest
     /// fit, and the CLI names the ones left.
+    #[test]
+    fn every_effect_parses_from_its_cli_name() {
+        use std::str::FromStr;
+        for style in FillStyle::ALL {
+            let cli = style.name().to_ascii_lowercase().replace(' ', "-");
+            assert_eq!(FillStyle::from_str(&cli), Ok(*style), "{cli}");
+        }
+        assert_eq!(FillStyle::from_str("Color splash").map(|f| f.name()), Ok("Color splash"));
+        assert!(FillStyle::from_str("channel-swap").is_err(), "retired");
+    }
+
     #[test]
     fn the_retired_inverted_background_loads_as_none() {
         assert_eq!(serde_json::from_str::<BgEffect>("\"inverted_source\"").unwrap(), BgEffect::None);
