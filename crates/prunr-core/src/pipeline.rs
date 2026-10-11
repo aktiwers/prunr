@@ -92,6 +92,12 @@ pub fn process_image_from_decoded(
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        progress.subject(|| {
+            let plane = view.slice(ndarray::s![0, 0, .., ..]);
+            let (h, w) = (plane.nrows(), plane.ncols());
+            let flat = plane.as_standard_layout();
+            crate::subject::subject_hint(flat.as_slice().unwrap_or(&[]), h, w, model)
+        });
         progress.step(Step::RefiningEdges);
         Ok(postprocess(view, img, &postprocess_opts))
     })?;
@@ -189,6 +195,7 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
             "infer_only raw tensor flattened",
         );
     }
+    progress.subject(|| crate::subject::subject_hint(&tensor_data, h, w, model));
     Ok(crate::types::InferenceResult {
         tensor_data,
         tensor_height: h,

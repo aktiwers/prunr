@@ -2648,6 +2648,7 @@ impl PrunrApp {
             }
             item.drop_hot_tensors();
             item.reveal = None;
+            item.subject = None;
             // 16 MB each: the shown image keeps its embedding, and with the
             // tool on so does the one shown before it.
             if !self.magic_brush_state.keeps_embedding(item.id) {
@@ -2781,7 +2782,7 @@ impl PrunrApp {
         for _ in 0..WORKER_POLL_PER_FRAME {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
-                WorkerResult::Report { item_id, update } => self.on_seg_report(item_id, update),
+                WorkerResult::Report { item_id, update } => self.on_seg_report(item_id, update, ctx),
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
@@ -2802,13 +2803,29 @@ impl PrunrApp {
 
     /// A background-removal step: the shared step words, except Loading
     /// the model, which names the models being loaded.
-    fn on_seg_report(&mut self, item_id: u64, update: prunr_core::ProgressUpdate) {
-        if update == prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) {
+    fn on_seg_report(&mut self, item_id: u64, update: prunr_core::ProgressUpdate, ctx: &egui::Context) {
+        if let prunr_core::ProgressUpdate::Subject(hint) = &update {
+            self.show_subject(item_id, hint, ctx);
+        } else if update == prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) {
             let text = self.loading_model_status_text(item_id);
             self.processor.set_seg_step_text(text);
         } else {
             self.processor.apply_seg_report(update);
         }
+    }
+
+    /// Outline the subject a run has just found on the shown image, while
+    /// its edges are refined. A 128 px hint costs well under a millisecond.
+    fn show_subject(&mut self, item_id: u64, hint: &prunr_core::SubjectHint, ctx: &egui::Context) {
+        if !self.batch.is_selected(item_id) {
+            return;
+        }
+        let Some((image, order)) = super::views::effects::subject_glow(hint) else { return };
+        let texture = ctx.load_texture(format!("subject-{item_id}"), image, egui::TextureOptions::LINEAR);
+        if let Some(item) = self.batch.find_by_id_mut(item_id) {
+            item.subject = Some(super::item::SubjectOutline { texture, shown_at: std::time::Instant::now(), order: order.into() });
+        }
+        ctx.request_repaint();
     }
 
     /// Include which models are loading so a DexiNed-only reload is

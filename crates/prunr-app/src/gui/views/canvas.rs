@@ -624,12 +624,19 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
+/// Seconds the subject outline takes to fade in.
+const SUBJECT_FADE_SECS: f32 = 0.35;
+
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
 fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
     match item.reveal_progress() {
-        Some((from, p)) => {
-            super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p);
+        Some((from, p, order)) => {
+            super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p, order);
+            // The subject's outline fades as the cut-out grows from it.
+            if let Some(subject) = item.subject.as_ref() {
+                ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(1.0 - p));
+            }
             ui.ctx().request_repaint();
         }
         None => {
@@ -717,6 +724,13 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         ).intersect(img_rect);
         if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
             ui.painter().rect_filled(shimmer_rect, 0.0, theme::PROCESSING_SWEEP);
+        }
+        // The subject, outlined as soon as the model has found it.
+        if let Some(subject) = item.and_then(|i| i.subject.as_ref()) {
+            let shown = (subject.shown_at.elapsed().as_secs_f32() / SUBJECT_FADE_SECS).min(1.0);
+            let breath = 0.75 + 0.25 * super::effects::breath(t);
+            ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(shown * breath));
+            ui.ctx().request_repaint();
         }
         img_rect
     });
