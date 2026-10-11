@@ -84,15 +84,6 @@ pub struct ItemSettings {
     /// a FullPipeline rerun on the next Process.
     #[serde(default)]
     pub input_transform: prunr_core::InputTransform,
-    /// Fingerprint of the active brush correction. The bytes themselves
-    /// live on the parent `BatchItem`; this hash is what the recipe diff
-    /// reads to fire MaskRerun on stroke commit.
-    ///
-    /// `NonZeroU64` niche optimization keeps this at 8 bytes vs 16 for
-    /// `Option<u64>`. Hash=0 is treated as None (content_hash never yields 0
-    /// in practice; the fnv1a of empty bytes is non-zero).
-    #[serde(default)]
-    pub correction_hash: Option<std::num::NonZeroU64>,
     /// Drives the CompositeOnly recipe diff when the user picks a different
     /// background image. `None` when no image bg is set.
     ///
@@ -160,7 +151,6 @@ impl Default for ItemSettings {
             fill_style: prunr_core::FillStyle::default(),
             bg_effect: prunr_core::BgEffect::default(),
             input_transform: prunr_core::InputTransform::default(),
-            correction_hash: None,
             bg_image_hash: None,
             bg_image_fit: BgImageFit::default(),
             output_scale: prunr_core::OutputScale::X4,
@@ -193,7 +183,6 @@ impl ItemSettings {
             feather: self.feather,
             fill_style: self.fill_style,
             bg_effect: self.bg_effect,
-            correction_hash: self.correction_hash.map(|nz| nz.get()),
         }
     }
 
@@ -339,9 +328,7 @@ mod tests {
     #[test]
     fn size_under_cache_line_budget() {
         // Budget is sized to absorb incremental FillStyle / LineStyle growth.
-        // Phase 6 took it to 96 B. Phase 15 added `correction_hash:
-        // Option<u64>` for the brush feature, lifting it to 112 B (two
-        // cache lines). Still Copy-friendly; the cost is one extra cache
+        // It sits around two cache lines. Still Copy-friendly; the cost is one extra cache
         // miss on cold access, never on the per-pixel hot path. Bump in
         // coarse steps to avoid a churn of test-only commits.
         assert!(
@@ -438,7 +425,6 @@ mod tests {
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
-            correction_hash: std::num::NonZeroU64::new(0xdeadbeef),
             bg_image_hash: std::num::NonZeroU64::new(0xfeedface),
             bg_image_fit: prunr_core::BgImageFit::Tile,
             output_scale: prunr_core::OutputScale::X2,
