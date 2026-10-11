@@ -97,7 +97,7 @@ impl TileRect {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProgressUpdate {
     Step(Step),
-    /// The outer count: crops of a stroke, passes of a two-pass upscale.
+    /// The outer count: crops of a stroke, passes of a multi-pass run.
     Outer { done: u32, total: u32, unit: Unit },
     /// The count inside the current outer unit: tiles, denoising steps.
     Inner { done: u32, total: u32, unit: Unit },

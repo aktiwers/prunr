@@ -12,7 +12,7 @@ pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePla
 
 use std::sync::Arc;
 
-use crate::progress::{Progress, Unit};
+use crate::progress::Progress;
 
 use half::f16;
 use image::{RgbImage, RgbaImage};
@@ -141,8 +141,7 @@ fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
 /// inferred here, so neither this function nor `upscale_rgba` needs to know
 /// which model it is running.
 ///
-/// Alpha is NOT handled here — it is composed by the public callers
-/// (`upscale_rgba` for single-pass, `upscale_two_pass` for the final pass).
+/// Alpha is NOT handled here — the public callers compose it.
 fn run_upscale_native(
     input: &RgbaImage,
     engine: &OrtEngine,
@@ -347,123 +346,31 @@ pub fn upscale_rgba(
     upscale_rgba_with_engine(input, &engine, model_id, scale, progress, None)
 }
 
-/// Engine-parameterized two-pass 4× upscale via `RealEsrganX2Plus`
-/// chained against itself. Caller constructs and owns the `OrtEngine`;
-/// used by the Processor's warm-engine cache so the graph-optimization
-/// stall is paid only on the first dispatch.
-///
-/// Pass 1: input → 2× via x2plus.
-/// Pass 2: 2× output → 4× via x2plus.
-///
-/// The engine must have been constructed for `ModelKind::RealEsrganX2Plus`.
-///
-/// Peak RAM: same as `upscale_two_pass` (see that doc).
-pub fn upscale_two_pass_with_engine(
-    input: &RgbaImage,
-    engine: &OrtEngine,
-    progress: &Progress,
-    terminate: Option<&Arc<UpscaleRunOptions>>,
-) -> Result<RgbaImage, CoreError> {
-    // Honor cancel before allocating the first pass.
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
+/// The model to run for `scale` when `model` is picked: Real-ESRGAN's own
+/// 2x model for a 2x Real-ESRGAN upscale when it is installed (about 4x
+/// faster than 4x and a downscale, as Real-ESRGAN does), else `model`.
+pub fn model_for_scale(model: prunr_models::ModelId, scale: crate::OutputScale, x2plus_installed: bool) -> prunr_models::ModelId {
+    use prunr_models::ModelId;
+    if model == ModelId::RealEsrganX4Plus && scale == crate::OutputScale::X2 && x2plus_installed {
+        ModelId::RealEsrganX2Plus
+    } else {
+        model
     }
-
-    let model_id = prunr_models::ModelId::RealEsrganX2Plus;
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
-        .ok_or_else(|| CoreError::Model("RealEsrganX2Plus not found in REGISTRY".into()))?;
-
-    let knobs = upscale_knobs(descriptor)?;
-    // Pass 1: source → 2×
-    progress.outer(0, 2, Unit::Pass);
-    let intermediate = run_upscale_native(input, engine, descriptor, knobs.native_scale, progress, terminate)?;
-
-    // Honor cancel between passes.
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
-
-    // Pass 2: intermediate → 4× (intermediate is moved, not cloned).
-    progress.outer(1, 2, Unit::Pass);
-    let final_rgb = run_upscale_native(&intermediate, engine, descriptor, knobs.native_scale, progress, terminate)?;
-    drop(intermediate);
-    progress.outer(2, 2, Unit::Pass);
-
-    // Compose alpha into final_rgb in place: take RGB from pass-2 output,
-    // overwrite its alpha with the Lanczos3-upscaled alpha from the original
-    // input. Mutating final_rgb saves a parallel 4× RgbaImage allocation.
-    let out_w = input.width() * 4;
-    let out_h = input.height() * 4;
-    let alpha_4x = upscale_alpha_lanczos3(input, out_w, out_h);
-    let mut out = final_rgb;
-    for (x, y, p) in out.enumerate_pixels_mut() {
-        p.0[3] = alpha_4x.get_pixel(x, y).0[0];
-    }
-    Ok(out)
-}
-
-/// Convenience wrapper: constructs an engine internally then delegates to
-/// `upscale_two_pass_with_engine`. Preserves the existing public API for
-/// callers that don't need the warm-engine cache (CLI, tests).
-///
-/// Pass 1: input → 2× via x2plus.
-/// Pass 2: 2× output → 4× via x2plus.
-///
-/// The intermediate 2× buffer is moved into the pass-2 input, not cloned —
-/// large-image RAM accounting depends on this. Pass-1's `RgbaImage` is freed
-/// as soon as pass-2 begins consuming it.
-///
-/// Peak RAM during pass-2 (per PRECONDITIONS.md two-pass smoke test, 963 MB
-/// peak on 512→1024 pass-2):
-///   input_bytes × 4   // pass-1 output (2× linear = 4× pixels)
-///   + input_bytes × 16 // pass-2 output (4× linear = 16× pixels)
-///   + ~64 MB           // x2plus ORT session (same session reused for both passes)
-///
-/// Compose stage allocates a 4× GrayImage for alpha (input × 4) and mutates
-/// pass-2's RgbaImage in place — no parallel 4× RgbaImage allocation.
-///
-/// Progress reports the pass as its outer count and each pass's tiles
-/// as the inner count.
-///
-/// Callable only via the `OutputScale::X4TwoPass` recipe variant.
-/// Nomos8k cannot use this path — its scale is fixed at 4×; the chip UI
-/// dims X4TwoPass for non-RealEsrgan models via `x4twopass_available`.
-pub fn upscale_two_pass(
-    input: &RgbaImage,
-    intra_threads: usize,
-    progress: &Progress,
-) -> Result<RgbaImage, CoreError> {
-    // Honor cancel before constructing the engine.
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
-
-    let model_id = prunr_models::ModelId::RealEsrganX2Plus;
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
-        .ok_or_else(|| CoreError::Model("RealEsrganX2Plus not found in REGISTRY".into()))?;
-
-    let level = pick_optimization_level(descriptor);
-    let engine = OrtEngine::new_with_optimization_level(
-        ModelKind::RealEsrganX2Plus,
-        intra_threads,
-        level,
-    )?;
-    upscale_two_pass_with_engine(input, &engine, progress, None)
-}
-
-/// Returns `true` when `model_id` supports `OutputScale::X4TwoPass`
-/// (chains `RealEsrganX2Plus` twice). Currently only `RealEsrganX4Plus`.
-pub fn x4twopass_available(model_id: prunr_models::ModelId) -> bool {
-    model_id == prunr_models::ModelId::RealEsrganX4Plus
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_real_esrgan_2x_runs_the_native_2x_model_when_installed() {
+        use crate::OutputScale;
+        use prunr_models::ModelId;
+        assert_eq!(model_for_scale(ModelId::RealEsrganX4Plus, OutputScale::X2, true), ModelId::RealEsrganX2Plus);
+        assert_eq!(model_for_scale(ModelId::RealEsrganX4Plus, OutputScale::X2, false), ModelId::RealEsrganX4Plus, "not installed");
+        assert_eq!(model_for_scale(ModelId::RealEsrganX4Plus, OutputScale::X4, true), ModelId::RealEsrganX4Plus);
+        assert_eq!(model_for_scale(ModelId::Nomos8kSchatL, OutputScale::X2, true), ModelId::Nomos8kSchatL, "other models resample");
+    }
 
     #[test]
     fn openvino_tiles_cap_at_256_for_a_prompt_cancel() {
@@ -549,58 +456,6 @@ mod tests {
     }
 
     // ── Two-pass scheduler tests ──────────────────────────────────────────────
-
-    /// `upscale_two_pass` takes no model_id parameter — RealEsrganX2Plus is
-    /// hardcoded. This test confirms the signature does not accept a model_id
-    /// argument by verifying the function compiles with only (input, threads,
-    /// callback, cancel) — a compile-error proof in the signature itself.
-    #[test]
-    #[allow(clippy::type_complexity)] // the explicit fn-pointer type IS the test — it pins the signature
-    fn two_pass_has_no_model_id_parameter() {
-        // If this test compiles, the signature is correct: no model_id arg.
-        let _fn: fn(&RgbaImage, usize, &Progress) -> Result<RgbaImage, CoreError> = |input, threads, progress| {
-            upscale_two_pass(input, threads, progress)
-        };
-    }
-
-    /// Cancel before dispatch must return Cancelled without loading the model.
-    #[test]
-    fn two_pass_cancel_during_pass1_returns_cancelled() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let cancel = Arc::new(AtomicBool::new(true));
-        let input = RgbaImage::from_pixel(8, 8, image::Rgba([128, 64, 32, 255]));
-        let result = upscale_two_pass(&input, 1, &Progress::none().with_cancel(cancel.clone()));
-
-        match result {
-            Err(CoreError::Cancelled) => {}
-            other => panic!("expected Err(Cancelled), got {:?}", other),
-        }
-        let _ = cancel.load(Ordering::Acquire);
-    }
-
-    /// `x4twopass_available` gates the X4TwoPass path: true only for
-    /// RealEsrganX4Plus (the user-facing model that signals ESRGAN architecture).
-    #[test]
-    fn x4twopass_available_predicate() {
-        assert!(
-            x4twopass_available(prunr_models::ModelId::RealEsrganX4Plus),
-            "x4twopass must be available when user has RealEsrganX4Plus selected"
-        );
-        assert!(
-            !x4twopass_available(prunr_models::ModelId::Nomos8kSchatL),
-            "x4twopass must not be available for Nomos8k — scale is fixed at 4×"
-        );
-        assert!(
-            !x4twopass_available(prunr_models::ModelId::RealEsrganX2Plus),
-            "RealEsrganX2Plus is an internal model — never the user's selected model"
-        );
-        assert!(
-            !x4twopass_available(prunr_models::ModelId::Silueta),
-            "Silueta is a segmentation model — x4twopass irrelevant"
-        );
-    }
 
     /// x2plus knobs match the x4plus export convention (same RRDB architecture,
     /// same export script → same tensor names and dtype).

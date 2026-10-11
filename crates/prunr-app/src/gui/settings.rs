@@ -627,9 +627,9 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::FourXNmkdSiaxCx => SettingsModel::FourXNmkdSiaxCxUpscale,
             ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
             ModelKind::RealEsrganX2Plus => {
-                // RealEsrganX2Plus is never the user-selected active model — it's
-                // selected indirectly via OutputScale::X4TwoPass. This conversion
-                // is unreachable in production; guard loudly if it ever fires.
+                // RealEsrganX2Plus is never the user-selected active model — it
+                // runs for a 2x Real-ESRGAN upscale. This conversion is
+                // unreachable in production; guard loudly if it ever fires.
                 unreachable!("RealEsrganX2Plus is an internal dispatch model — it has no SettingsModel variant")
             }
         }

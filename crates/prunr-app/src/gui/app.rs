@@ -723,11 +723,12 @@ impl PrunrApp {
             }
         };
         let recipe = item.settings.current_recipe(model_kind);
-        tracing::info!(item_id, ?model_id, ?output_scale, "upscale dispatched");
+        let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
+        tracing::info!(item_id, ?model_id, ?run_model, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         }
-        self.processor.dispatch_upscale(item_id, input, model_id, output_scale, intra_threads, recipe);
+        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, intra_threads, recipe);
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads

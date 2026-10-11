@@ -45,8 +45,8 @@ pub enum ModelId {
     TaesdFp16,
     RealEsrganX4Plus,
     Nomos8kSchatL,
-    /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand; internally dispatched
-    /// via `OutputScale::X4TwoPass` (chains x2plus twice for a net 4×).
+    /// Real-ESRGAN x2plus (RRDB, fp32). OnDemand; runs for a 2x
+    /// Real-ESRGAN upscale when installed.
     RealEsrganX2Plus,
     /// 4x NMKD Siax-CX (RRDB-23, fp32). OnDemand. Community-trained
     /// universal upscaler for clean / mildly-compressed photos.
@@ -322,8 +322,7 @@ pub struct UpscaleModelKnobs {
     /// outputs. Drives the tensor-packing branch in `upscale_rgba`.
     pub is_fp16: bool,
     /// Native output scale of the ONNX graph. x2plus is the only
-    /// native-2× upscale model — it's chained twice by
-    /// `upscale_two_pass` for net 4× output.
+    /// native-2× upscale model.
     pub native_scale: u32,
     /// `true` for window-attention transformers (HAT, Swin), `false`
     /// for CNN-style RRDB.
@@ -787,7 +786,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::RealEsrganX2Plus,
         display_name: "Real-ESRGAN x2plus",
-        description: "Internal upscale model — powers the 4\u{d7} (two-pass) refinement variant of Real-ESRGAN. Hidden from the model picker; selected indirectly via Output Scale.",
+        description: "Real-ESRGAN's own 2\u{d7} model: a 2\u{d7} Real-ESRGAN upscale runs it when installed, about four times faster than 4\u{d7} and a downscale. Hidden from the model picker.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "RealESRGAN_x2plus.onnx",
