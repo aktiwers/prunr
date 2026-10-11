@@ -115,11 +115,8 @@ fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
 }
 
 fn decode_source(item: &BatchItem) -> Option<DynamicImage> {
-    let bytes = item.source.load_bytes()
-        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source read"))
-        .ok()?;
-    prunr_core::load_image_from_bytes(&bytes)
-        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: decode"))
+    item.source.decode()
+        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source"))
         .ok()
 }
 
@@ -213,7 +210,7 @@ pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
     let path = temp_dir().join(&name);
     match &item.result_rgba {
         Some(rgba) => {
-            let baked = item.bake_export_bg(rgba);
+            let baked = item.export_bg().bake(rgba);
             // Stream-encode directly into BufWriter — saves the
             // ~5–30 MB intermediate Vec<u8> at 4 K.
             let file = std::fs::File::create(&path)?;

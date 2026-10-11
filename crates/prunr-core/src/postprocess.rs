@@ -497,10 +497,7 @@ pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Op
         BgEffect::BlurredSource { radius } => image::imageops::fast_blur(source, radius.clamp(1, 64) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
-            for p in img.pixels_mut() {
-                let y = luma_u8(p.0[0], p.0[1], p.0[2]);
-                p.0[0] = y; p.0[1] = y; p.0[2] = y;
-            }
+            apply_fill_style(&mut img, crate::types::FillStyle::Desaturate);
             img
         }
     };
@@ -508,6 +505,15 @@ pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Op
         p.0[3] = 255;
     }
     Some(img)
+}
+
+/// Put `effect`'s picture of `photo` under what `rgba` leaves transparent,
+/// covering it at any result size (an upscale included). False when there
+/// is no effect.
+pub fn apply_bg_effect(rgba: &mut RgbaImage, photo: &RgbaImage, effect: crate::types::BgEffect) -> bool {
+    let Some(picture) = effect_backdrop(photo, effect) else { return false };
+    crate::formats::apply_background_image(rgba, &DynamicImage::ImageRgba8(picture), crate::types::BgImageFit::Cover);
+    true
 }
 
 /// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.

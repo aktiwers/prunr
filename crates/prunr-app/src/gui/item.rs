@@ -22,31 +22,24 @@ pub(crate) struct ExportBg {
 impl ExportBg {
     pub(crate) fn bake(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
         use super::item_settings::Backdrop;
-        let mut copy = (**rgba).clone();
-        match self.backdrop {
-            Backdrop::Transparent => return Arc::clone(rgba),
-            Backdrop::Color(c) => prunr_core::apply_background_color(&mut copy, c),
-            Backdrop::Image(_) => {
-                let Some(bg) = self.image.as_ref() else { return Arc::clone(rgba) };
-                prunr_core::apply_background_image(&mut copy, &bg.image, self.fit);
-            }
-            Backdrop::Effect(effect) => {
-                let Some(picture) = self.photo().and_then(|p| prunr_core::effect_backdrop(&p, effect)) else {
-                    return Arc::clone(rgba);
-                };
-                // Same aspect as the result (its photo), so Cover fills exactly.
-                let picture = image::DynamicImage::ImageRgba8(picture);
-                prunr_core::apply_background_image(&mut copy, &picture, prunr_core::BgImageFit::Cover);
-            }
-        }
-        Arc::new(copy)
+        let composite = |under: &dyn Fn(&mut image::RgbaImage)| {
+            let mut copy = (**rgba).clone();
+            under(&mut copy);
+            Arc::new(copy)
+        };
+        let baked = match self.backdrop {
+            Backdrop::Transparent => None,
+            Backdrop::Color(c) => Some(composite(&|img| prunr_core::apply_background_color(img, c))),
+            Backdrop::Image(_) => self.image.as_ref()
+                .map(|bg| composite(&|img| prunr_core::apply_background_image(img, &bg.image, self.fit))),
+            Backdrop::Effect(effect) => self.photo()
+                .map(|photo| composite(&|img| { prunr_core::apply_bg_effect(img, &photo, effect); })),
+        };
+        baked.unwrap_or_else(|| Arc::clone(rgba))
     }
 
     fn photo(&self) -> Option<Arc<image::RgbaImage>> {
-        self.photo.clone().or_else(|| {
-            let bytes = self.source.load_bytes().ok()?;
-            prunr_core::load_image_from_bytes(&bytes).ok().map(|img| Arc::new(img.to_rgba8()))
-        })
+        self.photo.clone().or_else(|| self.source.decode().ok().map(|img| Arc::new(img.into_rgba8())))
     }
 }
 
@@ -81,6 +74,11 @@ pub(crate) enum ImageSource {
 
 impl ImageSource {
     /// Read the image bytes. For Path, reads from disk. For Bytes, clones the Arc.
+    pub(crate) fn decode(&self) -> Result<image::DynamicImage, String> {
+        let bytes = self.load_bytes().map_err(|e| e.to_string())?;
+        prunr_core::load_image_from_bytes(&bytes).map_err(|e| e.to_string())
+    }
+
     pub(crate) fn load_bytes(&self) -> std::io::Result<Arc<Vec<u8>>> {
         match self {
             Self::Path(path) => Ok(Arc::new(std::fs::read(path)?)),
@@ -926,10 +924,6 @@ impl BatchItem {
         }
     }
 
-    /// The result with its background baked in, for clipboard and drag-out.
-    pub(crate) fn bake_export_bg(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
-        self.export_bg().bake(rgba)
-    }
 
 }
 
