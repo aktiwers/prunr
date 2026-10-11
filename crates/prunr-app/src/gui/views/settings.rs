@@ -366,6 +366,13 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     hint(ui, "Use dark tones for the transparency pattern (helps on light results).");
     ui.add_space(theme::SPACE_SM);
 
+    super::chip::slider_row_f32(ui, "Selection fill", &mut settings.selection_fill, 0.0..=1.0, false, super::fmt::percent);
+    hint(ui, "How strongly a selection is tinted on the image.");
+    ui.add_space(theme::SPACE_SM);
+    ui.checkbox(&mut settings.selection_outline, RichText::new("Outline the selection")
+        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+    ui.add_space(theme::SPACE_SM);
+
     ui.checkbox(&mut settings.auto_hide_adjustments, RichText::new("Auto-hide adjustments toolbar")
         .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
     hint(ui, "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.");

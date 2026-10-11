@@ -146,24 +146,6 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
     );
     committed |= fe.commit;
     super::hint(ui, "Soften the selection edge.");
-    ui.add_space(2.0);
-    let ot = chip::slider_row_f32(
-        ui, "Outline width", &mut s.outline_thickness, 0.0..=10.0, false,
-        |v| fmt::px(v, 1),
-    );
-    committed |= ot.commit;
-    ui.add_space(2.0);
-    let oo = chip::slider_row_f32(
-        ui, "Outline opacity", &mut s.outline_opacity, 0.0..=1.0, false,
-        fmt::percent,
-    );
-    committed |= oo.commit;
-    ui.add_space(2.0);
-    let fo = chip::slider_row_f32(
-        ui, "Fill opacity", &mut s.fill_opacity, 0.0..=1.0, false,
-        fmt::percent,
-    );
-    committed |= fo.commit;
     committed
 }
 

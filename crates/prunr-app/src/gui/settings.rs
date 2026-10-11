@@ -26,6 +26,12 @@ pub struct Settings {
     /// Canvas transparency checkerboard uses dark tones instead of light.
     #[serde(default)]
     pub dark_checker: bool,
+    /// How strongly a selection is tinted on the image, 0..1.
+    #[serde(default = "default_selection_fill")]
+    pub selection_fill: f32,
+    /// Whether a selection is outlined on the image.
+    #[serde(default = "default_true")]
+    pub selection_outline: bool,
     /// Auto-rerun Tier 2 on knob tweaks (live preview). Default ON.
     #[serde(default = "default_live_preview")]
     pub live_preview: bool,
@@ -135,6 +141,8 @@ impl Settings {
 }
 
 fn default_live_preview() -> bool { true }
+fn default_true() -> bool { true }
+fn default_selection_fill() -> f32 { 0.15 }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
@@ -627,6 +635,8 @@ impl Default for Settings {
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
             dark_checker: false,
+            selection_fill: default_selection_fill(),
+            selection_outline: true,
             live_preview: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
@@ -727,6 +737,8 @@ mod tests {
         assert!(s.parallel_jobs >= 1,
             "parallel_jobs must clamp to >= 1 even on a single-core host");
         assert!(!s.dark_checker);
+        assert_eq!(s.selection_fill, 0.15);
+        assert!(s.selection_outline);
         assert!(s.live_preview);
         assert!(!s.auto_hide_adjustments);
         assert!(!s.export_split_layers);
@@ -993,11 +1005,11 @@ mod tests {
         s.presets.insert("Foo".to_string(), file);
         s.default_preset = "Foo".to_string();
         s.brush.radius = 33.0;
-        s.brush.fill_opacity = 0.2;
+        s.brush.hardness = 0.2;
 
         s.model = SettingsModel::U2net;
         s.on_model_change_resolve_brush();
-        assert_eq!((s.brush.radius, s.brush.fill_opacity), (33.0, 0.2), "what the user set for the brush survives a model switch");
+        assert_eq!((s.brush.radius, s.brush.hardness), (33.0, 0.2), "what the user set for the brush survives a model switch");
         assert_eq!(s.brush.inpaint_feather, 9.0, "the new model's tuning comes from the preset");
     }
 
