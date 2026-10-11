@@ -32,6 +32,12 @@ pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("edge_4K");
     group.throughput(Throughput::Elements((W * H) as u64));
     group.sample_size(10);
+    group.bench_function("dilate_round_r20", |b| {
+        b.iter(|| black_box(prunr_core::morphology::dilate_round(black_box(&mask), 20)))
+    });
+    group.bench_function("dilate_square_r20", |b| {
+        b.iter(|| { let mut m = mask.clone(); prunr_core::morphology::shift_mask(&mut m, -20.0); black_box(m) })
+    });
     group.bench_function("edge_plane", |b| {
         b.iter(|| black_box(edge_plane(black_box(&fine), 480, 640, W, H, 0.5, 2)))
     });

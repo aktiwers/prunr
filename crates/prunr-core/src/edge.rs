@@ -185,14 +185,10 @@ pub fn tensor_to_edge_mask(
     crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
 }
 
-/// `base` dilated by `thickness` pixels; `None` at 0, where the base
-/// already is the plane a composition draws.
+/// `base` grown by a round pen `thickness` pixels wide on each side;
+/// `None` at 0, where the base already is the plane a composition draws.
 pub fn thickened_edges(base: &image::GrayImage, thickness: u32) -> Option<image::GrayImage> {
-    (thickness > 0).then(|| {
-        let mut m = base.clone();
-        crate::morphology::shift_mask(&mut m, -(thickness as f32));
-        m
-    })
+    (thickness > 0).then(|| crate::morphology::dilate_round(base, thickness))
 }
 
 /// The edge plane a composition draws: `tensor_to_edge_mask` dilated by
@@ -765,6 +761,16 @@ mod tests {
         }
     }
     use image::{DynamicImage, RgbImage, Rgb};
+
+    /// Wide lines end and turn in round caps, like a pen, not squares.
+    #[test]
+    fn thick_lines_have_round_ends() {
+        let mut dot = image::GrayImage::new(21, 21);
+        dot.put_pixel(10, 10, image::Luma([255]));
+        let thick = thickened_edges(&dot, 6).expect("width above 0 thickens");
+        assert_eq!(thick.get_pixel(16, 10)[0], 255, "reaches the full width along an axis");
+        assert_eq!(thick.get_pixel(16, 16)[0], 0, "but not the square's corner");
+    }
 
     fn solid_rgb(w: u32, h: u32) -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([120, 120, 120])))
