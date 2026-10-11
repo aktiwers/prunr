@@ -29,14 +29,11 @@ pub(crate) struct BrushChipOutcome {
     pub reset_brush_requested: bool,
     /// A slider settled or a choice was made: the brush settings persist.
     pub committed: bool,
-    /// The strip's Apply button: run the model with the painted selection.
-    pub apply_requested: bool,
 }
 
 impl BrushChipOutcome {
     pub fn merge(&mut self, other: Self) {
         self.reset_brush_requested |= other.reset_brush_requested;
-        self.apply_requested |= other.apply_requested;
         self.committed |= other.committed;
     }
 }
