@@ -95,8 +95,7 @@ pub(crate) struct ToolbarState<'a> {
     pub processing: bool,
     pub has_bg_image: bool,
     pub bg_image_label: Option<&'a str>,
-    /// `(w, h)` of the active item's effective input — the chained result
-    /// when chain mode is on and a result exists, else the source.
+    /// `(w, h)` of the image the next upscale starts from.
     pub source_dims: (u32, u32),
     pub has_selection: bool,
     /// On-disk install state, refreshed on events rather than per frame.
@@ -1218,4 +1217,3 @@ mod tests {
         assert!(c.line_mode_from.is_none());
     }
 }
-

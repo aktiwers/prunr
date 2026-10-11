@@ -1567,8 +1567,8 @@ impl PrunrApp {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             item.status = BatchStatus::Processing;
             item.start_job(step, Engine::Segment);
-            let base = item.job.as_ref().and_then(|j| j.base.clone());
-            self.batch.request_filter_only(id, &source, base, fill_style);
+            let input = item.job_input();
+            self.batch.request_filter_only(id, &source, input, fill_style);
         }
     }
 
@@ -1632,8 +1632,7 @@ impl PrunrApp {
             // cached tensor never saw, unless it redoes the shown cut-out
             // from that cut-out's own starting image.
             if item.starts_from_result(Engine::Segment) {
-                let redo = item.timeline.current().origin.as_ref().is_some_and(|o| o.engine == Engine::Segment);
-                if !redo {
+                if !item.redoes_shown_step(Engine::Segment) {
                     item.set_cached_tensor(None);
                 }
                 tiers.tier1.insert(item.id);
@@ -1779,8 +1778,8 @@ impl PrunrApp {
         while let Some(admitted_id) = ctrl.try_admit_next() {
             if let Some(item) = self.batch.find_by_id_mut(admitted_id) {
                 if let Ok(bytes) = item.source.load_bytes() {
-                    let chain_input = item.job.as_ref().and_then(|j| j.base.clone());
-                    initial_items.push((item.id, bytes, chain_input));
+                    let input = item.job_input();
+                    initial_items.push((item.id, bytes, input));
                     item.status = BatchStatus::Processing;
                 }
             }
@@ -1815,9 +1814,9 @@ impl PrunrApp {
             .filter(|i| tier1_ids.contains(&i.id))
             .filter_map(|i| {
                 let bytes = i.source.load_bytes().ok()?;
-                let chain_input = i.job.as_ref().and_then(|j| j.base.clone());
+                let input = i.job_input();
                 i.status = BatchStatus::Processing;
-                Some((i.id, bytes, chain_input))
+                Some((i.id, bytes, input))
             })
             .collect();
 
@@ -2263,8 +2262,8 @@ impl PrunrApp {
         while let Some(next_id) = ctrl.try_admit_next() {
             if let Some(item) = self.batch.find_by_id_mut(next_id) {
                 let Ok(bytes) = item.source.load_bytes() else { continue; };
-                let chain_input = item.job.as_ref().and_then(|j| j.base.clone());
-                let tuple = (next_id, bytes, chain_input);
+                let input = item.job_input();
+                let tuple = (next_id, bytes, input);
                 item.status = BatchStatus::Processing;
 
                 if let Some(ref tx) = self.processor.admission_tx {
@@ -2351,7 +2350,7 @@ impl PrunrApp {
         // overwrites any existing `result_rgba`. Filter-only mode is
         // the legitimate user of that fallback (the filter IS the
         // pipeline). Anywhere else, refuse — better to skip the
-        // dispatch than discard a prior chained result.
+        // dispatch than discard a prior result.
         if matches!(kind, PreviewKind::Mask)
             && !is_filter_only
             && seg_tensor.is_none()
@@ -2360,24 +2359,22 @@ impl PrunrApp {
             return None;
         }
         // A run on top of an earlier result (an erase, a hand edit) keeps
-        // it: the preview starts from the same image Process would, the
-        // shown step's own starting image when it redoes that step. The
-        // `chain_dyn_cache` keeps the wrapped `DynamicImage` across ticks
-        // so a slider drag at 4K doesn't re-clone ~50 MB per tick;
-        // `Arc::ptr_eq` against the input is the self-invalidation check.
-        let base = item.run_input(Engine::Segment);
-        let original = if let Some(rgba) = base.as_ref() {
-            let cached = item.chain_dyn_cache.as_ref()
-                .and_then(|(src, dyn_img)| Arc::ptr_eq(rgba, src).then(|| Arc::clone(dyn_img)));
+        // it: the preview starts where Process would, the shown step's own
+        // start when it redoes that step.
+        let start = item.run_start(Engine::Segment);
+        let original = if let Some(rgba) = start.as_ref().and_then(|s| s.image.load()) {
+            let cached = item.start_dyn_cache.as_ref()
+                .and_then(|(src, dyn_img)| Arc::ptr_eq(&rgba, src).then(|| Arc::clone(dyn_img)));
             match cached {
                 Some(dyn_img) => dyn_img,
                 None => {
-                    let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone()));
-                    item.chain_dyn_cache = Some((Arc::clone(rgba), Arc::clone(&dyn_img)));
+                    let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((*rgba).clone()));
+                    item.start_dyn_cache = Some((rgba, Arc::clone(&dyn_img)));
                     dyn_img
                 }
             }
         } else {
+            item.start_dyn_cache = None;
             if item.source_dyn.is_none() {
                 let rgba = item.source_rgba.as_ref()?;
                 item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
@@ -2409,7 +2406,7 @@ impl PrunrApp {
                 version,
                 kind,
                 original,
-                base: None,
+                start: None,
                 settings: item.settings,
                 seg_tensor: None,
                 edge_tensor: None,
@@ -2448,7 +2445,7 @@ impl PrunrApp {
         let correction = seg_tensor.as_ref().and_then(|seg| item.selection_plane_at((seg.width, seg.height)));
         Some(DispatchInputs {
             version,
-            kind, original, base, settings: item.settings,
+            kind, original, start, settings: item.settings,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
             correction,
@@ -2552,7 +2549,7 @@ impl PrunrApp {
                 }
                 item.amend();
                 if !is_upscale_tier2 {
-                    item.record_origin(Engine::Segment, r.base);
+                    item.record_origin(Engine::Segment, r.start);
                 }
                 tracing::debug!(
                     event = "upscale_tier2_apply",
