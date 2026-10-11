@@ -3149,12 +3149,12 @@ impl PrunrApp {
             let msg = if counts.errored == 1 {
                 format!("Image failed: {first_err}")
             } else {
-                format!("{} image(s) failed — first: {first_err}", counts.errored)
+                format!("{} failed — first: {first_err}", super::views::fmt::count(counts.errored, "image", "images"))
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
         } else if !still_processing {
-            let msg = format!("All done \u{2014} {} images processed", counts.done);
+            let msg = format!("All done \u{2014} {} processed", super::views::fmt::count(counts.done, "image", "images"));
             self.status.text = msg.clone();
             self.toasts.success(msg);
         }

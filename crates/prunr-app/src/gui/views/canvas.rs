@@ -161,9 +161,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let active_inpaint_item = app.batch.selected_idx_clamped()
             .map(|idx| app.batch.items[idx].id)
             .filter(|&id| app.processor.is_inpaint_in_flight(id));
-        let cancelling = active_inpaint_item
-            .map(|id| app.processor.is_inpaint_cancelling(id))
-            .unwrap_or(false);
+        let cancelling = progress.is_cancelling()
+            || active_inpaint_item.is_some_and(|id| app.processor.is_inpaint_cancelling(id));
         let cancelled = match app.settings.progress_style {
             crate::gui::settings::ProgressStyle::Banner => {
                 super::progress_widget::render_banner(ui, canvas_rect, &progress, cancelling)

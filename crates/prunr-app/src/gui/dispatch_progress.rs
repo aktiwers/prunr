@@ -145,6 +145,11 @@ pub struct DispatchProgress {
 }
 
 impl DispatchProgress {
+    /// A cancel was requested and the run is finishing its current step.
+    pub fn is_cancelling(&self) -> bool {
+        self.step_label == step_labels::CANCELLING
+    }
+
     /// Builder for the seg / batch pipeline. `step` is whatever
     /// `BatchManager::progress().stage` reports ("Processing 3/5").
     pub fn seg(done: u32, total: u32, step: impl Into<Cow<'static, str>>) -> Self {
@@ -553,6 +558,16 @@ mod tests {
             Some(CancelTarget::InpaintForItem(7)),
         );
         assert_eq!(cancel_target_for(ProgressKind::SdInpaint, None), None);
+    }
+
+    /// The upscale cancel says so through its step label; the widgets
+    /// read the same fact to swap the headline and drop the Esc hint.
+    #[test]
+    fn a_cancelling_run_reads_as_cancelling() {
+        let mut p = upscale((1, 48));
+        assert!(!p.is_cancelling());
+        p.step_label = std::borrow::Cow::Borrowed(step_labels::CANCELLING);
+        assert!(p.is_cancelling());
     }
 
     #[test]
