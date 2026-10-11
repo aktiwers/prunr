@@ -144,7 +144,10 @@ pub(crate) fn render(
                         .on_hover_text("Click to apply these settings to the current image")
                         .clicked()
                     {
-                        *current_item = settings.preset_values(&name);
+                        // Applying sets what Reset to this preset would.
+                        let resolved = settings.resolve_preset(&name, None);
+                        *current_item = resolved.item_settings;
+                        settings.brush = resolved.brush;
                         applied = Some(name.clone());
                         egui::Popup::close_id(ui.ctx(), pop_id);
                     }
@@ -153,12 +156,22 @@ pub(crate) fn render(
                         |ui| {
                             // Delete — hidden for Prunr (non-deletable).
                             if !is_prunr {
-                                let delete_btn = ui.small_button(
-                                    RichText::new(ICON_DELETE.codepoint)
-                                        .size(theme::FONT_SIZE_MONO)
-                                        .color(theme::DESTRUCTIVE),
-                                );
-                                if delete_btn.on_hover_text("Delete preset").clicked() {
+                                // A first click arms the delete; a second confirms.
+                                let armed_id = egui::Id::new("preset_delete_armed");
+                                let armed = ui.data(|d| d.get_temp::<String>(armed_id)).as_deref() == Some(name.as_str());
+                                let label = if armed {
+                                    RichText::new("Delete?").size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE)
+                                } else {
+                                    RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE)
+                                };
+                                let clicked = crate::gui::views::chip::named(ui.small_button(label), "Delete preset")
+                                    .on_hover_text(if armed { "Click again to delete" } else { "Delete preset" })
+                                    .clicked();
+                                if clicked && !armed {
+                                    ui.data_mut(|d| d.insert_temp(armed_id, name.clone()));
+                                }
+                                if clicked && armed {
+                                    ui.data_mut(|d| d.remove::<String>(armed_id));
                                     settings.presets.remove(&name);
                                     // Remove the on-disk file too; presets are
                                     // the filesystem-store's source of truth.
@@ -190,6 +203,7 @@ pub(crate) fn render(
                                     .size(theme::FONT_SIZE_MONO)
                                     .color(star_color),
                             );
+                            let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
                             if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
                                 settings.default_preset = name.clone();
                             }
