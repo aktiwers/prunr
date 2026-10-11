@@ -1046,7 +1046,8 @@ impl PrunrApp {
         } else {
             raw_backend
         };
-        tracing::info!(item_id, ?backend, ?raw_backend, "inpaint stroke committed; dispatching");
+        let seed = raw_backend.is_sd_family().then(|| bs.sd_seed.unwrap_or_else(super::brush_state::fresh_sd_seed));
+        tracing::info!(item_id, ?backend, ?raw_backend, ?seed, "inpaint stroke committed; dispatching");
         let tuning = super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,
             feather_px: bs.inpaint_feather,
@@ -1057,7 +1058,7 @@ impl PrunrApp {
             sd_guidance_scale: bs.sd_guidance_scale,
             sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
-            sd_seed: bs.sd_seed,
+            sd_seed: seed,
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,
@@ -1065,7 +1066,7 @@ impl PrunrApp {
             )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
-        self.batch.items[idx].start_job(Some(StepKind::Erase), Engine::Erase);
+        self.batch.items[idx].start_erase(seed);
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
@@ -3640,6 +3641,7 @@ impl PrunrApp {
                     installed: self.hardware_install_cache,
                     show_original: self.show_original,
                     can_compare,
+                    shown_seed: item.shown_seed(),
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,

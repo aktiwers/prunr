@@ -102,6 +102,8 @@ pub(crate) struct ToolbarState<'a> {
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
     pub can_compare: bool,
+    /// The seed of the generated fill on screen, for Pin seed.
+    pub shown_seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -178,7 +180,7 @@ pub(crate) fn render(
             super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.processing);
         }
         if shows(model, Surface::SdChips) {
-            let outcome = super::eraser_chip::render(ui, app_settings, state.installed);
+            let outcome = super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed);
             if outcome.committed {
                 change.brush_settings_committed = true;
             }
