@@ -200,7 +200,7 @@ impl<T: Payload> Stored<T> {
     }
 
     #[cfg(test)]
-    fn is_compressed(&self) -> bool {
+    pub(crate) fn is_compressed(&self) -> bool {
         matches!(&*self.lock(), Tier::Compressed(_) | Tier::OnDisk(_))
     }
 }
@@ -224,6 +224,8 @@ pub(crate) struct DocState {
     pub(crate) result: Option<StoredImage>,
     pub(crate) recipe: Option<prunr_core::ProcessingRecipe>,
     pub(crate) selection: Option<StoredSelection>,
+    /// The selection's content hash, so restoring it costs no rehash.
+    pub(crate) selection_hash: Option<u64>,
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
     pub(crate) at: Instant,
@@ -244,6 +246,11 @@ impl Timeline {
         &self.states[self.cursor]
     }
 
+    /// The state before the shown one.
+    pub(crate) fn previous(&self) -> Option<&DocState> {
+        self.cursor.checked_sub(1).map(|i| &self.states[i])
+    }
+
     /// Fill in the shown state as a job it started lands: no new step.
     pub(crate) fn current_mut(&mut self) -> &mut DocState {
         &mut self.states[self.cursor]
@@ -253,11 +260,6 @@ impl Timeline {
     /// value it started at before it lands.
     pub(crate) fn version(&self) -> u64 {
         self.version
-    }
-
-    /// Make every running job's result stale without moving.
-    pub(crate) fn bump(&mut self) {
-        self.version += 1;
     }
 
     /// A new step after the shown one; any redo tail goes. A knob change
@@ -342,6 +344,7 @@ mod tests {
             result: None,
             recipe: None,
             selection: None,
+            selection_hash: None,
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
             at: Instant::now(),

@@ -21,11 +21,13 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.
+
 - **One toolbar row.** Every pipeline stage is a group chip (Mask, Lines, Fill style, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.
 - **Panels that stay out of the way.** Mask, Lines, Fill style, Background and Refine stay open while you work on the image and fade while a slider is held; the chip whose panel is open keeps its accent outline. Picks in Model, Preset, Quality and Scale close their list. Escape closes one thing per press: the open panel, then the top dialog, then a running job, then the selection.
 - Knob names follow the words other editors use: Opacity, Expand region, Edge blend, Feather, Edge shift, Denoise, Sharpen. American spelling throughout.
 - Paint Brush and Magic Brush share size and shape; while either is on, its knobs sit in a strip over the image, and `[` / `]` change the size.
-- Undo is one timeline across strokes, results and presets, with Cmd+Shift+Z as an alternate redo; stroke history is bounded at 32 snapshots per image.
+- Cmd+Shift+Z is an alternate redo; up to 64 undo steps per image.
 - Chain mode defaults on; switching to an upscale model turns it on so the cut-out feeds the upscaler.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
 - Line color choices (Original, Solid color, styles) live in one list.

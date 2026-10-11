@@ -289,7 +289,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         };
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
-        app.commit_selection_and_dispatch(item_id, merged);
+        app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);
     }
 }
 

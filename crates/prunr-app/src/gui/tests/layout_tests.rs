@@ -30,7 +30,7 @@ fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
         let mut cells = vec![0i8; 64 * 64];
         cells[64 * 10 + 10] = prunr_core::selection::FULL;
         app.batch.select_item(0);
-        app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells));
+        app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells), crate::gui::timeline::StepKind::Stroke);
     }
     settle(&mut harness);
     // Upscale has no brush.
