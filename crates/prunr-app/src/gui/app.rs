@@ -2331,6 +2331,31 @@ impl PrunrApp {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
         let version = item.timeline.version();
+        // UpscaleTier2: short-circuit the seg/edge path entirely. We need only
+        // the kept upscale run + knob snapshot. Return None if there is no
+        // upscale run yet (Tier-1 must run first).
+        if matches!(kind, PreviewKind::UpscaleTier2) {
+            use super::live_preview::UpscaleTier2Knobs;
+            let upscale = item.upscale.clone()?;
+            let knobs = UpscaleTier2Knobs::of(&item.settings);
+            return Some(DispatchInputs {
+                version,
+                kind,
+                // Unread by a Refine preview, which re-finishes the kept run.
+                original: Arc::new(image::DynamicImage::new_rgba8(0, 0)),
+                start: None,
+                settings: item.settings,
+                seg_tensor: None,
+                edge_tensor: None,
+                secondary_edge_tensor: None,
+                cached_edge: Default::default(),
+                cached_bold: Default::default(),
+                cached_masked_base: None,
+                correction: None,
+                upscale: Some(upscale),
+                upscale_tier2_knobs: Some(knobs),
+            });
+        }
         let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
@@ -2376,30 +2401,6 @@ impl PrunrApp {
         let secondary_edge_tensor = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. })
             .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
             .flatten();
-        // UpscaleTier2: short-circuit the seg/edge path entirely. We need only
-        // the kept upscale run + knob snapshot. Return None if there is no
-        // upscale run yet (Tier-1 must run first).
-        if matches!(kind, PreviewKind::UpscaleTier2) {
-            use super::live_preview::UpscaleTier2Knobs;
-            let upscale = item.upscale.clone()?;
-            let knobs = UpscaleTier2Knobs::of(&item.settings);
-            return Some(DispatchInputs {
-                version,
-                kind,
-                original,
-                start: None,
-                settings: item.settings,
-                seg_tensor: None,
-                edge_tensor: None,
-                secondary_edge_tensor: None,
-                cached_edge: Default::default(),
-                cached_bold: Default::default(),
-                cached_masked_base: None,
-                correction: None,
-                upscale: Some(upscale),
-                upscale_tier2_knobs: Some(knobs),
-            });
-        }
         match kind {
             // Mask kind without a seg tensor is the filter-only path:
             // `run_preview` applies fill_style to the raw source. No tensor
@@ -3632,6 +3633,17 @@ impl PrunrApp {
         self.apply_toolbar_change(ui.ctx(), toolbar_change, settings_before);
     }
 
+    /// Whether the image at `idx` changed only in Refine's after-the-model
+    /// knobs since its upscale, so its kept run can be re-finished.
+    fn wants_upscale_tier2(&self, idx: usize) -> bool {
+        let Some(item) = self.batch.items.get(idx) else { return false };
+        let (Some(_), Some(old), Some(model)) = (&item.upscale, &item.applied_recipe, self.settings.model.dispatch_model_kind()) else {
+            return false;
+        };
+        self.settings.model.is_upscale()
+            && prunr_core::resolve_tier(old, &item.settings.current_recipe(model)) == prunr_core::RequiredTier::UpscaleTier2
+    }
+
     fn apply_toolbar_change(
         &mut self,
         ctx: &egui::Context,
@@ -3772,60 +3784,17 @@ impl PrunrApp {
             }
         }
 
-        // Upscale Tier-2 live preview: sharpen / ai_blend / color_match
-        // tweaks don't produce a DispatchKind (they aren't in the knob catalog and
-        // resolve_auto_dispatch returns None for them). Detect them by checking
-        // the recipe diff directly: if the model is upscale, live preview is enabled,
-        // the item has a cached upscale_raw buffer, and the diff resolves to
-        // UpscaleTier2 — fire mark_tweak so the debounced postprocess kicks in.
-        if self.settings.live_preview && self.settings.model.is_upscale() {
-            let item = &self.batch.items[idx];
-            let has_raw = item.upscale.is_some();
-            let has_applied = item.applied_recipe.is_some();
-            tracing::debug!(
-                event = "upscale_tier2_check",
-                item_id,
-                live_preview = self.settings.live_preview,
-                model_is_upscale = self.settings.model.is_upscale(),
-                has_upscale_raw = has_raw,
-                has_applied_recipe = has_applied,
-                commit = toolbar_change.commit,
-                "tier2 detection gate"
-            );
-            if has_raw {
-                if let Some(ref old_recipe) = item.applied_recipe {
-                    let model = self.settings.model
-                        .dispatch_model_kind()
-                        .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
-                    let new_recipe = item.settings.current_recipe(model);
-                    let tier = prunr_core::resolve_tier(old_recipe, &new_recipe);
-                    tracing::debug!(
-                        event = "upscale_tier2_resolve",
-                        item_id,
-                        resolved_tier = ?tier,
-                        old_model = ?old_recipe.upscale.model,
-                        new_model = ?new_recipe.upscale.model,
-                        old_sharpen_bits = old_recipe.upscale.sharpen_bits,
-                        new_sharpen_bits = new_recipe.upscale.sharpen_bits,
-                        old_ai_blend_bits = old_recipe.upscale.ai_blend_bits,
-                        new_ai_blend_bits = new_recipe.upscale.ai_blend_bits,
-                        old_color_match = old_recipe.upscale.color_match,
-                        new_color_match = new_recipe.upscale.color_match,
-                        old_output_scale = ?old_recipe.upscale.output_scale,
-                        new_output_scale = ?new_recipe.upscale.output_scale,
-                        "tier2 recipe diff"
-                    );
-                    if matches!(tier, prunr_core::RequiredTier::UpscaleTier2) {
-                        tracing::debug!(event = "upscale_tier2_mark", item_id, "calling mark_tweak");
-                        self.processor.live_preview.mark_tweak(item_id, PreviewKind::UpscaleTier2);
-                        if toolbar_change.commit {
-                            self.processor.live_preview.flush(item_id);
-                            ctx.request_repaint();
-                        } else {
-                            ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
-                        }
-                    }
-                }
+        // Refine's after-the-model knobs need no model, so they preview
+        // whatever the Live preview setting. Checked only on a change (or
+        // a slider's release), not every frame.
+        let changed = self.batch.items[idx].settings != settings_before;
+        if (changed || toolbar_change.commit) && self.wants_upscale_tier2(idx) {
+            self.processor.live_preview.mark_tweak(item_id, PreviewKind::UpscaleTier2);
+            if toolbar_change.commit {
+                self.processor.live_preview.flush(item_id);
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
             }
         }
 
@@ -4383,6 +4352,42 @@ mod timeline_contract_tests {
 
         app.land_bg_image(load(false, Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
         assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
+    }
+
+    /// Refine's after-the-model knobs re-finish the kept upscale whatever
+    /// the Live preview setting; a Scale change needs a new run.
+    #[test]
+    fn refine_knobs_refinish_the_upscale_with_live_preview_off() {
+        use crate::gui::item::UpscaleCache;
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        app.settings.live_preview = false;
+        let item = &mut app.batch.items[0];
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
+        item.settings.sharpen = 0.4;
+        assert!(!app.wants_upscale_tier2(0), "no kept run yet");
+
+        let img = Arc::new(image::RgbaImage::new(4, 4));
+        app.batch.items[0].upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        assert!(app.wants_upscale_tier2(0), "a Sharpen change re-finishes the kept run");
+        app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
+        assert!(!app.wants_upscale_tier2(0), "a Scale change needs a new run");
+    }
+
+    /// A Refine preview re-finishes the kept upscale run: it needs neither
+    /// the decoded photo nor a copy of it.
+    #[test]
+    fn a_refine_preview_needs_only_the_kept_upscale() {
+        use crate::gui::item::UpscaleCache;
+        use crate::gui::live_preview::PreviewKind;
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        let item = &mut app.batch.items[0];
+        item.source_rgba = None;
+        let img = Arc::new(image::RgbaImage::new(4, 4));
+        item.upscale = Some(UpscaleCache { raw: img.clone(), input: img, reference: None });
+        let style = app.selection_style();
+        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style);
+        assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
+        assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
 
     /// A Full-lines run draws on the whole photo: a Pre-filter change must
