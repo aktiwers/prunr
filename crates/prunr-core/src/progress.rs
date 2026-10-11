@@ -160,15 +160,42 @@ impl Progress {
         self.report(ProgressUpdate::Inner { done, total, unit });
     }
 
+    /// The layout as the pipeline plans it; overlapping tiles reach the
+    /// listener as cells that meet edge to edge.
     pub fn tiles(&self, rects: Vec<TileRect>) {
         if self.sink.is_some() {
-            self.report(ProgressUpdate::Tiles(rects));
+            self.report(ProgressUpdate::Tiles(split_overlaps(&rects)));
         }
     }
 
     pub fn tile(&self, index: u32, done: bool) {
         self.report(ProgressUpdate::Tile { index, done });
     }
+}
+
+/// Trim each tile where it overlaps a neighbour, at the middle of the
+/// overlap, so overlapping tiles paint as cells that meet edge to edge.
+fn split_overlaps(rects: &[TileRect]) -> Vec<TileRect> {
+    rects.iter().map(|t| {
+        let mut cell = *t;
+        for o in rects {
+            let (ox1, oy1) = (o.x + o.w, o.y + o.h);
+            if std::ptr::eq(o, t) || o.x >= t.x + t.w || ox1 <= t.x || o.y >= t.y + t.h || oy1 <= t.y {
+                continue;
+            }
+            if o.x < t.x {
+                let mid = (t.x + ox1) / 2.0;
+                if mid > cell.x { cell.w -= mid - cell.x; cell.x = mid; }
+            }
+            if o.x > t.x { cell.w = cell.w.min((o.x + t.x + t.w) / 2.0 - cell.x); }
+            if o.y < t.y {
+                let mid = (t.y + oy1) / 2.0;
+                if mid > cell.y { cell.h -= mid - cell.y; cell.y = mid; }
+            }
+            if o.y > t.y { cell.h = cell.h.min((o.y + t.y + t.h) / 2.0 - cell.y); }
+        }
+        cell
+    }).collect()
 }
 
 /// Keeps every report, for tests and for `check_contract`.
@@ -290,6 +317,19 @@ mod tests {
             Outer { done: 2, total: 2, unit: Unit::Crop },
         ];
         assert_eq!(check_contract(&two_crops), Ok(()), "each crop counts its steps afresh");
+    }
+
+    #[test]
+    fn overlapping_tiles_meet_in_the_middle_of_the_overlap() {
+        // Two columns overlapping by 0.1, two rows overlapping by 0.2.
+        let t = |x, y| TileRect { x, y, w: 0.55, h: 0.6 };
+        let cells = split_overlaps(&[t(0.0, 0.0), t(0.45, 0.0), t(0.0, 0.4), t(0.45, 0.4)]);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert!(close(cells[0].w, 0.5) && close(cells[0].h, 0.5), "{:?}", cells[0]);
+        assert!(close(cells[1].x, 0.5) && close(cells[1].x + cells[1].w, 1.0), "{:?}", cells[1]);
+        assert!(close(cells[3].y, 0.5) && close(cells[3].y + cells[3].h, 1.0), "{:?}", cells[3]);
+        let apart = [TileRect { x: 0.0, y: 0.0, w: 0.2, h: 0.2 }, TileRect { x: 0.5, y: 0.5, w: 0.2, h: 0.2 }];
+        assert_eq!(split_overlaps(&apart), apart, "tiles that do not touch stay whole");
     }
 
     #[test]
