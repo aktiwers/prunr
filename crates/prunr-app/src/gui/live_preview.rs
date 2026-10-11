@@ -439,16 +439,14 @@ pub struct EdgePlanes {
     pub dilated: Option<Arc<GrayImage>>,
 }
 
-/// Edge scales an item keeps planes for: the two a dual-scale style draws
-/// (the shown scale and Bold), or the last two scales shown.
-const EDGE_PLANE_SLOTS: usize = 2;
-
-/// An item's edge planes per scale, most recently built first, each plane
-/// with the key it was built with. A thickness drag keeps the base and
-/// redoes the dilation only; a colour or compose drag keeps both.
+/// An item's edge planes per scale, each plane with the key it was built
+/// with: Bold (the second layer of the dual-scale style) and the newest
+/// other scale, as many planes as two separate caches held. A thickness
+/// drag keeps the base and redoes the dilation only; a colour or compose
+/// drag keeps both.
 #[derive(Default)]
 pub(crate) struct EdgePlaneCache {
-    slots: std::collections::VecDeque<ScalePlanes>,
+    slots: Vec<ScalePlanes>,
 }
 
 struct ScalePlanes {
@@ -467,31 +465,41 @@ impl EdgePlaneCache {
         }
     }
 
-    /// Keep what a dispatch built for `key`'s scale.
+    /// Keep what a dispatch built for `key`'s scale. A dispatch that built
+    /// nothing (every plane was a hit) changes nothing.
     pub(crate) fn store(&mut self, built: EdgePlanes, key: EdgePlaneKey) {
-        let mut slot = match self.slots.iter().position(|s| s.scale == key.scale) {
-            Some(i) => self.slots.remove(i).unwrap_or_else(|| ScalePlanes::empty(key.scale)),
-            None => ScalePlanes::empty(key.scale),
+        use prunr_core::EdgeScale::Bold;
+        if built.base.is_none() && built.dilated.is_none() {
+            return;
+        }
+        let i = match self.slots.iter().position(|s| s.scale == key.scale) {
+            Some(i) => i,
+            None => {
+                // A new non-Bold scale replaces the old one.
+                self.slots.retain(|s| s.scale == Bold || key.scale == Bold);
+                self.slots.push(ScalePlanes { scale: key.scale, base: None, dilated: None });
+                self.slots.len() - 1
+            }
         };
+        let slot = &mut self.slots[i];
         if let Some(b) = built.base {
             slot.base = Some((b, key.base_key()));
         }
         if let Some(d) = built.dilated {
             slot.dilated = Some((d, key));
         }
-        self.slots.push_front(slot);
-        self.slots.truncate(EDGE_PLANE_SLOTS);
     }
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
-}
 
-impl ScalePlanes {
-    fn empty(scale: prunr_core::EdgeScale) -> Self {
-        Self { scale, base: None, dilated: None }
+    /// One built dilated plane, for tests that check the cache is dropped.
+    #[cfg(test)]
+    pub(crate) fn store_placeholder(&mut self) {
+        let key = EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 };
+        self.store(EdgePlanes { base: None, dilated: Some(Arc::new(GrayImage::new(1, 1))) }, key);
     }
 }
 
@@ -771,8 +779,11 @@ fn resolve_edge_mask(
 #[cfg(test)]
 mod tests {
 
+
+    use super::*;
+
     #[test]
-    fn edge_planes_are_kept_per_scale_for_the_two_latest_scales() {
+    fn edge_planes_keep_bold_and_the_newest_other_scale() {
         use prunr_core::EdgeScale::{Balanced, Bold, Fine};
         let key = |scale, thickness| EdgePlaneKey { strength_bits: 1, scale, thickness };
         let plane = || Some(Arc::new(GrayImage::new(1, 1)));
@@ -784,12 +795,12 @@ mod tests {
         assert!(cache.lookup(key(Bold, 2)).dilated.is_some());
         let thicker = cache.lookup(key(Fine, 3));
         assert!(thicker.base.is_some() && thicker.dilated.is_none(), "a thickness change keeps only the base");
+        cache.store(EdgePlanes::default(), key(Balanced, 2));
+        assert!(cache.lookup(key(Fine, 2)).base.is_some(), "a dispatch that built nothing evicts nothing");
         cache.store(built(), key(Balanced, 2));
-        assert!(cache.lookup(key(Fine, 2)).base.is_none(), "the oldest scale gives way");
-        assert!(cache.lookup(key(Bold, 2)).base.is_some() && cache.lookup(key(Balanced, 2)).base.is_some());
+        assert!(cache.lookup(key(Fine, 2)).base.is_none(), "a new scale replaces the old one");
+        assert!(cache.lookup(key(Bold, 2)).base.is_some() && cache.lookup(key(Balanced, 2)).base.is_some(), "Bold stays");
     }
-
-    use super::*;
     use std::sync::Mutex;
 
     /// Test clock backed by a `Mutex<Instant>` so the test can advance

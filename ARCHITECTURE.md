@@ -359,7 +359,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 | Dilated plane (a thickness drag is about 32 ms at 4K) | strength, scale, thickness |
 | Masked-subject base (SubjectOutline) | mask recipe, model |
 
-Edge planes are kept per scale for the two scales built last: the shown scale and Bold for the dual-scale style, or the previous scale, so switching back is free. A colour, style or compose change costs only the composition. The composition is row-parallel and branch-free per row, and it blends colour only at edge pixels.
+Edge planes are kept per scale: Bold, for the dual-scale style, and the newest other scale. A colour, style or compose change costs only the composition. The composition is row-parallel and branch-free per row, and it blends colour only at edge pixels.
 
 ## GPU Execution Providers
 

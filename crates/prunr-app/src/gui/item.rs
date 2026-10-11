@@ -41,10 +41,7 @@ pub(crate) fn push_action_bounded(stack: &mut VecDeque<ActionType>, kind: Action
 }
 
 
-pub(crate) use super::stroke_history::StrokeSnapshot;
-use super::stroke_history::StrokeStack;
-#[cfg(test)]
-use super::stroke_history::STROKE_HISTORY_DEPTH;
+use super::stroke_history::{StrokeSnapshot, StrokeStack};
 
 /// `image` is `Arc`-wrapped so cloning across threads (canvas paint and
 /// save worker each take a handle) is a refcount bump, not a memcpy of
@@ -306,8 +303,8 @@ pub(crate) struct BatchItem {
     /// `Ctrl+Z` while brush mode is active pops the top entry and
     /// restores the snapshot — the user undoes one stroke per press.
     /// Bounded to STROKE_HISTORY_DEPTH; oldest entries dropped when full.
-    /// Snapshots live at source resolution so Paint Brush and Magic Brush
-    /// share one undo stack.
+    /// Planes are at source resolution so Paint Brush and Magic Brush share
+    /// one undo stack; below each stack's top they are kept as patches.
     pub(crate) stroke_undo_stack: StrokeStack,
     pub(crate) stroke_redo_stack: StrokeStack,
     /// Ordering layer: commit-order sequence of action types. Each entry is a
@@ -928,6 +925,7 @@ pub(crate) enum BatchStatus {
 
 #[cfg(test)]
 mod tests {
+    use crate::gui::stroke_history::STROKE_HISTORY_DEPTH;
     use super::*;
     use crate::gui::item_settings::ItemSettings;
 
@@ -946,7 +944,7 @@ mod tests {
     fn invalidate_edge_cache_clears_both_atomically() {
         let mut item = fixture_item(1);
         // Simulate populated edge caches (minimal placeholder structs).
-        item.edge_planes.store(crate::gui::live_preview::EdgePlanes { base: None, dilated: Some(Arc::new(image::GrayImage::new(1, 1))) }, crate::gui::live_preview::EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 });
+        item.edge_planes.store_placeholder();
         // (cached_edge_tensors would need a real CompressedEdgeTensors — leave None
         // here; the method should still run cleanly and clear the planes.)
         assert!(!item.edge_planes.is_empty());
