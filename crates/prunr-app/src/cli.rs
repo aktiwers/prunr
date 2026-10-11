@@ -226,15 +226,12 @@ impl CliBackdrop {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
-            CliBackdrop::Effect(effect) => {
-                let picture = prunr_core::load_image_from_path(photo_path)
-                    .ok()
-                    .and_then(|photo| prunr_core::effect_backdrop(&photo.to_rgba8(), *effect));
-                match picture {
-                    Some(p) => prunr_core::apply_background_image(result, &image::DynamicImage::ImageRgba8(p), prunr_core::BgImageFit::Cover),
-                    None => tracing::warn!(path = %photo_path.display(), "bg effect: photo unreadable"),
+            CliBackdrop::Effect(effect) => match prunr_core::load_image_from_path(photo_path) {
+                Ok(photo) => {
+                    prunr_core::apply_bg_effect(result, &photo.into_rgba8(), *effect);
                 }
-            }
+                Err(err) => tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
+            },
         }
     }
 }
