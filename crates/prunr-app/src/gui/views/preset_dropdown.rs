@@ -36,32 +36,12 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     if !exists {
         return format!("Custom  {}", ICON_EDIT.codepoint);
     }
-    let resolved = resolve_preset_view(settings, applied_preset);
+    let resolved = settings.resolve_preset(applied_preset, None);
     let item_diverged = *current != resolved.item_settings;
     let brush_diverged = settings.brush != resolved.brush;
     let is_modified = item_diverged || brush_diverged;
     let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
     format!("{applied_preset}  {state_icon}")
-}
-
-/// Resolve an arbitrary preset name to a `ResolvedView` using the
-/// active model. The dirty indicator may check a preset other than
-/// the active one, so the active-preset shortcut doesn't apply here.
-fn resolve_preset_view(
-    settings: &Settings,
-    name: &str,
-) -> crate::gui::presets::ResolvedView {
-    use crate::gui::presets;
-    let empty = presets::PresetFile::default();
-    let file = if name == PRUNR_PRESET {
-        &empty
-    } else {
-        settings.presets.get(name).unwrap_or(&empty)
-    };
-    let model_id = settings.model.to_model_id()
-        .or_else(|| Settings::default().model.to_model_id())
-        .expect("Settings::default().model always has a model_id");
-    presets::resolve_preset_for_model(file, model_id, None)
 }
 
 /// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
@@ -107,6 +87,11 @@ pub(crate) fn render(
     presets: &mut PresetUi<'_>,
 ) -> Option<String> {
     let pop_id = egui::Id::new("preset_popover");
+    // A delete armed in the list is forgotten once the list closes.
+    let delete_scope = pop_id.with("delete_armed");
+    if !egui::Popup::is_id_open(ui.ctx(), pop_id) {
+        ui.data_mut(|d| d.remove::<String>(delete_scope));
+    }
 
     let label = button_label(settings, current_item, presets.applied);
     let resp = crate::gui::views::chip::tooltip(
@@ -156,22 +141,9 @@ pub(crate) fn render(
                         |ui| {
                             // Delete — hidden for Prunr (non-deletable).
                             if !is_prunr {
-                                // A first click arms the delete; a second confirms.
-                                let armed_id = egui::Id::new("preset_delete_armed");
-                                let armed = ui.data(|d| d.get_temp::<String>(armed_id)).as_deref() == Some(name.as_str());
-                                let label = if armed {
-                                    RichText::new("Delete?").size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE)
-                                } else {
-                                    RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE)
-                                };
-                                let clicked = crate::gui::views::chip::named(ui.small_button(label), "Delete preset")
-                                    .on_hover_text(if armed { "Click again to delete" } else { "Delete preset" })
-                                    .clicked();
-                                if clicked && !armed {
-                                    ui.data_mut(|d| d.insert_temp(armed_id, name.clone()));
-                                }
-                                if clicked && armed {
-                                    ui.data_mut(|d| d.remove::<String>(armed_id));
+                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
+                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
+                                if crate::gui::views::chip::confirm_button(ui, delete_scope, &name, idle, armed, "Delete preset") {
                                     settings.presets.remove(&name);
                                     // Remove the on-disk file too; presets are
                                     // the filesystem-store's source of truth.

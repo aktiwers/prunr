@@ -17,7 +17,7 @@ use super::item_settings::ItemSettings;
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read_f32("PRUNR_GAMMA") { item.gamma = v; }
     if let Some(v) = read_f32("PRUNR_CONTRAST") { item.contrast = v; }
-    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = v; }
+    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
     if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
     if let Some(v) = read_f32("PRUNR_FEATHER") { item.feather = v; }
     if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
@@ -144,7 +144,7 @@ mod tests {
                 apply_to_item_settings(&mut item);
                 assert_eq!(item.gamma, 2.5);
                 assert_eq!(item.contrast, 0.4);
-                assert_eq!(item.edge_shift, -3.0);
+                assert_eq!(item.edge_shift, 3.0, "-3 shrinks, like the slider and the CLI");
             },
         );
     }

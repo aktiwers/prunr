@@ -125,6 +125,15 @@ pub struct MaskSettings {
     pub bg_effect: BgEffect,
 }
 
+impl MaskSettings {
+    /// The pipeline's `edge_shift` (+ erodes) for a shift as people read
+    /// it, + grows the subject: what the Shift edge slider, `--edge-shift`
+    /// and `PRUNR_EDGE_SHIFT` take. Its own inverse.
+    pub fn edge_shift_for_grow(grow: f32) -> f32 {
+        0.0 - grow
+    }
+}
+
 impl Default for MaskSettings {
     fn default() -> Self {
         Self {
