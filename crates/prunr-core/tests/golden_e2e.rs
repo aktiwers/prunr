@@ -45,7 +45,7 @@ mod test_common;
 
 use image::{ImageBuffer, Rgba, RgbaImage};
 use prunr_core::{
-    process_image_from_decoded, MaskSettings, ModelKind, OrtEngine, ProgressStage,
+    process_image_from_decoded, MaskSettings, ModelKind, OrtEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::{Path, PathBuf}};
@@ -163,8 +163,7 @@ fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), Strin
         &img,
         engine,
         &recipe.mask_settings,
-        None::<fn(ProgressStage, f32)>,
-        None,
+        &prunr_core::Progress::none(),
     )
     .map_err(|e| format!("pipeline: {e:?}"))?;
     let actual = result.rgba_image;

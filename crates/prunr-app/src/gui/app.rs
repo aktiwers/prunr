@@ -5,7 +5,6 @@ use std::sync::{mpsc, Arc};
 
 use egui::ViewportCommand;
 
-use prunr_core::ProgressStage;
 use super::drag_export_state::DragExportState;
 use super::history_manager::{HistoryDir, HistoryManager};
 use super::item::{ActionType, BatchItem, BatchStatus, HistorySlot, ImageSource, PresetSnapshot};
@@ -2333,7 +2332,7 @@ impl PrunrApp {
         // legacy `render_processing` was AppState-gated so it
         // disappeared automatically; the unified widget reads the
         // slot directly and needs an explicit clear.
-        self.processor.set_dispatch_progress(None);
+        self.processor.set_seg_counts(None, String::new());
         self.status.text = "Cancelled".to_string();
     }
 
@@ -2983,10 +2982,7 @@ impl PrunrApp {
         for _ in 0..WORKER_POLL_PER_FRAME {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
-                WorkerResult::Report { update, .. } => self.processor.apply_report(&update),
-                WorkerResult::BatchProgress { item_id, stage, pct } => {
-                    self.on_batch_progress(item_id, stage, pct);
-                }
+                WorkerResult::Report { item_id, update } => self.on_seg_report(item_id, update),
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
@@ -3005,21 +3001,15 @@ impl PrunrApp {
         }
     }
 
-    fn on_batch_progress(&mut self, item_id: u64, stage: ProgressStage, pct: f32) {
-        if !self.batch.is_selected(item_id) {
-            return;
+    /// A background-removal step: the shared step words, except Loading
+    /// the model, which names the models being loaded.
+    fn on_seg_report(&mut self, item_id: u64, update: prunr_core::ProgressUpdate) {
+        if update == prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) {
+            let text = self.loading_model_status_text(item_id);
+            self.processor.set_seg_step_text(text);
+        } else {
+            self.processor.apply_report(&update);
         }
-        self.status.stage = match stage {
-            ProgressStage::LoadingModel => self.loading_model_status_text(item_id),
-            ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU".into(),
-            ProgressStage::Decode => "Decoding image".into(),
-            ProgressStage::Resize => "Resizing".into(),
-            ProgressStage::Normalize => "Normalizing pixels".into(),
-            ProgressStage::Infer => "Running AI model".into(),
-            ProgressStage::Postprocess => "Building mask".into(),
-            ProgressStage::Alpha => "Applying transparency".into(),
-        };
-        self.status.pct = pct;
     }
 
     /// Include which models are loading so a DexiNed-only reload is
@@ -3138,10 +3128,8 @@ impl PrunrApp {
         // status_counts, which would inflate the total with items
         // Done from a previous dispatch (e.g. reprocessing one image
         // after the other was already finished).
-        let progress = self.processor.current_dispatch_progress().map(|(done, total)| {
-            crate::gui::dispatch_progress::DispatchProgress::seg(done, total, report.stage)
-        });
-        self.processor.set_dispatch_progress(progress);
+        let counts = self.processor.current_dispatch_progress();
+        self.processor.set_seg_counts(counts, report.stage);
     }
 
     fn on_batch_complete(&mut self) {
@@ -3171,7 +3159,7 @@ impl PrunrApp {
         // Drop the seg dispatch_progress entry so the canvas overlay
         // disappears with the cancel acknowledgement. Same reason
         // as `handle_cancel_all_and_reset`.
-        self.processor.set_dispatch_progress(None);
+        self.processor.set_seg_counts(None, String::new());
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {

@@ -170,7 +170,7 @@ pub enum LargeImagePolicy {
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use prunr_core::{
-    MaskSettings, ModelKind, ProgressStage, CoreError,
+    MaskSettings, ModelKind, CoreError,
     DOWNSCALE_TARGET,
     load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
 };
@@ -417,21 +417,6 @@ fn load_with_policy(
     // Encode as PNG bytes for uniform handling
     let rgba = img.into_rgba8();
     encode_rgba_png(&rgba)
-}
-
-// ── Spinner label mapping ────────────────────────────────────────────────────
-
-fn stage_label(stage: ProgressStage) -> &'static str {
-    match stage {
-        ProgressStage::LoadingModel => "Loading model...",
-        ProgressStage::LoadingModelCpuFallback => "GPU warming up \u{2014} using CPU...",
-        ProgressStage::Decode      => "Decoding...",
-        ProgressStage::Resize      => "Resizing...",
-        ProgressStage::Normalize   => "Normalizing...",
-        ProgressStage::Infer       => "Inferring...",
-        ProgressStage::Postprocess => "Postprocessing...",
-        ProgressStage::Alpha       => "Applying alpha...",
-    }
 }
 
 // ── Single-image execution path ──────────────────────────────────────────────
@@ -787,18 +772,6 @@ fn run_batch_subprocess(
                         if !quiet {
                             if let Some(Some(pb)) = spinners.get(orig_idx) {
                                 pb.set_message(format!("{} \u{2014} {}", inputs[orig_idx].display(), step.label()));
-                            }
-                        }
-                    }
-                    SubprocessEvent::Progress { item_id, stage, .. } => {
-                        let orig_idx = item_id as usize;
-                        if !quiet {
-                            if let Some(Some(pb)) = spinners.get(orig_idx) {
-                                pb.set_message(format!(
-                                    "{} \u{2014} {}",
-                                    inputs[orig_idx].display(),
-                                    stage_label(stage),
-                                ));
                             }
                         }
                     }

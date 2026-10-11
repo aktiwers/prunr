@@ -563,20 +563,32 @@ impl Processor {
         self.dispatch_progress.read()
     }
 
-    /// Publish progress for the seg path. Called by
-    /// `refresh_batch_progress_status` whenever batch state could have
-    /// changed (per-frame during a batch; once when it completes).
-    /// Skips the Mutex write when the new value is `None` and the slot
-    /// is already empty — covers the steady-state idle case where this
-    /// would otherwise grab the lock every frame.
-    pub(crate) fn set_dispatch_progress(
-        &self,
-        progress: Option<super::dispatch_progress::DispatchProgress>,
-    ) {
-        if progress.is_none() && self.dispatch_progress.read().is_none() {
+    /// Keep the background-removal run's image counts current; called
+    /// whenever batch state could have changed. The step the worker last
+    /// reported stays; `label` shows until the first step arrives. With
+    /// no batch running the slot is cleared, and the idle case takes no
+    /// write.
+    pub(crate) fn set_seg_counts(&self, counts: Option<(u32, u32)>, label: String) {
+        use super::dispatch_progress::{DispatchProgress, ProgressKind};
+        let Some((done, total)) = counts else {
+            if self.dispatch_progress.read().is_some_and(|p| p.kind == ProgressKind::Seg) {
+                self.dispatch_progress.set(None);
+            }
             return;
-        }
-        self.dispatch_progress.set(progress);
+        };
+        self.dispatch_progress.update(|p| match p {
+            Some(p) if p.kind == ProgressKind::Seg => p.inner = (done, total),
+            _ => *p = Some(DispatchProgress::seg(done, total, label)),
+        });
+    }
+
+    /// Show `text` as the background-removal run's current step.
+    pub(crate) fn set_seg_step_text(&self, text: String) {
+        self.dispatch_progress.update(|p| {
+            if let Some(p) = p {
+                p.step_label = std::borrow::Cow::Owned(text);
+            }
+        });
     }
 
     /// `true` while an upscale dispatch is in flight. The intent
@@ -1638,27 +1650,27 @@ mod tests {
         assert!(p.is_upscale_in_flight());
     }
 
+    /// Batch counts refresh every frame; they must update the count and
+    /// keep the step the worker reported, and clearing them must not wipe
+    /// another kind of run.
     #[test]
-    fn set_dispatch_progress_none_over_none_is_a_no_op() {
-        // The dirty-check inside `set_dispatch_progress` skips the
-        // Mutex write when the slot is already None. Verify both:
-        // (a) calling with None on an empty slot leaves it empty;
-        // (b) calling with None on a populated slot clears it.
+    fn seg_counts_keep_the_reported_step() {
         use crate::gui::dispatch_progress::DispatchProgress;
         let p = fixture();
+        p.set_seg_counts(None, String::new());
+        assert!(p.dispatch_progress().is_none(), "nothing running, nothing shown");
 
-        // Empty → None: still empty.
-        assert!(p.dispatch_progress().is_none(), "fixture starts empty");
-        p.set_dispatch_progress(None);
-        assert!(p.dispatch_progress().is_none(),
-            "set(None) on already-empty slot must not flip state");
+        p.set_seg_counts(Some((0, 3)), "Processing 0/3".into());
+        p.apply_report(&prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject));
+        p.set_seg_counts(Some((1, 3)), "Processing 1/3".into());
+        let shown = p.dispatch_progress().unwrap();
+        assert_eq!((shown.inner, shown.step_label.as_ref()), ((1, 3), "Finding the subject"));
 
-        // Populated → None: cleared.
-        p.set_dispatch_progress(Some(DispatchProgress::seg(1, 3, "Processing 1/3")));
-        assert!(p.dispatch_progress().is_some(), "Some was published");
-        p.set_dispatch_progress(None);
-        assert!(p.dispatch_progress().is_none(),
-            "Some→None clear must write through the dirty-check");
+        p.set_seg_counts(None, String::new());
+        assert!(p.dispatch_progress().is_none());
+        let _upscale = p.dispatch_progress.begin(DispatchProgress::upscale(0, 4, "Upscaling"));
+        p.set_seg_counts(None, String::new());
+        assert!(p.dispatch_progress().is_some(), "an upscale run is not the batch's to clear");
     }
 
     #[test]

@@ -11,13 +11,11 @@
 mod test_common;
 
 use prunr_core::{
-    CoreError, InferenceEngine, ModelKind, OrtEngine, ProgressStage,
+    CoreError, InferenceEngine, ModelKind, OrtEngine,
     LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
     process_image, batch_process,
     check_large_image, downscale_image,
 };
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
 use test_common::skip_if_no_ort;
@@ -114,7 +112,7 @@ fn test_rembg_reference() {
         let img_bytes = std::fs::read(&image_path)
             .expect("Failed to read test image");
 
-        let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
+        let result = process_image(&img_bytes, &engine, &prunr_core::Progress::none())
             .unwrap_or_else(|e| panic!("process_image failed for {stem}: {e}"));
 
         let our_rgba = result.rgba_image;
@@ -169,7 +167,7 @@ fn test_process_image_produces_valid_rgba_png() {
     }
 
     let img_bytes = std::fs::read(&image_path).unwrap();
-    let result = process_image(&img_bytes, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>)
+    let result = process_image(&img_bytes, &engine, &prunr_core::Progress::none())
         .expect("process_image should succeed");
 
     // Verify output has transparency (not all-opaque)
@@ -214,7 +212,7 @@ fn test_active_provider_queryable() {
 
 #[test]
 fn test_progress_callback_all_stages() {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     if skip_if_no_ort("test_progress_callback_all_stages") { return; }
     let engine = OrtEngine::new(ModelKind::Silueta, 1)
@@ -228,21 +226,15 @@ fn test_progress_callback_all_stages() {
 
     let img_bytes = std::fs::read(&image_path).unwrap();
 
-    let stages: Arc<Mutex<Vec<ProgressStage>>> = Arc::new(Mutex::new(Vec::new()));
-    let stages_clone = stages.clone();
+    let sink = Arc::new(prunr_core::progress::RecordingSink::default());
+    process_image(&img_bytes, &engine, &prunr_core::Progress::new(sink.clone())).expect("process_image");
 
-    let _ = process_image(&img_bytes, &engine, Some(move |stage, pct| {
-        stages_clone.lock().unwrap().push(stage);
-        assert!((0.0..=1.0).contains(&pct), "Progress pct must be in [0.0, 1.0], got {pct}");
-    }), None::<Arc<AtomicBool>>);
-
-    let recorded = stages.lock().unwrap();
-    assert!(recorded.len() >= 5, "Expected at least 5 progress stages, got {}", recorded.len());
-
-    // Verify Infer stage is present (most important for UI feedback)
+    let updates = sink.updates();
+    assert_eq!(prunr_core::progress::check_contract(&updates), Ok(()));
+    // Finding the subject is the step the user waits on.
     assert!(
-        recorded.iter().any(|s| matches!(s, ProgressStage::Infer)),
-        "ProgressStage::Infer must be reported"
+        updates.contains(&prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject)),
+        "Finding the subject must be reported"
     );
 }
 
@@ -270,7 +262,7 @@ fn test_format_support_png_jpeg_webp_bmp() {
         let mut buf = Vec::new();
         test_img.write_to(&mut Cursor::new(&mut buf), *fmt).unwrap();
 
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
+        let result = process_image(&buf, &engine, &prunr_core::Progress::none());
         assert!(result.is_ok(), "Format {name} should be supported: {:?}", result.err());
     }
 
@@ -280,7 +272,7 @@ fn test_format_support_png_jpeg_webp_bmp() {
         let mut buf = Vec::new();
         test_img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::WebP)
             .expect("WebP encode should work with image 0.25 webp feature");
-        let result = process_image(&buf, &engine, None::<fn(ProgressStage, f32)>, None::<Arc<AtomicBool>>);
+        let result = process_image(&buf, &engine, &prunr_core::Progress::none());
         assert!(result.is_ok(), "WebP format should be supported: {:?}", result.err());
     }
 }
@@ -347,7 +339,7 @@ fn test_batch_process_multiple_images() {
         &images,
         ModelKind::Silueta,
         1,
-        None::<fn(usize, ProgressStage, f32)>,
+        |_| prunr_core::Progress::none(),
     );
 
     assert_eq!(results.len(), 2, "batch_process must return one result per input");

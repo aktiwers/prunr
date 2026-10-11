@@ -4,7 +4,8 @@ use rayon::ThreadPoolBuilder;
 use crate::{
     engine::OrtEngine,
     pipeline::process_image_with_mask,
-    types::{CoreError, MaskSettings, ModelKind, ProcessResult, ProgressStage},
+    progress::Progress,
+    types::{CoreError, MaskSettings, ModelKind, ProcessResult},
 };
 
 /// Create an engine pool with GPU/CPU-aware sizing.
@@ -83,8 +84,7 @@ fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
 /// - `images`: Slice of image byte slices (PNG, JPEG, WebP, BMP)
 /// - `model`: Which model to use for all images in this batch
 /// - `jobs`: Desired parallelism. Actual pool size is capped for GPU (max 2) and CPU (1).
-/// - `progress`: Optional per-image progress callback.
-///   Signature: `|image_idx: usize, stage: ProgressStage, pct: f32|`
+/// - `progress_for`: the progress handle for image `idx`.
 ///
 /// # Returns
 /// `Vec<Result<ProcessResult, CoreError>>` — one entry per input image, in input order.
@@ -97,12 +97,12 @@ pub fn batch_process<F>(
     images: &[&[u8]],
     model: ModelKind,
     jobs: usize,
-    progress: Option<F>,
+    progress_for: F,
 ) -> Vec<Result<ProcessResult, CoreError>>
 where
-    F: Fn(usize, ProgressStage, f32) + Send + Sync,
+    F: Fn(usize) -> Progress + Send + Sync,
 {
-    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), false, progress)
+    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), false, progress_for)
 }
 
 /// Like `batch_process` but with custom mask settings.
@@ -116,10 +116,10 @@ pub fn batch_process_with_mask<F>(
     jobs: usize,
     mask: &MaskSettings,
     cpu_only: bool,
-    progress: Option<F>,
+    progress_for: F,
 ) -> Vec<Result<ProcessResult, CoreError>>
 where
-    F: Fn(usize, ProgressStage, f32) + Send + Sync,
+    F: Fn(usize) -> Progress + Send + Sync,
 {
     if images.is_empty() {
         return Vec::new();
@@ -148,10 +148,7 @@ where
             .enumerate()
             .for_each(|(idx, (slot, img_bytes))| {
                 let engine = &engines[idx % engines.len()];
-                let cb = progress.as_ref().map(|f| {
-                    move |stage: ProgressStage, pct: f32| f(idx, stage, pct)
-                });
-                *slot = process_image_with_mask(img_bytes, engine, mask, cb, None);
+                *slot = process_image_with_mask(img_bytes, engine, mask, &progress_for(idx));
             });
     });
 
@@ -213,7 +210,7 @@ mod tests {
             &[],
             ModelKind::Silueta,
             1,
-            None::<fn(usize, ProgressStage, f32)>,
+            |_| Progress::none(),
         );
         assert!(results.is_empty());
     }
@@ -250,7 +247,7 @@ mod tests {
             &image_refs,
             ModelKind::Silueta,
             1,
-            None::<fn(usize, ProgressStage, f32)>,
+            |_| Progress::none(),
         );
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok(), "Expected Ok result, got {:?}", results[0]);
@@ -278,7 +275,7 @@ mod tests {
             &image_refs,
             ModelKind::Silueta,
             2,
-            None::<fn(usize, ProgressStage, f32)>,
+            |_| Progress::none(),
         );
         assert_eq!(results.len(), 3, "Expected 3 results for 3 inputs");
         for (i, r) in results.iter().enumerate() {

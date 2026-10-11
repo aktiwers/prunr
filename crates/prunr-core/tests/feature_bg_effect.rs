@@ -11,7 +11,7 @@
 mod test_common;
 
 use prunr_core::{
-    process_image_from_decoded, BgEffect, MaskSettings, ModelKind, OrtEngine, ProgressStage,
+    process_image_from_decoded, BgEffect, MaskSettings, ModelKind, OrtEngine,
 };
 use test_common::{multi_subject_canary, skip_if_no_ort};
 
@@ -19,7 +19,7 @@ fn run_with_bg_effect(engine: &OrtEngine, bg_effect: BgEffect) -> image::RgbaIma
     let img = multi_subject_canary();
     let mask = MaskSettings { bg_effect, ..MaskSettings::default() };
     let result = process_image_from_decoded(
-        &img, engine, &mask, None::<fn(ProgressStage, f32)>, None,
+        &img, engine, &mask, &prunr_core::Progress::none(),
     ).expect("pipeline should succeed");
     result.rgba_image
 }

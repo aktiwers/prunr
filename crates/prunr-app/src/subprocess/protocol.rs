@@ -3,7 +3,7 @@
 //! All types are serde-serializable and sent as length-prefixed bincode
 //! frames over stdin/stdout.
 
-use prunr_core::{ModelKind, MaskSettings, EdgeSettings, ProgressStage, LineMode};
+use prunr_core::{ModelKind, MaskSettings, EdgeSettings, LineMode};
 use prunr_core::inpaint_sd::SdInpaintRequest;
 use prunr_models::ModelId;
 use serde::{Serialize, Deserialize};
@@ -156,12 +156,6 @@ pub enum SubprocessEvent {
     Report {
         item_id: u64,
         update: prunr_core::ProgressUpdate,
-    },
-    /// Per-stage progress for an image.
-    Progress {
-        item_id: u64,
-        stage: ProgressStage,
-        pct: f32,
     },
     /// Image processed successfully.
     /// Result RGBA is written to `result_path` temp file (not piped).
@@ -554,15 +548,6 @@ mod tests {
     fn event_ready_roundtrip() {
         roundtrip(&SubprocessEvent::Ready {
             active_provider: "CUDA".to_string(),
-        });
-    }
-
-    #[test]
-    fn event_progress_roundtrip() {
-        roundtrip(&SubprocessEvent::Progress {
-            item_id: 3,
-            stage: ProgressStage::Infer,
-            pct: 0.5,
         });
     }
 
