@@ -2296,9 +2296,10 @@ impl PrunrApp {
         // `Arc<DynamicImage>` on the item (built once, reused across every
         // subsequent dispatch of the drag session — see `source_dyn`).
         let is_filter_only = self.settings.model.to_model_kind().is_none();
+        let style = self.selection_style();
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, is_filter_only)
+            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -2331,6 +2332,7 @@ impl PrunrApp {
         id: u64,
         kind: super::live_preview::PreviewKind,
         is_filter_only: bool,
+        style: super::background_io::SelectionStyle,
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
@@ -2433,7 +2435,7 @@ impl PrunrApp {
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_tensor.as_ref().and_then(|seg| item.selection_plane_at((seg.width, seg.height)));
+        let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style));
         Some(DispatchInputs {
             version,
             kind, original, start, settings: item.settings,
@@ -3306,6 +3308,7 @@ impl PrunrApp {
         // allowed here — this drain runs from `logic()`, not a render
         // closure. A result for a mask that has since changed is dropped;
         // `ensure_selection_texture` already requested the current one.
+        let mut feathered_landed = Vec::new();
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
             if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                 if item.selection_tex_pending == Some(result.key) {
@@ -3322,6 +3325,9 @@ impl PrunrApp {
                             image,
                             egui::TextureOptions::LINEAR,
                         );
+                        if feathered.is_some() {
+                            feathered_landed.push(result.item_id);
+                        }
                         item.selection_texture = Some(super::item::SelectionTexture { key: result.key, handle, shown, feathered });
                     }
                     // A patch whose base texture has moved on is dropped; the
@@ -3335,6 +3341,12 @@ impl PrunrApp {
                     }
                 }
             }
+        }
+
+        // A feathered selection that just landed changes what the cut-out
+        // applies; re-cut with it.
+        for id in feathered_landed {
+            self.apply_kept_selection_to_new_result(id);
         }
 
         // Drain bg-image texture preps. Hash match guards against a

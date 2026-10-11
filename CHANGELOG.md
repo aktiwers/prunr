@@ -55,6 +55,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Feather softens what the brushes do to a cut-out, not only Delete / Copy / Cut, and brush edits keep their edge at full resolution instead of following the model's coarser grid. The selection on the image now shows feathered edges and strokes under 50 % opacity.
 - The eraser fills exactly what the brush cursor covers; at low Hardness the region used to shrink to half the cursor. Hardness is gone from the eraser, and Edge blend is now its Feather, the one softness control where the fill meets the photo.
 - Switching models keeps your brush size, hardness, opacity, mode and selection look; only the eraser's region settings and the Stable Diffusion settings follow the model.
 - Subtract and Alt take away from the selection with No model and from the eraser's region; they used to add to it. A fresh Magic Brush click restores, as its hint says.
