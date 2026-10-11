@@ -692,11 +692,11 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     let t = ui.ctx().input(|i| i.time) as f32;
 
-    // In chain mode with an existing result, show the result being processed
-    // (not the original).
+    // A run that builds on an earlier result shows that result while it works.
     let item = app.batch.selected_item();
     let result_tex = item.and_then(|i| i.result_texture.as_ref());
-    let display_texture = if app.settings.chain_mode && result_tex.is_some() {
+    let on_result = item.is_some_and(|i| i.job.as_ref().is_some_and(|j| j.base.is_some()));
+    let display_texture = if on_result && result_tex.is_some() {
         result_tex
     } else {
         item.and_then(|i| i.source_texture.as_ref())

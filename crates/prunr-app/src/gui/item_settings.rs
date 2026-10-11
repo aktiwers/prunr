@@ -214,8 +214,8 @@ impl ItemSettings {
     /// Pins mask fields to defaults in modes that skip segmentation so unrelated
     /// knob changes don't trigger reprocessing when the mask isn't used.
     ///
-    /// `model` and `chain_mode` are app-global, not per-item — caller provides them.
-    pub fn current_recipe(&self, model: prunr_core::ModelKind, chain_mode: bool) -> prunr_core::ProcessingRecipe {
+    /// `model` is app-global, not per-item — the caller provides it.
+    pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;
         let bg_rgb = self.bg.map(|[r, g, b, _]| [r, g, b]);
@@ -272,7 +272,6 @@ impl ItemSettings {
                 saturation_bits: self.saturation.to_bits(),
                 color_match: self.color_match,
             },
-            was_chain: chain_mode,
         }
     }
 }
@@ -346,7 +345,7 @@ mod tests {
     #[test]
     fn bg_rgb_stripped_in_recipe() {
         let s = ItemSettings { bg: Some([10, 20, 30, 200]), ..ItemSettings::default() };
-        let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
+        let r = s.current_recipe(prunr_core::ModelKind::Silueta);
         assert_eq!(r.composite.bg_color, Some([10, 20, 30]));
     }
 
@@ -358,7 +357,7 @@ mod tests {
             threshold: Some(0.8),
             ..ItemSettings::default()
         };
-        let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
+        let r = s.current_recipe(prunr_core::ModelKind::Silueta);
         let defaults = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default());
         assert_eq!(r.mask, defaults);
     }
@@ -451,11 +450,11 @@ mod tests {
     fn current_recipe_derives_upscale_model_from_active_model_kind() {
         let s = ItemSettings { output_scale: prunr_core::OutputScale::X2, ..ItemSettings::default() };
         // Active upscale model → recipe slot populated.
-        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
         assert_eq!(r.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
         assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
         // Active seg model → upscale slot empty.
-        let r = s.current_recipe(prunr_core::ModelKind::Silueta, false);
+        let r = s.current_recipe(prunr_core::ModelKind::Silueta);
         assert_eq!(r.upscale.model, None);
     }
 
@@ -483,7 +482,7 @@ mod tests {
             output_scale: prunr_core::OutputScale::X2,
             ..ItemSettings::default()
         };
-        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
         assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
     }
 
@@ -525,7 +524,7 @@ mod tests {
 
     #[test]
     fn default_current_recipe_carries_sharpen_default() {
-        let r = ItemSettings::default().current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        let r = ItemSettings::default().current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
         assert_eq!(r.upscale.sharpen(), prunr_core::DEFAULT_SHARPEN);
     }
 
@@ -541,7 +540,7 @@ mod tests {
             output_scale: prunr_core::OutputScale::X4TwoPass,
             ..ItemSettings::default()
         };
-        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus, false);
+        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
         assert_eq!(r.upscale.pre_denoise_bits, 0.4_f32.to_bits());
         assert_eq!(r.upscale.brightness_lift_bits, 0.7_f32.to_bits());
         assert_eq!(r.upscale.sharpen_bits, 0.3_f32.to_bits());

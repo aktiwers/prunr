@@ -55,7 +55,7 @@ impl ImageSource {
     }
 }
 
-use super::timeline::{store, DocState, StepKind, Timeline};
+use super::timeline::{store, DocState, Origin, StepKind, Timeline};
 
 /// A transition to a new image: first the image on screen is held while
 /// the new one's texture is built, then the new one reveals over it.
@@ -76,13 +76,14 @@ pub(crate) struct SubjectOutline {
 }
 
 /// A run awaited by an item: the timeline version it started at, the
-/// step its result records (`None`: it fills in the shown step), and the
-/// engine running it.
-#[derive(Clone, Copy)]
+/// step its result records (`None`: it fills in the shown step), the
+/// engine running it, and the image it started from (`None`: the original).
+#[derive(Clone)]
 pub(crate) struct Job {
     pub(crate) version: u64,
     pub(crate) step: Option<StepKind>,
     pub(crate) engine: Engine,
+    pub(crate) base: Option<Arc<image::RgbaImage>>,
 }
 
 /// What runs a job, and so what cancelling it stops.
@@ -408,6 +409,8 @@ impl BatchItem {
             selection_hash: self.selection_hash,
             settings: self.settings,
             applied_preset: self.applied_preset.clone(),
+            // A hand edit makes new pixels no run can redo.
+            origin: if kind == StepKind::Edit { None } else { shown.origin.clone() },
             at: std::time::Instant::now(),
         }
     }
@@ -518,13 +521,14 @@ impl BatchItem {
     /// Note a run starting now; `step` is the step its result records,
     /// `None` to fill in the shown one (a re-run a knob change asked for).
     pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
-        self.job = Some(Job { version: self.timeline.version(), step, engine });
+        let base = self.run_input(engine);
+        self.job = Some(Job { version: self.timeline.version(), step, engine, base });
     }
 
     /// Whether a landing result belongs to the state this item shows:
     /// an undo, a redo or another step since the run started makes it stale.
     pub(crate) fn job_is_current(&self) -> bool {
-        self.job.is_some_and(|j| j.version == self.timeline.version())
+        self.job.as_ref().is_some_and(|j| j.version == self.timeline.version())
     }
 
     /// The awaited run will not land (cancelled): the item shows its
@@ -539,9 +543,61 @@ impl BatchItem {
 
     /// Record a landed run's result, now in the working copy.
     pub(crate) fn finish_job(&mut self) {
-        match self.job.take().and_then(|j| j.step) {
+        let Some(job) = self.job.take() else { return self.amend() };
+        match job.step {
             Some(kind) => self.commit(kind),
             None => self.amend(),
+        }
+        self.record_origin(job.engine, job.base);
+    }
+
+    /// Record that `engine` made the shown step's image, starting from
+    /// `base` (`None`: the original).
+    pub(crate) fn record_origin(&mut self, engine: Engine, base: Option<Arc<image::RgbaImage>>) {
+        // Share the stored copy when the start is unchanged (a live tweak)
+        // or is the step before's image (a new run).
+        let unchanged = self.timeline.current().origin.as_ref()
+            .and_then(|o| o.base.clone())
+            .filter(|b| base.as_ref().is_some_and(|v| b.holds(v)));
+        let shown_before = self.timeline.previous().and_then(|p| p.result.clone());
+        let origin = Origin {
+            engine,
+            base_dims: base.as_ref().map(|b| b.dimensions()),
+            base: unchanged.or_else(|| store(base.as_ref(), shown_before.as_ref())),
+        };
+        self.timeline.current_mut().origin = Some(origin);
+    }
+
+    /// The image a run of `engine` starts from (`None`: the original). A
+    /// run of the engine that made the shown step redoes that step from
+    /// the image it started from; any other run builds on the shown
+    /// result. The eraser always builds on the result: each erase adds to
+    /// the last.
+    pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
+        let shown = self.timeline.current();
+        match shown.origin.as_ref() {
+            Some(o) if o.engine == engine && engine != Engine::Erase => o.base.as_ref().and_then(|b| b.load()),
+            _ => self.result_rgba.clone().or_else(|| shown.result.as_ref().and_then(|r| r.load())),
+        }
+    }
+
+    /// The size of `run_input(engine)` without loading it.
+    pub(crate) fn run_input_dims(&self, engine: Engine) -> (u32, u32) {
+        let shown = self.timeline.current();
+        let dims = match shown.origin.as_ref() {
+            Some(o) if o.engine == engine && engine != Engine::Erase => o.base_dims,
+            _ => self.result_rgba.as_ref().map(|r| r.dimensions()),
+        };
+        dims.unwrap_or(self.dimensions)
+    }
+
+    /// Whether a run of `engine` starts from an earlier result rather than
+    /// the original; cheap, for recipes and labels.
+    pub(crate) fn starts_from_result(&self, engine: Engine) -> bool {
+        let shown = self.timeline.current();
+        match shown.origin.as_ref() {
+            Some(o) if o.engine == engine && engine != Engine::Erase => o.base.is_some(),
+            _ => self.result_rgba.is_some() || shown.result.is_some(),
         }
     }
 
@@ -902,7 +958,7 @@ mod tests {
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
-        ItemSettings::default().current_recipe(prunr_core::ModelKind::Silueta, false)
+        ItemSettings::default().current_recipe(prunr_core::ModelKind::Silueta)
     }
 
     fn fixture_process_result(provider: &str) -> prunr_core::ProcessResult {
@@ -1128,6 +1184,61 @@ mod tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         item.undo_step();
         assert!(!item.job_is_current(), "an undo since the start makes the result stale");
+    }
+
+    /// Lands a run of `engine` that produced `v`, recording `step`.
+    fn land(item: &mut BatchItem, engine: Engine, step: Option<StepKind>, v: u8) -> Option<u8> {
+        item.start_job(step, engine);
+        let base = item.job.as_ref().and_then(|j| j.base.as_ref()).map(|b| b.get_pixel(0, 0).0[0]);
+        item.result_rgba = Some(px(v));
+        item.status = BatchStatus::Done;
+        item.finish_job();
+        base
+    }
+
+    /// Every run starts from the image a non-destructive editor would use:
+    /// redoing the shown step starts from that step's own starting image,
+    /// a different engine builds on the shown result, the eraser always
+    /// builds on it, and a hand edit is never undone by a rerun.
+    #[test]
+    fn a_run_starts_from_the_image_before_the_step_it_redoes() {
+        let mut item = fixture_item(1);
+        assert_eq!(land(&mut item, Engine::Segment, Some(StepKind::Process), 1), None, "first cut-out: the original");
+        assert_eq!(land(&mut item, Engine::Segment, None, 2), None, "a re-cut redoes it from the original, never the cut-out");
+
+        assert_eq!(land(&mut item, Engine::Upscale, Some(StepKind::Upscale), 3), Some(2), "upscaling builds on the cut-out");
+        assert_eq!(land(&mut item, Engine::Upscale, None, 4), Some(2), "upscaling again redoes it from the cut-out, not 16x");
+
+        assert_eq!(land(&mut item, Engine::Erase, Some(StepKind::Erase), 5), Some(4), "an erase builds on the upscale");
+        assert_eq!(land(&mut item, Engine::Erase, Some(StepKind::Erase), 6), Some(5), "each erase adds to the last");
+
+        assert_eq!(land(&mut item, Engine::Segment, Some(StepKind::Process), 7), Some(6), "a cut after erasing keeps the erase");
+        assert_eq!(land(&mut item, Engine::Segment, None, 8), Some(6), "and a re-cut starts from the erased image");
+
+        item.result_rgba = Some(px(9));
+        item.commit(StepKind::Edit);
+        assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(9), "a hand edit is kept by the next run");
+
+        item.undo_step();
+        assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(6), "undo brings back the step's own start");
+        assert!(item.starts_from_result(Engine::Segment));
+        assert_eq!(item.run_input_dims(Engine::Upscale), (2, 2));
+    }
+
+    /// A live tweak after another engine's step records where it started,
+    /// so the next tweak redoes it instead of stacking on its own output.
+    #[test]
+    fn a_live_tweak_records_its_start_so_the_next_one_does_not_stack() {
+        let mut item = fixture_item(1);
+        land(&mut item, Engine::Upscale, Some(StepKind::Upscale), 3);
+        let start = item.run_input(Engine::Segment);
+        assert_eq!(start.as_ref().map(|b| b.get_pixel(0, 0).0[0]), Some(3), "an effect starts from the upscale");
+
+        item.result_rgba = Some(px(4)); // the first tweak's preview landed
+        item.amend();
+        item.record_origin(Engine::Segment, start);
+        assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "the next tweak starts there too");
+        assert_eq!(item.run_input(Engine::Upscale).map(|b| b.get_pixel(0, 0).0[0]), Some(4), "a new upscale builds on the effect");
     }
 
     /// Parking releases the working image without a step; the timeline
