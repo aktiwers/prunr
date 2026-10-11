@@ -217,8 +217,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // tool (regardless of encoder state) so users discover Shift / Alt
     // before they need them. Active modifier tints to ACCENT; the rest stays
     // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
-    let paint_on_selection = app.brush_state.is_enabled() && shows(app.settings.model, Surface::SelectionStrokes);
-    if app.magic_brush_state.is_active() || paint_on_selection {
+    if app.magic_brush_state.is_active() || app.brush_state.is_enabled() {
         let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
         let base_color = theme::TEXT_SECONDARY;
         let active_color = theme::ACCENT;
@@ -271,27 +270,21 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         stamp.mode = app.settings.brush.mode_under(shift, subtract);
         stamp
     } else {
-        app.settings.brush.region_stamp()
+        app.settings.brush.region_stamp(subtract && !shift)
     };
     let action = {
         let item = &app.batch.items[idx];
         brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
     };
-    if selection_strokes && (shift || subtract) {
+    if shift || subtract {
         let glyph = if shift { "+" } else { "\u{2212}" };
         draw_modifier_glyph(ui, canvas_rect, glyph);
     }
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        // Merge this stroke onto the existing selection: same-direction
-        // overlap keeps the stronger stroke, an opposite-direction stroke
-        // wins where it lands.
-        let merged = match app.batch.items[idx].selection_mask.clone() {
-            Some(existing) => existing.add_mask(&stroke_mask)
-                .unwrap_or(stroke_mask),
-            None => stroke_mask,
-        };
+        let signed = app.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout;
+        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask, signed);
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
         app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);
