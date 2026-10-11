@@ -50,6 +50,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 - Magic Brush Confidence does what its hint says: it is the probability a pixel must reach, so higher keeps the sure core and lower grows into the rim, and moving it retunes the last click or stroke live. It used to gate the candidate choice and change nothing.
 - Undo restores the cut-out after a Magic Brush or Invert stroke in chain mode; only Paint strokes archived the previous result.
+- The selection outline stays visible when a large image is zoomed out to fit.
 - The click that closes a brush popover no longer paints a stroke.
 - Undo and redo step every stroke on every model, before or after a result, and a stroke is one step.
 - A stroke on an image undone back to the original no longer brings the cut-out back.

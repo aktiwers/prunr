@@ -222,6 +222,9 @@ impl BackgroundIO {
     }
 }
 
+/// Narrowest outline, in screen points, the overlay draws at any zoom.
+pub(crate) const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
+
 /// The style knobs a selection texture bakes in. All four apply on
 /// commit: the overlay is a single textured quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -259,6 +262,22 @@ impl SelectionStyle {
                 prunr_core::selection::refine::feather_edges(mask, src, px),
             )),
         }
+    }
+
+    /// The style as drawn at `zoom` (screen points per image pixel): an
+    /// outline that is on gets at least `MIN_OUTLINE_SCREEN_PX` on screen,
+    /// widened in odd whole-pixel bands (the dilation's steps) so the
+    /// texture is rebuilt only when the band changes.
+    pub(crate) fn at_zoom(self, zoom: f32) -> Self {
+        if self.band_radius().is_none() || zoom <= 0.0 {
+            return self;
+        }
+        let needed = MIN_OUTLINE_SCREEN_PX / zoom;
+        if needed <= self.outline_thickness {
+            return self;
+        }
+        let band = 2.0 * ((needed - 1.0) / 2.0).ceil() + 1.0;
+        Self { outline_thickness: band, ..self }
     }
 
     fn alpha(opacity: f32) -> u8 {
@@ -356,6 +375,23 @@ mod tests {
 
     fn style(fill: f32, outline: f32, thickness: f32) -> SelectionStyle {
         SelectionStyle { fill_opacity: fill, outline_opacity: outline, outline_thickness: thickness, edge_feather_px: 0 }
+    }
+
+    /// At fit zoom on a big image a 2 px outline is half a screen pixel and
+    /// fades out under bilinear sampling; it widens to stay visible, in
+    /// odd whole-pixel steps so a zoom drag rebuilds the overlay only a
+    /// few times.
+    #[test]
+    fn the_outline_stays_visible_when_zoomed_out() {
+        let s = style(0.15, 1.0, 2.0);
+        assert_eq!(s.at_zoom(1.0).outline_thickness, 2.0, "at 1:1 the setting holds");
+        assert_eq!(s.at_zoom(0.75).outline_thickness, 2.0);
+        assert_eq!(s.at_zoom(0.25).outline_thickness, 7.0, "6 px needed, next odd band");
+        assert!(s.at_zoom(0.25).outline_thickness * 0.25 >= MIN_OUTLINE_SCREEN_PX);
+        assert_eq!(s.at_zoom(0.26), s.at_zoom(0.27), "nearby zooms share one texture");
+        assert_eq!(style(0.15, 0.0, 2.0).at_zoom(0.25).outline_thickness, 2.0, "an outline turned off stays off");
+        assert_eq!(style(0.15, 1.0, 0.0).at_zoom(0.25).outline_thickness, 0.0);
+        assert_eq!(style(0.15, 1.0, 9.0).at_zoom(0.25).outline_thickness, 9.0, "a wider setting wins");
     }
 
     #[test]

@@ -1130,7 +1130,7 @@ impl PrunrApp {
         let base = item.source_for_inpaint()?;
         // What gets cut is what the overlay shows: the feathered mask, which
         // the texture build already computed when it is current.
-        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        let style = self.selection_style();
         let shown = item.current_selection_texture(style)
             .and_then(|t| t.feathered.clone())
             .or_else(|| style.feather(&mask, item.source_rgba.as_deref()))
@@ -1407,6 +1407,13 @@ impl PrunrApp {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
         }
+    }
+
+    /// The selection overlay's style at the current zoom. The overlay and
+    /// Delete / Copy / Cut read this one value, so the actions find the
+    /// feathered plane the overlay built.
+    pub(crate) fn selection_style(&self) -> super::background_io::SelectionStyle {
+        super::background_io::SelectionStyle::from_brush(&self.settings.brush).at_zoom(self.zoom_state.zoom)
     }
 
     /// Magic Brush cannot take a click yet: the shown image is encoding,
@@ -2797,7 +2804,7 @@ impl PrunrApp {
             self.request_selected_textures(idx, ctx);
             self.kick_bg_image_tex_prep(id, ctx);
         }
-        let style = super::background_io::SelectionStyle::from_brush(&self.settings.brush);
+        let style = self.selection_style();
         self.batch.ensure_selection_texture(style, ctx);
         self.ensure_magic_embedding_for_selected(ctx);
     }
