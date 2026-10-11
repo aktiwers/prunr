@@ -13,6 +13,15 @@ use crate::gui::theme;
 /// Seconds a new result takes to reveal.
 pub(crate) const REVEAL_SECS: f64 = 0.6;
 
+/// Whether keeping an image of `held_bytes` on screen through a reveal
+/// fits in `available_bytes` of free memory. A reveal keeps the old image
+/// alongside the new one; when that would crowd memory the new image
+/// simply replaces the old.
+pub(crate) fn reveal_fits(held_bytes: usize, available_bytes: u64) -> bool {
+    const SHARE_OF_FREE: u64 = 4;
+    (held_bytes as u64).saturating_mul(SHARE_OF_FREE) <= available_bytes
+}
+
 /// Seconds the subject outline takes to fade in.
 pub(crate) const SUBJECT_FADE_SECS: f32 = 0.35;
 
@@ -175,6 +184,14 @@ mod tests {
             last = o;
         }
         assert!(reveal_at(0.5, 0.0).0 > reveal_at(0.5, 1.0).0, "what comes first, arrives first");
+    }
+
+    #[test]
+    fn a_reveal_is_skipped_when_the_old_image_would_crowd_free_memory() {
+        let sixteen_k = 16_384 * 16_384 * 4;
+        assert!(reveal_fits(sixteen_k, 8 << 30), "plenty free");
+        assert!(!reveal_fits(sixteen_k, 2 << 30), "the old image would take half of what is free");
+        assert!(reveal_fits(1024 * 1024 * 4, 64 << 20), "a small image always fits");
     }
 
     /// The outline sits on the subject's edge, and a reveal over it starts
