@@ -624,11 +624,18 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
-/// A reveal under way: the image it reveals over, and how far it has come.
-fn reveal_progress(item: &crate::gui::item::BatchItem) -> Option<(&egui::TextureHandle, f32)> {
-    let (from, at) = item.reveal.as_ref()?;
-    let p = (at.elapsed().as_secs_f64() / super::effects::REVEAL_SECS) as f32;
-    (p < 1.0).then_some((from, p))
+/// `texture` in `img_rect`, revealing over the held image while the
+/// item's reveal runs.
+fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
+    match item.reveal_progress() {
+        Some((from, p)) => {
+            super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p);
+            ui.ctx().request_repaint();
+        }
+        None => {
+            ui.painter().image(texture.id(), img_rect, super::effects::UNIT_UV, tint);
+        }
+    }
 }
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
@@ -642,17 +649,12 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         );
         let alpha = (fade * 255.0) as u8;
         if fade < 1.0 { ui.ctx().request_repaint(); }
-        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        match app.batch.selected_item().and_then(reveal_progress) {
+        if let Some(item) = app.batch.selected_item() {
             // Undone back to the original: the source reveals over the cut.
-            Some((from, p)) => {
+            if item.reveal_progress().is_some() {
                 draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-                super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p);
-                ui.ctx().request_repaint();
             }
-            None => {
-                ui.painter().image(texture.id(), img_rect, full_uv, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
-            }
+            paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         }
 
         // Selection overlay — same call as `render_done`. Required here too
@@ -704,7 +706,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         ui.painter().image(
             texture.id(),
             img_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            super::effects::UNIT_UV,
             Color32::from_rgba_unmultiplied(255, 255, 255, 140),
         );
 
@@ -734,7 +736,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             ui.painter().image(
                 texture.id(),
                 img_rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                super::effects::UNIT_UV,
                 Color32::WHITE,
             );
             // The selection is authored against the source, so it shows
@@ -748,7 +750,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         }
     } else if let Some(it) = item {
         // Until the new result's texture lands, the image it replaces stays.
-        let shown = it.result_texture.as_ref().or(it.reveal_from.as_ref())?;
+        let shown = it.result_texture.as_ref().or(it.held_texture())?;
         let img_rect =
             compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         // A partially transparent bg lets the checkerboard show through,
@@ -761,16 +763,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         } else if let Some(bg) = it.settings.bg {
             ui.painter().rect_filled(img_rect, 0.0, Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
         }
-        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        match (it.result_texture.as_ref(), reveal_progress(it)) {
-            (Some(new), Some((from, p))) => {
-                super::effects::paint_reveal(ui.painter(), img_rect, from.id(), new.id(), p);
-                ui.ctx().request_repaint();
-            }
-            _ => {
-                ui.painter().image(shown.id(), img_rect, full_uv, Color32::WHITE);
-            }
-        }
+        paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         super::selection_overlay::render_selection_overlay(
             ui, it, img_rect, app.processor.is_inpaint_in_flight(it.id),
         );
@@ -842,7 +835,6 @@ pub(super) fn paint_bg_image(
     if tw <= 0.0 || th <= 0.0 || bw <= 0.0 || bh <= 0.0 {
         return;
     }
-    let unit_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     match fit {
         BgImageFit::Cover => {
             let tex_aspect = tw / th;
@@ -859,20 +851,20 @@ pub(super) fn paint_bg_image(
             ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
         }
         BgImageFit::Stretch => {
-            ui.painter().image(tex.id(), bounds, unit_uv, Color32::WHITE);
+            ui.painter().image(tex.id(), bounds, super::effects::UNIT_UV, Color32::WHITE);
         }
         BgImageFit::Contain => {
             let scale = (bw / tw).min(bh / th);
             let inner = egui::vec2(tw * scale, th * scale);
             let inner_rect = Rect::from_center_size(bounds.center(), inner);
-            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+            ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
         }
         BgImageFit::Center => {
             // 1:1 native size centred. May overflow `bounds` but the
             // canvas painter clips to the painter's clip rect (egui's
             // panel clipping handles overflow).
             let inner_rect = Rect::from_center_size(bounds.center(), egui::vec2(tw, th));
-            ui.painter().image(tex.id(), inner_rect, unit_uv, Color32::WHITE);
+            ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
         }
         BgImageFit::Tile => {
             // UV scaled by bounds/tex_size triggers WrapMode::Repeat in

@@ -76,7 +76,7 @@ impl Drop for DecodeSlotGuard {
 /// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
 #[derive(Clone)]
 pub struct TexPrepHandles {
-    pub tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
+    pub tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
     pub slots: Arc<DecodeSlots>,
 }
 
@@ -94,9 +94,9 @@ pub struct BackgroundIO {
     /// Save completion notifications
     pub save_done_tx: mpsc::Sender<String>,
     pub save_done_rx: mpsc::Receiver<String>,
-    /// Pre-built ColorImages ready for GPU upload (item_id, texture_name, image, is_result)
-    pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, bool)>,
-    pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, bool)>,
+    /// Pre-built ColorImages ready for GPU upload.
+    pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
+    pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, TexTarget)>,
     /// Filter-only (model=None) Process results — keeps the UI thread free
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
@@ -118,6 +118,16 @@ pub struct BackgroundIO {
     /// drain_background_channels runs in logic(), not a render closure).
     pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
     pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
+}
+
+/// What a prepared texture is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TexTarget {
+    Source,
+    /// A result from a discrete change: it reveals over the held image.
+    Result,
+    /// A live re-cut during a slider drag: swaps in at once.
+    LiveResult,
 }
 
 impl BackgroundIO {

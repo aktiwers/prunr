@@ -7,6 +7,7 @@ use egui::ViewportCommand;
 
 use super::drag_export_state::DragExportState;
 use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::background_io::TexTarget;
 use super::timeline::StepKind;
 use super::settings::Settings;
 use super::state::AppState;
@@ -1148,7 +1149,7 @@ impl PrunrApp {
         item.thumb_pending = true;
         let source = item.source.clone();
         Self::spawn_tex_prep(
-            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), true, handles, ctx.clone(),
+            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), TexTarget::Result, handles, ctx.clone(),
         );
         self.batch.request_thumbnail(item_id, &source, Some(&rgba));
         ctx.request_repaint();
@@ -1208,7 +1209,7 @@ impl PrunrApp {
                     Self::spawn_tex_prep(
                         new_rgba.clone(), item.id,
                         Self::tex_name("upscale", item.id, Some(switch)),
-                        true, handles.clone(), ctx.clone(),
+                        TexTarget::Result, handles.clone(), ctx.clone(),
                     );
                     self.batch.request_thumbnail(item_id, &source, Some(&new_rgba));
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
@@ -2579,7 +2580,7 @@ impl PrunrApp {
                 let switch = self.result_switch_id;
                 Self::spawn_tex_prep(
                     new_rgba, item.id, Self::tex_name("result", item.id, Some(switch)),
-                    true, handles.clone(), ctx.clone(),
+                    TexTarget::LiveResult, handles.clone(), ctx.clone(),
                 );
                 (item.id, item.source.clone(), r.is_final)
             };
@@ -2627,10 +2628,7 @@ impl PrunrApp {
             self.show_original = false;
         }
         if let (Some(idx), Some(id)) = (idx, selected) {
-            let item = &mut self.batch.items[idx];
-            if item.reveal.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f64() > super::views::effects::REVEAL_SECS) {
-                item.reveal = None;
-            }
+            self.batch.items[idx].settle_reveal();
             self.ensure_selected_source_decoded(idx);
             self.request_selected_textures(idx, ctx);
             self.kick_bg_image_tex_prep(id, ctx);
@@ -2650,7 +2648,6 @@ impl PrunrApp {
             }
             item.drop_hot_tensors();
             item.reveal = None;
-            item.reveal_from = None;
             // 16 MB each: the shown image keeps its embedding, and with the
             // tool on so does the one shown before it.
             if !self.magic_brush_state.keeps_embedding(item.id) {
@@ -2714,7 +2711,7 @@ impl PrunrApp {
             if let Some(rgba) = self.batch.items[idx].source_rgba.clone() {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
-                    rgba, item_id, Self::tex_name("source", item_id, None), false,
+                    rgba, item_id, Self::tex_name("source", item_id, None), TexTarget::Source,
                     self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
@@ -2727,7 +2724,7 @@ impl PrunrApp {
                 let switch = self.result_switch_id;
                 self.batch.items[idx].result_tex_pending = true;
                 Self::spawn_tex_prep(
-                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), true,
+                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), TexTarget::Result,
                     self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
@@ -2748,7 +2745,7 @@ impl PrunrApp {
         rgba: Arc<image::RgbaImage>,
         item_id: u64,
         name: String,
-        is_result: bool,
+        target: TexTarget,
         handles: super::background_io::TexPrepHandles,
         ctx: egui::Context,
     ) {
@@ -2763,7 +2760,7 @@ impl PrunrApp {
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
-            let _ = handles.tx.send((item_id, name, ci, is_result));
+            let _ = handles.tx.send((item_id, name, ci, target));
             ctx.request_repaint();
         });
     }
@@ -3257,13 +3254,15 @@ impl PrunrApp {
             self.show_original = false;
         }
 
-        while let Ok((item_id, name, color_image, is_result)) = self.batch.bg_io.tex_prep_rx.try_recv() {
+        while let Ok((item_id, name, color_image, target)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                if is_result {
+                if target != TexTarget::Source {
                     item.result_texture = Some(tex);
                     item.result_tex_pending = false;
-                    item.start_reveal();
+                    if target == TexTarget::Result {
+                        item.start_reveal();
+                    }
                     tracing::info!(item_id, kind = "result", "texture uploaded");
                 } else {
                     item.source_texture = Some(tex);
