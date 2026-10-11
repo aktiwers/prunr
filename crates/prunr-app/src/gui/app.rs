@@ -4182,7 +4182,7 @@ pub(crate) fn apply_tier2_postprocess(
     if knobs.ai_blend < 1.0 - f32::EPSILON {
         apply_ai_blend(img, bicubic_source, knobs.ai_blend);
     }
-    apply_sharpen(img, knobs.sharpen);
+    apply_sharpen(img, knobs.sharpen, knobs.sharpen_sigma);
     if knobs.color_match {
         apply_color_match(img, bicubic_source);
     }

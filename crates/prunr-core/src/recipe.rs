@@ -137,6 +137,12 @@ impl OutputScale {
     /// twice but still produces a 4× image — the factor is the *display*
     /// factor the user sees, not the inference count.
     #[inline]
+    /// The unsharp-mask radius, in output pixels, for detail the size of
+    /// one source pixel: half the enlargement.
+    pub fn sharpen_sigma(self) -> f32 {
+        self.factor() as f32 / 2.0
+    }
+
     pub fn factor(self) -> u32 {
         match self {
             OutputScale::X2 => 2,
@@ -169,10 +175,10 @@ pub struct UpscaleRecipe {
     pub color_match: bool,
 }
 
-/// Mild positive default counters Real-ESRGAN's slightly soft output —
-/// matches the Upscayl out-of-box perceived-quality bar without forcing
-/// the user to touch a slider. Mirrored by `ItemSettings::default().sharpen`.
-pub const DEFAULT_SHARPEN: f32 = 0.2;
+/// Off: an upscale model's output is sharp already, and an unsharp mask on
+/// top boosts its grain (no upscaler sharpens by default). Mirrored by
+/// `ItemSettings::default().sharpen`.
+pub const DEFAULT_SHARPEN: f32 = 0.0;
 
 impl Default for UpscaleRecipe {
     fn default() -> Self {
@@ -781,7 +787,7 @@ mod tests {
         let r = UpscaleRecipe::default();
         assert_eq!(r.output_scale, OutputScale::X4);
         assert_eq!(r.pre_denoise_bits, 0_u32);
-        assert_eq!(r.sharpen_bits, 0.2_f32.to_bits());
+        assert_eq!(r.sharpen_bits, 0.0_f32.to_bits(), "sharpen starts off");
         assert_eq!(r.ai_blend_bits, 1.0_f32.to_bits());
         assert!(!r.color_match);
     }

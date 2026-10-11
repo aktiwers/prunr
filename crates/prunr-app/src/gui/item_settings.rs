@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn serde_loads_old_preset_missing_phase32_fields() {
         // Phase-30 preset JSON missing all Phase-32 fields must load with
-        // sensible defaults: pre_denoise=0, sharpen=0.2 (from default_sharpen()),
+        // sensible defaults: pre_denoise=0, sharpen off (from default_sharpen()),
         // ai_blend=1 (the critical one — zero here would disable AI output).
         let old_json = r#"{
             "gamma": 1.0,
