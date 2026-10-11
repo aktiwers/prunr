@@ -58,7 +58,7 @@ impl ExportBg {
     }
 
     fn photo(&self) -> Option<Arc<image::RgbaImage>> {
-        self.photo.clone().or_else(|| self.source.decode().ok().map(|img| Arc::new(img.into_rgba8())))
+        self.photo.clone().or_else(|| self.source.decode_rgba().ok())
     }
 }
 
@@ -93,6 +93,10 @@ pub(crate) enum ImageSource {
 
 impl ImageSource {
     /// Read the image bytes. For Path, reads from disk. For Bytes, clones the Arc.
+    pub(crate) fn decode_rgba(&self) -> Result<Arc<image::RgbaImage>, String> {
+        self.decode().map(|img| Arc::new(img.into_rgba8()))
+    }
+
     pub(crate) fn decode(&self) -> Result<image::DynamicImage, String> {
         let bytes = self.load_bytes().map_err(|e| e.to_string())?;
         prunr_core::load_image_from_bytes(&bytes).map_err(|e| e.to_string())
@@ -592,6 +596,13 @@ impl BatchItem {
             origin.upscale_run = Some(run.run);
         }
         self.upscale = Some(run);
+    }
+
+    /// Whether only Refine's after-the-model knobs changed since this
+    /// step's own upscale, so its kept run can be re-finished.
+    pub(crate) fn refine_only_changed(&self, model: prunr_core::ModelKind) -> bool {
+        let (Some(_), Some(old)) = (self.kept_upscale(), &self.applied_recipe) else { return false };
+        model.is_upscale() && prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) == prunr_core::RequiredTier::UpscaleTier2
     }
 
     /// The kept upscale run, when it is the shown step's own.
