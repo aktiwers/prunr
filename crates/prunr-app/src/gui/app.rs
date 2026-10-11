@@ -2667,28 +2667,30 @@ impl PrunrApp {
 
     /// Build the picture behind the result off the UI thread: the
     /// background image, or the effect made from the photo (once it is
-    /// decoded). `drain_background_channels` uploads it. A no-op while
-    /// the shown or pending picture is the current one.
+    /// decoded). `drain_background_channels` uploads it. One build at a
+    /// time: a blur-radius drag builds the latest value when the one in
+    /// flight lands, not a blur per frame.
     pub(crate) fn kick_backdrop_tex_prep(&mut self, item_id: u64, ctx: &egui::Context) {
+        use super::item_settings::Backdrop;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let backdrop = item.settings.backdrop();
         let Some(key) = backdrop.picture_key() else {
             item.backdrop_texture = None;
             return;
         };
-        if item.backdrop_tex_pending == Some(key) || item.backdrop_texture.as_ref().is_some_and(|(k, _)| *k == key) {
+        if item.backdrop_tex_pending.is_some() || item.backdrop_texture.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
         let build: Box<dyn FnOnce() -> Option<image::RgbaImage> + Send> = match backdrop {
-            super::item_settings::Backdrop::Image(_) => {
+            Backdrop::Image(_) => {
                 let Some(bg) = item.bg_image.clone() else { return };
                 Box::new(move || Some(bg.image.to_rgba8()))
             }
-            super::item_settings::Backdrop::Effect(effect) => {
+            Backdrop::Effect(effect) => {
                 let Some(photo) = item.source_rgba.clone() else { return };
                 Box::new(move || prunr_core::effect_backdrop(&photo, effect))
             }
-            super::item_settings::Backdrop::Transparent | super::item_settings::Backdrop::Color(_) => return,
+            Backdrop::Transparent | Backdrop::Color(_) => return,
         };
         item.backdrop_tex_pending = Some(key);
         let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
@@ -2696,8 +2698,7 @@ impl PrunrApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
-            let Some(rgba) = build() else { return };
-            let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+            let ci = build().map(|rgba| egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()));
             let _ = tx.send((item_id, key, ci));
             ctx.request_repaint();
         });
@@ -3406,7 +3407,12 @@ impl PrunrApp {
             if item.backdrop_tex_pending == Some(key) {
                 item.backdrop_tex_pending = None;
             }
-            if item.settings.backdrop().picture_key() != Some(key) { continue; }
+            // A stale or empty build frees the slot: the next frame builds
+            // the current picture.
+            let Some(ci) = ci.filter(|_| item.settings.backdrop().picture_key() == Some(key)) else {
+                ctx.request_repaint();
+                continue;
+            };
             // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0
             // wraps); other fits keep UVs in [0, 1] so the wrap is a
             // no-op.
