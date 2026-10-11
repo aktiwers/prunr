@@ -76,6 +76,15 @@ pub(crate) struct BatchManager {
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// What landing a background picture did, for the app's part: the saved
+/// path map and the message.
+pub(crate) enum BgLanded {
+    Picked { hash: u64, path: std::path::PathBuf },
+    Filled,
+    Failed { picked: bool, error: String },
+    Gone,
+}
+
 impl BatchManager {
     /// Compress every stored undo state nothing else holds, off-thread,
     /// behind the decode slots so a burst can't fan out N zstd encoders.
@@ -388,6 +397,35 @@ impl BatchManager {
         }
     }
 
+    /// A background picture finished loading. A picked one replaces the
+    /// background as one undo step; a preset's fills in the picture its
+    /// settings name, if they still do; a preset's that failed is dropped.
+    pub(crate) fn land_bg_image(&mut self, load: super::background_io::BgImageLoad) -> BgLanded {
+        let super::background_io::BgImageLoad { item_id, path, picked, result } = load;
+        let Some(item) = self.find_by_id_mut(item_id) else { return BgLanded::Gone };
+        match result {
+            Ok((img, hash)) if picked => {
+                item.settings.bg = None;
+                item.settings.bg_effect = prunr_core::BgEffect::None;
+                item.set_bg_image_hashed(img, Some(path.clone()), hash);
+                item.commit(super::timeline::StepKind::Adjust);
+                BgLanded::Picked { hash, path }
+            }
+            Ok((img, hash)) => {
+                if item.settings.bg_image_hash.map(|h| h.get()) == Some(hash) {
+                    item.set_bg_image_hashed(img, Some(path), hash);
+                }
+                BgLanded::Filled
+            }
+            Err(error) => {
+                if !picked {
+                    item.clear_bg_image();
+                }
+                BgLanded::Failed { picked, error }
+            }
+        }
+    }
+
     /// Load and hash a background picture off the UI thread; it lands on
     /// `bg_io.bg_image_rx`.
     pub(crate) fn request_bg_image(&self, item_id: u64, path: std::path::PathBuf, picked: bool) {
@@ -600,8 +638,7 @@ impl BatchManager {
         let Some(source) = self.items.get(from) else { return };
         let (settings, bg_image) = (source.settings, source.bg_image.clone());
         for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
-            item.settings = settings;
-            item.bg_image = bg_image.clone();
+            item.adopt_settings(settings, bg_image.clone());
         }
     }
 
