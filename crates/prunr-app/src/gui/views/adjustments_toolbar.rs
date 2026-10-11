@@ -1154,22 +1154,16 @@ pub(super) fn render_model_dropdown(
     ui.add_enabled_ui(enabled, |ui| {
         let info = model_info(app_settings.model);
         let resp = chip::chip_button(ui, info.icon, info.name, false);
-        let (heading, body) = if app_settings.model.is_inpaint() {
-            (
-                "Eraser (LaMa inpaint)",
-                "Object-removal mode. Paint over an unwanted area with the brush; LaMa fills it in. Brush is auto-enabled in this mode.",
-            )
-        } else if mask_active || app_settings.model.is_upscale() {
-            (
-                "Model",
-                "Which AI model does the work. Each row shows its strength and download size.",
-            )
-        } else {
-            (
-                "Model not used",
-                "Sketch is set to Full, so the line detector runs over the whole image and the subject model is skipped. Switch Sketch to Off or Subject to use it again.",
-            )
+        // The chip is always named "Model"; the hint says what this one does.
+        use crate::gui::knob_catalog::ModelRole;
+        let body = match app_settings.model.role() {
+            ModelRole::Cutout if !mask_active => "Sketch is set to Full, so the lines are drawn over the whole photo and nothing is cut out. Set Sketch to Off or Subject to cut out the subject again.",
+            ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and download size.",
+            ModelRole::Erase => "Removes what you paint over and fills the area in. Paint with the brush, then Process.",
+            ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",
+            ModelRole::Filters => "No model runs: only the effect, lines and background apply to the photo.",
         };
+        let heading = "Model";
         let resp = chip::tooltip(resp, heading, body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
