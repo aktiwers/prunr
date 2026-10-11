@@ -96,15 +96,6 @@ pub struct BrushSettings {
     /// what the overlay shows and to what Delete / Copy / Cut act on.
     #[serde(default)]
     pub edge_feather: f32,
-    /// Outline stroke width in image pixels.
-    #[serde(default = "default_outline_thickness")]
-    pub outline_thickness: f32,
-    /// Outline stroke alpha. 0 = hidden, 1 = solid.
-    #[serde(default = "default_outline_opacity")]
-    pub outline_opacity: f32,
-    /// Selection fill alpha (tinted ACCENT). 0 = no fill, 1 = solid.
-    #[serde(default = "default_fill_opacity")]
-    pub fill_opacity: f32,
     /// Magic Brush only: the probability a pixel must reach to be
     /// selected (0.5 is the model's decision boundary). Lives in shared
     /// BrushSettings like the other per-tool knobs.
@@ -366,9 +357,6 @@ impl SdQualityPreset {
 
 fn default_feather() -> f32 { 4.0 }
 fn default_grow() -> f32 { 2.0 }
-fn default_outline_thickness() -> f32 { 2.0 }
-fn default_outline_opacity() -> f32 { 1.0 }
-fn default_fill_opacity() -> f32 { 0.15 }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
 /// 1.5 matches the `Balanced` preset's CFG (LCM scheduler, CFG up to
@@ -506,9 +494,6 @@ impl Default for BrushSettings {
             sd_strength: default_strength(),
             sd_use_taesd: None,
             edge_feather: 0.0,
-            outline_thickness: default_outline_thickness(),
-            outline_opacity: default_outline_opacity(),
-            fill_opacity: default_fill_opacity(),
             magic_confidence_threshold: default_magic_confidence_threshold(),
             magic_remove_specks: default_magic_remove_specks(),
         }
@@ -736,20 +721,6 @@ mod tests {
         let s = BrushSettings::default();
         assert!((s.edge_feather - 0.0).abs() < f32::EPSILON,
             "edge_feather default must be 0 (sharp edges)");
-    }
-
-    #[test]
-    fn brush_settings_default_outline_thickness_is_2_px() {
-        let s = BrushSettings::default();
-        assert!((s.outline_thickness - 2.0).abs() < f32::EPSILON,
-            "outline_thickness default must be 2.0 px");
-    }
-
-    #[test]
-    fn brush_settings_default_fill_opacity_is_15_percent() {
-        let s = BrushSettings::default();
-        assert!((s.fill_opacity - 0.15).abs() < f32::EPSILON,
-            "fill_opacity default must be 0.15 (15%)");
     }
 
     #[test]
@@ -1036,9 +1007,6 @@ mod tests {
             sd_strength: 0.6,
             sd_use_taesd: Some(true),
             edge_feather: 5.0,
-            outline_thickness: 4.0,
-            outline_opacity: 0.5,
-            fill_opacity: 0.8,
             magic_confidence_threshold: 0.7,
             magic_remove_specks: false,
         };
