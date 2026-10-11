@@ -822,9 +822,7 @@ pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item:
         }
         Backdrop::Image(_) | Backdrop::Effect(_) => {
             let Some((_, tex)) = item.backdrop_texture.as_ref() else { return };
-            // An effect is made from the photo itself, so it covers exactly.
-            let fit = if matches!(backdrop, Backdrop::Image(_)) { item.settings.bg_image_fit } else { prunr_core::BgImageFit::Cover };
-            paint_bg_image(ui, rect, tex, fit, image_px);
+            paint_bg_image(ui, rect, tex, backdrop.fit(item.settings.bg_image_fit), image_px);
         }
     }
 }
