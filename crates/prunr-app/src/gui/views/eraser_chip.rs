@@ -155,23 +155,23 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
             brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
             changed = true;
         }
-        let p = ui.add(
+        let p = chip::named(ui.add(
             egui::TextEdit::multiline(&mut brush.sd_prompt)
                 .hint_text("Empty: continue the surroundings")
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
-        );
+        ), "Prompt text");
         if p.lost_focus() { changed = true; }
         hint(ui, "What should fill the painted area. Be specific: \"wooden park bench in autumn forest\" works better than \"bench\".");
 
         ui.add_space(theme::SPACE_SM);
         ui.label(RichText::new("Negative prompt").strong().color(theme::TEXT_PRIMARY));
-        let np = ui.add(
+        let np = chip::named(ui.add(
             egui::TextEdit::multiline(&mut brush.sd_negative_prompt)
                 .hint_text("e.g. blurry, watermark, low quality")
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
-        );
+        ), "Negative prompt");
         if np.lost_focus() { changed = true; }
         hint(ui, "What to keep out of the fill. Used when Guidance (under Advanced) is above 1.");
     });
