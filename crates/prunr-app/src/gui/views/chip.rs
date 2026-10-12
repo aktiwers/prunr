@@ -1061,7 +1061,11 @@ pub(super) fn custom_color_dot(ui: &mut Ui, rgb: [u8; 3], on: bool) -> Response 
 /// row's end.
 pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
     let changed = ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        if in_panel_rows(ui) {
+            panel_name(ui, label);
+        } else {
+            ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| switch(ui, label, value)).inner
     }).inner.changed();
     ChipChange { changed, commit: changed }
