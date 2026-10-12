@@ -199,7 +199,7 @@ pub(crate) fn render(
             // has no subject to fill.
             let fill_reason = (!fill_style_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
             chip::gated(ui, fill_reason, |ui| {
-                let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
+                let changed = super::effect_chip::render(ui, &mut item_settings.fill_style);
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
             });
         }
@@ -391,7 +391,7 @@ fn render_mask_group(
         width: theme::POPOVER_WIDTH,
         live: true,
     };
-    chip::strip_chip(ui, group, "All mask settings", |ui, part| match part {
+    chip::strip_chip(ui, group, "All mask settings", chip::PanelHeader::RESET, |ui, part| match part {
         chip::Part::Quick => {
             mask_gamma(ui, s, change);
             mask_shift(ui, s, change);
@@ -511,7 +511,7 @@ fn render_lines_group(
         width: LINES_PANEL_WIDTH,
         live: true,
     };
-    chip::strip_chip(ui, group, "All line settings", |ui, part| match part {
+    chip::strip_chip(ui, group, "All line settings", chip::PanelHeader::RESET, |ui, part| match part {
         chip::Part::Quick => {
             let modes = [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline].map(|m| {
                 let enabled = m != LineMode::SubjectOutline || subject_available;
@@ -749,16 +749,16 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     match style {
         LineStyle::Solid => {}
         LineStyle::GradientY { top, bottom } => {
-            changed |= rgb_picker_row(ui, "Top", top);
-            changed |= rgb_picker_row(ui, "Bottom", bottom);
+            changed |= chip::color_row(ui, "Top", top);
+            changed |= chip::color_row(ui, "Bottom", bottom);
         }
         LineStyle::GradientX { left, right } => {
-            changed |= rgb_picker_row(ui, "Left", left);
-            changed |= rgb_picker_row(ui, "Right", right);
+            changed |= chip::color_row(ui, "Left", left);
+            changed |= chip::color_row(ui, "Right", right);
         }
         LineStyle::RadialGradient { center, inner, outer } => {
-            changed |= rgb_picker_row(ui, "Inner", inner);
-            changed |= rgb_picker_row(ui, "Outer", outer);
+            changed |= chip::color_row(ui, "Inner", inner);
+            changed |= chip::color_row(ui, "Outer", outer);
             changed |= chip::slider_row(ui, "Center X", &mut center[0], 0..=255).changed;
             changed |= chip::slider_row(ui, "Center Y", &mut center[1], 0..=255).changed;
         }
@@ -766,52 +766,10 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
             changed |= chip::slider_row(ui, "Cycles", cycles, 1..=10).changed;
         }
         LineStyle::DualScale { fine_color, bold_color } => {
-            changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);
-            changed |= rgb_picker_row(ui, "Bold (structure)", bold_color);
+            changed |= chip::color_row(ui, "Fine (detail)", fine_color);
+            changed |= chip::color_row(ui, "Bold (structure)", bold_color);
         }
     }
-    changed
-}
-
-/// Effect picker ("Fill style" in settings and code). Variant list + inline
-/// param editor; "None" heads the list, so the header has no reset.
-fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
-    use prunr_core::FillStyle;
-    let accent = !matches!(style, FillStyle::None);
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
-        "Effect",
-        "Restyle the subject's colors, or the whole photo with No model.",
-        None,
-    );
-
-    let popup_id = ui.make_persistent_id("fill_style_popup");
-    let mut changed = false;
-    chip::flyout_for(popup_id, &resp, |ui| {
-        // Wider popover so the variant list sits next to the parameter column
-        // instead of stacking above it — otherwise 4-stop GradientMap makes
-        // the popover taller than most screens.
-        ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        chip::popover_header(ui, "Effect", None);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(FILL_STYLE_LIST_WIDTH);
-                for option in FillStyle::ALL {
-                    let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-                    if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                        *style = *option;
-                        changed = true;
-                    }
-                }
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                if fill_style_params(ui, style) {
-                    changed = true;
-                }
-            });
-        });
-    });
     changed
 }
 
@@ -838,7 +796,7 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
         chip::section_label(ui, "Outline");
         changed |= chip::slider_row_f32(ui, "Width", &mut d.outline_width, 0.0..=prunr_core::Decoration::MAX_OUTLINE_PX, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed;
         if d.has_outline() {
-            changed |= rgb_picker_row(ui, "Color", &mut d.outline_color);
+            changed |= chip::color_row(ui, "Color", &mut d.outline_color);
         }
         ui.add_space(theme::SPACE_SM);
         ui.separator();
@@ -858,81 +816,6 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
     changed
 }
 
-const FILL_STYLE_POPOVER_WIDTH: f32 = 560.0;
-const FILL_STYLE_LIST_WIDTH: f32 = 140.0;
-const GRADIENT_MAP_COL_WIDTH: f32 = 190.0;
-
-fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
-    use prunr_core::FillStyle;
-    let mut changed = false;
-    match style {
-        FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia => {
-            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
-        }
-        FillStyle::Threshold { level } => {
-            changed |= chip::slider_row(ui, "Level", level, 0..=255).changed;
-        }
-        FillStyle::Posterize { levels } => {
-            changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
-        }
-        FillStyle::Solarize { pivot } => {
-            changed |= chip::slider_row(ui, "Pivot", pivot, 0..=255).changed;
-        }
-        FillStyle::HueShift { degrees } => {
-            changed |= chip::slider_row(ui, "Degrees", degrees, -180..=180).changed;
-        }
-        FillStyle::Saturate { percent } => {
-            changed |= chip::slider_row(ui, "Percent", percent, 0..=300).changed;
-        }
-        FillStyle::ColorSplash { keep_hue, tolerance } => {
-            changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
-            changed |= chip::slider_row(ui, "Tolerance (degrees)", tolerance, 0..=180).changed;
-            chip::kept_hues(ui, *keep_hue, *tolerance);
-        }
-        FillStyle::Pixelate { block_size } => {
-            changed |= chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed;
-        }
-        FillStyle::Duotone { dark, light } => {
-            changed |= rgb_picker_row(ui, "Dark", dark);
-            changed |= rgb_picker_row(ui, "Light", light);
-        }
-        FillStyle::CrossProcess { shadow, highlight } => {
-            changed |= rgb_picker_row(ui, "Shadow", shadow);
-            changed |= rgb_picker_row(ui, "Highlight", highlight);
-        }
-        FillStyle::Halftone { dot_spacing } => {
-            changed |= chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed;
-        }
-        FillStyle::GradientMap { stops } => {
-            // 2×2 grid keeps the 4-stop popover within one screen height; a
-            // linear stack would exceed the viewport on most displays.
-            let [s0, s1, s2, s3] = stops;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Shadow", s0);
-                });
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Dark mid", s1);
-                });
-            });
-            ui.add_space(theme::SPACE_XS);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Light mid", s2);
-                });
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Highlight", s3);
-                });
-            });
-        }
-    }
-    changed
-}
 
 /// The backgrounds a user can choose, read from `ItemSettings::backdrop`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1126,13 +1009,6 @@ fn apply_bg_kind(
     }
 }
 
-/// Label + inline color picker on two stacked rows. Thin wrapper over
-/// `chip::rgb_picker` — the label is purely visual context so the user
-/// knows which color they're editing.
-fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    chip::rgb_picker(ui, rgb)
-}
 
 /// Reset-to-default-preset button + preset dropdown.
 pub(super) fn render_reset_preset_cluster(

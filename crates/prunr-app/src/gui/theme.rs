@@ -215,6 +215,8 @@ pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0x9b, 0x4f, 0xd1);
 
 /// Lavender light: the accent lifted toward white, for glows over a photo.
 pub const GLOW: Color32 = Color32::from_rgb(0xe6, 0xd2, 0xfa);
+/// The ring around a picked tile.
+pub const ACCENT_RING: Color32 = Color32::from_rgb(0xb2, 0x7a, 0xe0);
 
 /// Amber for a run that is stopping.
 pub const CAUTION: Color32 = Color32::from_rgb(0xe8, 0xa8, 0x4c);
