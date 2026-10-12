@@ -163,7 +163,7 @@ fn settings_opens_from_its_toolbar_button() {
     assert!(!harness.state().show_settings);
     click(&mut harness, "Settings");
     assert!(harness.state().show_settings);
-    assert!(names(&harness).iter().any(|n| n == "Behavior"), "{:?}", names(&harness));
+    assert!(names(&harness).iter().any(|n| n == "Editing"), "{:?}", names(&harness));
 }
 
 #[test]

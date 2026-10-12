@@ -1,15 +1,18 @@
-//! Settings modal — four tabs:
-//! - **General**: hardware + performance knobs that change *what runs*
-//! - **Behavior**: toggles that change *how editing feels*
+//! Settings modal: a sidebar of pages, each a few groups of rows.
+//! - **Performance**: what runs and how much memory it may take
+//! - **Hardware**: this computer, the accelerator runtime, the cache
+//! - **Images**: what happens when images arrive
+//! - **Editing**: how the canvas looks while editing
 //! - **Hotkeys**: the shortcut table, each chord rebindable in place
-//! - **Model credits**: installed-model attribution (CC-BY compliance)
+//! - **Credits**: installed-model attribution (CC-BY compliance)
 //!
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
 
 use std::sync::Arc;
 
-use egui::RichText;
+use egui::{Color32, RichText};
+use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::settings::Settings;
@@ -20,22 +23,40 @@ use super::{hint, kv_row, section_heading};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
-    General,
-    Behavior,
+    Performance,
+    Hardware,
+    Images,
+    Editing,
     Hotkeys,
-    ModelCredits,
+    Credits,
 }
 
 impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Behavior => "Behavior",
+            Self::Performance => "Performance",
+            Self::Hardware => "Hardware",
+            Self::Images => "Images",
+            Self::Editing => "Editing",
             Self::Hotkeys => "Hotkeys",
-            Self::ModelCredits => "Model credits",
+            Self::Credits => "Credits",
         }
     }
-    pub(crate) const ALL: [SettingsTab; 4] = [Self::General, Self::Behavior, Self::Hotkeys, Self::ModelCredits];
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Performance => ICON_BOLT.codepoint,
+            Self::Hardware => ICON_MEMORY.codepoint,
+            Self::Images => ICON_IMAGE.codepoint,
+            Self::Editing => ICON_EDIT.codepoint,
+            Self::Hotkeys => ICON_KEYBOARD.codepoint,
+            Self::Credits => ICON_INFO.codepoint,
+        }
+    }
+
+    pub(crate) const ALL: [SettingsTab; 6] = [
+        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Hotkeys, Self::Credits,
+    ];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
     pub fn from_label(s: &str) -> Option<Self> {
@@ -43,8 +64,8 @@ impl SettingsTab {
     }
 }
 
-/// Read-only snapshot of runtime-install state passed into the General
-/// tab so its renderer doesn't need a `&mut PrunrApp`.
+/// Read-only snapshot of runtime-install state passed into the Hardware
+/// page so its renderer doesn't need a `&mut PrunrApp`.
 pub(crate) struct HardwareSectionContext {
     pub openvino_installed: bool,
     pub install_in_progress: bool,
@@ -53,7 +74,7 @@ pub(crate) struct HardwareSectionContext {
     pub sd_margin_mb: u64,
 }
 
-/// View-layer intent the General tab returns so platform side effects
+/// View-layer intent the Hardware page returns so platform side effects
 /// (rfd, runtime install) live on the orchestrator, not the view.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HardwareSectionIntent {
@@ -63,50 +84,47 @@ pub(crate) enum HardwareSectionIntent {
     ClearCompiledCache,
 }
 
+const SIDEBAR_WIDTH: f32 = 220.0;
+/// A row control's width before it has been measured once.
+const CONTROL_GUESS: f32 = 160.0;
+const SIDEBAR_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 31);
+const PAGE_MARGIN: egui::Margin = egui::Margin { left: 28, right: 20, top: 18, bottom: 20 };
+
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let keep_sd_before = app.settings.keep_sd_loaded;
     let processor_before = app.settings.processor;
-    let closed = theme::standard_modal_window(
-        ctx,
-        "settings",
-        "Settings",
-        [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
-        |ui| {
-            theme::apply_modal_visuals(ui);
-            render_tab_strip(ui, &mut app.settings_tab);
-            ui.add_space(theme::SPACE_SM);
-
-            // Tab content scrolls inside its own region so the footer
-            // (Reset row) doesn't overlap long content.
-            let scroll_height = (ui.available_height() - theme::MODAL_FOOTER_RESERVED).max(0.0);
-            hardware_intent = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(scroll_height)
-                .show(ui, |ui| {
-                    match app.settings_tab {
-                        SettingsTab::General => {
-                            let hw_ctx = HardwareSectionContext {
-                                openvino_installed: app.hardware_install_cache.openvino,
-                                install_in_progress: app.runtime_install.is_some(),
-                                install_status_text: app.runtime_install.as_ref()
-                                    .map(|p| p.last_event.status_text()),
-                                active_provider: app.settings.active_backend.clone(),
-                                sd_margin_mb: app.settings.sd_memory.margin_mb(),
-                            };
-                            render_tab_general(ui, &mut app.settings, &hw_ctx)
-                        }
-                        SettingsTab::Behavior => { render_tab_behavior(ui, &mut app.settings); None }
-                        SettingsTab::Hotkeys => { render_tab_hotkeys(ui, app); None }
-                        SettingsTab::ModelCredits => { render_tab_model_credits(ui); None }
-                    }
-                })
-                .inner;
-
-            ui.separator();
-            render_modal_footer(ui, app);
-        },
-    );
+    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::SETTINGS_MODAL_SIZE, |ui| {
+        theme::apply_modal_visuals(ui);
+        let height = ui.available_height();
+        let mut close = false;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            render_sidebar(ui, app, height);
+            egui::Frame::NONE.inner_margin(PAGE_MARGIN).show(ui, |ui| ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+                ui.set_width(ui.available_width());
+                ui.set_height(height - (PAGE_MARGIN.top + PAGE_MARGIN.bottom) as f32);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(app.settings_tab.label()).size(20.0).color(theme::TEXT_PRIMARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, Color32::from_white_alpha(15));
+                        close = super::chip::named(x, "Close settings").clicked();
+                    });
+                });
+                let footer = if app.pending_reset_confirm { 44.0 } else { 0.0 };
+                hardware_intent = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height((ui.available_height() - footer).max(0.0))
+                    .show(ui, |ui| render_page(ui, app))
+                    .inner;
+                if app.pending_reset_confirm {
+                    render_reset_confirm(ui, app);
+                }
+            }));
+        });
+        close
+    });
 
     if let Some(intent) = hardware_intent {
         dispatch_hardware_intent(app, intent);
@@ -122,36 +140,6 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     if closed {
         app.close_settings(ctx);
     }
-}
-
-/// Inline confirm-then-reset (no separate modal) so the destructive
-/// scope is spelled out before the user can act on it.
-fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    ui.horizontal(|ui| {
-        if app.pending_reset_confirm {
-            ui.label(RichText::new("Reset settings? Presets, licences, background pictures and the model stay.")
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
-                    app.pending_reset_confirm = false;
-                }
-                if button(ui, ButtonKind::Destructive, "Reset").clicked() {
-                    app.settings.reset_preserving_identity();
-                    // The shipped keys go live now, not at the next launch.
-                    app.apply_hotkeys(ui.ctx(), super::shortcuts::Bindings::shipped());
-                    app.pending_reset_confirm = false;
-                }
-            });
-        } else {
-            ui.label(RichText::new("Saved when Settings closes")
-                .color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, ButtonKind::Secondary, "Reset to defaults").clicked() {
-                    app.pending_reset_confirm = true;
-                }
-            });
-        }
-    });
 }
 
 fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
@@ -190,72 +178,302 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
     }
 }
 
-fn render_hardware_section(
-    ui: &mut egui::Ui,
-    ctx: &HardwareSectionContext,
-) -> Option<HardwareSectionIntent> {
+fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionIntent> {
+    match app.settings_tab {
+        SettingsTab::Performance => { render_page_performance(ui, &mut app.settings); None }
+        SettingsTab::Hardware => {
+            let hw_ctx = HardwareSectionContext {
+                openvino_installed: app.hardware_install_cache.openvino,
+                install_in_progress: app.runtime_install.is_some(),
+                install_status_text: app.runtime_install.as_ref().map(|p| p.last_event.status_text()),
+                active_provider: app.settings.active_backend.clone(),
+                sd_margin_mb: app.settings.sd_memory.margin_mb(),
+            };
+            render_page_hardware(ui, &hw_ctx)
+        }
+        SettingsTab::Images => { render_page_images(ui, &mut app.settings); None }
+        SettingsTab::Editing => { render_page_editing(ui, &mut app.settings); None }
+        SettingsTab::Hotkeys => { render_tab_hotkeys(ui, app); None }
+        SettingsTab::Credits => { render_tab_model_credits(ui); None }
+    }
+}
+
+/// The page list, and Reset to defaults at its foot.
+fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
+    let painter = ui.painter();
+    let left = egui::CornerRadius { nw: theme::PANEL_RADIUS, sw: theme::PANEL_RADIUS, ne: 0, se: 0 };
+    painter.rect_filled(rect, left, SIDEBAR_FILL);
+    painter.vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0, Color32::from_white_alpha(15)));
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 18.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Settings").size(16.0).color(theme::TEXT_PRIMARY));
+    });
+    ui.add_space(14.0);
+    for tab in SettingsTab::ALL {
+        if nav_item(&mut ui, Some(tab.icon()), tab.label(), app.settings_tab == tab).clicked() {
+            app.settings_tab = tab;
+        }
+    }
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        if nav_item(ui, None, "Reset to defaults", false).clicked() {
+            app.pending_reset_confirm = true;
+        }
+    });
+}
+
+/// One sidebar entry: a 34 px pill, purple while its page shows.
+fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if selected {
+            theme::ACCENT_BRIGHT.gamma_multiply(0.22)
+        } else if resp.hovered() {
+            Color32::from_white_alpha(10)
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, theme::PILL_RADIUS, fill);
+        let mut x = rect.left() + 12.0;
+        if let Some(icon) = icon {
+            painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(16.0), theme::ACCENT_RING);
+            x += 26.0;
+        }
+        let color = if selected { Color32::WHITE } else if icon.is_some() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
+        painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), color);
+    }
+    resp
+}
+
+/// Inline confirm-then-reset so the destructive scope is spelled out
+/// before the user can act on it.
+fn render_reset_confirm(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Reset settings? Presets, licences, background pictures and the model stay.")
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_MONO));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                app.pending_reset_confirm = false;
+            }
+            if button(ui, ButtonKind::Destructive, "Reset").clicked() {
+                app.settings.reset_preserving_identity();
+                // The shipped keys go live now, not at the next launch.
+                app.apply_hotkeys(ui.ctx(), super::shortcuts::Bindings::shipped());
+                app.pending_reset_confirm = false;
+            }
+        });
+    });
+}
+
+/// A page's small heading over a group.
+fn group_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(18.0);
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        ui.label(RichText::new(text).size(12.0).color(theme::TEXT_SECONDARY));
+    });
+    ui.add_space(4.0);
+}
+
+/// A group of rows in one dim rounded box.
+fn group<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut Rows<'_>) -> R) -> R {
+    egui::Frame::NONE
+        .fill(Color32::from_white_alpha(9))
+        .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(13)))
+        .corner_radius(14.0)
+        .inner_margin(egui::Margin::symmetric(16, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(&mut Rows { ui, first: true })
+        })
+        .inner
+}
+
+/// The rows of a `group`, a hairline between each.
+struct Rows<'a> {
+    ui: &'a mut egui::Ui,
+    first: bool,
+}
+
+impl Rows<'_> {
+    /// A row: its title over a one-line description on the left, the
+    /// control `control` draws on the right.
+    fn row<R>(&mut self, title: &str, description: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let ui = &mut *self.ui;
+        if !std::mem::replace(&mut self.first, false) {
+            let y = ui.cursor().top();
+            ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, Color32::from_white_alpha(13)));
+        }
+        // The control sits flush right but lays out left to right, so its
+        // width comes from the last frame: a right-to-left layout would
+        // reverse the parts of a stepper or a segmented choice.
+        let width_id = ui.id().with(("settings_row", title));
+        let control_width = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(CONTROL_GUESS);
+        let (out, drawn) = ui
+            .horizontal(|ui| {
+                ui.set_min_height(46.0);
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - control_width - theme::SPACE_MD).max(120.0));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(title).size(13.5).color(theme::TEXT_PRIMARY));
+                    if !description.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(description).size(12.0).color(theme::TEXT_SECONDARY)).wrap());
+                    }
+                    ui.add_space(6.0);
+                });
+                ui.add_space((ui.available_width() - control_width).max(0.0));
+                let r = ui.horizontal(control);
+                (r.inner, r.response.rect.width())
+            })
+            .inner;
+        if (drawn - control_width).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(width_id, drawn));
+            ui.ctx().request_repaint();
+        }
+        out
+    }
+
+    fn ui(&mut self) -> &mut egui::Ui {
+        self.ui
+    }
+}
+
+/// The board's stepper: − value + in one dim pill.
+fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::RangeInclusive<usize>) {
+    egui::Frame::NONE.fill(Color32::from_white_alpha(15)).corner_radius(theme::PILL_RADIUS).inner_margin(3.0).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let step = |ui: &mut egui::Ui, enabled: bool, glyph: &str, tip: &str| {
+                let b = egui::Button::new(RichText::new(glyph).size(15.0).color(theme::TEXT_PRIMARY))
+                    .frame(false)
+                    .min_size(egui::vec2(26.0, 26.0));
+                super::chip::named(ui.add_enabled(enabled, b), tip).clicked()
+            };
+            if step(ui, *value > *range.start(), "\u{2212}", "Fewer") {
+                *value -= 1;
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, value.to_string(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
+            if step(ui, *value < *range.end(), "+", "More") {
+                *value += 1;
+            }
+        });
+    })
+    .response
+    .on_hover_text(name);
+}
+
+fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
+    use crate::gui::settings::{ComputeMode, SdMemoryGuard};
+    use super::chip::Choice;
+    group_heading(ui, "Processing");
+    let max_jobs = settings.max_jobs();
+    let jobs_hint = if settings.is_gpu() {
+        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
+    } else {
+        format!("Images at once. 1\u{2013}{max_jobs}.")
+    };
+    let gpu = settings.is_gpu();
+    group(ui, |rows| {
+        rows.row("Parallel jobs", &jobs_hint, |ui| stepper(ui, "Parallel jobs", &mut settings.parallel_jobs, 1..=max_jobs));
+        if gpu {
+            rows.row("Processor", "Auto runs each model on the accelerator when it supports one.", |ui| {
+                super::chip::choice_buttons(ui, &[
+                    Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
+                    Choice { value: ComputeMode::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
+                ], &mut settings.processor);
+            });
+        }
+    });
+    group_heading(ui, "Stable Diffusion eraser");
+    group(ui, |rows| {
+        rows.row("Keep it loaded", "Faster repeated erases. Holds about 16 GB of RAM while the app is open.", |ui| {
+            super::chip::switch(ui, "Keep the Stable Diffusion eraser loaded", &mut settings.keep_sd_loaded);
+        });
+        rows.row("Memory guard", "How much memory to leave free for other apps while it runs.", |ui| {
+            super::chip::choice_buttons(ui, &[
+                Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1 GB free for other apps. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
+                Choice { value: SdMemoryGuard::Balanced, name: "Balanced", description: "Leaves about 2 GB free for other apps", enabled: true },
+                Choice { value: SdMemoryGuard::Strict, name: "Strict", description: "Leaves about 4 GB free, for when other apps grab memory while it runs", enabled: true },
+            ], &mut settings.sd_memory);
+        });
+    });
+}
+
+fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Option<HardwareSectionIntent> {
     use crate::hardware;
     use crate::runtime_install::RuntimeId;
     let mut intent = None;
-    section_heading(ui, "Hardware");
-
     let p = hardware::profile();
     let avail_ram = hardware::available_ram_bytes_throttled();
-    egui::Grid::new("hardware_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_XS])
-        .show(ui, |ui| {
-            kv_row(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand), theme::TEXT_SECONDARY);
-            let gpu_label = match (p.dgpu, p.igpu) {
-                (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
-                (Some(d), None) => format!("{d}"),
-                (None, Some(i)) => format!("{i} (iGPU)"),
-                (None, None) => "none detected".to_string(),
-            };
-            kv_row(ui, "GPU", &gpu_label, theme::TEXT_SECONDARY);
-            kv_row(ui, "Accelerator", &ctx.active_provider, theme::TEXT_SECONDARY);
-            let total_ram = hardware::total_ram_bytes();
-            kv_row(ui, "RAM",
-                &format!("{:.1} / {:.1} GB free",
-                    avail_ram as f64 / 1e9, total_ram as f64 / 1e9),
-                theme::TEXT_SECONDARY);
+
+    group_heading(ui, "This computer");
+    group(ui, |rows| {
+        let ui = rows.ui();
+        ui.add_space(4.0);
+        let kv = |ui: &mut egui::Ui, key: &str, value: &str| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(26.0);
+                ui.label(RichText::new(key).size(13.0).color(theme::TEXT_SECONDARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(value).size(13.0).color(theme::TEXT_PRIMARY));
+                });
+            });
+        };
+        kv(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand));
+        let gpu_label = match (p.dgpu, p.igpu) {
+            (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
+            (Some(d), None) => format!("{d}"),
+            (None, Some(i)) => format!("{i} (iGPU)"),
+            (None, None) => "none detected".to_string(),
+        };
+        kv(ui, "GPU", &gpu_label);
+        kv(ui, "Accelerator", &ctx.active_provider);
+        let total_ram = hardware::total_ram_bytes();
+        kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
+
+        // The same rule as the gate an erase passes, with the user's margin.
+        use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
+        let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
+            SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "SD 1.5: enough memory free"),
+            SdRamFit::TilesOnly => (
+                Color32::from_rgb(0xe1, 0xb3, 0x4e),
+                "SD 1.5: runs, but tall regions are filled in tiles. Close other apps for one pass",
+            ),
+            SdRamFit::Refused => (
+                Color32::from_rgb(0xd8, 0x6e, 0x6e),
+                "SD 1.5: not enough memory free. Close other apps or use Big-LaMa",
+            ),
+        };
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot.center(), 4.0, color);
+            ui.label(RichText::new(text).size(12.5).color(color));
         });
+        ui.add_space(4.0);
+    });
 
-    // The same rule as the gate an erase passes, with the user's margin.
-    use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
-    let margin_mb = ctx.sd_margin_mb;
-    let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), margin_mb) {
-        SdRamFit::Full => (
-            egui::Color32::from_rgb(0x6c, 0xd1, 0x6c),
-            "SD 1.5: enough memory free",
-        ),
-        SdRamFit::TilesOnly => (
-            egui::Color32::from_rgb(0xe1, 0xb3, 0x4e),
-            "SD 1.5: runs, but tall regions are filled in tiles. Close other apps for one pass",
-        ),
-        SdRamFit::Refused => (
-            egui::Color32::from_rgb(0xd8, 0x6e, 0x6e),
-            "SD 1.5: not enough memory free. Close other apps or use Big-LaMa",
-        ),
-    };
-    ui.add_space(theme::SPACE_XS);
-    ui.label(RichText::new(text).color(color).size(theme::FONT_SIZE_MONO));
-    ui.add_space(theme::SPACE_SM);
-
+    group_heading(ui, "Acceleration");
     let rt = RuntimeId::OpenVino;
     let installed = ctx.openvino_installed;
     let status = match (ctx.install_in_progress, ctx.install_status_text.as_deref()) {
         (true, Some(s)) => s.to_string(),
-        _ if installed => "Installed".to_string(),
-        _ => format!("Not installed ({} MB)", rt.approx_download_mb()),
+        _ if installed => "Installed.".to_string(),
+        _ if p.recommends_openvino() => format!(
+            "Not installed ({} MB). Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
+            rt.approx_download_mb(),
+        ),
+        _ => format!("Not installed ({} MB).", rt.approx_download_mb()),
     };
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(rt.display_name())
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.label(RichText::new(status)
-            .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    group(ui, |rows| {
+        rows.row(rt.display_name(), &status, |ui| {
             if ctx.install_in_progress {
                 if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                     intent = Some(HardwareSectionIntent::CancelInstall);
@@ -268,153 +486,63 @@ fn render_hardware_section(
                 intent = Some(HardwareSectionIntent::StartInstall(rt));
             }
         });
+        rows.row(
+            "Compiled-model cache",
+            "Models are compiled for your graphics hardware the first time they run. Clear it if a compiled file is corrupt or to free disk space.",
+            |ui| {
+                if button(ui, ButtonKind::Secondary, "Clear").clicked() {
+                    intent = Some(HardwareSectionIntent::ClearCompiledCache);
+                }
+            },
+        );
     });
-    if p.recommends_openvino() && !installed && !ctx.install_in_progress {
-        hint(ui, "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.");
-    }
-
-    ui.add_space(theme::SPACE_MD);
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Compiled-model cache")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if button(ui, ButtonKind::Secondary, "Clear").clicked() {
-                intent = Some(HardwareSectionIntent::ClearCompiledCache);
-            }
-        });
-    });
-    hint(ui, "Models are compiled for your graphics hardware the first time they run. Clear the cache if a compiled file is corrupt or to free disk space; models recompile on next use.");
-
-    ui.add_space(theme::SPACE_MD);
     intent
 }
 
-fn render_sd_memory_row(ui: &mut egui::Ui, value: &mut crate::gui::settings::SdMemoryGuard) {
-    use crate::gui::settings::SdMemoryGuard;
-    use super::chip::Choice;
-    super::chip::choice_row(ui, "SD memory guard", &[
-        Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1 GB free for other apps. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
-        Choice { value: SdMemoryGuard::Balanced, name: "Balanced", description: "Leaves about 2 GB free for other apps", enabled: true },
-        Choice { value: SdMemoryGuard::Strict, name: "Strict", description: "Leaves about 4 GB free, for when other apps grab memory while it runs", enabled: true },
-    ], value);
-}
-
-fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
-    let labels = SettingsTab::ALL.map(|t| t.label());
-    let mut idx = SettingsTab::ALL.iter().position(|t| t == current).unwrap_or(0);
-    super::chip::tab_strip(ui, &labels, &mut idx);
-    *current = SettingsTab::ALL[idx];
-    ui.separator();
-}
-
-fn render_tab_general(
-    ui: &mut egui::Ui,
-    settings: &mut Settings,
-    ctx: &HardwareSectionContext,
-) -> Option<HardwareSectionIntent> {
-    let intent = render_hardware_section(ui, ctx);
-    render_sd_memory_row(ui, &mut settings.sd_memory);
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Performance");
-    let max_jobs = settings.max_jobs();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Parallel jobs")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let stepper = |ui: &mut egui::Ui, enabled: bool, glyph: &str| {
-                super::chip::with_fill(ui, theme::BG_SECONDARY, |ui| {
-                    ui.add_enabled(
-                        enabled,
-                        egui::Button::new(RichText::new(glyph)
-                            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                            .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
-                    )
-                })
-                .clicked()
-            };
-            if stepper(ui, settings.parallel_jobs < max_jobs, "+") {
-                settings.parallel_jobs += 1;
-            }
-            ui.label(RichText::new(format!("{}", settings.parallel_jobs))
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY).strong());
-            if stepper(ui, settings.parallel_jobs > 1, "\u{2212}") {
-                settings.parallel_jobs -= 1;
-            }
-        });
-    });
-    let jobs_hint = if settings.is_gpu() {
-        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
-    } else {
-        format!("Images at once. 1\u{2013}{max_jobs}.")
-    };
-    hint(ui, &jobs_hint);
-    ui.add_space(theme::SPACE_MD);
-
-    if settings.is_gpu() {
-        use crate::gui::settings::ComputeMode;
-        super::chip::choice_row(ui, "Processor", &[
-            super::chip::Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
-            super::chip::Choice { value: ComputeMode::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
-        ], &mut settings.processor);
-        ui.add_space(theme::SPACE_MD);
-    }
-
-    intent
-}
-
-fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
-    section_heading(ui, "When opening images");
-    ui.checkbox(&mut settings.auto_process_on_import, RichText::new("Auto-process on import")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Run Process automatically as each image arrives.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Editing");
-    ui.checkbox(&mut settings.dark_checker, RichText::new("Dark checkerboard")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Use dark tones for the transparency pattern (helps on light results).");
-    ui.add_space(theme::SPACE_SM);
-
-    super::chip::slider_row_f32(ui, "Selection fill", &mut settings.selection_fill, 0.0..=1.0, false, super::fmt::percent);
-    hint(ui, "How strongly a selection is tinted on the image.");
-    ui.add_space(theme::SPACE_SM);
-    ui.checkbox(&mut settings.selection_outline, RichText::new("Outline the selection")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    ui.add_space(theme::SPACE_SM);
-
-    ui.checkbox(&mut settings.auto_hide_adjustments, RichText::new("Auto-hide adjustments toolbar")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Eraser");
-    ui.checkbox(&mut settings.keep_sd_loaded, RichText::new("Keep the Stable Diffusion eraser loaded")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Faster repeated erases. Holds about 16 GB of RAM while the app is open.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Defaults");
-
+fn render_page_images(ui: &mut egui::Ui, settings: &mut Settings) {
+    group_heading(ui, "When opening images");
     let preset_names = super::preset_dropdown::all_preset_names(settings);
     let current = settings.default_preset.clone();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Default preset")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        let combo = egui::ComboBox::from_id_salt("default_preset")
-            .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-            .show_ui(ui, |ui| {
-                for name in &preset_names {
-                    let selected = settings.default_preset == *name;
-                    if ui.selectable_label(selected, name).clicked() {
-                        settings.default_preset = name.clone();
+    group(ui, |rows| {
+        rows.row("Auto-process on import", "Run Process automatically as each image arrives.", |ui| {
+            super::chip::switch(ui, "Auto-process on import", &mut settings.auto_process_on_import);
+        });
+        rows.row("Default preset", "New images inherit this preset. The toolbar's reset restores its values.", |ui| {
+            let combo = egui::ComboBox::from_id_salt("default_preset")
+                .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                .show_ui(ui, |ui| {
+                    for name in &preset_names {
+                        let selected = settings.default_preset == *name;
+                        if ui.selectable_label(selected, name).clicked() {
+                            settings.default_preset = name.clone();
+                        }
                     }
-                }
-            });
-        super::chip::named(combo.response, "Default preset");
+                });
+            super::chip::named(combo.response, "Default preset");
+        });
     });
-    hint(ui, "New images inherit this preset. The reset button on the toolbar restores its values.");
+}
+
+fn render_page_editing(ui: &mut egui::Ui, settings: &mut Settings) {
+    group_heading(ui, "Canvas");
+    group(ui, |rows| {
+        rows.row("Dark checkerboard", "Dark tones for the transparency pattern, for light results.", |ui| {
+            super::chip::switch(ui, "Dark checkerboard", &mut settings.dark_checker);
+        });
+        rows.row("Selection fill", "How strongly a selection is tinted on the image.", |ui| {
+            ui.spacing_mut().slider_width = 140.0;
+            super::chip::bare_slider_f32(ui, "Selection fill", &mut settings.selection_fill, 0.0..=1.0, super::fmt::percent);
+        });
+        rows.row("Outline the selection", "", |ui| {
+            super::chip::switch(ui, "Outline the selection", &mut settings.selection_outline);
+        });
+    });
+    group_heading(ui, "Toolbar");
+    group(ui, |rows| {
+        rows.row("Auto-hide adjustments", "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.", |ui| {
+            super::chip::switch(ui, "Auto-hide adjustments toolbar", &mut settings.auto_hide_adjustments);
+        });
+    });
 }
 
 /// One row per action: label, the key slots, Reset. Clicking a slot
@@ -426,7 +554,6 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let current = Arc::clone(&app.bindings);
     let mut reset: Option<Bindings> = None;
 
-    section_heading(ui, "Hotkeys");
     hint(ui, "Click a key to change it, then press the new keys. Escape cancels, Backspace clears.");
     ui.add_space(theme::SPACE_SM);
     egui::Grid::new("hotkeys_grid")
@@ -507,7 +634,6 @@ fn sort_for_model_credits<'a>(
 }
 
 fn render_tab_model_credits(ui: &mut egui::Ui) {
-    super::section_heading(ui, "Model Credits");
     super::hint(ui, "All installed models, their authors, and licenses.");
     ui.add_space(theme::SPACE_SM);
 
