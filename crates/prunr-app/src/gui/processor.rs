@@ -914,9 +914,8 @@ impl Processor {
                         None
                     } else if error == MEMORY_PRESSURE_ABORT_MSG {
                         Some(
-                            "Erase aborted — system memory low. \
-                             Close other apps or use LaMa instead \
-                             (Settings → Eraser)."
+                            "Erase stopped: memory ran low. Close other \
+                             apps, or pick Eraser (Big-LaMa) under Model."
                                 .to_string(),
                         )
                     } else {
