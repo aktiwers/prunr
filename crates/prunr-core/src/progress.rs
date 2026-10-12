@@ -29,6 +29,8 @@ pub enum Step {
     DecodingResult,
     Blending,
     LoadingMagicBrush,
+    FindingFaces,
+    RestoringFaces,
 }
 
 impl Step {
@@ -47,6 +49,8 @@ impl Step {
             Step::DecodingResult => "Decoding the result",
             Step::Blending => "Blending into the photo",
             Step::LoadingMagicBrush => "Loading Magic Brush",
+            Step::FindingFaces => "Finding faces",
+            Step::RestoringFaces => "Restoring faces",
         }
     }
 }
@@ -58,6 +62,7 @@ pub enum Unit {
     Step,
     Crop,
     Image,
+    Face,
 }
 
 impl Unit {
@@ -68,6 +73,7 @@ impl Unit {
             Unit::Step => ("step", "steps"),
             Unit::Crop => ("crop", "crops"),
             Unit::Image => ("image", "images"),
+            Unit::Face => ("face", "faces"),
         };
         if n == 1 { one } else { many }
     }

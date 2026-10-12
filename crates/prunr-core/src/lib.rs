@@ -15,6 +15,7 @@ pub mod recipe;
 pub mod brush;
 pub mod math;
 pub mod inpaint;
+pub mod face;
 pub mod inpaint_sd;
 pub mod inpaint_blend;
 pub mod ep_compat;
