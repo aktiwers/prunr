@@ -352,13 +352,16 @@ pub fn slider_row_f32(
     logarithmic: bool,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
-    labelled_slider(
+    let (lo, hi) = (*range.start() as f64, *range.end() as f64);
+    let (change, resp) = labelled_slider(
         ui,
         label,
         egui::Slider::new(value, range)
             .custom_formatter(move |v, _| format(v as f32))
             .logarithmic(logarithmic),
-    )
+    );
+    paint_handle(ui, &resp, slider_fraction(*value as f64, lo, hi, logarithmic));
+    change
 }
 
 /// Label above a full-width slider whose box shows the value — the one
@@ -369,13 +372,50 @@ pub fn slider_row<T: egui::emath::Numeric>(
     value: &mut T,
     range: std::ops::RangeInclusive<T>,
 ) -> ChipChange {
-    labelled_slider(ui, label, egui::Slider::new(value, range))
+    let (lo, hi) = (range.start().to_f64(), range.end().to_f64());
+    let (change, resp) = labelled_slider(ui, label, egui::Slider::new(value, range));
+    paint_handle(ui, &resp, slider_fraction(value.to_f64(), lo, hi, false));
+    change
 }
 
-fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> ChipChange {
+fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
     let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
     let resp = ui.add(slider.show_value(true)).labelled_by(label.id);
-    ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }
+    (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
+}
+
+/// The handle's colour on the board: near-white over the rail.
+const HANDLE: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf4);
+
+/// Where a slider's handle sits, 0–1, by egui's own mapping (log10
+/// between the bounds for a logarithmic one, 1e-6 standing in for 0).
+fn slider_fraction(value: f64, lo: f64, hi: f64, logarithmic: bool) -> f32 {
+    if hi <= lo {
+        return 0.5;
+    }
+    let v = value.clamp(lo, hi);
+    let t = if logarithmic && lo >= 0.0 {
+        let floor = |x: f64| x.max(1e-6).log10();
+        (floor(v) - floor(lo)) / (floor(hi) - floor(lo))
+    } else {
+        (v - lo) / (hi - lo)
+    };
+    t.clamp(0.0, 1.0) as f32
+}
+
+/// The board's white handle, painted over egui's (which shares the
+/// rail's colour) at the same place and size: the slider is the row's
+/// first `slider_width`, its handle radius a 2.5th of its thickness.
+fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
+    let thickness = ui.text_style_height(&egui::TextStyle::Body).max(ui.spacing().interact_size.y);
+    let width = ui.spacing().slider_width;
+    let radius = thickness / 2.5;
+    let x = egui::lerp(resp.rect.left() + radius..=resp.rect.left() + width - radius, fraction);
+    let center = egui::pos2(x, resp.rect.center().y);
+    let radius = radius + ui.style().interact(resp).expansion;
+    let fill = if ui.is_enabled() { HANDLE } else { HANDLE.gamma_multiply(0.5) };
+    ui.painter().circle_filled(center + egui::vec2(0.0, 1.0), radius + 1.0, Color32::from_black_alpha(90));
+    ui.painter().circle_filled(center, radius, fill);
 }
 
 /// A selectable option with a title and a one-line description, for
@@ -681,6 +721,17 @@ pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// The painted handle sits where egui's mapping puts it: linear, and
+    /// log10 for a logarithmic slider (Gamma 1.0 on 0.01-10 is two thirds).
+    #[test]
+    fn the_handle_follows_egui_s_mapping() {
+        assert_eq!(super::slider_fraction(5.0, 0.0, 10.0, false), 0.5);
+        assert!((super::slider_fraction(1.0, 0.01, 10.0, true) - 2.0 / 3.0).abs() < 1e-6);
+        assert_eq!(super::slider_fraction(-3.0, 0.0, 10.0, false), 0.0);
+        assert_eq!(super::slider_fraction(1.0, 1.0, 1.0, false), 0.5);
+    }
+
     // The chip widgets require an egui::Ui to render, so unit tests here
     // only check the non-render helpers. Visual integration tests belong
     // in the adjustments_toolbar smoke test suite.
