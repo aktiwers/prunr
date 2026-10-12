@@ -4,7 +4,6 @@ use egui_material_icons::icons::*;
 use crate::gui::app::PrunrApp;
 use crate::gui::batch_manager::ProcessButtonLabel;
 use crate::gui::item::BatchStatus;
-use crate::gui::state::AppState;
 use crate::gui::theme;
 
 use super::adjustments_toolbar::ModelStoreRequest;
@@ -26,7 +25,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
-        let can_save_copy = app.batch.app_state() == AppState::Done;
         let has_selected = app.batch.has_any_selected();
 
         // ── Left: Open ──
@@ -109,10 +107,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            let has_saveable_selected = has_selected
-                && app.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done);
-            let show_save = can_save_copy || has_saveable_selected;
-            if show_save {
+            if app.can_save_intent() {
                 let (save_title, save_label) = if has_selected {
                     ("Save selected", format!("{}  Save selected", ICON_SAVE.codepoint))
                 } else {
