@@ -408,16 +408,17 @@ mod tests {
         assert_eq!(none, 0);
     }
 
-    /// On a cut-out, a selection while the brush erases is drawn in
+    /// On a cut-out, a selection while the switch is on Erase is drawn in
     /// Erase's warm red; otherwise in the accent.
     #[test]
     fn an_erasing_brush_marks_in_warm_red() {
+        use crate::gui::brush_state::CutoutAction;
         use crate::gui::settings::{Settings, SettingsModel};
-        use prunr_core::selection::{BrushMode, MaskArtifact, FULL};
+        use prunr_core::selection::{MaskArtifact, FULL};
         let mask = MaskArtifact::from_cells(1, 1, vec![FULL]);
-        let tint = |model, mode| {
+        let tint = |model, action| {
             let mut s = Settings { model, ..Settings::default() };
-            s.brush.mode = mode;
+            s.brush.cutout_action = action;
             let style = SelectionStyle { outline_thickness: 0.0, ..SelectionStyle::from_settings(&s) };
             build_selection_image(&mask, style).pixels[0].to_srgba_unmultiplied()
         };
@@ -425,9 +426,10 @@ mod tests {
         let near = |got: [u8; 4], want: egui::Color32| {
             got[..3].iter().zip([want.r(), want.g(), want.b()]).all(|(&g, w)| g.abs_diff(w) <= 3)
         };
-        assert!(near(tint(SettingsModel::BiRefNetLite, BrushMode::Subtract), crate::gui::theme::ERASE));
-        assert!(near(tint(SettingsModel::BiRefNetLite, BrushMode::Add), crate::gui::theme::ACCENT));
-        assert!(near(tint(SettingsModel::Inpaint, BrushMode::Subtract), crate::gui::theme::ACCENT), "subtracting from a region is not an erase");
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Erase), crate::gui::theme::ERASE));
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Restore), crate::gui::theme::ACCENT));
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Select), crate::gui::theme::ACCENT));
+        assert!(near(tint(SettingsModel::Inpaint, CutoutAction::Erase), crate::gui::theme::ACCENT), "a region for the eraser is not an erase");
     }
 
     /// At fit zoom on a big image a 2 px outline is half a screen pixel and

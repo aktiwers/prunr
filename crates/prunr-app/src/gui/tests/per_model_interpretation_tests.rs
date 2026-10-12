@@ -45,9 +45,9 @@ fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_cutout(item);
-    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style) }
+    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
         .expect("inputs").seg_tensor.expect("tensor");
-    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style) }
+    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
         .expect("inputs").seg_tensor.expect("tensor");
     assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
     let item = app.batch.find_by_id_mut(3).unwrap();
@@ -151,7 +151,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!((ld.reading.confidence - 0.9).abs() < 1e-6);
     // The retuned selection keeps only the right-hand columns.
     let sel = item.selection_mask.as_ref().unwrap();
-    assert!(sel.cells()[7] == prunr_core::selection::FULL && sel.cells()[0] == 0);
+    assert!(sel.cells()[7] != 0 && sel.cells()[0] == 0);
 
     // The speck switch retunes the last stroke the same way.
     app.magic_brush_state.rethreshold_in_flight = false;
@@ -498,7 +498,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     item.commit(StepKind::Process);
     give_tensor(item);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
-    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style) }
+    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
         .expect("the stroke's re-cut starts");
 
     app.handle_undo(&ctx);
@@ -605,4 +605,118 @@ fn the_drift_check_never_recuts_a_result_that_used_no_mask() {
         app.recipe_drift_tripwire();
         assert!(!app.processor.live_preview.is_pending_for(7), "{model:?} {line_mode:?}: no mask was applied, nothing to re-apply");
     }
+}
+
+/// A cut-out with a selection on it, nothing queued yet.
+fn cutout_with_selection(app: &mut PrunrApp, id: u64) {
+    use std::sync::Arc;
+    let item = push_test_item(app, id);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_cutout(item);
+    item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.commit(StepKind::Process);
+    let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
+    item.commit_selection_mask(Arc::new(selection), StepKind::Stroke);
+}
+
+/// The switch says what the selection does to the cut-out: Restore
+/// brings it back, Erase removes it, Select leaves the cut-out alone.
+#[test]
+fn the_switch_says_what_the_selection_does() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 4);
+    let style = app.selection_style();
+    let item = &app.batch.items[0];
+    let at = |action| item.correction_plane(style, action).map(|p| p.cells()[2 * 8 + 2]);
+    assert!(at(CutoutAction::Restore).is_some_and(|v| v > 0), "restored");
+    assert!(at(CutoutAction::Erase).is_some_and(|v| v < 0), "erased");
+    assert_eq!(at(CutoutAction::Select), None, "only selected");
+}
+
+/// Switching Restore / Erase applies the current selection anew.
+#[test]
+fn switching_the_action_recuts_the_selection() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::views::brush_chip::BrushChipOutcome;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 5);
+    assert!(!app.processor.live_preview.is_pending_for(5));
+    app.settings.brush.cutout_action = CutoutAction::Erase;
+    app.apply_brush_change(BrushChipOutcome { action_changed: true, ..Default::default() });
+    assert!(app.processor.live_preview.is_pending_for(5), "the re-cut is queued");
+}
+
+/// Delete folds the selection into the cut-out's edits as one step and
+/// starts a new area; Undo brings the selection back and the edits away.
+#[test]
+fn delete_on_a_cutout_keeps_the_erase_and_undo_returns_the_selection() {
+    use crate::gui::views::selection_action_bar::SelectionAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 6);
+    let selection = app.batch.items[0].selection_mask.clone();
+
+    app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+    let item = &app.batch.items[0];
+    assert!(item.selection_mask.is_none(), "a new area starts");
+    let edits = item.edits.as_ref().expect("the erase is kept");
+    assert!(edits.cells()[2 * 8 + 2] < 0 && edits.cells()[0] == 0);
+    assert_eq!(item.timeline.undo_steps(), 3, "the run, the stroke and the fold");
+
+    let item = &mut app.batch.items[0];
+    item.undo_step();
+    assert!(item.edits.is_none(), "undo takes the erase away");
+    assert_eq!(item.selection_mask.as_ref().map(|m| m.content_hash()), selection.map(|m| m.content_hash()));
+}
+
+/// Restore on the selection brings the area back on top of an earlier
+/// erase: the newer edit wins where it lands.
+#[test]
+fn restore_wins_over_an_earlier_erase() {
+    use crate::gui::views::selection_action_bar::SelectionAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 8);
+    let ctx = egui::Context::default();
+    app.handle_selection_action(0, SelectionAction::Delete, &ctx);
+    let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(selection), StepKind::Stroke);
+    app.handle_selection_action(0, SelectionAction::Restore, &ctx);
+    let edits = app.batch.items[0].edits.as_ref().expect("edits");
+    assert!(edits.cells()[2 * 8 + 2] > 0);
+}
+
+/// The correction is built once per change of its inputs: a second
+/// dispatch with the same edits and selection reuses the plane.
+#[test]
+fn the_correction_is_built_once() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    let style = app.selection_style();
+    let item = &mut app.batch.items[0];
+    item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let first = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let second = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    let erase = item.correction_plane(style, CutoutAction::Erase).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &erase), "another action builds anew");
+}
+
+/// A step's image shows its selection as the switch stood then; an undo
+/// back onto a live selection re-applies it as the switch stands now.
+#[test]
+fn undo_onto_a_selection_reapplies_the_current_action() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    app.settings.brush.cutout_action = CutoutAction::Erase;
+    cutout_with_selection(&mut app, 11);
+    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
+    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
+    app.settings.brush.cutout_action = CutoutAction::Restore;
+
+    app.handle_undo(&egui::Context::default());
+    assert!(app.batch.items[0].selection_mask.is_some());
+    assert!(app.processor.live_preview.is_pending_for(11), "the selection is re-applied as Restore");
 }

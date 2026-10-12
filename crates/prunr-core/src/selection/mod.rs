@@ -283,6 +283,11 @@ impl MaskArtifact {
         })
     }
 
+    /// The same area as a restore: every cell's amount, made positive.
+    pub fn as_restore(&self) -> Self {
+        self.map(|v| v.unsigned_abs().min(FULL as u8) as i8)
+    }
+
     /// Region inversion: `FULL - |v|`, signed by `mode`.
     pub fn invert(&self, mode: BrushMode) -> Self {
         let sign = mode.sign();
@@ -426,6 +431,12 @@ mod tests {
         MaskArtifact::from_cells(w, h, data)
     }
 
+
+    #[test]
+    fn a_selection_as_a_restore_keeps_its_amounts_positive() {
+        let selection = mask(4, 1, vec![-127, -60, 0, 40]);
+        assert_eq!(selection.as_restore().cells(), &[127, 60, 0, 40]);
+    }
 
     /// On a cut-out the newer stroke's direction wins; on a selection Add
     /// grows it, Subtract carves it away, and what stays is stored as an

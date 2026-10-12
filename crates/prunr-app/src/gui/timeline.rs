@@ -261,6 +261,9 @@ pub(crate) struct DocState {
     pub(crate) selection: Option<StoredSelection>,
     /// The selection's content hash, so restoring it costs no rehash.
     pub(crate) selection_hash: Option<u64>,
+    /// On a cut-out, the restores and erases already made (signed: plus
+    /// restores, minus erases); the selection is applied on top.
+    pub(crate) edits: Option<StoredSelection>,
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
     /// The run that made this step's image; `None` for the original and
@@ -311,6 +314,7 @@ impl DocState {
             recipe: None,
             selection: None,
             selection_hash: None,
+            edits: None,
             settings,
             applied_preset,
             origin: None,
@@ -417,8 +421,9 @@ impl Timeline {
             .chain(self.states.iter().filter_map(|s| Some(&s.origin.as_ref()?.start.as_ref()?.image)).filter(move |b| !is_a_result(b)))
     }
 
+    /// Every stored selection and cut-out edits plane.
     pub(crate) fn stored_selections(&self) -> impl Iterator<Item = &StoredSelection> {
-        self.states.iter().filter_map(|s| s.selection.as_ref())
+        self.states.iter().flat_map(|s| s.selection.iter().chain(s.edits.iter()))
     }
 }
 
@@ -443,6 +448,7 @@ mod tests {
             recipe: None,
             selection: None,
             selection_hash: None,
+            edits: None,
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
             origin: None,

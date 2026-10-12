@@ -3,7 +3,7 @@
 
 use egui::Ui;
 
-use crate::gui::brush_state::BrushSettings;
+use crate::gui::brush_state::{BrushSettings, CutoutAction};
 use crate::gui::theme;
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
@@ -19,37 +19,40 @@ pub(crate) struct BrushChipOutcome {
     pub reset_brush_requested: bool,
     /// A slider settled or a choice was made: the brush settings persist.
     pub committed: bool,
+    /// Restore / Erase / Select changed: the selection is applied anew.
+    pub action_changed: bool,
 }
 
 impl BrushChipOutcome {
     pub fn merge(&mut self, other: Self) {
         self.reset_brush_requested |= other.reset_brush_requested;
         self.committed |= other.committed;
+        self.action_changed |= other.action_changed;
     }
 }
 
-/// On a background-removal model a stroke edits the cut-out.
-pub(super) const CUTOUT_MODES: [chip::Choice<BrushMode>; 2] = [
-    chip::Choice { value: BrushMode::Add, name: "Restore", description: "Bring back what the model took away", enabled: true },
-    chip::Choice { value: BrushMode::Subtract, name: "Erase", description: "Remove what the model left behind", enabled: true },
+/// On a background-removal model: what the selection does to the cut-out.
+const CUTOUT_ACTIONS: [chip::Choice<CutoutAction>; 3] = [
+    chip::Choice { value: CutoutAction::Restore, name: "Restore", description: "Bring back what the model took away, as you paint", enabled: true },
+    chip::Choice { value: CutoutAction::Erase, name: "Erase", description: "Remove what the model left behind, as you paint", enabled: true },
+    chip::Choice { value: CutoutAction::Select, name: "Select", description: "Only select; Restore and Delete in the toolbar act on it", enabled: true },
 ];
 
 /// Elsewhere a stroke shapes the selection or the region to fill.
-pub(super) const REGION_MODES: [chip::Choice<BrushMode>; 2] = [
+const REGION_MODES: [chip::Choice<BrushMode>; 2] = [
     chip::Choice { value: BrushMode::Add, name: "Add", description: "Add to the selection", enabled: true },
     chip::Choice { value: BrushMode::Subtract, name: "Subtract", description: "Take away from the selection", enabled: true },
 ];
 
-/// The mode switch; Erase on a cut-out is picked in warm red, as its
-/// strokes are drawn.
-pub(super) fn mode_buttons(ui: &mut Ui, model: SettingsModel, mode: &mut BrushMode) -> bool {
-    let picked = if model.erases_with(*mode) { theme::ERASE_PICKED } else { theme::ACCENT_BRIGHT };
-    chip::choice_buttons_picked(ui, mode_choices(model), mode, picked)
-}
-
-/// Restore / Erase on a cut-out; Add / Subtract on a selection or region.
-pub(super) fn mode_choices(model: SettingsModel) -> &'static [chip::Choice<BrushMode>; 2] {
-    if model.edits_cutout() { &CUTOUT_MODES } else { &REGION_MODES }
+/// The brush switch: on a cut-out what the selection does (Erase picked
+/// in warm red, as its marks are drawn), elsewhere Add / Subtract.
+pub(super) fn mode_buttons(ui: &mut Ui, model: SettingsModel, s: &mut BrushSettings) -> bool {
+    if model.edits_cutout() {
+        let picked = if s.cutout_action == CutoutAction::Erase { theme::ERASE_PICKED } else { theme::ACCENT_BRIGHT };
+        chip::choice_buttons_picked(ui, &CUTOUT_ACTIONS, &mut s.cutout_action, picked)
+    } else {
+        chip::choice_buttons(ui, &REGION_MODES, &mut s.mode)
+    }
 }
 
 const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [

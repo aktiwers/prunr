@@ -259,6 +259,11 @@ impl PrunrApp {
         if change.committed {
             self.settings.save();
         }
+        if change.action_changed {
+            if let Some(id) = self.batch.selected_item().map(|i| i.id) {
+                self.recut_with_selection(id);
+            }
+        }
     }
 
     /// Persists the settings once input has paused: a held key repeats
@@ -810,6 +815,12 @@ impl PrunrApp {
                 if self.batch.items[idx].settings.bg_image_hash != preset_before {
                     self.reconcile_bg_image_after_preset(idx);
                 }
+                // The step's image shows its selection as the switch stood
+                // then; the switch may have moved since.
+                let item = &self.batch.items[idx];
+                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
+                    self.dispatch_brush_rerun(idx);
+                }
                 stepped.push(kind);
             }
         }
@@ -872,7 +883,7 @@ impl PrunrApp {
     pub(crate) fn recut_with_selection(&mut self, item_id: u64) {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let item = &self.batch.items[idx];
-        if item.selection_mask.is_some() && item.shows_cutout() && self.settings.model.edits_cutout() {
+        if (item.selection_mask.is_some() || item.edits.is_some()) && item.shows_cutout() && self.settings.model.edits_cutout() {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -927,7 +938,38 @@ impl PrunrApp {
     ) {
         let item_id = self.batch.items[idx].id;
 
+        // On a cut-out the selection is folded into the cut-out's edits:
+        // Delete erases it, Restore brings it back, Clear keeps what the
+        // switch is doing to it and starts a new area. Before the cut-out
+        // exists, Delete cuts the photo itself.
+        if self.batch.items[idx].corrects_cutout(self.settings.model) {
+            use super::brush_state::CutoutAction;
+            let fold = match action {
+                SelectionAction::Restore => Some(CutoutAction::Restore),
+                SelectionAction::Delete => Some(CutoutAction::Erase),
+                SelectionAction::Clear => Some(self.settings.brush.cutout_action),
+                SelectionAction::Cut => {
+                    if let Some((mask, base)) = self.selection_edit_inputs(idx) {
+                        self.system.copy_image(&mask.copy_to_rgba(&base));
+                        self.set_temporary_status("Selection cut to clipboard");
+                    }
+                    Some(CutoutAction::Erase)
+                }
+                SelectionAction::Copy | SelectionAction::Invert => None,
+            };
+            if let Some(fold) = fold {
+                let style = self.selection_style();
+                if self.batch.bake_selection(item_id, style, fold) {
+                    self.apply_selection_to_active_model(item_id);
+                }
+                ctx.request_repaint();
+                return;
+            }
+        }
+
         match action {
+            // Only a cut-out offers it; handled above.
+            SelectionAction::Restore => {}
             SelectionAction::Delete => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
                 self.apply_selection_cut(idx, &mask, &base, ctx);
@@ -945,14 +987,8 @@ impl PrunrApp {
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                // On a cut-out the inverted area restores or erases as the
-                // mode says; elsewhere a selection keeps the erase sign.
-                let mode = if self.settings.model.edits_cutout() {
-                    self.settings.brush.mode
-                } else {
-                    prunr_core::selection::BrushMode::Subtract
-                };
-                let inverted = mask.invert(mode);
+                // A selection is stored with the erase sign on every model.
+                let inverted = mask.invert(prunr_core::selection::BrushMode::Subtract);
                 self.commit_selection_and_dispatch(item_id, inverted, StepKind::Selection);
                 ctx.request_repaint();
             }
@@ -1410,7 +1446,7 @@ impl PrunrApp {
                     let existing = self.batch
                         .find_by_id(result.item_id)
                         .and_then(|i| i.selection_mask.clone());
-                    let final_mask = merge_stroke(existing, mask, self.settings.model.edits_cutout());
+                    let final_mask = merge_stroke(existing, mask);
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
                     self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
@@ -1449,7 +1485,6 @@ impl PrunrApp {
         self.processor.dispatch_sam_rethreshold(super::processor::SamRethresholdRequest {
             item_id, output: Arc::clone(&ld.output), mode: ld.mode,
             source_dims, reading: want, base,
-            signed: self.settings.model.edits_cutout(),
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }
@@ -2032,7 +2067,7 @@ impl PrunrApp {
         let jobs: Vec<LayerSave> = targets.iter()
             .filter_map(|id| self.batch.find_by_id(*id))
             .map(|item| LayerSave {
-                layers: super::drag_export::LayerJob::of(item, style),
+                layers: super::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
                 composite: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
             })
             .collect();
@@ -2141,7 +2176,7 @@ impl PrunrApp {
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch.find_by_id(*id) {
-                match super::drag_export::prepare_for_drag(item, split, style) {
+                match super::drag_export::prepare_for_drag(item, split, style, self.settings.brush.cutout_action) {
                     Ok(mut ps) => paths.append(&mut ps),
                     Err(e) => {
                         self.toasts.error(format!("Drag export failed: {e}"));
@@ -2411,9 +2446,10 @@ impl PrunrApp {
         // subsequent dispatch of the drag session — see `source_dyn`).
         let is_filter_only = self.settings.model == super::settings::SettingsModel::None;
         let style = self.selection_style();
+        let action = self.settings.brush.cutout_action;
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style)
+            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style, action)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -2447,6 +2483,7 @@ impl PrunrApp {
         kind: super::live_preview::PreviewKind,
         is_filter_only: bool,
         style: super::background_io::SelectionStyle,
+        action: super::brush_state::CutoutAction,
     ) -> Option<super::live_preview::DispatchInputs> {
         use super::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
@@ -2543,7 +2580,7 @@ impl PrunrApp {
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style));
+        let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
         Some(DispatchInputs {
             version,
             kind, original, start, settings: item.settings,
@@ -3776,6 +3813,7 @@ impl PrunrApp {
                     bg_image_label,
                     source_dims,
                     has_selection: item.selection_mask.is_some(),
+                    corrects_cutout: item.corrects_cutout(settings_ref.model),
                     installed: self.hardware_install_cache,
                     show_original: self.show_original,
                     can_compare,
@@ -4610,7 +4648,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style);
+        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action);
         assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
