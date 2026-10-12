@@ -54,7 +54,7 @@ const SEED_MARKER: &str = ".builtins_seeded_v2";
 /// Resolve the presets directory, creating it if needed. Returns `None` if
 /// the platform config dir can't be resolved (very rare).
 pub(crate) fn presets_dir() -> Option<PathBuf> {
-    let base = dirs::config_dir()?;
+    let base = super::settings::config_root()?;
     let dir = base.join(PRESETS_SUBDIR);
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
