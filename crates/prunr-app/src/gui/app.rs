@@ -414,7 +414,7 @@ impl PrunrApp {
             sidebar_hidden: false,
             adjustments_hidden: false,
             show_settings: false,
-            settings_tab: super::views::settings::SettingsTab::General,
+            settings_tab: super::views::settings::SettingsTab::Performance,
             pending_reset_confirm: false,
             hotkey_capture: None,
             bindings: Arc::new(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys)),

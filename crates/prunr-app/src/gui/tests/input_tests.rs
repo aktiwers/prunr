@@ -65,7 +65,7 @@ fn f1_opens_settings_on_hotkeys_and_closes_it_again() {
     assert_eq!(app.settings_tab, SettingsTab::Hotkeys);
     app.perform(Action::Shortcuts, &ctx);
     assert!(!app.show_settings);
-    app.settings_tab = SettingsTab::General;
+    app.settings_tab = SettingsTab::Performance;
     app.show_settings = true;
     app.perform(Action::Shortcuts, &ctx);
     assert!(app.show_settings && app.settings_tab == SettingsTab::Hotkeys, "from another tab it switches, not closes");

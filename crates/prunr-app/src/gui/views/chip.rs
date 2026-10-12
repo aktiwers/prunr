@@ -372,6 +372,15 @@ pub fn slider_row_f32(
     change
 }
 
+/// A slider and its value box with no label beside it, for a row that
+/// names the knob itself.
+pub(super) fn bare_slider_f32(ui: &mut Ui, name: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, format: impl Fn(f32) -> String) -> ChipChange {
+    let (lo, hi) = (*range.start() as f64, *range.end() as f64);
+    let resp = chip_named_slider(ui, name, egui::Slider::new(value, range).custom_formatter(move |v, _| format(v as f32)));
+    paint_handle(ui, &resp, slider_fraction(*value as f64, lo, hi, false));
+    ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }
+}
+
 /// Label above a full-width slider whose box shows the value — the one
 /// slider layout for popovers and Settings.
 pub fn slider_row<T: egui::emath::Numeric>(

@@ -16,7 +16,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
 - **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
-- **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
+- **Keep the Stable Diffusion eraser loaded** (Settings › Performance): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - **Outline & Shadow** for cut-outs: a sticker outline (width, color, round corners that follow soft hair edges) and a Soft or Drop shadow (opacity, blur, distance), under the subject, in the preview, Save and drag-out. `--outline PX[:HEX]` and `--shadow soft|drop` on the command line.
 - **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
@@ -40,7 +40,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Shift edge** (was Edge shift) reads the way other editors do: + grows the cut-out, − shrinks it, over ±20 px. `--edge-shift` on the command line follows, so a positive value now grows the subject.
 - **Contrast replaces Hard threshold** in the Mask panel: one slider that sharpens the cut-out's edge at the photo's full size, where 100% is a hard edge. Hard threshold cut at the model's lower resolution, so its edge was never really hard. Saved presets with it on load as Contrast 100%. On the command line `--contrast` replaces `--threshold`.
 - Magic Brush shows only what changes its result (mode, Confidence, Remove specks) and draws a small fixed cursor; its size, hardness and shape only ever changed the cursor.
-- How a selection looks on the image is one app setting (Settings › Behavior: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
+- How a selection looks on the image is one app setting (Settings › Editing: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
 - Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.
 - **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.
 
