@@ -88,6 +88,38 @@ pub const ROW_PICKED: Color32 = Color32::from_rgba_premultiplied(31, 16, 42, 51)
 pub const CARD_FILL: Color32 = Color32::from_rgba_premultiplied(9, 9, 9, 9);
 pub const CARD_EDGE: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
 
+/// egui's own animation time, while animations are on.
+const ANIMATION_TIME: f32 = 1.0 / 12.0;
+
+/// A moment the decorative effects hold at while animations are off: the
+/// working glow half lit, its sheen off the image.
+const STILL_MOMENT: f32 = 5.7;
+
+/// Settings › Animations, carried as egui's animation time so egui's own
+/// fades and slides stop with ours.
+pub fn apply_motion(ctx: &egui::Context, on: bool) {
+    if motion(ctx) != on {
+        ctx.global_style_mut(|s| s.animation_time = if on { ANIMATION_TIME } else { 0.0 });
+    }
+}
+
+/// Decorative motion (reveals, glows, sweeps) is on.
+pub fn motion(ctx: &egui::Context) -> bool {
+    ctx.global_style().animation_time > 0.0
+}
+
+/// The clock decorative motion runs on: the time, or one still moment
+/// while animations are off. Spinners that say the app is busy keep the
+/// real time.
+pub fn motion_clock(ctx: &egui::Context) -> f32 {
+    if motion(ctx) { ctx.input(|i| i.time) as f32 } else { STILL_MOMENT }
+}
+
+/// A fade's length: `secs`, or none while animations are off.
+pub fn fade_secs(ctx: &egui::Context, secs: f32) -> f32 {
+    if motion(ctx) { secs } else { 0.0 }
+}
+
 /// What a brush mark is drawn in: Erase's warm red, else the accent.
 pub fn mark_color(erase: bool) -> Color32 {
     if erase { ERASE } else { ACCENT }
@@ -421,3 +453,23 @@ pub const INSERTION_LINE: Color32 = ACCENT;
 pub const ZOOM_MIN: f32 = 0.10;
 pub const ZOOM_MAX: f32 = 20.0;
 pub const ZOOM_STEP: f32 = 1.1;
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    /// With animations off, egui's animations stop and the decorative
+    /// effects hold still; on again, both move.
+    #[test]
+    fn animations_off_holds_every_effect_still() {
+        let ctx = egui::Context::default();
+        apply_motion(&ctx, false);
+        assert!(!motion(&ctx));
+        assert_eq!(ctx.global_style().animation_time, 0.0, "egui's own fades stop too");
+        assert_eq!(motion_clock(&ctx), STILL_MOMENT);
+        assert_eq!(fade_secs(&ctx, 0.2), 0.0);
+        apply_motion(&ctx, true);
+        assert!(motion(&ctx));
+        assert_eq!(fade_secs(&ctx, 0.2), 0.2);
+    }
+}

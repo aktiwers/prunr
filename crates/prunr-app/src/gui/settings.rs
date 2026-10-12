@@ -32,6 +32,9 @@ pub struct Settings {
     /// Whether a selection is outlined on the image.
     #[serde(default = "default_true")]
     pub selection_outline: bool,
+    /// Reveals, glows and moving highlights; off shows each result at once.
+    #[serde(default = "default_true")]
+    pub animations: bool,
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
@@ -737,6 +740,7 @@ impl Default for Settings {
             dark_checker: false,
             selection_fill: default_selection_fill(),
             selection_outline: true,
+            animations: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
             export_format: prunr_core::ExportFormat::Png,

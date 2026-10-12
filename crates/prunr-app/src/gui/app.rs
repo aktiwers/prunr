@@ -2923,6 +2923,9 @@ impl PrunrApp {
     /// Outline the subject a run has just found on the shown image, while
     /// its edges are refined. A 128 px hint costs well under a millisecond.
     fn show_subject(&mut self, item_id: u64, hint: &prunr_core::SubjectHint, ctx: &egui::Context) {
+        if !self.settings.animations {
+            return;
+        }
         let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.status == BatchStatus::Processing && i.job_is_current());
         if !self.batch.is_selected(item_id) || !awaited {
             return;
@@ -3622,6 +3625,7 @@ impl eframe::App for PrunrApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
+        super::theme::apply_motion(ctx, self.settings.animations);
         // Held while the pointer stays down, so the press that dismissed a
         // popover is spent in full (see canvas.rs).
         let popup_open = super::theme::dismissable_popup_open(ctx);
