@@ -722,6 +722,7 @@ mod tests {
     fn undo_states_are_compressed_off_the_ui_thread() {
         let mut batch = fixture();
         let mut item = item_with_cache(1, 0);
+        item.on_screen = true;
         let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
         item.result_rgba = Some(Arc::clone(&rgba));
         item.status = BatchStatus::Done;

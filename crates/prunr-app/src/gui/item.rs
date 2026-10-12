@@ -333,6 +333,9 @@ pub(crate) struct BatchItem {
     /// unpacked off the UI thread and held so they stay unpacked: either
     /// shows without decoding first. Costs up to two images of RAM.
     pub(crate) warm_steps: Arc<std::sync::Mutex<[Option<WarmStep>; 2]>>,
+    /// The image is the one on screen: only it keeps steps warm, so a
+    /// batch reprocessing in the background holds no extra images.
+    pub(crate) on_screen: bool,
     /// The faces found for Restore faces, and the photo and model they
     /// were found with; a few MB per face.
     pub(crate) found_faces: Option<FoundFaces>,
@@ -673,14 +676,23 @@ impl BatchItem {
         self.warm_neighbour_steps();
     }
 
-    /// Let go of the unpacked neighbour steps (the image is off screen).
-    pub(crate) fn release_warm_steps(&self) {
-        *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
+    /// The image leaves or comes on screen: off screen it lets go of its
+    /// unpacked neighbour steps, on screen it warms them.
+    pub(crate) fn set_on_screen(&mut self, on: bool) {
+        self.on_screen = on;
+        if on {
+            self.warm_neighbour_steps();
+        } else {
+            *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
+        }
     }
 
     /// Unpack the images of the steps either side of the shown one on a
     /// worker and hold them; drop whatever was held for other steps.
-    pub(crate) fn warm_neighbour_steps(&self) {
+    fn warm_neighbour_steps(&self) {
+        if !self.on_screen {
+            return;
+        }
         let back = self.timeline.previous().and_then(|s| s.result.clone());
         let ahead = self.timeline.next().and_then(|s| s.result.clone());
         for (at, stored) in [(BACK, back), (AHEAD, ahead)] {
@@ -1256,6 +1268,7 @@ impl BatchItem {
             subject: None,
             tile_preview: None,
             warm_steps: Arc::default(),
+            on_screen: false,
             found_faces: None,
             faces_pending: None,
             faced_photo: None,
@@ -1416,6 +1429,7 @@ mod tests {
     #[test]
     fn the_step_undo_returns_to_stays_unpacked() {
         let mut item = fixture_item(1);
+        item.on_screen = true;
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))));
         item.commit(StepKind::Process);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))));
@@ -1430,10 +1444,23 @@ mod tests {
         assert!(Arc::ptr_eq(&warm, &back), "undo reads the held image");
     }
 
+    /// An image off screen (a batch reprocessing in the background) keeps
+    /// no step unpacked: its steps stay free to compress.
+    #[test]
+    fn an_image_off_screen_keeps_no_step_unpacked() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        item.commit(StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        item.commit(StepKind::Process);
+        assert!(item.warm_steps.lock().unwrap().iter().all(Option::is_none));
+    }
+
     /// After an undo, the step a redo goes to is kept unpacked too.
     #[test]
     fn the_step_redo_goes_to_stays_unpacked() {
         let mut item = fixture_item(1);
+        item.on_screen = true;
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))));
         item.commit(StepKind::Process);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))));
