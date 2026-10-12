@@ -59,10 +59,10 @@ const SD_LATENT_SIDE: u32 = SD_TILE / 8;
 pub const SD_CROP_MAX: u32 = 768;
 /// The largest region SD fills at full size in one crop with 32 px of
 /// photo around it: up to 768 on its long side with the tall crop.
-pub fn fit(tuning: &SdTuning) -> crate::inpaint::Fit {
+pub fn fit(req: &SdInpaintRequest) -> crate::inpaint::Fit {
     let side = |crop: u32| crop - 64;
     crate::inpaint::Fit {
-        long: side(if tuning.tall_crop { SD_CROP_MAX } else { SD_TILE }),
+        long: side(if req.tall_crop() { SD_CROP_MAX } else { SD_TILE }),
         short: side(SD_TILE),
     }
 }
@@ -261,6 +261,14 @@ pub fn fresh_seed() -> u64 {
 /// Where a refused SD erase sends the user instead.
 pub const LIGHTER_ERASER_HINT: &str = "pick Eraser (Big-LaMa) under Model instead";
 
+impl SdInpaintRequest {
+    /// Whether this run may use the tall crop: TAESD's graph is fixed at
+    /// 512², so with it a 768 crop failed outright.
+    pub fn tall_crop(&self) -> bool {
+        self.tuning.tall_crop && !self.use_taesd
+    }
+}
+
 impl Default for SdInpaintRequest {
     fn default() -> Self {
         Self {
@@ -333,7 +341,7 @@ pub fn process_inpaint_with(
     // the loop read the same value, so they cannot disagree about how
     // many tiles a region near an image edge really gets.
     let (img_w, img_h) = image.dimensions();
-    let max_side = if req.tuning.tall_crop { SD_CROP_MAX } else { SD_TILE };
+    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
     let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
     let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
     // The crops and tiles, in the order they run: the tile map's layout.
@@ -379,8 +387,8 @@ pub fn process_inpaint_with(
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
                 match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
                     Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
-                    Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
-                    Err(e) => tracing::error!(%e, "SD inference failed for component; skipping"),
+                    // A region left as it was would read as a finished erase.
+                    Err(e) => return Err(e),
                 }
                 progress.tile(tile_idx, true);
                 tile_idx += 1;
@@ -401,8 +409,7 @@ pub fn process_inpaint_with(
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
             match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
                 Ok(painted) => blend_tile(&mut out, &painted, &tile),
-                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
-                Err(e) => tracing::error!(%e, ?tile, "SD inference failed for tile; skipping"),
+                Err(e) => return Err(e),
             }
             progress.tile(tile_idx, true);
             tile_idx += 1;
@@ -2969,6 +2976,19 @@ mod tests {
     fn mask_components_returns_empty_for_empty_mask() {
         let m = GrayImage::new(64, 64);
         assert!(mask_components(&m).is_empty());
+    }
+
+    /// TAESD's graph is fixed at 512², so a run with it never plans the
+    /// 768 tall crop (it failed and left the region as it was).
+    #[test]
+    fn the_fast_decoder_keeps_crops_at_512() {
+        let tuning = SdTuning { tall_crop: true, ..SdTuning::default() };
+        let req = SdInpaintRequest { tuning, use_taesd: true, ..Default::default() };
+        assert!(!req.tall_crop());
+        assert_eq!(fit(&req).long, SD_TILE - 64);
+        let req = SdInpaintRequest { use_taesd: false, ..req };
+        assert!(req.tall_crop());
+        assert_eq!(fit(&req).long, SD_CROP_MAX - 64);
     }
 
     /// Slats a few pixels apart are one region; a mark across the image
