@@ -14,6 +14,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Ui};
 use crate::gui::brush_state::{BrushSettings, BrushState};
 use prunr_core::brush::Stamp;
 use crate::gui::item::BatchItem;
+use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 /// Minimum brush radius in screen pixels — clamps against zoom-out
@@ -39,11 +40,13 @@ pub(crate) enum BrushAction {
 pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
-    settings: &BrushSettings,
+    app_settings: &Settings,
     stamp: Stamp,
     item: &BatchItem,
     img_rect: Rect,
 ) -> BrushAction {
+    let settings = &app_settings.brush;
+    let look = CursorLook::of(settings, app_settings.brush_erases());
     // Strokes are authored at SOURCE resolution because the selection lives
     // there; painting at tensor resolution misaligned strokes once they were
     // resampled back.
@@ -52,7 +55,7 @@ pub(crate) fn handle_input(
         // Render a muted cursor so the user gets feedback that brush is
         // ON, but skip wiring.
         tracing::debug!(item_id = item.id, "brush active but item has no dimensions — cursor only");
-        draw_cursor(ui, img_rect, CursorLook::of(settings), /*armed=*/ false);
+        draw_cursor(ui, img_rect, look, /*armed=*/ false);
         return BrushAction::None;
     }
 
@@ -72,10 +75,10 @@ pub(crate) fn handle_input(
     let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
 
     // In-progress stroke trail (drawn first so the cursor renders on top).
-    draw_trail(ui, brush_state, settings);
+    draw_trail(ui, brush_state, look);
 
     // Cursor circle — armed only when the pointer is over the image.
-    draw_cursor(ui, img_rect, CursorLook::of(settings), pointer_on_img.is_some());
+    draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
     // Brush radius in model-pixel space — derived from the on-screen
     // img_rect width vs model width. One isotropic factor is enough:
@@ -127,11 +130,13 @@ pub(crate) struct CursorLook {
     pub(crate) hardness: f32,
     pub(crate) strength: f32,
     pub(crate) shape: prunr_core::brush::BrushShape,
+    /// Drawn in Erase's warm red.
+    pub(crate) erase: bool,
 }
 
 impl CursorLook {
-    pub(crate) fn of(s: &BrushSettings) -> Self {
-        Self { radius: s.radius, hardness: s.hardness, strength: s.strength, shape: s.shape }
+    pub(crate) fn of(s: &BrushSettings, erase: bool) -> Self {
+        Self { radius: s.radius, hardness: s.hardness, strength: s.strength, shape: s.shape, erase }
     }
 }
 
@@ -142,16 +147,15 @@ pub(crate) const MAGIC_CURSOR: CursorLook = CursorLook {
     hardness: 1.0,
     strength: 1.0,
     shape: prunr_core::brush::BrushShape::Circle,
+    erase: false,
 };
 
-/// Translucent ACCENT-purple stamps along the in-progress stroke's
-/// trail. Drawn on a foreground layer so the image rendered earlier
-/// in the same frame can't accidentally cover them, and tinted
-/// brighter than the theme ACCENT so the trail is legible on dark
-/// images too.
-fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
+/// Translucent stamps in the mark colour along the in-progress stroke's
+/// trail, on a foreground layer so the image rendered earlier in the
+/// same frame can't cover them.
+fn draw_trail(ui: &Ui, brush_state: &BrushState, look: CursorLook) {
     let Some(shape) = brush_state.active_shape() else { return };
-    draw_trail_for(ui, CursorLook::of(s), shape, brush_state.trail_stamps());
+    draw_trail_for(ui, look, shape, brush_state.trail_stamps());
 }
 
 /// Paint the in-progress trail from an arbitrary stamp iterator. Shared
@@ -167,7 +171,7 @@ pub(crate) fn draw_trail_for(
     if s.strength <= 0.0 {
         return;
     }
-    let accent = theme::ACCENT;
+    let accent = theme::mark_color(s.erase);
     let center_alpha = (110.0 * s.strength.clamp(0.0, 1.0)) as u8;
     if center_alpha == 0 {
         return;
@@ -212,7 +216,7 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     }
     let r = s.radius.max(MIN_SCREEN_RADIUS_PX);
     let color = if armed {
-        theme::ACCENT
+        theme::mark_color(s.erase)
     } else {
         Color32::from_rgba_premultiplied(160, 160, 160, 180)
     };

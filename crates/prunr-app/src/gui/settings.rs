@@ -162,6 +162,12 @@ fn default_selection_fill() -> f32 { 0.15 }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
+    /// The brush erases the cut-out, so its strokes and marks are drawn
+    /// in Erase's warm red.
+    pub(crate) fn brush_erases(&self) -> bool {
+        self.model.erases_with(self.brush.mode)
+    }
+
     /// Config file path: ~/.config/prunr/settings.json (Linux),
     /// ~/Library/Application Support/prunr/settings.json (macOS),
     /// %APPDATA%/prunr/settings.json (Windows).
@@ -641,6 +647,11 @@ impl SettingsModel {
         } else {
             ModelRole::Filters
         }
+    }
+
+    /// A brush in `mode` erases the cut-out.
+    pub fn erases_with(self, mode: prunr_core::selection::BrushMode) -> bool {
+        self.edits_cutout() && mode == prunr_core::selection::BrushMode::Subtract
     }
 
     /// See `ModelRole::edits_cutout`.

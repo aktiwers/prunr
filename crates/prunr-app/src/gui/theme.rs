@@ -77,6 +77,12 @@ pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 pub const RAIL: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
 /// The Erase colour of brushes and strokes.
 pub const ERASE: Color32 = Color32::from_rgb(0xe2, 0x70, 0x4f);
+/// What a brush mark is drawn in: Erase's warm red, else the accent.
+pub fn mark_color(erase: bool) -> Color32 {
+    if erase { ERASE } else { ACCENT }
+}
+/// Erase picked in a mode switch: the warm red a shade deeper, under white text.
+pub const ERASE_PICKED: Color32 = Color32::from_rgb(0xc9, 0x57, 0x3a);
 /// A hint under its row: smaller and greyer than a label.
 pub const HINT: Color32 = Color32::from_rgb(0x9c, 0x9c, 0x9c);
 pub const FONT_SIZE_HINT: f32 = 11.5;

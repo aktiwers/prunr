@@ -66,7 +66,8 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
         .show(ui.ctx(), |ui| {
             let available = (canvas_rect.width() - 2.0 * TOP_INSET).max(0.0);
             ui.set_max_width(available);
-            theme::strip_frame().show(ui, |ui| {
+            let mut dots = None;
+            let strip_rect = theme::strip_frame().show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
                     ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
@@ -77,15 +78,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         Tool::Magic => magic_knobs(ui, brush, facts.model),
                     };
                     ui.separator();
-                    let dots = chip::tooltip(
+                    dots = Some(chip::tooltip(
                         chip::icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, theme::BG_SECONDARY),
                         tool.more(),
                         "",
                         None,
-                    );
-                    chip::flyout_for(Id::new(("tool_strip_more", tool.title())), &dots, |ui| {
-                        change.merge(panel(ui, tool, brush, facts));
-                    });
+                    ));
                     if tool == Tool::Paint && facts.model == SettingsModel::SdInpaint {
                         ui.separator();
                         let reason = (!facts.can_reroll).then_some("Erase something first; this generates that fill again.");
@@ -96,7 +94,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         strip.try_another = chip::tooltip(resp, "Try another", "Generate this fill again with a new seed. Undo brings the previous one back.", None).clicked();
                     }
                 });
-            });
+            }).response.rect;
+            if let Some(dots) = dots {
+                chip::flyout_under(Id::new(("tool_strip_more", tool.title())), &dots, strip_rect, |ui| {
+                    change.merge(panel(ui, tool, brush, facts));
+                });
+            }
         });
     strip
 }
@@ -117,7 +120,7 @@ fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) 
 fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = false;
     if shows(model, Surface::SelectionStrokes) {
-        committed |= chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
+        committed |= brush_chip::mode_buttons(ui, model, &mut s.mode);
     }
     committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     if shows(model, Surface::SelectionStrokes) {
@@ -132,7 +135,7 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
 }
 
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
-    let mut committed = chip::choice_buttons(ui, brush_chip::mode_choices(model), &mut s.mode);
+    let mut committed = brush_chip::mode_buttons(ui, model, &mut s.mode);
     committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     committed
 }
