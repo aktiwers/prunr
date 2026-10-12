@@ -87,7 +87,7 @@ fn disk_usage_bytes() -> u64 {
 
 /// Returns true when the user closed the modal this frame.
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
-    let provider = app.settings.active_backend.clone();
+    let provider = app.settings.effective_backend().to_string();
 
     let initial_filter = app.model_store.as_ref().and_then(|r| r.filter);
     let mut new_filter = initial_filter;

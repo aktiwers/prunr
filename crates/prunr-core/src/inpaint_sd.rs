@@ -137,6 +137,9 @@ pub struct SdTuning {
     /// Headroom the RAM gate adds to the model's working set.
     #[serde(default = "default_margin_mb")]
     pub margin_mb: u64,
+    /// The Processor setting's "CPU only": no GPU provider for the parts.
+    #[serde(default)]
+    pub cpu_only: bool,
 }
 
 /// The headroom when the caller names none.
@@ -146,7 +149,7 @@ fn default_margin_mb() -> u64 { SD_DEFAULT_MARGIN_MB }
 
 impl Default for SdTuning {
     fn default() -> Self {
-        Self { keep_loaded: false, ov_device: None, tall_crop: false, margin_mb: SD_DEFAULT_MARGIN_MB }
+        Self { keep_loaded: false, ov_device: None, tall_crop: false, margin_mb: SD_DEFAULT_MARGIN_MB, cpu_only: false }
     }
 }
 
@@ -158,8 +161,8 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// fits is decided by `check_ram_for` in the process that runs the
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
-pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb }
+pub fn plan_tuning(keep_loaded: bool, margin_mb: u64, cpu_only: bool) -> SdTuning {
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -183,7 +186,7 @@ fn resident(id: prunr_models::ModelId) -> bool {
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone() }
+        SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only }
     }
 }
 
@@ -193,6 +196,14 @@ impl SdTuning {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
+    cpu_only: bool,
+}
+
+impl SdSessionKey {
+    /// The GPU providers this bundle's parts may try.
+    fn gpu_eps(&self) -> &'static [crate::engine::EpKind] {
+        if self.cpu_only { &[] } else { crate::engine::gpu_eps() }
+    }
 }
 
 impl SdSessionKey {
@@ -1209,7 +1220,7 @@ fn build_part_with_ep_ladder(
     let path = by_key.get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
 
-    let gpu_eps = crate::engine::available_gpu_eps();
+    let gpu_eps = session_key.gpu_eps();
 
     for &ep in gpu_eps {
         if !prunr_models::is_ep_compatible(id, ep.as_str()) {
@@ -1325,6 +1336,12 @@ fn build_part_with_ep_ladder(
     if id.is_sd_family() {
         tracing::warn!(?id, part = %key,
             "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
+        if session_key.cpu_only {
+            return Err(format!(
+                "The Stable Diffusion eraser needs a GPU provider, and Processor \
+                 is set to CPU only (Settings). Set it to Auto, or {LIGHTER_ERASER_HINT}.",
+            ));
+        }
         return Err(format!(
             "SD inpaint requires GPU acceleration. No compatible GPU \
              execution provider is available; SD on CPU produces \
@@ -2998,7 +3015,7 @@ mod tests {
         assert_eq!(ram_need_mb(id, m, true, false), m, "a resident bundle needs only the headroom");
         assert_eq!(ram_need_mb(id, m, true, true), m + SD_TALL_CROP_EXTRA_MB);
         let fit = |free: u64, resident: bool| {
-            let mut t = plan_tuning(false, m);
+            let mut t = plan_tuning(false, m, false);
             fit_ram(id, &mut t, free, resident).map(|()| t.tall_crop)
         };
         assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB, false), Ok(true));
@@ -3008,7 +3025,7 @@ mod tests {
         // the process holding it must not count it again.
         assert_eq!(fit(m + SD_TALL_CROP_EXTRA_MB, true), Ok(true), "resident: the extra alone decides");
         assert_eq!(fit(m, true), Ok(false));
-        let t = plan_tuning(true, m);
+        let t = plan_tuning(true, m, false);
         assert!(t.keep_loaded && t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
         assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
@@ -3086,6 +3103,17 @@ mod tests {
     /// seconds old — `Instant::now() - 600 s` then panics with an overflow.
     fn sweep_now() -> Instant {
         Instant::now() + Duration::from_secs(3600)
+    }
+
+    /// "CPU only" reaches the SD parts through the bundle key, so a
+    /// worker process needs no extra state, and a bundle built under the
+    /// other policy is never reused.
+    #[test]
+    fn a_cpu_only_bundle_tries_no_gpu_provider_and_has_its_own_key() {
+        let auto = plan_tuning(false, 0, false).session_key();
+        let cpu = plan_tuning(false, 0, true).session_key();
+        assert!(cpu.gpu_eps().is_empty());
+        assert_ne!(auto, cpu);
     }
 
     /// One SD bundle is resident at a time: "keep loaded" pins the

@@ -262,7 +262,7 @@ pub fn process_inpaint_with(
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
         let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
-            tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
+            tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB, crate::engine::cpu_only()),
             ..Default::default()
         });
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
@@ -501,7 +501,7 @@ fn build_lama_session(
     bytes: &[u8],
     threads: usize,
 ) -> Result<(Session, String), String> {
-    let gpu_eps = crate::engine::available_gpu_eps();
+    let gpu_eps = crate::engine::gpu_eps();
 
     for &ep in gpu_eps {
         // Static catalog + dynamic cache, same as engine.rs.

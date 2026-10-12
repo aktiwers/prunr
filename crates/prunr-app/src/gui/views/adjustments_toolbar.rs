@@ -1128,7 +1128,7 @@ pub(super) fn render_model_dropdown(
                 let advisory = variant
                     .to_model_id()
                     .and_then(prunr_models::descriptor)
-                    .and_then(|d| d.hardware_advisory(&app_settings.active_backend));
+                    .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
                 let row = chip::picker_row(ui, app_settings.model == variant, info.name, info.blurb);
                 let row = match advisory {

@@ -366,7 +366,7 @@ impl PrunrApp {
             model,
             jobs: settings.parallel_jobs,
             mask: item_defaults.mask_settings(),
-            force_cpu: settings.force_cpu,
+            force_cpu: settings.cpu_only(),
             line_mode: item_defaults.line_mode,
             edge: item_defaults.edge_settings(),
         })
@@ -473,6 +473,7 @@ impl PrunrApp {
             }
         }
         app.refresh_install_cache();
+        prunr_core::engine::set_cpu_only(app.settings.cpu_only());
         app
     }
 
@@ -1063,6 +1064,7 @@ impl PrunrApp {
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,
                 (self.settings.ram_safety_margin_gb.max(0.0) * 1024.0) as u64,
+                self.settings.cpu_only(),
             )),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
@@ -1890,7 +1892,7 @@ impl PrunrApp {
                 model,
                 jobs,
                 mask: current_settings.mask_settings(),
-                force_cpu: self.settings.force_cpu,
+                force_cpu: self.settings.cpu_only(),
                 line_mode: current_settings.line_mode,
                 edge: current_settings.edge_settings(),
             }),
@@ -3193,6 +3195,18 @@ impl PrunrApp {
         } else {
             self.open_settings();
         }
+    }
+
+    /// Apply a changed Processor setting: sessions built from now on follow
+    /// it, and every cached session (LaMa, upscale, the background-removal
+    /// and Stable Diffusion workers) is dropped so none keeps the old one.
+    pub(crate) fn apply_processor(&mut self) {
+        prunr_core::engine::set_cpu_only(self.settings.cpu_only());
+        prunr_core::inpaint::release_all_lama_sessions();
+        self.processor.release_upscale_engine();
+        self.processor.release_seg_warm();
+        self.processor.release_inpaint_subprocess();
+        tracing::info!(processor = ?self.settings.processor, "processor setting applied");
     }
 
     /// Re-read what is installed, and move the eraser off a quality whose

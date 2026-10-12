@@ -83,9 +83,8 @@ pub struct Settings {
     #[serde(default)]
     pub runtime_prompt_snoozed_until: std::collections::HashMap<String, i64>,
 
-    /// Force CPU inference even when GPU is available (not persisted — resets each launch).
-    #[serde(skip)]
-    pub force_cpu: bool,
+    #[serde(default)]
+    pub processor: Processor,
     #[serde(skip)]
     pub active_backend: String,
     #[serde(default)]
@@ -267,6 +266,16 @@ impl Settings {
     /// Whether the active backend is a GPU (not CPU).
     pub fn is_gpu(&self) -> bool {
         !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
+    }
+
+    pub fn cpu_only(&self) -> bool {
+        self.processor == Processor::CpuOnly
+    }
+
+    /// The provider the models run on: the detected one, or the CPU
+    /// under "CPU only".
+    pub fn effective_backend(&self) -> &str {
+        if self.cpu_only() { "CPU" } else { &self.active_backend }
     }
 
     /// Smart default for parallel jobs based on backend and model. In
@@ -460,6 +469,15 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
         }
     }
     s
+}
+
+/// Which hardware runs the models. Auto: a GPU provider where the model
+/// supports one, else the CPU. CpuOnly: every model on the CPU.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Processor {
+    #[default]
+    Auto,
+    CpuOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -663,7 +681,7 @@ impl Default for Settings {
             bg_image_paths: HashMap::new(),
             accepted_licenses: Vec::new(),
             runtime_prompt_snoozed_until: std::collections::HashMap::new(),
-            force_cpu: false,
+            processor: Processor::Auto,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             ram_safety_margin_gb: default_ram_safety_margin_gb(),
@@ -765,7 +783,7 @@ mod tests {
         assert!(s.bg_image_paths.is_empty());
         assert!(s.accepted_licenses.is_empty());
         assert!(s.runtime_prompt_snoozed_until.is_empty());
-        assert!(!s.force_cpu);
+        assert_eq!(s.processor, Processor::Auto);
         assert_eq!(s.active_backend, "CPU");
         assert_eq!(s.ram_safety_margin_gb, 2.0);
     }
@@ -836,6 +854,7 @@ mod tests {
 
         let original = Settings {
             parallel_jobs: 7,
+            processor: Processor::CpuOnly,
             auto_process_on_import: true,
             ..Settings::default()
         };
@@ -845,12 +864,20 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
         assert_eq!(restored.parallel_jobs, 7);
         assert!(restored.auto_process_on_import);
-        // `force_cpu` and `active_backend` are #[serde(skip)] by design
-        // (machine-specific runtime state, reset on every launch). The
-        // round-trip must not preserve them.
-        assert!(!restored.force_cpu);
+        assert_eq!(restored.processor, Processor::CpuOnly, "the processor choice is saved");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Under "CPU only" every reader of the backend (status bar, the
+    /// Model Store's GPU advisories) sees the CPU, not the detected GPU.
+    #[test]
+    fn cpu_only_reports_the_cpu_as_the_backend() {
+        let mut s = Settings { active_backend: "OpenVINO".into(), ..Settings::default() };
+        assert_eq!(s.effective_backend(), "OpenVINO");
+        s.processor = Processor::CpuOnly;
+        assert!(s.cpu_only());
+        assert_eq!(s.effective_backend(), "CPU");
     }
 
     #[test]

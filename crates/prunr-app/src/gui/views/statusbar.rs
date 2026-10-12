@@ -119,13 +119,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            // `force_cpu` overrides the detected backend so the toggle reflects
-            // the override instantly, not after the next batch reinit.
-            let backend_display = if app.settings.force_cpu {
-                "CPU (forced)"
-            } else {
-                &app.settings.active_backend
-            };
+            let backend_display = if app.settings.cpu_only() { "CPU only" } else { &app.settings.active_backend };
             ui.label(
                 RichText::new(format!("Backend: {backend_display}"))
                     .monospace()

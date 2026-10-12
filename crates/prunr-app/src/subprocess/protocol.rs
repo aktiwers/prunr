@@ -632,7 +632,7 @@ mod tests {
                 seed: Some(42),
                 use_taesd: false,
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::DpmPp2MKarras,
-                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512 },
+                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512, cpu_only: true },
             }),
             feather_px: 4.5,
             sharpen: 0.6,
