@@ -1506,6 +1506,20 @@ impl PrunrApp {
     /// settings to determine the minimum work needed (skip / mask rerun / full).
     /// `step`: the undo step the results record, or `None` to fill in the
     /// shown one (a re-run a knob change asked for).
+    /// Run background removal (or the No-model filter) on images imported
+    /// from `id_floor` on, when the setting is on. Erasers wait for a
+    /// painted region and upscales for the image to enlarge, so they
+    /// never start on import.
+    fn auto_process_imported(&mut self, id_floor: u64) {
+        let model = self.settings.model;
+        if !self.settings.auto_process_on_import || model.is_inpaint() || model.is_upscale() {
+            return;
+        }
+        if self.batch.items.iter().any(|i| i.id >= id_floor) {
+            self.process_items(|item| item.id >= id_floor, Some(StepKind::Process));
+        }
+    }
+
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         self.batch.fit_line_modes_to(self.settings.model);
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
@@ -3055,9 +3069,7 @@ impl PrunrApp {
                     self.zoom_state.reset();
                     self.pending_batch_sync = true;
                 }
-                if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
-                    self.process_items(|item| item.id >= id_floor, Some(StepKind::Process));
-                }
+                self.auto_process_imported(id_floor);
             }
         }
     }
@@ -3435,9 +3447,7 @@ impl PrunrApp {
                 self.zoom_state.reset();
                 self.sync_selected_batch_textures(ctx);
             }
-            if self.settings.auto_process_on_import && self.batch.next_id > id_floor {
-                self.process_items(|item| item.id >= id_floor, Some(StepKind::Process));
-            }
+            self.auto_process_imported(id_floor);
         }
     }
 
@@ -4306,6 +4316,22 @@ mod timeline_contract_tests {
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
+    }
+
+    /// Auto-process on import runs background removal (or the No-model
+    /// filter) on new images; an eraser needs a painted region and an
+    /// upscale runs on the image you pick, so those wait for Process.
+    #[test]
+    fn auto_process_on_import_runs_only_for_cut_out_and_filter_models() {
+        for model in [SettingsModel::SdInpaint, SettingsModel::Inpaint, SettingsModel::RealEsrganUpscale, SettingsModel::BiRefNetLite, SettingsModel::None] {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = model;
+            app.settings.auto_process_on_import = true;
+            push_test_item(&mut app, 5);
+            app.auto_process_imported(5);
+            let ran = matches!(app.batch.items[0].status, BatchStatus::Processing);
+            assert_eq!(ran, !(model.is_inpaint() || model.is_upscale()), "{model:?}");
+        }
     }
 
     /// A batch runs with the selected image's settings, so the No-model
