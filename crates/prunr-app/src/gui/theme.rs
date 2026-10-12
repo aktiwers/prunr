@@ -64,26 +64,76 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 }
 
 
-/// Standard frame for modal overlay windows.
-pub fn overlay_frame() -> egui::Frame {
+// === Building blocks (surfaces mockup, board 1) ===
+// Everything floats like the progress pill: dark glass, a hairline border,
+// a soft deep shadow. Panels round at 18 px, strips and buttons are pills,
+// inputs round at 10 px.
+
+/// The glass fill: Surface at 94 %.
+pub const GLASS: Color32 = Color32::from_rgba_premultiplied(23, 23, 27, 240);
+/// The hairline border around glass: white at 8 %.
+pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
+/// A slider's rail and an off switch.
+pub const RAIL: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
+/// The Erase colour of brushes and strokes.
+pub const ERASE: Color32 = Color32::from_rgb(0xe2, 0x70, 0x4f);
+pub const PANEL_RADIUS: u8 = 18;
+pub const PILL_RADIUS: u8 = 255;
+pub const INPUT_RADIUS: u8 = 10;
+
+/// The deep soft shadow under every floating surface.
+pub fn glass_shadow() -> egui::epaint::Shadow {
+    egui::epaint::Shadow { offset: [0, 14], blur: 36, spread: 0, color: Color32::from_black_alpha(128) }
+}
+
+/// A floating panel: modals, popovers, flyouts.
+pub fn panel_frame() -> egui::Frame {
     egui::Frame {
-        fill: OVERLAY_BG,
-        stroke: Stroke::new(STROKE_DEFAULT, OVERLAY_BORDER),
-        corner_radius: egui::CornerRadius::same(8),
+        fill: GLASS,
+        stroke: Stroke::new(STROKE_DEFAULT, HAIRLINE),
+        corner_radius: egui::CornerRadius::same(PANEL_RADIUS),
         inner_margin: egui::Margin::same(SPACE_MD as i8),
+        shadow: glass_shadow(),
         ..Default::default()
     }
 }
 
-/// The tool strip over the canvas: the overlay frame with the accent
-/// border and a tighter margin.
-pub fn strip_frame() -> egui::Frame {
+/// A floating pill: the tool strip, the quick strips, the progress pill.
+pub fn pill_frame() -> egui::Frame {
     egui::Frame {
-        fill: BG_SECONDARY,
-        stroke: Stroke::new(STROKE_DEFAULT, ACCENT),
-        inner_margin: egui::Margin::symmetric(SPACE_MD as i8 - SPACE_XS as i8, SPACE_XS as i8 + 2),
-        ..overlay_frame()
+        corner_radius: egui::CornerRadius::same(PILL_RADIUS),
+        inner_margin: egui::Margin { left: 18, right: 8, top: 8, bottom: 8 },
+        ..panel_frame()
     }
+}
+
+/// Standard frame for modal overlay windows.
+pub fn overlay_frame() -> egui::Frame {
+    panel_frame()
+}
+
+/// The tool strip over the canvas.
+pub fn strip_frame() -> egui::Frame {
+    pill_frame()
+}
+
+/// The app-wide look of the building blocks: glass popups and windows,
+/// purple selections and slider fills on a thin rail, round inputs.
+pub fn apply_building_blocks(visuals: &mut egui::Visuals, spacing: &mut egui::style::Spacing) {
+    visuals.window_fill = GLASS;
+    visuals.window_stroke = Stroke::new(STROKE_DEFAULT, HAIRLINE);
+    visuals.window_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
+    visuals.menu_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
+    visuals.window_shadow = glass_shadow();
+    visuals.popup_shadow = glass_shadow();
+    visuals.selection.bg_fill = ACCENT_BRIGHT;
+    visuals.slider_trailing_fill = true;
+    visuals.handle_shape = egui::style::HandleShape::Circle;
+    for w in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
+        w.corner_radius = egui::CornerRadius::same(INPUT_RADIUS);
+    }
+    visuals.widgets.inactive.bg_fill = RAIL;
+    spacing.slider_rail_height = 4.0;
 }
 
 /// Tighten egui's default visuals for a modal: subdued borders + the
@@ -233,7 +283,8 @@ pub const TOOLBAR_HEIGHT: f32 = 48.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 pub const PROGRESS_BAR_BG: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
-pub const BUTTON_ROUNDING: f32 = 4.0;
+/// Buttons and chips are pills.
+pub const BUTTON_ROUNDING: f32 = PILL_RADIUS as f32;
 pub const DROP_ZONE_ROUNDING: f32 = 8.0;
 pub const DROP_ZONE_BORDER_WIDTH: f32 = 2.0;
 
