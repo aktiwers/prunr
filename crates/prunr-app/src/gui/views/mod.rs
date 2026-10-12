@@ -112,14 +112,14 @@ pub struct ModelInfo {
 
 pub fn model_info(model: SettingsModel) -> ModelInfo {
     let (icon, name, blurb) = match model {
-        SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "fast \u{00b7} ~4 MB"),
-        SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "quality \u{00b7} ~170 MB"),
-        SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "detail \u{00b7} ~214 MB"),
-        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "filters and lines only"),
-        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "object removal \u{00b7} ~199 MB"),
-        SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "sharper fills \u{00b7} ~199 MB"),
-        SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "compact \u{00b7} ~26 MB"),
-        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "generative \u{00b7} ~2 GB"),
+        SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "Fast \u{00b7} ~4 MB"),
+        SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "Quality \u{00b7} ~170 MB"),
+        SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "Detail \u{00b7} ~214 MB"),
+        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "Filters and lines only"),
+        SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "Object removal \u{00b7} ~199 MB"),
+        SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "Sharper fills \u{00b7} ~199 MB"),
+        SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "Compact \u{00b7} ~26 MB"),
+        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "Generative \u{00b7} ~2 GB"),
         SettingsModel::RealEsrganUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Real-ESRGAN)", "4\u{00d7} \u{00b7} ~64 MB"),
         SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4\u{00d7} photos \u{00b7} ~155 MB"),
         SettingsModel::FourXNmkdSiaxCxUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Siax-CX)", "4\u{00d7} clean photos \u{00b7} ~64 MB"),
