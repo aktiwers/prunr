@@ -334,6 +334,12 @@ impl Timeline {
         &self.states[self.cursor]
     }
 
+    /// The latest run at or before the shown step: hand edits after a
+    /// run keep building on what that run made.
+    pub(crate) fn latest_run(&self) -> Option<&Origin> {
+        self.states.range(..=self.cursor).rev().find_map(|s| s.origin.as_ref())
+    }
+
     /// The state before the shown one.
     pub(crate) fn previous(&self) -> Option<&DocState> {
         self.cursor.checked_sub(1).map(|i| &self.states[i])
