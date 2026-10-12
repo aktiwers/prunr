@@ -142,7 +142,7 @@ fn params(ui: &mut Ui, style: &mut FillStyle, quick: bool) -> bool {
     changed
 }
 
-/// How a look's tile is drawn: the board's gradient for it, in the
+/// How a look's tile is drawn: a gradient that suggests it, in the
 /// look's own colours where it has them.
 enum Look {
     /// A diagonal ramp through two to four colours.
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_holds_the_boards_looks() {
+    fn the_strip_holds_the_favourite_looks() {
         let names = QUICK.map(|i| FillStyle::ALL[i].name());
         assert_eq!(names, ["None", "Desaturate", "Sepia", "Duotone", "Posterize"]);
     }

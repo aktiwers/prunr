@@ -64,7 +64,7 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 }
 
 
-// === Building blocks (surfaces mockup, board 1) ===
+// === Building blocks ===
 // Everything floats like the progress pill: dark glass, a hairline border,
 // a soft deep shadow. Panels round at 18 px, strips and buttons are pills,
 // inputs round at 10 px.
@@ -77,6 +77,17 @@ pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 pub const RAIL: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
 /// The Erase colour of brushes and strokes.
 pub const ERASE: Color32 = Color32::from_rgb(0xe2, 0x70, 0x4f);
+/// A field, a segmented control's track, a round icon button: white at 6 %.
+pub const FIELD_FILL: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 15);
+pub const FIELD_FILL_HOVER: Color32 = Color32::from_rgba_premultiplied(24, 24, 24, 24);
+/// A list row under the pointer.
+pub const ROW_HOVER: Color32 = Color32::from_rgba_premultiplied(10, 10, 10, 10);
+/// The purple wash behind the picked row of a list.
+pub const ROW_PICKED: Color32 = Color32::from_rgba_premultiplied(31, 16, 42, 51);
+/// A card or a group of rows: a faint lift with a faint edge.
+pub const CARD_FILL: Color32 = Color32::from_rgba_premultiplied(9, 9, 9, 9);
+pub const CARD_EDGE: Color32 = Color32::from_rgba_premultiplied(13, 13, 13, 13);
+
 /// What a brush mark is drawn in: Erase's warm red, else the accent.
 pub fn mark_color(erase: bool) -> Color32 {
     if erase { ERASE } else { ACCENT }
@@ -114,16 +125,6 @@ pub fn pill_frame() -> egui::Frame {
         inner_margin: egui::Margin { left: 18, right: 8, top: 8, bottom: 8 },
         ..panel_frame()
     }
-}
-
-/// Standard frame for modal overlay windows.
-pub fn overlay_frame() -> egui::Frame {
-    panel_frame()
-}
-
-/// The tool strip over the canvas.
-pub fn strip_frame() -> egui::Frame {
-    pill_frame()
 }
 
 /// The app-wide look of the building blocks: glass popups and windows,
@@ -179,7 +180,7 @@ pub fn standard_modal_window(
     size: [f32; 2],
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
-    let window = egui::Window::new(title).collapsible(false).frame(overlay_frame());
+    let window = egui::Window::new(title).collapsible(false).frame(panel_frame());
     show_modal(ctx, id, window, size, body)
 }
 

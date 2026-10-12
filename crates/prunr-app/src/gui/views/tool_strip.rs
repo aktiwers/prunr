@@ -67,7 +67,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
             let available = (canvas_rect.width() - 2.0 * TOP_INSET).max(0.0);
             ui.set_max_width(available);
             let mut dots = None;
-            let strip_rect = theme::strip_frame().show(ui, |ui| {
+            let strip_rect = theme::pill_frame().show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
                     ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);

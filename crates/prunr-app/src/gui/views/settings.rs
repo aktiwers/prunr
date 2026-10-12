@@ -108,7 +108,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(app.settings_tab.label()).size(20.0).color(theme::TEXT_PRIMARY));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, Color32::from_white_alpha(15));
+                        let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
                         close = super::chip::named(x, "Close settings").clicked();
                     });
                 });
@@ -204,7 +204,7 @@ fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
     let painter = ui.painter();
     let left = egui::CornerRadius { nw: theme::PANEL_RADIUS, sw: theme::PANEL_RADIUS, ne: 0, se: 0 };
     painter.rect_filled(rect, left, SIDEBAR_FILL);
-    painter.vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0, Color32::from_white_alpha(15)));
+    painter.vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0, theme::FIELD_FILL));
     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 18.0))).layout(egui::Layout::top_down(egui::Align::Min)));
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.add_space(4.0);
@@ -232,9 +232,9 @@ fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let fill = if selected {
-            theme::ACCENT_BRIGHT.gamma_multiply(0.22)
+            theme::ROW_PICKED
         } else if resp.hovered() {
-            Color32::from_white_alpha(10)
+            theme::ROW_HOVER
         } else {
             Color32::TRANSPARENT
         };
@@ -284,8 +284,8 @@ fn group_heading(ui: &mut egui::Ui, text: &str) {
 /// A group of rows in one dim rounded box.
 fn group<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut Rows<'_>) -> R) -> R {
     egui::Frame::NONE
-        .fill(Color32::from_white_alpha(9))
-        .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(13)))
+        .fill(theme::CARD_FILL)
+        .stroke(egui::Stroke::new(1.0, theme::CARD_EDGE))
         .corner_radius(14.0)
         .inner_margin(egui::Margin::symmetric(16, 4))
         .show(ui, |ui| {
@@ -308,7 +308,7 @@ impl Rows<'_> {
         let ui = &mut *self.ui;
         if !std::mem::replace(&mut self.first, false) {
             let y = ui.cursor().top();
-            ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, Color32::from_white_alpha(13)));
+            ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, theme::CARD_EDGE));
         }
         // The control sits flush right but lays out left to right, so its
         // width comes from the last frame: a right-to-left layout would
@@ -344,9 +344,9 @@ impl Rows<'_> {
     }
 }
 
-/// The board's stepper: − value + in one dim pill.
+/// A stepper: − value + in one dim pill.
 fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::RangeInclusive<usize>) {
-    egui::Frame::NONE.fill(Color32::from_white_alpha(15)).corner_radius(theme::PILL_RADIUS).inner_margin(3.0).show(ui, |ui| {
+    egui::Frame::NONE.fill(theme::FIELD_FILL).corner_radius(theme::PILL_RADIUS).inner_margin(3.0).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let step = |ui: &mut egui::Ui, enabled: bool, glyph: &str, tip: &str| {

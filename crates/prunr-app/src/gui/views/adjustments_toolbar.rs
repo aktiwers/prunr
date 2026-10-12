@@ -636,7 +636,7 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     line_color(ui, s, change);
 }
 
-/// The line color: the board's dots and a custom one for a solid color,
+/// The line color: swatch dots and a custom one for a solid color,
 /// the photo's own colors, or one of the multi-color styles.
 fn line_color(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     use prunr_core::LineStyle;
@@ -1064,11 +1064,9 @@ const BG_QUICK_KINDS: [chip::Choice<BgKind>; 2] = [
     chip::Choice { value: BgKind::BlurredSource, name: "Blurred", description: "A blurred copy of the photo", enabled: true },
 ];
 
-const CHECKER_DARK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
-const CHECKER_LIGHT: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
-
 fn checker(u: f32, v: f32, cells: f32) -> Color32 {
-    if ((u * cells).floor() as i32 + (v * cells).floor() as i32) % 2 == 0 { CHECKER_LIGHT } else { CHECKER_DARK }
+    let (light, dark) = theme::CHECKER_DARK_MODE;
+    if ((u * cells).floor() as i32 + (v * cells).floor() as i32) % 2 == 0 { light } else { dark }
 }
 
 fn paint_checker(painter: &egui::Painter, rect: egui::Rect) {
