@@ -1035,18 +1035,32 @@ impl PrunrApp {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
         };
+        let raw_backend = self.erase_backend();
+        let seed = raw_backend.is_sd_family()
+            .then(|| self.settings.brush.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
+        tracing::info!(item_id, ?raw_backend, ?seed, "inpaint stroke committed; dispatching");
+        let tuning = self.erase_tuning(seed);
+        self.processor.dispatch_inpaint(item_id, source, selection, tuning);
+        self.batch.items[idx].start_erase(seed);
+    }
+
+    /// The eraser model the Model picker names (LaMa without one).
+    fn erase_backend(&self) -> prunr_models::ModelId {
+        self.settings.model.to_model_id().unwrap_or(prunr_models::ModelId::LaMaFp32)
+    }
+
+    /// How a fill runs under the current settings, with `seed` for a
+    /// generated one.
+    fn erase_tuning(&mut self, seed: Option<u64>) -> super::processor::InpaintTuning {
         self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
-        let bs = &self.settings.brush;
-        let raw_backend = self.settings.model.to_model_id()
-            .unwrap_or(prunr_models::ModelId::LaMaFp32);
+        let raw_backend = self.erase_backend();
         let backend = if self.settings.lcm_routing_active(raw_backend) {
             prunr_models::ModelId::SdV15LcmInpaintFp16
         } else {
             raw_backend
         };
-        let seed = raw_backend.is_sd_family().then(|| bs.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
-        tracing::info!(item_id, ?backend, ?raw_backend, ?seed, "inpaint stroke committed; dispatching");
-        let tuning = super::processor::InpaintTuning {
+        let bs = &self.settings.brush;
+        super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
@@ -1063,9 +1077,43 @@ impl PrunrApp {
                 self.settings.sd_memory.margin_mb(),
             )),
             cpu_only: self.settings.cpu_only(),
+        }
+    }
+
+    /// "Try another" is possible: the SD eraser is chosen and the shown
+    /// step is a generated fill, with nothing running on the image.
+    pub fn can_reroll_intent(&self) -> bool {
+        self.settings.model == super::settings::SettingsModel::SdInpaint
+            && self.batch.selected_item().is_some_and(|i| !i.is_busy() && i.reroll().is_some())
+    }
+
+    /// Fill the shown fill's region again from the image it started on,
+    /// with a new seed, as a new step (undo shows the fill before). A
+    /// pinned seed follows the fill on screen.
+    pub fn handle_reroll_intent(&mut self) {
+        if !self.can_reroll_intent() {
+            return;
+        }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item = &self.batch.items[idx];
+        let Some(reroll) = item.reroll() else { return };
+        let start = match reroll.start.as_ref() {
+            Some(s) => s.image.load(),
+            None => item.source_rgba.clone().or_else(|| item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8()))),
         };
-        self.processor.dispatch_inpaint(item_id, source, selection, tuning);
-        self.batch.items[idx].start_erase(seed);
+        let (Some(source), Some(region)) = (start, reroll.region.load()) else {
+            tracing::warn!(item_id = item.id, "try another skipped: its start image or region is unavailable");
+            return;
+        };
+        let item_id = item.id;
+        let seed = prunr_core::inpaint_sd::fresh_seed();
+        if self.settings.brush.sd_seed.is_some() {
+            self.settings.brush.sd_seed = Some(seed);
+        }
+        tracing::info!(item_id, seed, "try another; dispatching");
+        let tuning = self.erase_tuning(Some(seed));
+        self.processor.dispatch_inpaint(item_id, source, region, tuning);
+        self.batch.items[idx].start_reroll(reroll, seed);
     }
 
     fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
@@ -4566,6 +4614,57 @@ mod timeline_contract_tests {
         app.processor.land_inpaint_for_test(1, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "landed: only the texture upload is left");
+    }
+
+    /// "Try another" reruns a generated fill from the image it started
+    /// on, with the region painted for it and a new seed, as a new step:
+    /// undo shows the fill before. It keeps working after a re-roll.
+    #[test]
+    fn try_another_reruns_the_fill_from_its_start_as_a_new_step() {
+        let mut app = app_with_processed_item(SettingsModel::SdInpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        let painted = app.batch.items[0].timeline.current().selection.clone().expect("the stroke's region");
+        let item = &mut app.batch.items[0];
+        assert!(item.reroll().is_none(), "nothing generated yet");
+        let first_start = item.run_start(Engine::Erase).map(|s| s.dims);
+        item.start_erase(Some(1));
+        item.result_rgba = Some(px(10));
+        item.invalidate_selection();
+        item.finish_job();
+        let r = item.reroll().expect("a generated fill can be re-rolled");
+        assert!(Arc::ptr_eq(&r.region, &painted), "the region painted for it");
+        assert_eq!(r.start.as_ref().map(|s| s.dims), first_start);
+        item.start_reroll(r, 2);
+        item.result_rgba = Some(px(20));
+        item.finish_job();
+        assert_eq!(item.shown_seed(), Some(2));
+        let again = item.reroll().expect("re-rolls chain");
+        assert!(Arc::ptr_eq(&again.region, &painted));
+        assert_eq!(again.start.as_ref().map(|s| s.dims), first_start, "still from the pre-erase image");
+        item.undo_step();
+        assert_eq!(item.shown_seed(), Some(1), "undo shows the fill before");
+    }
+
+    /// "Try another" is offered exactly when the SD eraser is chosen and
+    /// the shown step is a generated fill with nothing running on it.
+    #[test]
+    fn try_another_is_offered_only_for_a_shown_generated_fill() {
+        let mut app = app_with_processed_item(SettingsModel::SdInpaint);
+        assert!(!app.can_reroll_intent(), "nothing generated yet");
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        let item = &mut app.batch.items[0];
+        item.start_erase(Some(1));
+        assert!(!app.can_reroll_intent(), "not while a fill runs");
+        let item = &mut app.batch.items[0];
+        item.result_rgba = Some(px(10));
+        item.invalidate_selection();
+        item.finish_job();
+        assert!(app.can_reroll_intent());
+        app.settings.model = SettingsModel::Inpaint;
+        assert!(!app.can_reroll_intent(), "LaMa fills are not generated");
+        app.settings.model = SettingsModel::SdInpaint;
+        app.batch.items[0].undo_step();
+        assert!(!app.can_reroll_intent(), "the shown step is the stroke");
     }
 
     /// A refused or failed erase ends its run: the item stops waiting,

@@ -149,6 +149,15 @@ pub(crate) struct Job {
     pub(crate) start: Option<RunStart>,
     /// The seed a generated fill runs with.
     pub(crate) seed: Option<u64>,
+    /// The region an erase fills.
+    pub(crate) region: Option<super::timeline::StoredSelection>,
+}
+
+/// What "Try another" reruns: the shown fill's start (`None`: the
+/// original) and the region painted for it.
+pub(crate) struct Reroll {
+    pub(crate) start: Option<RunStart>,
+    pub(crate) region: super::timeline::StoredSelection,
 }
 
 /// What runs a job, and so what cancelling it stops.
@@ -566,14 +575,39 @@ impl BatchItem {
         self.start_seeded_job(step, engine, None);
     }
 
-    /// Note an erase starting now; `seed` is the one a generated fill runs with.
+    /// Note an erase of the shown selection starting now; `seed` is the
+    /// one a generated fill runs with.
     pub(crate) fn start_erase(&mut self, seed: Option<u64>) {
         self.start_seeded_job(Some(StepKind::Erase), Engine::Erase, seed);
+        if let Some(job) = self.job.as_mut() {
+            job.region = self.timeline.current().selection.clone();
+        }
+    }
+
+    /// Note "Try another" starting now: the shown fill's region from its
+    /// own start, with a new seed, recorded as a new step.
+    pub(crate) fn start_reroll(&mut self, reroll: Reroll, seed: u64) {
+        self.job = Some(Job {
+            version: self.timeline.version(),
+            step: Some(StepKind::Erase),
+            engine: Engine::Erase,
+            start: reroll.start,
+            seed: Some(seed),
+            region: Some(reroll.region),
+        });
+    }
+
+    /// The shown step as "Try another" would rerun it, when it is a
+    /// generated fill.
+    pub(crate) fn reroll(&self) -> Option<Reroll> {
+        let origin = self.timeline.current().origin.as_ref()
+            .filter(|o| o.engine == Engine::Erase && o.seed.is_some())?;
+        Some(Reroll { start: origin.start.clone(), region: origin.region.clone()? })
     }
 
     fn start_seeded_job(&mut self, step: Option<StepKind>, engine: Engine, seed: Option<u64>) {
         let start = self.run_start(engine);
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed });
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region: None });
     }
 
     /// The seed of the generated fill on screen.
@@ -606,6 +640,9 @@ impl BatchItem {
         }
         if let Some(job) = job {
             self.record_origin(job.engine, job.start, job.seed);
+            if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
+                origin.region = job.region;
+            }
         }
     }
 
@@ -637,7 +674,7 @@ impl BatchItem {
     /// The start is a stored timeline image, so the history sweep keeps
     /// compressing it.
     pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>, seed: Option<u64>) {
-        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed });
+        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed, region: None });
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
