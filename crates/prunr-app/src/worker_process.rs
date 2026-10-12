@@ -255,7 +255,6 @@ pub fn run_worker() -> ! {
     // `OpenVINO::is_available` on Linux which has been
     // observed to hang on some iGPU setups — bracket with tracing so a
     // future hang is diagnosable from the worker log.
-    prunr_core::engine::set_cpu_only(force_cpu);
     let probe_started = std::time::Instant::now();
     tracing::info!("worker: probing detect_active_provider…");
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
@@ -1004,7 +1003,8 @@ pub fn run_worker() -> ! {
                                 .to_luma8()
                         };
                         let raw = prunr_core::inpaint::process_inpaint_with(
-                            &image, &mask, model_id, sd_req.clone(), &progress,
+                            &image, &mask, model_id, sd_req.clone(),
+                            sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
                         ).map_err(|e| format!("inpaint: {e:?}"))?;
                         progress.step(prunr_core::Step::Blending);
                         Ok(prunr_core::inpaint_blend::finalize_inpaint(

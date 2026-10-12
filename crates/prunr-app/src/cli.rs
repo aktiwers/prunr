@@ -134,7 +134,7 @@ pub struct Cli {
     #[arg(long, value_name = "blur[:N]|bw", value_parser = parse_bg_effect)]
     pub bg_effect: Option<prunr_core::BgEffect>,
 
-    /// Force CPU inference even when GPU is available.
+    /// Run every model on the CPU, even when a GPU is available.
     #[arg(long)]
     pub cpu: bool,
 
@@ -386,7 +386,7 @@ fn run_inpaint(args: &Cli) -> i32 {
         eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
     }
     let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
-    let raw = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
+    let raw = match prunr_core::inpaint::process_inpaint_with(&img, &mask, prunr_models::ModelId::LaMaFp32, None, args.cpu, &prunr_core::Progress::none()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: inpaint failed: {e}");
@@ -1007,8 +1007,7 @@ pub fn run_doctor() {
     section("Paths");
     println!("Data dir:     {}", path_or_unknown(prunr_models::data_dir()));
     println!("Models dir:   {}", path_or_unknown(prunr_models::on_demand_dir()));
-    println!("Settings:     {}", path_or_unknown(
-        dirs::config_dir().map(|d| d.join("prunr").join("settings.json"))));
+    println!("Settings:     {}", path_or_unknown(prunr_app::gui::settings::Settings::config_path()));
     println!();
 
     section("Environment");

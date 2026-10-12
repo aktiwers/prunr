@@ -43,11 +43,11 @@ pub(crate) struct Bbox {
 /// Eagerly initialise the inpaint session for `id` in the background so
 /// the first stroke doesn't pay the ~5-10s session-build latency.
 /// Idempotent — repeated calls for the same id are no-ops.
-pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
+pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreError> {
     if id.is_sd_family() {
         return crate::inpaint_sd::prewarm(id);
     }
-    LamaSession::get(id).map(|_| ())
+    LamaSession::get(id, cpu_only).map(|_| ())
 }
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
@@ -231,12 +231,13 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None, &Progress::none())
+    process_inpaint_with(image, mask, id, None, false, &Progress::none())
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
 /// (prompt / negative prompt / guidance_scale / steps) and the run's
-/// progress handle. Cancel is checked between LaMa tiles and between
+/// progress handle. `cpu_only` keeps every session off the GPU providers
+/// (for SD it overrides the request's tuning). Cancel is checked between LaMa tiles and between
 /// SD UNet steps — ORT has no per-op cancel hook so worst-case latency
 /// on cancel is one tile (LaMa) or one UNet step (SD).
 pub fn process_inpaint_with(
@@ -244,6 +245,7 @@ pub fn process_inpaint_with(
     mask: &GrayImage,
     id: prunr_models::ModelId,
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
+    cpu_only: bool,
     progress: &Progress,
 ) -> Result<RgbaImage, CoreError> {
     if image.dimensions() != mask.dimensions() {
@@ -260,15 +262,16 @@ pub fn process_inpaint_with(
     }
     if id.is_sd_family() {
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
-        let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
+        let mut req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             num_inference_steps: 20,
-            tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB, crate::engine::cpu_only()),
+            tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         });
+        req.tuning.cpu_only = cpu_only;
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
     progress.step(Step::LoadingModel);
-    let session = LamaSession::get(id)?;
+    let session = LamaSession::get(id, cpu_only)?;
     tile_compose(image, mask, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
@@ -301,7 +304,9 @@ const LAMA_SWEEP_INTERVAL_SECS: u64 = 60;
 /// `Arc<OnceLock>` closes the build race between two concurrent
 /// `get()` callers (e.g. a prewarm racing the first stroke).
 type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
-type LamaCache = HashMap<prunr_models::ModelId, crate::inpaint_sd::CacheEntry<LamaSlot>>;
+/// Keyed by model and "CPU only", so a session built under one choice is
+/// never handed out under the other.
+type LamaCache = HashMap<(prunr_models::ModelId, bool), crate::inpaint_sd::CacheEntry<LamaSlot>>;
 
 fn lama_cache() -> &'static Mutex<LamaCache> {
     static CACHE: OnceLock<Mutex<LamaCache>> = OnceLock::new();
@@ -370,7 +375,7 @@ impl LamaSession {
     /// Pre-fix this was `Box::leak`'d to a `&'static`, which meant the
     /// session lived for the whole process lifetime — a single LaMa
     /// stroke pinned ~700 MB–2 GB of resident RAM until shutdown.
-    fn get(id: prunr_models::ModelId) -> Result<Arc<LamaSession>, CoreError> {
+    fn get(id: prunr_models::ModelId, cpu_only: bool) -> Result<Arc<LamaSession>, CoreError> {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
         let now = Instant::now();
@@ -389,7 +394,7 @@ impl LamaSession {
                     "LaMa: released idle session(s)",
                 );
             }
-            let entry = guard.entry(id)
+            let entry = guard.entry((id, cpu_only))
                 .or_insert_with(|| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::new()), now));
             // Don't refresh last_used on Err entries — sticky failures
             // shouldn't keep refreshing their idle timer (mirrors SD).
@@ -402,12 +407,12 @@ impl LamaSession {
         // Build outside the cache lock. Concurrent callers block on
         // the OnceLock and receive the same Result — no duplicate
         // session gets built.
-        slot.get_or_init(|| Self::new_inner(id).map(Arc::new))
+        slot.get_or_init(|| Self::new_inner(id, cpu_only).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
     }
 
-    fn new_inner(id: prunr_models::ModelId) -> Result<LamaSession, String> {
+    fn new_inner(id: prunr_models::ModelId, cpu_only: bool) -> Result<LamaSession, String> {
         let bytes = prunr_models::resolve_bytes(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let bytes = bytes.as_ref();
@@ -422,7 +427,7 @@ impl LamaSession {
         // Try GPU EPs first; fall back to CPU on any failure. Mirrors
         // `OrtEngine`'s one-EP-at-a-time ladder so a crashing EP can't
         // abort the whole session creation. Logs which EP won.
-        let (session, provider) = build_lama_session(id, bytes, threads)?;
+        let (session, provider) = build_lama_session(id, bytes, threads, cpu_only)?;
 
         let inputs = session.inputs().iter()
             .map(|i| i.name().to_string())
@@ -500,8 +505,9 @@ fn build_lama_session(
     id: prunr_models::ModelId,
     bytes: &[u8],
     threads: usize,
+    cpu_only: bool,
 ) -> Result<(Session, String), String> {
-    let gpu_eps = crate::engine::gpu_eps();
+    let gpu_eps = crate::engine::gpu_eps_for(cpu_only);
 
     for &ep in gpu_eps {
         // Static catalog + dynamic cache, same as engine.rs.
