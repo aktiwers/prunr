@@ -712,7 +712,6 @@ impl PrunrApp {
         let input = item.run_input(Engine::Upscale).or_else(|| item.source_rgba.clone())
             .map_or_else(|| super::processor::UpscaleInput::Source(item.source.clone()), super::processor::UpscaleInput::Decoded);
         let output_scale = item.settings.output_scale;
-        let intra_threads = prunr_core::batch::ort_intra_threads(self.settings.parallel_jobs);
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
         // user has tweaked to since).
@@ -729,7 +728,7 @@ impl PrunrApp {
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         }
-        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, intra_threads, recipe);
+        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, recipe);
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads

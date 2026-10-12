@@ -1108,9 +1108,11 @@ impl Processor {
         input: UpscaleInput,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
-        intra_threads: usize,
         recipe: ProcessingRecipe,
     ) {
+        // One upscale runs at a time, so it gets every core; "Parallel
+        // jobs" splits cores between images of a batch, not this run.
+        let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let free_mb = crate::hardware::available_ram_mb_throttled();
         if let Some(d) = prunr_models::descriptor(model_id) {
             if !admission_check(d.working_set_mb, free_mb) {
