@@ -9,9 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{Event, InputState, Key};
 
-use super::kv_row;
 use crate::gui::knob_catalog::ModelRole;
-use crate::gui::theme;
 
 const MOD_NAME: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
@@ -501,34 +499,9 @@ pub fn label(action: Action) -> &'static str {
 }
 
 /// Returns true if the modal should close.
-pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
-        ctx, "shortcuts", "Keyboard shortcuts",
-        [theme::SHORTCUT_OVERLAY_WIDTH, theme::SHORTCUT_OVERLAY_HEIGHT],
-        |ui| {
-            ui.vertical(|ui| {
-                ui.add_space(theme::SPACE_SM);
-                render_shortcut_grid(ui);
-            });
-        },
-    )
-}
-
-/// Two-column key/action grid. Used by the F1 overlay and the Settings
-/// Hotkeys tab.
-pub fn render_shortcut_grid(ui: &mut egui::Ui) {
-    egui::Grid::new("shortcuts_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_SM])
-        .show(ui, |ui| {
-            let bindings = current(ui.ctx());
-            for s in SHORTCUTS {
-                kv_row(ui, bindings.display(s.action), s.label, theme::TEXT_PRIMARY);
-            }
-            for (gesture, what) in GESTURES {
-                kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
-            }
-        });
+/// The mouse gestures, for the Hotkeys tab's list below the keys.
+pub fn gestures() -> &'static [(&'static str, &'static str)] {
+    GESTURES
 }
 
 #[cfg(test)]

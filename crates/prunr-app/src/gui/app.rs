@@ -14,7 +14,7 @@ use super::settings::Settings;
 use super::state::AppState;
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
-use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_flow, settings, shortcuts, sidebar, statusbar, toolbar};
+use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_flow, settings, sidebar, statusbar, toolbar};
 use super::views::selection_action_bar::SelectionAction;
 
 /// Days the user is left alone after dismissing the first-launch
@@ -48,7 +48,6 @@ pub struct PrunrApp {
     pub(crate) system: super::system_bridge::SystemBridge,
 
     // UI state
-    pub(crate) show_shortcuts: bool,
     pub(crate) show_cli_help: bool,
     pub(crate) show_pipeline_flow: bool,
 
@@ -331,7 +330,8 @@ impl PrunrApp {
                     self.apply_cancel_shortcut(ctx);
                 }
             }
-            Action::Shortcuts | Action::CliHelp | Action::PipelineFlow => {
+            Action::Shortcuts => self.toggle_hotkeys_tab(ctx),
+            Action::CliHelp | Action::PipelineFlow => {
                 if let Some(open) = self.help_modal_mut(action) {
                     *open = !*open;
                 }
@@ -401,7 +401,6 @@ impl PrunrApp {
             processor: super::processor::Processor::new(worker_tx, worker_rx),
             status: Default::default(),
             system,
-            show_shortcuts: false,
             show_cli_help: false,
             show_pipeline_flow: false,
             pending_copy: false,
@@ -771,7 +770,6 @@ impl PrunrApp {
     pub(crate) fn open_modals(&self) -> Vec<&'static str> {
         [
             (self.show_settings, "settings"),
-            (self.show_shortcuts, "shortcuts"),
             (self.show_cli_help, "cli_help"),
             (self.show_pipeline_flow, "pipeline_flow"),
             (self.model_store.is_some(), "model_store"),
@@ -3124,12 +3122,10 @@ impl PrunrApp {
     }
 
     /// The visibility flag behind a help modal's shortcut action; `None`
-    /// for actions that are not help modals. The keyboard toggles it, the
-    /// Help menu sets it.
-    pub(crate) fn help_modal_mut(&mut self, action: crate::gui::views::shortcuts::Action) -> Option<&mut bool> {
+    /// for actions that are not help modals.
+    fn help_modal_mut(&mut self, action: crate::gui::views::shortcuts::Action) -> Option<&mut bool> {
         use crate::gui::views::shortcuts::Action;
         match action {
-            Action::Shortcuts => Some(&mut self.show_shortcuts),
             Action::CliHelp => Some(&mut self.show_cli_help),
             Action::PipelineFlow => Some(&mut self.show_pipeline_flow),
             _ => None,
@@ -3175,8 +3171,6 @@ impl PrunrApp {
             self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
         } else if self.show_settings {
             self.close_settings(ctx);
-        } else if self.show_shortcuts {
-            self.show_shortcuts = false;
         } else if self.show_cli_help {
             self.show_cli_help = false;
         } else if self.show_pipeline_flow {
@@ -3185,6 +3179,18 @@ impl PrunrApp {
             return false;
         }
         true
+    }
+
+    /// Settings on the Hotkeys tab, the one list of shortcuts; closes it
+    /// when that tab is already showing.
+    pub(crate) fn toggle_hotkeys_tab(&mut self, ctx: &egui::Context) {
+        use super::views::settings::SettingsTab;
+        if self.show_settings && self.settings_tab == SettingsTab::Hotkeys {
+            self.close_settings(ctx);
+        } else {
+            self.settings_tab = SettingsTab::Hotkeys;
+            self.open_settings();
+        }
     }
 
     fn toggle_settings_panel(&mut self, ctx: &egui::Context) {
@@ -3918,9 +3924,6 @@ impl PrunrApp {
     }
 
     fn render_modal_overlays(&mut self, ctx: &egui::Context) {
-        if self.show_shortcuts && shortcuts::render(ctx) {
-            self.show_shortcuts = false;
-        }
         if self.show_cli_help && cli_help::render(ctx, &mut self.toasts) {
             self.show_cli_help = false;
         }
