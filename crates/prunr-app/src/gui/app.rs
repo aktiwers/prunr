@@ -2802,12 +2802,7 @@ impl PrunrApp {
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
-                WorkerResult::BackendReady(provider) => {
-                    if !provider.is_empty() && self.settings.active_backend != provider {
-                        self.settings.active_backend = provider;
-                        self.settings.parallel_jobs = self.settings.default_jobs();
-                    }
-                }
+                WorkerResult::BackendReady(provider) => self.settings.note_backend(provider),
             }
         }
     }
@@ -2907,11 +2902,7 @@ impl PrunrApp {
         tracing::info!(item_id, status = ?item.status, "item processing complete");
 
         if let Some(provider) = backend_update {
-            let backend_changed = self.settings.active_backend != provider;
-            self.settings.active_backend = provider;
-            if backend_changed {
-                self.settings.parallel_jobs = self.settings.default_jobs();
-            }
+            self.settings.note_backend(provider);
         }
 
         self.refresh_batch_progress_status();

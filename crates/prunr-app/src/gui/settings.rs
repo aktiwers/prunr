@@ -261,6 +261,17 @@ impl Settings {
         !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
     }
 
+    /// Record the provider a worker reports. Under "CPU only" the report
+    /// says CPU by choice, so the detected accelerator is kept (Settings
+    /// still offers Auto). A new provider re-derives the job count.
+    pub fn note_backend(&mut self, provider: String) {
+        if provider.is_empty() || self.cpu_only() || self.active_backend == provider {
+            return;
+        }
+        self.active_backend = provider;
+        self.parallel_jobs = self.default_jobs();
+    }
+
     pub fn cpu_only(&self) -> bool {
         self.processor == Processor::CpuOnly
     }
@@ -894,6 +905,8 @@ mod tests {
         s.processor = Processor::CpuOnly;
         assert!(s.cpu_only());
         assert_eq!(s.effective_backend(), "CPU");
+        s.note_backend("CPU".into());
+        assert_eq!(s.active_backend, "OpenVINO", "a CPU-only worker's report keeps the detected accelerator");
     }
 
     #[test]
