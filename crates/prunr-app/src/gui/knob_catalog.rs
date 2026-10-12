@@ -154,7 +154,7 @@ pub enum Surface {
     SelectionStrokes,
     /// Expand region, Feather and Sharpen for the filled region.
     FillRegionKnobs,
-    /// Restore faces: the models whose output is the photo itself.
+    /// Restore faces: every model whose output is the photo.
     Faces,
 }
 
@@ -172,7 +172,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Brushes => role != Upscale,
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
-        Surface::Faces => matches!(role, Cutout | Filters),
+        Surface::Faces => matches!(role, Cutout | Filters | Upscale),
     }
 }
 
@@ -524,7 +524,7 @@ mod tests {
         let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
-        let upscale: &[Surface] = &[Upscale];
+        let upscale: &[Surface] = &[Upscale, Faces];
         let rows: &[(SettingsModel, &[Surface])] = &[
             (SettingsModel::Silueta, cutout),
             (SettingsModel::U2net, cutout),

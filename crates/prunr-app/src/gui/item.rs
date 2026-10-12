@@ -235,19 +235,20 @@ impl CorrectionCache {
     }
 }
 
-/// The photo faces are found in: a run's start image or the source.
-/// Compared by identity, never unpacked to compare.
+/// The photo faces are found in: a run's start image, the source, or an
+/// upscale's output. Compared by identity, never unpacked to compare.
 #[derive(Clone)]
 pub(crate) enum FacePhoto {
     Start(super::timeline::StoredImage),
     Source(Arc<image::RgbaImage>),
+    Upscaled(Arc<image::RgbaImage>),
 }
 
 impl FacePhoto {
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Start(a), Self::Start(b)) => Arc::ptr_eq(a, b),
-            (Self::Source(a), Self::Source(b)) => Arc::ptr_eq(a, b),
+            (Self::Source(a), Self::Source(b)) | (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -255,7 +256,7 @@ impl FacePhoto {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
         match self {
             Self::Start(stored) => stored.load(),
-            Self::Source(rgba) => Some(Arc::clone(rgba)),
+            Self::Source(rgba) | Self::Upscaled(rgba) => Some(Arc::clone(rgba)),
         }
     }
 }
@@ -934,9 +935,13 @@ impl BatchItem {
         }
     }
 
-    /// The photo Restore faces works on for a photo model: where a preview
-    /// starts, as `build_preview_inputs` takes it.
+    /// The photo Restore faces works on: the shown upscale's output, or
+    /// where a photo model's preview starts, as `build_preview_inputs`
+    /// takes it.
     pub(crate) fn face_photo(&self) -> Option<FacePhoto> {
+        if let Some(run) = self.kept_upscale() {
+            return Some(FacePhoto::Upscaled(Arc::clone(&run.raw)));
+        }
         self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
             .or_else(|| self.source_rgba.clone().map(FacePhoto::Source))
     }
@@ -1479,6 +1484,23 @@ mod tests {
         assert!(item.kept_upscale().is_some());
         item.commit(StepKind::Adjust);
         assert!(item.kept_upscale().is_some(), "a Refine knob step keeps its upscale's run");
+    }
+
+    /// Restore faces works on the shown upscale's output; back on the
+    /// photo once that run is no longer the shown step's.
+    #[test]
+    fn faces_are_found_in_the_shown_upscale() {
+        let mut item = fixture_item(1);
+        let source = Arc::new(image::RgbaImage::new(4, 4));
+        item.source_rgba = Some(Arc::clone(&source));
+        assert!(item.face_photo().is_some_and(|p| p.same(&FacePhoto::Source(Arc::clone(&source)))));
+        let raw = Arc::new(image::RgbaImage::new(16, 16));
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.result_rgba = Some(Arc::clone(&raw));
+        item.land_upscale(UpscaleCache::new(Arc::clone(&raw), Arc::clone(&source), None));
+        assert!(item.face_photo().is_some_and(|p| p.same(&FacePhoto::Upscaled(Arc::clone(&raw)))));
+        item.undo_step();
+        assert!(!item.face_photo().is_some_and(|p| p.same(&FacePhoto::Upscaled(raw))));
     }
 
     /// Pin seed keeps the fill on screen: each fill's seed stays with its
