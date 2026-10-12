@@ -40,12 +40,12 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "-o <path>", "Where to save (file or folder)");
-                            opt_row(ui, "-m <model>", "silueta, u2net, or birefnet-lite");
-                            opt_row(ui, "-j 4", "Process 4 images at once");
-                            opt_row(ui, "-f", "Overwrite existing files");
-                            opt_row(ui, "-q", "Silent mode (errors only)");
-                            opt_row(ui, "--cpu", "Force CPU inference (skip GPU)");
+                            opt_row(ui, "--output, -o <path>", "Where to save (file or folder)");
+                            opt_row(ui, "--model, -m <model>", "silueta, u2net, or birefnet-lite");
+                            opt_row(ui, "--jobs, -j 4", "Process 4 images at once");
+                            opt_row(ui, "--force, -f", "Overwrite existing files");
+                            opt_row(ui, "--quiet, -q", "Silent mode (errors only)");
+                            opt_row(ui, "--cpu", "Run every model on the CPU");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -196,6 +196,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
+                            opt_row(ui, "--open <path>", "Start the app with this image loaded");
+                            opt_row(ui, "--doctor", "Print hardware, runtime, model and path facts, then exit");
+                            opt_row(ui, "--clear-ep-cache", "Forget which accelerators failed which models (after a driver update)");
                             opt_row(ui, "--debug", "Verbose tracing (use when reporting bugs)");
                         });
 
