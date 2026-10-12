@@ -39,9 +39,6 @@ pub struct Settings {
     /// composite. Single toggle, both export paths.
     #[serde(default)]
     pub export_split_layers: bool,
-    /// User-configurable keyboard shortcuts. Rebinding UI not yet wired.
-    #[serde(default)]
-    pub shortcuts: HashMap<String, String>,
     /// Named presets (excluding the synthetic "Prunr"). Populated from the
     /// filesystem store at load time; not written to settings.json on save —
     /// each preset lives as its own file in `~/.config/prunr/presets/` so
@@ -405,19 +402,23 @@ impl Settings {
         self.save();
     }
 
-    /// Reset to `Default` while preserving identity-bearing fields the user
-    /// expects to survive — the active backend probe and the user-authored
-    /// preset library + chosen default. `parallel_jobs` re-derives so it
-    /// snaps to a sane value for whatever GPU/CPU is detected.
+    /// Reset every preference to its default, keeping what the user owns
+    /// or agreed to: presets and the default one, licence acceptances,
+    /// background pictures, the model in use and the OpenVINO prompt
+    /// snooze. `parallel_jobs` re-derives for the detected hardware.
     pub fn reset_preserving_identity(&mut self) {
-        let backend = self.active_backend.clone();
-        let presets = std::mem::take(&mut self.presets);
-        let default_preset = self.default_preset.clone();
-        *self = Self::default();
-        self.active_backend = backend;
+        let kept = std::mem::take(self);
+        *self = Self {
+            active_backend: kept.active_backend,
+            presets: kept.presets,
+            default_preset: kept.default_preset,
+            accepted_licenses: kept.accepted_licenses,
+            bg_image_paths: kept.bg_image_paths,
+            model: kept.model,
+            runtime_prompt_snoozed_until: kept.runtime_prompt_snoozed_until,
+            ..Self::default()
+        };
         self.parallel_jobs = self.default_jobs();
-        self.presets = presets;
-        self.default_preset = default_preset;
     }
 }
 
@@ -670,7 +671,6 @@ impl Default for Settings {
             selection_outline: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
-            shortcuts: HashMap::new(),
             presets: HashMap::new(),
             default_preset: default_preset_name(),
             bg_image_paths: HashMap::new(),
@@ -771,7 +771,6 @@ mod tests {
         assert!(s.selection_outline);
         assert!(!s.auto_hide_adjustments);
         assert!(!s.export_split_layers);
-        assert!(s.shortcuts.is_empty());
         assert!(s.presets.is_empty());
         assert_eq!(s.default_preset, PRUNR_PRESET);
         assert!(s.bg_image_paths.is_empty());
@@ -861,6 +860,29 @@ mod tests {
         assert_eq!(restored.processor, Processor::CpuOnly, "the processor choice is saved");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reset keeps what the user owns or agreed to (presets, licence
+    /// acceptances, background pictures, the model in use, the OpenVINO
+    /// prompt snooze) and returns every preference to its default.
+    #[test]
+    fn reset_keeps_what_the_user_owns_and_resets_preferences() {
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        s.accepted_licenses.push("SdV15InpaintFp16".into());
+        s.bg_image_paths.insert(7, PathBuf::from("/pics/beach.jpg"));
+        s.runtime_prompt_snoozed_until.insert("OpenVino".into(), 99);
+        s.hotkeys.insert("undo".into(), vec!["Ctrl+U".into()]);
+        s.processor = Processor::CpuOnly;
+        s.keep_sd_loaded = true;
+        s.reset_preserving_identity();
+        assert_eq!(s.model, SettingsModel::SdInpaint);
+        assert_eq!(s.accepted_licenses, vec!["SdV15InpaintFp16".to_string()]);
+        assert_eq!(s.bg_image_paths.get(&7), Some(&PathBuf::from("/pics/beach.jpg")));
+        assert_eq!(s.runtime_prompt_snoozed_until.get("OpenVino"), Some(&99));
+        assert!(s.hotkeys.is_empty());
+        assert_eq!(s.processor, Processor::Auto);
+        assert!(!s.keep_sd_loaded);
     }
 
     /// Under "CPU only" every reader of the backend (status bar, the
