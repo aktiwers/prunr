@@ -52,7 +52,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         render_header(ui, app);
         ui.add_space(theme::SPACE_XS);
 
-        let anim_time = ui.ctx().input(|i| i.time) as f32;
+        let anim_time = theme::motion_clock(ui.ctx());
         let actions = render_item_list(ui, app, dragging_ids.as_ref(), sidebar_escape_rect, anim_time);
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
@@ -246,7 +246,7 @@ fn render_thumbnail_layer(
     let fade = ui.ctx().animate_bool_with_time(
         egui::Id::new(("thumb_fade", app.batch.items[i].id)),
         has_thumb,
-        0.2,
+        theme::fade_secs(ui.ctx(), 0.2),
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
     // Bg-image texture is built off-thread (kicked from the file-pick

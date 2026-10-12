@@ -13,7 +13,7 @@ use crate::gui::item::BatchItem;
 pub(crate) fn render_selection_overlay(ui: &Ui, item: &BatchItem, img_rect: Rect, working: bool) {
     let Some(tex) = item.selection_texture.as_ref() else { return };
     if working {
-        let t = ui.ctx().input(|i| i.time) as f32;
+        let t = crate::gui::theme::motion_clock(ui.ctx());
         super::effects::paint_working_masked(ui.painter(), img_rect, tex.handle.id(), t);
     } else {
         ui.painter().image(tex.handle.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE);

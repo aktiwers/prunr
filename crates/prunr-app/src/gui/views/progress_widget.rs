@@ -90,7 +90,7 @@ pub(crate) fn render(
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     if let Some(img_rect) = img_rect {
-        paint_tile_map(&painter, img_rect, progress, preview, t);
+        paint_tile_map(&painter, img_rect, progress, preview, theme::motion_clock(ui.ctx()));
     }
 
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);

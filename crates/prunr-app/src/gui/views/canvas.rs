@@ -623,7 +623,7 @@ fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchI
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
 fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
-    match item.reveal_progress() {
+    match item.reveal_progress().filter(|_| theme::motion(ui.ctx())) {
         Some((from, p, order)) => {
             super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p, order);
             // The subject's outline is gone by the time the cut-out has
@@ -647,7 +647,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
-            0.2,
+            theme::fade_secs(ui.ctx(), 0.2),
         );
         let alpha = (fade * 255.0) as u8;
         if fade < 1.0 { ui.ctx().request_repaint(); }
@@ -684,7 +684,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
 /// wiggle/breathing of the source image + horizontal shimmer sweep.
 fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-    let t = ui.ctx().input(|i| i.time) as f32;
+    let t = theme::motion_clock(ui.ctx());
 
     // A run that builds on an earlier result shows that result while it works.
     let item = app.batch.selected_item();
@@ -715,7 +715,8 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             Pos2::new(sweep_x - 40.0, img_rect.min.y),
             Pos2::new(sweep_x + 40.0, img_rect.max.y),
         ).intersect(img_rect);
-        if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
+        // A sweep held still is just a stripe: it only shows while moving.
+        if theme::motion(ui.ctx()) && shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
             ui.painter().rect_filled(shimmer_rect, 0.0, theme::PROCESSING_SWEEP);
         }
         // The subject, outlined as soon as the model has found it.
@@ -728,7 +729,9 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         img_rect
     });
 
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    if theme::motion(ui.ctx()) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    }
     painted
 }
 

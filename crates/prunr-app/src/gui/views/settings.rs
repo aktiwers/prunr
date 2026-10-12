@@ -537,6 +537,12 @@ fn render_page_editing(ui: &mut egui::Ui, settings: &mut Settings) {
             super::chip::switch(ui, "Outline the selection", &mut settings.selection_outline);
         });
     });
+    group_heading(ui, "Motion");
+    group(ui, |rows| {
+        rows.row("Animations", "Reveals, glows and moving highlights. Off shows each result at once.", |ui| {
+            super::chip::switch(ui, "Animations", &mut settings.animations);
+        });
+    });
     group_heading(ui, "Toolbar");
     group(ui, |rows| {
         rows.row("Auto-hide adjustments", "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.", |ui| {
