@@ -5,7 +5,7 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    fresh_sd_seed, BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
+    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
 };
 use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
@@ -39,7 +39,6 @@ pub(crate) fn render(
 }
 
 fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
-    brush.fit_sd_to_quality();
     let quality = brush.sd_scheduler;
     let shipped = SdSchedulerBundle::default_for(quality);
     let tuned = usize::from(brush.sd_steps != shipped.steps)
@@ -84,7 +83,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             None => "Pin seed".to_string(),
         };
         if chip::toggle_row(ui, &seed_label, &mut pinned).changed {
-            brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(fresh_sd_seed));
+            brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
             committed = true;
         }
         hint(ui, "Keeps the seed of the fill on screen, so the same prompt and settings give that fill again.");
@@ -107,7 +106,6 @@ fn render_quality_chip(
     lcm_bundle_installed: bool,
 ) -> bool {
     let pop_id = egui::Id::new("eraser_preset_popover");
-    app_settings.fit_sd_quality_to_install(lcm_bundle_installed);
     let active = app_settings.brush.sd_scheduler;
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_AUTO_AWESOME.codepoint, active.label(), false),

@@ -148,8 +148,7 @@ fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
-/// Fast's guidance; LCM output degrades above 2.
-pub(crate) fn default_cfg() -> f32 { 1.5 }
+fn default_cfg() -> f32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).guidance_scale }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
 /// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
@@ -172,15 +171,8 @@ pub(crate) fn own_prompt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Strin
 }
 fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
 
-/// A seed for a fill nobody pinned.
-pub fn fresh_sd_seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64)
-}
-
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
-fn default_sd_steps() -> u32 { 8 }
+fn default_sd_steps() -> u32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).steps }
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -244,10 +236,14 @@ impl BrushSettings {
     }
 
     /// The settings that belong to a model rather than to the brush: the
-    /// eraser's region knobs and the Stable Diffusion tuning.
+    /// eraser's region knobs and the Stable Diffusion quality, prompt and seed.
     pub fn take_model_tuning_from(&mut self, source: &Self) {
         self.take_inpaint_tuning_from(source);
-        self.take_sd_tuning_from(source);
+        self.take_sd_quality_from(source);
+        self.sd_prompt = source.sd_prompt.clone();
+        self.sd_negative_prompt = source.sd_negative_prompt.clone();
+        self.sd_seed = source.sd_seed;
+        self.sd_use_taesd = source.sd_use_taesd;
     }
 
     /// The eraser's region knobs: Expand region, Feather, Sharpen.
@@ -255,15 +251,6 @@ impl BrushSettings {
         self.inpaint_sharpen = source.inpaint_sharpen;
         self.inpaint_feather = source.inpaint_feather;
         self.inpaint_grow = source.inpaint_grow;
-    }
-
-    /// The Stable Diffusion eraser's quality, prompt and seed settings.
-    pub fn take_sd_tuning_from(&mut self, source: &Self) {
-        self.take_sd_quality_from(source);
-        self.sd_prompt = source.sd_prompt.clone();
-        self.sd_negative_prompt = source.sd_negative_prompt.clone();
-        self.sd_seed = source.sd_seed;
-        self.sd_use_taesd = source.sd_use_taesd;
     }
 
     /// The prompt a fill runs with: the user's, or the shipped one when

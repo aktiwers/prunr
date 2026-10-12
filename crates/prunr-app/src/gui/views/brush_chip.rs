@@ -70,11 +70,11 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
         outcome.committed |= chip::choice_row(ui, "Mode", mode_choices(model), &mut s.mode);
     }
     if shows(model, Surface::FillRegionKnobs) {
-        let g = chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0));
+        let g = expand_region_row(ui, s);
         outcome.committed |= g.commit;
         super::hint(ui, "Grow or shrink the painted region before the fill.");
         ui.add_space(4.0);
-        let f = chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)));
+        let f = feather_row(ui, s);
         outcome.committed |= f.commit;
         super::hint(ui, "Fade the fill into the photo over a ring just outside the painted region.");
         ui.add_space(4.0);
@@ -205,4 +205,14 @@ fn draw_preview(ui: &mut Ui, settings: &BrushSettings, hardness: f32) {
             );
         }
     }
+}
+
+/// The eraser's Expand region slider, in the flyout and the tool strip.
+pub(super) fn expand_region_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {
+    chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0))
+}
+
+/// The eraser's Feather slider, in the flyout and the tool strip.
+pub(super) fn feather_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {
+    chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)))
 }

@@ -208,6 +208,7 @@ use prunr_core::{
 };
 
 use crate::gui::settings::LineMode;
+use prunr_core::inpaint_blend::{fill_region, finalize_inpaint, DEFAULT_EDGE_BLEND_PX, DEFAULT_GROW_PX};
 
 /// What goes behind each result, from `--bg-effect`, `--bg-image` and
 /// `--bg-color`.
@@ -384,10 +385,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     if !args.quiet {
         eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
     }
-    // CLI defaults to LaMaFp32 — Big-LaMa selection from the CLI is
-    // tracked in PLAN 17-10 (would add `--inpaint-backend big-lama`).
-    use prunr_core::inpaint_blend::{DEFAULT_EDGE_BLEND_PX, DEFAULT_GROW_PX};
-    let mask = prunr_core::inpaint_blend::fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
+    let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
     let raw = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
         Ok(r) => r,
         Err(e) => {
@@ -395,7 +393,7 @@ fn run_inpaint(args: &Cli) -> i32 {
             return 1;
         }
     };
-    let result = prunr_core::inpaint_blend::finalize_inpaint(&raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0);
+    let result = finalize_inpaint(&raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0);
     if let Err(e) = result.save(&out_path) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;
