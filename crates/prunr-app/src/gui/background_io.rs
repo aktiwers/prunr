@@ -235,6 +235,8 @@ const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SelectionStyle {
     pub(crate) fill_opacity: f32,
+    /// Drawn in Erase's warm red: on a cut-out, the brush erases.
+    pub(crate) erase: bool,
     /// Outline width in image pixels; 0 draws no outline.
     pub(crate) outline_thickness: f32,
     pub(crate) edge_feather_px: u32,
@@ -247,6 +249,7 @@ impl SelectionStyle {
     pub(crate) fn from_settings(s: &super::settings::Settings) -> Self {
         Self {
             fill_opacity: s.selection_fill,
+            erase: s.brush_erases(),
             outline_thickness: if s.selection_outline { Self::OUTLINE_PX } else { 0.0 },
             edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
         }
@@ -255,7 +258,7 @@ impl SelectionStyle {
     /// The default outline and no feather, with `fill_opacity`.
     #[cfg(test)]
     pub(crate) fn with_fill(fill_opacity: f32) -> Self {
-        Self { fill_opacity, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0 }
+        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0 }
     }
 
     /// The feathered selection, or `None` when this style shows `mask` as
@@ -304,7 +307,7 @@ impl SelectionStyle {
     }
 }
 
-/// ACCENT-tinted image: each cell at the fill alpha scaled by its
+/// ACCENT-tinted image (Erase's red when `style.erase`): each cell at the fill alpha scaled by its
 /// coverage, so a feathered edge or a faint stroke shows as such, and
 /// the outline band stamped over it.
 pub(crate) fn build_selection_image(
@@ -313,7 +316,7 @@ pub(crate) fn build_selection_image(
 ) -> egui::ColorImage {
     use prunr_core::selection::MaskArtifact;
     let (w, h) = (mask.width as usize, mask.height as usize);
-    let accent = super::theme::ACCENT;
+    let accent = super::theme::mark_color(style.erase);
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
     let fill_alpha = SelectionStyle::alpha(style.fill_opacity) as f32;
     // A cell's colour depends only on its value: one per value.
@@ -397,6 +400,28 @@ mod tests {
         let (full, faint, none) = (img.pixels[0].a(), img.pixels[1].a(), img.pixels[2].a());
         assert!(faint > 0 && faint < full, "a quarter-coverage stroke shows, fainter ({faint} vs {full})");
         assert_eq!(none, 0);
+    }
+
+    /// On a cut-out, a selection while the brush erases is drawn in
+    /// Erase's warm red; otherwise in the accent.
+    #[test]
+    fn an_erasing_brush_marks_in_warm_red() {
+        use crate::gui::settings::{Settings, SettingsModel};
+        use prunr_core::selection::{BrushMode, MaskArtifact, FULL};
+        let mask = MaskArtifact::from_cells(1, 1, vec![FULL]);
+        let tint = |model, mode| {
+            let mut s = Settings { model, ..Settings::default() };
+            s.brush.mode = mode;
+            let style = SelectionStyle { outline_thickness: 0.0, ..SelectionStyle::from_settings(&s) };
+            build_selection_image(&mask, style).pixels[0].to_srgba_unmultiplied()
+        };
+        // Premultiplied storage rounds each channel by a step or two.
+        let near = |got: [u8; 4], want: egui::Color32| {
+            got[..3].iter().zip([want.r(), want.g(), want.b()]).all(|(&g, w)| g.abs_diff(w) <= 3)
+        };
+        assert!(near(tint(SettingsModel::BiRefNetLite, BrushMode::Subtract), crate::gui::theme::ERASE));
+        assert!(near(tint(SettingsModel::BiRefNetLite, BrushMode::Add), crate::gui::theme::ACCENT));
+        assert!(near(tint(SettingsModel::Inpaint, BrushMode::Subtract), crate::gui::theme::ACCENT), "subtracting from a region is not an erase");
     }
 
     /// At fit zoom on a big image a 2 px outline is half a screen pixel and

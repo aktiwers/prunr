@@ -325,6 +325,30 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
         });
 }
 
+/// A flyout under the whole of `anchor` and as wide, toggled by
+/// `toggle`: a strip's dots opening its full panel under the strip.
+/// Behaves like `flyout_for`; the body lays out as panel rows.
+pub(super) fn flyout_under(id: egui::Id, toggle: &Response, anchor: egui::Rect, body: impl FnOnce(&mut Ui)) {
+    outline_when_open(toggle, id);
+    egui::Popup::new(id, toggle.ctx.clone(), anchor, toggle.layer_id)
+        .open_memory(toggle.clicked().then_some(egui::SetOpenCommand::Toggle))
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_START)
+        .gap(10.0)
+        .frame(egui::Frame::NONE)
+        .show(|ui| {
+            theme::register_flyout(ui.ctx(), id);
+            if scrubbing_in(ui) {
+                ui.set_opacity(GHOST_OPACITY);
+            }
+            let frame = theme::panel_frame();
+            frame.show(ui, |ui| {
+                ui.set_width(anchor.width() - frame.total_margin().sum().x);
+                panel_rows(ui, body);
+            });
+        });
+}
+
 /// The accent outline on the chip whose popup is open, so the eye finds
 /// its way back from the panel to the control that opened it.
 fn outline_when_open(resp: &Response, id: egui::Id) {
@@ -959,6 +983,11 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
 /// The option buttons of a `choice_row`, inline, as the board's segmented
 /// control: one dim pill holding the options, the picked one purple.
 pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T) -> bool {
+    choice_buttons_picked(ui, options, value, theme::ACCENT_BRIGHT)
+}
+
+/// `choice_buttons` with the picked option in `picked` (Erase's warm red).
+pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T, picked: Color32) -> bool {
     egui::Frame::NONE
         .fill(Color32::from_white_alpha(15))
         .corner_radius(theme::PILL_RADIUS)
@@ -970,6 +999,7 @@ pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let v = ui.visuals_mut();
                 v.selection.stroke.color = Color32::WHITE;
+                v.selection.bg_fill = picked;
                 for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
                     w.corner_radius = egui::CornerRadius::same(theme::PILL_RADIUS);
                     w.bg_stroke = egui::Stroke::NONE;
