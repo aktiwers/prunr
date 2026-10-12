@@ -821,7 +821,6 @@ impl Processor {
                         use_taesd: plan.use_taesd,
                         scheduler,
                         tuning: tuning.sd_tuning.clone(),
-                        ..Default::default()
                     })
                 }
                 _ => None,

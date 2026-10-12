@@ -100,7 +100,7 @@ fn sd_bench() {
     let (id, steps, guidance, scheduler) = if std::env::var("PRUNR_SD_BENCH_MODEL").is_ok_and(|v| v == "lcm") {
         (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm)
     } else {
-        (prunr_models::ModelId::SdV15InpaintFp16, 20, 7.5, inpaint_sd::SchedulerKind::Ddim)
+        (prunr_models::ModelId::SdV15InpaintFp16, 25, 4.0, inpaint_sd::SchedulerKind::DpmPp2MKarras)
     };
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: {id:?} bundle not installed");
