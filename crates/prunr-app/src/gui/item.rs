@@ -34,8 +34,27 @@ pub(crate) struct ExportBg {
     backdrop: super::item_settings::Backdrop,
     image: Option<Arc<BgImage>>,
     fit: prunr_core::BgImageFit,
-    photo: Option<Arc<image::RgbaImage>>,
+    photo: Option<BackdropPhoto>,
     source: ImageSource,
+}
+
+/// The photo an effect background is made from: the image the shown
+/// result's run started from (a photo with an object erased first), or
+/// the original. An edited one is unpacked where it is used, off the UI
+/// thread.
+#[derive(Clone)]
+pub(crate) enum BackdropPhoto {
+    Edited(super::timeline::StoredImage),
+    Original(Arc<image::RgbaImage>),
+}
+
+impl BackdropPhoto {
+    pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
+        match self {
+            BackdropPhoto::Edited(stored) => stored.load(),
+            BackdropPhoto::Original(photo) => Some(Arc::clone(photo)),
+        }
+    }
 }
 
 impl ExportBg {
@@ -58,7 +77,7 @@ impl ExportBg {
     }
 
     fn photo(&self) -> Option<Arc<image::RgbaImage>> {
-        self.photo.clone().or_else(|| self.source.decode_rgba().ok())
+        self.photo.as_ref().and_then(BackdropPhoto::load).or_else(|| self.source.decode_rgba().ok())
     }
 }
 
@@ -1038,9 +1057,30 @@ impl BatchItem {
             backdrop: self.settings.backdrop(),
             image: self.bg_image.clone(),
             fit: self.settings.bg_image_fit,
-            photo: self.source_rgba.clone(),
+            photo: self.backdrop_photo(),
             source: self.source.clone(),
         }
+    }
+
+    /// See `BackdropPhoto`.
+    pub(crate) fn backdrop_photo(&self) -> Option<BackdropPhoto> {
+        let edited = self.timeline.latest_run().and_then(|o| o.start.as_ref());
+        match edited {
+            Some(start) => Some(BackdropPhoto::Edited(Arc::clone(&start.image))),
+            None => self.source_rgba.clone().map(BackdropPhoto::Original),
+        }
+    }
+
+    /// What the background texture is built from: the picture or effect
+    /// and, for an effect, which photo it is made from.
+    pub(crate) fn backdrop_key(&self) -> Option<u64> {
+        use super::item_settings::Backdrop;
+        let backdrop = self.settings.backdrop();
+        let key = backdrop.picture_key()?;
+        Some(match (backdrop, self.backdrop_photo()) {
+            (Backdrop::Effect(_), Some(BackdropPhoto::Edited(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
+            _ => key,
+        })
     }
 
 
@@ -1085,6 +1125,28 @@ mod tests {
         item.tile_preview = Some(preview);
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         assert!(item.tile_preview.is_none(), "a new run starts clear");
+    }
+
+    /// A cut-out made from an edited photo (an object erased first) gets
+    /// its effect background from that edited photo, not the original,
+    /// on screen and in export alike.
+    #[test]
+    fn the_effect_background_follows_the_photo_the_cut_out_was_made_from() {
+        use crate::gui::timeline::{Origin, RunStart, Stored};
+        let mut item = fixture_item(1);
+        item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([250, 250, 250, 255]))));
+        let erased = Stored::new(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([10, 10, 10, 255]))));
+        item.timeline.current_mut().origin = Some(Origin::new(Engine::Segment, Some(RunStart { image: erased, dims: (4, 2) })));
+        item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
+        let cut_out = Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 0, 0])));
+        assert_eq!(item.export_bg().bake(&cut_out).get_pixel(0, 0).0, [10, 10, 10, 255], "export: the edited photo behind");
+        assert_eq!(item.backdrop_photo().and_then(|p| p.load()).map(|p| p.get_pixel(0, 0).0), Some([10, 10, 10, 255]), "screen: the same photo");
+        let before = item.backdrop_key();
+        item.commit(StepKind::Stroke);
+        assert_eq!(item.backdrop_key(), before, "a stroke on the cut-out keeps the photo behind");
+        item.timeline = crate::gui::timeline::Timeline::new(item.timeline.current().clone());
+        item.timeline.current_mut().origin = None;
+        assert_ne!(item.backdrop_key(), before, "another photo behind builds another texture");
     }
 
     /// An effect is a picture of the photo put under whatever the result

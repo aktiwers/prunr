@@ -2767,7 +2767,7 @@ impl PrunrApp {
         use super::item_settings::Backdrop;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let backdrop = item.settings.backdrop();
-        let Some(key) = backdrop.picture_key() else {
+        let Some(key) = item.backdrop_key() else {
             item.backdrop_texture = None;
             return;
         };
@@ -2780,8 +2780,8 @@ impl PrunrApp {
                 Box::new(move || Some(bg.image.to_rgba8()))
             }
             Backdrop::Effect(effect) => {
-                let Some(photo) = item.source_rgba.clone() else { return };
-                Box::new(move || prunr_core::effect_backdrop(&photo, effect))
+                let Some(photo) = item.backdrop_photo() else { return };
+                Box::new(move || photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect)))
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,
         };
@@ -3520,7 +3520,7 @@ impl PrunrApp {
             }
             // A stale or empty build frees the slot: the next frame builds
             // the current picture.
-            let Some(ci) = ci.filter(|_| item.settings.backdrop().picture_key() == Some(key)) else {
+            let Some(ci) = ci.filter(|_| item.backdrop_key() == Some(key)) else {
                 ctx.request_repaint();
                 continue;
             };
