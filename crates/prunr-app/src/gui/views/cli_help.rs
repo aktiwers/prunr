@@ -16,7 +16,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             let tab_id = egui::Id::new("cli_help_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
 
-            super::chip::tab_strip(ui, &["Quick start", "Sketch", "Mask", "Eraser", "Advanced"], &mut tab);
+            super::chip::tab_strip(ui, &["Quick start", "Sketch", "Mask", "Eraser", "Upscale", "Advanced"], &mut tab);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
@@ -168,8 +168,39 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Custom output path");
                 }
 
-                // ── Advanced ──
+                // ── Upscale ──
                 4 => {
+                    section_heading(ui, "Upscale");
+                    hint(ui, "Enlarge a photo with an upscale model, refine it, and restore faces.");
+                    hint(ui, "Models download in the app's Model Store.");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Flags");
+
+                    egui::Grid::new("cli_upscale_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--upscale <model>", "realesrgan, nomos, siax or superscale: switch to Upscale mode");
+                            opt_row(ui, "--scale <2|3|4>", "How much larger (default 4)");
+                            opt_row(ui, "--denoise <0-1>", "Denoise before the model (default 0)");
+                            opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens (default 0)");
+                            opt_row(ui, "--ai-blend <0-1>", "1 keeps the model's output, 0 the plain enlargement (default 1)");
+                            opt_row(ui, "--color-match", "Match the upscale's colours to the original");
+                            opt_row(ui, "--restore-faces <model>", "gfpgan or restoreformer: redraw soft faces after the upscale");
+                            opt_row(ui, "--face-strength <0-100>", "Up to 50 adds detail over the photo's shading (default 50)");
+                        });
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Examples");
+                    example_row(ui, toasts, "prunr --upscale realesrgan photo.jpg",
+                        "Enlarge 4x, save photo_x4.png");
+                    example_row(ui, toasts, "prunr --upscale realesrgan --scale 2 --restore-faces gfpgan portrait.jpg",
+                        "Enlarge 2x and restore the faces");
+                }
+
+                // ── Advanced ──
+                5 => {
                     section_heading(ui, "Models");
 
                     egui::Grid::new("cli_models_grid")
