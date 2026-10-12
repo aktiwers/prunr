@@ -776,44 +776,64 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
 /// The Outline & Shadow chip: a sticker outline and a shadow under the
 /// cut-out. Returns true when a knob moved.
 fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
-    use prunr_core::ShadowKind;
     let value = match (d.has_outline(), d.has_shadow()) {
         (false, false) => "Off",
         (true, false) => "Outline",
         (false, true) => "Shadow",
         (true, true) => "Outline + shadow",
     };
-    let accent = d.has_outline() || d.has_shadow();
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_BORDER_OUTER.codepoint, value, accent),
-        "Outline & Shadow",
-        "A sticker outline and a shadow under the cut-out.",
-        None,
-    );
+    let on = d.has_outline() || d.has_shadow();
+    let group = chip::GroupChip {
+        id_salt: "decoration",
+        icon: ICON_BORDER_OUTER.codepoint,
+        label: "Outline & Shadow",
+        summary: value,
+        tooltip: "A sticker outline and a shadow under the cut-out.",
+        tuned: on,
+        width: DECORATION_PANEL_WIDTH,
+        live: true,
+    };
     let mut changed = false;
-    chip::flyout_for(ui.make_persistent_id("decoration_popup"), &resp, |ui| {
-        chip::popover_header(ui, "Outline & Shadow", None);
-        chip::section_label(ui, "Outline");
-        changed |= chip::slider_row_f32(ui, "Width", &mut d.outline_width, 0.0..=prunr_core::Decoration::MAX_OUTLINE_PX, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed;
-        if d.has_outline() {
-            changed |= chip::color_row(ui, "Color", &mut d.outline_color);
+    let header = chip::PanelHeader { note: "", reset: "Back to none" };
+    chip::strip_chip_faced(ui, group, value, "All outline and shadow settings", header, |ui, part| match part {
+        chip::Part::Quick => {
+            changed |= outline_width(ui, "Outline", d);
+            changed |= chip::choice_buttons(ui, &SHADOW_KINDS, &mut d.shadow);
         }
-        ui.add_space(theme::SPACE_SM);
-        ui.separator();
-        changed |= chip::choice_row(ui, "Shadow", &[
-            chip::Choice { value: ShadowKind::Off, name: "Off", description: "No shadow", enabled: true },
-            chip::Choice { value: ShadowKind::Soft, name: "Soft", description: "A soft shade all around, as if lit from the front", enabled: true },
-            chip::Choice { value: ShadowKind::Drop, name: "Drop", description: "A shadow falling below the subject", enabled: true },
-        ], &mut d.shadow);
-        if d.shadow != ShadowKind::Off {
-            changed |= chip::slider_row_f32(ui, "Opacity", &mut d.shadow_opacity, 0.0..=1.0, false, fmt::percent).changed;
-            changed |= chip::slider_row_f32(ui, "Blur", &mut d.shadow_blur, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
-        }
-        if d.shadow == ShadowKind::Drop {
-            changed |= chip::slider_row_f32(ui, "Distance", &mut d.shadow_distance, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+        chip::Part::Full { reset } => {
+            if reset {
+                *d = prunr_core::Decoration::default();
+                changed = true;
+            }
+            chip::panel_section(ui, "OUTLINE", None);
+            changed |= outline_width(ui, "Width", d);
+            if d.has_outline() {
+                changed |= chip::color_row(ui, "Color", &mut d.outline_color);
+            }
+            chip::panel_section(ui, "SHADOW", None);
+            changed |= chip::choice_row(ui, "Kind", &SHADOW_KINDS, &mut d.shadow);
+            if d.shadow != prunr_core::ShadowKind::Off {
+                changed |= chip::slider_row_f32(ui, "Opacity", &mut d.shadow_opacity, 0.0..=1.0, false, fmt::percent).changed;
+                changed |= chip::slider_row_f32(ui, "Blur", &mut d.shadow_blur, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+            }
+            if d.shadow == prunr_core::ShadowKind::Drop {
+                changed |= chip::slider_row_f32(ui, "Distance", &mut d.shadow_distance, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+            }
         }
     });
     changed
+}
+
+const DECORATION_PANEL_WIDTH: f32 = 400.0;
+
+const SHADOW_KINDS: [chip::Choice<prunr_core::ShadowKind>; 3] = [
+    chip::Choice { value: prunr_core::ShadowKind::Off, name: "No shadow", description: "", enabled: true },
+    chip::Choice { value: prunr_core::ShadowKind::Soft, name: "Soft", description: "A soft shade all around, as if lit from the front", enabled: true },
+    chip::Choice { value: prunr_core::ShadowKind::Drop, name: "Drop", description: "A shadow falling below the subject", enabled: true },
+];
+
+fn outline_width(ui: &mut Ui, label: &str, d: &mut prunr_core::Decoration) -> bool {
+    chip::slider_row_f32(ui, label, &mut d.outline_width, 0.0..=prunr_core::Decoration::MAX_OUTLINE_PX, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed
 }
 
 
