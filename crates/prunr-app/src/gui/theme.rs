@@ -357,10 +357,10 @@ pub const ACCENT_DISABLED: Color32 = Color32::from_rgba_premultiplied(49, 18, 57
 // === Window ===
 
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
-// Floor so the toolbar's longest configuration lays out without overlap;
-// nothing in it wraps. Measured by the `narrowest_toolbar` test: background
-// removal needs 1080, the SD eraser 920, upscale 670. Fits 1366×768 laptops.
-pub const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 540.0];
+// Floor set by the widest floating surface: the Mask quick strip (~860 px)
+// and Settings. The toolbar shows its chips as icons when narrow and fits
+// down to 640 (the `narrowest_toolbar` test).
+pub const MIN_WINDOW_SIZE: [f32; 2] = [900.0, 540.0];
 
 // === Typography (sizes for egui TextStyle overrides) ===
 
@@ -394,6 +394,12 @@ pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
 pub const MODAL_FILL: Color32 = Color32::from_rgb(23, 23, 27);
 /// Settings: its sidebar and the page beside it.
 pub const SETTINGS_MODAL_SIZE: [f32; 2] = [860.0, 600.0];
+
+/// `size` shrunk to leave a margin round the window, for a big modal.
+pub fn fit_to_window(ctx: &egui::Context, size: [f32; 2]) -> [f32; 2] {
+    let window = ctx.content_rect().size();
+    [size[0].min(window.x - 40.0), size[1].min(window.y - 40.0)]
+}
 pub const CLI_HELP_DIALOG_HEIGHT: f32 = 700.0;
 /// Vertical space the settings modal reserves at the bottom for its
 /// footer (Reset / Auto-saved row + separator).

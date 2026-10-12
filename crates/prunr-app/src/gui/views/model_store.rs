@@ -93,9 +93,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut new_filter = initial_filter;
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
-    let screen = ctx.content_rect().size();
-    let size = [STORE_SIZE[0].min(screen.x - 40.0), STORE_SIZE[1].min(screen.y - 40.0)];
-    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", size, |ui| {
+    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", theme::fit_to_window(ctx, STORE_SIZE), |ui| {
         let mut close = false;
         egui::Frame::NONE.inner_margin(egui::Margin { left: 26, right: 18, top: 20, bottom: 20 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
