@@ -86,6 +86,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- The Stable Diffusion eraser on Fast no longer finishes with nothing changed on a wide or tall area: its fast decoder only takes 512 px squares, so such an area failed and was skipped silently. It now runs at 512 px, and a part that fails stops the erase with a message.
 - Erasing a large object no longer leaves a ring of stray coloured pixels along the edge on flat backgrounds (a road at night, snow, a wall). The same fix makes Refine edges exact on large photos.
 - Upscale Sharpen starts off and sharpens detail rather than grain: it defaulted on with a one-pixel radius that boosted the model's texture on every upscale. Its radius now follows the enlargement.
 - Upscale AI blend and Color match compare with the image that was upscaled, not the original photo: an erased object no longer ghosts back, and noise Denoise removed stays gone. The result is finished in the upscale thread instead of the UI thread.
