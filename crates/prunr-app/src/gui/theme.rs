@@ -280,10 +280,8 @@ pub const FONT_SIZE_BODY: f32 = 14.0;
 pub const FONT_SIZE_HEADING: f32 = 16.0;
 pub const FONT_SIZE_MONO: f32 = 12.0;
 
-// === Shortcut Overlay ===
+// === Overlay ===
 
-pub const SHORTCUT_OVERLAY_WIDTH: f32 = 320.0;
-pub const SHORTCUT_OVERLAY_HEIGHT: f32 = 420.0;
 /// Overlay background: #1a1a1a at 95% alpha
 pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x3a, 0x3a, 0x3a, 0xf8);
 /// Overlay border: #ffffff20 (white 12.5%)
