@@ -142,7 +142,7 @@ impl Settings {
     /// ~/Library/Application Support/prunr/settings.json (macOS),
     /// %APPDATA%/prunr/settings.json (Windows).
     fn config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("prunr").join("settings.json"))
+        config_root().map(|d| d.join("prunr").join("settings.json"))
     }
 
     /// Load from disk, falling back to defaults if missing or corrupt.
@@ -430,6 +430,20 @@ impl Settings {
             ..Self::default()
         };
         self.parallel_jobs = self.default_jobs();
+    }
+}
+
+/// The folder the app's settings and presets live under: the platform
+/// config dir, or under test a folder of this test process, so a test
+/// that saves never overwrites the user's settings or presets.
+pub(crate) fn config_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        Some(std::env::temp_dir().join(format!("prunr-test-config-{}", std::process::id())))
+    }
+    #[cfg(not(test))]
+    {
+        dirs::config_dir()
     }
 }
 
@@ -960,16 +974,17 @@ mod tests {
         assert_eq!(restored.brush, super::BrushSettings::default());
     }
 
+    /// Settings live at <root>/prunr/settings.json, and under test the
+    /// root is never the user's config dir: a test that saves must not
+    /// overwrite the real settings or presets.
     #[test]
-    fn config_path_is_under_prunr_subfolder() {
-        // Cross-platform contract: settings always live at
-        // <config_dir>/prunr/settings.json on Linux/macOS/Windows.
-        // `dirs::config_dir` returns None only in genuinely broken envs.
-        let path = Settings::config_path().expect("config_dir resolves on test host");
-        assert!(
-            path.ends_with("prunr/settings.json") || path.ends_with("prunr\\settings.json"),
-            "expected .../prunr/settings.json, got {path:?}",
-        );
+    fn tests_save_settings_away_from_the_user_s_config() {
+        let path = Settings::config_path().expect("config root resolves");
+        assert!(path.ends_with("prunr/settings.json") || path.ends_with("prunr\\settings.json"), "{path:?}");
+        let user = dirs::config_dir().expect("config_dir resolves on test host");
+        assert!(!path.starts_with(&user), "{path:?} is in the user's config");
+        let presets = super::super::presets_fs::presets_dir().expect("presets dir");
+        assert!(!presets.starts_with(&user), "{presets:?} is in the user's config");
     }
 
     /// Non-LCM scheduler short-circuits before the install gate —
