@@ -298,6 +298,7 @@ fn quick_strips_name_every_control() {
         ("Mask", None, "All mask settings", "Contrast"),
         ("Sketch", Some("Whole photo"), "All line settings", "Style"),
         ("Effect", Some("Duotone"), "All effects", "Shadows"),
+        ("Background", Some("Cream"), "All background settings", "Custom color"),
     ] {
         let mut h = loaded();
         click(&mut h, chip);
