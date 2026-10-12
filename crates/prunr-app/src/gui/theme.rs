@@ -173,6 +173,34 @@ pub fn standard_modal_window(
     size: [f32; 2],
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
+    let window = egui::Window::new(title).collapsible(false).frame(overlay_frame());
+    show_modal(ctx, id, window, size, body)
+}
+
+/// A modal like `standard_modal_window` with no title bar and its frame
+/// flush to the edges: the body draws its own header (a sidebar, a close
+/// button) and returns true when its close was clicked.
+pub fn bare_modal_window(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    size: [f32; 2],
+    body: impl FnOnce(&mut egui::Ui) -> bool,
+) -> bool {
+    // Opaque: a page of text over a busy photo should not let it through.
+    let window = egui::Window::new(title).title_bar(false).frame(panel_frame().inner_margin(0).fill(MODAL_FILL));
+    let mut close_clicked = false;
+    let closed = show_modal(ctx, id, window, size, |ui| close_clicked = body(ui));
+    closed || close_clicked
+}
+
+fn show_modal(
+    ctx: &egui::Context,
+    id: &str,
+    window: egui::Window<'_>,
+    size: [f32; 2],
+    body: impl FnOnce(&mut egui::Ui),
+) -> bool {
     let opened_at_key = egui::Id::new(id).with("opened_at");
     let now = ctx.input(|i| i.time);
     let opened_at = ctx.memory_mut(|m| {
@@ -184,14 +212,12 @@ pub fn standard_modal_window(
     draw_modal_backdrop(ctx, &backdrop_id);
 
     let mut open = true;
-    let resp = egui::Window::new(title)
+    let resp = window
         .id(egui::Id::new(id))
         .open(&mut open)
-        .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size(size)
-        .frame(overlay_frame())
         .show(ctx, body);
 
     let close = !open || (debounce_passed && backdrop_clicked(ctx, &resp));
@@ -358,7 +384,10 @@ pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Phase 5: Settings Dialog ===
 pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
-pub const SETTINGS_DIALOG_HEIGHT: f32 = 620.0;
+/// The glass panel's colour at full cover, for a modal page of text.
+pub const MODAL_FILL: Color32 = Color32::from_rgb(23, 23, 27);
+/// Settings: its sidebar and the page beside it.
+pub const SETTINGS_MODAL_SIZE: [f32; 2] = [860.0, 600.0];
 pub const CLI_HELP_DIALOG_HEIGHT: f32 = 700.0;
 /// Vertical space the settings modal reserves at the bottom for its
 /// footer (Reset / Auto-saved row + separator).
