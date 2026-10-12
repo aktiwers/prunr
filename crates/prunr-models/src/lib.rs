@@ -950,7 +950,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::FaceGfpgan,
         display_name: "Faces (GFPGAN v1.4)",
-        description: "Redraws soft, small or compressed faces. The crispest of the two face models. Trained on FFHQ, a non-commercial photo set. ~340 MB.",
+        description: "Redraws soft, small or compressed faces. The crispest of the two face models. Trained on FFHQ, a non-commercial photo set.",
         category: ModelCategory::Face,
         source: ModelSource::MultiPartOnDemand {
             subdir: "face-gfpgan-1.4-1.0.0",
@@ -984,7 +984,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::FaceRestoreFormerPp,
         display_name: "Faces (RestoreFormer++)",
-        description: "Redraws soft, small or compressed faces. Stays closest to the person's own features. Trained on FFHQ, a non-commercial photo set. ~295 MB.",
+        description: "Redraws soft, small or compressed faces. Stays closest to the person's own features. Trained on FFHQ, a non-commercial photo set.",
         category: ModelCategory::Face,
         source: ModelSource::MultiPartOnDemand {
             subdir: "face-restoreformer-pp-1.0.0",

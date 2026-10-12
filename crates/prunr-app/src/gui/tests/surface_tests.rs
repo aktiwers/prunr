@@ -396,3 +396,18 @@ fn the_sd_eraser_strip_offers_try_another() {
     assert!(node.disabled, "greyed before any fill");
     super::tree_tests::assert_all_controls_named(&h, "SD eraser strip");
 }
+
+/// Without a face model the Faces strip offers the Model Store on its
+/// Faces tab, and closes as the store opens rather than staying over it.
+#[test]
+fn the_faces_strip_opens_the_store_and_steps_aside() {
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache = Default::default();
+    settle(&mut h);
+    click(&mut h, "Faces");
+    click(&mut h, "Get a face model");
+    settle(&mut h);
+    let store = h.state().model_store;
+    assert_eq!(store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Face)));
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the Faces strip closed");
+}
