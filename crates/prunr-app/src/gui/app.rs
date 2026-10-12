@@ -3894,8 +3894,15 @@ impl PrunrApp {
             self.on_model_changed();
         }
         if let Some(req) = change.open_model_store {
-            self.model_store = Some(req);
+            self.open_model_store(req, ui.ctx());
         }
+    }
+
+    /// Open the Model Store; the flyout or popover that asked for it
+    /// closes, or it stays drawn over the store.
+    fn open_model_store(&mut self, req: adjustments_toolbar::ModelStoreRequest, ctx: &egui::Context) {
+        egui::Popup::close_all(ctx);
+        self.model_store = Some(req);
     }
 
     fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
@@ -4035,7 +4042,7 @@ impl PrunrApp {
             self.settings.save();
         }
         if let Some(req) = toolbar_change.open_model_store {
-            self.model_store = Some(req);
+            self.open_model_store(req, ctx);
         }
         if toolbar_change.pick_bg_image {
             self.handle_pick_bg_image(idx);
