@@ -663,6 +663,7 @@ mod tests {
             ProgressUpdate::Tiles(vec![TileRect { x: 0.0, y: 0.5, w: 0.25, h: 0.5 }]),
             ProgressUpdate::Tile { index: 0, done: true },
             ProgressUpdate::Subject(prunr_core::SubjectHint { width: 2, height: 1, coverage: vec![0, 255] }),
+            ProgressUpdate::TilePreview(prunr_core::TilePreview { x: 1, y: 0, width: 1, height: 1, full_width: 2, full_height: 1, rgba: vec![1, 2, 3, 4] }),
         ] {
             roundtrip(&SubprocessEvent::Report { item_id: 9, update });
         }

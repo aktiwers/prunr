@@ -19,9 +19,9 @@
 //! working_set_mb admission gate refuses to dispatch when free RAM is
 //! below this peak.
 
-use crate::progress::{Progress, Step, TileRect, Unit};
+use crate::progress::{Progress, ProgressUpdate, Step, TilePreview, TileRect, Unit};
 
-use image::{RgbImage, RgbaImage};
+use image::{GrayImage, RgbImage, RgbaImage};
 
 use crate::CoreError;
 use super::alpha::upscale_alpha_lanczos3;
@@ -197,6 +197,10 @@ where
             }
         }
 
+        if let Some(edge) = progress.preview_edge() {
+            progress.report(ProgressUpdate::TilePreview(preview_tile(input, &inferred, tile, scale, edge)));
+        }
+        drop(inferred);
         progress.inner(tile_idx as u32 + 1, total, Unit::Tile);
         progress.tile(tile_idx as u32, true);
     }
@@ -220,6 +224,28 @@ where
     }
 
     Ok(out_img)
+}
+
+/// The finished `tile` as it sits on a preview of the whole image whose
+/// longer side is at most `edge` pixels: the model's output resampled with
+/// Lanczos3 into the tile's square, with the input's alpha. Costs one
+/// resample of the tile, a small share of its inference.
+fn preview_tile(input: &RgbaImage, inferred: &RgbImage, tile: &UpscaleTilePlacement, scale: u32, edge: u32) -> TilePreview {
+    let (in_w, in_h) = input.dimensions();
+    let s = (edge as f64 / in_w.max(in_h).max(1) as f64).min(1.0);
+    let at = |v: u32| (v as f64 * s).round() as u32;
+    let (full_width, full_height) = (at(in_w).max(1), at(in_h).max(1));
+    let (x, y) = (at(tile.x).min(full_width - 1), at(tile.y).min(full_height - 1));
+    let width = at(tile.x + tile.w).clamp(x + 1, full_width) - x;
+    let height = at(tile.y + tile.h).clamp(y + 1, full_height) - y;
+    // A padded tile is copied out first: the filter would pull the padding in.
+    let unpadded = (tile.padded_w != tile.w || tile.padded_h != tile.h)
+        .then(|| image::imageops::crop_imm(inferred, 0, 0, tile.w * scale, tile.h * scale).to_image());
+    let rgb = crate::formats::resize_rgb_image_lanczos3(unpadded.as_ref().unwrap_or(inferred), width, height);
+    let alpha = GrayImage::from_fn(tile.w, tile.h, |ax, ay| image::Luma([input.get_pixel(tile.x + ax, tile.y + ay)[3]]));
+    let alpha = crate::formats::resize_gray_lanczos3(&alpha, width, height);
+    let rgba = rgb.pixels().zip(alpha.pixels()).flat_map(|(c, a)| [c[0], c[1], c[2], a[0]]).collect();
+    TilePreview { x, y, width, height, full_width, full_height, rgba }
 }
 
 fn extract_rgb_tile(input: &RgbaImage, tile: &UpscaleTilePlacement) -> RgbImage {
@@ -398,6 +424,41 @@ mod tests {
         }).collect();
         assert_eq!(counts, (0..=expected_total).collect::<Vec<_>>(), "the count shows before the first tile runs");
         assert!(updates.iter().any(|u| matches!(u, ProgressUpdate::Tiles(t) if t.len() as u32 == expected_total)));
+    }
+
+    /// Asked for previews, the tiler sends each finished tile once, in
+    /// its square of a preview at most the asked size, in the model's
+    /// colours with the input's alpha; not asked, it sends none.
+    #[test]
+    fn previews_show_each_finished_tile_in_its_square() {
+        use crate::progress::{check_contract, RecordingSink};
+        let scale = 4u32;
+        let input = RgbaImage::from_pixel(600, 300, image::Rgba([0, 0, 0, 128]));
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 16 };
+        let tiles = plan_upscale_tiles(600, 300, cfg).len();
+        let run_tile = |_: &RgbImage, pw: u32, ph: u32| -> Result<RgbImage, CoreError> {
+            Ok(RgbImage::from_pixel(scale * pw, scale * ph, image::Rgb([10, 200, 30])))
+        };
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        upscale_tiled(&input, scale, cfg, run_tile, &Progress::new(sink.clone()).with_tile_previews(300)).expect("upscale_tiled failed");
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        let previews: Vec<_> = updates.iter().filter_map(|u| match u { ProgressUpdate::TilePreview(p) => Some(p), _ => None }).collect();
+        assert_eq!(previews.len(), tiles, "one preview per tile");
+        let mut covered = vec![false; 300 * 150];
+        for p in &previews {
+            assert_eq!((p.full_width, p.full_height), (300, 150), "the longer side fits the asked size");
+            for (i, px) in p.rgba.chunks(4).enumerate() {
+                assert!(px[0].abs_diff(10) <= 1 && px[1].abs_diff(200) <= 1 && px[2].abs_diff(30) <= 1 && px[3].abs_diff(128) <= 1, "{px:?}");
+                let (cx, cy) = (p.x + i as u32 % p.width, p.y + i as u32 / p.width);
+                covered[(cy * 300 + cx) as usize] = true;
+            }
+        }
+        assert!(covered.iter().all(|&c| c), "the squares cover the preview");
+
+        let quiet = std::sync::Arc::new(RecordingSink::default());
+        upscale_tiled(&input, scale, cfg, run_tile, &Progress::new(quiet.clone())).expect("upscale_tiled failed");
+        assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
     }
 
     #[test]

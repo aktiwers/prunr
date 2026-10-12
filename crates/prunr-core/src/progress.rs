@@ -105,6 +105,22 @@ pub enum ProgressUpdate {
     Tile { index: u32, done: bool },
     /// Where the subject is, as soon as segmentation has found it.
     Subject(crate::subject::SubjectHint),
+    /// A finished tile's result, small, for the listener to show in place.
+    TilePreview(TilePreview),
+}
+
+/// A finished tile at preview size: straight-alpha RGBA, `width × height`,
+/// placed at (`x`, `y`) in a `full_width × full_height` preview of the
+/// whole image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TilePreview {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub full_width: u32,
+    pub full_height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// Whoever listens to a pipeline's reports.
@@ -117,6 +133,7 @@ pub trait ProgressSink: Send + Sync {
 pub struct Progress {
     sink: Option<Arc<dyn ProgressSink>>,
     cancel: Option<Arc<AtomicBool>>,
+    preview_edge: Option<u32>,
 }
 
 impl Progress {
@@ -126,12 +143,24 @@ impl Progress {
     }
 
     pub fn new(sink: Arc<dyn ProgressSink>) -> Self {
-        Self { sink: Some(sink), cancel: None }
+        Self { sink: Some(sink), cancel: None, preview_edge: None }
     }
 
     pub fn with_cancel(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel = Some(flag);
         self
+    }
+
+    /// Ask for each finished tile as a preview whose whole image is at most
+    /// `longest_edge` pixels on its longer side.
+    pub fn with_tile_previews(mut self, longest_edge: u32) -> Self {
+        self.preview_edge = Some(longest_edge);
+        self
+    }
+
+    /// The preview size asked for, when someone listens for previews.
+    pub fn preview_edge(&self) -> Option<u32> {
+        self.sink.as_ref().and(self.preview_edge)
     }
 
     pub fn cancel_flag(&self) -> Option<&Arc<AtomicBool>> {
@@ -263,6 +292,11 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
             ProgressUpdate::Tile { index, .. } => {
                 if index as usize >= tiles {
                     return Err(format!("tile {index} of a layout of {tiles}"));
+                }
+            }
+            ProgressUpdate::TilePreview(ref t) => {
+                if t.x + t.width > t.full_width || t.y + t.height > t.full_height || t.rgba.len() != (t.width * t.height * 4) as usize {
+                    return Err(format!("preview tile {}×{} at {},{} outside its {}×{} image", t.width, t.height, t.x, t.y, t.full_width, t.full_height));
                 }
             }
             ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) => {}

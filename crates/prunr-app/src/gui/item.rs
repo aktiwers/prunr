@@ -201,6 +201,9 @@ pub(crate) struct BatchItem {
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
     pub(crate) subject: Option<SubjectOutline>,
+    /// The upscale under way's finished tiles, small, each in its square
+    /// of a preview of the whole image.
+    pub(crate) tile_preview: Option<egui::TextureHandle>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -492,6 +495,16 @@ impl BatchItem {
         }
     }
 
+    /// An upscale has landed: its finished-tile preview, the whole image
+    /// by now, is shown until the result's texture lands and the result
+    /// reveals over it. Without one, the shown image is held as usual.
+    pub(crate) fn hold_tile_preview_for_reveal(&mut self) {
+        match self.tile_preview.take() {
+            Some(preview) => self.reveal = Some(Reveal::Held(preview)),
+            None => self.hold_for_reveal(),
+        }
+    }
+
     /// The new result's texture has landed: reveal it over the held image.
     pub(crate) fn start_reveal(&mut self) {
         match self.reveal.take() {
@@ -605,6 +618,7 @@ impl BatchItem {
         region: Option<super::timeline::StoredSelection>,
     ) {
         self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region });
+        self.tile_preview = None;
     }
 
     /// The seed of the generated fill on screen.
@@ -935,6 +949,7 @@ impl BatchItem {
             result_tex_pending: false,
             reveal: None,
             subject: None,
+            tile_preview: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
@@ -1044,6 +1059,23 @@ mod tests {
             ItemSettings::default(),
             String::new(),
         )
+    }
+
+    /// A landed upscale reveals over its finished-tile preview, which
+    /// stays on screen until the result's texture lands; a new run never
+    /// shows the last run's tiles.
+    #[test]
+    fn an_upscale_reveals_over_its_tile_preview() {
+        let ctx = egui::Context::default();
+        let preview = ctx.load_texture("preview", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        let mut item = fixture_item(1);
+        item.tile_preview = Some(preview.clone());
+        item.hold_tile_preview_for_reveal();
+        assert_eq!(item.held_texture().map(|t| t.id()), Some(preview.id()), "the preview is held");
+        assert!(item.tile_preview.is_none());
+        item.tile_preview = Some(preview);
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        assert!(item.tile_preview.is_none(), "a new run starts clear");
     }
 
     /// An effect is a picture of the photo put under whatever the result
