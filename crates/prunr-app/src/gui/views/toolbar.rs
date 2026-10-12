@@ -19,6 +19,32 @@ fn icon_button(ui: &mut egui::Ui, icon: &'static str) -> egui::Response {
     with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(btn))
 }
 
+const FORMAT_CHOICES: [super::chip::Choice<prunr_core::ExportFormat>; 3] = [
+    super::chip::Choice { value: prunr_core::ExportFormat::Png, name: "PNG", description: "Lossless, keeps transparency", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Jpeg, name: "JPEG", description: "Small files; transparency becomes white", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Webp, name: "WebP", description: "Lossless, keeps transparency, smaller than PNG", enabled: true },
+];
+
+/// The arrow beside Save: the file format, and Separate layers for a
+/// cut-out. A pick is saved as the setting at once.
+fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    let resp = tooltip(icon_button(ui, ICON_EXPAND_MORE.codepoint), "Save options", "File format and separate layers.", None);
+    let id = egui::Id::new("save_options");
+    let mut changed = false;
+    popup_for(ui, id, &resp, |ui| {
+        popover_header(ui, "Save options", None);
+        changed |= super::chip::choice_row(ui, "Format", &FORMAT_CHOICES, &mut app.settings.export_format);
+        if app.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout {
+            ui.add_space(theme::SPACE_SM);
+            changed |= ui.checkbox(&mut app.settings.export_split_layers, "Separate layers").changed();
+            super::hint(ui, "Subject, lines and mask as separate PNG files.");
+        }
+    });
+    if changed {
+        app.settings.save();
+    }
+}
+
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
@@ -101,6 +127,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             if app.can_save_intent() {
+                render_save_options(ui, app);
                 let (save_title, save_label) = if has_selected {
                     ("Save selected", format!("{}  Save selected", ICON_SAVE.codepoint))
                 } else {
@@ -110,7 +137,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     RichText::new(save_label).color(theme::TEXT_PRIMARY),
                 )
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(save_btn)), save_title, "Save the result as PNG.", Some(Action::Save)).clicked() {
+                if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(save_btn)), save_title, "Save the result. The arrow beside it picks the format.", Some(Action::Save)).clicked() {
                     app.handle_save_selected();
                 }
             }

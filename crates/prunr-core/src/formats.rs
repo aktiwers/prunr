@@ -312,6 +312,80 @@ pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     Ok(buf)
 }
 
+/// A saved image's file format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExportFormat {
+    /// Lossless, keeps transparency.
+    #[default]
+    Png,
+    /// Lossy at quality 92; transparency is flattened onto white.
+    Jpeg,
+    /// Lossless WebP, keeps transparency.
+    Webp,
+}
+
+impl ExportFormat {
+    pub const ALL: [Self; 3] = [Self::Png, Self::Jpeg, Self::Webp];
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Webp => "WebP",
+        }
+    }
+
+    /// The format a file name asks for by its extension.
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "png" => Some(Self::Png),
+            "jpg" | "jpeg" => Some(Self::Jpeg),
+            "webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    pub fn encode(self, img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
+        match self {
+            Self::Png => encode_rgba_png(img),
+            Self::Jpeg => {
+                const JPEG_QUALITY: u8 = 92;
+                let flat = flatten_on_white(img);
+                let mut buf = Vec::with_capacity(img.as_raw().len() / 8);
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY)
+                    .encode(flat.as_raw(), flat.width(), flat.height(), image::ExtendedColorType::Rgb8)
+                    .map_err(CoreError::from)?;
+                Ok(buf)
+            }
+            Self::Webp => {
+                let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
+                image::codecs::webp::WebPEncoder::new_lossless(&mut buf)
+                    .encode(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+                    .map_err(CoreError::from)?;
+                Ok(buf)
+            }
+        }
+    }
+}
+
+/// Straight-alpha RGBA composited over white, as RGB.
+fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
+    image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
+        let p = img.get_pixel(x, y).0;
+        let a = p[3] as f32 / 255.0;
+        let mix = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+        image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])])
+    })
+}
+
 /// Encode a GrayImage (L8) as PNG bytes with fast compression.
 pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
@@ -328,6 +402,32 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Each format round-trips through the decoder: PNG and WebP keep
+    /// the pixels and alpha, JPEG flattens a transparent pixel to white.
+    #[test]
+    fn export_formats_round_trip_and_jpeg_flattens_alpha() {
+        let mut img = RgbaImage::from_pixel(32, 32, image::Rgba([200, 40, 10, 255]));
+        // A whole 16 px block, so JPEG's chroma subsampling cannot bleed into it.
+        for y in 0..16 { for x in 0..16 { img.put_pixel(x, y, image::Rgba([0, 0, 0, 0])); } }
+        for f in ExportFormat::ALL {
+            let bytes = f.encode(&img).unwrap();
+            let back = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            assert_eq!(back.dimensions(), (32, 32), "{f:?}");
+            match f {
+                ExportFormat::Jpeg => {
+                    let p = back.get_pixel(4, 4).0;
+                    assert!(p[0] > 240 && p[1] > 240 && p[2] > 240 && p[3] == 255, "transparent became white: {p:?}");
+                }
+                _ => assert_eq!(back, img, "{f:?} is lossless with alpha"),
+            }
+            let name = format!("a.{}", f.extension());
+            assert_eq!(ExportFormat::from_path(std::path::Path::new(&name)), Some(f));
+        }
+        assert_eq!(ExportFormat::from_path(std::path::Path::new("x.JPEG")), Some(ExportFormat::Jpeg));
+        assert_eq!(ExportFormat::from_path(std::path::Path::new("x.tif")), None);
+    }
+
     use super::*;
     use crate::types::DOWNSCALE_TARGET;
     use image::{DynamicImage, RgbaImage, Rgba};
