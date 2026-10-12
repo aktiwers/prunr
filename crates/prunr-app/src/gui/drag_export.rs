@@ -13,14 +13,16 @@
 //! - Stale cleanup (>10 min old) runs at app start.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use image::DynamicImage;
 use prunr_core::{FillStyle, MaskSettings};
 
-use super::item::BatchItem;
+use super::item::{BatchItem, ImageSource};
+use super::item_settings::ItemSettings;
 use super::settings::LineMode;
-use super::worker::SegBundle;
+use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
 
 /// Subdirectory name under temp_dir for prunr drag files.
 const DRAG_SUBDIR: &str = "prunr-drag";
@@ -119,36 +121,93 @@ fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
     format!("{}-{}.png", source_stem(source_filename), kind.suffix())
 }
 
+/// What a layer export reads from an item, as shared handles: taken on
+/// the UI thread in microseconds, rendered on a worker.
+#[derive(Clone)]
+pub(crate) struct LayerJob {
+    item_id: u64,
+    filename: String,
+    settings: ItemSettings,
+    start: Option<super::timeline::StoredImage>,
+    source_rgba: Option<Arc<image::RgbaImage>>,
+    source: ImageSource,
+    correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    seg: Option<CompressedTensor>,
+    edges: Option<CompressedEdgeTensors>,
+}
+
+impl LayerJob {
+    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle) -> Self {
+        Self {
+            item_id: item.id,
+            filename: item.filename.clone(),
+            settings: item.settings,
+            start: item.run_start(super::item::Engine::Segment).map(|s| s.image),
+            source_rgba: item.source_rgba.clone(),
+            source: item.source.clone(),
+            correction: item.correction_plane(style),
+            seg: item.cached_tensor.clone(),
+            edges: item.cached_edge_tensors.clone(),
+        }
+    }
+
+    pub(crate) fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    /// The item kept what layers are made from (they were dropped under
+    /// memory pressure, or the image was never processed).
+    pub(crate) fn has_layers(&self) -> bool {
+        self.seg.is_some() || self.edges.is_some()
+    }
+
+    /// Every layer it has as `(filename, PNG bytes)`; empty without any.
+    pub(crate) fn render_bytes(&self) -> Vec<(String, Vec<u8>)> {
+        let Some(src) = LayerSource::of(self) else { return Vec::new() };
+        let seg = self.seg.as_ref().and_then(CompressedTensor::bundle);
+        LayerKind::ALL.iter()
+            .copied()
+            .filter_map(|kind| {
+                let bytes = match render_layer(self, kind, &src, seg.as_ref())? {
+                    LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png(&rgba).ok()?,
+                    LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).ok()?,
+                };
+                Some((make_layer_filename(&self.filename, kind), bytes))
+            })
+            .collect()
+    }
+}
+
 /// What the layers are built from, so they match the canvas: the image
 /// the cut-out ran on (an erase or earlier result included) and the
 /// selection the re-cut applies.
 pub(crate) struct LayerSource {
     original: DynamicImage,
-    correction: Option<std::sync::Arc<prunr_core::selection::MaskArtifact>>,
+    correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
 }
 
 impl LayerSource {
-    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle) -> Option<Self> {
-        let start = item.run_input(super::item::Engine::Segment).or_else(|| item.source_rgba.clone());
+    fn of(job: &LayerJob) -> Option<Self> {
+        let start = job.start.as_ref().and_then(|s| s.load()).or_else(|| job.source_rgba.clone());
         let original = match start {
             Some(rgba) => DynamicImage::ImageRgba8((*rgba).clone()),
-            None => item.source.decode()
-                .map_err(|err| tracing::warn!(item_id = item.id, %err, "layer export: source"))
+            None => job.source.decode()
+                .map_err(|err| tracing::warn!(item_id = job.item_id, %err, "layer export: source"))
                 .ok()?,
         };
-        Some(Self { original, correction: item.correction_plane(style) })
+        Some(Self { original, correction: job.correction.clone() })
     }
 }
 
 fn render_layer(
-    item: &BatchItem,
+    job: &LayerJob,
     kind: LayerKind,
     src: &LayerSource,
     seg: Option<&SegBundle>,
 ) -> Option<LayerOutput> {
     let original = &src.original;
     let correction = src.correction.as_deref();
-    let item_id = item.id;
+    let item_id = job.item_id;
     match kind {
         LayerKind::Subject => {
             let seg = seg?;
@@ -158,7 +217,7 @@ fn render_layer(
             let mask = MaskSettings {
                 fill_style: FillStyle::None,
                 decoration: prunr_core::Decoration::default(),
-                ..item.settings.mask_settings()
+                ..job.settings.mask_settings()
             };
             let rgba = prunr_core::postprocess_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
@@ -169,8 +228,8 @@ fn render_layer(
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Lines => {
-            let edge = item.settings.edge_settings();
-            let tensors = item.cached_edge_tensors.as_ref()?.for_compose(&edge)?;
+            let edge = job.settings.edge_settings();
+            let tensors = job.edges.as_ref()?.for_compose(&edge)?;
             let rgba = prunr_core::compose_whole_photo(&tensors, original, &edge);
             Some(LayerOutput::Rgba(rgba))
         }
@@ -178,7 +237,7 @@ fn render_layer(
             let seg = seg?;
             let gray = prunr_core::tensor_to_mask_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
-                original, &prunr_core::PostprocessOpts::new(&item.settings.mask_settings(), seg.model).with_correction(correction),
+                original, &prunr_core::PostprocessOpts::new(&job.settings.mask_settings(), seg.model).with_correction(correction),
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
                 .ok()?;
@@ -195,13 +254,13 @@ enum LayerOutput {
 }
 
 fn write_layer(
-    item: &BatchItem,
+    job: &LayerJob,
     kind: LayerKind,
     src: &LayerSource,
     seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(layer) = render_layer(item, kind, src, seg) else { return Ok(None) };
-    let path = temp_dir().join(make_layer_filename(&item.filename, kind));
+    let Some(layer) = render_layer(job, kind, src, seg) else { return Ok(None) };
+    let path = temp_dir().join(make_layer_filename(&job.filename, kind));
     let file = std::fs::File::create(&path)?;
     let mut w = std::io::BufWriter::new(file);
     let res: Result<(), prunr_core::CoreError> = match layer {
@@ -266,49 +325,21 @@ pub(crate) fn prepare_for_drag(
 
     // One source image + one seg decompress — Subject and Mask share the
     // seg, Lines uses the edge tensor independently.
-    let Some(src) = LayerSource::of(item, style) else {
+    let job = LayerJob::of(item, style);
+    let Some(src) = LayerSource::of(&job) else {
         return Ok(vec![prepare(item)?]);
     };
-    let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
+    let seg = job.seg.as_ref().and_then(CompressedTensor::bundle);
 
     let paths: Vec<PathBuf> = LayerKind::ALL.iter()
         .copied()
-        .filter_map(|k| write_layer(item, k, &src, seg.as_ref()).transpose())
+        .filter_map(|k| write_layer(&job, k, &src, seg.as_ref()).transpose())
         .collect::<std::io::Result<Vec<_>>>()?;
 
     if paths.is_empty() {
         return Ok(vec![prepare(item)?]);
     }
     Ok(paths)
-}
-
-/// Render the available split layers for `item` as `(filename, PNG bytes)`
-/// pairs, without touching the filesystem. Shared by the Save-to-folder path
-/// in `app.rs` — drag-out writes these same bytes to the temp dir, Save
-/// writes them to the user's chosen folder.
-///
-/// Empty when no cached tensors are available (item never processed, or
-/// caches evicted under memory pressure) — callers should fall back to the
-/// composite PNG in that case.
-pub(crate) fn render_layer_bytes(item: &BatchItem, style: super::background_io::SelectionStyle) -> Vec<(String, Vec<u8>)> {
-    let Some(src) = LayerSource::of(item, style) else { return Vec::new() };
-    let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
-    LayerKind::ALL.iter()
-        .copied()
-        .filter_map(|kind| {
-            let layer = render_layer(item, kind, &src, seg.as_ref())?;
-            // Save-to-folder caller (`app.rs`) collects these bytes and
-            // writes them via `fs::write`; encoding to `Vec<u8>` here is
-            // unavoidable on this branch because the caller wants owned
-            // bytes (it ships them through a channel). Drag-out's hot
-            // path goes through `write_layer` and skips the Vec.
-            let bytes = match layer {
-                LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png(&rgba).ok()?,
-                LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).ok()?,
-            };
-            Some((make_layer_filename(&item.filename, kind), bytes))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -396,8 +427,9 @@ mod tests {
             String::new(),
         );
         let blank = LayerSource { original: DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10)), correction: None };
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
         for kind in LayerKind::ALL {
-            assert!(render_layer(&item, kind, &blank, None).is_none());
+            assert!(render_layer(&job, kind, &blank, None).is_none());
         }
     }
 
@@ -426,7 +458,8 @@ mod tests {
         let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
 
         let src = LayerSource { original: photo.clone(), correction: None };
-        let Some(LayerOutput::Rgba(layer)) = render_layer(&item, LayerKind::Lines, &src, None) else {
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
+        let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None) else {
             panic!("the Lines layer renders from the cached lines");
         };
         let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings());
@@ -455,12 +488,34 @@ mod tests {
         let src = LayerSource { original: DynamicImage::ImageRgba8((*erased).clone()), correction: Some(restore) };
         let seg = item.cached_tensor.as_ref().and_then(|t| t.bundle());
 
-        let Some(LayerOutput::Gray(mask)) = render_layer(&item, LayerKind::Mask, &src, seg.as_ref()) else { panic!("mask layer") };
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
+        let Some(LayerOutput::Gray(mask)) = render_layer(&job, LayerKind::Mask, &src, seg.as_ref()) else { panic!("mask layer") };
         assert_eq!(mask.get_pixel(5, 5)[0], 255, "the restored pixel is in the mask");
         assert_eq!(mask.get_pixel(9, 9)[0], 0, "the rest stays out");
-        let Some(LayerOutput::Rgba(subject)) = render_layer(&item, LayerKind::Subject, &src, seg.as_ref()) else { panic!("subject layer") };
+        let Some(LayerOutput::Rgba(subject)) = render_layer(&job, LayerKind::Subject, &src, seg.as_ref()) else { panic!("subject layer") };
         assert_eq!(subject.get_pixel(5, 5).0, [7, 8, 9, 255], "the subject is cut from the image the cut-out ran on");
     }
 
-}
+    /// A layer export is a snapshot the save thread renders: it moves to
+    /// another thread, renders the subject and mask from a cached cut-out,
+    /// and says when the image kept nothing to make layers from.
+    #[test]
+    fn a_layer_job_renders_on_another_thread() {
+        use crate::gui::item::{BatchItem, ImageSource};
+        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::worker::{CompressedTensor, TensorCache};
 
+        let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
+        item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        assert!(!LayerJob::of(&item, style).has_layers(), "nothing cached, no layers");
+
+        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        let job = LayerJob::of(&item, style);
+        assert!(job.has_layers());
+        let files = std::thread::spawn(move || job.render_bytes()).join().expect("render thread");
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["photo-subject.png", "photo-mask.png"]);
+        assert!(files.iter().all(|(_, bytes)| bytes.starts_with(b"\x89PNG")));
+    }
+}

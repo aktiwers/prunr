@@ -2007,11 +2007,10 @@ impl PrunrApp {
         }
     }
 
-    /// Folder-picker + multi-file save for layers mode. Renders up to 3 PNGs
-    /// per target (subject / lines / mask) via `drag_export::render_layer_bytes`
-    /// and writes them on a background thread. Per-item fallback to composite
-    /// when tensors are missing (e.g. unprocessed item), so every target lands
-    /// at least one file.
+    /// Folder-picker + multi-file save for layers mode: up to 3 PNGs per
+    /// target (subject / lines / mask), rendered and written on a background
+    /// thread from a `LayerJob` snapshot. Per-item fallback to the composite
+    /// when the layers' data is gone, so every target lands at least one file.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
         let Some(folder) = self.system.pick_folder_dialog(
             self.last_open_dir.as_deref(),
@@ -2030,41 +2029,32 @@ impl PrunrApp {
 
         let style = self.selection_style();
         let format = self.settings.export_format;
-        let mut payload: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-        let mut without_layers: Vec<String> = Vec::new();
-        for id in &targets {
-            let Some(item) = self.batch.find_by_id(*id) else { continue };
-            let layers = super::drag_export::render_layer_bytes(item, style);
-            if layers.is_empty() {
-                // The cut-out's data is gone (evicted, or never run): one
-                // composite file still lands, and the toast says so.
-                if let Some(rgba) = item.result_rgba.as_ref() {
-                    if let Ok(bytes) = format.encode(&item.export_bg().bake(rgba)) {
-                        payload.push((folder.join(super::drag_export::export_name(&item.filename, format)), bytes));
-                        without_layers.push(item.filename.clone());
-                    }
-                }
-                continue;
-            }
-            for (filename, bytes) in layers {
-                payload.push((folder.join(filename), bytes));
-            }
-        }
-
-        if payload.is_empty() {
+        let jobs: Vec<LayerSave> = targets.iter()
+            .filter_map(|id| self.batch.find_by_id(*id))
+            .map(|item| LayerSave {
+                layers: super::drag_export::LayerJob::of(item, style),
+                composite: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
+            })
+            .collect();
+        let without_layers: Vec<&str> = targets.iter()
+            .filter_map(|id| self.batch.find_by_id(*id))
+            .zip(&jobs)
+            .filter(|(_, job)| !job.layers.has_layers() && job.composite.is_some())
+            .map(|(item, _)| item.filename.as_str())
+            .collect();
+        if jobs.iter().all(|j| !j.layers.has_layers() && j.composite.is_none()) {
             self.toasts.error("Nothing to save — process the image first");
             return;
         }
-        let file_count = payload.len();
-        self.toasts.info(format!("Saving {file_count} file(s)..."));
         if !without_layers.is_empty() {
             self.toasts.info(format!(
                 "Saved as one image, without layers: {}. Process it again for layers.",
                 without_layers.join(", "),
             ));
         }
+        self.toasts.info("Saving layers...");
         let tx = self.batch.bg_io.save_done_tx.clone();
-        spawn_save_prerendered(payload, tx);
+        spawn_save_layers(folder, jobs, format, tx);
     }
 
     /// No checkboxes selected — save just the currently-viewed result via a
@@ -2211,35 +2201,35 @@ impl PrunrApp {
         // - 2+ checkbox-selected → copy the first, show a hint toast about drag-out.
         //   (System clipboards can't hold multiple images as bitmaps; drag-out
         //    is the native multi-image export path.)
-        let selected_with_result: Vec<Arc<image::RgbaImage>> = self
-            .batch
-            .items
-            .iter()
-            .filter(|b| b.selected)
-            .filter_map(|b| b.result_rgba.clone())
-            .collect();
-
-        let (rgba_to_copy, multi_hint) = match selected_with_result.len() {
-            0 => (
-                self.batch.selected_item().and_then(|i| i.result_rgba.clone()),
-                None,
-            ),
-            1 => (Some(selected_with_result[0].clone()), None),
+        let with_result = |b: &BatchItem| Some((b.result_rgba.clone()?, b.export_bg()));
+        let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.selected).filter_map(with_result).collect();
+        let (to_copy, multi_hint) = match ticked.len() {
+            0 => (self.batch.selected_item().and_then(with_result), None),
+            1 => (ticked.into_iter().next(), None),
             n => (
-                Some(selected_with_result[0].clone()),
+                ticked.into_iter().next(),
                 Some(format!(
                     "Copied 1 of {n} selected. Drag thumbnails out of the window to export multiple.")
                 ),
             ),
         };
 
-        let Some(rgba) = rgba_to_copy else { return };
-        // Bake bg into the clipboard image so it matches the canvas.
-        let rgba = self.batch.selected_item()
-            .map(|item| item.export_bg().bake(&rgba))
-            .unwrap_or(rgba);
+        let Some((rgba, bg)) = to_copy else { return };
+        // The background goes into the clipboard image so it matches the
+        // canvas; a blur of the full photo is baked off the UI thread.
+        if bg.is_empty() {
+            self.finish_copy(&rgba, multi_hint);
+            return;
+        }
+        let tx = self.batch.bg_io.copy_ready_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((bg.bake(&rgba), multi_hint));
+        });
+    }
 
-        if self.system.copy_image(&rgba) {
+    /// Hand a copy to the clipboard and say how it went.
+    fn finish_copy(&mut self, rgba: &image::RgbaImage, multi_hint: Option<String>) {
+        if self.system.copy_image(rgba) {
             if let Some(msg) = multi_hint {
                 self.toasts.info(msg);
             } else {
@@ -3444,6 +3434,9 @@ impl PrunrApp {
         }
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
+        while let Ok((rgba, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
+            self.finish_copy(&rgba, hint);
+        }
         // Drain save completion notifications
         while let Ok(msg) = self.batch.bg_io.save_done_rx.try_recv() {
             if msg.contains("fail") {
@@ -4211,14 +4204,33 @@ fn spawn_save_single(
 /// Write a vec of pre-encoded `(path, bytes)` pairs on a background thread.
 /// Used by the layers-save path — rendering happened on the UI thread (from
 /// cached tensors), this just does disk writes.
-fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<String>) {
+/// One image of a layers save: its layers, and the composite to save
+/// instead when it has none.
+struct LayerSave {
+    layers: super::drag_export::LayerJob,
+    composite: Option<(Arc<image::RgbaImage>, super::item::ExportBg)>,
+}
+
+/// Render and write each image's layers into `folder` on a background
+/// thread (the composite where an image has none); report the counts.
+fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<String>) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
-        for (path, bytes) in payload {
-            match std::fs::write(&path, &bytes) {
-                Ok(()) => saved += 1,
-                Err(_) => failed += 1,
+        for job in jobs {
+            let mut files = job.layers.render_bytes();
+            if files.is_empty() {
+                if let Some((rgba, bg)) = &job.composite {
+                    if let Ok(bytes) = format.encode(&bg.bake(rgba)) {
+                        files.push((super::drag_export::export_name(job.layers.filename(), format), bytes));
+                    }
+                }
+            }
+            for (name, bytes) in files {
+                match std::fs::write(folder.join(name), &bytes) {
+                    Ok(()) => saved += 1,
+                    Err(_) => failed += 1,
+                }
             }
         }
         let msg = if failed > 0 {

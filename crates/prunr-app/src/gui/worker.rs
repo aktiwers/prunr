@@ -40,8 +40,10 @@ pub struct TensorCache {
 }
 
 /// Zstd-compressed tensor stored in BatchItem. Trades ~1ms decompress for ~3-4x RAM savings.
+/// Cloning shares the bytes, so an export can take it to its thread.
+#[derive(Clone)]
 pub struct CompressedTensor {
-    compressed: Vec<u8>,
+    compressed: std::sync::Arc<[u8]>,
     pub height: u32,
     pub width: u32,
     pub model: ModelKind,
@@ -55,12 +57,12 @@ impl CompressedTensor {
             crate::subprocess::ipc::f32s_as_le_bytes(&tc.data),
             1,
         ).ok()?;
-        Some(Self { compressed, height: tc.height, width: tc.width, model: tc.model })
+        Some(Self { compressed: compressed.into(), height: tc.height, width: tc.width, model: tc.model })
     }
 
     /// Decompress to raw f32 tensor data for Tier 2 dispatch.
     pub fn decompress(&self) -> Option<Vec<f32>> {
-        let bytes = zstd::decode_all(self.compressed.as_slice()).ok()?;
+        let bytes = zstd::decode_all(&*self.compressed).ok()?;
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
@@ -81,8 +83,10 @@ pub struct EdgeTensorCache {
 /// Zstd-compressed multi-scale DexiNed cache. All 4 scales are extracted from
 /// one inference pass and compressed in parallel here, so scale switching in
 /// live preview is a tensor lookup (one decompress, no re-inference).
+/// Cloning shares the bytes.
+#[derive(Clone)]
 pub struct CompressedEdgeTensors {
-    tensors: [Vec<u8>; EDGE_SCALE_COUNT],
+    tensors: [std::sync::Arc<[u8]>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
 }
@@ -99,14 +103,14 @@ impl CompressedEdgeTensors {
         }).collect();
         if parts.iter().any(|p| p.is_empty()) { return None; }
         let [a, b, c, d] = parts.try_into().ok()?;
-        Some(Self { tensors: [a, b, c, d], height: raw.height, width: raw.width })
+        Some(Self { tensors: [a.into(), b.into(), c.into(), d.into()], height: raw.height, width: raw.width })
     }
 
     /// Decompress one scale's tensor. Called per-dispatch in the hot path,
     /// so wrap the result in `Arc<Vec<f32>>` + a scale discriminator at the
     /// call site (BatchItem::volatile_edge_tensor) to amortise across a drag.
     pub fn decompress(&self, scale: EdgeScale) -> Option<Vec<f32>> {
-        let bytes = zstd::decode_all(self.tensors[scale as usize].as_slice()).ok()?;
+        let bytes = zstd::decode_all(&*self.tensors[scale as usize]).ok()?;
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 

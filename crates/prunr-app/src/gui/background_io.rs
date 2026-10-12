@@ -105,6 +105,10 @@ pub struct BackgroundIO {
     /// Save completion notifications
     pub save_done_tx: mpsc::Sender<String>,
     pub save_done_rx: mpsc::Receiver<String>,
+    /// A copy whose background was baked off the UI thread, for the
+    /// clipboard, with the note to show once copied.
+    pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,
+    pub copy_ready_rx: mpsc::Receiver<(Arc<image::RgbaImage>, Option<String>)>,
     /// Pre-built ColorImages ready for GPU upload.
     pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
     pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, TexTarget)>,
@@ -165,6 +169,7 @@ impl BackgroundIO {
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
+        let (copy_ready_tx, copy_ready_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
@@ -178,6 +183,7 @@ impl BackgroundIO {
             thumb_tx, thumb_rx,
             decode_tx, decode_rx,
             save_done_tx, save_done_rx,
+            copy_ready_tx, copy_ready_rx,
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
