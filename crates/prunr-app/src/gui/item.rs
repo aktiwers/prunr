@@ -659,9 +659,14 @@ impl BatchItem {
         self.warm_neighbour_steps();
     }
 
+    /// Let go of the unpacked neighbour steps (the image is off screen).
+    pub(crate) fn release_warm_steps(&self) {
+        *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
+    }
+
     /// Unpack the images of the steps either side of the shown one on a
     /// worker and hold them; drop whatever was held for other steps.
-    fn warm_neighbour_steps(&self) {
+    pub(crate) fn warm_neighbour_steps(&self) {
         let back = self.timeline.previous().and_then(|s| s.result.clone());
         let ahead = self.timeline.next().and_then(|s| s.result.clone());
         for (at, stored) in [(BACK, back), (AHEAD, ahead)] {
