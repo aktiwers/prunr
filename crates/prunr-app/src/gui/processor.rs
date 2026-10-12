@@ -277,6 +277,31 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) reading: prunr_core::MaskReading,
 }
 
+/// The longer side of the preview an upscale shows while it runs: about a
+/// canvas at most, so the preview costs a few MB whatever the output size.
+const UPSCALE_PREVIEW_EDGE: u32 = 1536;
+
+/// An upscale's listener: finished-tile previews go to the canvas's
+/// channel, everything else to the progress pill.
+struct UpscaleSink {
+    run: super::dispatch_progress::RunSink,
+    item_id: u64,
+    previews: mpsc::Sender<(u64, prunr_core::TilePreview)>,
+}
+
+impl prunr_core::ProgressSink for UpscaleSink {
+    fn report(&self, update: prunr_core::ProgressUpdate) {
+        match update {
+            prunr_core::ProgressUpdate::TilePreview(tile) => {
+                if self.run.current() {
+                    let _ = self.previews.send((self.item_id, tile));
+                }
+            }
+            update => self.run.report(update),
+        }
+    }
+}
+
 /// Result delivered from a background upscale thread back to the main thread.
 /// Keyed on `item_id`; only one upscale is in flight at a time (gated by
 /// `can_process_intent`), so generation-based stale-drop is not needed today.
@@ -496,6 +521,9 @@ pub(crate) struct Processor {
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
     upscale_result_tx: mpsc::Sender<UpscaleResult>,
     upscale_result_rx: mpsc::Receiver<UpscaleResult>,
+    /// Each finished upscale tile, small, for the canvas to show in place.
+    upscale_preview_tx: mpsc::Sender<(u64, prunr_core::TilePreview)>,
+    upscale_preview_rx: mpsc::Receiver<(u64, prunr_core::TilePreview)>,
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
@@ -525,6 +553,7 @@ impl Processor {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
         let (upscale_result_tx, upscale_result_rx) = mpsc::channel();
+        let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         Self {
@@ -549,6 +578,8 @@ impl Processor {
             upscale_run_options: std::sync::OnceLock::new(),
             upscale_result_tx,
             upscale_result_rx,
+            upscale_preview_tx,
+            upscale_preview_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
             warm_upscale_engine: Arc::new(Mutex::new(None)),
             sam_encoder_tx,
@@ -1191,10 +1222,13 @@ impl Processor {
         // Clear any sticky terminate flag from the prior dispatch's cancel.
         let _ = run_options.unterminate();
         // The run shows "Loading the model" until the first tile reports.
-        let (progress, run) = self.dispatch_progress.progress_for(
+        let run = self.dispatch_progress.begin(
             super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Upscale, prunr_core::Step::LoadingModel.label()),
-            Arc::clone(&self.upscale_cancel),
         );
+        let sink = UpscaleSink { run: run.clone(), item_id, previews: self.upscale_preview_tx.clone() };
+        let progress = prunr_core::Progress::new(Arc::new(sink))
+            .with_cancel(Arc::clone(&self.upscale_cancel))
+            .with_tile_previews(UPSCALE_PREVIEW_EDGE);
 
         let active_flag = Arc::clone(&self.upscale_active);
         let result_tx = self.upscale_result_tx.clone();
@@ -1289,6 +1323,11 @@ impl Processor {
         // the between-tiles flag). Say so instead of looking frozen.
         self.mark_cancelling(super::dispatch_progress::ProgressKind::Upscale);
         tracing::debug!(terminate_ok, "upscale cancel requested");
+    }
+
+    /// Drain the finished-tile previews of the upscale under way.
+    pub(crate) fn pump_upscale_previews(&mut self) -> Vec<(u64, prunr_core::TilePreview)> {
+        self.upscale_preview_rx.try_iter().collect()
     }
 
     /// Drain completed upscale results from the background thread.

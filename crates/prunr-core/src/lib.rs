@@ -41,6 +41,6 @@ pub use edge::apply_input_transform;
 pub use postprocess::{apply_bg_effect, apply_fill_style, effect_backdrop};
 pub use selection::{MaskArtifact, SelectionError};
 pub use sam::{SamEmbedding, SamDecoderOutput, decode_to_mask_artifact, MaskReading, SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
-pub use progress::{Progress, ProgressSink, ProgressUpdate, Step, Unit, TileRect};
+pub use progress::{Progress, ProgressSink, ProgressUpdate, Step, Unit, TilePreview, TileRect};
 pub use subject::{subject_hint, SubjectHint};
 pub use sam::prompt::{SamPrompt, PromptError, build_click_prompt, build_stroke_prompt, MAX_STROKE_POINTS};

@@ -1187,6 +1187,34 @@ impl PrunrApp {
     }
 
     /// Drain completed upscale results and apply them to the matching item.
+    /// Paint each finished upscale tile into its square of the item's
+    /// preview texture, made on the run's first tile. Only the tile is
+    /// uploaded (`set_partial`).
+    fn pump_upscale_previews(&mut self, ctx: &egui::Context) {
+        let tiles = self.processor.pump_upscale_previews();
+        if tiles.is_empty() {
+            return;
+        }
+        for (item_id, tile) in tiles {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if !item.job_is_current() {
+                continue;
+            }
+            let full = [tile.full_width as usize, tile.full_height as usize];
+            let texture = match &mut item.tile_preview {
+                Some(t) if t.size() == full => t,
+                slot => slot.insert(ctx.load_texture(
+                    format!("tile-preview-{item_id}"),
+                    egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
+                    egui::TextureOptions::LINEAR,
+                )),
+            };
+            let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+            texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
+        }
+        ctx.request_repaint();
+    }
+
     /// A stale result (the user fired a new dispatch before the previous one
     /// finished, or an admission-refused run delivered nothing) is silently
     /// dropped when no in-flight dispatch is registered. `.try_recv()` keeps
@@ -1211,7 +1239,7 @@ impl PrunrApp {
                     item.result_rgba = Some(new_rgba.clone());
                     item.applied_recipe = Some(result_recipe);
                     item.status = BatchStatus::Done;
-                    item.hold_for_reveal();
+                    item.hold_tile_preview_for_reveal();
                     item.result_tex_pending = true;
                     item.thumb_pending = true;
                     let source = item.source.clone();
@@ -1229,11 +1257,15 @@ impl PrunrApp {
                 Err(prunr_core::CoreError::Cancelled) => {
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
                         item.job = None;
+                        item.tile_preview = None;
                     }
                     tracing::info!(item_id, "upscale cancelled by user");
                     self.toasts.info("Upscale cancelled");
                 }
                 Err(e) => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.tile_preview = None;
+                    }
                     let msg = e.to_string();
                     tracing::error!(item_id, %msg, "upscale dispatch failed");
                     self.toasts.error(format!("Upscale failed: {msg}"));
@@ -2375,6 +2407,7 @@ impl PrunrApp {
             self.toasts.info(msg);
         }
         self.pump_inpaint_results(ctx);
+        self.pump_upscale_previews(ctx);
         self.pump_upscale_results(ctx);
         self.pump_sam_results(ctx);
         self.pump_download_manager(ctx);

@@ -76,19 +76,21 @@ fn capsule_text(ui: &egui::Ui, painter: &Painter, progress: &DispatchProgress, m
     text
 }
 
-/// Paint the tile map and the capsule. Returns `true` when Cancel was
+/// Paint the tile map and the capsule; finished tiles show their part of
+/// `preview` when the run sends one. Returns `true` when Cancel was
 /// clicked this frame.
 pub(crate) fn render(
     ui: &mut egui::Ui,
     canvas_rect: Rect,
     img_rect: Option<Rect>,
     progress: &DispatchProgress,
+    preview: Option<egui::TextureId>,
 ) -> bool {
     let cancelling = progress.cancelling;
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     if let Some(img_rect) = img_rect {
-        paint_tile_map(&painter, img_rect, progress, t);
+        paint_tile_map(&painter, img_rect, progress, preview, t);
     }
 
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);
@@ -177,8 +179,9 @@ fn single_line(painter: &Painter, text: String, size: f32, color: Color32, max_w
     painter.layout_job(job)
 }
 
-/// Dim the tiles still to come, light the one running, leave done ones clear.
-fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress, t: f32) {
+/// Dim the tiles still to come, light the one running, and show the done
+/// ones from `preview`, or clear without one.
+fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress, preview: Option<egui::TextureId>, t: f32) {
     let to_screen = |r: &prunr_core::TileRect| Rect::from_min_size(
         img_rect.min + Vec2::new(r.x * img_rect.width(), r.y * img_rect.height()),
         Vec2::new(r.w * img_rect.width(), r.h * img_rect.height()),
@@ -193,7 +196,12 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
                 super::effects::paint_working(painter, r, t);
                 super::effects::paint_working_frame(painter, r);
             }
-            TileState::Done => {}
+            TileState::Done => {
+                if let Some(texture) = preview {
+                    let uv = Rect::from_min_size(Pos2::new(cell.x, cell.y), Vec2::new(cell.w, cell.h));
+                    painter.image(texture, r, uv, Color32::WHITE);
+                }
+            }
         }
     }
 }
