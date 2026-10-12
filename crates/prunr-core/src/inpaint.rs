@@ -268,10 +268,7 @@ pub fn process_inpaint_with(
             ..Default::default()
         });
         req.tuning.cpu_only = cpu_only;
-        let fit = crate::inpaint_sd::fit(&req);
-        return fill_at_scale(image, mask, req.fill_scale, fit, |rgba, m| {
-            crate::inpaint_sd::process_inpaint_with(rgba, m, id, req.clone(), progress)
-        });
+        return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
     process_lama(image, mask, id, cpu_only, FillScale::Auto, progress)
 }
@@ -404,12 +401,14 @@ pub(crate) fn fill_at_scale(
 }
 
 /// Fill the part of `mask` inside `hole` through `fill` at `factor` < 1,
-/// in place: the hole and as much photo again around it, scaled down,
-/// filled, scaled back up and pasted inside the mask only.
+/// in place: the hole and `OVERLAP` working pixels of photo around it
+/// (on Auto, one LaMa tile in all), scaled down, filled, scaled back up
+/// and pasted inside the hole only. Other holes in the crop stay holes,
+/// so the object being erased next door is never read as photo.
 ///
-/// Peak working set for a hole of side L: the crop around it (up to
-/// 2L × 2L RGBA, 64 MB at L = 2000) and its fill scaled back up (the
-/// same); the scaled copies are small (~768 px).
+/// Peak working set for a hole of side L: the crop around it and its
+/// fill scaled back up, each about (L + 2·64/factor)² RGBA; the scaled
+/// copies are one tile.
 fn fill_scaled_down(
     out: &mut RgbaImage,
     mask: &GrayImage,
@@ -417,7 +416,7 @@ fn fill_scaled_down(
     factor: f32,
     fill: &mut impl FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
 ) -> Result<(), CoreError> {
-    let margin = hole.w.max(hole.h) / 2;
+    let margin = (OVERLAP as f32 / factor).ceil() as u32;
     let (x0, y0) = (hole.x.saturating_sub(margin), hole.y.saturating_sub(margin));
     let (x1, y1) = ((hole.x + hole.w + margin).min(mask.width()), (hole.y + hole.h + margin).min(mask.height()));
     let crop = Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
@@ -426,20 +425,18 @@ fn fill_scaled_down(
     let crop_rgba = image::imageops::crop_imm(out, crop.x, crop.y, crop.w, crop.h).to_image();
     let small_rgba = crate::formats::resize_rgba(&crop_rgba, sw, sh, crate::formats::ResizeFilter::Lanczos3);
     drop(crop_rgba);
-    // Only this hole: another region's pixels in the crop are its own fill.
-    let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
-    let crop_mask = GrayImage::from_fn(crop.w, crop.h, |x, y| {
-        let (px, py) = (crop.x + x, crop.y + y);
-        if in_hole(px, py) { *mask.get_pixel(px, py) } else { image::Luma([0]) }
-    });
+    let crop_mask = image::imageops::crop_imm(mask, crop.x, crop.y, crop.w, crop.h).to_image();
     // Any coverage stays a hole, so nothing of the object survives the shrink.
     let mut small_mask = crate::formats::resize_gray_lanczos3(&crop_mask, sw, sh);
     small_mask.pixels_mut().for_each(|p| p.0[0] = if p.0[0] > 0 { 255 } else { 0 });
     let small_fill = fill(&small_rgba, &small_mask)?;
     let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
+    // Only this hole: another one's pixels in the crop get their own fill.
+    let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
     for (x, y, m) in crop_mask.enumerate_pixels() {
-        if m.0[0] >= 128 {
-            out.put_pixel(crop.x + x, crop.y + y, *filled.get_pixel(x, y));
+        let (px, py) = (crop.x + x, crop.y + y);
+        if m.0[0] >= 128 && in_hole(px, py) {
+            out.put_pixel(px, py, *filled.get_pixel(x, y));
         }
     }
     Ok(())
@@ -1528,6 +1525,37 @@ mod tests {
         }
     }
 
+    /// On Auto a large hole and its context come to one LaMa tile, and a
+    /// neighbouring hole inside the crop stays a hole there but is left
+    /// for its own fill.
+    #[test]
+    fn auto_fills_a_large_hole_in_one_tile_and_keeps_other_holes_out() {
+        let image = RgbaImage::from_pixel(3000, 2000, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(3000, 2000);
+        let mut paint = |x0: u32, y0: u32, x1: u32, y1: u32| for y in y0..y1 { for x in x0..x1 { mask.put_pixel(x, y, Luma([255])); } };
+        paint(500, 500, 1700, 1300);
+        paint(1800, 800, 1830, 830);
+        let hole = Bbox { x: 500, y: 500, w: 1200, h: 800 };
+        let factor = FillScale::Auto.factor((hole.w, hole.h), LAMA_FIT);
+        let mut seen = None;
+        let mut out = image.clone();
+        fill_scaled_down(&mut out, &mask, hole, factor, &mut |rgba: &RgbaImage, m: &GrayImage| {
+            // The mark at (1800-1830, 800-830): crop starts 200 px out, scaled by 0.32.
+            let neighbour = m.get_pixel(485, 165).0[0];
+            seen = Some((rgba.dimensions(), neighbour));
+            let mut filled = rgba.clone();
+            for (x, y, p) in m.enumerate_pixels() {
+                if p.0[0] >= 128 { filled.put_pixel(x, y, Rgba([200, 0, 0, 255])); }
+            }
+            Ok(filled)
+        }).unwrap();
+        let ((w, h), neighbour) = seen.expect("filled");
+        assert!(w <= TILE && h <= TILE, "one tile, got {w}x{h}");
+        assert_eq!(neighbour, 255, "the neighbouring hole is a hole to the model, not photo");
+        assert_eq!(out.get_pixel(1100, 900).0, [200, 0, 0, 255], "the hole is filled");
+        assert_eq!(out.get_pixel(1815, 815).0, [10, 20, 30, 255], "the neighbour is left for its own fill");
+    }
+
     /// Auto judges each region on its own: a small mark far from a large
     /// one fills at full size in one pass, the large one scaled down.
     #[test]
@@ -1582,7 +1610,7 @@ mod tests {
             Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
         }).unwrap();
         let ((w, h), holes) = seen.expect("filled");
-        assert_eq!((w, h), (60, 50), "the hole plus half its longer side around it, at a quarter");
+        assert_eq!((w, h), (100, 75), "64 working px each side reach the image's edges here: all of it, at a quarter");
         assert!(holes >= 30 * 20, "the whole hole is a hole at the small size");
         assert_eq!(out.get_pixel(200, 140).0, [200, 0, 0, 255], "inside: the fill");
         assert_eq!(out.get_pixel(140, 140).0, [10, 20, 30, 255], "outside: the photo");
