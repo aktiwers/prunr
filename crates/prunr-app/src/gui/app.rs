@@ -2784,12 +2784,15 @@ impl PrunrApp {
             // batch-completion burst doesn't hold N × ~50 MB ColorImage
             // peaks simultaneously. Same slot pool as the bg-io decode /
             // thumbnail / filter spawns.
+            let queued = std::time::Instant::now();
             let _slot = handles.slots.acquire();
+            let waited_ms = queued.elapsed().as_millis() as u64;
             let (w, h) = (rgba.width(), rgba.height());
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
+            tracing::debug!(item_id, waited_ms, convert_ms = queued.elapsed().as_millis() as u64 - waited_ms, "texture prepared");
             let _ = handles.tx.send((item_id, name, ci, target));
             ctx.request_repaint();
         });

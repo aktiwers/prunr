@@ -377,7 +377,9 @@ impl LivePreview {
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let version = inputs.version;
                 let start = inputs.start.clone();
+                let started = std::time::Instant::now();
                 let output = run_preview(inputs, &cancel);
+                tracing::debug!(item_id = id, kind = ?dispatch_kind, ms = started.elapsed().as_millis() as u64, "live preview ran");
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
