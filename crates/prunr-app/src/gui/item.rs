@@ -509,6 +509,11 @@ impl BatchItem {
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
         }
+        self.drop_correction_cache();
+    }
+
+    fn drop_correction_cache(&mut self) {
+        *self.correction_cache.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// What corrects a cut-out: the edits already made, with the
@@ -550,6 +555,7 @@ impl BatchItem {
         self.selection_mask = None;
         self.selection_hash = None;
         self.selection_texture = None;
+        self.drop_correction_cache();
         true
     }
 
