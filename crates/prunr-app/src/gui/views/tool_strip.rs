@@ -45,10 +45,20 @@ impl Tool {
 pub(crate) struct StripFacts {
     pub model: SettingsModel,
     pub encoder_pending: bool,
+    /// The shown fill can be generated again ("Try another").
+    pub can_reroll: bool,
 }
 
-pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
-    let mut change = BrushChipOutcome::default();
+/// What the strip asks of the app this frame.
+#[derive(Default)]
+pub(crate) struct StripChange {
+    pub brush: BrushChipOutcome,
+    pub try_another: bool,
+}
+
+pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> StripChange {
+    let mut strip = StripChange::default();
+    let change = &mut strip.brush;
     egui::Area::new(Id::new("tool_strip"))
         .order(Order::Foreground)
         .pivot(Align2::CENTER_TOP)
@@ -76,10 +86,25 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     chip::flyout_for(Id::new(("tool_strip_more", tool.title())), &dots, |ui| {
                         change.merge(panel(ui, tool, brush, facts));
                     });
+                    if tool == Tool::Paint && facts.model == SettingsModel::SdInpaint {
+                        ui.separator();
+                        let reason = (!facts.can_reroll).then_some("Erase something first; this generates that fill again.");
+                        let resp = chip::gated(ui, reason, |ui| {
+                            chip::button(ui, chip::ButtonKind::Secondary, try_another_label())
+                        });
+                        let resp = chip::named(resp, "Try another");
+                        strip.try_another = chip::tooltip(resp, "Try another", "Generate this fill again with a new seed. Undo brings the previous one back.", None).clicked();
+                    }
                 });
             });
         });
-    change
+    strip
+}
+
+/// The button's text: icon and words, built once.
+fn try_another_label() -> &'static str {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(|| format!("{}  Try another", egui_material_icons::icons::ICON_REFRESH.codepoint))
 }
 
 fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {

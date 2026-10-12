@@ -281,6 +281,9 @@ pub(crate) struct Origin {
     pub(crate) upscale_run: Option<u64>,
     /// The seed a generated fill ran with, for Pin seed.
     pub(crate) seed: Option<u64>,
+    /// The region an erase filled, so "Try another" can fill it again
+    /// (shared with the stroke step that painted it).
+    pub(crate) region: Option<StoredSelection>,
 }
 
 /// An image a run starts from: a stored timeline image, loaded only when
