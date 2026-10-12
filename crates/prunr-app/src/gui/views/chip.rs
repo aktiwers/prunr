@@ -379,7 +379,7 @@ pub fn slider_row<T: egui::emath::Numeric>(
 }
 
 fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
-    if ui.data(|d| d.get_temp::<bool>(egui::Id::new(PANEL_ROWS)).unwrap_or(false)) {
+    if in_panel_rows(ui) {
         return panel_slider(ui, label, slider);
     }
     let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
@@ -392,6 +392,9 @@ fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipC
 const PANEL_ROWS: &str = "chip_panel_rows";
 /// The name column of a panel row (the board's 116 px).
 const PANEL_NAME_WIDTH: f32 = 116.0;
+/// A panel row's height: the segmented control's, so every row's name
+/// centres on its control.
+const PANEL_ROW_HEIGHT: f32 = 30.0;
 /// Room for a panel row's value box.
 const PANEL_VALUE_WIDTH: f32 = 74.0;
 
@@ -408,13 +411,22 @@ pub(super) fn panel_rows<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
     out
 }
 
+fn in_panel_rows(ui: &Ui) -> bool {
+    ui.data(|d| d.get_temp::<bool>(egui::Id::new(PANEL_ROWS)).unwrap_or(false))
+}
+
+/// A panel row's name, in its fixed column.
+pub(super) fn panel_name(ui: &mut Ui, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(PANEL_NAME_WIDTH, PANEL_ROW_HEIGHT), egui::Sense::hover());
+    let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
+    ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
+}
+
 fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
     // On the caller's ui too: the handle is painted from its slider width.
     ui.spacing_mut().slider_width = (ui.available_width() - PANEL_NAME_WIDTH - PANEL_VALUE_WIDTH).max(60.0);
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(PANEL_NAME_WIDTH, ui.spacing().interact_size.y), egui::Sense::hover());
-        let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
-        ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
+        panel_name(ui, label);
         let resp = chip_named_slider(ui, label, slider);
         (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
     })
@@ -725,6 +737,18 @@ pub(super) fn gated<R>(ui: &mut Ui, reason: Option<&str>, body: impl FnOnce(&mut
     r.inner
 }
 
+/// A panel's section heading: the board's small capitals caption, and
+/// an optional note beside it.
+pub(super) fn panel_section(ui: &mut Ui, caption: &str, note: Option<&str>) {
+    ui.add_space(theme::SPACE_SM);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(caption).size(10.5).color(theme::TEXT_SECONDARY));
+        if let Some(note) = note {
+            ui.label(RichText::new(note).size(theme::FONT_SIZE_HINT).color(theme::HINT));
+        }
+    });
+}
+
 /// Secondary caption above a row or a list inside a popover.
 pub(super) fn section_label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
@@ -747,6 +771,13 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
     options: &[Choice<T>],
     value: &mut T,
 ) -> bool {
+    if in_panel_rows(ui) {
+        return ui.horizontal(|ui| {
+            panel_name(ui, label);
+            choice_buttons(ui, options, value)
+        })
+        .inner;
+    }
     section_label(ui, label);
     ui.horizontal_wrapped(|ui| {
         // Break the row between options, never inside a label.
@@ -756,22 +787,157 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
     .inner
 }
 
-/// The option buttons of a `choice_row`, inline: for a strip or a row
-/// that carries its own label.
+/// The option buttons of a `choice_row`, inline, as the board's segmented
+/// control: one dim pill holding the options, the picked one purple.
 pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T) -> bool {
+    egui::Frame::NONE
+        .fill(Color32::from_white_alpha(15))
+        .corner_radius(theme::PILL_RADIUS)
+        .inner_margin(3.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().button_padding = egui::vec2(11.0, 5.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let v = ui.visuals_mut();
+                v.selection.stroke.color = Color32::WHITE;
+                for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+                    w.corner_radius = egui::CornerRadius::same(theme::PILL_RADIUS);
+                    w.bg_stroke = egui::Stroke::NONE;
+                }
+                v.widgets.inactive.fg_stroke.color = theme::TEXT_SECONDARY;
+                let mut changed = false;
+                for opt in options {
+                    let selected = *value == opt.value;
+                    let text = RichText::new(opt.name).size(12.5);
+                    let resp = ui.add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, text)).inner;
+                    let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
+                    if resp.clicked() && !selected {
+                        *value = opt.value;
+                        changed = true;
+                    }
+                }
+                changed
+            })
+            .inner
+        })
+        .inner
+}
+
+/// The board's dropdown (a rounded field with a chevron) for a choice too
+/// long for a segmented row; in panel rows its name sits in the name
+/// column. The list opens inline under the field: egui keeps one popup
+/// open at a time, so a popup list would close the flyout holding it.
+/// Returns true when the value changed.
+pub(super) fn dropdown<T: Copy + PartialEq>(ui: &mut Ui, label: &str, options: &[Choice<T>], value: &mut T) -> bool {
+    let current = options.iter().find(|o| o.value == *value).map_or("", |o| o.name);
+    let open_id = ui.id().with(("dropdown", label));
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+    let panel = in_panel_rows(ui);
+    let field = |ui: &mut Ui, open: bool| {
+        let width = (ui.available_width() - if panel { PANEL_VALUE_WIDTH } else { 0.0 }).max(120.0);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, PANEL_ROW_HEIGHT), egui::Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), label));
+        let fill = if resp.hovered() || open { Color32::from_white_alpha(24) } else { Color32::from_white_alpha(15) };
+        let painter = ui.painter();
+        painter.rect_filled(rect, theme::INPUT_RADIUS, fill);
+        let text = if ui.is_enabled() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
+        painter.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, current, egui::FontId::proportional(13.0), text);
+        let chevron = if open { ICON_EXPAND_LESS.codepoint } else { ICON_EXPAND_MORE.codepoint };
+        painter.text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, chevron, egui::FontId::proportional(16.0), theme::TEXT_SECONDARY);
+        resp
+    };
+    let resp = if panel {
+        ui.horizontal(|ui| {
+            panel_name(ui, label);
+            field(ui, open)
+        })
+        .inner
+    } else {
+        section_label(ui, label);
+        field(ui, open)
+    };
+    if resp.clicked() {
+        open = !open;
+    }
     let mut changed = false;
-    for opt in options {
-        let selected = *value == opt.value;
-        let resp = ui
-            .add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, opt.name))
-            .inner;
-        let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
-        if resp.clicked() && !selected {
-            *value = opt.value;
-            changed = true;
+    if open {
+        ui.horizontal(|ui| {
+            if panel {
+                ui.add_space(PANEL_NAME_WIDTH + ui.spacing().item_spacing.x);
+            }
+            ui.vertical(|ui| {
+                for opt in options {
+                    let selected = *value == opt.value;
+                    let resp = ui.add_enabled_ui(opt.enabled, |ui| picker_row(ui, selected, opt.name, opt.description)).inner;
+                    if resp.clicked() {
+                        open = false;
+                        if !selected {
+                            *value = opt.value;
+                            changed = true;
+                        }
+                    }
+                }
+            });
+        });
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    changed
+}
+
+/// A named colour among the board's swatch dots.
+pub(super) struct Swatch {
+    pub name: &'static str,
+    pub rgb: [u8; 3],
+}
+
+/// The board's colour dots in a row, the one matching `current` ringed
+/// white. Returns the clicked dot's colour.
+pub(super) fn swatch_dots(ui: &mut Ui, swatches: &[Swatch], current: Option<[u8; 3]>) -> Option<[u8; 3]> {
+    let mut picked = None;
+    for sw in swatches {
+        let [r, g, b] = sw.rgb;
+        if color_dot(ui, sw.name, Color32::from_rgb(r, g, b), current == Some(sw.rgb)).clicked() {
+            picked = Some(sw.rgb);
         }
     }
-    changed
+    picked
+}
+
+/// One 24 px swatch dot, ringed white while `on`; reads as a radio
+/// button named `name` to the tree.
+pub(super) fn color_dot(ui: &mut Ui, name: &str, fill: Color32, on: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), on, name));
+    if ui.is_rect_visible(rect) {
+        let ring = if on { Color32::WHITE } else if resp.hovered() { Color32::from_white_alpha(90) } else { Color32::from_white_alpha(38) };
+        ui.painter().circle_filled(rect.center(), 11.0, fill);
+        ui.painter().circle_stroke(rect.center(), 11.0, egui::Stroke::new(2.0, ring));
+    }
+    resp.on_hover_text(name)
+}
+
+/// The board's "custom colour" dot: a hue ring around the colour itself.
+pub(super) fn custom_color_dot(ui: &mut Ui, rgb: [u8; 3], on: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), on, "Custom color"));
+    if ui.is_rect_visible(rect) {
+        let c = rect.center();
+        const SEGMENTS: usize = 24;
+        for i in 0..SEGMENTS {
+            let a0 = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            let color: Color32 = Hsva::new(i as f32 / SEGMENTS as f32, 0.8, 1.0, 1.0).into();
+            let p = |a: f32| c + 11.0 * egui::vec2(a.cos(), a.sin());
+            ui.painter().line_segment([p(a0), p(a1)], egui::Stroke::new(2.5, color));
+        }
+        let [r, g, b] = rgb;
+        ui.painter().circle_filled(c, 7.5, Color32::from_rgb(r, g, b));
+        if on {
+            ui.painter().circle_stroke(c, 12.5, egui::Stroke::new(1.0, Color32::WHITE));
+        }
+    }
+    resp.on_hover_text("Custom color")
 }
 
 /// On/off row inside a popover: the label, and the board's switch at the
@@ -826,13 +992,16 @@ pub(super) fn kept_hues(ui: &mut Ui, hue: u16, tolerance: u16) {
     });
 }
 
+const RGB_PICKER_MAX_WIDTH: f32 = 240.0;
+
 /// Inline RGB picker for a `[u8; 3]` inside a parent popover: a
 /// saturation/brightness square, a hue strip and Red / Green / Blue
 /// fields, each named. Inline because a picker in its own popup reads as
 /// a click outside the parent popover and closes it. Returns `true` when
 /// the user changed the color.
 pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
-    let width = ui.spacing().slider_width;
+    // A panel row's slider spans the panel; a square that wide is a wall.
+    let width = ui.spacing().slider_width.min(RGB_PICKER_MAX_WIDTH);
     let (square, square_resp) = ui.allocate_exact_size(egui::vec2(width, width * 0.6), egui::Sense::drag());
     // Hue and saturation are kept across frames: a grey or black RGB holds
     // neither, so recomputing them from RGB would snap the hue to red.

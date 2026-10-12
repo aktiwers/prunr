@@ -304,9 +304,14 @@ pub(crate) fn render(
     change
 }
 
-const LINES_POPOVER_WIDTH: f32 = 560.0;
-const LINES_LEFT_COLUMN_WIDTH: f32 = 260.0;
-const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
+const LINES_PANEL_WIDTH: f32 = 460.0;
+const FILTER_COUNT: usize = prunr_core::InputTransform::ALL.len();
+const STYLE_COUNT: usize = prunr_core::LineStyle::ALL.len();
+
+/// Which of `all` has `value`'s variant, whatever its parameters.
+fn variant_index<T>(all: &[T], value: &T) -> usize {
+    all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
+}
 
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
@@ -477,8 +482,16 @@ fn epsilon_from_detail(detail: f32) -> f32 {
     10f32.powf(-2.0 - 4.0 * detail.clamp(0.0, 1.0))
 }
 
-/// Sketch mode plus every line knob, in processing order; the line color
-/// list sits in its own column.
+const LINE_SWATCHES: [chip::Swatch; 5] = [
+    chip::Swatch { name: "Black", rgb: [0x11, 0x11, 0x11] },
+    chip::Swatch { name: "White", rgb: [0xf2, 0xf2, 0xf2] },
+    chip::Swatch { name: "Plum", rgb: [0x7b, 0x2d, 0x8e] },
+    chip::Swatch { name: "Blue", rgb: [0x2b, 0x5f, 0xb8] },
+    chip::Swatch { name: "Rust", rgb: [0xb8, 0x45, 0x2b] },
+];
+
+/// Sketch mode plus every line knob: the mode and the two line knobs on
+/// the strip, the rest in the panel in processing order.
 fn render_lines_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
@@ -486,7 +499,6 @@ fn render_lines_group(
     subject_available: bool,
     change: &mut ToolbarChange,
 ) {
-    use prunr_core::{ComposeMode, InputTransform, LineStyle};
     let on = s.line_mode != LineMode::Off;
     let tuned = on && chip::tuned_count(LINES_FIELDS, s, d) > 0;
     let group = chip::GroupChip {
@@ -496,150 +508,184 @@ fn render_lines_group(
         summary: mode_label(s.line_mode),
         tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
         tuned,
-        width: if on { LINES_POPOVER_WIDTH } else { theme::POPOVER_WIDTH },
+        width: LINES_PANEL_WIDTH,
         live: true,
     };
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            // The mode transition is recorded by the caller after the render.
-            s.line_mode = d.line_mode;
-            reset_group(LINES_FIELDS, s, d, change);
-            mark_input_transform_change(change);
-        }
-
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(LINES_LEFT_COLUMN_WIDTH);
-                ui.set_max_width(LINES_LEFT_COLUMN_WIDTH);
-
-                let modes = [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly].map(|m| {
-                    let enabled = m != LineMode::SubjectOutline || subject_available;
-                    chip::Choice {
-                        value: m,
-                        name: mode_label(m),
-                        description: if enabled { mode_description(m) } else { "Needs a background-removal model to find the subject" },
-                        enabled,
-                    }
-                });
-                // The caller records the mode transition after the render.
-                chip::choice_row(ui, "Sketch", &modes, &mut s.line_mode);
-                if !on {
-                    hint(ui, "Off: no lines are drawn.");
-                    return;
+    chip::strip_chip(ui, group, "All line settings", |ui, part| match part {
+        chip::Part::Quick => {
+            let modes = [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline].map(|m| {
+                let enabled = m != LineMode::SubjectOutline || subject_available;
+                chip::Choice {
+                    value: m,
+                    name: mode_label(m),
+                    description: if enabled { mode_description(m) } else { "Needs a background-removal model to find the subject" },
+                    enabled,
                 }
-                ui.add_space(theme::SPACE_XS);
-                chip::section_label(ui, "Pre-filter");
-                let mut filter_changed = false;
-                ui.horizontal_wrapped(|ui| {
-                    for option in InputTransform::ALL {
-                        let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.input_transform);
-                        if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                            s.input_transform = *option;
-                            filter_changed = true;
-                        }
-                    }
-                });
-                // Steps, not sliders: each pick reruns the line detector once.
-                match &mut s.input_transform {
-                    InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
-                    InputTransform::ContrastBoost { percent } => {
-                        filter_changed |= chip::choice_row(ui, "Contrast", &CONTRAST_STEPS, percent);
-                    }
-                    InputTransform::Posterize { levels } => {
-                        filter_changed |= chip::choice_row(ui, "Levels", &LEVEL_STEPS, levels);
-                    }
-                }
-                if filter_changed {
-                    mark_input_transform_change(change);
-                }
-                hint(ui, "Applied to the image before the lines are traced. Requires reprocessing.");
-                ui.add_space(theme::SPACE_XS);
-
-                // Dual scale draws Fine and Bold itself, so the scale has no effect.
-                let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
-                let scales = [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused].map(|sc| chip::Choice {
-                    value: sc,
-                    name: scale_label(sc),
-                    description: scale_description(sc),
-                    enabled: scale_active,
-                });
-                let scale_changed = chip::choice_row(ui, "Scale", &scales, &mut s.edge_scale);
-                aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
-                if !scale_active {
-                    hint(ui, "Dual scale draws Fine and Bold itself.");
-                }
-                ui.add_space(theme::SPACE_XS);
-
-                aggregate_knob(
-                    chip::slider_row_f32(ui, "Line detail", &mut s.line_strength, 0.0..=1.0, false, |v| fmt::plain(v, 2)),
-                    StaticKnob::LineStrength, change,
-                );
-                hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
-                ui.add_space(theme::SPACE_XS);
-
-                let mut thickness = s.edge_thickness as u32;
-                let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
-                s.edge_thickness = thickness.min(255) as u8;
-                aggregate_knob(t, StaticKnob::EdgeThickness, change);
-                ui.add_space(theme::SPACE_XS);
-
-                if s.line_mode == LineMode::SubjectOutline {
-                    let compositions = [
-                        ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
-                        ComposeMode::Ghost,
-                    ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
-                    let changed = chip::choice_row(ui, "Composition", &compositions, &mut s.compose_mode);
-                    aggregate_bool(changed, StaticKnob::ComposeMode, change);
-                    // Lines in the photo's own colors vanish on a filled subject.
-                    if changed && s.compose_mode == ComposeMode::SubjectFilled && lines_in_photo_colors(s) {
-                        s.solid_line_color = Some([0, 0, 0]);
-                        aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                    }
-                    ui.add_space(theme::SPACE_XS);
-                }
-
             });
-
-            if !on {
+            // The caller records the mode transition after the render.
+            chip::choice_buttons(ui, &modes, &mut s.line_mode);
+            if s.line_mode != LineMode::Off {
+                line_detail(ui, s, change);
+                line_width(ui, s, change);
+            }
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                // The mode transition is recorded by the caller after the render.
+                s.line_mode = d.line_mode;
+                reset_group(LINES_FIELDS, s, d, change);
+                mark_input_transform_change(change);
+            }
+            if s.line_mode == LineMode::Off {
+                hint(ui, "Off: no lines are drawn.");
                 return;
             }
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_min_width(LINES_COLOR_LIST_WIDTH);
-                chip::section_label(ui, "Line color");
-                let is_solid = matches!(s.line_style, LineStyle::Solid);
-                if chip::picker_row(ui, lines_in_photo_colors(s), "Original", "the photo's own colors").clicked() {
-                    s.line_style = LineStyle::Solid;
-                    s.solid_line_color = None;
-                    aggregate_bool(true, StaticKnob::LineStyle, change);
-                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                }
-                if chip::picker_row(ui, is_solid && s.solid_line_color.is_some(), "Solid color", "one color for every line").clicked() {
-                    s.line_style = LineStyle::Solid;
-                    s.solid_line_color = Some(LINE_COLOR_FALLBACK);
-                    aggregate_bool(true, StaticKnob::LineStyle, change);
-                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                }
-                for option in &LineStyle::ALL[1..] {
-                    let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.line_style);
-                    if chip::picker_row(ui, selected, option.name(), line_style_description(option)).clicked() && !selected {
-                        s.line_style = *option;
-                        aggregate_bool(true, StaticKnob::LineStyle, change);
-                    }
-                }
-                ui.add_space(theme::SPACE_XS);
-                if is_solid {
-                    if let Some(rgb) = s.solid_line_color.as_mut() {
-                        let changed = rgb_picker_row(ui, "Color", rgb);
-                        aggregate_bool(changed, StaticKnob::SolidLineColor, change);
-                    }
-                } else {
-                    let changed = line_style_params(ui, &mut s.line_style);
-                    aggregate_bool(changed, StaticKnob::LineStyle, change);
-                }
-            });
-        });
+            lines_panel(ui, s, change);
+        }
     });
+}
+
+fn line_detail(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(
+        chip::slider_row_f32(ui, "Line detail", &mut s.line_strength, 0.0..=1.0, false, |v| fmt::plain(v, 2)),
+        StaticKnob::LineStrength, change,
+    );
+}
+
+fn line_width(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    let mut thickness = s.edge_thickness as u32;
+    let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
+    s.edge_thickness = thickness.min(255) as u8;
+    aggregate_knob(t, StaticKnob::EdgeThickness, change);
+}
+
+fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    use prunr_core::{ComposeMode, InputTransform, LineStyle};
+    // Dual scale draws Fine and Bold itself, so the scale has no effect.
+    let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
+    let scales = [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused].map(|sc| chip::Choice {
+        value: sc,
+        name: scale_label(sc),
+        description: scale_description(sc),
+        enabled: scale_active,
+    });
+    let scale_changed = chip::choice_row(ui, "Scale", &scales, &mut s.edge_scale);
+    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
+    if !scale_active {
+        hint(ui, "Dual scale draws Fine and Bold itself.");
+    }
+    line_detail(ui, s, change);
+    hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
+    line_width(ui, s, change);
+
+    if s.line_mode == LineMode::SubjectOutline {
+        let compositions = [
+            ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
+            ComposeMode::Ghost,
+        ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
+        let changed = chip::dropdown(ui, "Composition", &compositions, &mut s.compose_mode);
+        aggregate_bool(changed, StaticKnob::ComposeMode, change);
+        // Lines in the photo's own colors vanish on a filled subject.
+        if changed && s.compose_mode == ComposeMode::SubjectFilled && lines_in_photo_colors(s) {
+            s.solid_line_color = Some([0, 0, 0]);
+            aggregate_bool(true, StaticKnob::SolidLineColor, change);
+        }
+    }
+
+    chip::panel_section(ui, "PRE-FILTER", Some("Requires reprocessing."));
+    let filters: [_; FILTER_COUNT] = std::array::from_fn(|i| chip::Choice {
+        value: i,
+        name: InputTransform::ALL[i].name(),
+        description: "",
+        enabled: true,
+    });
+    let mut picked = variant_index(InputTransform::ALL, &s.input_transform);
+    let mut filter_changed = false;
+    if chip::dropdown(ui, "Filter", &filters, &mut picked) {
+        s.input_transform = InputTransform::ALL[picked];
+        filter_changed = true;
+    }
+    // Steps, not sliders: each pick reruns the line detector once.
+    match &mut s.input_transform {
+        InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
+        InputTransform::ContrastBoost { percent } => {
+            filter_changed |= chip::choice_row(ui, "Contrast", &CONTRAST_STEPS, percent);
+        }
+        InputTransform::Posterize { levels } => {
+            filter_changed |= chip::choice_row(ui, "Levels", &LEVEL_STEPS, levels);
+        }
+    }
+    if filter_changed {
+        mark_input_transform_change(change);
+    }
+
+    chip::panel_section(ui, "LINE COLOR", None);
+    line_color(ui, s, change);
+}
+
+/// The line color: the board's dots and a custom one for a solid color,
+/// the photo's own colors, or one of the multi-color styles.
+fn line_color(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    use prunr_core::LineStyle;
+    let is_solid = matches!(s.line_style, LineStyle::Solid);
+    let solid = s.solid_line_color.filter(|_| is_solid);
+    let custom_id = ui.id().with("custom_line_color");
+    let mut custom_open = ui.data(|d| d.get_temp::<bool>(custom_id).unwrap_or(false));
+    let set_solid = |s: &mut ItemSettings, rgb: Option<[u8; 3]>, change: &mut ToolbarChange| {
+        s.line_style = LineStyle::Solid;
+        s.solid_line_color = rgb;
+        aggregate_bool(true, StaticKnob::LineStyle, change);
+        aggregate_bool(true, StaticKnob::SolidLineColor, change);
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if let Some(rgb) = chip::swatch_dots(ui, &LINE_SWATCHES, solid) {
+            set_solid(s, Some(rgb), change);
+            custom_open = false;
+        }
+        let is_preset = solid.is_some_and(|c| LINE_SWATCHES.iter().any(|sw| sw.rgb == c));
+        let custom_rgb = solid.unwrap_or(LINE_COLOR_FALLBACK);
+        if chip::custom_color_dot(ui, custom_rgb, custom_open || (solid.is_some() && !is_preset)).clicked() {
+            custom_open = !custom_open;
+            if solid.is_none() {
+                set_solid(s, Some(custom_rgb), change);
+            }
+        }
+        ui.add_space(theme::SPACE_XS);
+        let own = lines_in_photo_colors(s);
+        let text = RichText::new("or the photo's own colors").size(12.0).color(if own { theme::GLOW } else { theme::TEXT_SECONDARY });
+        if ui.add(egui::Button::new(text).frame(false)).clicked() && !own {
+            set_solid(s, None, change);
+            custom_open = false;
+        }
+    });
+    if custom_open && matches!(s.line_style, LineStyle::Solid) {
+        if let Some(rgb) = s.solid_line_color.as_mut() {
+            let changed = chip::rgb_picker(ui, rgb);
+            aggregate_bool(changed, StaticKnob::SolidLineColor, change);
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(custom_id, custom_open));
+
+    let styles: [_; STYLE_COUNT] = std::array::from_fn(|i| chip::Choice {
+        value: i,
+        name: LineStyle::ALL[i].name(),
+        description: line_style_description(&LineStyle::ALL[i]),
+        enabled: true,
+    });
+    let mut style_idx = variant_index(LineStyle::ALL, &s.line_style);
+    if chip::dropdown(ui, "Style", &styles, &mut style_idx) {
+        s.line_style = LineStyle::ALL[style_idx];
+        if style_idx == 0 && s.solid_line_color.is_none() {
+            s.solid_line_color = Some(LINE_COLOR_FALLBACK);
+        }
+        aggregate_bool(true, StaticKnob::LineStyle, change);
+        aggregate_bool(true, StaticKnob::SolidLineColor, change);
+    }
+    if !matches!(s.line_style, LineStyle::Solid) {
+        let changed = line_style_params(ui, &mut s.line_style);
+        aggregate_bool(changed, StaticKnob::LineStyle, change);
+    }
 }
 
 fn compose_label(mode: prunr_core::ComposeMode) -> &'static str {
