@@ -6,7 +6,6 @@ use crate::gui::batch_manager::ProcessButtonLabel;
 use crate::gui::item::BatchStatus;
 use crate::gui::theme;
 
-use super::adjustments_toolbar::ModelStoreRequest;
 use super::chip::{picker_row, popover_header, popup_for, tooltip, with_fill};
 use super::shortcuts::{keys, Action};
 
@@ -48,7 +47,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let help_resp = tooltip(
             icon_button(ui, ICON_HELP.codepoint),
             "Help",
-            "Shortcuts, the command-line reference, the pipelines and the Model Store.",
+            "Shortcuts, the command-line reference and the pipelines.",
             None,
         );
         let help_id = egui::Id::new("help_menu");
@@ -65,10 +64,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     app.perform(action, &ui.ctx().clone());
                     chosen = true;
                 }
-            }
-            if picker_row(ui, false, "Model Store", "Download and manage models").clicked() {
-                app.model_store = Some(ModelStoreRequest::default());
-                chosen = true;
             }
             if chosen {
                 egui::Popup::close_id(ui.ctx(), help_id);

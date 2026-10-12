@@ -1089,6 +1089,18 @@ pub(super) fn render_reset_preset_cluster(
     }
 }
 
+/// The toolbar of the empty window: only the model picker, so a model
+/// can be chosen or downloaded before the first image.
+pub(crate) fn render_model_only(
+    ui: &mut Ui,
+    app_settings: &mut Settings,
+    installed: crate::gui::hardware_cache::HardwareInstallCache,
+) -> ToolbarChange {
+    let mut change = ToolbarChange::default();
+    ui.horizontal(|ui| render_model_dropdown(ui, app_settings, false, true, installed, &mut change));
+    change
+}
+
 /// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
 /// sets `change.model_changed` + `commit` when the selection flips so caller
 /// can invalidate tensor caches and fire a fresh Tier 1.
