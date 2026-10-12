@@ -327,3 +327,33 @@ fn picking_a_quality_closes_its_popover() {
     click(&mut h, &quality);
     assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes it");
 }
+
+/// Save options is a set-and-go popover by the Save button: it names its
+/// controls, offers Separate layers only for a cut-out model, and a format
+/// pick sticks as the setting.
+#[test]
+fn save_options_name_their_controls_and_follow_the_model() {
+    use crate::gui::settings::SettingsModel;
+    use std::sync::Arc;
+    for (model, layers) in [(SettingsModel::BiRefNetLite, true), (SettingsModel::Inpaint, false)] {
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            app.settings.model = model;
+            let item = push_test_item(app, 1);
+            item.dimensions = (4, 4);
+            item.source_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.status = BatchStatus::Done;
+            item.commit(crate::gui::timeline::StepKind::Process);
+            app.batch.select_item(0);
+        }
+        settle(&mut h);
+        click(&mut h, "Save options");
+        super::tree_tests::assert_all_controls_named(&h, "save options");
+        let names = super::tree_tests::names(&h);
+        assert_eq!(names.iter().any(|n| n == "Separate layers"), layers, "{model:?}");
+        click(&mut h, "WebP");
+        assert_eq!(h.state().settings.export_format, prunr_core::ExportFormat::Webp);
+    }
+}

@@ -391,14 +391,6 @@ fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
     ui.add_space(theme::SPACE_MD);
 
     section_heading(ui, "Defaults");
-    ui.checkbox(&mut settings.export_split_layers, RichText::new("Split exports into layers")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-        .on_hover_text(
-            "Drag-out and Save emit subject / lines / mask as separate \
-             PNGs — useful for Photoshop / Procreate. On Linux (no \
-             drag-out) this only affects Save.");
-    hint(ui, "Subject / lines / mask as separate PNGs.");
-    ui.add_space(theme::SPACE_SM);
 
     let preset_names = super::preset_dropdown::all_preset_names(settings);
     let current = settings.default_preset.clone();

@@ -1907,12 +1907,19 @@ impl PrunrApp {
             || self.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done)
     }
 
+    /// "Separate layers" applies: the switch is on and the model cuts out a
+    /// subject (layers come from its mask and lines).
+    pub(crate) fn saves_layers(&self) -> bool {
+        self.settings.export_split_layers
+            && self.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout
+    }
+
     pub fn handle_save_selected(&mut self) {
         let has_selection = self.batch.items.iter()
             .any(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some());
         // Layers mode: always folder-picker, regardless of selection count.
         // The filenames are derived from each item's source stem + layer suffix.
-        if self.settings.export_split_layers {
+        if self.saves_layers() {
             self.save_layers_to_folder(has_selection);
             return;
         }
@@ -1981,10 +1988,7 @@ impl PrunrApp {
     fn save_current_to_file(&mut self) {
         let Some(item) = self.batch.selected_item() else { return };
         let Some(rgba) = item.result_rgba.clone() else { return };
-        let default_name = Path::new(&item.filename).file_stem()
-            .and_then(|s| s.to_str())
-            .map(|stem| format!("{stem}.prunr.png"))
-            .unwrap_or_else(|| "result.prunr.png".to_string());
+        let default_name = export_name(&item.filename, self.settings.export_format);
         let bg = item.export_bg();
         self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
@@ -1997,31 +2001,33 @@ impl PrunrApp {
         let (rgba, bg, default_name) = {
             let Some(item) = self.batch.items.get(idx) else { return };
             let Some(rgba) = item.result_rgba.clone() else { return };
-            let stem = Path::new(&item.filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("image");
-            (rgba, item.export_bg(), format!("{stem}.prunr.png"))
+            (rgba, item.export_bg(), export_name(&item.filename, self.settings.export_format))
         };
         self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
 
-    /// Shared tail for the two single-item save paths: open the PNG save-as
-    /// dialog, then bake the background, encode and write on a background
-    /// thread.
+    /// Shared tail for the two single-item save paths: open the save-as
+    /// dialog, then bake the background, encode in the format the chosen
+    /// name asks for and write on a background thread.
     fn save_rgba_with_dialog(
         &mut self,
         rgba: Arc<image::RgbaImage>,
         bg: super::item::ExportBg,
         default_name: &str,
     ) {
-        let Some(path) = self.system.save_png_dialog(
+        let preferred = self.settings.export_format;
+        let Some(path) = self.system.save_image_dialog(
             self.last_open_dir.as_deref(),
             default_name,
+            preferred,
         ) else { return };
+        let (path, format) = match prunr_core::ExportFormat::from_path(&path) {
+            Some(f) => (path, f),
+            None => (path.with_extension(preferred.extension()), preferred),
+        };
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving...");
-        spawn_save_single(path, rgba, bg, tx);
+        spawn_save_single(path, rgba, bg, format, tx);
     }
 
     /// One or more sidebar checkboxes selected — pick a folder, write each
@@ -2038,7 +2044,7 @@ impl PrunrApp {
         let count = items.len();
         self.toasts.info(format!("Saving {count} image(s)..."));
         let tx = self.batch.bg_io.save_done_tx.clone();
-        spawn_save_batch(folder, items, tx);
+        spawn_save_batch(folder, items, self.settings.export_format, tx);
     }
 
     pub fn remove_selected(&mut self) {
@@ -2056,7 +2062,7 @@ impl PrunrApp {
     /// (winit + drag crate incompatibility; see Cargo.toml comment).
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
-        let split = self.settings.export_split_layers;
+        let split = self.saves_layers();
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch.find_by_id(*id) {
@@ -4088,10 +4094,22 @@ fn is_supported_image_ext(path: &Path) -> bool {
 /// Encode + write one PNG on a background thread, then send the result toast
 /// text on `tx`. Stays at module scope so neither save method needs `&mut self`
 /// once they've kicked off the work.
-fn spawn_save_single(path: PathBuf, rgba: Arc<image::RgbaImage>, bg: super::item::ExportBg, tx: mpsc::Sender<String>) {
+/// `<source-stem>.prunr.<ext>`, the name a saved result gets.
+fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
+    let stem = Path::new(source_filename).file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    format!("{stem}.prunr.{}", format.extension())
+}
+
+fn spawn_save_single(
+    path: PathBuf,
+    rgba: Arc<image::RgbaImage>,
+    bg: super::item::ExportBg,
+    format: prunr_core::ExportFormat,
+    tx: mpsc::Sender<String>,
+) {
     std::thread::spawn(move || {
-        let msg = match prunr_core::encode_rgba_png(&bg.bake(&rgba)) {
-            Ok(png_bytes) => match std::fs::write(&path, &png_bytes) {
+        let msg = match format.encode(&bg.bake(&rgba)) {
+            Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(()) => "Saved".into(),
                 Err(e) => format!("Save failed: {e}"),
             },
@@ -4123,24 +4141,21 @@ fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<Str
     });
 }
 
-/// Encode + write N PNGs into `folder` (named `<source-stem>.prunr.png`) on a
+/// Encode + write N images into `folder` (named by `export_name`) on a
 /// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<(String, Arc<image::RgbaImage>, super::item::ExportBg)>,
+    format: prunr_core::ExportFormat,
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
         for (filename, rgba, bg) in items {
-            let stem = Path::new(&filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("image");
-            let out_path = folder.join(format!("{stem}.prunr.png"));
-            match prunr_core::encode_rgba_png(&bg.bake(&rgba)) {
-                Ok(png_bytes) => match std::fs::write(&out_path, &png_bytes) {
+            let out_path = folder.join(export_name(&filename, format));
+            match format.encode(&bg.bake(&rgba)) {
+                Ok(bytes) => match std::fs::write(&out_path, &bytes) {
                     Ok(()) => saved += 1,
                     Err(_) => failed += 1,
                 },
@@ -4358,6 +4373,16 @@ mod timeline_contract_tests {
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
+    }
+
+    /// A saved result is named after its source, with the format's
+    /// extension.
+    #[test]
+    fn a_saved_result_is_named_after_its_source_and_format() {
+        use prunr_core::ExportFormat;
+        assert_eq!(super::export_name("beach.jpeg", ExportFormat::Png), "beach.prunr.png");
+        assert_eq!(super::export_name("beach.jpeg", ExportFormat::Jpeg), "beach.prunr.jpg");
+        assert_eq!(super::export_name("noext", ExportFormat::Webp), "noext.prunr.webp");
     }
 
     /// Cmd+S works whenever the Save button shows: a ticked finished
