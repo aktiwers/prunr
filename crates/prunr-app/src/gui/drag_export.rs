@@ -156,7 +156,7 @@ impl LayerJob {
             correction: item.correction_plane(style, action),
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
-            faces: item.faces_input(),
+            faces: item.faces_input(super::item::FaceStage::Photo),
         }
     }
 
