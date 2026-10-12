@@ -584,19 +584,23 @@ pub(super) enum ButtonKind {
     Primary,
     Secondary,
     Destructive,
+    /// Text only, for a quiet action beside a louder one.
+    Ghost,
 }
 
 /// Themed text button at chip height. Row 1 builds its own taller
 /// buttons; everything else goes through here.
 pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
     let (fill, color) = match kind {
-        ButtonKind::Primary => (theme::ACCENT, Color32::WHITE),
-        ButtonKind::Secondary => (theme::BG_SECONDARY, theme::TEXT_PRIMARY),
+        ButtonKind::Primary => (theme::ACCENT_BRIGHT, Color32::WHITE),
+        ButtonKind::Secondary => (Color32::from_white_alpha(20), theme::TEXT_PRIMARY),
         ButtonKind::Destructive => (theme::DESTRUCTIVE, Color32::WHITE),
+        ButtonKind::Ghost => (Color32::TRANSPARENT, theme::TEXT_SECONDARY),
     };
     with_fill(ui, fill, |ui| {
         ui.add(
             egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
+                .stroke(egui::Stroke::NONE)
                 .corner_radius(theme::BUTTON_ROUNDING)
                 .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT)),
         )

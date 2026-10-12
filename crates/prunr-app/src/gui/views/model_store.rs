@@ -1,8 +1,8 @@
 //! Model Store modal — single user-facing surface for browsing,
 //! installing, cancelling, and deleting on-demand models.
 
-use egui::RichText;
-use egui_material_icons::icons::ICON_WARNING;
+use egui::{Color32, RichText};
+use egui_material_icons::icons::*;
 
 use prunr_models::{
     descriptor as model_descriptor, on_demand_dir, ModelCategory, ModelDescriptor, ModelId,
@@ -93,50 +93,60 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut new_filter = initial_filter;
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
-    let backdrop_closed = theme::standard_modal_window(
-        ctx, "model_store", "Model Store",
-        [theme::SETTINGS_DIALOG_WIDTH, 560.0],
-        |ui| {
-            let mut idx = FILTERS.iter().position(|(_, c)| *c == new_filter).unwrap_or(0);
-            super::chip::tab_strip(ui, &FILTERS.map(|(label, _)| label), &mut idx);
-            new_filter = FILTERS[idx].1;
-            ui.add_space(theme::SPACE_SM);
-            ui.separator();
+    let screen = ctx.content_rect().size();
+    let size = [STORE_SIZE[0].min(screen.x - 40.0), STORE_SIZE[1].min(screen.y - 40.0)];
+    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", size, |ui| {
+        let mut close = false;
+        egui::Frame::NONE.inner_margin(egui::Margin { left: 26, right: 18, top: 20, bottom: 20 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Model Store").size(19.0).color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(format!(
+                        "Everything runs on this computer. Download what you need. {} on disk.",
+                        format_byte_size(disk_usage_bytes()),
+                    )).size(12.5).color(theme::TEXT_SECONDARY));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, Color32::from_white_alpha(15));
+                    close = super::chip::named(x, "Close Model Store").clicked();
+                });
+            });
+            ui.add_space(14.0);
+            super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
+            ui.add_space(14.0);
 
-            egui::ScrollArea::vertical()
-                .max_height(420.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let mut shown = 0;
-                    for desc in REGISTRY {
-                        if let Some(c) = new_filter {
-                            if desc.category != c { continue; }
-                        }
-                        if shown > 0 {
-                            ui.add_space(theme::SPACE_XS);
-                            ui.separator();
-                        }
-                        shown += 1;
-                        ui.add_space(theme::SPACE_SM);
+            let card_width = ((ui.available_width() - 2.0 * CARD_GAP) / 3.0).floor();
+            // Cards in a row stretch to its tallest, measured last frame,
+            // so a row's footers line up.
+            let heights_id = egui::Id::new(("store_row_heights", new_filter.map(|c| c as u8)));
+            let last: Vec<f32> = ui.data(|d| d.get_temp(heights_id)).unwrap_or_default();
+            let mut heights = vec![0.0f32; REGISTRY.len().div_ceil(3)];
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                egui::Grid::new("store_cards").spacing([CARD_GAP, CARD_GAP]).show(ui, |ui| {
+                    let shown = REGISTRY.iter().filter(|d| new_filter.is_none_or(|c| d.category == c));
+                    for (i, desc) in shown.enumerate() {
+                        let row = i / 3;
                         let state = app.download_manager.state(desc.id);
-                        if let Some(action) = render_card(ui, desc, &state, &provider) {
+                        let height = last.get(row).copied().unwrap_or(0.0);
+                        let (action, natural) = render_card(ui, desc, &state, &provider, egui::vec2(card_width, height));
+                        heights[row] = heights[row].max(natural);
+                        if let Some(action) = action {
                             pending_actions.push((desc.id, action));
+                        }
+                        if i % 3 == 2 {
+                            ui.end_row();
                         }
                     }
                 });
-
-            ui.add_space(theme::SPACE_SM);
-            ui.separator();
-            ui.horizontal(|ui| {
-                let total = disk_usage_bytes();
-                ui.label(
-                    RichText::new(format!("Disk usage: {}", format_byte_size(total)))
-                        .size(theme::FONT_SIZE_MONO)
-                        .color(theme::TEXT_SECONDARY),
-                );
             });
-        },
-    );
+            if heights != last {
+                ui.data_mut(|d| d.insert_temp(heights_id, heights));
+                ui.ctx().request_repaint();
+            }
+        });
+        close
+    });
 
     for (id, action) in pending_actions {
         match action {
@@ -163,126 +173,208 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
         }
     }
 
-    backdrop_closed
+    closed
 }
 
+const STORE_SIZE: [f32; 2] = [1000.0, 700.0];
+const CARD_GAP: f32 = 14.0;
+const CARD_MIN_HEIGHT: f32 = 150.0;
+const CARD_PADDING: f32 = 16.0;
+const FOOTER_HEIGHT: f32 = 30.0;
+const BAR_HEIGHT: f32 = 4.0;
+const READY_FILL: Color32 = Color32::from_rgba_premultiplied(13, 25, 13, 31);
+const READY_TEXT: Color32 = Color32::from_rgb(0x9f, 0xe0, 0x9f);
+const FAILED_TEXT: Color32 = Color32::from_rgb(0xd8, 0x8e, 0x8e);
+const ADVISORY_TEXT: Color32 = Color32::from_rgb(0xe1, 0xb3, 0x4e);
+
 /// Filter tabs in display order; `None` is "All".
-const FILTERS: [(&str, Option<ModelCategory>); 5] = [
-    ("All", None),
-    ("Background", Some(ModelCategory::Segmentation)),
-    ("Sketch", Some(ModelCategory::EdgeDetection)),
-    ("Eraser", Some(ModelCategory::Inpaint)),
-    ("Upscale", Some(ModelCategory::Upscale)),
+const FILTERS: [super::chip::Choice<Option<ModelCategory>>; 5] = [
+    filter(None, "All"),
+    filter(Some(ModelCategory::Segmentation), "Background"),
+    filter(Some(ModelCategory::EdgeDetection), "Sketch"),
+    filter(Some(ModelCategory::Inpaint), "Eraser"),
+    filter(Some(ModelCategory::Upscale), "Upscale"),
 ];
 
+const fn filter(value: Option<ModelCategory>, name: &'static str) -> super::chip::Choice<Option<ModelCategory>> {
+    super::chip::Choice { value, name, description: "", enabled: true }
+}
+
+fn category_label(c: ModelCategory) -> (&'static str, &'static str) {
+    match c {
+        ModelCategory::Segmentation => (ICON_CONTENT_CUT.codepoint, "Background"),
+        ModelCategory::EdgeDetection => (ICON_DRAW.codepoint, "Sketch"),
+        ModelCategory::Inpaint => (ICON_BRUSH.codepoint, "Eraser"),
+        ModelCategory::Upscale => (ICON_ARROW_UPWARD.codepoint, "Upscale"),
+        ModelCategory::Selection => (ICON_AUTO_AWESOME.codepoint, "Selection"),
+    }
+}
+
+/// The download size in MB, for a model that downloads.
+fn download_mb(desc: &ModelDescriptor) -> Option<u64> {
+    match desc.source {
+        ModelSource::OnDemand { size_mb, .. } => Some(size_mb as u64),
+        ModelSource::MultiPartOnDemand { parts, .. } => Some(parts.iter().map(|p| p.size_bytes).sum::<u64>() / (1024 * 1024)),
+        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
+    }
+}
+
+/// One card: icon, name and kind; what it is for; and a footer with its
+/// size and what can be done with it. The name row opens the licence,
+/// author and source in place.
 fn render_card(
     ui: &mut egui::Ui,
     desc: &ModelDescriptor,
     state: &DownloadState,
     provider: &str,
-) -> Option<CardAction> {
+    size: egui::Vec2,
+) -> (Option<CardAction>, f32) {
     let installed = prunr_models::is_available(desc.id);
     let action = card_action(desc, installed, state);
     let advisory = desc.hardware_advisory(provider);
-
+    let border = if installed {
+        theme::ACCENT_BRIGHT.gamma_multiply(0.35)
+    } else {
+        Color32::from_white_alpha(15)
+    };
     let mut clicked = None;
-
-    // A fixed button column, so the text wraps beside it instead of
-    // running under it.
-    const BUTTON_COLUMN: f32 = 110.0;
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - BUTTON_COLUMN).max(0.0));
-            ui.label(
-                RichText::new(desc.display_name)
-                    .size(theme::FONT_SIZE_HEADING)
-                    .strong()
-                    .color(theme::TEXT_PRIMARY),
-            );
-            ui.label(
-                RichText::new(desc.description)
-                    .size(theme::FONT_SIZE_BODY)
-                    .color(theme::TEXT_PRIMARY),
-            );
-            let meta = match desc.source {
-                ModelSource::Bundled => "Built-in".to_string(),
-                ModelSource::MultiPartBundled { license, .. } => {
-                    format!("Built-in · {} · {}", license.license, license.source_url)
-                }
-                ModelSource::OnDemand { license, size_mb, .. } => {
-                    format!("{} · {} · {size_mb} MB", license.license, license.source_url)
-                }
-                ModelSource::MultiPartOnDemand { license, parts, .. } => {
-                    let total_mb = parts.iter().map(|p| p.size_bytes).sum::<u64>() / (1024 * 1024);
-                    format!("{} · {} · {total_mb} MB", license.license, license.source_url)
-                }
-            };
-            ui.label(
-                RichText::new(meta)
-                    .size(theme::FONT_SIZE_MONO)
-                    .color(theme::TEXT_SECONDARY),
-            );
-            if let DownloadState::InProgress { bytes_so_far, total_bytes } = *state {
-                let pct = if total_bytes > 0 {
-                    (bytes_so_far as f32 / total_bytes as f32 * 100.0).round() as u32
-                } else { 0 };
-                ui.label(
-                    RichText::new(format!(
-                        "Downloading: {} / {} ({pct}%)",
-                        format_byte_size(bytes_so_far), format_byte_size(total_bytes),
-                    ))
-                    .size(theme::FONT_SIZE_MONO)
-                    .color(theme::TEXT_SECONDARY),
-                );
-            } else if *state == DownloadState::Queued {
-                ui.label(
-                    RichText::new("Queued: starts when the current download finishes")
-                        .size(theme::FONT_SIZE_MONO)
-                        .color(theme::TEXT_SECONDARY),
-                );
-            } else if let DownloadState::Failed { error } = state {
-                ui.label(
-                    RichText::new(format!("Last attempt failed: {error}"))
-                        .size(theme::FONT_SIZE_MONO)
-                        .color(theme::TEXT_HINT),
-                );
+    let mut natural = 0.0;
+    egui::Frame::NONE
+        .fill(Color32::from_white_alpha(9))
+        .stroke(egui::Stroke::new(1.0, border))
+        .corner_radius(16.0)
+        .inner_margin(CARD_PADDING)
+        .show(ui, |ui| ui.vertical(|ui| {
+            ui.set_width(size.x - 2.0 * CARD_PADDING);
+            let open_id = ui.id().with(("store_card", desc.id));
+            let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+            let (icon, tag) = category_label(desc.category);
+            let top = ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 18.0, theme::ACCENT_BRIGHT.gamma_multiply(0.18));
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(17.0), theme::GLOW);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(desc.display_name).size(14.0).strong().color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(tag).size(11.0).color(theme::TEXT_SECONDARY));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    let chevron = if open { ICON_EXPAND_LESS.codepoint } else { ICON_EXPAND_MORE.codepoint };
+                    ui.label(RichText::new(chevron).size(16.0).color(theme::TEXT_SECONDARY));
+                });
+            }).response;
+            let details = ui.interact(top.rect, open_id.with("toggle"), egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            details.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, open, format!("Details {}", desc.display_name)));
+            if details.clicked() {
+                open = !open;
             }
+            ui.add(egui::Label::new(RichText::new(desc.description).size(12.5).color(theme::TEXT_PRIMARY.gamma_multiply(0.8))).wrap());
             if let Some(msg) = advisory {
-                ui.label(
-                    RichText::new(format!("{} {msg}", ICON_WARNING.codepoint))
-                        .size(theme::FONT_SIZE_MONO)
-                        .color(theme::TEXT_HINT),
-                );
+                ui.label(RichText::new(msg).size(12.0).color(ADVISORY_TEXT));
             }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if let Some(label) = button_label(action) {
-                let kind = match action {
-                    CardAction::Delete => ButtonKind::Destructive,
-                    CardAction::Download | CardAction::Retry => ButtonKind::Primary,
-                    _ => ButtonKind::Secondary,
-                };
-                let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
-                let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
-                let resp = super::chip::named_with(resp, || format!("{label} {}", desc.display_name));
-                if resp.clicked() {
-                    clicked = Some(action);
-                }
+            if open {
+                card_details(ui, desc, state);
             }
-        });
-    });
+            let downloading = matches!(state, DownloadState::InProgress { .. });
+            let footer = FOOTER_HEIGHT + if downloading { BAR_HEIGHT + ui.spacing().item_spacing.y } else { 0.0 };
+            let content = ui.min_rect().height() + theme::SPACE_XS + footer;
+            natural = (content + 2.0 * CARD_PADDING).max(CARD_MIN_HEIGHT);
+            ui.add_space((size.y.max(natural) - 2.0 * CARD_PADDING - content).max(0.0) + theme::SPACE_XS);
+            if let DownloadState::InProgress { bytes_so_far, total_bytes } = *state {
+                let fraction = if total_bytes > 0 { bytes_so_far as f32 / total_bytes as f32 } else { 0.0 };
+                let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR_HEIGHT), egui::Sense::hover());
+                ui.painter().rect_filled(bar, 2.0, theme::RAIL);
+                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * fraction, BAR_HEIGHT)), 2.0, theme::ACCENT_BRIGHT);
+            }
+            let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
+            ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let (meta, color) = card_meta(desc, state, advisory.is_some());
+                ui.label(RichText::new(meta).size(12.0).color(color));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if matches!(action, CardAction::Bundled) || (installed && action == CardAction::Delete) {
+                        badge(ui, if action == CardAction::Bundled { "Ready" } else { "Installed" });
+                    }
+                    if let Some(label) = button_label(action) {
+                        let kind = match action {
+                            CardAction::Delete => ButtonKind::Ghost,
+                            CardAction::Download => ButtonKind::Primary,
+                            _ => ButtonKind::Secondary,
+                        };
+                        let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
+                        let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
+                        let resp = super::chip::named_with(resp, || format!("{label} {}", desc.display_name));
+                        if resp.clicked() {
+                            clicked = Some(action);
+                        }
+                    }
+                });
+            });
+            ui.data_mut(|d| d.insert_temp(open_id, open));
+        }));
+    (clicked, natural)
+}
 
-    clicked
+/// The footer's text: the size, or what the download is doing.
+fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (String, Color32) {
+    let size = download_mb(desc).map(|mb| format!("{mb} MB"));
+    match state {
+        DownloadState::InProgress { bytes_so_far, total_bytes } => {
+            let pct = if *total_bytes > 0 { bytes_so_far * 100 / total_bytes } else { 0 };
+            (format!("{} of {} \u{00b7} {pct}%", format_byte_size(*bytes_so_far), format_byte_size(*total_bytes)), theme::TEXT_SECONDARY)
+        }
+        DownloadState::Queued => ("Queued".into(), theme::TEXT_SECONDARY),
+        DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY),
+        DownloadState::Failed { .. } if !prunr_models::is_available(desc.id) => ("Download failed".into(), FAILED_TEXT),
+        _ => match size {
+            Some(s) => (s, if advisory { ADVISORY_TEXT } else { theme::TEXT_SECONDARY }),
+            None => ("Built-in".into(), theme::TEXT_SECONDARY),
+        },
+    }
+}
+
+/// What the name row opens: the licence, the author and the source, and
+/// why the last download failed.
+fn card_details(ui: &mut egui::Ui, desc: &ModelDescriptor, state: &DownloadState) {
+    let license = match desc.source {
+        ModelSource::OnDemand { license, .. }
+        | ModelSource::MultiPartOnDemand { license, .. }
+        | ModelSource::MultiPartBundled { license, .. } => Some(license),
+        ModelSource::Bundled => None,
+    };
+    ui.add_space(theme::SPACE_XS);
+    let line = |ui: &mut egui::Ui, key: &str, value: &str| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(key).size(12.0).color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new(value).size(12.0).color(theme::TEXT_PRIMARY));
+        });
+    };
+    match license {
+        Some(l) => {
+            line(ui, "License", l.license);
+            line(ui, "Author", l.author);
+            ui.hyperlink_to(RichText::new("Source \u{2197}").size(12.0), l.source_url);
+        }
+        None => line(ui, "License", "Bundled with Prunr"),
+    }
+    if let DownloadState::Failed { error } = state {
+        ui.label(RichText::new(format!("Last attempt: {error}")).size(12.0).color(FAILED_TEXT));
+    }
+}
+
+fn badge(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::NONE.fill(READY_FILL).corner_radius(theme::PILL_RADIUS).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+        ui.label(RichText::new(text).size(11.5).color(READY_TEXT));
+    });
 }
 
 fn button_label(action: CardAction) -> Option<&'static str> {
     match action {
-        CardAction::Bundled => Some("Built-in"),
+        CardAction::Bundled => None,
         CardAction::Download => Some("Download"),
         CardAction::Cancel => Some("Cancel"),
-        CardAction::Verifying => Some("Verifying…"),
-        CardAction::Delete => Some("Delete"),
-        CardAction::Retry => Some("Retry"),
+        CardAction::Verifying => None,
+        CardAction::Delete => Some("Remove"),
+        CardAction::Retry => Some("Try again"),
     }
 }
 
