@@ -616,6 +616,7 @@ fn cutout_with_selection(app: &mut PrunrApp, id: u64) {
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_cutout(item);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
     item.commit(StepKind::Process);
     let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
     item.commit_selection_mask(Arc::new(selection), StepKind::Stroke);
@@ -720,4 +721,24 @@ fn undo_onto_a_selection_reapplies_the_current_action() {
     app.handle_undo(&egui::Context::default());
     assert!(app.batch.items[0].selection_mask.is_some());
     assert!(app.processor.live_preview.is_pending_for(11), "the selection is re-applied as Restore");
+}
+
+/// An undo to a step another model made does not re-cut it from the
+/// cached segmentation, which would rewrite that step with this model's
+/// cut-out.
+#[test]
+fn undo_onto_another_models_step_does_not_recut_it() {
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 12);
+    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
+    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
+    app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::U2net));
+    app.batch.items[0].commit(StepKind::Process);
+    app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta));
+    // The tensor stays U2net's, as after reprocessing with another model.
+    let cache = crate::gui::worker::TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::U2net };
+    app.batch.items[0].set_cached_tensor(crate::gui::worker::CompressedTensor::from_raw(cache));
+    app.handle_undo(&egui::Context::default());
+    assert!(!app.processor.live_preview.is_pending_for(12));
 }

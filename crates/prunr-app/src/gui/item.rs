@@ -1191,6 +1191,13 @@ impl BatchItem {
         self.status == BatchStatus::Done && self.cached_tensor.is_some()
     }
 
+    /// The cached segmentation is what made the shown step: after an undo
+    /// to a step another model made (or an upscale), a re-cut from it would
+    /// rewrite that step with the wrong model's cut-out.
+    pub(crate) fn tensor_made_shown_step(&self) -> bool {
+        matches!((&self.applied_recipe, &self.cached_tensor), (Some(recipe), Some(tensor)) if recipe.inference.model == tensor.model)
+    }
+
     /// Whether the selection corrects the cut-out on screen under `model`,
     /// rather than acting on the image as a plain selection.
     pub(crate) fn corrects_cutout(&self, model: super::settings::SettingsModel) -> bool {
