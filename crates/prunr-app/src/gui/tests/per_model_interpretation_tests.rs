@@ -705,6 +705,27 @@ fn the_correction_is_built_once() {
     assert!(!std::sync::Arc::ptr_eq(&first, &erase), "another action builds anew");
 }
 
+/// The cached correction (up to three full-size planes) goes once it
+/// cannot be hit again: the selection baked, or the image off screen.
+#[test]
+fn the_correction_cache_lets_go_after_a_bake_and_off_screen() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    let style = app.selection_style();
+    let item = &mut app.batch.items[0];
+    item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let plane = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let held_edits = std::sync::Arc::clone(item.edits.as_ref().unwrap());
+    item.drop_hot_tensors();
+    assert_eq!(std::sync::Arc::strong_count(&held_edits), 2, "off screen: the cache holds no edits");
+    assert_eq!(std::sync::Arc::strong_count(&plane), 1, "off screen: the cache holds no plane");
+    item.correction_plane(style, CutoutAction::Restore).unwrap();
+    assert!(item.bake_selection(style, CutoutAction::Restore));
+    let baked = item.edits.as_ref().unwrap();
+    assert_eq!(std::sync::Arc::strong_count(baked), 1, "baked: the cache holds no plane");
+}
+
 /// A step's image shows its selection as the switch stood then; an undo
 /// back onto a live selection re-applies it as the switch stands now.
 #[test]
