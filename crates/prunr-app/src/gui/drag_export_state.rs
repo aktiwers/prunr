@@ -30,6 +30,20 @@ enum PrewriteFiles {
     Written(Vec<PathBuf>),
 }
 
+fn joined(item_id: u64, h: JoinHandle<std::io::Result<Vec<PathBuf>>>) -> Option<Vec<PathBuf>> {
+    match h.join() {
+        Ok(Ok(paths)) => Some(paths),
+        Ok(Err(err)) => {
+            tracing::warn!(item_id, %err, "writing drag files ahead failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(item_id, "drag file writer panicked");
+            None
+        }
+    }
+}
+
 pub(crate) struct DragExportState {
     /// One-shot: set by sidebar when a drag escapes the sidebar rect.
     /// Consumed by `ui()` which then invokes the platform drag crate.
@@ -85,8 +99,23 @@ impl DragExportState {
     }
 
     /// Whether `id`'s files written ahead (or being written) match `key`.
-    pub(crate) fn has_current(&self, id: u64, key: &DragKey) -> bool {
+    pub(crate) fn has_current(&mut self, id: u64, key: &DragKey) -> bool {
+        self.settle(id);
         self.prewritten.get(&id).is_some_and(|p| p.key.matches(key))
+    }
+
+    /// Collect a finished write of `id`'s files, dropping it when it
+    /// failed so the next hover writes them again.
+    fn settle(&mut self, id: u64) {
+        let finished = matches!(self.prewritten.get(&id), Some(Prewrite { files: PrewriteFiles::Writing(h), .. }) if h.is_finished());
+        if !finished {
+            return;
+        }
+        if let Some(Prewrite { key, files: PrewriteFiles::Writing(h) }) = self.prewritten.remove(&id) {
+            if let Some(paths) = joined(id, h) {
+                self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Written(paths) });
+            }
+        }
     }
 
     /// A write of `id`'s files is still running.
@@ -106,21 +135,20 @@ impl DragExportState {
     }
 
     /// `id`'s drag files if they were written ahead for `key`, waiting for
-    /// a write still running. `None` when the drag must write them now; a
-    /// stale write still running is finished first so it cannot overwrite
-    /// the fresh files afterwards.
-    pub(crate) fn take_written(&mut self, id: u64, key: &DragKey) -> Option<std::io::Result<Vec<PathBuf>>> {
+    /// a write still running. `None` when the drag must write them now
+    /// (none, stale or failed); a stale write still running is finished
+    /// first so it cannot overwrite the fresh files afterwards.
+    pub(crate) fn take_written(&mut self, id: u64, key: &DragKey) -> Option<Vec<PathBuf>> {
         let prewrite = self.prewritten.remove(&id)?;
         let paths = match prewrite.files {
-            PrewriteFiles::Written(paths) => Ok(paths),
-            PrewriteFiles::Writing(h) => h.join().unwrap_or_else(|_| Err(std::io::Error::other("drag file writer panicked"))),
+            PrewriteFiles::Written(paths) => Some(paths),
+            PrewriteFiles::Writing(h) => joined(id, h),
         };
         if !prewrite.key.matches(key) {
             return None;
         }
-        if let Ok(paths) = &paths {
-            self.prewritten.insert(id, Prewrite { key: prewrite.key, files: PrewriteFiles::Written(paths.clone()) });
-        }
+        let paths = paths?;
+        self.prewritten.insert(id, Prewrite { key: prewrite.key, files: PrewriteFiles::Written(paths.clone()) });
         Some(paths)
     }
 
