@@ -374,9 +374,14 @@ pub(crate) fn fill_at_scale(
     fit: Fit,
     mut fill: impl FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
 ) -> Result<RgbaImage, CoreError> {
+    if scale == FillScale::Full {
+        return fill(image, mask);
+    }
     let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
-        .map(|r| r.to_bbox())
-        .map(|r| (r, scale.factor((r.w, r.h), fit)))
+        .map(|r| {
+            let r = r.to_bbox();
+            (r, scale.factor((r.w, r.h), fit))
+        })
         .filter(|&(_, f)| f < 1.0)
         .collect();
     if shrunk.is_empty() {
@@ -384,15 +389,13 @@ pub(crate) fn fill_at_scale(
     }
     let mut out = image.clone();
     let mut rest = mask.clone();
+    let width = mask.width() as usize;
     for (region, factor) in shrunk {
-        let mut region_mask = GrayImage::new(mask.width(), mask.height());
-        for y in region.y..region.y + region.h {
-            for x in region.x..region.x + region.w {
-                region_mask.put_pixel(x, y, *mask.get_pixel(x, y));
-                rest.put_pixel(x, y, image::Luma([0]));
-            }
+        fill_scaled_down(&mut out, mask, region, factor, &mut fill)?;
+        for y in region.y as usize..(region.y + region.h) as usize {
+            let row = y * width + region.x as usize;
+            rest.as_mut()[row..row + region.w as usize].fill(0);
         }
-        out = fill_scaled_down(&out, &region_mask, region, factor, &mut fill)?;
     }
     if !mask_is_empty(&rest) {
         out = fill(&out, &rest)?;
@@ -400,39 +403,46 @@ pub(crate) fn fill_at_scale(
     Ok(out)
 }
 
-/// Fill `hole` (the bbox of `mask`) through `fill` at `factor` < 1: the
-/// hole and as much photo again around it, scaled down, filled, scaled
-/// back up and pasted inside the mask only.
+/// Fill the part of `mask` inside `hole` through `fill` at `factor` < 1,
+/// in place: the hole and as much photo again around it, scaled down,
+/// filled, scaled back up and pasted inside the mask only.
 ///
 /// Peak working set for a hole of side L: the crop around it (up to
-/// 2L × 2L RGBA, 64 MB at L = 2000), its fill scaled back up (the same)
-/// and the output image; the scaled copies are small (~768 px).
+/// 2L × 2L RGBA, 64 MB at L = 2000) and its fill scaled back up (the
+/// same); the scaled copies are small (~768 px).
 fn fill_scaled_down(
-    image: &RgbaImage,
+    out: &mut RgbaImage,
     mask: &GrayImage,
     hole: Bbox,
     factor: f32,
     fill: &mut impl FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
-) -> Result<RgbaImage, CoreError> {
-    let crop = mask_bbox(mask, 128, hole.w.max(hole.h) / 2).unwrap_or(hole);
+) -> Result<(), CoreError> {
+    let margin = hole.w.max(hole.h) / 2;
+    let (x0, y0) = (hole.x.saturating_sub(margin), hole.y.saturating_sub(margin));
+    let (x1, y1) = ((hole.x + hole.w + margin).min(mask.width()), (hole.y + hole.h + margin).min(mask.height()));
+    let crop = Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     let small = |side: u32| ((side as f32 * factor).round() as u32).max(1);
     let (sw, sh) = (small(crop.w), small(crop.h));
-    let crop_rgba = image::imageops::crop_imm(image, crop.x, crop.y, crop.w, crop.h).to_image();
+    let crop_rgba = image::imageops::crop_imm(out, crop.x, crop.y, crop.w, crop.h).to_image();
     let small_rgba = crate::formats::resize_rgba(&crop_rgba, sw, sh, crate::formats::ResizeFilter::Lanczos3);
     drop(crop_rgba);
-    let crop_mask = image::imageops::crop_imm(mask, crop.x, crop.y, crop.w, crop.h).to_image();
+    // Only this hole: another region's pixels in the crop are its own fill.
+    let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
+    let crop_mask = GrayImage::from_fn(crop.w, crop.h, |x, y| {
+        let (px, py) = (crop.x + x, crop.y + y);
+        if in_hole(px, py) { *mask.get_pixel(px, py) } else { image::Luma([0]) }
+    });
     // Any coverage stays a hole, so nothing of the object survives the shrink.
     let mut small_mask = crate::formats::resize_gray_lanczos3(&crop_mask, sw, sh);
     small_mask.pixels_mut().for_each(|p| p.0[0] = if p.0[0] > 0 { 255 } else { 0 });
     let small_fill = fill(&small_rgba, &small_mask)?;
     let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
-    let mut out = image.clone();
     for (x, y, m) in crop_mask.enumerate_pixels() {
         if m.0[0] >= 128 {
             out.put_pixel(crop.x + x, crop.y + y, *filled.get_pixel(x, y));
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// One LaMa session per process — see `LamaSession::get`. Tiles run
@@ -1566,7 +1576,8 @@ mod tests {
         }
         let hole = mask_bbox(&mask, 128, 0).unwrap();
         let mut seen = None;
-        let out = fill_scaled_down(&image, &mask, hole, 0.25, &mut |rgba: &RgbaImage, m: &GrayImage| {
+        let mut out = image.clone();
+        fill_scaled_down(&mut out, &mask, hole, 0.25, &mut |rgba: &RgbaImage, m: &GrayImage| {
             seen = Some((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
             Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
         }).unwrap();

@@ -75,7 +75,7 @@ impl RestoredFace {
         let mask = face_mask(false);
         let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
         let original_planes = planes(&original);
-        let restored_planes = colour_matched(planes(&restored), &original_planes, &mask);
+        let restored_planes = colour_matched(planes(&restored), &original_planes, mask);
         let low = |p: &[Vec<f32>; 3]| -> [Vec<f32>; 3] { std::array::from_fn(|c| gaussian(&p[c], FACE_SIZE, DETAIL_SIGMA)) };
         let image = |p: &[Vec<f32>; 3]| RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
             let i = (y * FACE_SIZE + x) as usize;
@@ -103,8 +103,11 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, progress: 
         .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no {key} part")));
     progress.step(Step::FindingFaces);
     let faces = detect(&mut load(&part("detector")?)?, image)?;
-    if faces.is_empty() || progress.is_cancelled() {
-        return if progress.is_cancelled() { Err(CoreError::Cancelled) } else { Ok(Vec::new()) };
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    if faces.is_empty() {
+        return Ok(Vec::new());
     }
     progress.step(Step::LoadingModel);
     let mut restorer = load(&part("restorer")?)?;
@@ -339,9 +342,15 @@ impl Default for FaceBlend {
 /// crop-local: tens of ms per face.
 pub fn compose_faces(image: &RgbaImage, faces: &[RestoredFace], blend: FaceBlend) -> RgbaImage {
     let mut out = image.clone();
+    compose_faces_into(&mut out, faces, blend);
+    out
+}
+
+/// `compose_faces` into an image the caller owns, saving the copy.
+pub fn compose_faces_into(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend) {
     let strength = blend.strength.clamp(0.0, 1.0);
     if strength == 0.0 || faces.is_empty() {
-        return out;
+        return;
     }
     let mask = face_mask(blend.hair);
     // The largest face in the photo is the one its alignment shrinks most.
@@ -350,15 +359,20 @@ pub fn compose_faces(image: &RgbaImage, faces: &[RestoredFace], blend: FaceBlend
     use rayon::prelude::*;
     let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| blend_face(face, strength)).collect();
     for (face, blended) in chosen.iter().zip(&blended) {
-        paste(&mut out, face, blended, &mask);
+        paste(out, face, blended, mask);
     }
-    out
 }
 
 /// The crop's face area, soft-edged, as 0-1 weights over the 512 crop:
 /// an ellipse from brow to chin on the FFHQ template, or with `hair` one
-/// that takes in the hair and ears.
-fn face_mask(hair: bool) -> Vec<f32> {
+/// that takes in the hair and ears. Built once per kind.
+fn face_mask(hair: bool) -> &'static [f32] {
+    static FACE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    static WITH_HAIR: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    if hair { WITH_HAIR.get_or_init(|| build_face_mask(true)) } else { FACE.get_or_init(|| build_face_mask(false)) }
+}
+
+fn build_face_mask(hair: bool) -> Vec<f32> {
     let n = FACE_SIZE as usize;
     let (cx, cy, rx, ry) = if hair { (256.0f32, 250.0f32, 225.0f32, 250.0f32) } else { (256.0, 280.0, 170.0, 215.0) };
     let hard: Vec<f32> = (0..n * n)
@@ -373,7 +387,7 @@ fn face_mask(hair: bool) -> Vec<f32> {
 
 /// Gaussian blur approximated by three box passes.
 fn gaussian(plane: &[f32], side: u32, sigma: f32) -> Vec<f32> {
-    // Three boxes of radius r have variance 3·(r² + r)/3 ≈ sigma².
+    // Three box passes of radius r have a variance of r² + r ≈ sigma².
     let r = (((12.0 * sigma * sigma / 3.0 + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as u32;
     let mut out = plane.to_vec();
     for _ in 0..3 {

@@ -132,6 +132,11 @@ impl BatchManager {
         self.items.iter().find(|b| b.id == id)
     }
 
+    /// The position of the item with `id`, for callers that index.
+    pub(crate) fn index_of(&self, id: u64) -> Option<usize> {
+        self.items.iter().position(|b| b.id == id)
+    }
+
     /// Mutable counterpart of `find_by_id`. Used by worker-event handlers
     /// that write results / status into the matching item.
     pub(crate) fn find_by_id_mut(&mut self, id: u64) -> Option<&mut BatchItem> {
