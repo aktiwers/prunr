@@ -115,8 +115,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
     // Only consume the flag when the texture is ready — with lazy decode,
     // the texture may not exist on the first frame after opening.
-    if let Some(tex) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
-        let tex_size = tex.size_vec2();
+    let frame = app.batch.selected_item()
+        .filter(|i| i.source_texture.is_some())
+        .map(|i| (i.id, i.frame_size()));
+    if let Some((item_id, tex_size)) = frame {
+        app.zoom_state.follow_frame(item_id, tex_size);
         let canvas_size = canvas_rect.size();
 
         if app.zoom_state.pending_fit_zoom {
@@ -259,8 +262,10 @@ fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, glyph: &str) {
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
     let Some(item) = app.batch.selected_item() else { return };
-    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
-    let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    if item.result_texture.is_none() && item.source_texture.is_none() {
+        return;
+    }
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
     let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
@@ -302,13 +307,10 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
 
     let Some(item) = app.batch.selected_item() else { return };
-    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
-    let img_rect = compute_img_rect(
-        canvas_rect,
-        tex.size_vec2(),
-        app.zoom_state.zoom,
-        app.zoom_state.pan_offset,
-    );
+    if item.result_texture.is_none() && item.source_texture.is_none() {
+        return;
+    }
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
 
     let Some(idx) = app.batch.selected_idx_clamped() else { return };
     let item = &app.batch.items[idx];
@@ -640,8 +642,8 @@ fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item:
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-    if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
-        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    if let Some((item, texture)) = app.batch.selected_item().and_then(|i| Some((i, i.source_texture.as_ref()?))) {
+        let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
@@ -695,7 +697,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     };
 
     let painted = display_texture.map(|texture| {
-        let tex_size = texture.size_vec2();
+        let tex_size = item.map_or(texture.size_vec2(), |i| i.frame_size());
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
         let wiggle_x = (t * 0.8).sin() * 2.0;
         let wiggle_y = (t * 1.1).cos() * 1.5;
@@ -736,11 +738,10 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let mut painted = None;
     if app.show_original {
         if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
-            // Drawn where the result is, at its size: after an upscale the
-            // original covers the same area instead of a quarter of it.
-            let frame = item.and_then(|i| i.result_texture.as_ref()).unwrap_or(texture);
-            let img_rect =
-                compute_img_rect(canvas_rect, frame.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+            // Drawn in the result's frame: after an upscale the original
+            // covers the same area instead of a quarter of it.
+            let frame = item.map_or(texture.size_vec2(), |i| i.frame_size());
+            let img_rect = compute_img_rect(canvas_rect, frame, app.zoom_state.zoom, app.zoom_state.pan_offset);
             ui.painter().image(
                 texture.id(),
                 img_rect,
@@ -757,10 +758,9 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     } else if let Some(it) = item {
         // Until the new result's texture lands, the image it replaces stays.
         let shown = it.result_texture.as_ref().or(it.held_texture())?;
-        let img_rect =
-            compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+        let img_rect = compute_img_rect(canvas_rect, it.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-        paint_backdrop(ui, img_rect, it, shown.size_vec2());
+        paint_backdrop(ui, img_rect, it, it.frame_size());
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         draw_selection(ui, app, it, img_rect);
         painted = Some(img_rect);
