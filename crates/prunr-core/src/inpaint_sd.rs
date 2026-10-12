@@ -1373,7 +1373,7 @@ fn build_part_with_ep_ladder(
             "SD inpaint requires GPU acceleration. No compatible GPU \
              execution provider is available; SD on CPU produces \
              incorrect output. Install OpenVINO Runtime (Settings → \
-             Hardware) or pick LaMa as the eraser instead.".to_string(),
+             Hardware) or pick Eraser (Big-LaMa) under Model instead.".to_string(),
         );
     }
     crate::cache::gc_stale_for_model(id, "CPU");
@@ -2130,8 +2130,8 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, free_mb: u64, resid
     Err(format!(
         "{} refused to load: only {:.1} GB RAM free, \
          {:.1} GB minimum recommended (includes {:.1} GB safety \
-         headroom). Close other apps or use LaMa instead — \
-         Settings → Eraser.",
+         headroom). Close other apps, or pick Eraser (Big-LaMa) \
+         under Model instead.",
         desc.display_name,
         free_mb as f64 / 1024.0,
         need_mb as f64 / 1024.0,
