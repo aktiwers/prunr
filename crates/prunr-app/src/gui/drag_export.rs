@@ -40,6 +40,15 @@ fn temp_dir() -> PathBuf {
     dir
 }
 
+/// The folder one image's drag files go in. Each image has its own, so
+/// two images with one file name (IMG_1.jpg from two folders) never write
+/// over each other, and the dropped files keep their plain names.
+fn item_dir(item_id: u64) -> PathBuf {
+    let dir = temp_dir().join(item_id.to_string());
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Check whether a path was created by our own drag-out (i.e. lives under prunr-drag/).
 /// Used to reject self-originated drops so our own thumbnails can't be re-ingested.
 pub(crate) fn is_self_drop(path: &Path) -> bool {
@@ -50,7 +59,15 @@ pub(crate) fn is_self_drop(path: &Path) -> bool {
 /// for: the folder holds a handful of files, and a sweep left on a thread
 /// can die with the process.
 pub(crate) fn cleanup_all() {
-    crate::fs_util::sweep_dir_files(&temp_dir());
+    let Ok(entries) = std::fs::read_dir(temp_dir()) else { return };
+    for entry in entries.flatten() {
+        remove_entry(&entry.path());
+    }
+}
+
+/// A drag file, or an image's folder of them.
+fn remove_entry(path: &Path) {
+    let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
 }
 
 /// Remove stale temp files left behind by previous sessions or crashes.
@@ -60,8 +77,6 @@ pub(crate) fn cleanup_stale() {
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let now = SystemTime::now();
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() { continue; }
         let Ok(meta) = entry.metadata() else { continue };
         let age = meta
             .modified()
@@ -69,7 +84,7 @@ pub(crate) fn cleanup_stale() {
             .and_then(|m| now.duration_since(m).ok())
             .unwrap_or(Duration::ZERO);
         if age > STALE_AGE {
-            let _ = std::fs::remove_file(&path);
+            remove_entry(&entry.path());
         }
     }
 }
@@ -271,7 +286,7 @@ fn write_layer(
     seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
     let Some(layer) = render_layer(job, kind, src, seg) else { return Ok(None) };
-    let path = temp_dir().join(make_layer_filename(&job.filename, kind));
+    let path = item_dir(job.item_id).join(make_layer_filename(&job.filename, kind));
     write_atomically(&path, |w| match layer {
         LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, w),
         // No streaming variant for Gray yet — encode_gray_png allocates
@@ -302,6 +317,7 @@ fn write_atomically(
 /// (keeping the extension so file managers recognize it).
 #[derive(Clone)]
 struct Composite {
+    item_id: u64,
     filename: String,
     result: Option<(Arc<image::RgbaImage>, super::item::ExportBg)>,
     source: ImageSource,
@@ -310,6 +326,7 @@ struct Composite {
 impl Composite {
     fn of(item: &BatchItem) -> Self {
         Self {
+            item_id: item.id,
             filename: make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode),
             result: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
             source: item.source.clone(),
@@ -317,7 +334,7 @@ impl Composite {
     }
 
     fn write(&self) -> std::io::Result<PathBuf> {
-        let path = temp_dir().join(&self.filename);
+        let path = item_dir(self.item_id).join(&self.filename);
         match &self.result {
             Some((rgba, bg)) => {
                 let baked = bg.bake(rgba);
@@ -477,6 +494,25 @@ mod tests {
             make_filename("", true, LineMode::Off),
             "image.prunr.png"
         );
+    }
+
+    /// Two images with one file name get their own drag files.
+    #[test]
+    fn two_images_with_one_name_keep_their_own_drag_files() {
+        use crate::gui::brush_state::CutoutAction;
+        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let mut a = processed_item(31, "same-name.jpg");
+        a.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))));
+        let mut b = processed_item(32, "same-name.jpg");
+        b.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))));
+        let (pa, pb) = (DragFiles::of(&a, spec).write().unwrap(), DragFiles::of(&b, spec).write().unwrap());
+        assert_ne!(pa[0], pb[0]);
+        assert_eq!(pa[0].file_name(), pb[0].file_name(), "the dropped files keep the plain name");
+        let red = image::open(&pa[0]).unwrap().to_rgba8();
+        assert_eq!(red.get_pixel(0, 0).0, [255, 0, 0, 255], "a's file is still a's");
+        for p in [&pa[0], &pb[0]] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
