@@ -11,7 +11,8 @@
 //! - strength works by frequency: up to half it brings in the restored
 //!   fine detail over the photo's own shading and shape, above half it
 //!   also takes the restored shading;
-//! - a face already as sharp as its restoration takes less of it;
+//! - a face larger than the restorer's 512 px takes its detail only as
+//!   far as that resolution reaches;
 //! - it is pasted through a soft face-shaped mask from the template, not
 //!   a feathered square that smears into hair and background.
 
@@ -56,13 +57,38 @@ pub struct Face {
     pub landmarks: [[f32; 2]; 5],
 }
 
-/// A face found and redrawn: its aligned crop of the photo, the
-/// restorer's version, and how the crop maps onto the photo.
+/// A face found and redrawn, prepared for blending at any strength: the
+/// aligned crop of the photo and the restorer's version colour-matched to
+/// it, each split into shading (`*_low`) and detail. About 3 MB per face;
+/// what a strength change does is then a per-pixel mix.
 #[derive(Clone)]
 pub struct RestoredFace {
     to_crop: Similarity,
     original: RgbImage,
     restored: RgbImage,
+    original_low: RgbImage,
+    restored_low: RgbImage,
+}
+
+impl RestoredFace {
+    fn new(to_crop: Similarity, original: RgbImage, restored: RgbImage) -> Self {
+        let mask = face_mask(false);
+        let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
+        let original_planes = planes(&original);
+        let restored_planes = colour_matched(planes(&restored), &original_planes, &mask);
+        let low = |p: &[Vec<f32>; 3]| -> [Vec<f32>; 3] { std::array::from_fn(|c| gaussian(&p[c], FACE_SIZE, DETAIL_SIGMA)) };
+        let image = |p: &[Vec<f32>; 3]| RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
+            let i = (y * FACE_SIZE + x) as usize;
+            Rgb(std::array::from_fn(|c| p[c][i].round().clamp(0.0, 255.0) as u8))
+        });
+        Self {
+            to_crop,
+            original_low: image(&low(&original_planes)),
+            restored_low: image(&low(&restored_planes)),
+            restored: image(&restored_planes),
+            original,
+        }
+    }
 }
 
 /// Find every face in `image` and redraw it with `id`'s restorer.
@@ -93,7 +119,7 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, progress: 
         let to_crop = Similarity::fit(&face.landmarks, &TEMPLATE);
         let original = warp_to_crop(image, &to_crop);
         let restored = restore(&mut restorer, &original)?;
-        out.push(RestoredFace { to_crop, original, restored });
+        out.push(RestoredFace::new(to_crop, original, restored));
     }
     progress.outer(total, total, Unit::Face);
     Ok(out)
@@ -321,9 +347,10 @@ pub fn compose_faces(image: &RgbaImage, faces: &[RestoredFace], blend: FaceBlend
     // The largest face in the photo is the one its alignment shrinks most.
     let largest = faces.iter().min_by(|a, b| a.to_crop.scale().total_cmp(&b.to_crop.scale()));
     let chosen: Vec<&RestoredFace> = if blend.largest_only { largest.into_iter().collect() } else { faces.iter().collect() };
-    for face in chosen {
-        let blended = blend_face(face, strength, &mask);
-        paste(&mut out, face, &blended, &mask);
+    use rayon::prelude::*;
+    let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| blend_face(face, strength)).collect();
+    for (face, blended) in chosen.iter().zip(&blended) {
+        paste(&mut out, face, blended, &mask);
     }
     out
 }
@@ -356,38 +383,30 @@ fn gaussian(plane: &[f32], side: u32, sigma: f32) -> Vec<f32> {
 }
 
 /// The face at `strength`, in crop space, as RGB planes.
-fn blend_face(face: &RestoredFace, strength: f32, mask: &[f32]) -> [Vec<f32>; 3] {
-    let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
-    let original = planes(&face.original);
-    let restored = colour_matched(planes(&face.restored), &original, mask);
-    let detail_take = (2.0 * strength).min(1.0) * detail_need(&original, &restored, mask);
+fn blend_face(face: &RestoredFace, strength: f32) -> [Vec<f32>; 3] {
+    let detail_take = (2.0 * strength).min(1.0) * detail_reach(face);
     let shading_take = (2.0 * strength - 1.0).max(0.0);
+    let (o, r, o_low, r_low) = (face.original.as_raw(), face.restored.as_raw(), face.original_low.as_raw(), face.restored_low.as_raw());
     std::array::from_fn(|c| {
-        let (o_low, r_low) = (gaussian(&original[c], FACE_SIZE, DETAIL_SIGMA), gaussian(&restored[c], FACE_SIZE, DETAIL_SIGMA));
-        (0..original[c].len())
+        (c..o.len())
+            .step_by(3)
             .map(|i| {
-                let low = o_low[i] + (r_low[i] - o_low[i]) * shading_take;
-                let (o_detail, r_detail) = (original[c][i] - o_low[i], restored[c][i] - r_low[i]);
+                let (o, r, o_low, r_low) = (f32::from(o[i]), f32::from(r[i]), f32::from(o_low[i]), f32::from(r_low[i]));
+                let low = o_low + (r_low - o_low) * shading_take;
+                let (o_detail, r_detail) = (o - o_low, r - r_low);
                 low + o_detail + (r_detail - o_detail) * detail_take
             })
             .collect()
     })
 }
 
-/// How much of the restored detail the face needs, 0.25-1: a face whose
-/// own fine detail already matches the restoration's takes a quarter of
-/// it, a soft one all of it.
-fn detail_need(original: &[Vec<f32>; 3], restored: &[Vec<f32>; 3], mask: &[f32]) -> f32 {
-    let energy = |planes: &[Vec<f32>; 3]| -> f32 {
-        let luma: Vec<f32> = (0..planes[0].len()).map(|i| 0.299 * planes[0][i] + 0.587 * planes[1][i] + 0.114 * planes[2][i]).collect();
-        let low = gaussian(&luma, FACE_SIZE, 1.5);
-        luma.iter().zip(&low).zip(mask).map(|((v, l), m)| (v - l).powi(2) * m).sum::<f32>()
-    };
-    let (o, r) = (energy(original), energy(restored));
-    if r <= f32::EPSILON {
-        return 0.25;
-    }
-    (1.25 * (1.0 - o / r)).clamp(0.25, 1.0)
+/// How far the restored detail reaches, 0.25-1. The restorer draws at
+/// 512 px; a face larger than that in the photo has finer detail of its
+/// own than the restoration, so it takes the restored detail only in
+/// proportion. A face's own sharpness can't decide this: an upscaler's
+/// invented edges measure as sharp as real detail.
+fn detail_reach(face: &RestoredFace) -> f32 {
+    face.to_crop.scale().clamp(0.25, 1.0)
 }
 
 /// `restored` shifted to the original's mean brightness and colour over
@@ -512,7 +531,7 @@ mod tests {
 
     fn face_of(original: RgbImage, restored: RgbImage) -> RestoredFace {
         // Crop pixel (u, v) is photo pixel (u, v) + (10, 20).
-        RestoredFace { to_crop: Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, original, restored }
+        RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, original, restored)
     }
 
     /// "Largest only" keeps the face the alignment shrinks most.
@@ -521,12 +540,23 @@ mod tests {
         let image = RgbaImage::from_pixel(1400, 700, Rgba([120, 100, 90, 255]));
         let flat = RgbImage::from_pixel(512, 512, Rgb([120, 100, 90]));
         let stripes = RgbImage::from_fn(512, 512, |x, _| if x % 2 == 0 { Rgb([160, 140, 130]) } else { Rgb([80, 60, 50]) });
-        let small = RestoredFace { to_crop: Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, original: flat.clone(), restored: stripes.clone() };
-        let big = RestoredFace { to_crop: Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, original: flat, restored: stripes };
+        let small = RestoredFace::new(Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, flat.clone(), stripes.clone());
+        let big = RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, flat, stripes);
         let out = compose_faces(&image, &[small, big], FaceBlend { strength: 1.0, largest_only: true, hair: false });
         let changed = |x: u32, y: u32| out.get_pixel(x, y) != image.get_pixel(x, y);
         assert!(changed(256, 280), "the big face");
         assert!(!changed(1000 + 128, 140), "not the small one");
+    }
+
+    /// A face twice the restorer's size in the photo takes half its
+    /// detail; one smaller takes it all.
+    #[test]
+    fn a_large_face_takes_the_restored_detail_in_proportion() {
+        let flat = RgbImage::from_pixel(512, 512, Rgb([100, 100, 100]));
+        let at = |a: f32| detail_reach(&RestoredFace::new(Similarity { a, b: 0.0, tx: 0.0, ty: 0.0 }, flat.clone(), flat.clone()));
+        assert_eq!(at(0.5), 0.5);
+        assert_eq!(at(1.6), 1.0);
+        assert_eq!(at(0.1), 0.25, "never below a quarter");
     }
 
     #[test]
