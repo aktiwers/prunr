@@ -732,7 +732,7 @@ mod tests {
         state.prewrite(9, key(&item), DragFiles::of(&item, spec(false)));
         assert!(state.has_current(9, &key(&item)));
 
-        let paths = state.take_written(9, &key(&item)).expect("written ahead").expect("written");
+        let paths = state.take_written(9, &key(&item)).expect("written ahead");
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("ahead-test.prunr.png"));
         assert!(std::fs::read(&paths[0]).expect("file").starts_with(b"\x89PNG"));
@@ -744,9 +744,30 @@ mod tests {
 
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         assert!(state.take_written(9, &key(&item)).is_none(), "stale: the drag writes anew");
-        if let Some(Ok(other_paths)) = state.take_written(10, &key(&other)) {
+        if let Some(other_paths) = state.take_written(10, &key(&other)) {
             let _ = std::fs::remove_file(&other_paths[0]);
         }
         let _ = std::fs::remove_file(&paths[0]);
+    }
+
+    /// A write ahead that failed (the photo moved, the disk filled) is
+    /// dropped: the next hover tries again and the drag writes fresh.
+    #[test]
+    fn a_failed_write_ahead_is_tried_again() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::drag_export_state::DragExportState;
+        use crate::gui::item::{BatchItem, ImageSource};
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let gone = ImageSource::Path(PathBuf::from("/nonexistent/prunr-drag-gone.png"));
+        let item = BatchItem::new(11, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new());
+        let mut state = DragExportState::new();
+        state.prewrite(11, DragKey::of(&item, spec), DragFiles::of(&item, spec));
+        while state.is_writing(11) {
+            std::thread::yield_now();
+        }
+        assert!(!state.has_current(11, &DragKey::of(&item, spec)), "a hover writes again");
+        state.prewrite(11, DragKey::of(&item, spec), DragFiles::of(&item, spec));
+        assert!(state.take_written(11, &DragKey::of(&item, spec)).is_none(), "the drag writes fresh");
     }
 }
