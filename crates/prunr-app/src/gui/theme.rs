@@ -271,8 +271,8 @@ pub const ACCENT_DISABLED: Color32 = Color32::from_rgba_premultiplied(49, 18, 57
 pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
 // Floor so the toolbar's longest configuration lays out without overlap;
 // nothing in it wraps. Measured by the `narrowest_toolbar` test: background
-// removal needs 1010, the SD eraser 960, upscale 670. Fits 1366×768 laptops.
-pub const MIN_WINDOW_SIZE: [f32; 2] = [1020.0, 540.0];
+// removal needs 1080, the SD eraser 920, upscale 670. Fits 1366×768 laptops.
+pub const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 540.0];
 
 // === Typography (sizes for egui TextStyle overrides) ===
 

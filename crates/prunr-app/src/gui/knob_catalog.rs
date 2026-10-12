@@ -48,6 +48,9 @@ pub enum StaticKnob {
 
     // Inference-level — needs worker subprocess.
     Model,
+
+    // Mask tier, appended to keep the other ordinals stable.
+    Decoration,
 }
 
 impl StaticKnob {
@@ -72,6 +75,7 @@ impl StaticKnob {
             StaticKnob::BgColor => 15,
             StaticKnob::BgImageFit => 16,
             StaticKnob::Model => 17,
+            StaticKnob::Decoration => 18,
         }
     }
 
@@ -95,6 +99,7 @@ impl StaticKnob {
         StaticKnob::BgColor,
         StaticKnob::BgImageFit,
         StaticKnob::Model,
+        StaticKnob::Decoration,
     ];
 }
 
@@ -134,6 +139,8 @@ pub enum Surface {
     Mask,
     Lines,
     Effect,
+    /// The cut-out's sticker outline and shadow.
+    Decoration,
     Background,
     /// The upscaler's Scale and Refine chips.
     Upscale,
@@ -156,7 +163,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
     use ModelRole::*;
     let role = model.role();
     match surface {
-        Surface::Mask => role == Cutout,
+        Surface::Mask | Surface::Decoration => role == Cutout,
         Surface::Lines | Surface::Effect | Surface::Background => matches!(role, Cutout | Filters),
         Surface::Upscale => role == Upscale,
         Surface::SdChips => model == SettingsModel::SdInpaint,
@@ -216,7 +223,8 @@ impl StaticKnob {
             | StaticKnob::RefineEdges
             | StaticKnob::GuidedRadius
             | StaticKnob::GuidedEpsilon
-            | StaticKnob::Feather => KnobRequirement::MaskProduced,
+            | StaticKnob::Feather
+            | StaticKnob::Decoration => KnobRequirement::MaskProduced,
 
             StaticKnob::FillStyle => KnobRequirement::SubjectPresent,
 
@@ -349,7 +357,8 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::GuidedRadius
         | StaticKnob::GuidedEpsilon
         | StaticKnob::Feather
-        | StaticKnob::FillStyle => s(MaskRerun, Nothing, LivePreviewMask, true),
+        | StaticKnob::FillStyle
+        | StaticKnob::Decoration => s(MaskRerun, Nothing, LivePreviewMask, true),
 
         StaticKnob::LineStrength
         | StaticKnob::EdgeThickness
@@ -493,6 +502,7 @@ mod tests {
             (StaticKnob::BgColor, TransparencyProduced),
             (StaticKnob::BgImageFit, TransparencyProduced),
             (StaticKnob::Model, Always),
+            (StaticKnob::Decoration, MaskProduced),
         ];
         assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
         for &(knob, req) in expected {
@@ -506,8 +516,8 @@ mod tests {
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs];
-        let cutout: &[Surface] = &[Mask, Lines, Effect, Background, Brushes, SelectionStrokes];
+        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs];
+        let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes];
         let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
@@ -728,6 +738,7 @@ mod tests {
                     _ => FillStyle::None,
                 };
             }
+            StaticKnob::Decoration => new.decoration.outline_width = base.decoration.outline_width + 4.0,
             StaticKnob::BgEffect => {
                 new.bg_effect = match base.bg_effect {
                     prunr_core::BgEffect::None => prunr_core::BgEffect::DesaturatedSource,

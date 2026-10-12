@@ -357,3 +357,22 @@ fn save_options_name_their_controls_and_follow_the_model() {
         assert_eq!(h.state().settings.export_format, prunr_core::ExportFormat::Webp);
     }
 }
+
+/// The Outline & Shadow flyout names every control, with the outline on
+/// and a Drop shadow (every row showing), and a Width change re-cuts.
+#[test]
+fn the_outline_and_shadow_flyout_names_every_control() {
+    let mut h = loaded();
+    {
+        let d = &mut h.state_mut().batch.items[0].settings.decoration;
+        d.outline_width = 6.0;
+        d.shadow = prunr_core::ShadowKind::Drop;
+    }
+    settle(&mut h);
+    click(&mut h, "Outline & Shadow");
+    super::tree_tests::assert_all_controls_named(&h, "outline and shadow");
+    let names = super::tree_tests::names(&h);
+    for expected in ["Width", "Red", "Off", "Soft", "Drop", "Opacity", "Blur", "Distance"] {
+        assert!(names.iter().any(|n| n.starts_with(expected)), "{expected} missing from {names:?}");
+    }
+}

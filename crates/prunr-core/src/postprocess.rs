@@ -39,6 +39,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, opts: &Postpro
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     apply_mask_inplace(&mut rgba, &mask);
     apply_fill_style(&mut rgba, opts.mask_settings.fill_style);
+    crate::decorate::apply_decoration(&mut rgba, &opts.mask_settings.decoration);
     rgba
 }
 
