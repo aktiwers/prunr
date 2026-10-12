@@ -1291,7 +1291,7 @@ impl Processor {
             )
             .map(|raw| {
                 let raw = Arc::new(raw);
-                let knobs = super::live_preview::UpscaleTier2Knobs::of_recipe(&recipe.upscale);
+                let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
                 let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs, None);
                 UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
             });

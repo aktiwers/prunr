@@ -2598,9 +2598,8 @@ impl PrunrApp {
         // the kept upscale run + knob snapshot. Return None if there is no
         // upscale run yet (Tier-1 must run first).
         if matches!(kind, PreviewKind::UpscaleTier2) {
-            use super::live_preview::UpscaleTier2Knobs;
             let upscale = item.kept_upscale()?.clone();
-            let knobs = UpscaleTier2Knobs::of(&item.settings);
+            let knobs = item.settings.upscale_refine();
             return Some(DispatchInputs {
                 version,
                 kind,

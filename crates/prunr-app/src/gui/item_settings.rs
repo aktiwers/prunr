@@ -299,6 +299,11 @@ impl ItemSettings {
     /// knob changes don't trigger reprocessing when the mask isn't used.
     ///
     /// `model` is app-global, not per-item — the caller provides it.
+    /// What Refine applies after the upscale model.
+    pub fn upscale_refine(&self) -> prunr_core::upscale::Refine {
+        prunr_core::upscale::Refine { sharpen: self.sharpen, sharpen_sigma: self.output_scale.sharpen_sigma(), ai_blend: self.ai_blend, color_match: self.color_match }
+    }
+
     pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;
