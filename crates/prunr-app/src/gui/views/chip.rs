@@ -609,13 +609,19 @@ pub(super) enum Part {
 /// it, while the dots are on, the full panel. One `body` draws both parts
 /// so both may edit the same settings. The canvas stays live under it and
 /// it fades while one of its sliders is held, like any flyout.
-pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, header: PanelHeader<'_>, mut body: impl FnMut(&mut Ui, Part)) {
+pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, header: PanelHeader<'_>, body: impl FnMut(&mut Ui, Part)) {
     let face: Cow<'_, str> = if g.summary.is_empty() {
         Cow::Borrowed(g.label)
     } else {
         Cow::Owned(format!("{} \u{00b7} {}", g.label, g.summary))
     };
-    let resp = tooltip(chip_button(ui, g.icon, &face, g.tuned), g.label, g.tooltip, None);
+    strip_chip_faced(ui, g, &face, more, header, body);
+}
+
+/// A `strip_chip` whose chip shows `face` instead of its label: for a
+/// chip whose name is too long to sit in the toolbar.
+pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: &str, header: PanelHeader<'_>, mut body: impl FnMut(&mut Ui, Part)) {
+    let resp = tooltip(chip_button(ui, g.icon, face, g.tuned), g.label, g.tooltip, None);
     let pop_id = egui::Id::new(("group_chip", g.id_salt));
     let expanded_id = pop_id.with("expanded");
     outline_when_open(&resp, pop_id);
