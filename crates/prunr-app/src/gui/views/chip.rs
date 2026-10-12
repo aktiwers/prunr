@@ -609,7 +609,7 @@ pub(super) enum Part {
 /// it, while the dots are on, the full panel. One `body` draws both parts
 /// so both may edit the same settings. The canvas stays live under it and
 /// it fades while one of its sliders is held, like any flyout.
-pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, mut body: impl FnMut(&mut Ui, Part)) {
+pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, header: PanelHeader<'_>, mut body: impl FnMut(&mut Ui, Part)) {
     let face: Cow<'_, str> = if g.summary.is_empty() {
         Cow::Borrowed(g.label)
     } else {
@@ -648,12 +648,116 @@ pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, mut body: im
                 ui.add_space(10.0);
                 theme::panel_frame().show(ui, |ui| {
                     ui.set_min_width(g.width);
-                    let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
+                    let reset = panel_header(ui, g.label, header, !g.tuned);
                     panel_rows(ui, |ui| body(ui, Part::Full { reset }));
                 });
             }
             ui.data_mut(|d| d.insert_temp(expanded_id, expanded));
         });
+}
+
+/// What a full panel's title row says beside its title, and what its
+/// reset is called: "Reset", or what the reset goes back to.
+#[derive(Clone, Copy)]
+pub(super) struct PanelHeader<'a> {
+    pub note: &'a str,
+    pub reset: &'a str,
+}
+
+impl PanelHeader<'_> {
+    pub const RESET: PanelHeader<'static> = PanelHeader { note: "", reset: "Reset" };
+}
+
+/// A full panel's title row: the title, the note, and the reset at the
+/// end, greyed while the group sits at its default. True on the frame
+/// the reset was clicked.
+fn panel_header(ui: &mut Ui, title: &str, header: PanelHeader<'_>, at_default: bool) -> bool {
+    let clicked = ui
+        .horizontal(|ui| {
+            ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let text = RichText::new(header.reset).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO);
+                let clicked = ui.add_enabled(!at_default, egui::Button::new(text).frame(false)).clicked();
+                if !header.note.is_empty() {
+                    ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(12.0));
+                }
+                clicked
+            })
+            .inner
+        })
+        .inner;
+    ui.add_space(theme::SPACE_XS);
+    clicked
+}
+
+/// A colour knob as a panel row: its name and a dot in the colour, which
+/// opens the picker in place under the row. True when the colour changed.
+pub(super) fn color_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
+    let open_id = ui.id().with(("color_row", label));
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+    let [r, g, b] = *rgb;
+    let dot = ui
+        .horizontal(|ui| {
+            if in_panel_rows(ui) {
+                panel_name(ui, label);
+            } else {
+                ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+            }
+            color_dot(ui, label, Color32::from_rgb(r, g, b), open)
+        })
+        .inner;
+    if dot.clicked() {
+        open = !open;
+    }
+    let mut changed = false;
+    if open {
+        ui.horizontal(|ui| {
+            if in_panel_rows(ui) {
+                ui.add_space(PANEL_NAME_WIDTH + ui.spacing().item_spacing.x);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().slider_width = RGB_PICKER_MAX_WIDTH;
+                changed = rgb_picker(ui, rgb);
+            });
+        });
+    }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    changed
+}
+
+/// A picture tile: `paint` fills a rounded swatch of `size`, the name
+/// sits under it when `caption`, and the picked one is ringed in accent.
+/// Reads as a selectable item named `name`.
+pub(super) fn swatch_tile(ui: &mut Ui, name: &str, selected: bool, size: egui::Vec2, caption: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> Response {
+    const CAPTION_HEIGHT: f32 = 18.0;
+    const TILE_RADIUS: f32 = 10.0;
+    let tile = egui::vec2(size.x + 8.0, size.y + if caption { CAPTION_HEIGHT + 6.0 } else { 0.0 });
+    let (rect, resp) = ui.allocate_exact_size(tile, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, name));
+    if ui.is_rect_visible(rect) {
+        let swatch = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + size.y / 2.0), size);
+        paint(ui.painter(), swatch);
+        let ring = if selected {
+            Some(theme::ACCENT_RING)
+        } else if resp.hovered() {
+            Some(Color32::from_white_alpha(70))
+        } else {
+            None
+        };
+        if let Some(ring) = ring {
+            ui.painter().rect_stroke(swatch.expand(1.0), TILE_RADIUS + 1.0, egui::Stroke::new(2.0, ring), egui::StrokeKind::Outside);
+        }
+        if caption {
+            ui.painter().text(
+                egui::pos2(rect.center().x, swatch.bottom() + 6.0),
+                egui::Align2::CENTER_TOP,
+                name,
+                egui::FontId::proportional(11.5),
+                if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY },
+            );
+        }
+    }
+    resp
 }
 
 /// A quick strip's slider width (the board's 72 px).
@@ -704,7 +808,7 @@ pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool
 /// "default" or "n tuned", for a group chip face.
 pub(super) fn tuned_summary(tuned: usize) -> Cow<'static, str> {
     match tuned {
-        0 => Cow::Borrowed("default"),
+        0 => Cow::Borrowed(""),
         n => Cow::Owned(format!("{n} tuned")),
     }
 }

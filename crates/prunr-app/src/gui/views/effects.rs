@@ -69,6 +69,33 @@ fn reveal_at(p: f32, order: f32) -> (f32, f32) {
 /// A `GRID × GRID` mesh over `rect` with `texture` mapped across it and
 /// each vertex coloured by `color(u, v, vertex index)`.
 pub(crate) fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, color: impl Fn(f32, f32, usize) -> Color32) {
+    paint_mesh_placed(painter, rect, texture, |p| p, color);
+}
+
+/// `rect` coloured by `color(u, v)` with its corners rounded to `radius`:
+/// the grid's corner vertices are pulled onto the arcs.
+pub(crate) fn paint_rounded_mesh(painter: &Painter, rect: Rect, radius: f32, color: impl Fn(f32, f32) -> Color32) {
+    paint_mesh_placed(painter, rect, TextureId::default(), |p| round_into(rect, radius, p), |u, v, _| color(u, v));
+}
+
+/// `p` moved onto the rounded rect's edge when it lies outside a corner arc.
+fn round_into(rect: Rect, radius: f32, p: Pos2) -> Pos2 {
+    let center = Pos2::new(
+        p.x.clamp(rect.left() + radius, rect.right() - radius),
+        p.y.clamp(rect.top() + radius, rect.bottom() - radius),
+    );
+    let d = p - center;
+    let len = d.length();
+    if len > radius { center + d * (radius / len) } else { p }
+}
+
+fn paint_mesh_placed(
+    painter: &Painter,
+    rect: Rect,
+    texture: TextureId,
+    place: impl Fn(Pos2) -> Pos2,
+    color: impl Fn(f32, f32, usize) -> Color32,
+) {
     let mut mesh = Mesh::with_texture(texture);
     mesh.reserve_vertices((GRID + 1) * (GRID + 1));
     mesh.reserve_triangles(2 * GRID * GRID);
@@ -78,7 +105,7 @@ pub(crate) fn paint_mesh(painter: &Painter, rect: Rect, texture: TextureId, colo
             let (u, v) = (i as f32 / GRID as f32, j as f32 / GRID as f32);
             let uv = if texture == TextureId::default() { WHITE_UV } else { Pos2::new(u, v) };
             let index = mesh.vertices.len();
-            mesh.vertices.push(Vertex { pos: rect.lerp_inside(egui::vec2(u, v)), uv, color: color(u, v, index) });
+            mesh.vertices.push(Vertex { pos: place(rect.lerp_inside(egui::vec2(u, v))), uv, color: color(u, v, index) });
         }
     }
     for j in 0..n {
@@ -158,6 +185,16 @@ pub(crate) fn paint_working_frame(painter: &Painter, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rounded_mesh_pulls_only_its_corners_in() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(60.0, 40.0));
+        let corner = round_into(rect, 10.0, Pos2::ZERO);
+        assert!(((corner - Pos2::new(10.0, 10.0)).length() - 10.0).abs() < 1e-4, "the corner lands on its arc");
+        for p in [Pos2::new(30.0, 0.0), Pos2::new(0.0, 20.0), Pos2::new(30.0, 20.0), Pos2::new(60.0, 40.0 - 10.0)] {
+            assert_eq!(round_into(rect, 10.0, p), p, "{p:?} stays put");
+        }
+    }
 
     #[test]
     fn a_breath_rises_and_settles_between_zero_and_one() {
