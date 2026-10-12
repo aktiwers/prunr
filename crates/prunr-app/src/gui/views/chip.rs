@@ -646,10 +646,35 @@ pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice
     changed
 }
 
-/// On/off row inside a popover.
+/// On/off row inside a popover: the label, and the board's switch at the
+/// row's end.
 pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
-    let changed = ui.checkbox(value, label).changed();
+    let changed = ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| switch(ui, label, value)).inner
+    }).inner.changed();
     ChipChange { changed, commit: changed }
+}
+
+/// The board's switch: a 34×20 pill, purple when on, with a white knob
+/// that slides across. Reads as a checkbox named `name` to the tree.
+pub(super) fn switch(ui: &mut Ui, name: &str, on: &mut bool) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(34.0, 20.0), egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, name));
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let track = theme::RAIL.lerp_to_gamma(theme::ACCENT_BRIGHT, t);
+        let track = if resp.hovered() { track.lerp_to_gamma(Color32::WHITE, 0.06) } else { track };
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::CornerRadius::same(theme::PILL_RADIUS), if ui.is_enabled() { track } else { track.gamma_multiply(0.5) });
+        let knob_x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
+        painter.circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, Color32::WHITE);
+    }
+    resp
 }
 
 /// The hue wheel unrolled, with the hues within `tolerance` degrees of
