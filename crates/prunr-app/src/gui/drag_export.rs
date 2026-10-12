@@ -9,7 +9,8 @@
 //! Temp file lifecycle:
 //! - Single subdirectory under `std::env::temp_dir()/prunr-drag/`.
 //! - Filenames derived from source (e.g. `sunset.prunr.png`, `sunset-lines.png`).
-//! - Not deleted at drag end — receiving apps may read async.
+//! - Not deleted at drag end — receiving apps may read async. Files written
+//!   ahead of a drag (on hover) stay too, so hovering again writes nothing.
 //! - Stale cleanup (>10 min old) runs at app start.
 
 use std::path::{Path, PathBuf};
@@ -45,9 +46,11 @@ pub(crate) fn is_self_drop(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == DRAG_SUBDIR)
 }
 
-/// Remove ALL temp drag files. Called on graceful app exit.
+/// Remove ALL temp drag files. Called on graceful app exit, and waited
+/// for: the folder holds a handful of files, and a sweep left on a thread
+/// can die with the process.
 pub(crate) fn cleanup_all() {
-    crate::fs_util::sweep_dir_files_async(temp_dir());
+    crate::fs_util::sweep_dir_files(&temp_dir());
 }
 
 /// Remove stale temp files left behind by previous sessions or crashes.
@@ -674,8 +677,15 @@ mod tests {
         assert!(std::fs::read(&paths[0]).expect("file").starts_with(b"\x89PNG"));
         assert!(state.take_written(9, &key(&item)).is_some(), "kept for the next drag");
 
+        let other = processed_item(10, "ahead-other.jpg");
+        state.prewrite(10, key(&other), DragFiles::of(&other, false, style, CutoutAction::Restore));
+        assert!(state.has_current(9, &key(&item)), "hovering another image keeps these: no rewrite on return");
+
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         assert!(state.take_written(9, &key(&item)).is_none(), "stale: the drag writes anew");
+        if let Some(Ok(other_paths)) = state.take_written(10, &key(&other)) {
+            let _ = std::fs::remove_file(&other_paths[0]);
+        }
         let _ = std::fs::remove_file(&paths[0]);
     }
 }

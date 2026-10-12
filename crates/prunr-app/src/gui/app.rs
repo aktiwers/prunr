@@ -2236,7 +2236,6 @@ impl PrunrApp {
         let Some(id) = self.drag_export.due(std::time::Instant::now()) else { return };
         let Some(idx) = self.batch.items.iter().position(|i| i.id == id) else { return };
         let targets = self.batch.drag_targets(idx);
-        self.drag_export.keep_only(&targets);
         let (split, style, action) = (self.saves_layers(), self.selection_style(), self.settings.brush.cutout_action);
         for id in targets {
             let Some(item) = self.batch.find_by_id(id) else { continue };

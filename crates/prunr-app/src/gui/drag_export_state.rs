@@ -47,8 +47,8 @@ pub(crate) struct DragExportState {
     /// The thumbnail under the pointer, since when, and whether it is
     /// pressed: a drag may follow, so its files are written ahead.
     hover: Option<(u64, Instant, bool)>,
-    /// Files written ahead for the thumbnails a drag would carry, so the
-    /// drag starts without encoding on the UI thread.
+    /// Files written ahead, kept per image until it changes so hovering
+    /// it again writes nothing; the drag folder is emptied at exit.
     prewritten: HashMap<u64, Prewrite>,
 }
 
@@ -100,11 +100,6 @@ impl DragExportState {
         }
         let handle = std::thread::spawn(move || files.write());
         self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Writing(handle) });
-    }
-
-    /// Forget files written ahead for items a drag would no longer carry.
-    pub(crate) fn keep_only(&mut self, ids: &[u64]) {
-        self.prewritten.retain(|id, _| ids.contains(id));
     }
 
     /// `id`'s drag files if they were written ahead for `key`, waiting for
