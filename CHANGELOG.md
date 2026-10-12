@@ -18,6 +18,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
 - **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
+- **Outline & Shadow** for cut-outs: a sticker outline (width, color, round corners that follow soft hair edges) and a Soft or Drop shadow (opacity, blur, distance), under the subject, in the preview, Save and drag-out. `--outline PX[:HEX]` and `--shadow soft|drop` on the command line.
+- **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
@@ -56,7 +58,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The Model picker shows in the empty window, and its last row opens the Model Store (which left the Help menu).
 - Reset to defaults keeps your presets, licence acceptances, background pictures and model, and the shipped hotkeys apply at once.
 - The Live preview switch is gone: changes always preview.
-- The window can be made narrower: 1020 px minimum, down from 1100.
+- The window can be made narrower: 1080 px minimum, down from 1100.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
 - The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
 
@@ -94,6 +96,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - An upscale uses every core whatever Parallel jobs is set to.
 - A refused or failed erase no longer leaves the app busy; switching the SD eraser between Fast and Quality with Keep loaded on no longer runs out of memory.
 - Cmd+S works whenever the Save button shows; the sidebar's tick, delete and save are real buttons.
+- `prunr a.jpg -o b.png` writes `b.png` (it wrote into a folder `b.png/` and failed), and outside a terminal each result and error prints a line instead of going to an invisible spinner.
 - With No model, Process never runs a cut-out: an image left on Sketch Subject switches to Whole photo, and a batch takes the filter path whenever the shown image has no lines.
 - Smooth softens large photos too (it blurred at full size, which shrank to nothing at the size the line detector reads), and the line detector's dots in the photo's corners are gone.
 - Lines no longer mix modes: in Full a Pre-filter change no longer produces a subject outline, and going Full → Off → Subject traces the subject again instead of reusing lines from the whole photo.
