@@ -144,8 +144,8 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
     }
 }
 
-fn default_feather() -> f32 { 4.0 }
-fn default_grow() -> f32 { 2.0 }
+fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
+fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
 /// Fast's guidance; LCM output degrades above 2.

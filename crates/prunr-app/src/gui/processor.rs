@@ -624,13 +624,9 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         rayon::spawn(move || {
-            let raw_mask = correction.region_mask(image.width(), image.height());
-            // Pre-process: grow/erode the painted area before LaMa runs.
-            let mask = if tuning.grow_px != 0.0 {
-                prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
-            } else {
-                raw_mask
-            };
+            let mask = prunr_core::inpaint_blend::fill_region(
+                &correction.region_mask(image.width(), image.height()), tuning.grow_px, tuning.feather_px,
+            );
             // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
             let sd_req = None;
             let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &progress);
@@ -799,12 +795,9 @@ impl Processor {
                 });
             };
             if cancelled() { send_cancelled(); return; }
-            let raw_mask = correction.region_mask(image.width(), image.height());
-            let mask = if tuning.grow_px != 0.0 {
-                prunr_core::inpaint::grow_mask(&raw_mask, tuning.grow_px.round() as i32)
-            } else {
-                raw_mask
-            };
+            let mask = prunr_core::inpaint_blend::fill_region(
+                &correction.region_mask(image.width(), image.height()), tuning.grow_px, tuning.feather_px,
+            );
             let sd_req = match tuning.backend {
                 prunr_models::ModelId::SdV15InpaintFp16
                 | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
