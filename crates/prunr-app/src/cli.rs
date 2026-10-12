@@ -1032,6 +1032,23 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 mod tests {
     use clap::Parser;
 
+    /// Help › Command-line reference lists every flag `prunr --help`
+    /// shows, so a new or renamed flag cannot leave it behind.
+    #[test]
+    fn the_gui_reference_names_every_visible_flag() {
+        use clap::CommandFactory;
+        let text = include_str!("gui/views/cli_help.rs");
+        let missing: Vec<String> = super::Cli::command()
+            .get_arguments()
+            .filter(|a| !a.is_hide_set())
+            .filter_map(|a| a.get_long())
+            .filter(|long| !["help", "version"].contains(long))
+            .map(|long| format!("--{long}"))
+            .filter(|flag| !text.contains(&format!("\"{flag}")))
+            .collect();
+        assert!(missing.is_empty(), "missing from the reference: {missing:?}");
+    }
+
     #[test]
     fn bg_effect_reads_blur_with_a_radius_and_bw() {
         use super::parse_bg_effect;
