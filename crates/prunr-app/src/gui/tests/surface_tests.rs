@@ -297,3 +297,33 @@ fn the_upscale_surfaces_name_every_control() {
         assert_all_controls_named(&h, &format!("{chip} on an upscaler"));
     }
 }
+
+/// The SD eraser's Quality and Prompt popovers and Advanced flyout name
+/// every control, the prompts included.
+#[test]
+fn the_sd_eraser_surfaces_name_every_control() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    for (chip, expect) in [("Quality", "Fast"), ("Prompt", "Negative prompt"), ("Advanced", "Guidance")] {
+        let mut h = loaded();
+        h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
+        settle(&mut h);
+        click(&mut h, chip);
+        assert!(egui::Popup::is_any_open(&h.ctx), "{chip} opened");
+        let names = names(&h);
+        assert!(names.iter().any(|n| n.starts_with(expect)), "{chip}: {expect} shown in {names:?}");
+        assert_all_controls_named(&h, &format!("{chip} on the SD eraser"));
+    }
+}
+
+/// Quality is a set-and-go popover: picking one closes it.
+#[test]
+fn picking_a_quality_closes_its_popover() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
+    h.state_mut().settings.brush.sd_scheduler = crate::gui::brush_state::SdScheduler::DpmPlusPlus2MKarras;
+    settle(&mut h);
+    click(&mut h, "Quality");
+    let quality = super::tree_tests::names(&h).into_iter().find(|n| n.starts_with("Quality") && n != "Quality").expect("the Quality row");
+    click(&mut h, &quality);
+    assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes it");
+}
