@@ -193,6 +193,12 @@ pub(crate) enum Engine {
     Upscale,
 }
 
+/// The step an undo goes back to, and its image once unpacked.
+pub(crate) struct WarmStep {
+    step: super::timeline::StoredImage,
+    pub(crate) image: Option<Arc<image::RgbaImage>>,
+}
+
 pub(crate) struct BatchItem {
     pub(crate) id: u64,
     pub(crate) filename: String,
@@ -228,6 +234,10 @@ pub(crate) struct BatchItem {
     /// The upscale under way's finished tiles, small, each in its square
     /// of a preview of the whole image.
     pub(crate) tile_preview: Option<egui::TextureHandle>,
+    /// The previous step's image, unpacked off the UI thread and held so
+    /// it stays unpacked: an undo shows it without decoding first. Costs
+    /// one image of RAM.
+    pub(crate) warm_previous: Arc<std::sync::Mutex<Option<WarmStep>>>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -498,6 +508,31 @@ impl BatchItem {
         self.unpark_result();
         let state = self.snapshot(kind);
         self.timeline.push(state);
+        self.warm_previous_step();
+    }
+
+    /// Unpack the previous step's image on a worker and hold it; drop
+    /// whatever was held for an older step.
+    fn warm_previous_step(&self) {
+        let stored = self.timeline.previous().and_then(|s| s.result.clone());
+        let slot = Arc::clone(&self.warm_previous);
+        let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match stored {
+            Some(stored) if held.as_ref().is_some_and(|w| Arc::ptr_eq(&w.step, &stored)) => {}
+            Some(stored) => {
+                *held = Some(WarmStep { step: Arc::clone(&stored), image: None });
+                drop(held);
+                std::thread::spawn(move || {
+                    let image = stored.load();
+                    let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // A newer step may have taken the slot meanwhile.
+                    if let Some(w) = held.as_mut().filter(|w| Arc::ptr_eq(&w.step, &stored)) {
+                        w.image = image;
+                    }
+                });
+            }
+            None => *held = None,
+        }
     }
 
     /// Fold the working copy into the shown step: a job it started landed.
@@ -604,6 +639,7 @@ impl BatchItem {
         self.unpark_result();
         let undone = self.timeline.undo()?;
         self.restore();
+        self.warm_previous_step();
         Some(undone)
     }
 
@@ -612,6 +648,7 @@ impl BatchItem {
         self.unpark_result();
         let redone = self.timeline.redo()?;
         self.restore();
+        self.warm_previous_step();
         Some(redone)
     }
 
@@ -983,6 +1020,7 @@ impl BatchItem {
             reveal: None,
             subject: None,
             tile_preview: None,
+            warm_previous: Arc::default(),
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
@@ -1130,6 +1168,26 @@ mod tests {
         item.tile_preview = Some(preview);
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         assert!(item.tile_preview.is_none(), "a new run starts clear");
+    }
+
+    /// The step an undo goes back to is kept unpacked, so undo never waits
+    /// on the UI thread for it: once the warm-up lands, reading it back is
+    /// the very image held, not a fresh decode.
+    #[test]
+    fn the_step_undo_returns_to_stays_unpacked() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))));
+        item.commit(StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))));
+        item.commit(StepKind::Adjust);
+        let warm = (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            item.warm_previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|w| w.image.clone())
+        });
+        let warm = warm.expect("the previous step warms up");
+        assert_eq!(warm.get_pixel(0, 0).0, [1, 2, 3, 255]);
+        let back = item.timeline.previous().and_then(|s| s.result.as_ref()).and_then(|r| r.load()).expect("previous result");
+        assert!(Arc::ptr_eq(&warm, &back), "undo reads the held image");
     }
 
     /// A cut-out made from an edited photo (an object erased first) gets
