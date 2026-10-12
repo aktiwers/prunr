@@ -114,18 +114,35 @@ fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
     format!("{}-{}.png", source_stem(source_filename), kind.suffix())
 }
 
-fn decode_source(item: &BatchItem) -> Option<DynamicImage> {
-    item.source.decode()
-        .map_err(|err| tracing::warn!(item_id = item.id, %err, "split drag-out: source"))
-        .ok()
+/// What the layers are built from, so they match the canvas: the image
+/// the cut-out ran on (an erase or earlier result included) and the
+/// selection the re-cut applies.
+pub(crate) struct LayerSource {
+    original: DynamicImage,
+    correction: Option<std::sync::Arc<prunr_core::selection::MaskArtifact>>,
+}
+
+impl LayerSource {
+    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle) -> Option<Self> {
+        let start = item.run_input(super::item::Engine::Segment).or_else(|| item.source_rgba.clone());
+        let original = match start {
+            Some(rgba) => DynamicImage::ImageRgba8((*rgba).clone()),
+            None => item.source.decode()
+                .map_err(|err| tracing::warn!(item_id = item.id, %err, "layer export: source"))
+                .ok()?,
+        };
+        Some(Self { original, correction: item.correction_plane(style) })
+    }
 }
 
 fn render_layer(
     item: &BatchItem,
     kind: LayerKind,
-    original: &DynamicImage,
+    src: &LayerSource,
     seg: Option<&SegBundle>,
 ) -> Option<LayerOutput> {
+    let original = &src.original;
+    let correction = src.correction.as_deref();
     let item_id = item.id;
     match kind {
         LayerKind::Subject => {
@@ -139,7 +156,7 @@ fn render_layer(
             };
             let rgba = prunr_core::postprocess_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
-                original, &prunr_core::PostprocessOpts::new(&mask, seg.model),
+                original, &prunr_core::PostprocessOpts::new(&mask, seg.model).with_correction(correction),
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "subject layer postprocess"))
                 .ok()?;
@@ -155,7 +172,7 @@ fn render_layer(
             let seg = seg?;
             let gray = prunr_core::tensor_to_mask_from_flat(
                 &seg.data, seg.height as usize, seg.width as usize,
-                original, &prunr_core::PostprocessOpts::new(&item.settings.mask_settings(), seg.model),
+                original, &prunr_core::PostprocessOpts::new(&item.settings.mask_settings(), seg.model).with_correction(correction),
             )
                 .map_err(|err| tracing::warn!(item_id, %err, "mask layer reshape"))
                 .ok()?;
@@ -174,10 +191,10 @@ enum LayerOutput {
 fn write_layer(
     item: &BatchItem,
     kind: LayerKind,
-    original: &DynamicImage,
+    src: &LayerSource,
     seg: Option<&SegBundle>,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(layer) = render_layer(item, kind, original, seg) else { return Ok(None) };
+    let Some(layer) = render_layer(item, kind, src, seg) else { return Ok(None) };
     let path = temp_dir().join(make_layer_filename(&item.filename, kind));
     let file = std::fs::File::create(&path)?;
     let mut w = std::io::BufWriter::new(file);
@@ -232,22 +249,25 @@ pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
 /// (subject / lines / mask). Layers whose underlying tensor isn't cached are
 /// skipped; if all are missing the path falls back to composite so an
 /// unprocessed drag still lands a file.
-pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result<Vec<PathBuf>> {
+pub(crate) fn prepare_for_drag(
+    item: &BatchItem,
+    split: bool,
+    style: super::background_io::SelectionStyle,
+) -> std::io::Result<Vec<PathBuf>> {
     if !split {
         return Ok(vec![prepare(item)?]);
     }
 
-    // Decode source + decompress seg tensor once — Subject+Mask share seg,
-    // Lines uses the edge tensor independently. Avoids a 4K decode 3× on
-    // drag completion.
-    let Some(original) = decode_source(item) else {
+    // One source image + one seg decompress — Subject and Mask share the
+    // seg, Lines uses the edge tensor independently.
+    let Some(src) = LayerSource::of(item, style) else {
         return Ok(vec![prepare(item)?]);
     };
     let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
 
     let paths: Vec<PathBuf> = LayerKind::ALL.iter()
         .copied()
-        .filter_map(|k| write_layer(item, k, &original, seg.as_ref()).transpose())
+        .filter_map(|k| write_layer(item, k, &src, seg.as_ref()).transpose())
         .collect::<std::io::Result<Vec<_>>>()?;
 
     if paths.is_empty() {
@@ -264,13 +284,13 @@ pub(crate) fn prepare_for_drag(item: &BatchItem, split: bool) -> std::io::Result
 /// Empty when no cached tensors are available (item never processed, or
 /// caches evicted under memory pressure) — callers should fall back to the
 /// composite PNG in that case.
-pub(crate) fn render_layer_bytes(item: &BatchItem) -> Vec<(String, Vec<u8>)> {
-    let Some(original) = decode_source(item) else { return Vec::new() };
+pub(crate) fn render_layer_bytes(item: &BatchItem, style: super::background_io::SelectionStyle) -> Vec<(String, Vec<u8>)> {
+    let Some(src) = LayerSource::of(item, style) else { return Vec::new() };
     let seg = item.cached_tensor.as_ref().and_then(|ct| ct.bundle());
     LayerKind::ALL.iter()
         .copied()
         .filter_map(|kind| {
-            let layer = render_layer(item, kind, &original, seg.as_ref())?;
+            let layer = render_layer(item, kind, &src, seg.as_ref())?;
             // Save-to-folder caller (`app.rs`) collects these bytes and
             // writes them via `fs::write`; encoding to `Vec<u8>` here is
             // unavoidable on this branch because the caller wants owned
@@ -369,7 +389,7 @@ mod tests {
             ItemSettings::default(),
             String::new(),
         );
-        let blank = DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10));
+        let blank = LayerSource { original: DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10)), correction: None };
         for kind in LayerKind::ALL {
             assert!(render_layer(&item, kind, &blank, None).is_none());
         }
@@ -399,12 +419,42 @@ mod tests {
         item.cached_edge_tensors = CompressedEdgeTensors::from_raw(raw);
         let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
 
-        let Some(LayerOutput::Rgba(layer)) = render_layer(&item, LayerKind::Lines, &photo, None) else {
+        let src = LayerSource { original: photo.clone(), correction: None };
+        let Some(LayerOutput::Rgba(layer)) = render_layer(&item, LayerKind::Lines, &src, None) else {
             panic!("the Lines layer renders from the cached lines");
         };
         let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings());
         assert_eq!(layer.as_raw(), canvas.as_raw());
         assert_eq!(layer.get_pixel(8, 8).0[..3], [255, 0, 0], "Fine lines draw in the fine color");
     }
+
+    /// Layers show what the canvas shows: a restore stroke is in the mask
+    /// and subject, and the subject's colors come from the image the
+    /// cut-out ran on (an erase before it included), not the original file.
+    #[test]
+    fn layers_carry_the_brush_corrections_and_the_cut_out_s_start_image() {
+        use crate::gui::item::{BatchItem, ImageSource};
+        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use std::sync::Arc;
+
+        let (w, h) = (16u32, 16u32);
+        let mut item = BatchItem::new(1, "x.png".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (w, h), ItemSettings::default(), String::new());
+        let all_background = vec![-10.0_f32; 64];
+        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: all_background, height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        let mut cells = vec![0i8; (w * h) as usize];
+        cells[(5 * w + 5) as usize] = prunr_core::selection::FULL;
+        let restore = Arc::new(prunr_core::selection::MaskArtifact::from_cells(w, h, cells));
+        let erased = Arc::new(image::RgbaImage::from_pixel(w, h, image::Rgba([7, 8, 9, 255])));
+        let src = LayerSource { original: DynamicImage::ImageRgba8((*erased).clone()), correction: Some(restore) };
+        let seg = item.cached_tensor.as_ref().and_then(|t| t.bundle());
+
+        let Some(LayerOutput::Gray(mask)) = render_layer(&item, LayerKind::Mask, &src, seg.as_ref()) else { panic!("mask layer") };
+        assert_eq!(mask.get_pixel(5, 5)[0], 255, "the restored pixel is in the mask");
+        assert_eq!(mask.get_pixel(9, 9)[0], 0, "the rest stays out");
+        let Some(LayerOutput::Rgba(subject)) = render_layer(&item, LayerKind::Subject, &src, seg.as_ref()) else { panic!("subject layer") };
+        assert_eq!(subject.get_pixel(5, 5).0, [7, 8, 9, 255], "the subject is cut from the image the cut-out ran on");
+    }
+
 }
 
