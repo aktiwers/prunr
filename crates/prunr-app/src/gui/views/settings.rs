@@ -50,6 +50,7 @@ pub(crate) struct HardwareSectionContext {
     pub install_in_progress: bool,
     pub install_status_text: Option<String>,
     pub active_provider: String,
+    pub ram_safety_margin_gb: f32,
 }
 
 /// View-layer intent the General tab returns so platform side effects
@@ -91,6 +92,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 install_status_text: app.runtime_install.as_ref()
                                     .map(|p| p.last_event.status_text()),
                                 active_provider: app.settings.active_backend.clone(),
+                                ram_safety_margin_gb: app.settings.ram_safety_margin_gb,
                             };
                             render_tab_general(ui, &mut app.settings, &hw_ctx)
                         }
@@ -219,21 +221,21 @@ fn render_hardware_section(
                 theme::TEXT_SECONDARY);
         });
 
-    // SD-specific verdict on its own line, color-coded so it pops.
-    let sd_working_set: u64 = 7 * 1024 * 1024 * 1024;
-    let verdict = hardware::ram_verdict(sd_working_set, avail_ram);
-    let (color, text) = match verdict {
-        hardware::RamVerdict::Comfortable => (
+    // The same rule as the gate an erase passes, with the user's margin.
+    use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
+    let margin_mb = (ctx.ram_safety_margin_gb.max(0.0) * 1024.0) as u64;
+    let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), margin_mb) {
+        SdRamFit::Full => (
             egui::Color32::from_rgb(0x6c, 0xd1, 0x6c),
-            "SD 1.5: comfortable headroom",
+            "SD 1.5: enough memory free",
         ),
-        hardware::RamVerdict::Tight => (
+        SdRamFit::TilesOnly => (
             egui::Color32::from_rgb(0xe1, 0xb3, 0x4e),
-            "SD 1.5: tight — close other apps before running",
+            "SD 1.5: runs, but tall regions are filled in tiles. Close other apps for one pass",
         ),
-        hardware::RamVerdict::Insufficient => (
+        SdRamFit::Refused => (
             egui::Color32::from_rgb(0xd8, 0x6e, 0x6e),
-            "SD 1.5: insufficient — try Big-LaMa instead",
+            "SD 1.5: not enough memory free. Close other apps or use Big-LaMa",
         ),
     };
     ui.add_space(theme::SPACE_XS);
