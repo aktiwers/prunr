@@ -254,6 +254,12 @@ pub fn process_inpaint_with(
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
     use crate::progress::{Step, TileRect, Unit};
+    // The other quality's bundle goes before the RAM gate counts it: it
+    // would be dropped on load anyway, and kept-loaded it filled RAM.
+    drop_other_bundles(
+        &mut sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+        &(id, req.tuning.session_key()),
+    );
     check_ram_for(id, &mut req.tuning).map_err(CoreError::Inference)?;
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
@@ -1007,6 +1013,28 @@ pub(crate) fn sweep_idle<K: std::hash::Hash + Eq, T>(
     before - cache.len()
 }
 
+/// Release every cached bundle but `keep`'s, pinned or not.
+fn drop_other_bundles<K: std::hash::Hash + Eq, T>(cache: &mut HashMap<K, CacheEntry<T>>, keep: &K) {
+    cache.retain(|k, _| k == keep);
+}
+
+/// The cache entry for `key`, made with `make` when missing, after
+/// dropping every other entry: one SD bundle is resident at a time, so
+/// "keep loaded" holds the eraser in use, not each one used before.
+/// A dropped bundle a run still holds lives until that run ends.
+fn admit<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, CacheEntry<T>>,
+    key: K,
+    make: impl FnOnce() -> T,
+    now: Instant,
+    pin: bool,
+) -> &mut CacheEntry<T> {
+    drop_other_bundles(cache, &key);
+    let entry = cache.entry(key).or_insert_with(|| CacheEntry::new(make(), now));
+    entry.pinned = pin;
+    entry
+}
+
 /// Background sweeper interval. 60 s gives reclaim within ~1 minute of
 /// the idle threshold without burning CPU; the sweep itself is a single
 /// HashMap::retain over <10 entries so it's free.
@@ -1064,9 +1092,7 @@ impl SdSession {
                     "SD: released idle session bundle(s)",
                 );
             }
-            let entry = guard.entry((id, key.clone()))
-                .or_insert_with(|| CacheEntry::new(Arc::new(std::sync::OnceLock::new()), now));
-            entry.pinned = pin;
+            let entry = admit(&mut guard, (id, key.clone()), || Arc::new(std::sync::OnceLock::new()), now, pin);
             // Don't refresh last_used when the slot already holds an
             // Err — otherwise a sticky build failure would keep
             // refreshing its idle timer on every retry and never
@@ -3060,6 +3086,21 @@ mod tests {
     /// seconds old — `Instant::now() - 600 s` then panics with an overflow.
     fn sweep_now() -> Instant {
         Instant::now() + Duration::from_secs(3600)
+    }
+
+    /// One SD bundle is resident at a time: "keep loaded" pins the
+    /// eraser, not every bundle it has used. Switching Fast to Quality
+    /// with both pinned held two 2 GB bundles and swapped the machine.
+    #[test]
+    fn admitting_a_bundle_drops_the_other_ones_pinned_or_not() {
+        let now = Instant::now();
+        let mut cache: HashMap<&str, CacheEntry<u8>> = HashMap::new();
+        admit(&mut cache, "fast", || 1, now, true);
+        admit(&mut cache, "quality", || 2, now, true);
+        assert_eq!(cache.keys().copied().collect::<Vec<_>>(), vec!["quality"]);
+        assert!(cache["quality"].pinned);
+        admit(&mut cache, "quality", || 9, now, false);
+        assert_eq!(cache["quality"].value, 2, "the resident bundle is reused, not rebuilt");
     }
 
     #[test]
