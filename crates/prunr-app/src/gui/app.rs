@@ -172,9 +172,6 @@ impl PrunrApp {
         visuals.widgets.open.bg_stroke = subtle; // ComboBox "open" state
         visuals.window_stroke = subtle;
         visuals.error_fg_color = theme::DESTRUCTIVE;
-        // Selected choices (Restore / Erase, shapes, lists) wear the accent
-        // everywhere, the tool strip included, not egui's blue.
-        visuals.selection.bg_fill = theme::ACCENT;
         cc.egui_ctx.set_visuals(visuals);
 
         // Override font sizes and suppress debug red-border warnings
@@ -191,6 +188,7 @@ impl PrunrApp {
             egui::TextStyle::Monospace,
             egui::FontId::monospace(theme::FONT_SIZE_MONO),
         );
+        theme::apply_building_blocks(&mut style.visuals, &mut style.spacing);
         // Disable debug red-border warnings that fire on layout shifts
         // (e.g. sidebar appearing after file-open changes widget rects between frames).
         #[cfg(debug_assertions)]
