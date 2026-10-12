@@ -230,7 +230,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         );
         let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
         let painter = ui.painter();
-        let (shift_hint, alt_hint) = super::shortcuts::modifier_hints(app.settings.model.role());
+        let (shift_hint, alt_hint) = super::shortcuts::MODIFIER_HINTS;
         let shift_color = if shift { active_color } else { base_color };
         let shift_rect = painter.text(
             pos, egui::Align2::LEFT_TOP, shift_hint, font.clone(), shift_color,
@@ -272,7 +272,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
     let stamp = if selection_strokes {
         let mut stamp = app.settings.brush.stamp();
-        stamp.mode = app.settings.brush.mode_under(shift, subtract);
+        stamp.mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
         stamp
     } else {
         app.settings.brush.region_stamp(subtract && !shift)
@@ -288,7 +288,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask, app.settings.model.edits_cutout());
+        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask);
 
         tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
         app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);
@@ -334,7 +334,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
     let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
-    let mode = app.settings.brush.mode_under(shift, subtract);
+    let mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
     if shift || subtract {
         draw_modifier_glyph(ui, canvas_rect, if shift { "+" } else { "\u{2212}" });
     }

@@ -168,7 +168,7 @@ impl Settings {
     /// The brush erases the cut-out, so its strokes and marks are drawn
     /// in Erase's warm red.
     pub(crate) fn brush_erases(&self) -> bool {
-        self.model.erases_with(self.brush.mode)
+        self.model.erases_with(self.brush.cutout_action)
     }
 
     /// Config file path: ~/.config/prunr/settings.json (Linux),
@@ -652,9 +652,9 @@ impl SettingsModel {
         }
     }
 
-    /// A brush in `mode` erases the cut-out.
-    pub fn erases_with(self, mode: prunr_core::selection::BrushMode) -> bool {
-        self.edits_cutout() && mode == prunr_core::selection::BrushMode::Subtract
+    /// The selection erases the cut-out under `action`.
+    pub fn erases_with(self, action: super::brush_state::CutoutAction) -> bool {
+        self.edits_cutout() && action == super::brush_state::CutoutAction::Erase
     }
 
     /// See `ModelRole::edits_cutout`.

@@ -137,7 +137,7 @@ pub(crate) struct LayerJob {
 }
 
 impl LayerJob {
-    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle) -> Self {
+    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle, action: super::brush_state::CutoutAction) -> Self {
         Self {
             item_id: item.id,
             filename: item.filename.clone(),
@@ -145,7 +145,7 @@ impl LayerJob {
             start: item.run_start(super::item::Engine::Segment).map(|s| s.image),
             source_rgba: item.source_rgba.clone(),
             source: item.source.clone(),
-            correction: item.correction_plane(style),
+            correction: item.correction_plane(style, action),
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
         }
@@ -318,6 +318,7 @@ pub(crate) fn prepare_for_drag(
     item: &BatchItem,
     split: bool,
     style: super::background_io::SelectionStyle,
+    action: super::brush_state::CutoutAction,
 ) -> std::io::Result<Vec<PathBuf>> {
     if !split {
         return Ok(vec![prepare(item)?]);
@@ -325,7 +326,7 @@ pub(crate) fn prepare_for_drag(
 
     // One source image + one seg decompress — Subject and Mask share the
     // seg, Lines uses the edge tensor independently.
-    let job = LayerJob::of(item, style);
+    let job = LayerJob::of(item, style, action);
     let Some(src) = LayerSource::of(&job) else {
         return Ok(vec![prepare(item)?]);
     };
@@ -427,7 +428,7 @@ mod tests {
             String::new(),
         );
         let blank = LayerSource { original: DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10)), correction: None };
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
         for kind in LayerKind::ALL {
             assert!(render_layer(&job, kind, &blank, None).is_none());
         }
@@ -458,7 +459,7 @@ mod tests {
         let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
 
         let src = LayerSource { original: photo.clone(), correction: None };
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
         let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None) else {
             panic!("the Lines layer renders from the cached lines");
         };
@@ -488,7 +489,7 @@ mod tests {
         let src = LayerSource { original: DynamicImage::ImageRgba8((*erased).clone()), correction: Some(restore) };
         let seg = item.cached_tensor.as_ref().and_then(|t| t.bundle());
 
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0));
+        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
         let Some(LayerOutput::Gray(mask)) = render_layer(&job, LayerKind::Mask, &src, seg.as_ref()) else { panic!("mask layer") };
         assert_eq!(mask.get_pixel(5, 5)[0], 255, "the restored pixel is in the mask");
         assert_eq!(mask.get_pixel(9, 9)[0], 0, "the rest stays out");
@@ -508,14 +509,36 @@ mod tests {
         let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        assert!(!LayerJob::of(&item, style).has_layers(), "nothing cached, no layers");
+        assert!(!LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "nothing cached, no layers");
 
         item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
-        let job = LayerJob::of(&item, style);
+        let job = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
         let files = std::thread::spawn(move || job.render_bytes()).join().expect("render thread");
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["photo-subject.png", "photo-mask.png"]);
         assert!(files.iter().all(|(_, bytes)| bytes.starts_with(b"\x89PNG")));
+    }
+
+    /// The layers carry the edits already made to the cut-out, even while
+    /// the brush only selects.
+    #[test]
+    fn the_layers_carry_the_cutout_edits() {
+        use crate::gui::item::{BatchItem, ImageSource};
+        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+
+        let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
+        item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
+        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        let erased_left: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -prunr_core::selection::FULL } else { 0 }).collect();
+        item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+
+        let files = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Select).render_bytes();
+        let (_, mask) = files.iter().find(|(n, _)| n == "photo-mask.png").expect("a mask layer");
+        let mask = image::load_from_memory(mask).expect("png").to_luma8();
+        assert_eq!(mask.get_pixel(0, 4)[0], 0, "the erased half is gone");
+        assert_eq!(mask.get_pixel(7, 4)[0], 255, "the rest stays");
     }
 }

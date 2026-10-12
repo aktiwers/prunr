@@ -99,6 +99,8 @@ pub(crate) struct ToolbarState<'a> {
     /// `(w, h)` of the image the next upscale starts from.
     pub source_dims: (u32, u32),
     pub has_selection: bool,
+    /// The selection corrects the cut-out on screen (Restore is offered).
+    pub corrects_cutout: bool,
     /// On-disk install state, refreshed on events rather than per frame.
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
@@ -257,7 +259,7 @@ pub(crate) fn render(
             }
 
             if state.has_selection {
-                if let Some(action) = render_selection_actions(ui) {
+                if let Some(action) = render_selection_actions(ui, state.corrects_cutout) {
                     change.selection_action = Some(action);
                 }
             }

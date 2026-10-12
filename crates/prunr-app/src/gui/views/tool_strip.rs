@@ -58,6 +58,7 @@ pub(crate) struct StripChange {
 
 pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> StripChange {
     let mut strip = StripChange::default();
+    let action_before = brush.cutout_action;
     let change = &mut strip.brush;
     egui::Area::new(Id::new("tool_strip"))
         .order(Order::Foreground)
@@ -101,6 +102,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                 });
             }
         });
+    strip.brush.action_changed = brush.cutout_action != action_before;
     strip
 }
 
@@ -120,7 +122,7 @@ fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) 
 fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = false;
     if shows(model, Surface::SelectionStrokes) {
-        committed |= brush_chip::mode_buttons(ui, model, &mut s.mode);
+        committed |= brush_chip::mode_buttons(ui, model, s);
     }
     committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
     if shows(model, Surface::SelectionStrokes) {
@@ -135,7 +137,7 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
 }
 
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
-    let mut committed = brush_chip::mode_buttons(ui, model, &mut s.mode);
+    let mut committed = brush_chip::mode_buttons(ui, model, s);
     committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     committed
 }

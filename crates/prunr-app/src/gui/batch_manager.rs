@@ -620,6 +620,23 @@ impl BatchManager {
         was_present
     }
 
+    /// On a cut-out: fold the selection into the edits as `action` says
+    /// (see `BatchItem::bake_selection`), one undo step. True when there
+    /// was a selection.
+    pub(crate) fn bake_selection(
+        &mut self,
+        item_id: u64,
+        style: super::background_io::SelectionStyle,
+        action: super::brush_state::CutoutAction,
+    ) -> bool {
+        let Some(item) = self.find_by_id_mut(item_id) else { return false };
+        let baked = item.bake_selection(style, action);
+        if baked {
+            item.commit(super::timeline::StepKind::Selection);
+        }
+        baked
+    }
+
     /// Called when source_rgba is replaced on an item (re-decode, image
     /// switch into a previously-evicted item). Drops the selection AND
     /// the SAM encoder embedding — both are bound to the source bytes
@@ -1376,7 +1393,7 @@ mod tests {
         let item = &mut bm.items[0];
         item.commit_selection_mask(std::sync::Arc::clone(&selection), crate::gui::timeline::StepKind::Stroke);
         let hash = item.selection_hash.expect("committed");
-        let plane = item.correction_plane(style(0.15)).expect("a selection");
+        let plane = item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).expect("a selection");
         assert_eq!((plane.width, plane.height), (8, 8), "the photo's size, not the model's");
         assert!(std::sync::Arc::ptr_eq(&plane, &selection));
 
@@ -1384,7 +1401,7 @@ mod tests {
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
             key: (hash, style(0.15)), handle, shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
         });
-        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15)).unwrap(), &feathered), "the feathered plane once built");
+        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).unwrap(), &feathered), "the feathered plane once built");
     }
 
     #[test]

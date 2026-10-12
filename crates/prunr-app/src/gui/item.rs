@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::brush_state::CutoutAction;
+
 /// An upscale run kept for Refine: the model's `raw` output, the `input`
 /// it read (after Denoise), and that input enlarged to the output size
 /// (`reference`) once AI blend or Color match needed it.
@@ -193,6 +195,46 @@ pub(crate) enum Engine {
     Upscale,
 }
 
+/// `selection` applied over `edits`: restored (made positive) or erased
+/// (kept negative, as a selection is stored); where it lands it wins.
+pub(crate) fn apply_selection(
+    edits: Option<&prunr_core::selection::MaskArtifact>,
+    selection: &prunr_core::selection::MaskArtifact,
+    action: CutoutAction,
+) -> prunr_core::selection::MaskArtifact {
+    let signed = match action {
+        CutoutAction::Restore => selection.as_restore(),
+        CutoutAction::Erase | CutoutAction::Select => selection.clone(),
+    };
+    match edits.map(|e| e.add_mask(&signed)) {
+        Some(Ok(merged)) => merged,
+        Some(Err(err)) => {
+            tracing::warn!(%err, "edits size differs from the selection; keeping the selection alone");
+            signed
+        }
+        None => signed,
+    }
+}
+
+/// See `BatchItem::correction_cache`.
+struct CorrectionCache {
+    edits: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    selection: Arc<prunr_core::selection::MaskArtifact>,
+    action: CutoutAction,
+    plane: Arc<prunr_core::selection::MaskArtifact>,
+}
+
+impl CorrectionCache {
+    fn matches(&self, edits: Option<&Arc<prunr_core::selection::MaskArtifact>>, selection: &Arc<prunr_core::selection::MaskArtifact>, action: CutoutAction) -> bool {
+        let same_edits = match (&self.edits, edits) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        same_edits && Arc::ptr_eq(&self.selection, selection) && self.action == action
+    }
+}
+
 /// The step an undo goes back to, and its image once unpacked.
 pub(crate) struct WarmStep {
     step: super::timeline::StoredImage,
@@ -310,6 +352,11 @@ pub(crate) struct BatchItem {
     /// Content hash of `selection_mask`, set in lockstep with the mask by
     /// `commit_selection_mask`. Half of the selection texture's key.
     pub(crate) selection_hash: Option<u64>,
+    /// On a cut-out, the restores and erases already made (see `DocState::edits`).
+    pub(crate) edits: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    /// The last correction built from the selection and the edits, with
+    /// the inputs it was built from (held, so a match is never a reused address).
+    correction_cache: std::sync::Mutex<Option<CorrectionCache>>,
 
     /// Key of the selection texture build in flight, if any; cleared when
     /// that build lands or is dropped as stale.
@@ -381,14 +428,57 @@ impl BatchItem {
         }
     }
 
-    /// The selection a re-cut applies, at full resolution: feathered when
-    /// Feather is on and the overlay has built the feathered plane (off
-    /// the UI thread; its landing re-cuts again). `None` without a
-    /// selection or with a blank one.
-    pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        let selection = self.selection_mask.as_ref().filter(|m| !m.is_blank())?;
-        let feathered = self.current_selection_texture(style).and_then(|t| t.feathered.clone());
-        Some(feathered.unwrap_or_else(|| Arc::clone(selection)))
+    /// What corrects a cut-out: the edits already made, with the
+    /// selection on top as `action` says (restored, erased, or nothing
+    /// while only selecting), at full resolution. The selection is the
+    /// feathered plane once the overlay has built it (its landing re-cuts
+    /// again). Built once per change of its inputs.
+    pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        let selection = self.selection_mask.as_ref()
+            .filter(|m| !m.is_blank() && action != CutoutAction::Select)
+            .map(|m| self.feathered_selection(style).unwrap_or_else(|| Arc::clone(m)));
+        match (&self.edits, selection) {
+            (None, None) => None,
+            (Some(edits), None) => Some(Arc::clone(edits)),
+            // A selection is stored as an erase: as it is, it erases.
+            (None, Some(selection)) if action == CutoutAction::Erase => Some(selection),
+            (edits, Some(selection)) => {
+                let mut cache = self.correction_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(hit) = cache.as_ref().filter(|c| c.matches(edits.as_ref(), &selection, action)) {
+                    return Some(Arc::clone(&hit.plane));
+                }
+                let plane = Arc::new(apply_selection(edits.as_deref(), &selection, action));
+                *cache = Some(CorrectionCache { edits: edits.clone(), selection, action, plane: Arc::clone(&plane) });
+                Some(plane)
+            }
+        }
+    }
+
+    /// Fold the selection into the edits as `action` says and clear it:
+    /// what was restored or erased stays, and the next strokes start a new
+    /// area. False when there was no selection.
+    pub(crate) fn bake_selection(&mut self, style: super::background_io::SelectionStyle, action: CutoutAction) -> bool {
+        if self.selection_mask.is_none() {
+            return false;
+        }
+        if action != CutoutAction::Select {
+            self.edits = self.correction_plane(style, action);
+        }
+        self.selection_mask = None;
+        self.selection_hash = None;
+        self.selection_texture = None;
+        true
+    }
+
+    /// The current selection feathered as `style` says, once the overlay
+    /// has built it. Only the feather matters: a change of tint or fill
+    /// keeps the plane.
+    fn feathered_selection(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        let (hash, texture) = (self.selection_hash?, self.selection_texture.as_ref()?);
+        let (built_hash, built_style) = texture.key;
+        (built_hash == hash && built_style.edge_feather_px == style.edge_feather_px)
+            .then(|| texture.feathered.clone())
+            .flatten()
     }
 
     /// The overlay texture, when it was built from the current selection
@@ -504,6 +594,7 @@ impl BatchItem {
             recipe: self.applied_recipe.clone(),
             selection: store(self.selection_mask.as_ref(), shown.selection.as_ref()),
             selection_hash: self.selection_hash,
+            edits: store(self.edits.as_ref(), shown.edits.as_ref()),
             settings: self.settings,
             applied_preset: self.applied_preset.clone(),
             // A hand edit makes new pixels no run can redo.
@@ -629,6 +720,7 @@ impl BatchItem {
         self.applied_recipe = shown.recipe;
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
         self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
+        self.edits = shown.edits.as_ref().and_then(|e| e.load());
         if self.settings.line_mode != shown.settings.line_mode {
             self.invalidate_edge_cache();
         }
@@ -941,6 +1033,12 @@ impl BatchItem {
         self.status == BatchStatus::Done && self.cached_tensor.is_some()
     }
 
+    /// Whether the selection corrects the cut-out on screen under `model`,
+    /// rather than acting on the image as a plain selection.
+    pub(crate) fn corrects_cutout(&self, model: super::settings::SettingsModel) -> bool {
+        model.edits_cutout() && self.shows_cutout()
+    }
+
     /// Release the working result while the item is in the background;
     /// the timeline keeps it and compresses it once nothing else holds it.
     pub(crate) fn park_result(&mut self) -> bool {
@@ -1050,6 +1148,8 @@ impl BatchItem {
             backdrop_tex_pending: None,
             selection_mask: None,
             selection_hash: None,
+            edits: None,
+            correction_cache: std::sync::Mutex::default(),
             selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,

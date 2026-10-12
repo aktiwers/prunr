@@ -26,23 +26,18 @@ pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
     match (role.edits_cutout(), mac) {
         (false, true) => "Click or stroke an object to add it to the selection; Alt takes it away.",
         (false, false) => "Click or stroke an object to add it to the selection; Alt or Ctrl takes it away.",
-        (true, true) => "Click or stroke an object to restore it; Alt erases it.",
-        (true, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
+        (true, true) => "Click or stroke an object to select it; Alt takes it away. Restore, Erase or Select in the strip says what the selection does.",
+        (true, false) => "Click or stroke an object to select it; Alt or Ctrl takes it away. Restore, Erase or Select in the strip says what the selection does.",
     }
 }
 
-/// The bottom-left hint while a brush is on: what Shift and Alt do for
-/// this model. A background-removal cut-out is restored or erased; any
-/// other selection is added to or subtracted from.
-pub(crate) fn modifier_hints(role: ModelRole) -> (&'static str, &'static str) {
-    let mac = cfg!(target_os = "macos");
-    match (role.edits_cutout(), mac) {
-        (false, true) => ("Shift = add", "Alt = subtract"),
-        (false, false) => ("Shift = add", "Alt/Ctrl = subtract"),
-        (true, true) => ("Shift = restore", "Alt = erase"),
-        (true, false) => ("Shift = restore", "Alt/Ctrl = erase"),
-    }
-}
+/// The bottom-left hint while a brush is on: what Shift and Alt do to
+/// the selection, on every model.
+pub(crate) const MODIFIER_HINTS: (&str, &str) = if cfg!(target_os = "macos") {
+    ("Shift = add", "Alt = remove")
+} else {
+    ("Shift = add", "Alt/Ctrl = remove")
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {

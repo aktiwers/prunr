@@ -10,6 +10,16 @@ use serde::{Deserialize, Serialize};
 /// Brush radius in screen points, for the sliders and the size keys.
 pub const BRUSH_RADIUS_RANGE: std::ops::RangeInclusive<f32> = 1.0..=200.0;
 
+/// What the selection does on a cut-out: restored or erased live as it
+/// is painted, or only selected (the menu's Restore and Delete act on it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CutoutAction {
+    #[default]
+    Restore,
+    Erase,
+    Select,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrushSettings {
@@ -21,7 +31,10 @@ pub struct BrushSettings {
     /// subtract). Decoupled from hardness so users can fine-tune
     /// intensity without changing edge softness.
     pub strength: f32,
+    /// Add to or take from the selection; on a cut-out a stroke adds and
+    /// Alt/Ctrl takes away, and `cutout_action` says what the selection does.
     pub mode: BrushMode,
+    pub cutout_action: CutoutAction,
     pub shape: BrushShape,
     /// Eraser-only: post-process unsharp-mask amount applied inside the
     /// inpainted region. 0.0 = LaMa output as-is (slightly soft, the
@@ -211,12 +224,16 @@ impl BrushSettings {
     /// toggle and seg-mode strength) — and SD-tuning fields are owned
     /// by the SD chip popover.
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
-    /// subtracts for the stroke's duration, else the chosen mode.
-    pub fn mode_under(&self, shift: bool, subtract: bool) -> BrushMode {
+    /// subtracts for the stroke's duration; otherwise it adds on a
+    /// `cutout` (the switch there says what the selection does) and
+    /// follows the chosen mode elsewhere.
+    pub fn mode_under(&self, cutout: bool, shift: bool, subtract: bool) -> BrushMode {
         if shift {
             BrushMode::Add
         } else if subtract {
             BrushMode::Subtract
+        } else if cutout {
+            BrushMode::Add
         } else {
             self.mode
         }
@@ -294,6 +311,7 @@ impl Default for BrushSettings {
             hardness: 0.7,
             strength: 1.0,
             mode: BrushMode::Add,
+            cutout_action: CutoutAction::default(),
             shape: BrushShape::Circle,
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
@@ -491,11 +509,13 @@ mod tests {
     fn modifiers_override_the_chosen_mode_for_a_stroke() {
         let mut b = super::BrushSettings::default();
         b.mode = super::BrushMode::Subtract;
-        assert_eq!(b.mode_under(false, false), super::BrushMode::Subtract);
-        assert_eq!(b.mode_under(true, false), super::BrushMode::Add);
-        assert_eq!(b.mode_under(true, true), super::BrushMode::Add, "Shift wins over Alt");
+        assert_eq!(b.mode_under(false, false, false), super::BrushMode::Subtract);
+        assert_eq!(b.mode_under(false, true, false), super::BrushMode::Add);
+        assert_eq!(b.mode_under(false, true, true), super::BrushMode::Add, "Shift wins over Alt");
         b.mode = super::BrushMode::Add;
-        assert_eq!(b.mode_under(false, true), super::BrushMode::Subtract);
+        assert_eq!(b.mode_under(false, false, true), super::BrushMode::Subtract);
+        assert_eq!(b.mode_under(true, false, false), super::BrushMode::Add, "on a cut-out a plain stroke adds");
+        assert_eq!(b.mode_under(true, false, true), super::BrushMode::Subtract);
     }
 
     #[test]
@@ -809,6 +829,7 @@ mod tests {
             edge_feather: 5.0,
             magic_confidence_threshold: 0.7,
             magic_remove_specks: false,
+            cutout_action: CutoutAction::Erase,
         };
         s.reset_popover_fields_from(&BrushSettings::default());
 
@@ -823,6 +844,7 @@ mod tests {
         // strength + mode carry user intent (seg pipeline + Add/Subtract).
         assert!((s.strength - 0.42).abs() < f32::EPSILON, "strength must survive popover reset");
         assert_eq!(s.mode, BrushMode::Add, "mode must survive popover reset");
+        assert_eq!(s.cutout_action, CutoutAction::Erase, "the cut-out action must survive popover reset");
 
         // SD-tuning fields are owned by the SD chip popover.
         assert_eq!(s.sd_prompt, "custom prompt");
