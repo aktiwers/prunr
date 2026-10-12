@@ -91,41 +91,65 @@ impl RestoredFace {
     }
 }
 
-/// Find every face in `image` and redraw it with `id`'s restorer.
+/// Find every face in `image` and redraw it with `id`'s restorer, loading
+/// the models for this one photo.
 ///
 /// Peak working set: the detector's input (≤ 1280² × 3 f32, 20 MB), the
 /// restorer session (~1.2 GB for GFPGAN while it runs), and two 512²
 /// RGB crops per face (1.5 MB each face).
 pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
-    let parts = prunr_models::multi_part_paths(id)
-        .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-    let part = |key: &str| parts.iter().find(|(k, _)| *k == key).map(|(_, p)| p.clone())
-        .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no {key} part")));
-    progress.step(Step::FindingFaces);
-    let faces = detect(&mut load(&part("detector")?)?, image)?;
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
+    FaceRestorer::new(id)?.find_and_restore(image, progress)
+}
+
+/// A face model loaded once for several photos (a command-line batch).
+/// The restorer (~1.2 GB for GFPGAN) loads on the first face and stays
+/// until this is dropped.
+pub struct FaceRestorer {
+    id: prunr_models::ModelId,
+    detector: Session,
+    restorer_path: std::path::PathBuf,
+    restorer: Option<Session>,
+}
+
+impl FaceRestorer {
+    pub fn new(id: prunr_models::ModelId) -> Result<Self, CoreError> {
+        let parts = prunr_models::multi_part_paths(id)
+            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
+        let part = |key: &str| parts.iter().find(|(k, _)| *k == key).map(|(_, p)| p.clone())
+            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no {key} part")));
+        Ok(Self { id, detector: load(&part("detector")?)?, restorer_path: part("restorer")?, restorer: None })
     }
-    if faces.is_empty() {
-        return Ok(Vec::new());
-    }
-    progress.step(Step::LoadingModel);
-    let mut restorer = load(&part("restorer")?)?;
-    progress.step(Step::RestoringFaces);
-    let total = faces.len() as u32;
-    let mut out = Vec::with_capacity(faces.len());
-    for (i, face) in faces.iter().enumerate() {
+
+    pub fn find_and_restore(&mut self, image: &RgbaImage, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
+        progress.step(Step::FindingFaces);
+        let faces = detect(&mut self.detector, image)?;
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        progress.outer(i as u32, total, Unit::Face);
-        let to_crop = Similarity::fit(&face.landmarks, &TEMPLATE);
-        let original = warp_to_crop(image, &to_crop);
-        let restored = restore(&mut restorer, &original)?;
-        out.push(RestoredFace::new(to_crop, original, restored));
+        if faces.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.restorer.is_none() {
+            progress.step(Step::LoadingModel);
+            self.restorer = Some(load(&self.restorer_path)?);
+        }
+        let restorer = self.restorer.as_mut().ok_or_else(|| CoreError::Inference(format!("face model {:?}: restorer not loaded", self.id)))?;
+        progress.step(Step::RestoringFaces);
+        let total = faces.len() as u32;
+        let mut out = Vec::with_capacity(faces.len());
+        for (i, face) in faces.iter().enumerate() {
+            if progress.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            progress.outer(i as u32, total, Unit::Face);
+            let to_crop = Similarity::fit(&face.landmarks, &TEMPLATE);
+            let original = warp_to_crop(image, &to_crop);
+            let restored = restore(restorer, &original)?;
+            out.push(RestoredFace::new(to_crop, original, restored));
+        }
+        progress.outer(total, total, Unit::Face);
+        Ok(out)
     }
-    progress.outer(total, total, Unit::Face);
-    Ok(out)
 }
 
 fn load(path: &std::path::Path) -> Result<Session, CoreError> {

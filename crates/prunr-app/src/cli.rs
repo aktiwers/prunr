@@ -475,11 +475,12 @@ struct UpscaleJob<'a> {
     scale: prunr_core::OutputScale,
     refine: prunr_core::upscale::Refine,
     denoise: f32,
-    faces: Option<(prunr_models::ModelId, prunr_core::face::FaceBlend)>,
+    /// Loaded once for the batch.
+    faces: Option<(prunr_core::face::FaceRestorer, prunr_core::face::FaceBlend)>,
 }
 
 impl UpscaleJob<'_> {
-    fn run(&self, img: image::RgbaImage) -> Result<image::RgbaImage, String> {
+    fn run(&mut self, img: image::RgbaImage) -> Result<image::RgbaImage, String> {
         let img = std::sync::Arc::new(img);
         let model_input = if self.denoise > 0.0 {
             std::sync::Arc::new(prunr_core::denoise::apply_denoise(&img, self.denoise.min(1.0)))
@@ -491,10 +492,10 @@ impl UpscaleJob<'_> {
             .map_err(|e| format!("upscale failed: {e}"))?;
         let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
         let mut out = std::sync::Arc::unwrap_or_clone(shown);
-        if let Some((face_model, blend)) = self.faces {
-            let faces = prunr_core::face::find_and_restore(&out, face_model, &progress)
+        if let Some((restorer, blend)) = self.faces.as_mut() {
+            let faces = restorer.find_and_restore(&out, &progress)
                 .map_err(|e| format!("restore faces failed: {e}"))?;
-            prunr_core::face::compose_faces_into(&mut out, &faces, blend);
+            prunr_core::face::compose_faces_into(&mut out, &faces, *blend);
         }
         Ok(out)
     }
@@ -561,6 +562,14 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         color_match: args.color_match,
     };
     let blend = prunr_core::face::FaceBlend { strength: f32::from(args.face_strength) / 100.0, ..Default::default() };
+    let faces = match args.restore_faces.map(|m| prunr_core::face::FaceRestorer::new(m.model_id())).transpose() {
+        Ok(faces) => faces.map(|restorer| (restorer, blend)),
+        Err(e) => {
+            eprintln!("error: cannot load the face model: {e}");
+            return 1;
+        }
+    };
+    let mut job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces };
     let is_batch = args.inputs.len() > 1;
     let suffix = format!("_x{}.png", scale.factor());
     let mut failed = 0;
@@ -574,7 +583,6 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         if !args.quiet {
             eprintln!("Upscaling {}...", input.display());
         }
-        let job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces: args.restore_faces.map(|m| (m.model_id(), blend)) };
         let result = image::open(input)
             .map_err(|e| format!("failed to read {}: {e}", input.display()))
             .and_then(|img| job.run(img.into_rgba8()))
