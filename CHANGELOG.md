@@ -15,14 +15,14 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
-- **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
+- **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
 - **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
 - Color splash shows which hues it keeps on a strip under its sliders.
-- **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and the F1 list and tooltips show your bindings.
+- **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and tooltips show your bindings. F1 opens this tab, with the mouse gestures below the keys.
 
 ### Changed
 
@@ -50,6 +50,12 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The "Use last result as input" switch is gone: each step remembers what it started from, so a new tool builds on the result while changing a setting or running the same tool again redoes the step instead of stacking on it. Undo goes back to the original.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
 - Line color choices (Original, Solid color, styles) live in one list.
+- **Save as PNG, JPEG or WebP.** The arrow beside Save picks the format and, for a cut-out, Separate layers (moved from Settings). JPEG flattens transparency onto white; WebP is lossless and keeps it.
+- **Processor: Auto or CPU only**, saved, for every model (was "Force CPU this session", which only reached background removal).
+- **SD memory guard: Relaxed, Balanced or Strict** replaces the GB safety-margin slider; the memory note in Settings uses the same rule as the erase.
+- The Model picker shows in the empty window, and its last row opens the Model Store (which left the Help menu).
+- Reset to defaults keeps your presets, licence acceptances, background pictures and model, and the shipped hotkeys apply at once.
+- The Live preview switch is gone: changes always preview.
 - The window can be made narrower: 1020 px minimum, down from 1100.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
 - The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
@@ -82,6 +88,12 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Tile backgrounds tile by image pixels, so the screen matches the export at any zoom; a see-through background image keeps its color instead of darkening.
 - With an effect on Sketch Subject, the lines are traced from the plain subject, so Pixelate or Halftone no longer turns them into steps after Process.
 - The exported Lines layer of a split drag-out matches the canvas, Dual scale included.
+- Separate layers keep your brush corrections and start from the image the cut-out ran on; an image whose cut-out data is gone saves as one file, and a toast says so.
+- Model Store: Retry works after any failed download, a cancelled one returns to Download, a queued one says so, and disk usage counts the Stable Diffusion files.
+- Auto-process on import runs only for background removal and No model; it used to start a wrong run with an eraser or upscaler selected.
+- An upscale uses every core whatever Parallel jobs is set to.
+- A refused or failed erase no longer leaves the app busy; switching the SD eraser between Fast and Quality with Keep loaded on no longer runs out of memory.
+- Cmd+S works whenever the Save button shows; the sidebar's tick, delete and save are real buttons.
 - With No model, Process never runs a cut-out: an image left on Sketch Subject switches to Whole photo, and a batch takes the filter path whenever the shown image has no lines.
 - Smooth softens large photos too (it blurred at full size, which shrank to nothing at the size the line detector reads), and the line detector's dots in the photo's corners are gone.
 - Lines no longer mix modes: in Full a Pre-filter change no longer produces a subject outline, and going Full → Off → Subject traces the subject again instead of reusing lines from the whole photo.
