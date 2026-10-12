@@ -7,12 +7,12 @@ use crate::gui::app::PrunrApp;
 use crate::gui::item::{BatchItem, BatchStatus};
 use crate::gui::theme;
 
-/// Manual pointer hit test for a rect — returns (hovered, clicked).
-fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
-    ui.ctx().input(|i| {
-        let hover = i.pointer.hover_pos().is_some_and(|p| rect.contains(p));
-        (hover, hover && i.pointer.primary_clicked())
-    })
+/// A control drawn over a row: a real widget on top of the row, so it
+/// takes the click and carries a name for the accessibility tree.
+fn row_control(ui: &egui::Ui, rect: Rect, id: egui::Id, info: egui::WidgetInfo) -> egui::Response {
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    resp.widget_info(|| info.clone());
+    resp
 }
 
 /// Collected per-frame actions produced by the item rows, applied after the
@@ -176,6 +176,7 @@ fn render_item_row(
     }
 
     let checkbox_clicked = paint_selection_checkbox(ui, &mut app.batch.items[i], item_rect);
+    let row_hovered = ui.rect_contains_pointer(item_rect);
 
     if matches!(app.batch.items[i].status, BatchStatus::Processing) {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
@@ -186,8 +187,7 @@ fn render_item_row(
         actions.needs_repaint = true;
     }
 
-    let close_clicked =
-        paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, &item_response, actions);
+    let close_clicked = paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, row_hovered, actions);
 
     // DnD: set drag payload (intra-sidebar reorder) and check for drops.
     item_response.dnd_set_drag_payload(i);
@@ -346,7 +346,11 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
     );
     let cb_rect = Rect::from_center_size(cb_center, Vec2::splat(cb_size));
 
-    let (cb_hovered, cb_clicked) = hit_test(ui, cb_rect);
+    let resp = row_control(
+        ui, cb_rect, egui::Id::new(("sidebar_tick", item.id)),
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.selected, format!("Tick {}", item.filename)),
+    );
+    let (cb_hovered, cb_clicked) = (resp.hovered(), resp.clicked());
     if cb_clicked {
         item.selected = !item.selected;
     }
@@ -461,10 +465,10 @@ fn paint_hover_buttons(
     item: &BatchItem,
     i: usize,
     item_rect: Rect,
-    item_response: &egui::Response,
+    row_hovered: bool,
     actions: &mut SidebarActions,
 ) -> bool {
-    if !item_response.hovered() || ui.ctx().dragged_id().is_some() {
+    if !row_hovered || ui.ctx().dragged_id().is_some() {
         return false;
     }
     let mut close_clicked = false;
@@ -475,7 +479,8 @@ fn paint_hover_buttons(
         item_rect.max.x - 4.0 - btn_size * 0.5,
         item_rect.min.y + 4.0 + btn_size * 0.5,
     );
-    if paint_hover_circle_btn(ui, del_center, btn_size, ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
+    let del_name = format!("Delete {}", item.filename);
+    if paint_hover_circle_btn(ui, (del_center, btn_size), ("sidebar_delete", item.id, &del_name), ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
         actions.remove_idx = Some(i);
         close_clicked = true;
     }
@@ -486,7 +491,8 @@ fn paint_hover_buttons(
             item_rect.min.x + 4.0 + btn_size * 0.5,
             item_rect.max.y - 4.0 - btn_size * 0.5,
         );
-        if paint_hover_circle_btn(ui, save_center, btn_size, ICON_SAVE.codepoint, theme::ACCENT) {
+        let save_name = format!("Save {}", item.filename);
+        if paint_hover_circle_btn(ui, (save_center, btn_size), ("sidebar_save", item.id, &save_name), ICON_SAVE.codepoint, theme::ACCENT) {
             actions.save_idx = Some(i);
             close_clicked = true;
         }
@@ -498,13 +504,17 @@ fn paint_hover_buttons(
 /// `hover_color` is the fill shown on hover; idle is translucent black.
 fn paint_hover_circle_btn(
     ui: &egui::Ui,
-    center: Pos2,
-    size: f32,
+    (center, size): (Pos2, f32),
+    (salt, item_id, name): (&'static str, u64, &str),
     icon: &str,
     hover_color: Color32,
 ) -> bool {
     let rect = Rect::from_center_size(center, Vec2::splat(size));
-    let (hovered, pressed) = hit_test(ui, rect);
+    let resp = row_control(
+        ui, rect, egui::Id::new((salt, item_id)),
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name),
+    );
+    let (hovered, pressed) = (resp.hovered(), resp.clicked());
     let bg = if hovered {
         hover_color
     } else {
