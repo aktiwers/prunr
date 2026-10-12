@@ -99,17 +99,39 @@ pub struct Settings {
     #[serde(default)]
     pub keep_sd_loaded: bool,
 
-    /// Free RAM the SD pre-flight gate requires *on top of* the model's
-    /// declared `working_set_mb`. Default 2 GB matches the historical
-    /// hardcoded `SAFETY_MARGIN_MB`. Lower → SD runs in tighter
-    /// memory situations (riskier, may swap-thrash). Higher → more
-    /// conservative on systems where other apps spike during inference.
-    #[serde(default = "default_ram_safety_margin_gb")]
-    pub ram_safety_margin_gb: f32,
+    /// How much free memory the SD eraser leaves for other apps.
+    #[serde(default)]
+    pub sd_memory: SdMemoryGuard,
 }
 
 
-fn default_ram_safety_margin_gb() -> f32 { 2.0 }
+/// The SD eraser's memory guard: the headroom its RAM gate adds on top
+/// of the model's need.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SdMemoryGuard {
+    /// About 1 GB: fits SD on a tight machine; other apps may be squeezed.
+    Relaxed,
+    #[default]
+    Balanced,
+    /// About 4 GB: for machines where other apps grab memory mid-run.
+    Strict,
+}
+
+impl SdMemoryGuard {
+    pub fn margin_mb(self) -> u64 {
+        let balanced = prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB;
+        match self {
+            Self::Relaxed => balanced / 2,
+            Self::Balanced => balanced,
+            Self::Strict => balanced * 2,
+        }
+    }
+
+    /// The choice nearest a margin saved by builds that had a GB slider.
+    fn from_margin_gb(gb: f64) -> Self {
+        if gb < 1.5 { Self::Relaxed } else if gb < 3.0 { Self::Balanced } else { Self::Strict }
+    }
+}
 
 impl Settings {
     /// Should the SD inpaint dispatcher route to the LCM checkpoint?
@@ -183,6 +205,7 @@ impl Settings {
             }
         };
         super::item_settings::migrate_old_item_settings(&mut value);
+        migrate_sd_margin(&mut value);
 
         let mut settings: Self = match serde_json::from_value(value.clone()) {
             Ok(s) => s,
@@ -450,6 +473,13 @@ pub(crate) fn config_root() -> Option<PathBuf> {
     }
 }
 
+/// A saved GB margin becomes the nearest memory guard.
+fn migrate_sd_margin(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    let Some(gb) = obj.remove("ram_safety_margin_gb").and_then(|v| v.as_f64()) else { return };
+    obj.entry("sd_memory").or_insert_with(|| serde_json::to_value(SdMemoryGuard::from_margin_gb(gb)).unwrap_or_default());
+}
+
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -708,7 +738,7 @@ impl Default for Settings {
             processor: Processor::Auto,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
-            ram_safety_margin_gb: default_ram_safety_margin_gb(),
+            sd_memory: SdMemoryGuard::Balanced,
             hotkeys: BTreeMap::new(),
             keep_sd_loaded: false,
         }
@@ -807,7 +837,7 @@ mod tests {
         assert!(s.runtime_prompt_snoozed_until.is_empty());
         assert_eq!(s.processor, Processor::Auto);
         assert_eq!(s.active_backend, "CPU");
-        assert_eq!(s.ram_safety_margin_gb, 2.0);
+        assert_eq!(s.sd_memory, SdMemoryGuard::Balanced);
     }
 
     /// Wrap an `ItemSettings` into a single-entry v2 `PresetFile` keyed
@@ -912,6 +942,21 @@ mod tests {
         assert!(s.hotkeys.is_empty());
         assert_eq!(s.processor, Processor::Auto);
         assert!(!s.keep_sd_loaded);
+    }
+
+    /// A margin saved by the GB slider loads as the nearest guard.
+    #[test]
+    fn a_saved_gb_margin_becomes_the_nearest_memory_guard() {
+        for (gb, guard) in [(0.5, SdMemoryGuard::Relaxed), (2.0, SdMemoryGuard::Balanced), (6.0, SdMemoryGuard::Strict)] {
+            let mut v = serde_json::to_value(Settings::default()).unwrap();
+            let obj = v.as_object_mut().unwrap();
+            obj.remove("sd_memory");
+            obj.insert("ram_safety_margin_gb".into(), gb.into());
+            migrate_sd_margin(&mut v);
+            let s: Settings = serde_json::from_value(v).unwrap();
+            assert_eq!(s.sd_memory, guard, "{gb} GB");
+        }
+        assert_eq!(SdMemoryGuard::Balanced.margin_mb(), prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB);
     }
 
     /// Under "CPU only" every reader of the backend (status bar, the
