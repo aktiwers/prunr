@@ -264,7 +264,9 @@ fn the_background_flyout_names_every_control_for_each_choice() {
         settle(&mut h);
         click(&mut h, "Background");
         assert!(egui::Popup::is_any_open(&h.ctx), "{name}: the Background flyout opened");
-        assert_all_controls_named(&h, &format!("background flyout, {name}"));
+        assert_all_controls_named(&h, &format!("background strip, {name}"));
+        click(&mut h, "All background settings");
+        assert_all_controls_named(&h, &format!("background panel, {name}"));
     }
 }
 
@@ -278,8 +280,10 @@ fn the_effect_flyout_names_every_control_for_each_effect() {
         settle(&mut h);
         click(&mut h, "Effect");
         assert!(egui::Popup::is_any_open(&h.ctx), "{style:?}: the Effect flyout opened");
-        assert!(names(&h).iter().any(|n| n == "None"), "{style:?}: None is in the list");
-        assert_all_controls_named(&h, &format!("effect flyout, {style:?}"));
+        assert_all_controls_named(&h, &format!("effect strip, {style:?}"));
+        click(&mut h, "All effects");
+        assert!(names(&h).iter().any(|n| n == "Gradient map"), "{style:?}: every look has a tile");
+        assert_all_controls_named(&h, &format!("effect panel, {style:?}"));
     }
 }
 

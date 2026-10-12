@@ -1017,11 +1017,18 @@ pub(super) fn swatch_dots(ui: &mut Ui, swatches: &[Swatch], current: Option<[u8;
 /// One 24 px swatch dot, ringed white while `on`; reads as a radio
 /// button named `name` to the tree.
 pub(super) fn color_dot(ui: &mut Ui, name: &str, fill: Color32, on: bool) -> Response {
+    painted_dot(ui, name, on, |painter, rect| {
+        painter.circle_filled(rect.center(), rect.width() / 2.0, fill);
+    })
+}
+
+/// A swatch dot whose inside `paint` draws (a checkerboard, a picture).
+pub(super) fn painted_dot(ui: &mut Ui, name: &str, on: bool, paint: impl FnOnce(&egui::Painter, egui::Rect)) -> Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), on, name));
     if ui.is_rect_visible(rect) {
         let ring = if on { Color32::WHITE } else if resp.hovered() { Color32::from_white_alpha(90) } else { Color32::from_white_alpha(38) };
-        ui.painter().circle_filled(rect.center(), 11.0, fill);
+        paint(ui.painter(), egui::Rect::from_center_size(rect.center(), egui::vec2(22.0, 22.0)));
         ui.painter().circle_stroke(rect.center(), 11.0, egui::Stroke::new(2.0, ring));
     }
     resp.on_hover_text(name)
