@@ -58,7 +58,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The Model picker shows in the empty window, and its last row opens the Model Store (which left the Help menu).
 - Reset to defaults keeps your presets, licence acceptances, background pictures and model, and the shipped hotkeys apply at once.
 - The Live preview switch is gone: changes always preview.
-- The window can be made narrower: 1080 px minimum, down from 1100.
+- The window can be made narrower: 900 px minimum, down from 1100; a narrow toolbar shows its chips as icons.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
 - The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
 

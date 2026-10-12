@@ -68,12 +68,32 @@ pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui
 /// Shared chip-button renderer. Returns the response for popup wiring.
 /// `accent` = true draws an accent border (non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
-    chip_face(ui, format!("{icon}  {value}"), accent)
+    let text = if compact(ui) { icon.to_owned() } else { format!("{icon}  {value}") };
+    chip_face(ui, text, accent)
 }
 
 /// A chip that opens a menu: the face ends in a chevron.
 pub(super) fn menu_chip_button(ui: &mut Ui, icon: &str, value: &str) -> Response {
-    chip_face(ui, format!("{icon}  {value}  {}", ICON_EXPAND_MORE.codepoint), false)
+    let chevron = ICON_EXPAND_MORE.codepoint;
+    let text = if compact(ui) { format!("{icon} {chevron}") } else { format!("{icon}  {value}  {chevron}") };
+    chip_face(ui, text, false)
+}
+
+const COMPACT: &str = "chip_compact";
+
+/// Run `body` with its chips showing their icon only, when `on`: a
+/// toolbar row too narrow for their words. Tooltips and names stay.
+pub(super) fn compact_chips<R>(ui: &mut Ui, on: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
+    let key = egui::Id::new(COMPACT);
+    let outer = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
+    ui.data_mut(|d| d.insert_temp(key, on));
+    let out = body(ui);
+    ui.data_mut(|d| d.insert_temp(key, outer));
+    out
+}
+
+fn compact(ui: &Ui) -> bool {
+    ui.data(|d| d.get_temp::<bool>(egui::Id::new(COMPACT)).unwrap_or(false))
 }
 
 fn chip_face(ui: &mut Ui, text: String, accent: bool) -> Response {
