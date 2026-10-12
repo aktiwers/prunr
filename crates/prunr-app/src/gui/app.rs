@@ -425,7 +425,7 @@ impl PrunrApp {
             pending_license_request: None,
             pending_onboarding_toast: None,
             runtime_install: None,
-            hardware_install_cache: super::hardware_cache::HardwareInstallCache::refresh(),
+            hardware_install_cache: Default::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
             popup_open_at_frame_start: false,
@@ -472,6 +472,7 @@ impl PrunrApp {
                 }
             }
         }
+        app.refresh_install_cache();
         app
     }
 
@@ -1037,7 +1038,7 @@ impl PrunrApp {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return;
         };
-        self.settings.fit_sd_quality_to_install(Settings::can_select_lcm_scheduler());
+        self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
         let bs = &self.settings.brush;
         let raw_backend = self.settings.model.to_model_id()
             .unwrap_or(prunr_models::ModelId::LaMaFp32);
@@ -1046,7 +1047,7 @@ impl PrunrApp {
         } else {
             raw_backend
         };
-        let seed = raw_backend.is_sd_family().then(|| bs.sd_seed.unwrap_or_else(super::brush_state::fresh_sd_seed));
+        let seed = raw_backend.is_sd_family().then(|| bs.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
         tracing::info!(item_id, ?backend, ?raw_backend, ?seed, "inpaint stroke committed; dispatching");
         let tuning = super::processor::InpaintTuning {
             sharpen: bs.inpaint_sharpen,
@@ -1418,16 +1419,14 @@ impl PrunrApp {
                     let name = progress.runtime.display_name();
                     self.toasts.success(format!("{name} installed"));
                     self.runtime_install = None;
-                    self.hardware_install_cache =
-                        super::hardware_cache::HardwareInstallCache::refresh();
+                    self.refresh_install_cache();
                     return;
                 }
                 InstallEvent::Failed { error } => {
                     let name = progress.runtime.display_name();
                     self.toasts.error(format!("{name} install failed: {error}"));
                     self.runtime_install = None;
-                    self.hardware_install_cache =
-                        super::hardware_cache::HardwareInstallCache::refresh();
+                    self.refresh_install_cache();
                     return;
                 }
                 _ => {}
@@ -1448,13 +1447,13 @@ impl PrunrApp {
                     let name = prunr_models::descriptor(id)
                         .map_or("Model", |d| d.display_name);
                     self.toasts.success(format!("{name} ready"));
-                    self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
+                    self.refresh_install_cache();
                 }
                 DownloadEvent::Failed { id, error, .. } => {
                     let name = prunr_models::descriptor(id)
                         .map_or("Model", |d| d.display_name);
                     self.toasts.error(format!("{name} download failed: {error}"));
-                    self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
+                    self.refresh_install_cache();
                 }
                 DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}
             }
@@ -2552,7 +2551,7 @@ impl PrunrApp {
                 }
                 item.amend();
                 if !is_upscale_tier2 {
-                    item.record_origin(Engine::Segment, r.start);
+                    item.record_origin(Engine::Segment, r.start, None);
                 }
                 tracing::debug!(
                     event = "upscale_tier2_apply",
@@ -3187,9 +3186,16 @@ impl PrunrApp {
         }
     }
 
+    /// Re-read what is installed, and move the eraser off a quality whose
+    /// download is gone.
+    pub(crate) fn refresh_install_cache(&mut self) {
+        self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
+        self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
+    }
+
     pub(crate) fn open_settings(&mut self) {
         self.show_settings = true;
-        self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
+        self.refresh_install_cache();
     }
 
     fn navigate_batch(&mut self, ctx: &egui::Context, dir: NavDir) {
@@ -4406,7 +4412,7 @@ mod timeline_contract_tests {
         use crate::gui::worker::{CompressedTensor, TensorCache};
         let mut app = app_with_processed_item(SettingsModel::Silueta);
         let item = &mut app.batch.items[0];
-        item.record_origin(Engine::Segment, None);
+        item.record_origin(Engine::Segment, None, None);
         item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
         item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));

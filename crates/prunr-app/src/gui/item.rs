@@ -392,6 +392,11 @@ impl BatchItem {
         self.last_decode = None;
     }
 
+    /// True while a run, a decode, a texture or a thumbnail is still to land.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.status == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
+    }
+
     /// True while a background thread owes this item a decode, a texture
     /// or a thumbnail.
     pub(crate) fn has_pending_work(&self) -> bool {
@@ -558,16 +563,17 @@ impl BatchItem {
     /// Note a run starting now; `step` is the step its result records,
     /// `None` to fill in the shown one (a re-run a knob change asked for).
     pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
-        let start = self.run_start(engine);
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed: None });
+        self.start_seeded_job(step, engine, None);
     }
 
     /// Note an erase starting now; `seed` is the one a generated fill runs with.
     pub(crate) fn start_erase(&mut self, seed: Option<u64>) {
-        self.start_job(Some(StepKind::Erase), Engine::Erase);
-        if let Some(job) = self.job.as_mut() {
-            job.seed = seed;
-        }
+        self.start_seeded_job(Some(StepKind::Erase), Engine::Erase, seed);
+    }
+
+    fn start_seeded_job(&mut self, step: Option<StepKind>, engine: Engine, seed: Option<u64>) {
+        let start = self.run_start(engine);
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed });
     }
 
     /// The seed of the generated fill on screen.
@@ -599,7 +605,7 @@ impl BatchItem {
             None => self.amend(),
         }
         if let Some(job) = job {
-            self.timeline.current_mut().origin = Some(Origin { engine: job.engine, start: job.start, upscale_run: None, seed: job.seed });
+            self.record_origin(job.engine, job.start, job.seed);
         }
     }
 
@@ -627,10 +633,11 @@ impl BatchItem {
     }
 
     /// Record that `engine` made the shown step's image, starting from
-    /// `start` (`None`: the original). The start is a stored timeline
-    /// image, so the history sweep keeps compressing it.
-    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
-        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed: None });
+    /// `start` (`None`: the original), with `seed` for a generated fill.
+    /// The start is a stored timeline image, so the history sweep keeps
+    /// compressing it.
+    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>, seed: Option<u64>) {
+        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed });
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
@@ -1390,7 +1397,7 @@ mod tests {
 
         item.result_rgba = Some(px(4)); // the first tweak's preview landed
         item.amend();
-        item.record_origin(Engine::Segment, start);
+        item.record_origin(Engine::Segment, start, None);
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "the next tweak starts there too");
         assert_eq!(item.run_input(Engine::Upscale).map(|b| b.get_pixel(0, 0).0[0]), Some(4), "a new upscale builds on the effect");
     }
