@@ -339,6 +339,35 @@ fn reset_group(fields: &[chip::Field<ItemSettings>], s: &mut ItemSettings, d: &I
 }
 
 /// The five mask stages, in the order the pipeline applies them.
+fn mask_gamma(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)), StaticKnob::Gamma, change);
+}
+
+fn mask_shift(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
+    let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
+    if shift.changed {
+        s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
+    }
+    aggregate_knob(shift, StaticKnob::EdgeShift, change);
+}
+
+fn mask_refine(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange, inline: bool) {
+    let r = if inline {
+        chip::inline_switch(ui, "Refine edges", &mut s.refine_edges)
+    } else {
+        chip::toggle_row(ui, "Refine edges", &mut s.refine_edges)
+    };
+    aggregate_knob(r, StaticKnob::RefineEdges, change);
+}
+
+fn mask_feather(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(
+        chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
+        StaticKnob::Feather, change,
+    );
+}
+
 fn render_mask_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
@@ -357,63 +386,59 @@ fn render_mask_group(
         width: theme::POPOVER_WIDTH,
         live: true,
     };
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            reset_group(MASK_FIELDS, s, d, change);
+    chip::strip_chip(ui, group, "All mask settings", |ui, part| match part {
+        chip::Part::Quick => {
+            mask_gamma(ui, s, change);
+            mask_shift(ui, s, change);
+            mask_refine(ui, s, change, true);
+            mask_feather(ui, s, change);
         }
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)),
-            StaticKnob::Gamma, change,
-        );
-        hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the photo.");
-        ui.add_space(theme::SPACE_XS);
-
-
-        let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
-        let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
-        if shift.changed {
-            s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
-        }
-        aggregate_knob(shift, StaticKnob::EdgeShift, change);
-        hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(chip::toggle_row(ui, "Refine edges", &mut s.refine_edges), StaticKnob::RefineEdges, change);
-        hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
-        if s.refine_edges {
-            let mut radius = s.guided_radius as u32;
-            let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
-            s.guided_radius = radius.min(255) as u8;
-            aggregate_knob(r, StaticKnob::GuidedRadius, change);
-            hint(ui, "How far from the edge refinement looks for hair and detail.");
-            egui::CollapsingHeader::new("Advanced").id_salt("refine_advanced").show(ui, |ui| {
-                let mut detail = detail_from_epsilon(s.guided_epsilon);
-                let d = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
-                if d.changed {
-                    s.guided_epsilon = epsilon_from_detail(detail);
-                }
-                aggregate_knob(d, StaticKnob::GuidedEpsilon, change);
-                hint(ui, "Higher follows finer color edges.");
+        chip::Part::Full { reset } => {
+            if reset {
+                reset_group(MASK_FIELDS, s, d, change);
+            }
+            hint(ui, "Five steps, each on the one above.");
+            chip::step(ui, 1, true, |ui| {
+                mask_gamma(ui, s, change);
+                hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the photo.");
+            });
+            chip::step(ui, 2, true, |ui| {
+                mask_shift(ui, s, change);
+                hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
+            });
+            chip::step(ui, 3, s.refine_edges, |ui| {
+                mask_refine(ui, s, change, false);
+                hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
+                ui.add_enabled_ui(s.refine_edges, |ui| {
+                    let mut radius = s.guided_radius as u32;
+                    let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
+                    s.guided_radius = radius.min(255) as u8;
+                    aggregate_knob(r, StaticKnob::GuidedRadius, change);
+                    let mut detail = detail_from_epsilon(s.guided_epsilon);
+                    let dt = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
+                    if dt.changed {
+                        s.guided_epsilon = epsilon_from_detail(detail);
+                    }
+                    aggregate_knob(dt, StaticKnob::GuidedEpsilon, change);
+                    hint(ui, "Edge width: how far from the edge refinement looks. Detail: higher follows finer color edges.");
+                });
+            });
+            chip::step(ui, 4, s.feather > 0.0, |ui| {
+                mask_feather(ui, s, change);
+                hint(ui, "Soften the mask edge.");
+            });
+            chip::step(ui, 5, s.contrast > 0.0, |ui| {
+                aggregate_knob(
+                    chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
+                    StaticKnob::Contrast, change,
+                );
+                hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
+            });
+            ui.add_space(theme::SPACE_SM);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                hint(ui, "Pipeline diagram: F3");
             });
         }
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
-            StaticKnob::Feather, change,
-        );
-        hint(ui, "Soften the mask edge.");
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
-            StaticKnob::Contrast, change,
-        );
-        hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
-        ui.add_space(theme::SPACE_SM);
-
-        hint(ui, "Press F3 for the pipeline diagram.");
     });
 }
 

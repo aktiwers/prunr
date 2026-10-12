@@ -379,9 +379,51 @@ pub fn slider_row<T: egui::emath::Numeric>(
 }
 
 fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
+    if ui.data(|d| d.get_temp::<bool>(egui::Id::new(PANEL_ROWS)).unwrap_or(false)) {
+        return panel_slider(ui, label, slider);
+    }
     let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
     let resp = ui.add(slider.show_value(true)).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
+}
+
+/// The key under which `panel_rows` marks a panel whose sliders lay out
+/// as the board's rows.
+const PANEL_ROWS: &str = "chip_panel_rows";
+/// The name column of a panel row (the board's 116 px).
+const PANEL_NAME_WIDTH: f32 = 116.0;
+/// Room for a panel row's value box.
+const PANEL_VALUE_WIDTH: f32 = 74.0;
+
+/// Run `body` with its sliders laid out as the board's panel rows: the
+/// name in a fixed column, the slider filling the row, the value at its end.
+pub(super) fn panel_rows<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
+    let key = egui::Id::new(PANEL_ROWS);
+    let outer = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
+    let width = ui.spacing().slider_width;
+    ui.data_mut(|d| d.insert_temp(key, true));
+    let out = body(ui);
+    ui.data_mut(|d| d.insert_temp(key, outer));
+    ui.spacing_mut().slider_width = width;
+    out
+}
+
+fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
+    // On the caller's ui too: the handle is painted from its slider width.
+    ui.spacing_mut().slider_width = (ui.available_width() - PANEL_NAME_WIDTH - PANEL_VALUE_WIDTH).max(60.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(PANEL_NAME_WIDTH, ui.spacing().interact_size.y), egui::Sense::hover());
+        let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
+        ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
+        let resp = chip_named_slider(ui, label, slider);
+        (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
+    })
+    .inner
+}
+
+/// A slider with its value box, named `label` for the tree.
+fn chip_named_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> Response {
+    named(ui.add(slider.show_value(true)), label)
 }
 
 /// The handle's colour on the board: near-white over the rail.
@@ -540,6 +582,92 @@ pub(super) fn group_chip<R>(
     out
 }
 
+/// Which part of a quick-strip chip `body` is drawing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Part {
+    /// The strip under the chip: the knobs people reach for.
+    Quick,
+    /// The full panel the strip's dots open; `reset` is true on the frame
+    /// its Reset was clicked, before any row renders.
+    Full { reset: bool },
+}
+
+/// A group chip whose flyout is a quick strip that expands (surfaces
+/// mockup, board 3): a glass pill with the main knobs and dots, and under
+/// it, while the dots are on, the full panel. One `body` draws both parts
+/// so both may edit the same settings. The canvas stays live under it and
+/// it fades while one of its sliders is held, like any flyout.
+pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, mut body: impl FnMut(&mut Ui, Part)) {
+    let face: Cow<'_, str> = if g.summary.is_empty() {
+        Cow::Borrowed(g.label)
+    } else {
+        Cow::Owned(format!("{} \u{00b7} {}", g.label, g.summary))
+    };
+    let resp = tooltip(chip_button(ui, g.icon, &face, g.tuned), g.label, g.tooltip, None);
+    let pop_id = egui::Id::new(("group_chip", g.id_salt));
+    let expanded_id = pop_id.with("expanded");
+    outline_when_open(&resp, pop_id);
+    egui::Popup::from_toggle_button_response(&resp)
+        .id(pop_id)
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_START, egui::RectAlign::TOP_END])
+        .frame(egui::Frame::NONE)
+        .show(|ui| {
+            theme::register_flyout(ui.ctx(), pop_id);
+            if scrubbing_in(ui) {
+                ui.set_opacity(GHOST_OPACITY);
+            }
+            let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));
+            theme::pill_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 16.0;
+                    ui.spacing_mut().slider_width = STRIP_SLIDER_WIDTH;
+                    ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
+                    body(ui, Part::Quick);
+                    let fill = if expanded { theme::ACCENT_BRIGHT.gamma_multiply(0.35) } else { Color32::from_white_alpha(15) };
+                    let dots = tooltip(icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, fill), more, "", None);
+                    if dots.clicked() {
+                        expanded = !expanded;
+                    }
+                });
+            });
+            if expanded {
+                ui.add_space(10.0);
+                theme::panel_frame().show(ui, |ui| {
+                    ui.set_min_width(g.width);
+                    let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
+                    panel_rows(ui, |ui| body(ui, Part::Full { reset }));
+                });
+            }
+            ui.data_mut(|d| d.insert_temp(expanded_id, expanded));
+        });
+}
+
+/// A quick strip's slider width (the board's 72 px).
+const STRIP_SLIDER_WIDTH: f32 = 72.0;
+
+/// One numbered step of a full panel: the number in its badge (dim while
+/// the step is off) and the step's rows beside it.
+pub(super) fn step<R>(ui: &mut Ui, number: u8, active: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+        let (fill, text) = if active {
+            (theme::ACCENT_BRIGHT.gamma_multiply(0.2), theme::GLOW)
+        } else {
+            (Color32::from_white_alpha(15), theme::TEXT_SECONDARY)
+        };
+        ui.painter().circle_filled(rect.center(), 12.0, fill);
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, STEP_NUMBERS[number as usize % STEP_NUMBERS.len()],
+            egui::FontId::proportional(11.5), text);
+        ui.add_space(theme::SPACE_SM);
+        ui.vertical(|ui| body(ui)).inner
+    })
+    .inner
+}
+
+const STEP_NUMBERS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
 /// The first row of every popover: the control's title on the left and,
 /// when the popover has a default, Reset on the right. `reset` carries
 /// the tooltip and whether the popover already sits at its default, in
@@ -653,6 +781,13 @@ pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChan
         ui.label(RichText::new(label).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| switch(ui, label, value)).inner
     }).inner.changed();
+    ChipChange { changed, commit: changed }
+}
+
+/// A switch with its label beside it, for a quick strip.
+pub(super) fn inline_switch(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
+    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    let changed = switch(ui, label, value).changed();
     ChipChange { changed, commit: changed }
 }
 
