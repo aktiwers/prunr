@@ -140,6 +140,8 @@ pub(crate) struct LayerJob {
     correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
     seg: Option<CompressedTensor>,
     edges: Option<CompressedEdgeTensors>,
+    /// The faces Restore faces blends into the photo, as on the canvas.
+    faces: Option<super::live_preview::FacesInput>,
 }
 
 impl LayerJob {
@@ -154,6 +156,7 @@ impl LayerJob {
             correction: item.correction_plane(style, action),
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
+            faces: item.face_photo().and_then(|photo| item.faces_for(&photo)),
         }
     }
 
@@ -195,9 +198,11 @@ pub(crate) struct LayerSource {
 impl LayerSource {
     fn of(job: &LayerJob) -> Option<Self> {
         let start = job.start.as_ref().and_then(|s| s.load()).or_else(|| job.source_rgba.clone());
-        let original = match start {
-            Some(rgba) => DynamicImage::ImageRgba8((*rgba).clone()),
-            None => job.source.decode()
+        let original = match (&job.faces, start) {
+            (Some(super::live_preview::FacesInput { faced: Some(faced), .. }), _) => (**faced).clone(),
+            (Some(faces), Some(rgba)) => DynamicImage::ImageRgba8(prunr_core::face::compose_faces(&rgba, &faces.key.faces, faces.key.blend)),
+            (None, Some(rgba)) => DynamicImage::ImageRgba8((*rgba).clone()),
+            (_, None) => job.source.decode()
                 .map_err(|err| tracing::warn!(item_id = job.item_id, %err, "layer export: source"))
                 .ok()?,
         };

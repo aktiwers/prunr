@@ -182,6 +182,8 @@ pub struct PreviewResult {
     /// The upscale reference an UpscaleTier2 dispatch built, for the kept
     /// upscale run.
     pub new_reference: Option<Arc<image::RgbaImage>>,
+    /// The faced photo this dispatch built, for the item to reuse.
+    pub new_faced: Option<(Arc<DynamicImage>, FacedKey)>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -377,6 +379,7 @@ impl LivePreview {
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let version = inputs.version;
                 let start = inputs.start.clone();
+                let faced_key = inputs.faces.as_ref().map(|f| f.key.clone());
                 let started = std::time::Instant::now();
                 let output = run_preview(inputs, &cancel);
                 tracing::debug!(item_id = id, kind = ?dispatch_kind, ms = started.elapsed().as_millis() as u64, "live preview ran");
@@ -396,6 +399,7 @@ impl LivePreview {
                         item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                         new_edge, new_bold, new_masked_base,
                         new_reference: output.built_reference,
+                        new_faced: output.built_faced.zip(faced_key),
                         applied_mask: mask_recipe,
                         applied_tier2_knobs,
                         is_final: false,
@@ -500,6 +504,30 @@ pub struct DispatchInputs {
     pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
     /// For `PreviewKind::UpscaleTier2` only — snapshot of the four Tier-2 knobs.
     pub upscale_tier2_knobs: Option<UpscaleTier2Knobs>,
+    /// Restored faces to blend into `original` before anything else.
+    pub faces: Option<FacesInput>,
+}
+
+/// The faces found for a preview's photo and how they go back; `faced` is
+/// the photo with them blended in, when a dispatch already built it for
+/// this blend.
+#[derive(Clone)]
+pub struct FacesInput {
+    pub key: FacedKey,
+    pub faced: Option<Arc<DynamicImage>>,
+}
+
+/// What a faced photo was built from: these faces at this blend.
+#[derive(Clone)]
+pub struct FacedKey {
+    pub faces: Arc<Vec<prunr_core::face::RestoredFace>>,
+    pub blend: prunr_core::face::FaceBlend,
+}
+
+impl FacedKey {
+    pub fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.faces, &other.faces) && self.blend == other.blend
+    }
 }
 
 /// What an edge plane was built from; a plane is reused only on an exact match.
@@ -633,11 +661,12 @@ struct RunOutput {
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
     built_reference: Option<Arc<image::RgbaImage>>,
+    built_faced: Option<Arc<DynamicImage>>,
 }
 
 impl RunOutput {
     fn empty() -> Self {
-        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None }
+        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None }
     }
 }
 
@@ -661,6 +690,27 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::empty() };
     }
 
+    // Faces go into the photo before the mask, the effect and the lines.
+    let mut inputs = inputs;
+    let built_faced = match inputs.faces.take() {
+        Some(FacesInput { faced: Some(faced), .. }) => {
+            inputs.original = faced;
+            None
+        }
+        Some(FacesInput { key, faced: None }) => {
+            let faced = Arc::new(DynamicImage::ImageRgba8(prunr_core::face::compose_faces(&inputs.original.to_rgba8(), &key.faces, key.blend)));
+            inputs.original = Arc::clone(&faced);
+            Some(faced)
+        }
+        None => None,
+    };
+    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    let output = run_photo_preview(inputs);
+    RunOutput { built_faced, ..output }
+}
+
+/// `run_preview` for the kinds made from the photo (not an upscale).
+fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     // Pipeline shape follows the user's CURRENT `line_mode`, not tensor
     // presence. After a SubjectOutline → Off round-trip we (intentionally)
     // keep both tensors cached, so using tensor-presence as the selector
@@ -763,7 +813,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
                 &mask, &base, &compose_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims,
             );
-            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, built_reference: None }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::empty() }
         }
         PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
     }
@@ -1050,6 +1100,7 @@ mod tests {
             new_bold: None,
             new_masked_base: None,
             new_reference: None,
+            new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1079,6 +1130,7 @@ mod tests {
             new_bold: None,
             new_masked_base: None,
             new_reference: None,
+            new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1107,6 +1159,7 @@ mod tests {
             new_bold: None,
             new_masked_base: None,
             new_reference: None,
+            new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1132,6 +1185,7 @@ mod tests {
             new_bold: None,
             new_masked_base: None,
             new_reference: None,
+            new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1164,6 +1218,7 @@ mod tests {
             new_bold: None,
             new_masked_base: None,
             new_reference: None,
+            new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             is_final: false,
@@ -1253,6 +1308,7 @@ mod tests {
                 correction: None,
                 upscale: Some(crate::gui::item::UpscaleCache::new(raw_arc.clone(), raw_arc.clone(), None)),
                 upscale_tier2_knobs: Some(knobs),
+                faces: None,
             },
             &cancel,
         );
@@ -1310,6 +1366,7 @@ mod tests {
                     correction: None,
                     upscale: None,
                     upscale_tier2_knobs: None,
+                    faces: None,
                 },
                 &std::sync::atomic::AtomicBool::new(false),
             )

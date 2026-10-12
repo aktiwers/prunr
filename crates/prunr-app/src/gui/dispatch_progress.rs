@@ -27,6 +27,8 @@ pub enum ProgressKind {
     Inpaint,
     /// Super-resolution upscale (Real-ESRGAN, HAT-L).
     Upscale,
+    /// Restore faces: a few seconds, not cancellable.
+    Faces,
 }
 
 /// What Cancel stops. An eraser run needs the item it runs on; without
@@ -43,6 +45,7 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
         ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
+        ProgressKind::Faces => None,
     }
 }
 

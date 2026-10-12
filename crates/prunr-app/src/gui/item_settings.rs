@@ -119,6 +119,62 @@ pub struct ItemSettings {
     /// Reinhard Lab mean+stddev color match against source RGB.
     #[serde(default)]
     pub color_match: bool,
+    /// Restore faces: on or off, with which model and how strongly.
+    #[serde(default)]
+    pub faces: FaceSettings,
+}
+
+/// The face restorer a run uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaceModel {
+    #[default]
+    Gfpgan,
+    RestoreFormerPp,
+}
+
+impl FaceModel {
+    pub const ALL: [Self; 2] = [Self::Gfpgan, Self::RestoreFormerPp];
+
+    pub fn id(self) -> prunr_models::ModelId {
+        match self {
+            Self::Gfpgan => prunr_models::ModelId::FaceGfpgan,
+            Self::RestoreFormerPp => prunr_models::ModelId::FaceRestoreFormerPp,
+        }
+    }
+}
+
+/// Restore faces. `on` and `model` decide whether faces are found and
+/// redrawn (a model run); the rest only how they go back, which is live.
+/// Strength is whole percent to fit the ItemSettings byte budget.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FaceSettings {
+    pub on: bool,
+    pub model: FaceModel,
+    pub strength_pct: u8,
+    pub largest_only: bool,
+    pub hair: bool,
+}
+
+impl Default for FaceSettings {
+    fn default() -> Self {
+        Self { on: false, model: FaceModel::default(), strength_pct: 50, largest_only: false, hair: false }
+    }
+}
+
+impl FaceSettings {
+    pub fn blend(&self) -> prunr_core::face::FaceBlend {
+        prunr_core::face::FaceBlend {
+            strength: f32::from(self.strength_pct.min(100)) / 100.0,
+            largest_only: self.largest_only,
+            hair: self.hair,
+        }
+    }
+
+    /// The faces to find, when any: the model to find them with.
+    pub fn wanted(&self) -> Option<prunr_models::ModelId> {
+        self.on.then(|| self.model.id())
+    }
 }
 
 fn default_sharpen() -> f32 { prunr_core::DEFAULT_SHARPEN }
@@ -153,6 +209,7 @@ impl Default for ItemSettings {
             sharpen: prunr_core::DEFAULT_SHARPEN,
             ai_blend: 1.0,
             color_match: false,
+            faces: FaceSettings::default(),
         }
     }
 }
@@ -534,6 +591,7 @@ mod tests {
             sharpen: 0.3,
             ai_blend: 0.6,
             color_match: true,
+            faces: FaceSettings { on: true, model: FaceModel::RestoreFormerPp, strength_pct: 70, largest_only: true, hair: true },
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();

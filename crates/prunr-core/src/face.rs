@@ -293,6 +293,7 @@ fn restore(session: &mut Session, crop: &RgbImage) -> Result<RgbImage, CoreError
 /// How the found faces go back into the photo; all of it is cheap to
 /// change.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FaceBlend {
     /// 0 = the photo, 1 = fully restored.
     pub strength: f32,

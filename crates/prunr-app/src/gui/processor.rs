@@ -122,6 +122,14 @@ pub(crate) struct SamEncoderResult {
     pub(crate) result: Result<prunr_core::sam::SamEmbedding, String>,
 }
 
+/// A face search landing: the faces found in `photo` with `model`.
+pub(crate) struct FacesResult {
+    pub(crate) item_id: u64,
+    pub(crate) photo: super::item::FacePhoto,
+    pub(crate) model: prunr_models::ModelId,
+    pub(crate) result: Result<Vec<prunr_core::face::RestoredFace>, String>,
+}
+
 /// Which selection operation the Magic Brush click/stroke was performing.
 /// Mirrors the Shift/Alt modifier semantics from 33-UI-SPEC.
 /// Single-slot warm upscale engine. Shared with the dispatch thread so
@@ -543,6 +551,8 @@ pub(crate) struct Processor {
     sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
     sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
     sam_sessions: SamSessionSlot,
+    faces_tx: mpsc::Sender<FacesResult>,
+    faces_rx: mpsc::Receiver<FacesResult>,
 }
 
 impl Processor {
@@ -556,6 +566,7 @@ impl Processor {
         let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
+        let (faces_tx, faces_rx) = mpsc::channel();
         Self {
             worker_tx,
             worker_rx,
@@ -587,6 +598,8 @@ impl Processor {
             sam_decoder_tx,
             sam_decoder_rx,
             sam_sessions: Arc::new(Mutex::new(None)),
+            faces_tx,
+            faces_rx,
         }
     }
 
@@ -1369,6 +1382,25 @@ impl Processor {
             let _ = tx.send(SamEncoderResult { item_id, result });
         });
         Ok(())
+    }
+
+    /// Find and redraw the faces in `photo` with `model` on a thread; the
+    /// capsule shows it. The photo is unpacked there, never here.
+    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId) {
+        let tx = self.faces_tx.clone();
+        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
+        let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        std::thread::spawn(move || {
+            let result = photo.load()
+                .ok_or_else(|| "the photo is no longer there".to_string())
+                .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, &progress).map_err(|e| e.to_string()));
+            run.end();
+            let _ = tx.send(FacesResult { item_id, photo, model, result });
+        });
+    }
+
+    pub(crate) fn pump_faces_results(&mut self) -> Vec<FacesResult> {
+        self.faces_rx.try_iter().collect()
     }
 
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool

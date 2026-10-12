@@ -86,6 +86,8 @@ pub struct ToolbarChange {
     pub(crate) toggle_magic: bool,
     /// User clicked the Compare toggle (show the original over the result).
     pub(crate) toggle_compare: bool,
+    /// What the Faces chip changed.
+    pub(crate) faces: super::faces_chip::FacesChange,
 }
 
 /// Read-only per-frame facts the toolbar renders against. Built by the
@@ -107,6 +109,8 @@ pub(crate) struct ToolbarState<'a> {
     pub can_compare: bool,
     /// The seed of the generated fill on screen, for Pin seed.
     pub shown_seed: Option<u64>,
+    /// How many faces Restore faces found in the shown photo.
+    pub faces_found: super::faces_chip::FoundCount,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -133,8 +137,18 @@ impl Default for ToolbarChange {
             toggle_paint: false,
             toggle_magic: false,
             toggle_compare: false,
+            faces: Default::default(),
         }
     }
+}
+
+/// The Faces chip; "Get a face model" opens the Model Store on Faces.
+pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let faces = super::faces_chip::render(ui, &mut item_settings.faces, state.installed, state.faces_found);
+    if faces.open_store {
+        change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Face) });
+    }
+    change.faces = faces;
 }
 
 // Starting values for knobs whose factory default is "off": the slider
@@ -211,6 +225,9 @@ pub(crate) fn render(
                 let changed = super::effect_chip::render(ui, &mut item_settings.fill_style);
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
             });
+        }
+        if shows(model, Surface::Faces) {
+            render_faces_chip(ui, item_settings, &state, &mut change);
         }
         if shows(model, Surface::Decoration) {
             let reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out to outline.");
