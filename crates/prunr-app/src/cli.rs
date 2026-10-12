@@ -274,6 +274,12 @@ impl Cli {
         }
     }
 
+    /// Where an input's result is written: `-o` names the file for one
+    /// input and the folder for several.
+    fn result_path(&self, input: &std::path::Path) -> PathBuf {
+        output_path(input, &self.output, self.inputs.len() > 1)
+    }
+
     fn line_mode(&self) -> LineMode {
         if self.lines_after_bg {
             LineMode::SubjectOutline
@@ -510,7 +516,10 @@ fn run_batch(args: &Cli) -> i32 {
     // the per-tick fan-out cost the perf trace caught was ~13% of
     // prunr-binary self-time. 4 Hz feels indistinguishable for image
     // processing cadence and is the standard non-game-CLI rate.
-    let mp = if !args.quiet {
+    // Spinners only on a terminal: elsewhere indicatif draws nothing, and
+    // a result's message (an error above all) would never show. Without
+    // them each result prints a line instead.
+    let mp = if !args.quiet && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
         Some(MultiProgress::with_draw_target(
             indicatif::ProgressDrawTarget::stderr_with_hz(4),
         ))
@@ -668,7 +677,7 @@ fn run_batch(args: &Cli) -> i32 {
         let original_idx = valid_indices[batch_idx];
         let input = &args.inputs[original_idx];
         let elapsed = start_times[original_idx].elapsed();
-        let out_path = output_path(input, &args.output, true);
+        let out_path = args.result_path(input);
 
         let spinner_opt = spinners_arc.get(original_idx).and_then(|o| o.as_ref());
 
@@ -1030,6 +1039,19 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    /// `-o` with one input is the output file; with several it is the
+    /// folder each result goes into.
+    #[test]
+    fn dash_o_is_the_file_for_one_input_and_the_folder_for_several() {
+        use std::path::Path;
+        let one = super::Cli::parse_from(["prunr", "in/a.jpg", "-o", "out/result.png"]);
+        assert_eq!(one.result_path(Path::new("in/a.jpg")), Path::new("out/result.png"));
+        let many = super::Cli::parse_from(["prunr", "in/a.jpg", "in/b.jpg", "-o", "out"]);
+        assert_eq!(many.result_path(Path::new("in/b.jpg")), Path::new("out/b.prunr.png"));
+        let none = super::Cli::parse_from(["prunr", "in/a.jpg"]);
+        assert_eq!(none.result_path(Path::new("in/a.jpg")), Path::new("in/a.prunr.png"));
+    }
 
     /// Help › Command-line reference lists every flag `prunr --help`
     /// shows, so a new or renamed flag cannot leave it behind.
