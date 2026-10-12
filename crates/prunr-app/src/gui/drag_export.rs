@@ -152,9 +152,9 @@ fn render_layer(
     match kind {
         LayerKind::Subject => {
             let seg = seg?;
-            // Strip the user's effect, outline and shadow so the receiving
-            // app gets a clean subject. Keep every other mask knob so their guided-filter /
-            // feather / edge_shift refinements survive.
+            // A clean subject for the receiving app: no effect, outline or
+            // shadow. The other mask knobs stay, so the guided-filter,
+            // feather and edge-shift refinements survive.
             let mask = MaskSettings {
                 fill_style: FillStyle::None,
                 decoration: prunr_core::Decoration::default(),
