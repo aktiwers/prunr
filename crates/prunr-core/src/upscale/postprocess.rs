@@ -253,9 +253,92 @@ fn mean_std(vals: &[f32]) -> (f32, f32) {
     (mean as f32, variance.sqrt() as f32)
 }
 
+/// What Refine applies after the model: Sharpen, AI blend toward the
+/// plain enlargement, Color match to the input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Refine {
+    pub sharpen: f32,
+    pub sharpen_sigma: f32,
+    pub ai_blend: f32,
+    pub color_match: bool,
+}
+
+impl Refine {
+    pub fn of_recipe(r: &crate::UpscaleRecipe) -> Self {
+        Self { sharpen: r.sharpen(), sharpen_sigma: r.output_scale.sharpen_sigma(), ai_blend: r.ai_blend(), color_match: r.color_match }
+    }
+
+    /// AI blend and Color match compare against the upscaled image's input.
+    fn needs_reference(&self) -> bool {
+        self.ai_blend < 1.0 - f32::EPSILON || self.color_match
+    }
+
+    fn change_nothing(&self) -> bool {
+        self.sharpen == 0.0 && !self.needs_reference()
+    }
+}
+
+/// The upscale result to show, from the model's raw output and `input`, the
+/// image the model read: Refine's knobs applied after the model. AI blend
+/// and Color match compare against `input` enlarged to the output size,
+/// reused from `reference` when it already is that size and built (and
+/// returned for caching) otherwise. With every knob at its default the raw
+/// output is shown as is, not copied.
+///
+/// Order: AI blend, then Sharpen (it sharpens what the blend left), then
+/// Color match (global statistics last).
+///
+/// Peak working set besides `raw`: the result, a blur buffer while AI
+/// blend and Sharpen are both on, and the enlarged input for AI blend or
+/// Color match (1-3 × w·h·4 bytes).
+pub fn refine(
+    raw: &std::sync::Arc<RgbaImage>,
+    input: &RgbaImage,
+    reference: Option<std::sync::Arc<RgbaImage>>,
+    knobs: &Refine,
+) -> (std::sync::Arc<RgbaImage>, Option<std::sync::Arc<RgbaImage>>) {
+    use std::sync::Arc;
+    if knobs.change_nothing() {
+        return (Arc::clone(raw), reference);
+    }
+    let reference = knobs.needs_reference().then(|| {
+        reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
+            Arc::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom))
+        })
+    });
+    let blend = reference.as_deref().filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON);
+    let mut shown = match blend {
+        Some(reference) => {
+            let mut blended = (**raw).clone();
+            apply_ai_blend(&mut blended, reference, knobs.ai_blend);
+            if knobs.sharpen == 0.0 { blended } else { sharpened(&blended, knobs.sharpen, knobs.sharpen_sigma) }
+        }
+        None => sharpened(raw, knobs.sharpen, knobs.sharpen_sigma),
+    };
+    if let Some(reference) = reference.as_deref().filter(|_| knobs.color_match) {
+        apply_color_match(&mut shown, reference);
+    }
+    (Arc::new(shown), reference)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With every knob at its default the model's output is shown as is,
+    /// not copied; AI blend at 0 shows the plain enlargement of the input.
+    #[test]
+    fn refine_leaves_the_output_alone_at_defaults_and_blends_toward_the_input() {
+        use std::sync::Arc;
+        let raw = Arc::new(RgbaImage::from_pixel(4, 4, image::Rgba([200, 200, 200, 255])));
+        let input = RgbaImage::from_pixel(2, 2, image::Rgba([40, 40, 40, 255]));
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        let (shown, reference) = refine(&raw, &input, None, &off);
+        assert!(Arc::ptr_eq(&shown, &raw) && reference.is_none());
+        let (shown, reference) = refine(&raw, &input, None, &Refine { ai_blend: 0.0, ..off });
+        assert_eq!(shown.get_pixel(1, 1).0, [40, 40, 40, 255]);
+        assert!(reference.is_some_and(|r| r.dimensions() == (4, 4)), "the enlarged input comes back for reuse");
+    }
     use image::{Rgba, RgbaImage};
 
     fn make_image(w: u32, h: u32, fill: [u8; 4]) -> RgbaImage {
