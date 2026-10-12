@@ -158,7 +158,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let active_inpaint_item = app.batch.selected_idx_clamped()
             .map(|idx| app.batch.items[idx].id)
             .filter(|&id| app.processor.is_inpaint_in_flight(id));
-        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress) {
+        let preview = app.batch.selected_item().and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
+        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, preview) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};

@@ -18,6 +18,12 @@ fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u
     dst.into_vec()
 }
 
+/// SIMD Lanczos3 resize of an RGB image, borrowed.
+pub fn resize_rgb_image_lanczos3(src: &image::RgbImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
+    let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8x3, dst_width, dst_height, ResizeFilter::Lanczos3);
+    image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+}
+
 /// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
 pub fn resize_gray_lanczos3(src: &GrayImage, dst_width: u32, dst_height: u32) -> GrayImage {
     let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8, dst_width, dst_height, ResizeFilter::Lanczos3);
@@ -404,6 +410,14 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_rgb_resize_keeps_a_flat_colour() {
+        let src = image::RgbImage::from_pixel(64, 32, image::Rgb([20, 140, 230]));
+        let out = super::resize_rgb_image_lanczos3(&src, 8, 4);
+        assert_eq!(out.dimensions(), (8, 4));
+        assert!(out.pixels().all(|p| p.0 == [20, 140, 230]));
+    }
+
 
     use super::*;
     use crate::types::DOWNSCALE_TARGET;
