@@ -946,11 +946,31 @@ impl BatchItem {
             .or_else(|| self.source_rgba.clone().map(FacePhoto::Source))
     }
 
+    /// The faces found in `photo` with `model`, if those are the ones kept.
+    pub(crate) fn found_for(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> Option<&FoundFaces> {
+        self.found_faces.as_ref().filter(|f| f.model == model && f.photo.same(photo))
+    }
+
+    /// Whether a search of `photo` with `model` is under way.
+    pub(crate) fn pending_for(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> bool {
+        self.faces_pending.as_ref().is_some_and(|(p, m)| *m == model && p.same(photo))
+    }
+
+    /// Whether the image wants faces from `photo` with `model`: Restore
+    /// faces is on with that model and `photo` is the one shown.
+    pub(crate) fn wants_faces(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> bool {
+        self.settings.faces.wanted() == Some(model) && self.face_photo().is_some_and(|p| p.same(photo))
+    }
+
+    /// The faces the shown photo's preview blends in.
+    pub(crate) fn faces_input(&self) -> Option<super::live_preview::FacesInput> {
+        self.faces_for(&self.face_photo()?)
+    }
+
     /// The faces a preview of `photo` blends in, if Restore faces is on and
     /// they were found for that photo with the chosen model.
     pub(crate) fn faces_for(&self, photo: &FacePhoto) -> Option<super::live_preview::FacesInput> {
-        let model = self.settings.faces.wanted()?;
-        let found = self.found_faces.as_ref().filter(|f| f.model == model && f.photo.same(photo))?;
+        let found = self.found_for(photo, self.settings.faces.wanted()?)?;
         let key = super::live_preview::FacedKey { faces: Arc::clone(&found.faces), blend: self.settings.faces.blend() };
         let faced = self.faced_photo.as_ref().filter(|(_, k)| k.matches(&key)).map(|(p, _)| Arc::clone(p));
         Some(super::live_preview::FacesInput { key, faced })
@@ -967,9 +987,7 @@ impl BatchItem {
     /// nothing found or under way matches.
     pub(crate) fn faces_to_find(&self, photo: &FacePhoto) -> Option<prunr_models::ModelId> {
         let model = self.settings.faces.wanted()?;
-        let found = self.found_faces.as_ref().is_some_and(|f| f.model == model && f.photo.same(photo));
-        let pending = self.faces_pending.as_ref().is_some_and(|(p, m)| *m == model && p.same(photo));
-        (!found && !pending).then_some(model)
+        (self.found_for(photo, model).is_none() && !self.pending_for(photo, model)).then_some(model)
     }
 
     /// The pixels a run of `engine` starts from (`None`: the original).
