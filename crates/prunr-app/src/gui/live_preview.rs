@@ -83,48 +83,12 @@ pub enum PreviewKind {
 }
 
 /// Tier-2 upscale postprocess knob values captured at snapshot time.
-#[derive(Debug, Clone, Copy)]
-pub struct UpscaleTier2Knobs {
-    pub sharpen: f32,
-    pub sharpen_sigma: f32,
-    pub ai_blend: f32,
-    pub color_match: bool,
-}
+pub type UpscaleTier2Knobs = prunr_core::upscale::Refine;
 
-impl UpscaleTier2Knobs {
-    pub fn of(s: &crate::gui::item_settings::ItemSettings) -> Self {
-        Self { sharpen: s.sharpen, sharpen_sigma: s.output_scale.sharpen_sigma(), ai_blend: s.ai_blend, color_match: s.color_match }
-    }
-
-    pub fn of_recipe(r: &prunr_core::UpscaleRecipe) -> Self {
-        Self { sharpen: r.sharpen(), sharpen_sigma: r.output_scale.sharpen_sigma(), ai_blend: r.ai_blend(), color_match: r.color_match }
-    }
-
-    /// AI blend and Color match compare against the upscaled image's input.
-    fn needs_reference(&self) -> bool {
-        self.ai_blend < 1.0 - f32::EPSILON || self.color_match
-    }
-
-    fn change_nothing(&self) -> bool {
-        self.sharpen == 0.0 && !self.needs_reference()
-    }
-}
-
-/// The upscale result to show, from the model's raw output and `input`, the
-/// image the model read: Refine's knobs applied after the model. AI blend
-/// and Color match compare against `input` enlarged to the output size,
-/// reused from `reference` when it already is that size and built (and
-/// returned for caching) otherwise. With every knob at its default the raw
-/// output is shown as is, not copied.
-///
-/// Order: AI blend, then Sharpen (it sharpens what the blend left), then
-/// Color match (global statistics last).
-///
-/// Peak working set besides `raw`: the result, a blur buffer while AI
-/// blend and Sharpen are both on, and the enlarged input for AI blend or
-/// Color match (1-3 × w·h·4 bytes).
-/// Restored faces go in last: AI blend would mix them back toward the
-/// plain enlargement, and Sharpen would sharpen redrawn detail.
+/// The upscale result to show: Refine over the model's output
+/// (`prunr_core::upscale::refine`), then the restored faces. Faces go in
+/// last: AI blend would mix them back toward the plain enlargement, and
+/// Sharpen would sharpen redrawn detail.
 pub(crate) fn finish_upscale(
     raw: &Arc<RgbaImage>,
     input: &RgbaImage,
@@ -132,43 +96,12 @@ pub(crate) fn finish_upscale(
     knobs: &UpscaleTier2Knobs,
     faces: Option<&FacedKey>,
 ) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
-    let (shown, reference) = refine_upscale(raw, input, reference, knobs);
+    let (shown, reference) = prunr_core::upscale::refine(raw, input, reference, knobs);
     let shown = match faces {
         Some(f) => Arc::new(prunr_core::face::compose_faces(&shown, &f.faces, f.blend)),
         None => shown,
     };
     (shown, reference)
-}
-
-/// Sharpen, AI blend and Color match over the model's output.
-fn refine_upscale(
-    raw: &Arc<RgbaImage>,
-    input: &RgbaImage,
-    reference: Option<Arc<RgbaImage>>,
-    knobs: &UpscaleTier2Knobs,
-) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
-    if knobs.change_nothing() {
-        return (Arc::clone(raw), reference);
-    }
-    let reference = knobs.needs_reference().then(|| {
-        reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
-            Arc::new(prunr_core::formats::resize_rgba(input, raw.width(), raw.height(), prunr_core::formats::ResizeFilter::CatmullRom))
-        })
-    });
-    use prunr_core::upscale::{apply_ai_blend, apply_color_match, sharpened};
-    let blend = reference.as_deref().filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON);
-    let mut shown = match blend {
-        Some(reference) => {
-            let mut blended = (**raw).clone();
-            apply_ai_blend(&mut blended, reference, knobs.ai_blend);
-            if knobs.sharpen == 0.0 { blended } else { sharpened(&blended, knobs.sharpen, knobs.sharpen_sigma) }
-        }
-        None => sharpened(raw, knobs.sharpen, knobs.sharpen_sigma),
-    };
-    if let Some(reference) = reference.as_deref().filter(|_| knobs.color_match) {
-        apply_color_match(&mut shown, reference);
-    }
-    (Arc::new(shown), reference)
 }
 
 /// A completed Tier 2 rerun delivered back to the UI thread.
