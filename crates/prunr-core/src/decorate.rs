@@ -13,7 +13,7 @@
 //!
 //! Peak working set for a region of n pixels: the outline's alpha copy (n)
 //! and two f32 distance planes (8n); the shadow's alpha copy (n) and two
-//! f32 planes (8n) plus the box filter's integral (4n). Each set is freed
+//! f32 planes (8n) plus the box filter's row sums (4n). Each set is freed
 //! before the next starts.
 
 use image::RgbaImage;
