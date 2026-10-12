@@ -4438,6 +4438,21 @@ mod timeline_contract_tests {
         assert!(app.batch.items[0].selection_mask.is_some(), "undo brings the marks back with the image");
     }
 
+    /// The control socket reports the app busy while an erase runs, so a
+    /// driver waits for the fill instead of reading the working overlay.
+    #[test]
+    fn the_app_is_busy_while_an_erase_runs() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        assert!(!super::super::automation::state::dump(&app).busy);
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
+        assert!(super::super::automation::state::dump(&app).busy, "an erase in flight");
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert!(app.batch.items[0].job.is_none(), "landed: only the texture upload is left");
+    }
+
     /// An erase result that lands after an undo is dropped.
     #[test]
     fn an_erase_after_an_undo_does_not_land() {

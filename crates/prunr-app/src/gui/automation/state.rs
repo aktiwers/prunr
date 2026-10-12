@@ -60,7 +60,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         selected: app.batch.selected_item().map(|it| it.id),
         busy: app.processor.live_preview.is_busy()
             || app.processor.is_upscale_in_flight()
-            || app.batch.items.iter().any(|it| it.status == crate::gui::item::BatchStatus::Processing || it.has_pending_work()),
+            || app.batch.items.iter().any(|it| it.status == crate::gui::item::BatchStatus::Processing || it.job.is_some() || it.has_pending_work()),
         items: app
             .batch
             .items
