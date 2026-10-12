@@ -291,6 +291,13 @@ impl FaceStage {
     pub(crate) fn of(role: super::knob_catalog::ModelRole) -> Self {
         if role == super::knob_catalog::ModelRole::Upscale { Self::Upscale } else { Self::Photo }
     }
+
+    pub(crate) fn engine(self) -> Engine {
+        match self {
+            Self::Photo => Engine::Segment,
+            Self::Upscale => Engine::Upscale,
+        }
+    }
 }
 
 /// Faces found in one photo with one model.
@@ -691,6 +698,7 @@ impl BatchItem {
             applied_preset: self.applied_preset.clone(),
             // A hand edit makes new pixels no run can redo.
             origin: if kind == StepKind::Edit { None } else { shown.origin.clone() },
+            faced: shown.faced,
             at: std::time::Instant::now(),
         }
     }
@@ -933,12 +941,32 @@ impl BatchItem {
             None => self.amend(),
         }
         if let Some(job) = job {
+            let engine = job.engine;
             self.timeline.current_mut().origin = Some(Origin {
                 seed: job.seed,
                 region: job.region,
                 ..Origin::new(job.engine, job.start)
             });
+            // Faces blend in later, when their re-cut lands.
+            self.settle_faced(engine, false);
         }
+    }
+
+    /// Note whether the shown step's image has restored faces: blended by
+    /// the run that just landed, or already in the image it started from.
+    pub(crate) fn settle_faced(&mut self, engine: Engine, blended: bool) {
+        let faced = blended || self.start_faced(engine);
+        self.timeline.current_mut().faced = faced;
+    }
+
+    fn start_faced(&self, engine: Engine) -> bool {
+        self.run_start(engine).is_some_and(|s| self.timeline.image_faced(&s.image))
+    }
+
+    /// The photo at `stage` already has restored faces from an earlier
+    /// step: restoring them again would sharpen them twice.
+    pub(crate) fn faces_already_restored(&self, stage: FaceStage) -> bool {
+        self.start_faced(stage.engine())
     }
 
     /// An upscale lands: its step is recorded, and the run is kept for
@@ -1000,6 +1028,9 @@ impl BatchItem {
     /// output, or where a photo model's preview starts, as
     /// `build_preview_inputs` takes it.
     pub(crate) fn face_photo(&self, stage: FaceStage) -> Option<FacePhoto> {
+        if self.faces_already_restored(stage) {
+            return None;
+        }
         match stage {
             FaceStage::Upscale => self.kept_upscale().map(|run| FacePhoto::Upscaled(Arc::clone(&run.raw))),
             FaceStage::Photo => self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))

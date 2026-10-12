@@ -2508,6 +2508,16 @@ impl PrunrApp {
         }
     }
 
+    /// What the Faces panel says about the search of `item`'s photo.
+    fn face_search(item: &BatchItem, stage: super::item::FaceStage) -> super::views::faces_chip::FoundCount {
+        use super::views::faces_chip::FaceSearch;
+        if item.faces_already_restored(stage) {
+            return Some(FaceSearch::RestoredEarlier);
+        }
+        let found = item.found_for(&item.face_photo(stage)?, item.settings.faces.wanted()?)?;
+        Some(if found.failed { FaceSearch::Failed } else { FaceSearch::Found(found.faces.len()) })
+    }
+
     /// Restore faces works on the active model's stage.
     fn face_stage(&self) -> super::item::FaceStage {
         super::item::FaceStage::of(self.settings.model.role())
@@ -2836,6 +2846,9 @@ impl PrunrApp {
                 if !is_upscale_tier2 {
                     item.record_origin(Engine::Segment, r.start);
                 }
+                let stage = if is_upscale_tier2 { super::item::FaceStage::Upscale } else { super::item::FaceStage::Photo };
+                let blended = item.faces_input(stage).is_some_and(|f| !f.key.faces.is_empty());
+                item.settle_faced(stage.engine(), blended);
                 tracing::debug!(
                     event = "upscale_tier2_apply",
                     item_id = item.id,
@@ -3990,9 +4003,7 @@ impl PrunrApp {
                     show_original: self.show_original,
                     can_compare,
                     shown_seed: item.shown_seed(),
-                    faces_found: item.face_photo(super::item::FaceStage::of(settings_ref.model.role())).zip(item.settings.faces.wanted())
-                        .and_then(|(photo, model)| item.found_for(&photo, model))
-                        .map(|f| if f.failed { super::views::faces_chip::FaceSearch::Failed } else { super::views::faces_chip::FaceSearch::Found(f.faces.len()) }),
+                    faces_found: Self::face_search(item, super::item::FaceStage::of(settings_ref.model.role())),
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
@@ -4600,6 +4611,33 @@ mod faces_tests {
         app.land_faces(landed(&source, FaceModel::Gfpgan));
         assert!(app.batch.items[0].found_faces.is_some());
         assert!(app.processor.live_preview.is_pending_for(1), "the re-blend is queued");
+    }
+
+    /// Faces are restored once per chain: a run starting from an image
+    /// that already has them (a faced cut-out, an erase on one) leaves
+    /// them alone; redoing the faced step itself restores them again.
+    #[test]
+    fn faces_are_not_restored_over_restored_faces() {
+        use crate::gui::item::{Engine, FaceStage};
+        use crate::gui::timeline::StepKind;
+        let (mut app, _) = app_with_faces_on();
+        let item = &mut app.batch.items[0];
+        item.status = crate::gui::item::BatchStatus::Done;
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        item.commit(StepKind::Process);
+        item.record_origin(Engine::Segment, None);
+        item.settle_faced(Engine::Segment, true);
+        assert!(item.face_photo(FaceStage::Photo).is_some(), "redoing the faced step starts from the photo");
+        assert!(!item.faces_already_restored(FaceStage::Photo));
+
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        item.commit(StepKind::Edit);
+        assert!(item.faces_already_restored(FaceStage::Photo), "the next cut-out starts from restored faces");
+        assert!(item.face_photo(FaceStage::Photo).is_none());
+        assert!(item.faces_input(FaceStage::Photo).is_none());
+
+        item.undo_step();
+        assert!(!item.faces_already_restored(FaceStage::Photo), "back on the faced step: its redo restores again");
     }
 
     /// A failed search is not repeated on its own (it would fail again
