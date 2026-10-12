@@ -260,8 +260,13 @@ impl PrunrApp {
             self.settings.save();
         }
         if change.action_changed {
-            if let Some(id) = self.batch.selected_item().map(|i| i.id) {
-                self.recut_with_selection(id);
+            let model = self.settings.model;
+            let follow: Vec<usize> = self.batch.items.iter().enumerate()
+                .filter(|(_, i)| i.selection_mask.is_some() && i.corrects_cutout(model))
+                .map(|(idx, _)| idx)
+                .collect();
+            for idx in follow {
+                self.dispatch_brush_rerun(idx);
             }
         }
     }
@@ -2779,7 +2784,7 @@ impl PrunrApp {
         use super::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
         for r in results {
-            let (item_id, source, is_final) = {
+            let (item_id, source, is_final, landed) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                     continue;
                 };
@@ -2835,12 +2840,20 @@ impl PrunrApp {
                     is_final = r.is_final,
                     "apply_completed_previews: result drained"
                 );
-                let switch = self.result_switch_id;
-                Self::spawn_tex_prep(
-                    new_rgba, item.id, Self::tex_name("result", item.id, Some(switch)),
-                    TexTarget::LiveResult, handles.clone(), ctx.clone(),
-                );
-                (item.id, item.source.clone(), r.is_final)
+                if item.on_screen {
+                    let switch = self.result_switch_id;
+                    Self::spawn_tex_prep(
+                        Arc::clone(&new_rgba), item.id, Self::tex_name("result", item.id, Some(switch)),
+                        TexTarget::LiveResult, handles.clone(), ctx.clone(),
+                    );
+                } else {
+                    item.result_tex_pending = false;
+                    item.drop_hot_tensors();
+                    item.source_dyn = None;
+                    item.start_dyn_cache = None;
+                    item.park_result();
+                }
+                (item.id, item.source.clone(), r.is_final, new_rgba)
             };
             // On the drag-settled result only, regenerate the sidebar
             // thumbnail. Unlike nulling `thumb_texture` + letting the
@@ -2850,11 +2863,10 @@ impl PrunrApp {
             // never sees a spinner-gap. Mid-drag results skip this entirely
             // (is_final false) to avoid regenerating thumbs every debounce.
             if is_final {
-                let result_rgba = self.batch.find_by_id(item_id).and_then(|i| i.result_rgba.clone());
                 if let Some(item) = self.batch.find_by_id_mut(item_id) {
                     item.thumb_pending = true;
                 }
-                self.batch.request_thumbnail(item_id, &source, result_rgba.as_ref());
+                self.batch.request_thumbnail(item_id, &source, Some(&landed));
             }
         }
         ctx.request_repaint();

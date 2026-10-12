@@ -637,17 +637,67 @@ fn the_switch_says_what_the_selection_does() {
     assert_eq!(at(CutoutAction::Select), None, "only selected");
 }
 
-/// Switching Restore / Erase applies the current selection anew.
+/// Switching Restore / Erase applies the current selection anew, on
+/// every image with one: an image off screen is dragged, copied and
+/// saved with its result too.
 #[test]
-fn switching_the_action_recuts_the_selection() {
+fn switching_the_action_recuts_every_selection() {
     use crate::gui::brush_state::CutoutAction;
     use crate::gui::views::brush_chip::BrushChipOutcome;
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 5);
+    cutout_with_selection(&mut app, 6);
+    cutout_with_selection(&mut app, 7);
+    let style = app.selection_style();
+    app.batch.items[2].bake_selection(style, CutoutAction::Restore);
+    app.batch.select_item(0);
     assert!(!app.processor.live_preview.is_pending_for(5));
     app.settings.brush.cutout_action = CutoutAction::Erase;
     app.apply_brush_change(BrushChipOutcome { action_changed: true, ..Default::default() });
     assert!(app.processor.live_preview.is_pending_for(5), "the re-cut is queued");
+    assert!(app.processor.live_preview.is_pending_for(6), "off screen too");
+    assert!(!app.processor.live_preview.is_pending_for(7), "edits alone do not follow the switch");
+}
+
+/// A re-cut landing on an image off screen leaves it as it was left:
+/// result parked in the timeline, no texture, no decompressed tensor.
+#[test]
+fn a_recut_landing_off_screen_keeps_the_image_parked() {
+    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 3);
+    let style = app.selection_style();
+    let action = app.settings.brush.cutout_action;
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, action)
+        .expect("the re-cut starts");
+    assert!(app.batch.items[0].volatile_seg_tensor.is_some());
+    app.batch.items[0].set_on_screen(false);
+    let landed = PreviewResult {
+        item_id: 3,
+        rgba: Arc::new(px(9)),
+        kind: PreviewKind::Mask,
+        generation: 0,
+        version: inputs.version,
+        start: None,
+        new_edge: None,
+        new_bold: None,
+        new_masked_base: None,
+        new_reference: None,
+        new_faced: None,
+        applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+        applied_tier2_knobs: None,
+        is_final: true,
+    };
+    app.apply_completed_previews(&ctx, vec![landed]);
+    let item = &mut app.batch.items[0];
+    assert!(item.result_rgba.is_none(), "parked");
+    assert!(!item.result_tex_pending, "no texture for an image off screen");
+    assert!(item.volatile_seg_tensor.is_none() && item.source_dyn.is_none(), "working copies released");
+    item.unpark_result();
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(9)), "the re-cut is what comes back");
 }
 
 /// Delete folds the selection into the cut-out's edits as one step and
