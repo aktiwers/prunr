@@ -219,6 +219,16 @@ impl SdSessionKey {
 
 fn default_strength() -> f32 { 1.0 }
 
+/// A seed for a fill nobody pinned.
+pub fn fresh_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// Where a refused SD erase sends the user instead.
+pub const LIGHTER_ERASER_HINT: &str = "pick Eraser (Big-LaMa) under Model instead";
+
 impl Default for SdInpaintRequest {
     fn default() -> Self {
         Self {
@@ -715,12 +725,7 @@ fn run_one_tile(
         SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps)),
         SchedulerKind::UniPc => Scheduler::UniPc(UniPcScheduler::new_sd15(steps)),
     };
-    let seed = req.seed.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-    });
+    let seed = req.seed.unwrap_or_else(fresh_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     // Strength < 1.0 → skip early denoise steps and initialize from a
@@ -1369,12 +1374,12 @@ fn build_part_with_ep_ladder(
     if id.is_sd_family() {
         tracing::warn!(?id, part = %key,
             "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
-        return Err(
+        return Err(format!(
             "SD inpaint requires GPU acceleration. No compatible GPU \
              execution provider is available; SD on CPU produces \
              incorrect output. Install OpenVINO Runtime (Settings → \
-             Hardware) or pick Eraser (Big-LaMa) under Model instead.".to_string(),
-        );
+             Hardware) or {LIGHTER_ERASER_HINT}.",
+        ));
     }
     crate::cache::gc_stale_for_model(id, "CPU");
     let builder = sd_base_builder()
@@ -2130,8 +2135,7 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, free_mb: u64, resid
     Err(format!(
         "{} refused to load: only {:.1} GB RAM free, \
          {:.1} GB minimum recommended (includes {:.1} GB safety \
-         headroom). Close other apps, or pick Eraser (Big-LaMa) \
-         under Model instead.",
+         headroom). Close other apps, or {LIGHTER_ERASER_HINT}.",
         desc.display_name,
         free_mb as f64 / 1024.0,
         need_mb as f64 / 1024.0,

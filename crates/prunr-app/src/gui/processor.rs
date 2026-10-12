@@ -352,6 +352,14 @@ pub(crate) struct InpaintTuning {
     pub sd_tuning: prunr_core::inpaint_sd::SdTuning,
 }
 
+impl InpaintTuning {
+    /// The region a fill replaces: the painted one grown by Expand, plus
+    /// the Feather ring.
+    fn fill_region(&self, painted: &prunr_core::selection::MaskArtifact, (w, h): (u32, u32)) -> image::GrayImage {
+        prunr_core::inpaint_blend::fill_region(&painted.region_mask(w, h), self.grow_px, self.feather_px)
+    }
+}
+
 impl Default for InpaintTuning {
     fn default() -> Self {
         Self {
@@ -624,9 +632,7 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         rayon::spawn(move || {
-            let mask = prunr_core::inpaint_blend::fill_region(
-                &correction.region_mask(image.width(), image.height()), tuning.grow_px, tuning.feather_px,
-            );
+            let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
             let sd_req = None;
             let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &progress);
@@ -795,9 +801,7 @@ impl Processor {
                 });
             };
             if cancelled() { send_cancelled(); return; }
-            let mask = prunr_core::inpaint_blend::fill_region(
-                &correction.region_mask(image.width(), image.height()), tuning.grow_px, tuning.feather_px,
-            );
+            let mask = tuning.fill_region(&correction, image.dimensions());
             let sd_req = match tuning.backend {
                 prunr_models::ModelId::SdV15InpaintFp16
                 | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
@@ -913,11 +917,10 @@ impl Processor {
                     let user_error = if cancelled {
                         None
                     } else if error == MEMORY_PRESSURE_ABORT_MSG {
-                        Some(
-                            "Erase stopped: memory ran low. Close other \
-                             apps, or pick Eraser (Big-LaMa) under Model."
-                                .to_string(),
-                        )
+                        Some(format!(
+                            "Erase stopped: memory ran low. Close other apps, or {}.",
+                            prunr_core::inpaint_sd::LIGHTER_ERASER_HINT,
+                        ))
                     } else {
                         Some(error)
                     };

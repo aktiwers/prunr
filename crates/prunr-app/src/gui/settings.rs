@@ -196,6 +196,7 @@ impl Settings {
                 return Self::default();
             }
         };
+        settings.brush.fit_sd_to_quality();
 
         // v1 migration: stash old per-image fields as a "Previous defaults"
         // preset. User can apply it explicitly if they want their old values

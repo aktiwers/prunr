@@ -168,8 +168,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
                 Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
                 Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
             };
-            app.hardware_install_cache =
-                crate::gui::hardware_cache::HardwareInstallCache::refresh();
+            app.refresh_install_cache();
         }
         HardwareSectionIntent::ClearCompiledCache => {
             // Off-thread: a multi-GB rmtree on a slow disk would stall
