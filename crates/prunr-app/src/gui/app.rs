@@ -2188,7 +2188,7 @@ impl PrunrApp {
             let Some(item) = self.batch.find_by_id(*id) else { continue };
             let key = super::drag_export::DragKey::of(item, spec);
             let written = self.drag_export.take_written(*id, &key)
-                .unwrap_or_else(|| super::drag_export::DragFiles::of(item, spec).write());
+                .map_or_else(|| super::drag_export::DragFiles::of(item, spec).write(), Ok);
             match written {
                 Ok(mut ps) => paths.append(&mut ps),
                 Err(e) => { self.toasts.error(format!("Drag export failed: {e}")); }
