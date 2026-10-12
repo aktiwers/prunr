@@ -24,6 +24,8 @@ struct SidebarActions {
     remove_idx: Option<usize>,
     save_idx: Option<usize>,
     needs_repaint: bool,
+    /// The row under the pointer, and whether it is pressed.
+    hovered: Option<(u64, bool)>,
 }
 
 /// Values that are constant for the whole item loop — computed once and
@@ -58,6 +60,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
         if actions.needs_repaint || app.batch.items.iter().any(|i| i.has_pending_work()) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+        }
+        if let Some(due) = app.drag_export.note_hover(actions.hovered, std::time::Instant::now()) {
+            ui.ctx().request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
         }
         apply_actions(app, &actions);
     });
@@ -177,6 +182,9 @@ fn render_item_row(
 
     let checkbox_clicked = paint_selection_checkbox(ui, &mut app.batch.items[i], item_rect);
     let row_hovered = ui.rect_contains_pointer(item_rect);
+    if row_hovered {
+        actions.hovered = Some((app.batch.items[i].id, item_response.is_pointer_button_down_on()));
+    }
 
     if matches!(app.batch.items[i].status, BatchStatus::Processing) {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
@@ -555,19 +563,7 @@ fn detect_drag_escape(
         return;
     }
 
-    let source_selected = app.batch.items[i].selected;
-    let ids: Vec<u64> = if source_selected {
-        app.batch
-            .items
-            .iter()
-            .filter(|b| b.selected && !matches!(b.status, BatchStatus::Processing))
-            .map(|b| b.id)
-            .collect()
-    } else if !matches!(app.batch.items[i].status, BatchStatus::Processing) {
-        vec![app.batch.items[i].id]
-    } else {
-        Vec::new()
-    };
+    let ids = app.batch.drag_targets(i);
     if !ids.is_empty() {
         app.drag_export.pending = Some(ids);
     }

@@ -2167,21 +2167,30 @@ impl PrunrApp {
 
     /// Initiate an OS drag-out for the given batch item IDs.
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
-    /// On Linux: clears drag state and shows a one-time fallback toast
-    /// (winit + drag crate incompatibility; see Cargo.toml comment).
+    /// On Linux: a one-time fallback toast, no files written (winit + drag
+    /// crate incompatibility; see Cargo.toml comment).
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
-        let split = self.saves_layers();
-        let style = self.selection_style();
+        if !super::drag_export::DRAG_OUT_SUPPORTED {
+            if !self.drag_export.linux_notified {
+                self.drag_export.linux_notified = true;
+                self.toasts.info(
+                    "Drag to external apps isn't supported on Linux yet.\n\
+                     Use Ctrl+C to copy to clipboard, or the Save button to export."
+                );
+            }
+            return;
+        }
+        let (split, style, action) = (self.saves_layers(), self.selection_style(), self.settings.brush.cutout_action);
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
-            if let Some(item) = self.batch.find_by_id(*id) {
-                match super::drag_export::prepare_for_drag(item, split, style, self.settings.brush.cutout_action) {
-                    Ok(mut ps) => paths.append(&mut ps),
-                    Err(e) => {
-                        self.toasts.error(format!("Drag export failed: {e}"));
-                    }
-                }
+            let Some(item) = self.batch.find_by_id(*id) else { continue };
+            let key = super::drag_export::DragKey::of(item, split, style, action);
+            let written = self.drag_export.take_written(*id, &key)
+                .unwrap_or_else(|| super::drag_export::DragFiles::of(item, split, style, action).write());
+            match written {
+                Ok(mut ps) => paths.append(&mut ps),
+                Err(e) => { self.toasts.error(format!("Drag export failed: {e}")); }
             }
         }
         if paths.is_empty() {
@@ -2216,15 +2225,25 @@ impl PrunrApp {
             }
         }
 
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
-            if !self.drag_export.linux_notified {
-                self.drag_export.linux_notified = true;
-                self.toasts.info(
-                    "Drag to external apps isn't supported on Linux yet.\n\
-                     Use Ctrl+C to copy to clipboard, or the Save button to export."
-                );
+    }
+
+    /// Write the drag files of the thumbnail under the pointer ahead, on
+    /// a worker, so a drag out of the window starts at once.
+    fn prewrite_drag_files(&mut self) {
+        if !super::drag_export::DRAG_OUT_SUPPORTED {
+            return;
+        }
+        let Some(id) = self.drag_export.due(std::time::Instant::now()) else { return };
+        let Some(idx) = self.batch.items.iter().position(|i| i.id == id) else { return };
+        let targets = self.batch.drag_targets(idx);
+        self.drag_export.keep_only(&targets);
+        let (split, style, action) = (self.saves_layers(), self.selection_style(), self.settings.brush.cutout_action);
+        for id in targets {
+            let Some(item) = self.batch.find_by_id(id) else { continue };
+            let key = super::drag_export::DragKey::of(item, split, style, action);
+            if !self.drag_export.has_current(id, &key) {
+                let files = super::drag_export::DragFiles::of(item, split, style, action);
+                self.drag_export.prewrite(id, key, files);
             }
         }
     }
@@ -3671,6 +3690,7 @@ impl eframe::App for PrunrApp {
         self.flush_settings_save(ctx);
         drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
+        self.prewrite_drag_files();
         self.update_window_title(ctx);
         self.status.tick();
         self.reconcile_selected(ctx);

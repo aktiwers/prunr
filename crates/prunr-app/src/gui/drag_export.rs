@@ -24,6 +24,9 @@ use super::item_settings::ItemSettings;
 use super::settings::LineMode;
 use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
 
+/// Dragging files out of the window works here (see the module notes).
+pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", target_os = "macos"));
+
 /// Subdirectory name under temp_dir for prunr drag files.
 const DRAG_SUBDIR: &str = "prunr-drag";
 /// Files older than this are considered stale and get removed at startup.
@@ -261,86 +264,171 @@ fn write_layer(
 ) -> std::io::Result<Option<PathBuf>> {
     let Some(layer) = render_layer(job, kind, src, seg) else { return Ok(None) };
     let path = temp_dir().join(make_layer_filename(&job.filename, kind));
-    let file = std::fs::File::create(&path)?;
-    let mut w = std::io::BufWriter::new(file);
-    let res: Result<(), prunr_core::CoreError> = match layer {
-        LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, &mut w),
+    write_atomically(&path, |w| match layer {
+        LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, w),
         // No streaming variant for Gray yet — encode_gray_png allocates
         // a small Vec (mask is single-channel, ~12 MB at 4 K vs ~50 MB
         // RGBA). Acceptable for this layer's traffic.
         LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray)
-            .and_then(|bytes| {
-                std::io::Write::write_all(&mut w, &bytes)
-                    .map_err(prunr_core::CoreError::Io)
-            }),
-    };
-    res.map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::io::Write::flush(&mut w)?;
+            .and_then(|bytes| std::io::Write::write_all(w, &bytes).map_err(prunr_core::CoreError::Io)),
+    })?;
     Ok(Some(path))
 }
 
-/// Prepare a drag temp file for a batch item. Returns the absolute path.
-/// If the item has no processed result, writes the raw source bytes as-is
-/// (preserving original extension so file managers recognize it).
-///
-/// Bakes the per-item bg (color or image) into the PNG so the dropped
-/// file matches the canvas — same parity rule as Save and clipboard
-/// copy. Split-layer drags don't go through here (`render_layer` keeps
-/// each layer clean for downstream compositing).
-pub(crate) fn prepare(item: &BatchItem) -> std::io::Result<PathBuf> {
-    let name = make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode);
-    let path = temp_dir().join(&name);
-    match &item.result_rgba {
-        Some(rgba) => {
-            let baked = item.export_bg().bake(rgba);
-            // Stream-encode directly into BufWriter — saves the
-            // ~5–30 MB intermediate Vec<u8> at 4 K.
-            let file = std::fs::File::create(&path)?;
-            let mut w = std::io::BufWriter::new(file);
-            prunr_core::encode_rgba_png_into(&baked, &mut w)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            std::io::Write::flush(&mut w)?;
-        }
-        None => {
-            let bytes = item.source.load_bytes()?;
-            std::fs::write(&path, bytes.as_slice())?;
-        }
-    }
-    Ok(path)
+/// Write `path` through a sibling temp file renamed into place, so an app
+/// still reading an earlier drop of the same name never sees half a file.
+fn write_atomically(
+    path: &Path,
+    encode: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), prunr_core::CoreError>,
+) -> std::io::Result<()> {
+    let part = path.with_extension("part");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&part)?);
+    encode(&mut w).map_err(|e| std::io::Error::other(e.to_string()))?;
+    std::io::Write::flush(&mut w)?;
+    drop(w);
+    std::fs::rename(&part, path)
 }
 
-/// Prepare drag temp files for a batch item. `split=false` yields the single
-/// composite PNG (`prepare`); `split=true` yields up to three layer PNGs
-/// (subject / lines / mask). Layers whose underlying tensor isn't cached are
-/// skipped; if all are missing the path falls back to composite so an
-/// unprocessed drag still lands a file.
-pub(crate) fn prepare_for_drag(
-    item: &BatchItem,
-    split: bool,
+/// One item's composite drag file: the result with its background baked
+/// in, like Save and Copy, or the source bytes as-is before processing
+/// (keeping the extension so file managers recognize it).
+#[derive(Clone)]
+struct Composite {
+    filename: String,
+    result: Option<(Arc<image::RgbaImage>, super::item::ExportBg)>,
+    source: ImageSource,
+}
+
+impl Composite {
+    fn of(item: &BatchItem) -> Self {
+        Self {
+            filename: make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode),
+            result: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
+            source: item.source.clone(),
+        }
+    }
+
+    fn write(&self) -> std::io::Result<PathBuf> {
+        let path = temp_dir().join(&self.filename);
+        match &self.result {
+            Some((rgba, bg)) => {
+                let baked = bg.bake(rgba);
+                write_atomically(&path, |w| prunr_core::encode_rgba_png_into(&baked, w))?;
+            }
+            None => {
+                let bytes = self.source.load_bytes()?;
+                write_atomically(&path, |w| std::io::Write::write_all(w, &bytes).map_err(prunr_core::CoreError::Io))?;
+            }
+        }
+        Ok(path)
+    }
+}
+
+/// What dragging one item writes, as shared handles taken on the UI
+/// thread: the composite, or its layers (subject / lines / mask) when
+/// layers are on. Layers the item no longer has are skipped; with none,
+/// the composite goes instead so the drag still lands a file.
+#[derive(Clone)]
+pub(crate) struct DragFiles {
+    composite: Composite,
+    layers: Option<LayerJob>,
+}
+
+impl DragFiles {
+    pub(crate) fn of(
+        item: &BatchItem,
+        split: bool,
+        style: super::background_io::SelectionStyle,
+        action: super::brush_state::CutoutAction,
+    ) -> Self {
+        Self { composite: Composite::of(item), layers: split.then(|| LayerJob::of(item, style, action)) }
+    }
+
+    /// Render and write the files; slow on a big image, so off the UI
+    /// thread where it can be.
+    pub(crate) fn write(&self) -> std::io::Result<Vec<PathBuf>> {
+        if let Some(job) = &self.layers {
+            if let Some(src) = LayerSource::of(job) {
+                // One seg decompress shared by Subject and Mask.
+                let seg = job.seg.as_ref().and_then(CompressedTensor::bundle);
+                let paths = LayerKind::ALL.iter()
+                    .filter_map(|&k| write_layer(job, k, &src, seg.as_ref()).transpose())
+                    .collect::<std::io::Result<Vec<_>>>()?;
+                if !paths.is_empty() {
+                    return Ok(paths);
+                }
+            }
+        }
+        Ok(vec![self.composite.write()?])
+    }
+}
+
+/// What a drag's files were made from, to tell whether files written
+/// earlier still show the item. Images are held weakly: the key keeps no
+/// pixels alive, and a live weak handle keeps its address from reuse.
+pub(crate) struct DragKey {
+    settings: ItemSettings,
+    result: Option<std::sync::Weak<image::RgbaImage>>,
+    bg_image: Option<std::sync::Weak<super::item::BgImage>>,
+    backdrop: Option<u64>,
+    layers: Option<LayerKey>,
+}
+
+/// What layers add to a drag's key: the correction they apply and the
+/// tensors they are made from.
+struct LayerKey {
     style: super::background_io::SelectionStyle,
     action: super::brush_state::CutoutAction,
-) -> std::io::Result<Vec<PathBuf>> {
-    if !split {
-        return Ok(vec![prepare(item)?]);
+    selection: Option<u64>,
+    edits: Option<std::sync::Weak<prunr_core::selection::MaskArtifact>>,
+    seg: bool,
+    edges: bool,
+}
+
+impl DragKey {
+    pub(crate) fn of(
+        item: &BatchItem,
+        split: bool,
+        style: super::background_io::SelectionStyle,
+        action: super::brush_state::CutoutAction,
+    ) -> Self {
+        Self {
+            settings: item.settings,
+            result: item.result_rgba.as_ref().map(Arc::downgrade),
+            bg_image: item.bg_image.as_ref().map(Arc::downgrade),
+            backdrop: item.backdrop_key(),
+            layers: split.then(|| LayerKey {
+                style,
+                action,
+                selection: item.selection_hash,
+                edits: item.edits.as_ref().map(Arc::downgrade),
+                seg: item.cached_tensor.is_some(),
+                edges: item.cached_edge_tensors.is_some(),
+            }),
+        }
     }
 
-    // One source image + one seg decompress — Subject and Mask share the
-    // seg, Lines uses the edge tensor independently.
-    let job = LayerJob::of(item, style, action);
-    let Some(src) = LayerSource::of(&job) else {
-        return Ok(vec![prepare(item)?]);
-    };
-    let seg = job.seg.as_ref().and_then(CompressedTensor::bundle);
-
-    let paths: Vec<PathBuf> = LayerKind::ALL.iter()
-        .copied()
-        .filter_map(|k| write_layer(&job, k, &src, seg.as_ref()).transpose())
-        .collect::<std::io::Result<Vec<_>>>()?;
-
-    if paths.is_empty() {
-        return Ok(vec![prepare(item)?]);
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        fn same<T>(a: &Option<std::sync::Weak<T>>, b: &Option<std::sync::Weak<T>>) -> bool {
+            match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.ptr_eq(b),
+                _ => false,
+            }
+        }
+        self.settings == other.settings
+            && same(&self.result, &other.result)
+            && same(&self.bg_image, &other.bg_image)
+            && self.backdrop == other.backdrop
+            && match (&self.layers, &other.layers) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    (a.style, a.action, a.selection, a.seg, a.edges) == (b.style, b.action, b.selection, b.seg, b.edges)
+                        && same(&a.edits, &b.edits)
+                }
+                _ => false,
+            }
     }
-    Ok(paths)
 }
 
 #[cfg(test)]
@@ -540,5 +628,54 @@ mod tests {
         let mask = image::load_from_memory(mask).expect("png").to_luma8();
         assert_eq!(mask.get_pixel(0, 4)[0], 0, "the erased half is gone");
         assert_eq!(mask.get_pixel(7, 4)[0], 255, "the rest stays");
+    }
+
+    fn processed_item(id: u64, name: &str) -> crate::gui::item::BatchItem {
+        use crate::gui::item::{BatchItem, BatchStatus, ImageSource};
+        let mut item = BatchItem::new(id, name.to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (4, 4), ItemSettings::default(), String::new());
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([7, 8, 9, 255]))));
+        item.status = BatchStatus::Done;
+        item
+    }
+
+    /// Files written ahead stand for the item only while it shows what
+    /// they were made from: a new result or another background stales them.
+    #[test]
+    fn a_drag_key_follows_what_the_files_show() {
+        use crate::gui::brush_state::CutoutAction;
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let mut item = processed_item(1, "key.jpg");
+        let key = DragKey::of(&item, false, style, CutoutAction::Restore);
+        assert!(key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)));
+        assert!(!key.matches(&DragKey::of(&item, true, style, CutoutAction::Restore)), "layers write other files");
+        item.settings.bg = Some([255, 0, 0, 255]);
+        assert!(!key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)), "another background");
+        item.settings.bg = None;
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        assert!(!key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)), "a new result");
+    }
+
+    /// A drag takes the files written ahead on a worker; once the item
+    /// changes, it writes them anew instead.
+    #[test]
+    fn a_drag_takes_the_files_written_ahead_while_current() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::drag_export_state::DragExportState;
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let mut item = processed_item(9, "ahead-test.jpg");
+        let mut state = DragExportState::new();
+        let key = |item: &crate::gui::item::BatchItem| DragKey::of(item, false, style, CutoutAction::Restore);
+        state.prewrite(9, key(&item), DragFiles::of(&item, false, style, CutoutAction::Restore));
+        assert!(state.has_current(9, &key(&item)));
+
+        let paths = state.take_written(9, &key(&item)).expect("written ahead").expect("written");
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("ahead-test.prunr.png"));
+        assert!(std::fs::read(&paths[0]).expect("file").starts_with(b"\x89PNG"));
+        assert!(state.take_written(9, &key(&item)).is_some(), "kept for the next drag");
+
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        assert!(state.take_written(9, &key(&item)).is_none(), "stale: the drag writes anew");
+        let _ = std::fs::remove_file(&paths[0]);
     }
 }

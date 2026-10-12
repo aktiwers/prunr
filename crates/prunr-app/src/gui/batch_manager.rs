@@ -581,6 +581,17 @@ impl BatchManager {
         self.bg_io.request_selection_visualization(item_id, mask, key, source, base, ctx.clone());
     }
 
+    /// The items a drag from row `idx` carries: every ticked one when that
+    /// row is ticked, else that row; never one still processing.
+    pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
+        let free = |b: &&BatchItem| b.status != BatchStatus::Processing;
+        match self.items.get(idx) {
+            Some(row) if row.selected => self.items.iter().filter(|b| b.selected).filter(free).map(|b| b.id).collect(),
+            Some(row) => std::iter::once(row).filter(free).map(|b| b.id).collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Evict all tensor caches except the selected item (called under memory pressure).
     pub(crate) fn evict_all_tensors(&mut self) {
         let selected_id = self.selected_item().map(|b| b.id);
@@ -1402,6 +1413,24 @@ mod tests {
             key: (hash, style(0.15)), handle, shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
         });
         assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).unwrap(), &feathered), "the feathered plane once built");
+    }
+
+    /// A drag carries the ticked rows when it starts on one, else its own
+    /// row; never a row still processing.
+    #[test]
+    fn a_drag_carries_the_ticked_rows_or_its_own() {
+        let mut bm = fixture();
+        for id in 0..3 {
+            bm.items.push(item_with_cache(id, 0));
+        }
+        bm.items[0].selected = true;
+        bm.items[2].selected = true;
+        assert_eq!(bm.drag_targets(0), [0, 2]);
+        assert_eq!(bm.drag_targets(1), [1]);
+        bm.items[2].status = BatchStatus::Processing;
+        assert_eq!(bm.drag_targets(0), [0]);
+        bm.items[1].status = BatchStatus::Processing;
+        assert!(bm.drag_targets(1).is_empty());
     }
 
     #[test]
