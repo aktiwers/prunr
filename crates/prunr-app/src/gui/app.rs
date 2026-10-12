@@ -2472,21 +2472,20 @@ impl PrunrApp {
         if !item.wants_faces(&landed.photo, landed.model, stage) {
             return;
         }
-        let faces = match landed.result {
+        let (faces, failed) = match landed.result {
             Ok(faces) if faces.is_empty() => {
                 self.set_temporary_status("No faces found");
-                faces
+                (faces, false)
             }
-            Ok(faces) => faces,
+            Ok(faces) => (faces, false),
             Err(err) => {
                 tracing::warn!(item_id = landed.item_id, %err, "face restore failed");
                 self.toasts.error(format!("Restore faces failed: {err}"));
-                // Kept empty so the same photo is not searched again.
-                Vec::new()
+                (Vec::new(), true)
             }
         };
         let item = &mut self.batch.items[idx];
-        item.found_faces = Some(super::item::FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces) });
+        item.found_faces = Some(super::item::FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces), failed });
         item.faces_changed();
         self.redo_faces_blend(idx);
     }
@@ -2495,6 +2494,10 @@ impl PrunrApp {
     /// search change re-blends now (or takes the faces out) and
     /// `pump_faces` finds them again where needed.
     fn on_faces_change(&mut self, idx: usize, change: super::views::faces_chip::FacesChange) {
+        let item = &mut self.batch.items[idx];
+        if change.search && item.found_faces.as_ref().is_some_and(|f| f.failed) {
+            item.found_faces = None;
+        }
         if change.search || change.blend {
             self.batch.items[idx].faces_changed();
             // Before a result exists there is nothing to blend into, and a
@@ -3988,7 +3991,8 @@ impl PrunrApp {
                     can_compare,
                     shown_seed: item.shown_seed(),
                     faces_found: item.face_photo(super::item::FaceStage::of(settings_ref.model.role())).zip(item.settings.faces.wanted())
-                        .and_then(|(photo, model)| item.found_for(&photo, model)).map(|f| f.faces.len()),
+                        .and_then(|(photo, model)| item.found_for(&photo, model))
+                        .map(|f| if f.failed { super::views::faces_chip::FaceSearch::Failed } else { super::views::faces_chip::FaceSearch::Found(f.faces.len()) }),
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
@@ -4575,7 +4579,7 @@ mod faces_tests {
         let item = &mut app.batch.items[0];
         let photo = item.face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::Gfpgan.id()));
-        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), model: FaceModel::Gfpgan.id(), faces: Arc::default() });
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false });
         assert!(item.faces_for(&photo).is_some() && item.faces_to_find(&photo).is_none());
         item.settings.faces.model = FaceModel::RestoreFormerPp;
         assert!(item.faces_for(&photo).is_none());
@@ -4596,6 +4600,21 @@ mod faces_tests {
         app.land_faces(landed(&source, FaceModel::Gfpgan));
         assert!(app.batch.items[0].found_faces.is_some());
         assert!(app.processor.live_preview.is_pending_for(1), "the re-blend is queued");
+    }
+
+    /// A failed search is not repeated on its own (it would fail again
+    /// every frame); changing On / Off or the model tries again.
+    #[test]
+    fn a_failed_search_is_retried_on_a_search_change() {
+        let (mut app, source) = app_with_faces_on();
+        let failed = FacesResult { result: Err("no memory".into()), ..landed(&source, FaceModel::Gfpgan) };
+        app.land_faces(failed);
+        let photo = app.batch.items[0].face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
+        assert!(app.batch.items[0].faces_to_find(&photo).is_none(), "not searched again every frame");
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
+        assert!(app.batch.items[0].faces_to_find(&photo).is_none(), "a blend change does not search");
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { search: true, ..Default::default() });
+        assert_eq!(app.batch.items[0].faces_to_find(&photo), Some(FaceModel::Gfpgan.id()), "tried again");
     }
 
     /// A blend change drops the faced photo built for the old blend and
@@ -4641,7 +4660,7 @@ mod faces_tests {
     fn images_not_on_screen_drop_the_faced_photo() {
         let (mut app, source) = app_with_faces_on();
         push_test_item(&mut app, 2);
-        let found = FoundFaces { photo: FacePhoto::Source(source), model: FaceModel::Gfpgan.id(), faces: Arc::default() };
+        let found = FoundFaces { photo: FacePhoto::Source(source), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false };
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         let item = &mut app.batch.items[0];
         item.found_faces = Some(found);

@@ -299,6 +299,9 @@ pub(crate) struct FoundFaces {
     pub(crate) photo: FacePhoto,
     pub(crate) model: prunr_models::ModelId,
     pub(crate) faces: Arc<Vec<prunr_core::face::RestoredFace>>,
+    /// The search failed: none are blended, and it is not repeated until
+    /// a search setting changes.
+    pub(crate) failed: bool,
 }
 
 /// Where `BatchItem::warm_steps` holds the step an undo goes back to and

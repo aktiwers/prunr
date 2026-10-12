@@ -24,8 +24,14 @@ pub(crate) struct FacesChange {
     pub open_store: bool,
 }
 
-/// How many faces were found in the shown photo, when a search ran.
-pub(crate) type FoundCount = Option<usize>;
+/// What the search of the shown photo came to, when one ran.
+pub(crate) type FoundCount = Option<FaceSearch>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FaceSearch {
+    Found(usize),
+    Failed,
+}
 
 const ON_OFF: [chip::Choice<bool>; 2] = [
     chip::Choice { value: false, name: "Off", description: "", enabled: true },
@@ -115,8 +121,9 @@ fn found_text(on: bool, found: FoundCount) -> std::borrow::Cow<'static, str> {
     match (on, found) {
         (false, _) => "Faces are found and redrawn when this is on.".into(),
         (true, None) => "Faces are found once the image is processed.".into(),
-        (true, Some(0)) => "No faces found.".into(),
-        (true, Some(1)) => "1 face found.".into(),
-        (true, Some(n)) => format!("{n} faces found.").into(),
+        (true, Some(FaceSearch::Failed)) => "The face search failed. Turn Faces off and on to try again.".into(),
+        (true, Some(FaceSearch::Found(0))) => "No faces found.".into(),
+        (true, Some(FaceSearch::Found(1))) => "1 face found.".into(),
+        (true, Some(FaceSearch::Found(n))) => format!("{n} faces found.").into(),
     }
 }
