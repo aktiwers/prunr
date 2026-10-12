@@ -186,12 +186,13 @@ const FAILED_TEXT: Color32 = Color32::from_rgb(0xd8, 0x8e, 0x8e);
 const ADVISORY_TEXT: Color32 = Color32::from_rgb(0xe1, 0xb3, 0x4e);
 
 /// Filter tabs in display order; `None` is "All".
-const FILTERS: [super::chip::Choice<Option<ModelCategory>>; 5] = [
+const FILTERS: [super::chip::Choice<Option<ModelCategory>>; 6] = [
     filter(None, "All"),
     filter(Some(ModelCategory::Segmentation), "Background"),
     filter(Some(ModelCategory::EdgeDetection), "Sketch"),
     filter(Some(ModelCategory::Inpaint), "Eraser"),
     filter(Some(ModelCategory::Upscale), "Upscale"),
+    filter(Some(ModelCategory::Face), "Faces"),
 ];
 
 const fn filter(value: Option<ModelCategory>, name: &'static str) -> super::chip::Choice<Option<ModelCategory>> {
@@ -205,6 +206,7 @@ fn category_label(c: ModelCategory) -> (&'static str, &'static str) {
         ModelCategory::Inpaint => (ICON_BRUSH.codepoint, "Eraser"),
         ModelCategory::Upscale => (ICON_ARROW_UPWARD.codepoint, "Upscale"),
         ModelCategory::Selection => (ICON_AUTO_AWESOME.codepoint, "Selection"),
+        ModelCategory::Face => (ICON_FACE.codepoint, "Faces"),
     }
 }
 
