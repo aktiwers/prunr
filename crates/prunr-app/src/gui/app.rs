@@ -1061,7 +1061,7 @@ impl PrunrApp {
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,
-                (self.settings.ram_safety_margin_gb.max(0.0) * 1024.0) as u64,
+                self.settings.sd_memory.margin_mb(),
                 self.settings.cpu_only(),
             )),
         };
