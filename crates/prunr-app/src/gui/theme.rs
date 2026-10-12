@@ -77,6 +77,9 @@ pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 pub const RAIL: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
 /// The Erase colour of brushes and strokes.
 pub const ERASE: Color32 = Color32::from_rgb(0xe2, 0x70, 0x4f);
+/// A hint under its row: smaller and greyer than a label.
+pub const HINT: Color32 = Color32::from_rgb(0x9c, 0x9c, 0x9c);
+pub const FONT_SIZE_HINT: f32 = 11.5;
 pub const PANEL_RADIUS: u8 = 18;
 pub const PILL_RADIUS: u8 = 255;
 pub const INPUT_RADIUS: u8 = 10;

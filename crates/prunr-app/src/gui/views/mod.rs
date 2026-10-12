@@ -53,8 +53,8 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(
         egui::Label::new(
             RichText::new(text)
-                .color(theme::TEXT_PRIMARY)
-                .size(theme::FONT_SIZE_MONO),
+                .color(theme::HINT)
+                .size(theme::FONT_SIZE_HINT),
         )
         .wrap(),
     );
