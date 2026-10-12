@@ -2878,7 +2878,7 @@ impl PrunrApp {
             if let Some(idx) = idx {
                 self.evict_background_item_caches(idx);
                 self.batch.items[idx].unpark_result();
-                self.batch.items[idx].warm_neighbour_steps();
+                self.batch.items[idx].set_on_screen(true);
             }
             self.show_original = false;
         }
@@ -2909,7 +2909,7 @@ impl PrunrApp {
             // themselves (a few MB) stay, so it is rebuilt without a search.
             item.faced_photo = None;
             // Up to two images; warmed again when the image is shown.
-            item.release_warm_steps();
+            item.set_on_screen(false);
             // A full-size picture made from the photo; rebuilt when shown.
             if matches!(item.settings.backdrop(), super::item_settings::Backdrop::Effect(_)) {
                 item.backdrop_texture = None;
@@ -4639,6 +4639,7 @@ mod faces_tests {
         let mut app = super::PrunrApp::new_for_test();
         for id in [1, 2] {
             let item = push_test_item(&mut app, id);
+            item.on_screen = true;
             item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
             item.commit(crate::gui::timeline::StepKind::Process);
             item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
