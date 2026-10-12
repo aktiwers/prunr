@@ -166,10 +166,9 @@ fn settings_opens_from_its_toolbar_button() {
 #[test]
 fn help_modals_name_every_control() {
     let mut harness = harness();
-    for (flag, surface) in [(0, "shortcuts"), (1, "cli help"), (2, "pipeline flow")] {
+    for (flag, surface) in [(1, "cli help"), (2, "pipeline flow")] {
         {
             let app = harness.state_mut();
-            app.show_shortcuts = flag == 0;
             app.show_cli_help = flag == 1;
             app.show_pipeline_flow = flag == 2;
         }

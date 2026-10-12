@@ -472,6 +472,16 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
     ui.add_space(theme::SPACE_MD);
+    section_heading(ui, "Mouse");
+    egui::Grid::new("gestures_grid")
+        .num_columns(2)
+        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+        .show(ui, |ui| {
+            for (gesture, what) in shortcuts::gestures() {
+                kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
+            }
+        });
+    ui.add_space(theme::SPACE_MD);
     if app.settings.hotkeys.is_empty() {
         ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
     } else if button(ui, ButtonKind::Secondary, "Reset all hotkeys").clicked() {
