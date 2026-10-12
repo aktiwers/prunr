@@ -84,16 +84,25 @@ const COMPACT: &str = "chip_compact";
 /// Run `body` with its chips showing their icon only, when `on`: a
 /// toolbar row too narrow for their words. Tooltips and names stay.
 pub(super) fn compact_chips<R>(ui: &mut Ui, on: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let key = egui::Id::new(COMPACT);
-    let outer = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
-    ui.data_mut(|d| d.insert_temp(key, on));
-    let out = body(ui);
-    ui.data_mut(|d| d.insert_temp(key, outer));
-    out
+    with_flag(ui, COMPACT, on, body)
 }
 
 fn compact(ui: &Ui) -> bool {
-    ui.data(|d| d.get_temp::<bool>(egui::Id::new(COMPACT)).unwrap_or(false))
+    flag(ui, COMPACT)
+}
+
+/// Run `body` with the ambient flag `key` set to `on`, restoring it after.
+fn with_flag<R>(ui: &mut Ui, key: &str, on: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = egui::Id::new(key);
+    let outer = flag(ui, key);
+    ui.data_mut(|d| d.insert_temp(id, on));
+    let out = body(ui);
+    ui.data_mut(|d| d.insert_temp(id, outer));
+    out
+}
+
+fn flag(ui: &Ui, key: &str) -> bool {
+    ui.data(|d| d.get_temp::<bool>(egui::Id::new(key)).unwrap_or(false))
 }
 
 fn chip_face(ui: &mut Ui, text: String, accent: bool) -> Response {
@@ -324,24 +333,38 @@ const GHOST_OPACITY: f32 = 0.35;
 /// it, never a click elsewhere. While one of its sliders is held it fades
 /// so the image under it stays readable.
 pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut Ui)) {
-    outline_when_open(resp, id);
+    show_flyout(id, resp, below_chip(resp, id), |ui| {
+        // The frame is drawn inside so it fades with the contents.
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_min_width(theme::POPOVER_WIDTH);
+            body(ui);
+        });
+    });
+}
+
+/// A flyout popup under the chip `resp`, falling back to its other sides.
+fn below_chip(resp: &Response, id: egui::Id) -> egui::Popup<'static> {
     egui::Popup::from_toggle_button_response(resp)
         .id(id)
-        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .align(egui::RectAlign::BOTTOM_START)
         // A chip near the right edge (the strip's dots) opens leftwards.
         .align_alternatives(&[egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_START, egui::RectAlign::TOP_END])
+}
+
+/// What every flyout shares: its chip's outline while open, clicks
+/// elsewhere ignored, registered as a flyout, and faded while one of its
+/// sliders is held. `body` draws its own frame so the frame fades too.
+fn show_flyout(id: egui::Id, chip: &Response, popup: egui::Popup<'_>, body: impl FnOnce(&mut Ui)) {
+    outline_when_open(chip, id);
+    popup
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .frame(egui::Frame::NONE)
         .show(|ui| {
             theme::register_flyout(ui.ctx(), id);
             if scrubbing_in(ui) {
                 ui.set_opacity(GHOST_OPACITY);
             }
-            // The frame is drawn inside so it fades with the contents.
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(theme::POPOVER_WIDTH);
-                body(ui);
-            });
+            body(ui);
         });
 }
 
@@ -349,24 +372,17 @@ pub(super) fn flyout_for(id: egui::Id, resp: &Response, body: impl FnOnce(&mut U
 /// `toggle`: a strip's dots opening its full panel under the strip.
 /// Behaves like `flyout_for`; the body lays out as panel rows.
 pub(super) fn flyout_under(id: egui::Id, toggle: &Response, anchor: egui::Rect, body: impl FnOnce(&mut Ui)) {
-    outline_when_open(toggle, id);
-    egui::Popup::new(id, toggle.ctx.clone(), anchor, toggle.layer_id)
+    let popup = egui::Popup::new(id, toggle.ctx.clone(), anchor, toggle.layer_id)
         .open_memory(toggle.clicked().then_some(egui::SetOpenCommand::Toggle))
-        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .align(egui::RectAlign::BOTTOM_START)
-        .gap(10.0)
-        .frame(egui::Frame::NONE)
-        .show(|ui| {
-            theme::register_flyout(ui.ctx(), id);
-            if scrubbing_in(ui) {
-                ui.set_opacity(GHOST_OPACITY);
-            }
-            let frame = theme::panel_frame();
-            frame.show(ui, |ui| {
-                ui.set_width(anchor.width() - frame.total_margin().sum().x);
-                panel_rows(ui, body);
-            });
+        .gap(10.0);
+    show_flyout(id, toggle, popup, |ui| {
+        let frame = theme::panel_frame();
+        frame.show(ui, |ui| {
+            ui.set_width(anchor.width() - frame.total_margin().sum().x);
+            panel_rows(ui, body);
         });
+    });
 }
 
 /// The accent outline on the chip whose popup is open, so the eye finds
@@ -449,9 +465,9 @@ fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipC
 }
 
 /// The key under which `panel_rows` marks a panel whose sliders lay out
-/// as the board's rows.
+/// as panel rows.
 const PANEL_ROWS: &str = "chip_panel_rows";
-/// The name column of a panel row (the board's 116 px).
+/// The name column of a panel row.
 const PANEL_NAME_WIDTH: f32 = 116.0;
 /// A panel row's height: the segmented control's, so every row's name
 /// centres on its control.
@@ -459,21 +475,17 @@ const PANEL_ROW_HEIGHT: f32 = 30.0;
 /// Room for a panel row's value box.
 const PANEL_VALUE_WIDTH: f32 = 74.0;
 
-/// Run `body` with its sliders laid out as the board's panel rows: the
+/// Run `body` with its sliders laid out as panel rows: the
 /// name in a fixed column, the slider filling the row, the value at its end.
 pub(super) fn panel_rows<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let key = egui::Id::new(PANEL_ROWS);
-    let outer = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
     let width = ui.spacing().slider_width;
-    ui.data_mut(|d| d.insert_temp(key, true));
-    let out = body(ui);
-    ui.data_mut(|d| d.insert_temp(key, outer));
+    let out = with_flag(ui, PANEL_ROWS, true, body);
     ui.spacing_mut().slider_width = width;
     out
 }
 
 fn in_panel_rows(ui: &Ui) -> bool {
-    ui.data(|d| d.get_temp::<bool>(egui::Id::new(PANEL_ROWS)).unwrap_or(false))
+    flag(ui, PANEL_ROWS)
 }
 
 /// A panel row's name, in its fixed column.
@@ -499,7 +511,7 @@ fn chip_named_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> Resp
     named(ui.add(slider.show_value(true)), label)
 }
 
-/// The handle's colour on the board: near-white over the rail.
+/// The handle's colour: near-white over the rail.
 const HANDLE: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf4);
 
 /// Where a slider's handle sits, 0–1, by egui's own mapping (log10
@@ -518,7 +530,7 @@ fn slider_fraction(value: f64, lo: f64, hi: f64, logarithmic: bool) -> f32 {
     t.clamp(0.0, 1.0) as f32
 }
 
-/// The board's white handle, painted over egui's (which shares the
+/// The white handle, painted over egui's (which shares the
 /// rail's colour) at the same place and size: the slider is the row's
 /// first `slider_width`, its handle radius a 2.5th of its thickness.
 fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
@@ -533,7 +545,7 @@ fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
     ui.painter().circle_filled(center, radius, fill);
 }
 
-/// The board's choice-list row: an icon in a dim circle, the title over
+/// A choice-list row: an icon in a dim circle, the title over
 /// a one-line description, and when picked a purple wash and a check.
 /// Reads as a button named title, newline, description.
 pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description: &str, selected: bool, icon_fill: Color32) -> Response {
@@ -543,9 +555,9 @@ pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description:
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let fill = if selected {
-            theme::ACCENT_BRIGHT.gamma_multiply(0.18)
+            theme::ROW_PICKED
         } else if resp.hovered() {
-            Color32::from_white_alpha(10)
+            theme::ROW_HOVER
         } else {
             Color32::TRANSPARENT
         };
@@ -567,8 +579,8 @@ pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description:
     resp
 }
 
-/// A choice list's dim icon circle; the board's purple one marks an action.
-pub(super) const LIST_ICON_FILL: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 15);
+/// A choice list's dim icon circle; a purple one marks an action.
+pub(super) const LIST_ICON_FILL: Color32 = theme::FIELD_FILL;
 pub(super) const LIST_ACTION_FILL: Color32 = Color32::from_rgba_premultiplied(39, 20, 52, 64);
 
 /// A selectable option with a title and a one-line description, for
@@ -655,6 +667,7 @@ pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
 /// and carries the accent outline while any knob inside is off its
 /// default; the popover opens with a title row and a Reset for the
 /// whole group, then `body` lists the knobs in processing order.
+#[derive(Clone, Copy)]
 pub(super) struct GroupChip<'a> {
     pub id_salt: &'a str,
     pub icon: &'a str,
@@ -668,6 +681,17 @@ pub(super) struct GroupChip<'a> {
     pub live: bool,
 }
 
+impl GroupChip<'_> {
+    /// The chip's face: its label, and the summary after a dot.
+    fn face(&self) -> Cow<'_, str> {
+        if self.summary.is_empty() {
+            Cow::Borrowed(self.label)
+        } else {
+            Cow::Owned(format!("{} \u{00b7} {}", self.label, self.summary))
+        }
+    }
+}
+
 /// Render a group chip. `body` receives `reset == true` on the frame the
 /// group's Reset was clicked, before any of its rows render. Returns the
 /// body's value while the popover is open.
@@ -676,12 +700,7 @@ pub(super) fn group_chip<R>(
     g: GroupChip<'_>,
     body: impl FnOnce(&mut Ui, bool) -> R,
 ) -> Option<R> {
-    let face: Cow<'_, str> = if g.summary.is_empty() {
-        Cow::Borrowed(g.label)
-    } else {
-        Cow::Owned(format!("{} \u{00b7} {}", g.label, g.summary))
-    };
-    let resp = tooltip(chip_button(ui, g.icon, &face, g.tuned), g.label, g.tooltip, None);
+    let resp = tooltip(chip_button(ui, g.icon, &g.face(), g.tuned), g.label, g.tooltip, None);
     let pop_id = egui::Id::new(("group_chip", g.id_salt));
     let mut out = None;
     let contents = |ui: &mut Ui| {
@@ -707,18 +726,12 @@ pub(super) enum Part {
     Full { reset: bool },
 }
 
-/// A group chip whose flyout is a quick strip that expands (surfaces
-/// mockup, board 3): a glass pill with the main knobs and dots, and under
+/// A group chip whose flyout is a quick strip that expands: a glass pill with the main knobs and dots, and under
 /// it, while the dots are on, the full panel. One `body` draws both parts
 /// so both may edit the same settings. The canvas stays live under it and
 /// it fades while one of its sliders is held, like any flyout.
 pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, header: PanelHeader<'_>, body: impl FnMut(&mut Ui, Part)) {
-    let face: Cow<'_, str> = if g.summary.is_empty() {
-        Cow::Borrowed(g.label)
-    } else {
-        Cow::Owned(format!("{} \u{00b7} {}", g.label, g.summary))
-    };
-    strip_chip_faced(ui, g, &face, more, header, body);
+    strip_chip_faced(ui, g, &g.face(), more, header, body);
 }
 
 /// A `strip_chip` whose chip shows `face` instead of its label: for a
@@ -727,18 +740,7 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
     let resp = tooltip(chip_button(ui, g.icon, face, g.tuned), g.label, g.tooltip, None);
     let pop_id = egui::Id::new(("group_chip", g.id_salt));
     let expanded_id = pop_id.with("expanded");
-    outline_when_open(&resp, pop_id);
-    egui::Popup::from_toggle_button_response(&resp)
-        .id(pop_id)
-        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
-        .align(egui::RectAlign::BOTTOM_START)
-        .align_alternatives(&[egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_START, egui::RectAlign::TOP_END])
-        .frame(egui::Frame::NONE)
-        .show(|ui| {
-            theme::register_flyout(ui.ctx(), pop_id);
-            if scrubbing_in(ui) {
-                ui.set_opacity(GHOST_OPACITY);
-            }
+    show_flyout(pop_id, &resp, below_chip(&resp, pop_id), |ui| {
             let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));
             theme::pill_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -746,7 +748,7 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
                     ui.spacing_mut().slider_width = STRIP_SLIDER_WIDTH;
                     ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
                     body(ui, Part::Quick);
-                    let fill = if expanded { theme::ACCENT_BRIGHT.gamma_multiply(0.35) } else { Color32::from_white_alpha(15) };
+                    let fill = if expanded { theme::ACCENT_BRIGHT.gamma_multiply(0.35) } else { theme::FIELD_FILL };
                     let dots = tooltip(icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, fill), more, "", None);
                     if dots.clicked() {
                         expanded = !expanded;
@@ -824,10 +826,7 @@ pub(super) fn color_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
             if in_panel_rows(ui) {
                 ui.add_space(PANEL_NAME_WIDTH + ui.spacing().item_spacing.x);
             }
-            ui.vertical(|ui| {
-                ui.spacing_mut().slider_width = RGB_PICKER_MAX_WIDTH;
-                changed = rgb_picker(ui, rgb);
-            });
+            ui.vertical(|ui| changed = rgb_picker(ui, rgb));
         });
     }
     ui.data_mut(|d| d.insert_temp(open_id, open));
@@ -869,7 +868,7 @@ pub(super) fn swatch_tile(ui: &mut Ui, name: &str, selected: bool, size: egui::V
     resp
 }
 
-/// A quick strip's slider width (the board's 72 px).
+/// A quick strip's slider width.
 const STRIP_SLIDER_WIDTH: f32 = 72.0;
 
 /// One numbered step of a full panel: the number in its badge (dim while
@@ -880,7 +879,7 @@ pub(super) fn step<R>(ui: &mut Ui, number: u8, active: bool, body: impl FnOnce(&
         let (fill, text) = if active {
             (theme::ACCENT_BRIGHT.gamma_multiply(0.2), theme::GLOW)
         } else {
-            (Color32::from_white_alpha(15), theme::TEXT_SECONDARY)
+            (theme::FIELD_FILL, theme::TEXT_SECONDARY)
         };
         ui.painter().circle_filled(rect.center(), 12.0, fill);
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, STEP_NUMBERS[number as usize % STEP_NUMBERS.len()],
@@ -914,7 +913,7 @@ pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool
     clicked
 }
 
-/// "default" or "n tuned", for a group chip face.
+/// "n tuned", or nothing at the default, for a group chip face.
 pub(super) fn tuned_summary(tuned: usize) -> Cow<'static, str> {
     match tuned {
         0 => Cow::Borrowed(""),
@@ -950,7 +949,7 @@ pub(super) fn gated<R>(ui: &mut Ui, reason: Option<&str>, body: impl FnOnce(&mut
     r.inner
 }
 
-/// A panel's section heading: the board's small capitals caption, and
+/// A panel's section heading: a small capitals caption, and
 /// an optional note beside it.
 pub(super) fn panel_section(ui: &mut Ui, caption: &str, note: Option<&str>) {
     ui.add_space(theme::SPACE_SM);
@@ -1000,7 +999,7 @@ pub(super) fn choice_row<T: Copy + PartialEq>(
     .inner
 }
 
-/// The option buttons of a `choice_row`, inline, as the board's segmented
+/// The option buttons of a `choice_row`, inline, as a segmented
 /// control: one dim pill holding the options, the picked one purple.
 pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T) -> bool {
     choice_buttons_picked(ui, options, value, theme::ACCENT_BRIGHT)
@@ -1009,7 +1008,7 @@ pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice
 /// `choice_buttons` with the picked option in `picked` (Erase's warm red).
 pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T, picked: Color32) -> bool {
     egui::Frame::NONE
-        .fill(Color32::from_white_alpha(15))
+        .fill(theme::FIELD_FILL)
         .corner_radius(theme::PILL_RADIUS)
         .inner_margin(3.0)
         .show(ui, |ui| {
@@ -1043,7 +1042,7 @@ pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &
         .inner
 }
 
-/// The board's dropdown (a rounded field with a chevron) for a choice too
+/// A dropdown (a rounded field with a chevron) for a choice too
 /// long for a segmented row; in panel rows its name sits in the name
 /// column. The list opens inline under the field: egui keeps one popup
 /// open at a time, so a popup list would close the flyout holding it.
@@ -1057,7 +1056,7 @@ pub(super) fn dropdown<T: Copy + PartialEq>(ui: &mut Ui, label: &str, options: &
         let width = (ui.available_width() - if panel { PANEL_VALUE_WIDTH } else { 0.0 }).max(120.0);
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, PANEL_ROW_HEIGHT), egui::Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), label));
-        let fill = if resp.hovered() || open { Color32::from_white_alpha(24) } else { Color32::from_white_alpha(15) };
+        let fill = if resp.hovered() || open { theme::FIELD_FILL_HOVER } else { theme::FIELD_FILL };
         let painter = ui.painter();
         painter.rect_filled(rect, theme::INPUT_RADIUS, fill);
         let text = if ui.is_enabled() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
@@ -1104,13 +1103,13 @@ pub(super) fn dropdown<T: Copy + PartialEq>(ui: &mut Ui, label: &str, options: &
     changed
 }
 
-/// A named colour among the board's swatch dots.
+/// A named colour among the swatch dots.
 pub(super) struct Swatch {
     pub name: &'static str,
     pub rgb: [u8; 3],
 }
 
-/// The board's colour dots in a row, the one matching `current` ringed
+/// Colour dots in a row, the one matching `current` ringed
 /// white. Returns the clicked dot's colour.
 pub(super) fn swatch_dots(ui: &mut Ui, swatches: &[Swatch], current: Option<[u8; 3]>) -> Option<[u8; 3]> {
     let mut picked = None;
@@ -1143,17 +1142,18 @@ pub(super) fn painted_dot(ui: &mut Ui, name: &str, on: bool, paint: impl FnOnce(
     resp.on_hover_text(name)
 }
 
-/// The board's "custom colour" dot: a hue ring around the colour itself.
+/// The "custom colour" dot: a hue ring around the colour itself.
 pub(super) fn custom_color_dot(ui: &mut Ui, rgb: [u8; 3], on: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), on, "Custom color"));
     if ui.is_rect_visible(rect) {
         let c = rect.center();
         const SEGMENTS: usize = 24;
-        for i in 0..SEGMENTS {
+        static HUES: std::sync::OnceLock<[Color32; SEGMENTS]> = std::sync::OnceLock::new();
+        let hues = HUES.get_or_init(|| std::array::from_fn(|i| Hsva::new(i as f32 / SEGMENTS as f32, 0.8, 1.0, 1.0).into()));
+        for (i, &color) in hues.iter().enumerate() {
             let a0 = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
             let a1 = (i + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-            let color: Color32 = Hsva::new(i as f32 / SEGMENTS as f32, 0.8, 1.0, 1.0).into();
             let p = |a: f32| c + 11.0 * egui::vec2(a.cos(), a.sin());
             ui.painter().line_segment([p(a0), p(a1)], egui::Stroke::new(2.5, color));
         }
@@ -1166,7 +1166,7 @@ pub(super) fn custom_color_dot(ui: &mut Ui, rgb: [u8; 3], on: bool) -> Response 
     resp.on_hover_text("Custom color")
 }
 
-/// On/off row inside a popover: the label, and the board's switch at the
+/// On/off row inside a popover: the label, and the switch at the
 /// row's end.
 pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
     let changed = ui.horizontal(|ui| {
@@ -1187,7 +1187,7 @@ pub(super) fn inline_switch(ui: &mut Ui, label: &str, value: &mut bool) -> ChipC
     ChipChange { changed, commit: changed }
 }
 
-/// The board's switch: a 34×20 pill, purple when on, with a white knob
+/// A switch: a 34×20 pill, purple when on, with a white knob
 /// that slides across. Reads as a checkbox named `name` to the tree.
 pub(super) fn switch(ui: &mut Ui, name: &str, on: &mut bool) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(egui::vec2(34.0, 20.0), egui::Sense::click());
@@ -1222,7 +1222,7 @@ pub(super) fn kept_hues(ui: &mut Ui, hue: u16, tolerance: u16) {
     });
 }
 
-const RGB_PICKER_MAX_WIDTH: f32 = 240.0;
+const RGB_PICKER_WIDTH: f32 = 240.0;
 
 /// Inline RGB picker for a `[u8; 3]` inside a parent popover: a
 /// saturation/brightness square, a hue strip and Red / Green / Blue
@@ -1230,8 +1230,7 @@ const RGB_PICKER_MAX_WIDTH: f32 = 240.0;
 /// a click outside the parent popover and closes it. Returns `true` when
 /// the user changed the color.
 pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
-    // A panel row's slider spans the panel; a square that wide is a wall.
-    let width = ui.spacing().slider_width.min(RGB_PICKER_MAX_WIDTH);
+    let width = RGB_PICKER_WIDTH;
     let (square, square_resp) = ui.allocate_exact_size(egui::vec2(width, width * 0.6), egui::Sense::drag());
     // Hue and saturation are kept across frames: a grey or black RGB holds
     // neither, so recomputing them from RGB would snap the hue to red.

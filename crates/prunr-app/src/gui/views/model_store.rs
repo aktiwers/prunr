@@ -106,7 +106,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                     )).size(12.5).color(theme::TEXT_SECONDARY));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, Color32::from_white_alpha(15));
+                    let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
                     close = super::chip::named(x, "Close Model Store").clicked();
                 });
             });
@@ -233,12 +233,12 @@ fn render_card(
     let border = if installed {
         theme::ACCENT_BRIGHT.gamma_multiply(0.35)
     } else {
-        Color32::from_white_alpha(15)
+        theme::FIELD_FILL
     };
     let mut clicked = None;
     let mut natural = 0.0;
     egui::Frame::NONE
-        .fill(Color32::from_white_alpha(9))
+        .fill(theme::CARD_FILL)
         .stroke(egui::Stroke::new(1.0, border))
         .corner_radius(16.0)
         .inner_margin(CARD_PADDING)
