@@ -52,26 +52,37 @@ pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
 /// of single-pixel 4-connected morphology — fine for the small values
-/// the GUI exposes (±16 px max). px == 0 returns a clone unchanged.
+/// the GUI exposes. px == 0 returns a clone unchanged.
+///
+/// Works on the mask's bbox (plus `px` when dilating): nothing farther
+/// than `px` from the mask can change, so the result is bit-identical
+/// to a full-image pass. Peak RAM: the output plus two bbox buffers.
 pub fn grow_mask(mask: &GrayImage, px: i32) -> GrayImage {
     if px == 0 {
         return mask.clone();
     }
-    let iters = px.unsigned_abs() as usize;
+    let (w, h) = mask.dimensions();
+    let iters = px.unsigned_abs();
     let dilate = px > 0;
-    let mut current = mask.clone();
+    let mut out = GrayImage::new(w, h);
+    let Some(b) = mask_bbox(mask, 128, if dilate { iters } else { 0 }) else {
+        return out;
+    };
+    let mut current = image::imageops::crop_imm(mask, b.x, b.y, b.w, b.h).to_image();
+    let mut next = GrayImage::new(b.w, b.h);
     for _ in 0..iters {
-        current = morphology_step(&current, dilate);
+        morphology_step_into(&current, &mut next, dilate);
+        std::mem::swap(&mut current, &mut next);
     }
-    current
+    image::imageops::replace(&mut out, &current, b.x as i64, b.y as i64);
+    out
 }
 
-fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
+fn morphology_step_into(mask: &GrayImage, out: &mut GrayImage, dilate: bool) {
     let (w, h) = mask.dimensions();
     let w_us = w as usize;
     let h_us = h as usize;
     let raw = mask.as_raw();
-    let mut out = GrayImage::new(w, h);
     let buf = out.as_mut();
     for y in 0..h_us {
         for x in 0..w_us {
@@ -94,7 +105,6 @@ fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
             buf[y * w_us + x] = if bit { 255 } else { 0 };
         }
     }
-    out
 }
 
 /// For each pixel, the distance to the nearest mask==0 pixel (0.0 if
@@ -1201,6 +1211,30 @@ mod tests {
         let (img, msk) = pick_input_names(&names);
         assert_eq!(img, "the_image");
         assert_eq!(msk, "the_mask");
+    }
+
+    /// The bbox-cropped grow matches full-image morphology, for masks in
+    /// the middle and touching each image edge, growing and shrinking.
+    #[test]
+    fn grow_mask_matches_full_image_morphology() {
+        let full = |m: &GrayImage, px: i32| {
+            let mut cur = m.clone();
+            let mut next = GrayImage::new(m.width(), m.height());
+            for _ in 0..px.unsigned_abs() {
+                morphology_step_into(&cur, &mut next, px > 0);
+                std::mem::swap(&mut cur, &mut next);
+            }
+            cur
+        };
+        for (x0, y0, x1, y1) in [(10, 12, 20, 25), (0, 0, 6, 9), (30, 33, 40, 40), (0, 15, 40, 18)] {
+            let mut m = GrayImage::new(40, 40);
+            for y in y0..y1 { for x in x0..x1 { m.put_pixel(x, y, Luma([255])); } }
+            m.put_pixel(35, 3, Luma([90]));
+            for px in [-3, -1, 1, 4, 7] {
+                assert_eq!(grow_mask(&m, px), full(&m, px), "rect {:?} px {px}", (x0, y0, x1, y1));
+            }
+        }
+        assert_eq!(grow_mask(&GrayImage::new(8, 8), 3), GrayImage::new(8, 8));
     }
 
     #[test]
