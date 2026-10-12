@@ -65,6 +65,7 @@ pub(crate) enum HardwareSectionIntent {
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let keep_sd_before = app.settings.keep_sd_loaded;
+    let processor_before = app.settings.processor;
     let closed = theme::standard_modal_window(
         ctx,
         "settings",
@@ -112,6 +113,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     // next stroke.
     if keep_sd_before && !app.settings.keep_sd_loaded {
         app.processor.release_inpaint_subprocess();
+    }
+    if app.settings.processor != processor_before {
+        app.apply_processor();
     }
     if closed {
         app.close_settings(ctx);
@@ -339,10 +343,12 @@ fn render_tab_general(
     hint(ui, &jobs_hint);
     ui.add_space(theme::SPACE_MD);
 
-    if settings.is_gpu() {
-        ui.checkbox(&mut settings.force_cpu, RichText::new("Force CPU this session")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        hint(ui, "Resets to GPU on next launch. Useful for debugging GPU misbehaviour.");
+    if prunr_core::OrtEngine::detect_active_provider() != "CPU" {
+        use crate::gui::settings::Processor;
+        super::chip::choice_row(ui, "Processor", &[
+            super::chip::Choice { value: Processor::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
+            super::chip::Choice { value: Processor::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
+        ], &mut settings.processor);
         ui.add_space(theme::SPACE_MD);
     }
 
