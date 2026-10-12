@@ -3485,12 +3485,18 @@ impl PrunrApp {
 impl Drop for PrunrApp {
     fn drop(&mut self) {
         self.processor.cancels.request_global_cancel();
-        super::drag_export::cleanup_all();
-        super::history_disk::cleanup_all();
     }
 }
 
 impl eframe::App for PrunrApp {
+    /// The session's temp files go on a graceful exit. Not in `Drop`:
+    /// tests build many apps in one process, and each drop emptied the
+    /// process-wide history dir under the others' feet.
+    fn on_exit(&mut self) {
+        super::drag_export::cleanup_all();
+        super::history_disk::cleanup_all();
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if let Some(frame) = self.automation.as_mut().and_then(|auto| auto.take_frame()) {
             raw_input.events.extend(frame.events);
