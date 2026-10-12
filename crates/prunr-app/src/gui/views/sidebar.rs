@@ -9,9 +9,9 @@ use crate::gui::theme;
 
 /// A control drawn over a row: a real widget on top of the row, so it
 /// takes the click and carries a name for the accessibility tree.
-fn row_control(ui: &egui::Ui, rect: Rect, id: egui::Id, info: egui::WidgetInfo) -> egui::Response {
+fn row_control(ui: &egui::Ui, rect: Rect, id: egui::Id, info: impl Fn() -> egui::WidgetInfo) -> egui::Response {
     let resp = ui.interact(rect, id, egui::Sense::click());
-    resp.widget_info(|| info.clone());
+    resp.widget_info(info);
     resp
 }
 
@@ -348,7 +348,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
 
     let resp = row_control(
         ui, cb_rect, egui::Id::new(("sidebar_tick", item.id)),
-        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.selected, format!("Tick {}", item.filename)),
+        || egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.selected, format!("Tick {}", item.filename)),
     );
     let (cb_hovered, cb_clicked) = (resp.hovered(), resp.clicked());
     if cb_clicked {
@@ -479,8 +479,9 @@ fn paint_hover_buttons(
         item_rect.max.x - 4.0 - btn_size * 0.5,
         item_rect.min.y + 4.0 + btn_size * 0.5,
     );
-    let del_name = format!("Delete {}", item.filename);
-    if paint_hover_circle_btn(ui, (del_center, btn_size), ("sidebar_delete", item.id, &del_name), ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
+    let del_id = egui::Id::new(("sidebar_delete", item.id));
+    let del_name = || format!("Delete {}", item.filename);
+    if paint_hover_circle_btn(ui, del_center, btn_size, del_id, del_name, ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
         actions.remove_idx = Some(i);
         close_clicked = true;
     }
@@ -491,8 +492,9 @@ fn paint_hover_buttons(
             item_rect.min.x + 4.0 + btn_size * 0.5,
             item_rect.max.y - 4.0 - btn_size * 0.5,
         );
-        let save_name = format!("Save {}", item.filename);
-        if paint_hover_circle_btn(ui, (save_center, btn_size), ("sidebar_save", item.id, &save_name), ICON_SAVE.codepoint, theme::ACCENT) {
+        let save_id = egui::Id::new(("sidebar_save", item.id));
+        let save_name = || format!("Save {}", item.filename);
+        if paint_hover_circle_btn(ui, save_center, btn_size, save_id, save_name, ICON_SAVE.codepoint, theme::ACCENT) {
             actions.save_idx = Some(i);
             close_clicked = true;
         }
@@ -504,16 +506,15 @@ fn paint_hover_buttons(
 /// `hover_color` is the fill shown on hover; idle is translucent black.
 fn paint_hover_circle_btn(
     ui: &egui::Ui,
-    (center, size): (Pos2, f32),
-    (salt, item_id, name): (&'static str, u64, &str),
+    center: Pos2,
+    size: f32,
+    id: egui::Id,
+    name: impl Fn() -> String,
     icon: &str,
     hover_color: Color32,
 ) -> bool {
     let rect = Rect::from_center_size(center, Vec2::splat(size));
-    let resp = row_control(
-        ui, rect, egui::Id::new((salt, item_id)),
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name),
-    );
+    let resp = row_control(ui, rect, id, || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name()));
     let (hovered, pressed) = (resp.hovered(), resp.clicked());
     let bg = if hovered {
         hover_color

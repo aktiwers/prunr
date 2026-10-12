@@ -353,10 +353,10 @@ fn render_tab_general(
     ui.add_space(theme::SPACE_MD);
 
     if settings.is_gpu() {
-        use crate::gui::settings::Processor;
+        use crate::gui::settings::ComputeMode;
         super::chip::choice_row(ui, "Processor", &[
-            super::chip::Choice { value: Processor::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
-            super::chip::Choice { value: Processor::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
+            super::chip::Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
+            super::chip::Choice { value: ComputeMode::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
         ], &mut settings.processor);
         ui.add_space(theme::SPACE_MD);
     }

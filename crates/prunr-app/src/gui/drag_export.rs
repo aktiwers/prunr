@@ -73,6 +73,11 @@ fn source_stem(source_filename: &str) -> &str {
         .unwrap_or("image")
 }
 
+/// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
+pub(crate) fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
+    format!("{}.prunr.{}", source_stem(source_filename), format.extension())
+}
+
 /// Build a human-friendly filename stem for a batch item given its processing mode.
 ///
 /// Naming convention: `.prunr` is a tool tag (signals "Prunr touched this") that
@@ -85,7 +90,7 @@ fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -
     }
     let stem = source_stem(source_filename);
     match line_mode {
-        LineMode::Off => format!("{stem}.prunr.png"),
+        LineMode::Off => export_name(source_filename, prunr_core::ExportFormat::Png),
         LineMode::EdgesOnly => format!("{stem}-lines.png"),
         LineMode::SubjectOutline => format!("{stem}.prunr-lines.png"),
     }

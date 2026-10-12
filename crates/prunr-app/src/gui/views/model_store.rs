@@ -264,7 +264,7 @@ fn render_card(
                 };
                 let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
                 let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
-                let resp = super::chip::named(resp, &format!("{label} {}", desc.display_name));
+                let resp = super::chip::named_with(resp, || format!("{label} {}", desc.display_name));
                 if resp.clicked() {
                     clicked = Some(action);
                 }
@@ -400,10 +400,10 @@ mod tests {
     fn dl_in_progress() -> DownloadState { DownloadState::InProgress { bytes_so_far: 1, total_bytes: 100 } }
     fn dl_verifying() -> DownloadState { DownloadState::Verifying }
     fn dl_done() -> DownloadState { DownloadState::Done }
-    fn dl_failed_retryable() -> DownloadState {
+    fn dl_failed_network() -> DownloadState {
         DownloadState::Failed { error: "timeout".into() }
     }
-    fn dl_failed_fatal() -> DownloadState {
+    fn dl_failed_disk_full() -> DownloadState {
         DownloadState::Failed { error: "No space left on device".into() }
     }
     fn synthetic(gpu: prunr_models::GpuRequirement) -> prunr_models::ModelDescriptor {
@@ -458,7 +458,7 @@ mod tests {
     fn bundled_always_renders_as_none() {
         let d = synthetic_bundled();
         assert_eq!(card_action(&d, true, &dl_idle()), CardAction::Bundled);
-        assert_eq!(card_action(&d, false, &dl_failed_retryable()), CardAction::Bundled);
+        assert_eq!(card_action(&d, false, &dl_failed_network()), CardAction::Bundled);
     }
 
     #[test]
@@ -488,9 +488,9 @@ mod tests {
     }
 
     #[test]
-    fn ondemand_failed_retryable_uninstalled_is_retry_clickable() {
+    fn ondemand_failed_network_uninstalled_is_retry_clickable() {
         let d = synthetic(prunr_models::GpuRequirement::None);
-        let a = card_action(&d, false, &dl_failed_retryable());
+        let a = card_action(&d, false, &dl_failed_network());
         assert_eq!(a, CardAction::Retry);
         assert!(action_enabled(a));
     }
@@ -498,9 +498,9 @@ mod tests {
     /// A failure the network retry gave up on (disk full, 404, bad
     /// checksum) can still be retried by hand once the cause is fixed.
     #[test]
-    fn ondemand_failed_fatal_uninstalled_is_retry_clickable() {
+    fn ondemand_failed_disk_full_uninstalled_is_retry_clickable() {
         let d = synthetic(prunr_models::GpuRequirement::None);
-        let a = card_action(&d, false, &dl_failed_fatal());
+        let a = card_action(&d, false, &dl_failed_disk_full());
         assert_eq!(a, CardAction::Retry);
         assert!(action_enabled(a));
     }
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn ondemand_failed_but_already_installed_shows_delete() {
         let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, true, &dl_failed_retryable()), CardAction::Delete);
+        assert_eq!(card_action(&d, true, &dl_failed_network()), CardAction::Delete);
     }
 
     // ── Hardware advisory ─────────────────────────────────────────────

@@ -273,55 +273,10 @@ pub(crate) fn render(
         });
     });
 
-    // Model-change hooks: fire regardless of which row is active.
-    // Drop any cached LaMa sessions on model change — fires for
-    // every direction (LaMa→LaMa-FP32, LaMa→SD, Silueta→LaMa, …)
-    // so the previous backend's ~700 MB–2 GB resident set isn't
-    // pinned across the user's "I'm done with that tool" signal.
-    // Safe because in-flight strokes hold their own Arc — we only
-    // drop the cache's ref. Rebuild on next paint is 5–15 s
-    // (well below user perception threshold for an explicit
-    // model switch).
-    if change.model_changed {
-        prunr_core::inpaint::release_all_lama_sessions();
-    }
-
     // Inpaint mode: paint is the only input — auto-enable brush so
-    // the user doesn't have to click two buttons. Settings stays
-    // pinned subtract-equivalent (mode picker is hidden in the
-    // popover anyway when Inpaint is active). Pre-warm the LaMa /
-    // MI-GAN session in the background so the first stroke doesn't
-    // pay the 5-10 s zstd-decompress + ORT-session-build cost.
-    //
-    // SD-family models are NOT prewarmed here. They run in the
-    // dedicated `inpaint_only` subprocess via `inpaint_bridge`, so
-    // building an `SdSession` in this (GUI) process loads ~9 GB
-    // into RAM that no dispatch path will ever read — the GUI
-    // never calls `process_inpaint_with` for SD models. The
-    // observable bug: GUI process bloats to 15 GB on model
-    // switch, then the subprocess loads its own 9 GB on first
-    // stroke → ~24 GB peak → memory-pressure abort on any
-    // 16 GB box.
-    if change.model_changed && app_settings.model.is_inpaint() {
-        if !brush_state.is_enabled() {
-            brush_state.toggle();
-        }
-        let raw_id = app_settings.model.to_model_id();
-        let in_process = matches!(
-            raw_id,
-            Some(prunr_models::ModelId::LaMaFp32)
-                | Some(prunr_models::ModelId::BigLaMa)
-                | Some(prunr_models::ModelId::Migan)
-        );
-        if in_process {
-            if let Some(id) = raw_id {
-                rayon::spawn(move || {
-                    if let Err(e) = prunr_core::inpaint::prewarm(id) {
-                        tracing::warn!(?id, %e, "Inpaint prewarm failed");
-                    }
-                });
-            }
-        }
+    // the user doesn't have to click two buttons.
+    if change.model_changed && app_settings.model.is_inpaint() && !brush_state.is_enabled() {
+        brush_state.toggle();
     }
 
     // Line-mode transition: record the signal + cache impact (deterministic

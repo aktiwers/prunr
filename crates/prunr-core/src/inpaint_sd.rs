@@ -161,8 +161,8 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// fits is decided by `check_ram_for` in the process that runs the
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
-pub fn plan_tuning(keep_loaded: bool, margin_mb: u64, cpu_only: bool) -> SdTuning {
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only }
+pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -225,7 +225,7 @@ pub(crate) struct SdSessionKey {
 impl SdSessionKey {
     /// The GPU providers this bundle's parts may try.
     fn gpu_eps(&self) -> &'static [crate::engine::EpKind] {
-        if self.cpu_only { &[] } else { crate::engine::gpu_eps() }
+        crate::engine::gpu_eps_for(self.cpu_only)
     }
 }
 
@@ -3038,7 +3038,7 @@ mod tests {
         assert_eq!(ram_need_mb(id, m, true, false), m, "a resident bundle needs only the headroom");
         assert_eq!(ram_need_mb(id, m, true, true), m + SD_TALL_CROP_EXTRA_MB);
         let fit = |free: u64, resident: bool| {
-            let mut t = plan_tuning(false, m, false);
+            let mut t = plan_tuning(false, m);
             fit_ram(id, &mut t, free, resident).map(|()| t.tall_crop)
         };
         assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB, false), Ok(true));
@@ -3048,7 +3048,7 @@ mod tests {
         // the process holding it must not count it again.
         assert_eq!(fit(m + SD_TALL_CROP_EXTRA_MB, true), Ok(true), "resident: the extra alone decides");
         assert_eq!(fit(m, true), Ok(false));
-        let t = plan_tuning(true, m, false);
+        let t = plan_tuning(true, m);
         assert!(t.keep_loaded && t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
         assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
@@ -3137,7 +3137,7 @@ mod tests {
         let margin = 2048;
         let base = ram_need_mb(id, margin, false, false);
         for free in [base - 1, base, base + SD_TALL_CROP_EXTRA_MB - 1, base + SD_TALL_CROP_EXTRA_MB] {
-            let mut t = plan_tuning(false, margin, false);
+            let mut t = plan_tuning(false, margin);
             let gate = fit_ram(id, &mut t, free, false);
             let expected = match (gate.is_ok(), t.tall_crop) {
                 (false, _) => SdRamFit::Refused,
@@ -3153,8 +3153,8 @@ mod tests {
     /// other policy is never reused.
     #[test]
     fn a_cpu_only_bundle_tries_no_gpu_provider_and_has_its_own_key() {
-        let auto = plan_tuning(false, 0, false).session_key();
-        let cpu = plan_tuning(false, 0, true).session_key();
+        let auto = plan_tuning(false, 0).session_key();
+        let cpu = SdTuning { cpu_only: true, ..plan_tuning(false, 0) }.session_key();
         assert!(cpu.gpu_eps().is_empty());
         assert_ne!(auto, cpu);
     }

@@ -20,9 +20,9 @@ fn icon_button(ui: &mut egui::Ui, icon: &'static str) -> egui::Response {
 }
 
 const FORMAT_CHOICES: [super::chip::Choice<prunr_core::ExportFormat>; 3] = [
-    super::chip::Choice { value: prunr_core::ExportFormat::Png, name: "PNG", description: "Lossless, keeps transparency", enabled: true },
-    super::chip::Choice { value: prunr_core::ExportFormat::Jpeg, name: "JPEG", description: "Small files; transparency becomes white", enabled: true },
-    super::chip::Choice { value: prunr_core::ExportFormat::Webp, name: "WebP", description: "Lossless, keeps transparency, smaller than PNG", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Png, name: prunr_core::ExportFormat::Png.label(), description: "Lossless, keeps transparency", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Jpeg, name: prunr_core::ExportFormat::Jpeg.label(), description: "Small files; transparency becomes white", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Webp, name: prunr_core::ExportFormat::Webp.label(), description: "Lossless, keeps transparency, smaller than PNG", enabled: true },
 ];
 
 /// The arrow beside Save: the file format, and Separate layers for a

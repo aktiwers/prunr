@@ -81,7 +81,7 @@ pub struct Settings {
     pub runtime_prompt_snoozed_until: std::collections::HashMap<String, i64>,
 
     #[serde(default)]
-    pub processor: Processor,
+    pub processor: ComputeMode,
     #[serde(skip)]
     pub active_backend: String,
     #[serde(default)]
@@ -103,7 +103,6 @@ pub struct Settings {
     #[serde(default)]
     pub sd_memory: SdMemoryGuard,
 }
-
 
 /// The SD eraser's memory guard: the headroom its RAM gate adds on top
 /// of the model's need.
@@ -166,7 +165,7 @@ impl Settings {
     /// Config file path: ~/.config/prunr/settings.json (Linux),
     /// ~/Library/Application Support/prunr/settings.json (macOS),
     /// %APPDATA%/prunr/settings.json (Windows).
-    fn config_path() -> Option<PathBuf> {
+    pub fn config_path() -> Option<PathBuf> {
         config_root().map(|d| d.join("prunr").join("settings.json"))
     }
 
@@ -299,7 +298,7 @@ impl Settings {
     }
 
     pub fn cpu_only(&self) -> bool {
-        self.processor == Processor::CpuOnly
+        self.processor == ComputeMode::CpuOnly
     }
 
     /// The provider the models run on: the detected one, or the CPU
@@ -529,7 +528,7 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
 /// Which hardware runs the models. Auto: a GPU provider where the model
 /// supports one, else the CPU. CpuOnly: every model on the CPU.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Processor {
+pub enum ComputeMode {
     #[default]
     Auto,
     CpuOnly,
@@ -735,7 +734,7 @@ impl Default for Settings {
             bg_image_paths: HashMap::new(),
             accepted_licenses: Vec::new(),
             runtime_prompt_snoozed_until: std::collections::HashMap::new(),
-            processor: Processor::Auto,
+            processor: ComputeMode::Auto,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             sd_memory: SdMemoryGuard::Balanced,
@@ -835,7 +834,7 @@ mod tests {
         assert!(s.bg_image_paths.is_empty());
         assert!(s.accepted_licenses.is_empty());
         assert!(s.runtime_prompt_snoozed_until.is_empty());
-        assert_eq!(s.processor, Processor::Auto);
+        assert_eq!(s.processor, ComputeMode::Auto);
         assert_eq!(s.active_backend, "CPU");
         assert_eq!(s.sd_memory, SdMemoryGuard::Balanced);
     }
@@ -906,7 +905,7 @@ mod tests {
 
         let original = Settings {
             parallel_jobs: 7,
-            processor: Processor::CpuOnly,
+            processor: ComputeMode::CpuOnly,
             auto_process_on_import: true,
             ..Settings::default()
         };
@@ -916,7 +915,7 @@ mod tests {
         let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
         assert_eq!(restored.parallel_jobs, 7);
         assert!(restored.auto_process_on_import);
-        assert_eq!(restored.processor, Processor::CpuOnly, "the processor choice is saved");
+        assert_eq!(restored.processor, ComputeMode::CpuOnly, "the processor choice is saved");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -932,7 +931,7 @@ mod tests {
         s.bg_image_paths.insert(7, PathBuf::from("/pics/beach.jpg"));
         s.runtime_prompt_snoozed_until.insert("OpenVino".into(), 99);
         s.hotkeys.insert("undo".into(), vec!["Ctrl+U".into()]);
-        s.processor = Processor::CpuOnly;
+        s.processor = ComputeMode::CpuOnly;
         s.keep_sd_loaded = true;
         s.reset_preserving_identity();
         assert_eq!(s.model, SettingsModel::SdInpaint);
@@ -940,7 +939,7 @@ mod tests {
         assert_eq!(s.bg_image_paths.get(&7), Some(&PathBuf::from("/pics/beach.jpg")));
         assert_eq!(s.runtime_prompt_snoozed_until.get("OpenVino"), Some(&99));
         assert!(s.hotkeys.is_empty());
-        assert_eq!(s.processor, Processor::Auto);
+        assert_eq!(s.processor, ComputeMode::Auto);
         assert!(!s.keep_sd_loaded);
     }
 
@@ -965,7 +964,7 @@ mod tests {
     fn cpu_only_reports_the_cpu_as_the_backend() {
         let mut s = Settings { active_backend: "OpenVINO".into(), ..Settings::default() };
         assert_eq!(s.effective_backend(), "OpenVINO");
-        s.processor = Processor::CpuOnly;
+        s.processor = ComputeMode::CpuOnly;
         assert!(s.cpu_only());
         assert_eq!(s.effective_backend(), "CPU");
         s.note_backend("CPU".into());

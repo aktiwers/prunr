@@ -128,23 +128,31 @@ pub(crate) struct SamEncoderResult {
 /// session construction (seconds on a cold EP) never runs on the GUI
 /// thread; single-slot because caching several upscale engines is YAGNI.
 type WarmUpscaleEngine =
-    Arc<Mutex<Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>>>;
+    Arc<Mutex<Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>>>;
+
+/// What a warm upscale engine was built for: the model, and whether the
+/// user chose "CPU only" (an engine built under the other choice misses).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UpscaleEngineKey {
+    kind: prunr_core::ModelKind,
+    cpu_only: bool,
+}
 
 fn lock_warm_engine(
     slot: &WarmUpscaleEngine,
-) -> std::sync::MutexGuard<'_, Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>> {
+) -> std::sync::MutexGuard<'_, Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>> {
     slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The cached engine on a ModelKind hit; a mismatch evicts the slot and
+/// The cached engine on a key hit; a mismatch evicts the slot and
 /// returns `None`. Never constructs an engine.
 fn cached_upscale_engine(
     slot: &WarmUpscaleEngine,
-    model_kind: prunr_core::ModelKind,
+    key: UpscaleEngineKey,
 ) -> Option<Arc<prunr_core::OrtEngine>> {
     let mut guard = lock_warm_engine(slot);
     match guard.as_ref() {
-        Some((kind, engine)) if *kind == model_kind => Some(Arc::clone(engine)),
+        Some((cached, engine)) if *cached == key => Some(Arc::clone(engine)),
         Some(_) => {
             *guard = None;
             None
@@ -153,22 +161,25 @@ fn cached_upscale_engine(
     }
 }
 
-/// Cached engine for `model_kind`, constructing and caching one when
-/// absent. The lock is released during construction so the GUI thread's
+/// Cached engine for `key`, constructing and caching one when absent.
+/// The lock is released during construction so the GUI thread's
 /// `release_upscale_engine` never waits on a session build.
 fn ensure_upscale_engine(
     slot: &WarmUpscaleEngine,
-    model_kind: prunr_core::ModelKind,
+    key: UpscaleEngineKey,
     intra_threads: usize,
     level: prunr_core::engine::GraphOptimizationLevel,
 ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
-    if let Some(cached) = cached_upscale_engine(slot, model_kind) {
+    if let Some(cached) = cached_upscale_engine(slot, key) {
         return Ok(cached);
     }
-    let fresh = Arc::new(
-        prunr_core::OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?,
-    );
-    *lock_warm_engine(slot) = Some((model_kind, Arc::clone(&fresh)));
+    let engine = if key.cpu_only {
+        prunr_core::OrtEngine::new_cpu_only_with_optimization_level(key.kind, intra_threads, level)?
+    } else {
+        prunr_core::OrtEngine::new_with_optimization_level(key.kind, intra_threads, level)?
+    };
+    let fresh = Arc::new(engine);
+    *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
 }
 
@@ -350,6 +361,8 @@ pub(crate) struct InpaintTuning {
     /// SD-only: how the pipeline runs, planned by the caller from the
     /// settings and the free RAM.
     pub sd_tuning: prunr_core::inpaint_sd::SdTuning,
+    /// Settings › Processor is "CPU only": no session uses a GPU provider.
+    pub cpu_only: bool,
 }
 
 impl InpaintTuning {
@@ -375,6 +388,7 @@ impl Default for InpaintTuning {
             sd_seed: None,
             use_taesd: false,
             sd_tuning: Default::default(),
+            cpu_only: false,
         }
     }
 }
@@ -642,7 +656,7 @@ impl Processor {
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
             let sd_req = None;
-            let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, &progress);
+            let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, tuning.cpu_only, &progress);
             if outcome.is_ok() {
                 progress.step(prunr_core::Step::Blending);
             }
@@ -744,12 +758,22 @@ impl Processor {
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
     }
 
+    /// Drop every cached model session: the in-process LaMa and upscale
+    /// ones, and both workers'. On a model switch or a Processor change.
+    pub(crate) fn release_all_sessions(&mut self) {
+        prunr_core::inpaint::release_all_lama_sessions();
+        self.release_upscale_engine();
+        self.release_seg_warm();
+        self.release_inpaint_subprocess();
+    }
+
     #[cfg(test)]
     fn try_cached_upscale_engine(
         &mut self,
         model_kind: prunr_core::ModelKind,
+        cpu_only: bool,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
-        cached_upscale_engine(&self.warm_upscale_engine, model_kind)
+        cached_upscale_engine(&self.warm_upscale_engine, UpscaleEngineKey { kind: model_kind, cpu_only })
     }
 
     /// Drops the cached upscale engine. Call on:
@@ -765,7 +789,7 @@ impl Processor {
     #[cfg(test)]
     pub(crate) fn warm_upscale_engine_for_test(
         &mut self,
-    ) -> std::sync::MutexGuard<'_, Option<(prunr_core::ModelKind, Arc<prunr_core::OrtEngine>)>> {
+    ) -> std::sync::MutexGuard<'_, Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>> {
         lock_warm_engine(&self.warm_upscale_engine)
     }
 
@@ -827,7 +851,7 @@ impl Processor {
                         seed: tuning.sd_seed,
                         use_taesd: plan.use_taesd,
                         scheduler,
-                        tuning: tuning.sd_tuning.clone(),
+                        tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
                     })
                 }
                 _ => None,
@@ -1108,6 +1132,7 @@ impl Processor {
         input: UpscaleInput,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
+        cpu_only: bool,
         recipe: ProcessingRecipe,
     ) {
         // One upscale runs at a time, so it gets every core; "Parallel
@@ -1198,7 +1223,7 @@ impl Processor {
             // thread holds its own Arc, so a model swap that evicts the slot
             // mid-run never invalidates this session.
             let engine_for_thread = match ensure_upscale_engine(
-                &engine_slot, cache_model_kind, intra_threads, level,
+                &engine_slot, UpscaleEngineKey { kind: cache_model_kind, cpu_only }, intra_threads, level,
             ) {
                 Ok(engine) => engine,
                 Err(err) => {
@@ -2150,10 +2175,14 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
+            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         let got = p
-            .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus)
+            .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, false)
             .expect("cache hit must return the sentinel Arc");
+        assert!(
+            p.try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, true).is_none(),
+            "an engine built for Auto is not reused under CPU only",
+        );
         assert!(
             Arc::ptr_eq(&sentinel, &got),
             "cache hit must return the SAME Arc that was inserted"
@@ -2168,8 +2197,8 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
-        let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL);
+            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL, false);
         assert!(
             got.is_none(),
             "cache miss on ModelKind mismatch must return None"
@@ -2188,7 +2217,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((ModelKind::RealEsrganX4Plus, Arc::clone(&sentinel)));
+            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         p.release_upscale_engine();
         assert!(
             p.warm_upscale_engine_for_test().is_none(),
