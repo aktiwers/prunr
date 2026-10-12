@@ -32,9 +32,6 @@ pub struct Settings {
     /// Whether a selection is outlined on the image.
     #[serde(default = "default_true")]
     pub selection_outline: bool,
-    /// Auto-rerun Tier 2 on knob tweaks (live preview). Default ON.
-    #[serde(default = "default_live_preview")]
-    pub live_preview: bool,
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
@@ -139,7 +136,6 @@ impl Settings {
     }
 }
 
-fn default_live_preview() -> bool { true }
 fn default_true() -> bool { true }
 fn default_selection_fill() -> f32 { 0.15 }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
@@ -672,7 +668,6 @@ impl Default for Settings {
             dark_checker: false,
             selection_fill: default_selection_fill(),
             selection_outline: true,
-            live_preview: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
             shortcuts: HashMap::new(),
@@ -774,7 +769,6 @@ mod tests {
         assert!(!s.dark_checker);
         assert_eq!(s.selection_fill, 0.15);
         assert!(s.selection_outline);
-        assert!(s.live_preview);
         assert!(!s.auto_hide_adjustments);
         assert!(!s.export_split_layers);
         assert!(s.shortcuts.is_empty());
