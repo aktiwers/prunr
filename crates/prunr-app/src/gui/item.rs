@@ -518,6 +518,15 @@ impl BatchItem {
         }
     }
 
+    /// The size of the frame the image is shown in: the result's, once
+    /// there is one, else the source's. Every texture shown for this item
+    /// (source, preview, held image, result) is drawn into it, so a
+    /// hand-over between them never moves the image.
+    pub(crate) fn frame_size(&self) -> egui::Vec2 {
+        let (w, h) = self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions());
+        egui::vec2(w as f32, h as f32)
+    }
+
     /// The image shown until the new one's texture lands.
     pub(crate) fn held_texture(&self) -> Option<&egui::TextureHandle> {
         match &self.reveal {
