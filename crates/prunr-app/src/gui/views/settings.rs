@@ -94,7 +94,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let keep_sd_before = app.settings.keep_sd_loaded;
     let processor_before = app.settings.processor;
-    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::SETTINGS_MODAL_SIZE, |ui| {
+    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::fit_to_window(ctx, theme::SETTINGS_MODAL_SIZE), |ui| {
         theme::apply_modal_visuals(ui);
         let height = ui.available_height();
         let mut close = false;

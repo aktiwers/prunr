@@ -173,7 +173,13 @@ pub(crate) fn render(
     let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
     let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
 
-    ui.horizontal(|ui| {
+    // The row goes compact (chips show their icon only) when its full
+    // left cluster and its right cluster, both measured on earlier
+    // frames, would not fit side by side.
+    let fit_id = egui::Id::new("toolbar_fit");
+    let (full_left, right) = ui.data(|d| d.get_temp::<(f32, f32)>(fit_id)).unwrap_or_default();
+    let compact = full_left + right + theme::SPACE_MD > ui.available_width();
+    ui.horizontal(|ui| chip::compact_chips(ui, compact, |ui| {
         render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
 
         let model = app_settings.model;
@@ -227,9 +233,10 @@ pub(crate) fn render(
             });
         }
 
+        let left = ui.min_rect().width();
         // Right-aligned cluster. Right-to-left layout fills from the right
         // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let right_rect = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
@@ -278,8 +285,13 @@ pub(crate) fn render(
                     change.toggle_magic = true;
                 }
             });
-        });
-    });
+        }).response.rect;
+        let fit = (if compact { full_left } else { left }, right_rect.width());
+        if (fit.0 - full_left).abs() > 0.5 || (fit.1 - right).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(fit_id, fit));
+            ui.ctx().request_repaint();
+        }
+    }));
 
     // Inpaint mode: paint is the only input — auto-enable brush so
     // the user doesn't have to click two buttons.
