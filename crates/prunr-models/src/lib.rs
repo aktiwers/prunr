@@ -61,6 +61,12 @@ pub enum ModelId {
     /// authoring. Encoder cached on BatchItem; decoder runs per
     /// click/stroke.
     Sam2HieraSmall,
+    /// GFPGAN v1.4 face restorer with the YuNet face detector. Two-part
+    /// OnDemand bundle; Apache-2.0 (restorer) + MIT (detector).
+    FaceGfpgan,
+    /// RestoreFormer++ face restorer with the YuNet face detector. Same
+    /// input and output as `FaceGfpgan`; Apache-2.0 + MIT.
+    FaceRestoreFormerPp,
 }
 
 impl ModelId {
@@ -93,6 +99,8 @@ impl ModelId {
         ModelId::FourXNmkdSiaxCx,
         ModelId::FourXNmkdSuperscale,
         ModelId::Sam2HieraSmall,
+        ModelId::FaceGfpgan,
+        ModelId::FaceRestoreFormerPp,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -119,6 +127,8 @@ impl ModelId {
             ModelId::FourXNmkdSiaxCx => "four_x_nmkd_siax_cx",
             ModelId::FourXNmkdSuperscale => "four_x_nmkd_superscale",
             ModelId::Sam2HieraSmall => "sam2_hiera_small",
+            ModelId::FaceGfpgan => "face_gfpgan",
+            ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
         }
     }
 
@@ -135,6 +145,9 @@ pub enum ModelCategory {
     /// BG-removal pipeline. Encoder + decoder ship as separate ONNX
     /// files (`MultiPartOnDemand`).
     Selection,
+    /// Face restoration: a detector finds faces, a restorer redraws each
+    /// one. Runs after the photo's own model, never in its place.
+    Face,
 }
 
 /// Hardware requirement for a model. Drives Model Store + dropdown
@@ -934,7 +947,84 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
+    ModelDescriptor {
+        id: ModelId::FaceGfpgan,
+        display_name: "Faces (GFPGAN v1.4)",
+        description: "Redraws soft, small or compressed faces. The crispest of the two face models. Trained on FFHQ, a non-commercial photo set. ~340 MB.",
+        category: ModelCategory::Face,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "face-gfpgan-1.4-1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "restorer",
+                    filename: "gfpgan_v1.4.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/gfpgan_v1.4.onnx",
+                    sha256: "0e063e4071211196ec76e9da82f0495e2d4f56e2d9ebcd63c776dbcef60cd087",
+                    size_bytes: 340_345_497,
+                },
+                YUNET_PART,
+            ],
+            license: LicenseInfo {
+                author: "Tencent ARC (GFPGAN); OpenCV (YuNet, MIT)",
+                license: "Apache 2.0",
+                license_url: "https://github.com/TencentARC/GFPGAN/blob/master/LICENSE",
+                source_url: "https://github.com/TencentARC/GFPGAN",
+            },
+            license_acceptance_required: false,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+        working_set_mb: 1200,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
+    ModelDescriptor {
+        id: ModelId::FaceRestoreFormerPp,
+        display_name: "Faces (RestoreFormer++)",
+        description: "Redraws soft, small or compressed faces. Stays closest to the person's own features. Trained on FFHQ, a non-commercial photo set. ~295 MB.",
+        category: ModelCategory::Face,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "face-restoreformer-pp-1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "restorer",
+                    filename: "restoreformer_pp.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/restoreformer_pp.onnx",
+                    sha256: "67c7fbdf69bd7223f5f42875421fbba71a2124117a66be6a5c450969c293c4e1",
+                    size_bytes: 295_248_883,
+                },
+                YUNET_PART,
+            ],
+            license: LicenseInfo {
+                author: "Zhouxia Wang et al. (RestoreFormer++); OpenCV (YuNet, MIT)",
+                license: "Apache 2.0",
+                license_url: "https://github.com/wzhouxiff/RestoreFormerPlusPlus/blob/main/LICENSE",
+                source_url: "https://github.com/wzhouxiff/RestoreFormerPlusPlus",
+            },
+            license_acceptance_required: false,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+        working_set_mb: 1200,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
 ];
+
+/// The face detector both face models ship with, pinned to its commit.
+const YUNET_PART: ModelPart = ModelPart {
+    key: "detector",
+    filename: "face_detection_yunet_2026may.onnx",
+    url: "https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+    sha256: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+    size_bytes: 229_738,
+};
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
     REGISTRY.iter().find(|d| d.id == id)
@@ -1185,7 +1275,9 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
         | ModelId::FourXNmkdSuperscale
-        | ModelId::Sam2HieraSmall => {
+        | ModelId::Sam2HieraSmall
+        | ModelId::FaceGfpgan
+        | ModelId::FaceRestoreFormerPp => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1377,7 +1469,9 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
         | ModelId::TaesdFp16
-        | ModelId::Sam2HieraSmall => return None,
+        | ModelId::Sam2HieraSmall
+        | ModelId::FaceGfpgan
+        | ModelId::FaceRestoreFormerPp => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1473,7 +1567,9 @@ mod tests {
                 | ModelId::RealEsrganX2Plus
                 | ModelId::FourXNmkdSiaxCx
                 | ModelId::FourXNmkdSuperscale
-                | ModelId::Sam2HieraSmall => {}
+                | ModelId::Sam2HieraSmall
+                | ModelId::FaceGfpgan
+                | ModelId::FaceRestoreFormerPp => {}
             }
         }
     }
