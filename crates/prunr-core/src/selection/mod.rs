@@ -106,13 +106,19 @@ fn scan_flags(cells: &[i8]) -> (bool, bool) {
 
 /// How a newer stroke cell lands on an existing one: zero leaves the
 /// existing cell, same sign keeps the stronger magnitude (painting twice
-/// does not double up), opposite sign lets the newer stroke win.
+/// does not double up), opposite sign moves it toward the newer stroke by
+/// that stroke's strength, as paint would: a full stroke flips it, a
+/// soft edge only nudges it.
 #[inline]
 fn merge_cell(existing: i8, newer: i8) -> i8 {
     match newer {
         0 => existing,
-        n if n > 0 => existing.max(n),
-        n => existing.min(n),
+        n if (n > 0) == (existing > 0) || existing == 0 => if n > 0 { existing.max(n) } else { existing.min(n) },
+        n => {
+            let weight = f32::from(n.unsigned_abs()) / f32::from(FULL as u8);
+            let moved = f32::from(existing) + (f32::from(n) - f32::from(existing)) * weight;
+            moved.round().clamp(-f32::from(FULL as u8), f32::from(FULL as u8)) as i8
+        }
     }
 }
 
@@ -525,13 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn add_mask_opposite_sign_lets_newer_stroke_win() {
-        // An Add stroke painted over a Subtract region restores it, and
-        // vice versa.
-        let existing = mask(2, 1, vec![-100, 80]);
-        let newer = mask(2, 1, vec![30, -10]);
+    fn add_mask_opposite_sign_moves_toward_the_newer_stroke_by_its_strength() {
+        // A full restore over an erase flips it; a faint one (a soft brush
+        // edge, a feathered rim) only nudges it, as paint would.
+        let existing = mask(4, 1, vec![-100, 80, -127, 127]);
+        let newer = mask(4, 1, vec![30, -10, 127, -127]);
         let r = existing.add_mask(&newer).unwrap();
-        assert_eq!(r.cells(), &[30, -10]);
+        assert_eq!(r.cells(), &[-69, 73, 127, -127]);
     }
 
     #[test]
