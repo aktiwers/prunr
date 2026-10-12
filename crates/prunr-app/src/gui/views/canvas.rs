@@ -273,7 +273,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     };
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
+        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, stamp, item, img_rect)
     };
     if shift || subtract {
         let glyph = if shift { "+" } else { "\u{2212}" };
@@ -325,7 +325,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 
-    let look = super::brush_overlay::MAGIC_CURSOR;
+    let look = super::brush_overlay::CursorLook { erase: app.settings.brush_erases(), ..super::brush_overlay::MAGIC_CURSOR };
     let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
     super::brush_overlay::draw_trail_for(ui, look, look.shape, app.magic_brush_state.active_trail.stamps());
     super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
