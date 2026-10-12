@@ -572,29 +572,20 @@ impl BatchItem {
     /// Note a run starting now; `step` is the step its result records,
     /// `None` to fill in the shown one (a re-run a knob change asked for).
     pub(crate) fn start_job(&mut self, step: Option<StepKind>, engine: Engine) {
-        self.start_seeded_job(step, engine, None);
+        self.begin_job(step, engine, self.run_start(engine), None, None);
     }
 
     /// Note an erase of the shown selection starting now; `seed` is the
     /// one a generated fill runs with.
     pub(crate) fn start_erase(&mut self, seed: Option<u64>) {
-        self.start_seeded_job(Some(StepKind::Erase), Engine::Erase, seed);
-        if let Some(job) = self.job.as_mut() {
-            job.region = self.timeline.current().selection.clone();
-        }
+        let region = self.timeline.current().selection.clone();
+        self.begin_job(Some(StepKind::Erase), Engine::Erase, self.run_start(Engine::Erase), seed, region);
     }
 
     /// Note "Try another" starting now: the shown fill's region from its
     /// own start, with a new seed, recorded as a new step.
     pub(crate) fn start_reroll(&mut self, reroll: Reroll, seed: u64) {
-        self.job = Some(Job {
-            version: self.timeline.version(),
-            step: Some(StepKind::Erase),
-            engine: Engine::Erase,
-            start: reroll.start,
-            seed: Some(seed),
-            region: Some(reroll.region),
-        });
+        self.begin_job(Some(StepKind::Erase), Engine::Erase, reroll.start, Some(seed), Some(reroll.region));
     }
 
     /// The shown step as "Try another" would rerun it, when it is a
@@ -605,9 +596,15 @@ impl BatchItem {
         Some(Reroll { start: origin.start.clone(), region: origin.region.clone()? })
     }
 
-    fn start_seeded_job(&mut self, step: Option<StepKind>, engine: Engine, seed: Option<u64>) {
-        let start = self.run_start(engine);
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region: None });
+    fn begin_job(
+        &mut self,
+        step: Option<StepKind>,
+        engine: Engine,
+        start: Option<RunStart>,
+        seed: Option<u64>,
+        region: Option<super::timeline::StoredSelection>,
+    ) {
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region });
     }
 
     /// The seed of the generated fill on screen.
@@ -639,10 +636,11 @@ impl BatchItem {
             None => self.amend(),
         }
         if let Some(job) = job {
-            self.record_origin(job.engine, job.start, job.seed);
-            if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
-                origin.region = job.region;
-            }
+            self.timeline.current_mut().origin = Some(Origin {
+                seed: job.seed,
+                region: job.region,
+                ..Origin::new(job.engine, job.start)
+            });
         }
     }
 
@@ -670,11 +668,10 @@ impl BatchItem {
     }
 
     /// Record that `engine` made the shown step's image, starting from
-    /// `start` (`None`: the original), with `seed` for a generated fill.
-    /// The start is a stored timeline image, so the history sweep keeps
-    /// compressing it.
-    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>, seed: Option<u64>) {
-        self.timeline.current_mut().origin = Some(Origin { engine, start, upscale_run: None, seed, region: None });
+    /// `start` (`None`: the original). The start is a stored timeline
+    /// image, so the history sweep keeps compressing it.
+    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
+        self.timeline.current_mut().origin = Some(Origin::new(engine, start));
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
@@ -1434,7 +1431,7 @@ mod tests {
 
         item.result_rgba = Some(px(4)); // the first tweak's preview landed
         item.amend();
-        item.record_origin(Engine::Segment, start, None);
+        item.record_origin(Engine::Segment, start);
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "the next tweak starts there too");
         assert_eq!(item.run_input(Engine::Upscale).map(|b| b.get_pixel(0, 0).0[0]), Some(4), "a new upscale builds on the effect");
     }

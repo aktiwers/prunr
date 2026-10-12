@@ -141,7 +141,7 @@ pub struct Cli {
 
     /// Shadow under the cut-out: `soft` (all around) or `drop` (below),
     /// with the app's default opacity, blur and distance.
-    #[arg(long, value_name = "soft|drop", value_parser = parse_shadow)]
+    #[arg(long, value_name = "soft|drop", value_parser = str::parse::<prunr_core::ShadowKind>)]
     pub shadow: Option<prunr_core::ShadowKind>,
 
     /// Run every model on the CPU, even when a GPU is available.
@@ -264,19 +264,12 @@ fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
 fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
     let (width, color) = s.split_once(':').unwrap_or((s, "ffffff"));
     let width: f32 = width.parse().map_err(|_| format!("'{width}' is not an outline width in px"))?;
-    if !(0.0..=96.0).contains(&width) {
-        return Err(format!("outline width {width} is outside 0-96 px"));
+    let max = prunr_core::Decoration::MAX_OUTLINE_PX;
+    if !(0.0..=max).contains(&width) {
+        return Err(format!("outline width {width} is outside 0-{max} px"));
     }
     let color = parse_hex_color(color).ok_or_else(|| format!("'{color}' is not a hex color like ffffff"))?;
     Ok((width, color))
-}
-
-fn parse_shadow(s: &str) -> Result<prunr_core::ShadowKind, String> {
-    match s {
-        "soft" => Ok(prunr_core::ShadowKind::Soft),
-        "drop" => Ok(prunr_core::ShadowKind::Drop),
-        _ => Err(format!("'{s}' is not one of soft, drop")),
-    }
 }
 
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {

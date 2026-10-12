@@ -174,17 +174,32 @@ impl Decoration {
         self.shadow != ShadowKind::Off && self.shadow_opacity > 0.0
     }
 
+    /// The widest outline the app and `--outline` offer, in pixels.
+    pub const MAX_OUTLINE_PX: f32 = 96.0;
+
+    /// How far below the subject the shadow falls, in whole pixels.
+    pub fn shadow_fall_px(&self) -> u32 {
+        if self.shadow == ShadowKind::Drop { self.shadow_distance.round().max(0.0) as u32 } else { 0 }
+    }
+
     /// How far past the subject the decoration can reach, in pixels.
     pub fn reach_px(&self) -> u32 {
         let outline = if self.has_outline() { self.outline_width.ceil() } else { 0.0 };
-        let shadow = if self.has_shadow() {
-            let fall = if self.shadow == ShadowKind::Drop { self.shadow_distance } else { 0.0 };
-            // Three box passes of radius blur/2 reach 1.5 × blur.
-            1.5 * self.shadow_blur + fall
-        } else {
-            0.0
-        };
+        // Three box passes of radius blur/2 reach 1.5 × blur.
+        let shadow = if self.has_shadow() { 1.5 * self.shadow_blur + self.shadow_fall_px() as f32 } else { 0.0 };
         (outline + shadow).ceil().max(0.0) as u32 + 2
+    }
+}
+
+impl std::str::FromStr for ShadowKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "soft" => Ok(Self::Soft),
+            "drop" => Ok(Self::Drop),
+            _ => Err(format!("'{s}' is not one of off, soft, drop")),
+        }
     }
 }
 

@@ -765,7 +765,7 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
     chip::flyout_for(ui.make_persistent_id("decoration_popup"), &resp, |ui| {
         chip::popover_header(ui, "Outline & Shadow", None);
         chip::section_label(ui, "Outline");
-        changed |= chip::slider_row_f32(ui, "Width", &mut d.outline_width, 0.0..=96.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed;
+        changed |= chip::slider_row_f32(ui, "Width", &mut d.outline_width, 0.0..=prunr_core::Decoration::MAX_OUTLINE_PX, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed;
         if d.has_outline() {
             changed |= rgb_picker_row(ui, "Color", &mut d.outline_color);
         }

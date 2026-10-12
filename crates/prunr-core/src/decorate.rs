@@ -1,22 +1,25 @@
 //! A sticker outline and a shadow around a cut-out, drawn under it.
 //!
 //! Works on straight-alpha sRGB like the rest of the pipeline. The outline
-//! is the subject's alpha grown by a disc of its width (round corners, and
-//! its rim keeps the subject's own soft edge), filled with the outline
-//! colour. The shadow is the alpha of subject and outline blurred by three
-//! box passes (close to a Gaussian), moved down for a Drop shadow, and
-//! filled with black at the chosen opacity.
+//! covers everything within its width of the subject by Euclidean distance
+//! (round corners, an anti-aliased rim) in the outline colour. The shadow
+//! is the alpha of subject and outline blurred by three box passes (close
+//! to a Gaussian), moved down for a Drop shadow, in black at its opacity.
 //!
-//! Only the subject's bbox plus the decoration's reach is touched; pixels
-//! farther out cannot change.
+//! Only the subject's bbox plus the decoration's reach is touched, in
+//! place; pixels farther out cannot change. Scans, transforms and blends
+//! run row-parallel: on a 20 MP subject an outline costs ~80–100 ms at any
+//! width, a shadow ~90 ms.
 //!
-//! Peak working set for a bbox of n pixels: the RGBA crop (4n), the
-//! grown alpha (n) and two f32 planes for the shadow (8n), freed before
-//! the crop is written back.
+//! Peak working set for a region of n pixels: the outline's alpha copy (n)
+//! and two f32 distance planes (8n); the shadow's alpha copy (n) and two
+//! f32 planes (8n) plus the box filter's integral (4n). Each set is freed
+//! before the next starts.
 
-use image::{GrayImage, RgbaImage};
+use image::RgbaImage;
+use rayon::prelude::*;
 
-use crate::types::{Decoration, ShadowKind};
+use crate::types::Decoration;
 
 pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
     if !d.has_outline() && !d.has_shadow() {
@@ -25,91 +28,193 @@ pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
     let (w, h) = rgba.dimensions();
     let Some((x0, y0, x1, y1)) = alpha_bbox(rgba) else { return };
     let reach = d.reach_px();
-    let (bx, by) = (x0.saturating_sub(reach), y0.saturating_sub(reach));
-    let (ex, ey) = ((x1 + reach + 1).min(w), (y1 + reach + 1).min(h));
-    let mut crop = image::imageops::crop_imm(rgba, bx, by, ex - bx, ey - by).to_image();
+    let region = Region {
+        x: x0.saturating_sub(reach) as usize,
+        y: y0.saturating_sub(reach) as usize,
+        w: ((x1 + reach + 1).min(w) - x0.saturating_sub(reach)) as usize,
+        h: ((y1 + reach + 1).min(h) - y0.saturating_sub(reach)) as usize,
+        stride: w as usize,
+    };
     if d.has_outline() {
-        add_outline(&mut crop, d.outline_width, d.outline_color);
+        let cover = outline_cover(&region.alpha(rgba), region.w, region.h, d.outline_width);
+        region.composite_under(rgba, d.outline_color, |i| cover[i]);
     }
     if d.has_shadow() {
-        add_shadow(&mut crop, d);
+        let cast = shadow_cover(&region.alpha(rgba), region.w, region.h, d);
+        region.composite_under(rgba, [0, 0, 0], |i| cast[i]);
     }
-    image::imageops::replace(rgba, &crop, bx as i64, by as i64);
 }
 
-/// Inclusive bounds of the pixels with any alpha.
-fn alpha_bbox(rgba: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
-    let w = rgba.width() as usize;
-    let mut bounds: Option<(usize, usize, usize, usize)> = None;
-    for (i, px) in rgba.as_raw().chunks_exact(4).enumerate() {
-        if px[3] == 0 {
-            continue;
-        }
-        let (x, y) = (i % w, i / w);
-        bounds = Some(match bounds {
-            None => (x, y, x, y),
-            Some((a, b, c, e)) => (a.min(x), b.min(y), c.max(x), e.max(y)),
+/// The part of the image the decoration can touch: the subject's bbox
+/// plus the decoration's reach. Pixels outside it never change.
+struct Region {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    /// Image width, for row offsets.
+    stride: usize,
+}
+
+impl Region {
+    fn rows<'a>(&self, rgba: &'a mut RgbaImage) -> impl IndexedParallelIterator<Item = &'a mut [u8]> {
+        let (x, w, stride) = (self.x, self.w, self.stride);
+        rgba.as_mut()
+            .par_chunks_exact_mut(stride * 4)
+            .skip(self.y)
+            .take(self.h)
+            .map(move |row| &mut row[x * 4..(x + w) * 4])
+    }
+
+    /// The region's alpha, one byte per pixel.
+    fn alpha(&self, rgba: &RgbaImage) -> Vec<u8> {
+        let raw = rgba.as_raw();
+        let mut out = vec![0u8; self.w * self.h];
+        out.par_chunks_exact_mut(self.w).enumerate().for_each(|(ry, row)| {
+            let start = ((self.y + ry) * self.stride + self.x) * 4;
+            for (o, px) in row.iter_mut().zip(raw[start..start + self.w * 4].chunks_exact(4)) {
+                *o = px[3];
+            }
+        });
+        out
+    }
+
+    /// The region composited over a layer of `color` at coverage `under`
+    /// (0–1 for each region pixel, row-major), straight alpha.
+    fn composite_under(&self, rgba: &mut RgbaImage, color: [u8; 3], under: impl Fn(usize) -> f32 + Sync) {
+        let w = self.w;
+        self.rows(rgba).enumerate().for_each(|(ry, row)| {
+            for (rx, px) in row.chunks_exact_mut(4).enumerate() {
+                if px[3] == 255 {
+                    continue;
+                }
+                let top = px[3] as f32 / 255.0;
+                let below = under(ry * w + rx) * (1.0 - top);
+                let out = top + below;
+                if out <= 0.0 {
+                    continue;
+                }
+                let inv = 1.0 / out;
+                for c in 0..3 {
+                    px[c] = ((px[c] as f32 * top + color[c] as f32 * below) * inv).round().clamp(0.0, 255.0) as u8;
+                }
+                px[3] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
         });
     }
-    bounds.map(|(a, b, c, e)| (a as u32, b as u32, c as u32, e as u32))
 }
 
-fn alpha_plane(rgba: &RgbaImage) -> GrayImage {
-    let alpha = rgba.as_raw().chunks_exact(4).map(|px| px[3]).collect();
-    // invariant: one byte per pixel of the same image.
-    GrayImage::from_raw(rgba.width(), rgba.height(), alpha).expect("one alpha byte per pixel")
+/// Inclusive bounds of the pixels with any alpha, scanning rows in parallel.
+fn alpha_bbox(rgba: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let w = rgba.width() as usize;
+    rgba.as_raw()
+        .par_chunks_exact(w * 4)
+        .enumerate()
+        .filter_map(|(y, row)| {
+            let first = row.chunks_exact(4).position(|px| px[3] != 0)?;
+            let last = row.chunks_exact(4).rposition(|px| px[3] != 0)?;
+            Some((first, y, last, y))
+        })
+        .reduce_with(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+        .map(|(a, b, c, e)| (a as u32, b as u32, c as u32, e as u32))
 }
 
-/// `rgba` composited over a layer of `color` at coverage `under`
-/// (straight alpha, 0–1 per pixel).
-fn composite_over(rgba: &mut RgbaImage, color: [u8; 3], under: impl Fn(usize) -> f32) {
-    for (i, px) in rgba.as_mut().chunks_exact_mut(4).enumerate() {
-        let top = px[3] as f32 / 255.0;
-        let below = under(i) * (1.0 - top);
-        let out = top + below;
-        if out <= 0.0 {
-            continue;
+/// Outline coverage: 1 inside the subject (alpha ≥ half), falling from 1
+/// to 0 across the pixel at `width` from it, by Euclidean distance (round
+/// corners, anti-aliased rim). O(n) whatever the width.
+fn outline_cover(alpha: &[u8], w: usize, h: usize, width: f32) -> Vec<f32> {
+    let d2 = squared_distance_to(alpha, w, h, |a| a >= 128);
+    d2.par_iter().map(|&d| (width + 0.5 - d.sqrt()).clamp(0.0, 1.0)).collect()
+}
+
+/// Shadow coverage: the alpha moved down for a Drop shadow, blurred by
+/// three box passes (close to a Gaussian), at the shadow's opacity.
+fn shadow_cover(alpha: &[u8], w: usize, h: usize, d: &Decoration) -> Vec<f32> {
+    let fall = d.shadow_fall_px() as usize;
+    let mut cast = vec![0.0f32; w * h];
+    // Rows above `fall` start empty; each row below takes the one `fall` up.
+    cast.par_chunks_exact_mut(w).enumerate().skip(fall).for_each(|(y, row)| {
+        for (o, &a) in row.iter_mut().zip(&alpha[(y - fall) * w..(y - fall + 1) * w]) {
+            *o = a as f32 / 255.0;
         }
-        for c in 0..3 {
-            px[c] = ((px[c] as f32 * top + color[c] as f32 * below) / out).round().clamp(0.0, 255.0) as u8;
-        }
-        px[3] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
-    }
-}
-
-fn add_outline(rgba: &mut RgbaImage, width: f32, color: [u8; 3]) {
-    let grown = crate::morphology::dilate_round(&alpha_plane(rgba), width.round() as u32);
-    let grown = grown.as_raw();
-    composite_over(rgba, color, |i| grown[i] as f32 / 255.0);
-}
-
-fn add_shadow(rgba: &mut RgbaImage, d: &Decoration) {
-    let (w, h) = rgba.dimensions();
-    let (wu, hu) = (w as usize, h as usize);
-    let fall = if d.shadow == ShadowKind::Drop { d.shadow_distance.round().max(0.0) as usize } else { 0 };
-    let raw = rgba.as_raw();
-    // The silhouette moved down by `fall`; rows above it start empty.
-    let mut cast = vec![0.0f32; wu * hu];
-    for y in fall..hu {
-        for x in 0..wu {
-            cast[y * wu + x] = raw[((y - fall) * wu + x) * 4 + 3] as f32 / 255.0;
-        }
-    }
+    });
     let radius = (d.shadow_blur / 2.0).round() as u32;
     if radius > 0 {
         let mut tmp = vec![0.0f32; cast.len()]; // reused as each pass's output
         for _ in 0..3 {
-            crate::guided_filter::box_filter_into(&cast, w, h, radius, &mut tmp);
+            crate::guided_filter::box_filter_into(&cast, w as u32, h as u32, radius, &mut tmp);
             std::mem::swap(&mut cast, &mut tmp);
         }
     }
     let opacity = d.shadow_opacity.clamp(0.0, 1.0);
-    composite_over(rgba, [0, 0, 0], |i| cast[i] * opacity);
+    cast.par_iter_mut().for_each(|v| *v *= opacity);
+    cast
+}
+
+/// Squared Euclidean distance from each pixel to the nearest pixel where
+/// `inside` holds (0 there), by Felzenszwalb–Huttenlocher's separable
+/// lower-envelope transform: columns, then rows, each in parallel.
+fn squared_distance_to(alpha: &[u8], w: usize, h: usize, inside: impl Fn(u8) -> bool + Sync) -> Vec<f32> {
+    const FAR: f32 = 1e20;
+    let mut grid: Vec<f32> = alpha.par_iter().map(|&a| if inside(a) { 0.0 } else { FAR }).collect();
+    // Columns: transpose so each column is a contiguous line.
+    let mut cols = vec![0.0f32; w * h];
+    cols.par_chunks_exact_mut(h).enumerate().for_each(|(x, col)| {
+        for (y, c) in col.iter_mut().enumerate() {
+            *c = grid[y * w + x];
+        }
+        edt_line(col);
+    });
+    grid.par_chunks_exact_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, r) in row.iter_mut().enumerate() {
+            *r = cols[x * h + y];
+        }
+        edt_line(row);
+    });
+    grid
+}
+
+/// One line of the lower-envelope transform, in place: `f` holds 0 or
+/// FAR in, squared distance to the nearest 0 out.
+/// In f64: with FAR near 1e20, f32 would lose the `q²` terms.
+fn edt_line(f: &mut [f32]) {
+    let n = f.len();
+    if n == 0 {
+        return;
+    }
+    let src: Vec<f64> = f.iter().map(|&x| x as f64).collect();
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f64; n + 1];
+    let mut k = 0usize;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+    let at = |q: usize| src[q] + (q * q) as f64;
+    for q in 1..n {
+        let mut s = (at(q) - at(v[k])) / (2.0 * (q - v[k]) as f64);
+        // z[0] is -inf, so this stops at k = 0.
+        while s <= z[k] {
+            k -= 1;
+            s = (at(q) - at(v[k])) / (2.0 * (q - v[k]) as f64);
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+    k = 0;
+    for (q, out) in f.iter_mut().enumerate() {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let dq = (q - v[k].min(q)) as f64 + (v[k].saturating_sub(q)) as f64;
+        *out = (dq * dq + src[v[k]]) as f32;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ShadowKind;
 
     /// An opaque red square in the middle of a transparent canvas.
     fn square() -> RgbaImage {
@@ -175,4 +280,45 @@ mod tests {
         let back = image::imageops::crop_imm(&big, 40, 40, 64, 64).to_image();
         assert_eq!(back, small);
     }
+
+    /// Cost of each stage on a 20 MP subject; run with
+    /// `cargo test -p prunr-core --profile profiling --lib decorate_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn decorate_cost() {
+        let (w, h) = (5472u32, 3648u32);
+        let mut base = RgbaImage::new(w, h);
+        for y in 400..3300 { for x in 1200..4200 {
+            let dx = x as f32 - 2700.0; let dy = y as f32 - 1850.0;
+            if dx * dx / 1500.0f32.powi(2) + dy * dy / 1450.0f32.powi(2) < 1.0 { base.put_pixel(x, y, image::Rgba([90, 60, 40, 255])); }
+        }}
+        for (name, d) in [
+            ("outline 16", Decoration { outline_width: 16.0, ..Decoration::default() }),
+            ("outline 96", Decoration { outline_width: 96.0, ..Decoration::default() }),
+            ("drop shadow 24", Decoration { shadow: ShadowKind::Drop, ..Decoration::default() }),
+            ("both, 16 + drop 64", Decoration { outline_width: 16.0, shadow: ShadowKind::Drop, shadow_blur: 64.0, ..Decoration::default() }),
+        ] {
+            let mut img = base.clone();
+            let t = std::time::Instant::now();
+            apply_decoration(&mut img, &d);
+            eprintln!("{name}: {} ms", t.elapsed().as_millis());
+        }
+    }
+
+
+    /// The distance transform matches brute force on a scattered mask,
+    /// edges and corners included.
+    #[test]
+    fn squared_distance_matches_brute_force() {
+        let (w, h) = (23usize, 17usize);
+        let alpha: Vec<u8> = (0..w * h).map(|i| if (i * 7919) % 31 == 0 || i == w * h - 1 { 255 } else { 0 }).collect();
+        let got = squared_distance_to(&alpha, w, h, |a| a >= 128);
+        for y in 0..h { for x in 0..w {
+            let want = (0..w * h).filter(|&j| alpha[j] >= 128)
+                .map(|j| { let (jx, jy) = (j % w, j / w); ((jx as i64 - x as i64).pow(2) + (jy as i64 - y as i64).pow(2)) as f32 })
+                .fold(f32::INFINITY, f32::min);
+            assert_eq!(got[y * w + x], want, "({x}, {y})");
+        }}
+    }
+
 }

@@ -2630,7 +2630,7 @@ impl PrunrApp {
                 }
                 item.amend();
                 if !is_upscale_tier2 {
-                    item.record_origin(Engine::Segment, r.start, None);
+                    item.record_origin(Engine::Segment, r.start);
                 }
                 tracing::debug!(
                     event = "upscale_tier2_apply",
@@ -4569,7 +4569,7 @@ mod timeline_contract_tests {
         use crate::gui::worker::{CompressedTensor, TensorCache};
         let mut app = app_with_processed_item(SettingsModel::Silueta);
         let item = &mut app.batch.items[0];
-        item.record_origin(Engine::Segment, None, None);
+        item.record_origin(Engine::Segment, None);
         item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
         item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
