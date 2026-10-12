@@ -269,6 +269,9 @@ pub(crate) struct DocState {
     /// The run that made this step's image; `None` for the original and
     /// for edits made by hand.
     pub(crate) origin: Option<Origin>,
+    /// The image has restored faces in it, blended by its own run or
+    /// carried over from the image it was made from.
+    pub(crate) faced: bool,
     pub(crate) at: Instant,
 }
 
@@ -318,6 +321,7 @@ impl DocState {
             settings,
             applied_preset,
             origin: None,
+            faced: false,
             at: Instant::now(),
         }
     }
@@ -342,6 +346,11 @@ impl Timeline {
     /// run keep building on what that run made.
     pub(crate) fn latest_run(&self) -> Option<&Origin> {
         self.states.range(..=self.cursor).rev().find_map(|s| s.origin.as_ref())
+    }
+
+    /// Whether a step holding `image` has restored faces in it.
+    pub(crate) fn image_faced(&self, image: &StoredImage) -> bool {
+        self.states.iter().any(|s| s.faced && s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, image)))
     }
 
     /// The state before the shown one.
@@ -457,6 +466,7 @@ mod tests {
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
             origin: None,
+            faced: false,
             at: Instant::now(),
         }
     }

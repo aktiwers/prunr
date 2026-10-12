@@ -31,6 +31,8 @@ pub(crate) type FoundCount = Option<FaceSearch>;
 pub(crate) enum FaceSearch {
     Found(usize),
     Failed,
+    /// The photo is made from an image whose faces were already restored.
+    RestoredEarlier,
 }
 
 const ON_OFF: [chip::Choice<bool>; 2] = [
@@ -121,6 +123,7 @@ fn found_text(on: bool, found: FoundCount) -> std::borrow::Cow<'static, str> {
     match (on, found) {
         (false, _) => "Faces are found and redrawn when this is on.".into(),
         (true, None) => "Faces are found once the image is processed.".into(),
+        (true, Some(FaceSearch::RestoredEarlier)) => "Faces were restored in an earlier step; they are not restored twice.".into(),
         (true, Some(FaceSearch::Failed)) => "The face search failed. Turn Faces off and on to try again.".into(),
         (true, Some(FaceSearch::Found(0))) => "No faces found.".into(),
         (true, Some(FaceSearch::Found(1))) => "1 face found.".into(),
