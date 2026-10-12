@@ -3790,8 +3790,7 @@ impl PrunrApp {
 
         // Seg live-preview is meaningless in inpaint mode — no seg tensor
         // to rerun, and the no-tensor fallback would overwrite result_rgba.
-        let seg_preview_active = self.settings.live_preview
-            && !self.settings.model.is_inpaint();
+        let seg_preview_active = !self.settings.model.is_inpaint();
         match dispatch {
             DispatchKind::None => {}
             DispatchKind::Render => {}
@@ -4385,13 +4384,12 @@ mod timeline_contract_tests {
         assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
     }
 
-    /// Refine's after-the-model knobs re-finish the kept upscale whatever
-    /// the Live preview setting; a Scale change needs a new run.
+    /// Refine's after-the-model knobs re-finish the kept upscale; a Scale
+    /// change needs a new run.
     #[test]
-    fn refine_knobs_refinish_the_upscale_with_live_preview_off() {
+    fn refine_knobs_refinish_the_upscale() {
         use crate::gui::item::UpscaleCache;
         let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
-        app.settings.live_preview = false;
         let item = &mut app.batch.items[0];
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
         item.settings.sharpen = 0.4;
