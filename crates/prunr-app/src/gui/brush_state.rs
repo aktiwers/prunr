@@ -54,7 +54,7 @@ pub struct BrushSettings {
     /// fills; erosion preserves more original detail at the boundary.
     #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
-    /// LaMa-family only: how large a hole is filled (see `FillScale`).
+    /// Eraser: how large a hole is filled (see `FillScale`).
     #[serde(default)]
     pub inpaint_fill_scale: prunr_core::inpaint::FillScale,
     /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.

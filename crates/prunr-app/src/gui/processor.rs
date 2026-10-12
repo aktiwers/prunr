@@ -359,7 +359,7 @@ pub(crate) struct InpaintTuning {
     pub sharpen: f32,
     pub feather_px: f32,
     pub grow_px: f32,
-    /// LaMa-family only: how large the hole is filled.
+    /// How large the hole is filled.
     pub fill_scale: prunr_core::inpaint::FillScale,
     /// Which inpaint backend to use (LaMaFp32, BigLaMa, …). For
     /// SD-family backends, the choice between `SdV15InpaintFp16`
@@ -882,6 +882,7 @@ impl Processor {
                         use_taesd: plan.use_taesd,
                         scheduler,
                         tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
+                        fill_scale: tuning.fill_scale,
                     })
                 }
                 _ => None,
