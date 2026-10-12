@@ -310,7 +310,7 @@ pub fn process_inpaint_with(
     mut req: SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    use crate::progress::{Step, TileRect, Unit};
+    use crate::progress::Step;
     // The other quality's bundle goes before the RAM gate counts it: it
     // would be dropped on load anyway, and kept-loaded it filled RAM.
     drop_other_bundles(
@@ -332,29 +332,9 @@ pub fn process_inpaint_with(
         )));
     }
 
-    let components = mask_regions(mask);
-    if components.is_empty() {
+    if mask_regions(mask).is_empty() {
         return Ok(image.clone());
     }
-
-    // One plan per component, made once: the outer progress total and
-    // the loop read the same value, so they cannot disagree about how
-    // many tiles a region near an image edge really gets.
-    let (img_w, img_h) = image.dimensions();
-    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
-    let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
-    let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
-    // The crops and tiles, in the order they run: the tile map's layout.
-    progress.tiles(plans.iter().flat_map(|plan| match plan {
-        RegionPlan::Crop { x, y, w, h } => vec![TileRect::of_pixels(*x, *y, *w, *h, img_w, img_h)],
-        RegionPlan::Tiles(tiles) => tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, img_w, img_h)).collect(),
-    }).collect());
-    let mut tile_idx: u32 = 0;
-    // One crop or tile starts: the outer count, and the tile map's cell.
-    let start = |idx: u32| {
-        progress.outer(idx, outer_total, Unit::Crop);
-        progress.tile(idx, false);
-    };
     progress.step(Step::LoadingModel);
 
     // Hold an Arc through the run so the idle sweep can't drop sessions
@@ -376,8 +356,51 @@ pub fn process_inpaint_with(
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
     };
-    let mut out = image.clone();
+    // One session for every region the fill scale fills on its own. The
+    // fit reads the tall crop as the RAM gate above left it.
+    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), |img, m| {
+        paint_regions(&bundle, &vae, img, m, &req, progress)
+    })?;
+    if progress.is_cancelled() { return Err(CoreError::Cancelled); }
+    tracing::info!(
+        session_ms, run_ms = run_started.elapsed().as_millis() as u64,
+        tuning = ?req.tuning,
+        "SD: inpaint done",
+    );
+    Ok(out)
+}
 
+/// Fill every region of `mask` in `image` with the loaded bundle: one
+/// crop per region that fits, overlapping tiles for one that doesn't.
+fn paint_regions(
+    bundle: &SdSession,
+    vae: &VaeBackend,
+    image: &RgbaImage,
+    mask: &GrayImage,
+    req: &SdInpaintRequest,
+    progress: &crate::progress::Progress,
+) -> Result<RgbaImage, CoreError> {
+    use crate::progress::{TileRect, Unit};
+    let components = mask_regions(mask);
+    // One plan per component, made once: the outer progress total and
+    // the loop read the same value, so they cannot disagree about how
+    // many tiles a region near an image edge really gets.
+    let (img_w, img_h) = image.dimensions();
+    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
+    let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
+    let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
+    // The crops and tiles, in the order they run: the tile map's layout.
+    progress.tiles(plans.iter().flat_map(|plan| match plan {
+        RegionPlan::Crop { x, y, w, h } => vec![TileRect::of_pixels(*x, *y, *w, *h, img_w, img_h)],
+        RegionPlan::Tiles(tiles) => tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, img_w, img_h)).collect(),
+    }).collect());
+    let mut tile_idx: u32 = 0;
+    // One crop or tile starts: the outer count, and the tile map's cell.
+    let start = |idx: u32| {
+        progress.outer(idx, outer_total, Unit::Crop);
+        progress.tile(idx, false);
+    };
+    let mut out = image.clone();
     for (component, plan) in components.iter().zip(plans) {
         if progress.is_cancelled() { return Err(CoreError::Cancelled); }
         let tiles = match plan {
@@ -387,7 +410,7 @@ pub fn process_inpaint_with(
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
                 // A failed region fails the run: left as it was, it would read
                 // as a finished erase.
-                let painted = run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress)?;
+                let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
                 image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
                 progress.tile(tile_idx, true);
                 tile_idx += 1;
@@ -406,19 +429,13 @@ pub fn process_inpaint_with(
             start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            let painted = run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress)?;
+            let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
             blend_tile(&mut out, &painted, &tile);
             progress.tile(tile_idx, true);
             tile_idx += 1;
         }
     }
-    if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     progress.outer(outer_total, outer_total, Unit::Crop);
-    tracing::info!(
-        tiles = tile_idx, session_ms, run_ms = run_started.elapsed().as_millis() as u64,
-        tuning = ?req.tuning,
-        "SD: inpaint done",
-    );
     Ok(out)
 }
 
