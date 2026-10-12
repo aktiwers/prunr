@@ -57,6 +57,16 @@ const SD_LATENT_SIDE: u32 = SD_TILE / 8;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
+/// The largest region SD fills at full size in one crop with 32 px of
+/// photo around it: up to 768 on its long side with the tall crop.
+pub fn fit(tuning: &SdTuning) -> crate::inpaint::Fit {
+    let side = |crop: u32| crop - 64;
+    crate::inpaint::Fit {
+        long: side(if tuning.tall_crop { SD_CROP_MAX } else { SD_TILE }),
+        short: side(SD_TILE),
+    }
+}
+
 /// The UNet downsamples three times, so a crop side is a multiple of 64.
 const SD_SIDE_STEP: u32 = 64;
 /// SD 1.5 latent scaling factor. Diffusers calls this `vae.config.scaling_factor`.
@@ -114,6 +124,10 @@ pub struct SdInpaintRequest {
     /// How the pipeline runs for this stroke; see `plan_tuning`.
     #[serde(default)]
     pub tuning: SdTuning,
+    /// How large a region is filled; Auto shrinks one that would need
+    /// tiles to fit one crop.
+    #[serde(default)]
+    pub fill_scale: crate::inpaint::FillScale,
 }
 
 /// How the SD pipeline runs, built at dispatch (`plan_tuning`) from the
@@ -258,6 +272,7 @@ impl Default for SdInpaintRequest {
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
             tuning: SdTuning::default(),
+            fill_scale: Default::default(),
         }
     }
 }
@@ -309,7 +324,7 @@ pub fn process_inpaint_with(
         )));
     }
 
-    let components = mask_components(mask);
+    let components = mask_regions(mask);
     if components.is_empty() {
         return Ok(image.clone());
     }
@@ -519,8 +534,55 @@ fn edge_alpha(pos: u32, length: u32, feather_lo: bool, feather_hi: bool) -> f32 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MaskBbox {
+pub(crate) struct MaskBbox {
     x_min: u32, y_min: u32, x_max: u32, y_max: u32,
+}
+
+impl MaskBbox {
+    pub(crate) fn to_bbox(self) -> crate::inpaint::Bbox {
+        crate::inpaint::Bbox { x: self.x_min, y: self.y_min, w: self.x_max - self.x_min + 1, h: self.y_max - self.y_min + 1 }
+    }
+}
+
+/// Pieces of a mask closer than this are one region: a slatted bench or
+/// a fence selected by Magic Brush is hundreds of pieces split by the
+/// gaps between slats, and filling each on its own ran hundreds of crops.
+pub(crate) const REGION_GAP: u32 = 64;
+
+/// The regions a fill plans for: the mask's pieces (`mask_components`),
+/// those within `REGION_GAP` of each other grouped under one bbox.
+pub(crate) fn mask_regions(mask: &GrayImage) -> Vec<MaskBbox> {
+    group_near(mask_components(mask), REGION_GAP)
+}
+
+fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
+    let near = |a: &MaskBbox, b: &MaskBbox| {
+        a.x_min <= b.x_max.saturating_add(gap) && b.x_min <= a.x_max.saturating_add(gap)
+            && a.y_min <= b.y_max.saturating_add(gap) && b.y_min <= a.y_max.saturating_add(gap)
+    };
+    // Grouping can bring a bbox near one already passed, so repeat until
+    // a pass groups nothing.
+    loop {
+        let mut grouped = false;
+        let mut i = 0;
+        while i < regions.len() {
+            let mut j = i + 1;
+            while j < regions.len() {
+                if near(&regions[i], &regions[j]) {
+                    let b = regions.swap_remove(j);
+                    let a = &mut regions[i];
+                    *a = MaskBbox { x_min: a.x_min.min(b.x_min), y_min: a.y_min.min(b.y_min), x_max: a.x_max.max(b.x_max), y_max: a.y_max.max(b.y_max) };
+                    grouped = true;
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        if !grouped {
+            return regions;
+        }
+    }
 }
 
 /// Find the bounding box of every disjoint painted region in `mask`
@@ -533,7 +595,7 @@ struct MaskBbox {
 /// the stack. `visited` is sized to the outer bbox of all painted
 /// pixels (via `inpaint::mask_bbox`), not the full image — a 100-px
 /// stroke in a 4K image needs ~10 KB of scratch instead of 16 MB.
-fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
+pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     let (w, _h) = mask.dimensions();
     let raw = mask.as_raw();
     let Some(outer) = crate::inpaint::mask_bbox(mask, 128, 0) else {
@@ -2907,6 +2969,29 @@ mod tests {
     fn mask_components_returns_empty_for_empty_mask() {
         let m = GrayImage::new(64, 64);
         assert!(mask_components(&m).is_empty());
+    }
+
+    /// Slats a few pixels apart are one region; a mark across the image
+    /// stays its own.
+    #[test]
+    fn nearby_pieces_are_one_region() {
+        let mut m = GrayImage::new(1000, 300);
+        for slat in 0..20 {
+            for y in 50..250 {
+                for x in 0..12 {
+                    m.put_pixel(100 + slat * 20 + x, y, Luma([255]));
+                }
+            }
+        }
+        for y in 140..160 {
+            for x in 900..920 {
+                m.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(mask_components(&m).len(), 21);
+        let regions = mask_regions(&m);
+        assert_eq!(regions.len(), 2, "{regions:?}");
+        assert!(regions.iter().any(|r| r.x_min == 100 && r.x_max == 100 + 19 * 20 + 11));
     }
 
     #[test]

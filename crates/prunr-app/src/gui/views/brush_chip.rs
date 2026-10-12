@@ -109,10 +109,10 @@ pub(super) fn expand_region_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chi
     chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0))
 }
 
-/// The LaMa-family eraser's Fill scale, in both brushes' panels. Returns
-/// true when it changed.
+/// The eraser's Fill scale, in both brushes' panels. Returns true when
+/// it changed.
 pub(super) fn fill_scale_row(ui: &mut egui::Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
-    if !shows(model, Surface::FillRegionKnobs) || model == SettingsModel::SdInpaint {
+    if !shows(model, Surface::FillRegionKnobs) {
         return false;
     }
     let changed = chip::choice_row(ui, "Fill scale", &FILL_SCALES, &mut s.inpaint_fill_scale);
