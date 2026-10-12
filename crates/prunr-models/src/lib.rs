@@ -613,7 +613,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
         display_name: "Eraser (SD 1.5 LCM, fast)",
-        description: "Latent Consistency Model variant of SD 1.5 inpaint. ~5\u{00d7} faster on CPU/iGPU; lower fidelity. Active when scheduler = LCM (selected on the SD chip).",
+        description: "The Stable Diffusion eraser's Fast quality: several times faster than Quality. Picked with Quality \u{2192} Fast on the Stable Diffusion eraser.",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
             subdir: "sd15-lcm-inpaint-fp16-1.0.1",
