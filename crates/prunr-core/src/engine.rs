@@ -75,25 +75,6 @@ impl std::fmt::Display for EpKind {
 /// non-NVIDIA Linux desktop population) hit OpenVINO first when their
 /// Runtime Store install wins. NVIDIA users still get CUDA because
 /// OpenVINO Runtime won't be installed and `is_available()` returns false.
-/// The Processor setting's "CPU only": every session built afterwards
-/// skips the GPU providers. Process-wide because a process runs one
-/// policy; the GUI sets it from Settings and drops its cached sessions,
-/// a worker sets it from its Init.
-static CPU_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_cpu_only(on: bool) {
-    CPU_ONLY.store(on, std::sync::atomic::Ordering::Release);
-}
-
-pub fn cpu_only() -> bool {
-    CPU_ONLY.load(std::sync::atomic::Ordering::Acquire)
-}
-
-/// The GPU providers a session may try: none under "CPU only".
-pub(crate) fn gpu_eps() -> &'static [EpKind] {
-    if cpu_only() { &[] } else { available_gpu_eps() }
-}
-
 pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Vec<EpKind>> = OnceLock::new();
@@ -119,6 +100,12 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
         tracing::info!(eps = ?eps_str, "Available GPU execution providers");
         eps
     }).as_slice()
+}
+
+/// The GPU providers a session may try: none when the user chose
+/// "CPU only" (Settings › Processor).
+pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
+    if cpu_only { &[] } else { available_gpu_eps() }
 }
 
 /// ORT-backed inference engine. Holds one Session per model selection.
@@ -293,7 +280,7 @@ impl OrtEngine {
         // reached — exactly the DirectML AbiCustomRegistry failure seen in the
         // wild). Fall through on error; the caller retries with cpu_only=true
         // if all GPU EPs fail.
-        let gpu_eps = gpu_eps();
+        let gpu_eps = available_gpu_eps();
 
         let mut last_err: Option<CoreError> = None;
         for &ep in gpu_eps {

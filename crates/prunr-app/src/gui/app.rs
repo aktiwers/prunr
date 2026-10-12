@@ -472,7 +472,6 @@ impl PrunrApp {
             }
         }
         app.refresh_install_cache();
-        prunr_core::engine::set_cpu_only(app.settings.cpu_only());
         app
     }
 
@@ -728,7 +727,7 @@ impl PrunrApp {
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         }
-        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, recipe);
+        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe);
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
@@ -1062,8 +1061,8 @@ impl PrunrApp {
             sd_tuning: super::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,
                 self.settings.sd_memory.margin_mb(),
-                self.settings.cpu_only(),
             )),
+            cpu_only: self.settings.cpu_only(),
         };
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
         self.batch.items[idx].start_erase(seed);
@@ -1500,11 +1499,6 @@ impl PrunrApp {
         self.processor.live_preview.flush(id);
     }
 
-    /// Collect and send batch items matching `filter` for processing.
-    /// Uses tier routing: compares each item's applied_recipe against current
-    /// settings to determine the minimum work needed (skip / mask rerun / full).
-    /// `step`: the undo step the results record, or `None` to fill in the
-    /// shown one (a re-run a knob change asked for).
     /// Run background removal (or the No-model filter) on images imported
     /// from `id_floor` on, when the setting is on. Erasers wait for a
     /// painted region and upscales for the image to enlarge, so they
@@ -1519,6 +1513,11 @@ impl PrunrApp {
         }
     }
 
+    /// Collect and send batch items matching `filter` for processing.
+    /// Uses tier routing: compares each item's applied_recipe against current
+    /// settings to determine the minimum work needed (skip / mask rerun / full).
+    /// `step`: the undo step the results record, or `None` to fill in the
+    /// shown one (a re-run a knob change asked for).
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         self.batch.fit_line_modes_to(self.settings.model);
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
@@ -1963,7 +1962,7 @@ impl PrunrApp {
                 // composite file still lands, and the toast says so.
                 if let Some(rgba) = item.result_rgba.as_ref() {
                     if let Ok(bytes) = format.encode(&item.export_bg().bake(rgba)) {
-                        payload.push((folder.join(export_name(&item.filename, format)), bytes));
+                        payload.push((folder.join(super::drag_export::export_name(&item.filename, format)), bytes));
                         without_layers.push(item.filename.clone());
                     }
                 }
@@ -1995,7 +1994,7 @@ impl PrunrApp {
     fn save_current_to_file(&mut self) {
         let Some(item) = self.batch.selected_item() else { return };
         let Some(rgba) = item.result_rgba.clone() else { return };
-        let default_name = export_name(&item.filename, self.settings.export_format);
+        let default_name = super::drag_export::export_name(&item.filename, self.settings.export_format);
         let bg = item.export_bg();
         self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
@@ -2008,7 +2007,7 @@ impl PrunrApp {
         let (rgba, bg, default_name) = {
             let Some(item) = self.batch.items.get(idx) else { return };
             let Some(rgba) = item.result_rgba.clone() else { return };
-            (rgba, item.export_bg(), export_name(&item.filename, self.settings.export_format))
+            (rgba, item.export_bg(), super::drag_export::export_name(&item.filename, self.settings.export_format))
         };
         self.save_rgba_with_dialog(rgba, bg, &default_name);
     }
@@ -3215,15 +3214,11 @@ impl PrunrApp {
         }
     }
 
-    /// Apply a changed Processor setting: sessions built from now on follow
-    /// it, and every cached session (LaMa, upscale, the background-removal
-    /// and Stable Diffusion workers) is dropped so none keeps the old one.
+    /// Apply a changed Processor setting. Every run already carries it and
+    /// each session cache keys on it; this frees the sessions built under
+    /// the old choice now instead of at their idle timeout.
     pub(crate) fn apply_processor(&mut self) {
-        prunr_core::engine::set_cpu_only(self.settings.cpu_only());
-        prunr_core::inpaint::release_all_lama_sessions();
-        self.processor.release_upscale_engine();
-        self.processor.release_seg_warm();
-        self.processor.release_inpaint_subprocess();
+        self.processor.release_all_sessions();
         tracing::info!(processor = ?self.settings.processor, "processor setting applied");
     }
 
@@ -3653,9 +3648,7 @@ impl PrunrApp {
 
     fn render_empty_model_bar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let installed = self.hardware_install_cache;
-        let change = egui::Panel::top("adjustments_toolbar")
-            .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)
-            .frame(panel_frame)
+        let change = adjustments_panel(panel_frame)
             .show_inside(ui, |ui| adjustments_toolbar::render_model_only(ui, &mut self.settings, installed))
             .inner;
         if change.model_changed {
@@ -3668,14 +3661,11 @@ impl PrunrApp {
 
     fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
-        let height = theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0;
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
         let is_processing = self.batch.app_state() == AppState::Processing || self.processor.is_upscale_in_flight();
         // Compared after the toolbar ran: a changed knob or preset is a step.
         let settings_before = self.batch.items[idx].settings;
-        egui::Panel::top("adjustments_toolbar")
-            .exact_size(height)
-            .frame(panel_frame)
+        adjustments_panel(panel_frame)
             .show_inside(ui, |ui| {
                 let can_compare = self.can_compare_intent();
                 // Split borrow: app.settings and app.batch are disjoint
@@ -3752,23 +3742,27 @@ impl PrunrApp {
             "{} loaded",
             crate::gui::views::model_name(self.settings.model),
         ));
-        // Drop every cached engine on model switch — both the
-        // inpaint subprocess (SD bundle / LaMa subprocess
-        // residual) and the seg subprocess's warm engine pool
-        // (BiRefNetLite ~2 GB, U2Net ~800 MB, etc.). The
-        // in-process LaMa cache was already cleared in
-        // `adjustments_toolbar`'s on-model-changed branch.
-        // Combined: every model switch reclaims RAM from every
-        // backend the user is no longer using, regardless of
-        // direction (inpaint→inpaint, seg→seg, inpaint→seg, …).
-        self.processor.release_inpaint_subprocess();
-        self.processor.release_seg_warm();
-        // Drop the warm upscale engine on every model switch — both
-        // upscale→upscale and upscale→seg/inpaint. ensure_upscale_engine
-        // evicts on ModelKind mismatch anyway, but this explicit drop
-        // covers the switch-away-from-upscale case where ensure is never
-        // called again.
-        self.processor.release_upscale_engine();
+        // Every model switch reclaims RAM from every backend the user
+        // is no longer using, whatever the direction.
+        self.processor.release_all_sessions();
+        self.prewarm_in_process_eraser();
+    }
+
+    /// Build the LaMa / Big-LaMa / MI-GAN session in the background, so
+    /// the first stroke skips the 5-10 s build. Not SD: it runs in its
+    /// own subprocess, and a session here would hold ~9 GB no run reads.
+    fn prewarm_in_process_eraser(&self) {
+        use prunr_models::ModelId;
+        let Some(id) = self.settings.model.to_model_id() else { return };
+        if !matches!(id, ModelId::LaMaFp32 | ModelId::BigLaMa | ModelId::Migan) {
+            return;
+        }
+        let cpu_only = self.settings.cpu_only();
+        rayon::spawn(move || {
+            if let Err(e) = prunr_core::inpaint::prewarm(id, cpu_only) {
+                tracing::warn!(?id, %e, "Inpaint prewarm failed");
+            }
+        });
     }
 
     fn apply_toolbar_change(
@@ -4099,15 +4093,16 @@ fn is_supported_image_ext(path: &Path) -> bool {
     )
 }
 
-/// Encode + write one PNG on a background thread, then send the result toast
-/// text on `tx`. Stays at module scope so neither save method needs `&mut self`
-/// once they've kicked off the work.
-/// `<source-stem>.prunr.<ext>`, the name a saved result gets.
-fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
-    let stem = Path::new(source_filename).file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-    format!("{stem}.prunr.{}", format.extension())
+/// The second toolbar row's panel, with or without an image loaded.
+fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
+    egui::Panel::top("adjustments_toolbar")
+        .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)
+        .frame(frame)
 }
 
+/// Encode + write one image on a background thread, then send the result
+/// toast text on `tx`. Stays at module scope so neither save method needs
+/// `&mut self` once they've kicked off the work.
 fn spawn_save_single(
     path: PathBuf,
     rgba: Arc<image::RgbaImage>,
@@ -4149,7 +4144,7 @@ fn spawn_save_prerendered(payload: Vec<(PathBuf, Vec<u8>)>, tx: mpsc::Sender<Str
     });
 }
 
-/// Encode + write N images into `folder` (named by `export_name`) on a
+/// Encode + write N images into `folder` (named by `drag_export::export_name`) on a
 /// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
@@ -4161,7 +4156,7 @@ fn spawn_save_batch(
         let mut saved = 0usize;
         let mut failed = 0usize;
         for (filename, rgba, bg) in items {
-            let out_path = folder.join(export_name(&filename, format));
+            let out_path = folder.join(super::drag_export::export_name(&filename, format));
             match format.encode(&bg.bake(&rgba)) {
                 Ok(bytes) => match std::fs::write(&out_path, &bytes) {
                     Ok(()) => saved += 1,
@@ -4388,9 +4383,9 @@ mod timeline_contract_tests {
     #[test]
     fn a_saved_result_is_named_after_its_source_and_format() {
         use prunr_core::ExportFormat;
-        assert_eq!(super::export_name("beach.jpeg", ExportFormat::Png), "beach.prunr.png");
-        assert_eq!(super::export_name("beach.jpeg", ExportFormat::Jpeg), "beach.prunr.jpg");
-        assert_eq!(super::export_name("noext", ExportFormat::Webp), "noext.prunr.webp");
+        assert_eq!(crate::gui::drag_export::export_name("beach.jpeg", ExportFormat::Png), "beach.prunr.png");
+        assert_eq!(crate::gui::drag_export::export_name("beach.jpeg", ExportFormat::Jpeg), "beach.prunr.jpg");
+        assert_eq!(crate::gui::drag_export::export_name("noext", ExportFormat::Webp), "noext.prunr.webp");
     }
 
     /// Cmd+S works whenever the Save button shows: a ticked finished

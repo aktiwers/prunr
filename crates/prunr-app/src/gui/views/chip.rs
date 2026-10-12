@@ -244,6 +244,13 @@ pub(super) fn named(resp: Response, name: &str) -> Response {
     resp
 }
 
+/// `named` for a name built per widget (from a file or model name):
+/// built only while the accessibility tree is being read.
+pub(super) fn named_with(resp: Response, name: impl FnOnce() -> String) -> Response {
+    resp.ctx.accesskit_node_builder(resp.id, |node| node.set_label(name()));
+    resp
+}
+
 /// Render the standard reset-to-default button at the bottom of a popover.
 pub(super) fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
     ui.small_button(

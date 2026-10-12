@@ -32,8 +32,8 @@ impl SystemBridge {
         dlg.pick_files()
     }
 
-    /// PNG save-as dialog. Returns `None` on cancel.
     /// Save-as dialog offering every export format, `preferred` first.
+    /// `None` on cancel.
     pub fn save_image_dialog(
         &self,
         start_dir: Option<&Path>,
@@ -43,8 +43,7 @@ impl SystemBridge {
         let mut dlg = rfd::FileDialog::new().set_file_name(default_name).set_title("Save image");
         let others = prunr_core::ExportFormat::ALL.into_iter().filter(|f| *f != preferred);
         for f in std::iter::once(preferred).chain(others) {
-            let exts: &[&str] = if f == prunr_core::ExportFormat::Jpeg { &["jpg", "jpeg"] } else { &[f.extension()] };
-            dlg = dlg.add_filter(format!("{} image", f.label()), exts);
+            dlg = dlg.add_filter(format!("{} image", f.label()), f.extensions());
         }
         if let Some(dir) = start_dir {
             dlg = dlg.set_directory(dir);
