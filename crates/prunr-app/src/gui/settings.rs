@@ -161,7 +161,7 @@ impl Settings {
 }
 
 fn default_true() -> bool { true }
-fn default_selection_fill() -> f32 { 0.15 }
+fn default_selection_fill() -> f32 { 0.30 }
 fn default_preset_name() -> String { PRUNR_PRESET.to_string() }
 
 impl Settings {
@@ -840,7 +840,7 @@ mod tests {
         assert!(s.parallel_jobs >= 1,
             "parallel_jobs must clamp to >= 1 even on a single-core host");
         assert!(!s.dark_checker);
-        assert_eq!(s.selection_fill, 0.15);
+        assert_eq!(s.selection_fill, 0.30);
         assert!(s.selection_outline);
         assert!(!s.auto_hide_adjustments);
         assert!(!s.export_split_layers);
