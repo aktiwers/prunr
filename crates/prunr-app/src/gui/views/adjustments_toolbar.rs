@@ -9,7 +9,7 @@
 //! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
 //! invalidate the right textures and schedule live-preview reruns.
 
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use egui_material_icons::icons::*;
 
 use super::selection_action_bar::{render_selection_actions, SelectionAction};
@@ -23,6 +23,7 @@ use crate::gui::knob_catalog::{
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt, hint, preset_dropdown};
+use crate::gui::views::effects::paint_rounded_mesh;
 use prunr_core::{EdgeScale, LineMode};
 
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
@@ -857,6 +858,15 @@ impl BgKind {
         }
     }
 
+    /// The name under its tile.
+    fn short_name(self) -> &'static str {
+        match self {
+            Self::BlurredSource => "Blurred",
+            Self::DesaturatedSource => "Black & white",
+            kind => kind.name(),
+        }
+    }
+
     fn of(backdrop: Backdrop) -> Self {
         use prunr_core::BgEffect;
         match backdrop {
@@ -902,100 +912,173 @@ fn render_background_chip(
     use prunr_core::BgEffect;
 
     let current = BgKind::of(backdrop);
-    let accent = current != BgKind::Transparent;
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
-        "Background",
-        "What fills the transparent area behind the subject: a solid color, an image, or a blurred or black-and-white copy of the photo.",
-    None,
-);
-
-    let popup_id = ui.make_persistent_id("background_popup");
-    chip::flyout_for(popup_id, &resp, |ui| {
-        ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        chip::popover_header(ui, "Background", None);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(BACKGROUND_LIST_WIDTH);
+    let solid = bg.filter(|_| current == BgKind::Solid).map(|c| [c[0], c[1], c[2]]);
+    let group = chip::GroupChip {
+        id_salt: "background",
+        icon: ICON_PALETTE.codepoint,
+        label: "Background",
+        summary: current.name(),
+        tooltip: "What fills the transparent area behind the subject: a solid color, an image, or a blurred or black-and-white copy of the photo.",
+        tuned: current != BgKind::Transparent,
+        width: BACKGROUND_PANEL_WIDTH,
+        live: true,
+    };
+    let header = chip::PanelHeader { note: "", reset: "Back to transparent" };
+    let pick = |kind: BgKind, bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
+        // The picture lives on the item and loads off the UI thread; it
+        // replaces the background when it lands.
+        if kind == BgKind::Image {
+            change.pick_bg_image = true;
+            return;
+        }
+        apply_bg_kind(bg, bg_effect, kind, default_color);
+        if has_bg_image {
+            // Any other kind drops the image so the new choice owns the
+            // background alone.
+            change.clear_bg_image = true;
+        }
+        aggregate_bool(true, StaticKnob::BgColor, change);
+    };
+    let set_color = |rgb: [u8; 3], bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
+        pick(BgKind::Solid, bg, bg_effect, change);
+        *bg = Some([rgb[0], rgb[1], rgb[2], 255]);
+    };
+    chip::strip_chip_faced(ui, group, current.name(), "All background settings", header, |ui, part| match part {
+        chip::Part::Quick => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if chip::painted_dot(ui, "Transparent", current == BgKind::Transparent, paint_checker).clicked()
+                    && current != BgKind::Transparent
+                {
+                    pick(BgKind::Transparent, bg, bg_effect, change);
+                }
+                if let Some(rgb) = chip::swatch_dots(ui, &BG_SWATCHES, solid) {
+                    set_color(rgb, bg, bg_effect, change);
+                }
+            });
+            let mut kind = current;
+            if chip::choice_buttons(ui, &BG_QUICK_KINDS, &mut kind) {
+                pick(kind, bg, bg_effect, change);
+            }
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                pick(BgKind::Transparent, bg, bg_effect, change);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let shown = solid.unwrap_or([default_color[0], default_color[1], default_color[2]]);
                 for kind in BgKind::ALL {
                     let selected = kind == current;
-                    if ui.selectable_label(selected, kind.name()).clicked() && !selected {
-                        // The picture lives on the item and loads off the UI
-                        // thread; it replaces the background when it lands.
-                        if matches!(kind, BgKind::Image) {
-                            change.pick_bg_image = true;
-                            continue;
-                        }
-                        apply_bg_kind(bg, bg_effect, kind, default_color);
-                        if has_bg_image {
-                            // Picking any non-image kind drops the image so
-                            // the new choice owns the bg surface alone.
-                            change.clear_bg_image = true;
-                        }
-                        aggregate_bool(true, StaticKnob::BgColor, change);
+                    let resp = chip::swatch_tile(ui, kind.short_name(), selected, BG_TILE, true, |painter, rect| {
+                        paint_bg_tile(painter, rect, kind, shown);
+                    });
+                    if resp.clicked() && (!selected || kind == BgKind::Image) {
+                        pick(kind, bg, bg_effect, change);
                     }
                 }
             });
-            ui.separator();
-            ui.vertical(|ui| {
-                match current {
-                    BgKind::Transparent => {
-                        hint(ui, "No background; the exported PNG keeps its transparency.");
-                    }
-                    BgKind::Solid => {
-                        if let Some(rgba) = bg.as_mut() {
-                            let mut rgb = [rgba[0], rgba[1], rgba[2]];
-                            if chip::rgb_picker(ui, &mut rgb) {
-                                *rgba = [rgb[0], rgb[1], rgb[2], 255];
-                                aggregate_bool(true, StaticKnob::BgColor, change);
-                            }
-                            hint(ui, "One color fills the transparent area on screen and in the export.");
+            match current {
+                BgKind::Transparent => {
+                    hint(ui, "No background; the exported PNG keeps its transparency.");
+                }
+                BgKind::Solid => {
+                    chip::panel_section(ui, "SOLID COLOR", None);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if let Some(rgb) = chip::swatch_dots(ui, &BG_SWATCHES, solid) {
+                            set_color(rgb, bg, bg_effect, change);
+                        }
+                        if let Some([r, g, b]) = solid {
+                            ui.label(RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                        }
+                    });
+                    if let Some(rgba) = bg.as_mut() {
+                        let mut rgb = [rgba[0], rgba[1], rgba[2]];
+                        if chip::color_row(ui, "Custom color", &mut rgb) {
+                            *rgba = [rgb[0], rgb[1], rgb[2], 255];
+                            aggregate_bool(true, StaticKnob::BgColor, change);
                         }
                     }
-                    BgKind::Image => {
-                        if let Some(label) = bg_image_label {
-                            ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-                            ui.add_space(theme::SPACE_XS);
-                        }
+                }
+                BgKind::Image => {
+                    chip::panel_section(ui, "IMAGE", bg_image_label);
+                    ui.horizontal(|ui| {
                         if chip::button(ui, chip::ButtonKind::Secondary, "Choose image\u{2026}").clicked() {
                             change.pick_bg_image = true;
                         }
-                        if has_bg_image
-                            && chip::button(ui, chip::ButtonKind::Secondary, "Remove image").clicked()
-                        {
+                        if has_bg_image && chip::button(ui, chip::ButtonKind::Secondary, "Remove image").clicked() {
                             change.clear_bg_image = true;
                         }
-                        if has_bg_image {
-                            ui.add_space(theme::SPACE_XS);
-                            ui.label(RichText::new("Fit").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-                            for fit in prunr_core::BgImageFit::ALL {
-                                let selected = *fit == *bg_image_fit;
-                                if ui.selectable_label(selected, fit.name()).clicked() && !selected {
-                                    *bg_image_fit = *fit;
-                                    aggregate_bool(true, StaticKnob::BgImageFit, change);
-                                }
-                            }
+                    });
+                    if has_bg_image {
+                        let fits: [_; FIT_COUNT] = std::array::from_fn(|i| {
+                            let f = prunr_core::BgImageFit::ALL[i];
+                            chip::Choice { value: f, name: f.name(), description: "", enabled: true }
+                        });
+                        if chip::choice_row(ui, "Fit", &fits, bg_image_fit) {
+                            aggregate_bool(true, StaticKnob::BgImageFit, change);
                         }
-                        hint(ui, "The image fills the transparent area on screen and in the export.");
-                    }
-                    BgKind::BlurredSource => {
-                        if let BgEffect::BlurredSource { radius } = bg_effect {
-                            let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
-                            aggregate_bool(r.changed, StaticKnob::BgEffect, change);
-                        }
-                        hint(ui, "A blurred copy of the photo fills the transparent area.");
-                    }
-                    BgKind::DesaturatedSource => {
-                        hint(ui, "A black-and-white copy of the photo fills the transparent area.");
                     }
                 }
-            });
-        });
+                BgKind::BlurredSource => {
+                    if let BgEffect::BlurredSource { radius } = bg_effect {
+                        chip::panel_section(ui, "BLURRED PHOTO", None);
+                        let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
+                        aggregate_bool(r.changed, StaticKnob::BgEffect, change);
+                    }
+                }
+                BgKind::DesaturatedSource => {
+                    hint(ui, "A black-and-white copy of the photo fills the transparent area.");
+                }
+            }
+        }
     });
 }
 
-const BACKGROUND_POPOVER_WIDTH: f32 = 480.0;
-const BACKGROUND_LIST_WIDTH: f32 = 150.0;
+const BACKGROUND_PANEL_WIDTH: f32 = 400.0;
+const BG_TILE: egui::Vec2 = egui::vec2(66.0, 42.0);
+const FIT_COUNT: usize = prunr_core::BgImageFit::ALL.len();
+
+const BG_SWATCHES: [chip::Swatch; 4] = [
+    chip::Swatch { name: "White", rgb: [0xff, 0xff, 0xff] },
+    chip::Swatch { name: "Black", rgb: [0x00, 0x00, 0x00] },
+    chip::Swatch { name: "Cream", rgb: [0xe9, 0xe2, 0xd6] },
+    chip::Swatch { name: "Plum", rgb: [0x7b, 0x2d, 0x8e] },
+];
+
+const BG_QUICK_KINDS: [chip::Choice<BgKind>; 2] = [
+    chip::Choice { value: BgKind::Image, name: "Image", description: "A picture of your choice", enabled: true },
+    chip::Choice { value: BgKind::BlurredSource, name: "Blurred", description: "A blurred copy of the photo", enabled: true },
+];
+
+const CHECKER_DARK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
+const CHECKER_LIGHT: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
+
+fn checker(u: f32, v: f32, cells: f32) -> Color32 {
+    if ((u * cells).floor() as i32 + (v * cells).floor() as i32) % 2 == 0 { CHECKER_LIGHT } else { CHECKER_DARK }
+}
+
+fn paint_checker(painter: &egui::Painter, rect: egui::Rect) {
+    paint_rounded_mesh(painter, rect, rect.width() / 2.0, |u, v| checker(u, v, 3.0));
+}
+
+/// A background kind's tile: what it puts behind the subject.
+fn paint_bg_tile(painter: &egui::Painter, rect: egui::Rect, kind: BgKind, solid: [u8; 3]) {
+    const RADIUS: f32 = 10.0;
+    let [r, g, b] = solid;
+    let sky = Color32::from_rgb(0x8f, 0xb8, 0xde);
+    let field = Color32::from_rgb(0x5f, 0x8a, 0x4a);
+    match kind {
+        BgKind::Transparent => paint_rounded_mesh(painter, rect, RADIUS, |u, v| checker(u, v * BG_TILE.y / BG_TILE.x, 6.0)),
+        BgKind::Solid => {
+            painter.rect_filled(rect, RADIUS, Color32::from_rgb(r, g, b));
+        }
+        BgKind::Image => paint_rounded_mesh(painter, rect, RADIUS, |_, v| if v < 0.6 { sky } else { field }),
+        BgKind::BlurredSource => paint_rounded_mesh(painter, rect, RADIUS, |u, v| sky.lerp_to_gamma(field, (v * 0.8 + u * 0.2).clamp(0.0, 1.0))),
+        BgKind::DesaturatedSource => paint_rounded_mesh(painter, rect, RADIUS, |_, v| Color32::from_gray(200).lerp_to_gamma(Color32::from_gray(90), v)),
+    }
+}
 
 /// Set the two bg fields to `kind` alone: the background is one choice.
 /// Solid keeps a colour picked earlier, or starts from the default.
