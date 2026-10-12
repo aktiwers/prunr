@@ -1289,6 +1289,7 @@ impl PrunrApp {
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
                         item.land_upscale(output.run);
                     }
+                    self.reblend_faces(item_id);
                     tracing::info!(item_id, "upscale result applied");
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
@@ -2471,7 +2472,7 @@ impl PrunrApp {
         let item = &mut self.batch.items[idx];
         item.found_faces = Some(super::item::FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces) });
         item.faces_changed();
-        self.dispatch_brush_rerun(idx);
+        self.redo_faces_blend(idx);
     }
 
     /// The Faces chip changed: a blend change re-blends what was found; a
@@ -2480,6 +2481,18 @@ impl PrunrApp {
     fn on_faces_change(&mut self, idx: usize, change: super::views::faces_chip::FacesChange) {
         if change.search || change.blend {
             self.batch.items[idx].faces_changed();
+            self.redo_faces_blend(idx);
+        }
+    }
+
+    /// Blend the faces again: a Refine re-finish for a shown upscale, a
+    /// re-cut otherwise.
+    fn redo_faces_blend(&mut self, idx: usize) {
+        if self.batch.items[idx].kept_upscale().is_some() {
+            let id = self.batch.items[idx].id;
+            self.processor.live_preview.mark_tweak(id, super::live_preview::PreviewKind::UpscaleTier2);
+            self.processor.live_preview.flush(id);
+        } else {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -2489,7 +2502,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
         let item = &self.batch.items[idx];
         if item.face_photo().is_some_and(|photo| item.faces_for(&photo).is_some()) {
-            self.dispatch_brush_rerun(idx);
+            self.redo_faces_blend(idx);
         }
     }
 
@@ -2604,7 +2617,7 @@ impl PrunrApp {
                 correction: None,
                 upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
-                faces: None,
+                faces: item.face_photo().and_then(|photo| item.faces_for(&photo)),
             });
         }
         let seg_tensor = item.hot_seg_tensor();
