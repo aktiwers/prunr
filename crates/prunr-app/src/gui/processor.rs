@@ -359,6 +359,8 @@ pub(crate) struct InpaintTuning {
     pub sharpen: f32,
     pub feather_px: f32,
     pub grow_px: f32,
+    /// LaMa-family only: how large the hole is filled.
+    pub fill_scale: prunr_core::inpaint::FillScale,
     /// Which inpaint backend to use (LaMaFp32, BigLaMa, …). For
     /// SD-family backends, the choice between `SdV15InpaintFp16`
     /// (standard SD weights) and `SdV15LcmInpaintFp16` (LCM weights)
@@ -401,6 +403,7 @@ impl Default for InpaintTuning {
             sharpen: 0.0,
             feather_px: 0.0,
             grow_px: 0.0,
+            fill_scale: Default::default(),
             backend: prunr_models::ModelId::LaMaFp32,
             sd_prompt: String::new(),
             sd_negative_prompt: String::new(),
@@ -682,9 +685,8 @@ impl Processor {
         let tx = self.inpaint_tx.clone();
         rayon::spawn(move || {
             let mask = tuning.fill_region(&correction, image.dimensions());
-            // This path only sees LaMa / Big-LaMa / MI-GAN — sd_req is unread.
-            let sd_req = None;
-            let outcome = prunr_core::inpaint::process_inpaint_with(&image, &mask, tuning.backend, sd_req, tuning.cpu_only, &progress);
+            // This path only sees LaMa / Big-LaMa / MI-GAN.
+            let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.backend, tuning.cpu_only, tuning.fill_scale, &progress);
             if outcome.is_ok() {
                 progress.step(prunr_core::Step::Blending);
             }

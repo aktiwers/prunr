@@ -270,14 +270,122 @@ pub fn process_inpaint_with(
         req.tuning.cpu_only = cpu_only;
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
+    process_lama(image, mask, id, cpu_only, FillScale::Auto, progress)
+}
+
+/// How large LaMa fills a hole. It works in 512 px tiles: a hole much
+/// wider than that leaves tiles with no photo in them, which fill flat
+/// grey. Filling a scaled-down copy keeps the whole hole in view of its
+/// surroundings, a little softer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FillScale {
+    /// Full size while the hole fits `AUTO_HOLE_PX`, else shrunk to it.
+    #[default]
+    Auto,
+    Full,
+    Half,
+    Quarter,
+}
+
+/// Auto's largest hole side, in working pixels: room for 64 px of photo
+/// on each side within one LaMa tile.
+pub const AUTO_HOLE_PX: u32 = TILE - 2 * OVERLAP;
+
+impl FillScale {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Full, Self::Half, Self::Quarter];
+
+    /// The factor a hole whose longer side is `hole_px` is filled at.
+    pub fn factor(self, hole_px: u32) -> f32 {
+        match self {
+            Self::Auto if hole_px > AUTO_HOLE_PX => AUTO_HOLE_PX as f32 / hole_px as f32,
+            Self::Auto | Self::Full => 1.0,
+            Self::Half => 0.5,
+            Self::Quarter => 0.25,
+        }
+    }
+}
+
+impl std::fmt::Display for FillScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Full => "full",
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+        })
+    }
+}
+
+impl std::str::FromStr for FillScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter()
+            .find(|v| v.to_string().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown fill scale '{s}' (expected: auto, full, half, quarter)"))
+    }
+}
+
+/// LaMa, Big-LaMa or MI-GAN fill of `mask` (255 = fill) at `scale`.
+/// Below full size it fills the hole and as much photo again around it,
+/// scaled down, and pastes the fill scaled back up inside the mask only.
+///
+/// Peak working set below full size, for a hole of side L: the crop
+/// around it (up to 2L × 2L RGBA, 64 MB at L = 2000), its fill scaled
+/// back up (the same), and the output image. The scaled copies are
+/// small (Auto: ~768 px).
+pub fn process_lama(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    id: prunr_models::ModelId,
+    cpu_only: bool,
+    scale: FillScale,
+    progress: &Progress,
+) -> Result<RgbaImage, CoreError> {
+    let Some(hole) = mask_bbox(mask, 128, 0) else { return Ok(image.clone()) };
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
-    tile_compose(image, mask, progress, |tile_rgba, tile_mask| {
+    let fill = |rgba: &RgbaImage, m: &GrayImage| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
             tile_rgba.clone()
         })
-    })
+    });
+    let factor = scale.factor(hole.w.max(hole.h));
+    if factor >= 1.0 {
+        return fill(image, mask);
+    }
+    fill_scaled_down(image, mask, hole, factor, fill)
+}
+
+/// Fill `hole` (the bbox of `mask`) through `fill` at `factor` < 1: the
+/// hole and as much photo again around it, scaled down, filled, scaled
+/// back up and pasted inside the mask only.
+fn fill_scaled_down(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    hole: Bbox,
+    factor: f32,
+    fill: impl FnOnce(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
+) -> Result<RgbaImage, CoreError> {
+    let crop = mask_bbox(mask, 128, hole.w.max(hole.h) / 2).unwrap_or(hole);
+    let small = |side: u32| ((side as f32 * factor).round() as u32).max(1);
+    let (sw, sh) = (small(crop.w), small(crop.h));
+    let crop_rgba = image::imageops::crop_imm(image, crop.x, crop.y, crop.w, crop.h).to_image();
+    let small_rgba = crate::formats::resize_rgba(&crop_rgba, sw, sh, crate::formats::ResizeFilter::Lanczos3);
+    drop(crop_rgba);
+    let crop_mask = image::imageops::crop_imm(mask, crop.x, crop.y, crop.w, crop.h).to_image();
+    // Any coverage stays a hole, so nothing of the object survives the shrink.
+    let mut small_mask = crate::formats::resize_gray_lanczos3(&crop_mask, sw, sh);
+    small_mask.pixels_mut().for_each(|p| p.0[0] = if p.0[0] > 0 { 255 } else { 0 });
+    let small_fill = fill(&small_rgba, &small_mask)?;
+    let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
+    let mut out = image.clone();
+    for (x, y, m) in crop_mask.enumerate_pixels() {
+        if m.0[0] >= 128 {
+            out.put_pixel(crop.x + x, crop.y + y, *filled.get_pixel(x, y));
+        }
+    }
+    Ok(out)
 }
 
 /// One LaMa session per process — see `LamaSession::get`. Tiles run
@@ -1345,6 +1453,45 @@ mod tests {
         assert_eq!(msk_t[[0, 0, 32, 32]], 1.0);
         // Outside the source region, mask stays 0 (zero-padded).
         assert_eq!(msk_t[[0, 0, 200, 200]], 0.0);
+    }
+
+    /// Auto fills a hole up to one tile's worth at full size and shrinks
+    /// a larger one to that; the fixed scales ignore the hole.
+    #[test]
+    fn fill_scale_factor_follows_the_hole_on_auto() {
+        assert_eq!(FillScale::Auto.factor(AUTO_HOLE_PX), 1.0);
+        assert!((FillScale::Auto.factor(AUTO_HOLE_PX * 4) - 0.25).abs() < 1e-6);
+        assert_eq!(FillScale::Full.factor(5000), 1.0);
+        assert_eq!(FillScale::Half.factor(10), 0.5);
+        assert_eq!(FillScale::Quarter.factor(10), 0.25);
+        for v in FillScale::ALL {
+            assert_eq!(v.to_string().parse::<FillScale>(), Ok(v));
+        }
+    }
+
+    /// Below full size the fill sees the hole and photo around it, scaled
+    /// down, and only the hole changes in the result.
+    #[test]
+    fn a_scaled_fill_changes_only_the_hole() {
+        let image = RgbaImage::from_pixel(400, 300, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(400, 300);
+        for y in 100..180 {
+            for x in 150..270 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let hole = mask_bbox(&mask, 128, 0).unwrap();
+        let mut seen = None;
+        let out = fill_scaled_down(&image, &mask, hole, 0.25, |rgba, m| {
+            seen = Some((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
+            Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
+        }).unwrap();
+        let ((w, h), holes) = seen.expect("filled");
+        assert_eq!((w, h), (60, 50), "the hole plus half its longer side around it, at a quarter");
+        assert!(holes >= 30 * 20, "the whole hole is a hole at the small size");
+        assert_eq!(out.get_pixel(200, 140).0, [200, 0, 0, 255], "inside: the fill");
+        assert_eq!(out.get_pixel(140, 140).0, [10, 20, 30, 255], "outside: the photo");
+        assert_eq!(out.get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 
     #[test]
