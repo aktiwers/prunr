@@ -393,6 +393,27 @@ impl DragFiles {
     }
 }
 
+/// Write each item's files, `writers()` at a time; the results come back
+/// in the order given.
+pub(crate) fn write_all(jobs: Vec<DragFiles>) -> Vec<std::io::Result<Vec<PathBuf>>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<std::io::Result<Vec<PathBuf>>>>> = jobs.iter().map(|_| Default::default()).collect();
+    std::thread::scope(|s| {
+        for _ in 0..super::drag_export_state::writers().min(jobs.len()) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(job) = jobs.get(i) else { break };
+                *results[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job.write());
+            });
+        }
+    });
+    results.into_iter()
+        .map(|r| r.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(|| Err(std::io::Error::other("drag file writer stopped"))))
+        .collect()
+}
+
 /// What a drag's files were made from, to tell whether files written
 /// earlier still show the item. Images are held weakly: the key keeps no
 /// pixels alive, and a live weak handle keeps its address from reuse.
@@ -770,4 +791,52 @@ mod tests {
         state.prewrite(11, DragKey::of(&item, spec), DragFiles::of(&item, spec));
         assert!(state.take_written(11, &DragKey::of(&item, spec)).is_none(), "the drag writes fresh");
     }
+
+    /// A drag of many images writes a few at a time, the hovered image
+    /// first: one write per image at once held a baked copy of each.
+    #[test]
+    fn many_drag_files_are_written_a_few_at_a_time_hovered_first() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::drag_export_state::{writers, DragExportState};
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let items: Vec<_> = (100..112).map(|id| processed_item(id, &format!("pool{id}.jpg"))).collect();
+        let targets: Vec<u64> = items.iter().map(|i| i.id).collect();
+        let key_of = |id: u64| items.iter().find(|i| i.id == id).map(|i| DragKey::of(i, spec));
+        let files_of = |id: u64| items.iter().find(|i| i.id == id).map(|i| DragFiles::of(i, spec));
+        let mut state = DragExportState::new();
+        let more = state.queue_writes(107, &targets, key_of, files_of);
+        assert!(more, "the rest wait their turn");
+        assert_eq!(state.started(), writers(), "only a few at once");
+        assert!(state.has_current(107, &DragKey::of(&items[7], spec)), "the hovered image first");
+        let mut rounds = 0;
+        while state.queue_writes(107, &targets, key_of, files_of) {
+            std::thread::yield_now();
+            rounds += 1;
+            assert!(rounds < 1_000_000, "the queue drains");
+        }
+        assert_eq!(state.started(), targets.len());
+        for (id, item) in targets.iter().zip(&items) {
+            for path in state.take_written(*id, &DragKey::of(item, spec)).expect("written") {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Files the drag still needs are written in parallel, in the order
+    /// asked.
+    #[test]
+    fn files_missing_at_the_drag_are_written_in_order() {
+        use crate::gui::brush_state::CutoutAction;
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let items: Vec<_> = (200..206).map(|id| processed_item(id, &format!("order{id}.jpg"))).collect();
+        let written = write_all(items.iter().map(|i| DragFiles::of(i, spec)).collect());
+        for (result, item) in written.into_iter().zip(&items) {
+            let paths = result.expect("written");
+            assert!(paths[0].ends_with(format!("order{}.prunr.png", item.id)));
+            let _ = std::fs::remove_file(&paths[0]);
+        }
+    }
 }
+

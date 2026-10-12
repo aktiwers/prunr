@@ -2187,14 +2187,33 @@ impl PrunrApp {
             }
             return;
         }
+        use super::drag_export::{DragFiles, DragKey};
         let spec = self.drag_spec();
-        let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
-        for id in &ids {
+        // Files not written ahead are written now, in parallel, while the
+        // writes ahead still running finish.
+        let mut ahead: Vec<(usize, u64, DragKey)> = Vec::new();
+        let mut fresh: Vec<(usize, DragFiles)> = Vec::new();
+        for (slot, id) in ids.iter().enumerate() {
             let Some(item) = self.batch.find_by_id(*id) else { continue };
-            let key = super::drag_export::DragKey::of(item, spec);
-            let written = self.drag_export.take_written(*id, &key)
-                .map_or_else(|| super::drag_export::DragFiles::of(item, spec).write(), Ok);
-            match written {
+            let key = DragKey::of(item, spec);
+            if self.drag_export.has_current(*id, &key) {
+                ahead.push((slot, *id, key));
+            } else {
+                fresh.push((slot, DragFiles::of(item, spec)));
+            }
+        }
+        let mut written: Vec<Option<std::io::Result<Vec<PathBuf>>>> = ids.iter().map(|_| None).collect();
+        let (slots, jobs): (Vec<usize>, Vec<DragFiles>) = fresh.into_iter().unzip();
+        for (slot, result) in slots.into_iter().zip(super::drag_export::write_all(jobs)) {
+            written[slot] = Some(result);
+        }
+        for (slot, id, key) in ahead {
+            written[slot] = self.drag_export.take_written(id, &key).map(Ok)
+                .or_else(|| self.batch.find_by_id(id).map(|item| DragFiles::of(item, spec).write()));
+        }
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
+        for result in written.into_iter().flatten() {
+            match result {
                 Ok(mut ps) => paths.append(&mut ps),
                 Err(e) => { self.toasts.error(format!("Drag export failed: {e}")); }
             }
@@ -2233,27 +2252,24 @@ impl PrunrApp {
 
     }
 
-    /// Write the drag files of the thumbnail under the pointer ahead, on
-    /// a worker, so a drag out of the window starts at once.
-    fn prewrite_drag_files(&mut self) {
+    /// Write the drag files of the thumbnail under the pointer (and the
+    /// other ticked images a drag of it takes) ahead, on workers, so a
+    /// drag out of the window starts at once. True while more are due.
+    fn prewrite_drag_files(&mut self) -> bool {
         if !super::drag_export::DRAG_OUT_SUPPORTED {
-            return;
+            return false;
         }
-        let Some(id) = self.drag_export.due(std::time::Instant::now()) else { return };
-        let Some(idx) = self.batch.index_of(id) else { return };
+        let Some(id) = self.drag_export.due(std::time::Instant::now()) else { return false };
+        let Some(idx) = self.batch.index_of(id) else { return false };
         let targets = self.batch.drag_targets(idx);
         let spec = self.drag_spec();
-        for id in targets {
-            if self.drag_export.is_writing(id) {
-                continue;
-            }
-            let Some(item) = self.batch.find_by_id(id) else { continue };
-            let key = super::drag_export::DragKey::of(item, spec);
-            if !self.drag_export.has_current(id, &key) {
-                let files = super::drag_export::DragFiles::of(item, spec);
-                self.drag_export.prewrite(id, key, files);
-            }
-        }
+        let batch = &self.batch;
+        self.drag_export.queue_writes(
+            id,
+            &targets,
+            |t| batch.find_by_id(t).map(|item| super::drag_export::DragKey::of(item, spec)),
+            |t| batch.find_by_id(t).map(|item| super::drag_export::DragFiles::of(item, spec)),
+        )
     }
 
     /// How a drag writes its files under the current settings.
@@ -3848,7 +3864,9 @@ impl eframe::App for PrunrApp {
         self.flush_settings_save(ctx);
         drain_screenshot_replies(ctx);
         self.drain_background_channels(ctx);
-        self.prewrite_drag_files();
+        if self.prewrite_drag_files() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         self.update_window_title(ctx);
         self.status.tick();
         self.reconcile_selected(ctx);

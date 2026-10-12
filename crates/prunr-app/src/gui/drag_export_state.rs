@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,15 @@ use super::drag_export::{DragFiles, DragKey};
 /// How long the pointer rests on a thumbnail before its drag files are
 /// written ahead: long enough that sweeping down the list writes nothing.
 pub(crate) const HOVER_DWELL: Duration = Duration::from_millis(250);
+
+/// How many images' drag files are written at once. PNG encoding is
+/// CPU-bound: on 8 cores a 12-24 MP image took 0.15 s alone, 0.04 s each
+/// with four writers and 0.03 s with eight. Each running write also holds
+/// a baked copy of its image.
+pub(crate) fn writers() -> usize {
+    static WRITERS: OnceLock<usize> = OnceLock::new();
+    *WRITERS.get_or_init(|| std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 4))
+}
 
 /// One item's drag files, written ahead of a drag on a worker.
 struct Prewrite {
@@ -116,6 +125,48 @@ impl DragExportState {
                 self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Written(paths) });
             }
         }
+    }
+
+    /// Write the files of `targets` ahead, `writers()` at a time, the
+    /// hovered image first. True while writes run or wait their turn, so
+    /// the caller comes back to start the next ones.
+    pub(crate) fn queue_writes(
+        &mut self,
+        hovered: u64,
+        targets: &[u64],
+        key_of: impl Fn(u64) -> Option<DragKey>,
+        files_of: impl Fn(u64) -> Option<DragFiles>,
+    ) -> bool {
+        let mut free = writers().saturating_sub(self.writes_running());
+        let order = targets.iter().copied().filter(|&t| t == hovered)
+            .chain(targets.iter().copied().filter(|&t| t != hovered));
+        let mut more = false;
+        for id in order {
+            let Some(key) = key_of(id) else { continue };
+            if self.has_current(id, &key) {
+                more |= self.is_writing(id);
+                continue;
+            }
+            // A stale write of these names finishes before the fresh one.
+            if self.is_writing(id) || free == 0 {
+                more = true;
+                continue;
+            }
+            let Some(files) = files_of(id) else { continue };
+            self.prewrite(id, key, files);
+            free -= 1;
+            more = true;
+        }
+        more
+    }
+
+    fn writes_running(&self) -> usize {
+        self.prewritten.values().filter(|p| matches!(&p.files, PrewriteFiles::Writing(h) if !h.is_finished())).count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> usize {
+        self.prewritten.len()
     }
 
     /// A write of `id`'s files is still running.
