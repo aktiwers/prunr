@@ -268,7 +268,7 @@ pub fn process_inpaint_with(
             ..Default::default()
         });
         req.tuning.cpu_only = cpu_only;
-        let fit = crate::inpaint_sd::fit(&req.tuning);
+        let fit = crate::inpaint_sd::fit(&req);
         return fill_at_scale(image, mask, req.fill_scale, fit, |rgba, m| {
             crate::inpaint_sd::process_inpaint_with(rgba, m, id, req.clone(), progress)
         });
