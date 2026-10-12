@@ -4,6 +4,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
+use super::surface_tests::loaded;
 use crate::gui::app::PrunrApp;
 use crate::gui::automation::tree::{readable_name, ControlNode};
 use crate::gui::item::BatchStatus;
@@ -289,3 +290,35 @@ fn an_upscale_run_holds_its_scale_and_refine_chips() {
     }
 }
 
+
+/// Each quick strip and the full panel its dots open name every control.
+#[test]
+fn quick_strips_name_every_control() {
+    for (chip, on, more, in_panel) in [
+        ("Mask", None, "All mask settings", "Contrast"),
+        ("Sketch", Some("Whole photo"), "All line settings", "Style"),
+    ] {
+        let mut h = loaded();
+        click(&mut h, chip);
+        if let Some(on) = on {
+            click(&mut h, on);
+        }
+        assert_all_controls_named(&h, &format!("{chip} strip"));
+        click(&mut h, more);
+        assert!(names(&h).iter().any(|n| n == in_panel), "{chip}: {in_panel} missing from the full panel");
+        assert_all_controls_named(&h, &format!("{chip} panel"));
+    }
+}
+
+/// A dropdown in a flyout opens its list in place: a popup list would
+/// replace the flyout, the one popup egui keeps open.
+#[test]
+fn a_dropdown_keeps_its_flyout_open() {
+    let mut h = loaded();
+    click(&mut h, "Sketch");
+    click(&mut h, "Whole photo");
+    click(&mut h, "All line settings");
+    click(&mut h, "Style");
+    assert!(egui::Popup::is_any_open(&h.ctx), "the flyout stayed open");
+    assert!(names(&h).iter().any(|n| n.starts_with("Rainbow")), "the list opened");
+}
