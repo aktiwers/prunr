@@ -1447,13 +1447,13 @@ impl PrunrApp {
                     self.toasts.success(format!("{name} ready"));
                     self.refresh_install_cache();
                 }
-                DownloadEvent::Failed { id, error, .. } => {
+                DownloadEvent::Failed { id, error } => {
                     let name = prunr_models::descriptor(id)
                         .map_or("Model", |d| d.display_name);
                     self.toasts.error(format!("{name} download failed: {error}"));
                     self.refresh_install_cache();
                 }
-                DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}
+                DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } | DownloadEvent::Cancelled { .. } => {}
             }
         }
         ctx.request_repaint();
