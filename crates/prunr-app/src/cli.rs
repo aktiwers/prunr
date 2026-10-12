@@ -184,6 +184,84 @@ pub struct Cli {
     /// scale, a little softer.
     #[arg(long, requires = "inpaint", default_value = "auto")]
     pub fill_scale: prunr_core::inpaint::FillScale,
+
+    /// Upscale mode: enlarge the image with this model instead of
+    /// removing its background. Saves {stem}_x{scale}.png.
+    #[arg(long, value_name = "MODEL")]
+    pub upscale: Option<CliUpscaler>,
+
+    /// How much larger the upscale makes the image.
+    #[arg(long, requires = "upscale", default_value = "4", value_parser = ["2", "3", "4"])]
+    pub scale: String,
+
+    /// Denoise before the upscale model, 0 (off) to 1.
+    #[arg(long, requires = "upscale", default_value_t = 0.0)]
+    pub denoise: f32,
+
+    /// Sharpen after the upscale, -1 (soften) to 1; 0 is off.
+    #[arg(long, requires = "upscale", default_value_t = prunr_core::DEFAULT_SHARPEN, allow_negative_numbers = true)]
+    pub sharpen: f32,
+
+    /// AI blend: 1 keeps the model's output, 0 the plain enlargement.
+    #[arg(long, requires = "upscale", default_value_t = 1.0)]
+    pub ai_blend: f32,
+
+    /// Match the upscale's colours to the original.
+    #[arg(long, requires = "upscale")]
+    pub color_match: bool,
+
+    /// Restore faces with this model after the upscale (downloaded in the
+    /// app's Model Store).
+    #[arg(long, requires = "upscale", value_name = "MODEL")]
+    pub restore_faces: Option<CliFaceModel>,
+
+    /// Restore faces strength in percent: up to 50 adds detail and keeps
+    /// the photo's shading, above it the redrawn shading too.
+    #[arg(long, requires = "restore_faces", default_value_t = 50, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub face_strength: u8,
+}
+
+/// Upscale model selection.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliUpscaler {
+    /// Real-ESRGAN x4plus: the all-round photo upscaler.
+    Realesrgan,
+    /// 4xNomos8kSCHAT-L: the most detailed, the slowest.
+    Nomos,
+    /// 4x NMKD Siax-CX: clean or mildly compressed photos.
+    Siax,
+    /// 4x NMKD Superscale: noisy or compressed photos.
+    Superscale,
+}
+
+impl CliUpscaler {
+    fn model_id(self) -> prunr_models::ModelId {
+        use prunr_models::ModelId;
+        match self {
+            Self::Realesrgan => ModelId::RealEsrganX4Plus,
+            Self::Nomos => ModelId::Nomos8kSchatL,
+            Self::Siax => ModelId::FourXNmkdSiaxCx,
+            Self::Superscale => ModelId::FourXNmkdSuperscale,
+        }
+    }
+}
+
+/// Restore faces model selection.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliFaceModel {
+    /// GFPGAN v1.4: the crispest.
+    Gfpgan,
+    /// RestoreFormer++: closest to the person's own features.
+    Restoreformer,
+}
+
+impl CliFaceModel {
+    fn model_id(self) -> prunr_models::ModelId {
+        match self {
+            Self::Gfpgan => prunr_models::ModelId::FaceGfpgan,
+            Self::Restoreformer => prunr_models::ModelId::FaceRestoreFormerPp,
+        }
+    }
 }
 
 /// Model selection
@@ -358,33 +436,145 @@ pub fn run_remove(args: &Cli) -> i32 {
         }
     }
 
-    if args.inpaint {
-        // Eraser mode reads `inputs[0]`, `mask`, `output`, `force`,
-        // `quiet` and ignores everything else. Surface the conflicts
-        // up front so a user typing `--inpaint --lines --bg-color
-        // ff0000 --mask m.png photo.jpg` doesn't get a quiet erase
-        // with no hint that those flags were thrown away.
-        let mut conflicts: Vec<&'static str> = Vec::new();
-        if args.lines { conflicts.push("--lines"); }
-        if args.lines_after_bg { conflicts.push("--lines-after-bg"); }
-        if args.line_color.is_some() { conflicts.push("--line-color"); }
-        if args.bg_color.is_some() { conflicts.push("--bg-color"); }
-        if args.bg_image.is_some() { conflicts.push("--bg-image"); }
-        if args.bg_effect.is_some() { conflicts.push("--bg-effect"); }
-        if args.effect.is_some() { conflicts.push("--effect"); }
-        if args.contrast > 0.0 { conflicts.push("--contrast"); }
+    // Eraser and upscale modes ignore the background-removal flags; say so
+    // up front rather than quietly throw them away.
+    let mode = match (args.inpaint, args.upscale) {
+        (true, Some(_)) => {
+            eprintln!("error: --upscale cannot be combined with --inpaint.");
+            return 1;
+        }
+        (true, None) => Some("--inpaint"),
+        (false, Some(_)) => Some("--upscale"),
+        (false, None) => None,
+    };
+    if let Some(mode) = mode {
+        let conflicts = background_removal_flags(args);
         if !conflicts.is_empty() {
             eprintln!(
-                "error: --inpaint cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
+                "error: {mode} cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
                 conflicts.join(", "),
             );
             return 1;
         }
+    }
+    if args.inpaint {
         return run_inpaint(args);
+    }
+    if let Some(upscaler) = args.upscale {
+        return run_upscale(args, upscaler);
     }
 
     // All processing uses subprocess isolation for OOM protection
     run_batch(args)
+}
+
+/// The background-removal flags set on the command line.
+fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
+    [
+        (args.lines, "--lines"),
+        (args.lines_after_bg, "--lines-after-bg"),
+        (args.line_color.is_some(), "--line-color"),
+        (args.bg_color.is_some(), "--bg-color"),
+        (args.bg_image.is_some(), "--bg-image"),
+        (args.bg_effect.is_some(), "--bg-effect"),
+        (args.effect.is_some(), "--effect"),
+        (args.contrast > 0.0, "--contrast"),
+    ]
+    .into_iter()
+    .filter_map(|(set, flag)| set.then_some(flag))
+    .collect()
+}
+
+/// Upscale mode: enlarge each input with `upscaler`, Refine after it
+/// (sharpen, AI blend, colour match) and, when asked, restore faces, as
+/// the app does. The model loads once for the whole batch.
+fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
+    use prunr_core::OutputScale;
+    let scale = match args.scale.as_str() {
+        "2" => OutputScale::X2,
+        "3" => OutputScale::X3,
+        _ => OutputScale::X4,
+    };
+    let model = prunr_core::upscale::model_for_scale(upscaler.model_id(), scale, prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus));
+    for needed in std::iter::once(model).chain(args.restore_faces.map(CliFaceModel::model_id)) {
+        if !prunr_models::is_available(needed) {
+            eprintln!("error: {}", prunr_models::not_installed_error(needed));
+            return 1;
+        }
+    }
+    let Some(descriptor) = prunr_models::descriptor(model) else {
+        eprintln!("error: {model:?} is not a known model");
+        return 1;
+    };
+    let level = prunr_core::upscale::pick_optimization_level(descriptor);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let engine = prunr_core::ModelKind::try_from(model)
+        .map_err(|id| prunr_core::CoreError::Model(format!("{id:?} is not an upscaler")))
+        .and_then(|kind| if args.cpu {
+            prunr_core::OrtEngine::new_cpu_only_with_optimization_level(kind, threads, level)
+        } else {
+            prunr_core::OrtEngine::new_with_optimization_level(kind, threads, level)
+        });
+    let engine = match engine {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("error: cannot load the upscale model: {e}");
+            return 1;
+        }
+    };
+    let refine = prunr_core::upscale::Refine {
+        sharpen: args.sharpen.clamp(-1.0, 1.0),
+        sharpen_sigma: scale.sharpen_sigma(),
+        ai_blend: args.ai_blend.clamp(0.0, 1.0),
+        color_match: args.color_match,
+    };
+    let blend = prunr_core::face::FaceBlend { strength: f32::from(args.face_strength) / 100.0, ..Default::default() };
+    let is_batch = args.inputs.len() > 1;
+    let suffix = format!("_x{}.png", scale.factor());
+    let mut failed = 0;
+    for input in &args.inputs {
+        let out_path = output_path_with_suffix(input, &args.output, is_batch, &suffix);
+        if let Err(e) = check_overwrite(&out_path, args.force) {
+            eprintln!("error: {e}");
+            failed += 1;
+            continue;
+        }
+        if !args.quiet {
+            eprintln!("Upscaling {}...", input.display());
+        }
+        let result = image::open(input)
+            .map_err(|e| format!("failed to read {}: {e}", input.display()))
+            .and_then(|img| {
+                let img = std::sync::Arc::new(img.into_rgba8());
+                let model_input = if args.denoise > 0.0 {
+                    std::sync::Arc::new(prunr_core::denoise::apply_denoise(&img, args.denoise.min(1.0)))
+                } else {
+                    img
+                };
+                let progress = prunr_core::Progress::none();
+                let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, &engine, model, scale.factor(), &progress, None)
+                    .map_err(|e| format!("upscale failed: {e}"))?;
+                let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &refine);
+                match args.restore_faces {
+                    Some(face_model) => {
+                        let faces = prunr_core::face::find_and_restore(&shown, face_model.model_id(), &progress)
+                            .map_err(|e| format!("restore faces failed: {e}"))?;
+                        Ok(prunr_core::face::compose_faces(&shown, &faces, blend))
+                    }
+                    None => Ok(std::sync::Arc::unwrap_or_clone(shown)),
+                }
+            })
+            .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
+        match result {
+            Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                failed += 1;
+            }
+        }
+    }
+    i32::from(failed > 0)
 }
 
 /// Eraser mode: load image + mask, run LaMa, save inpainted result.
@@ -1103,6 +1293,21 @@ mod tests {
         assert_eq!(white.outline_color, [255, 255, 255]);
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--outline", "120"]).is_err());
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
+    }
+
+    /// The upscale flags parse into a mode; its knobs need it, and faces
+    /// need a face model named.
+    #[test]
+    fn the_upscale_flags_need_upscale_mode() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);
+        assert_eq!(cli.upscale, Some(super::CliUpscaler::Nomos));
+        assert_eq!((cli.scale.as_str(), cli.sharpen, cli.face_strength), ("3", -0.5, 70));
+        assert_eq!(cli.restore_faces.map(super::CliFaceModel::model_id), Some(prunr_models::ModelId::FaceRestoreFormerPp));
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--scale", "2"]).is_err(), "--scale needs --upscale");
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "5"]).is_err());
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--face-strength", "50"]).is_err(), "strength needs a face model");
+        let mixed = super::Cli::parse_from(["prunr", "a.png", "--upscale", "siax", "--bg-color", "ff0000"]);
+        assert_eq!(super::background_removal_flags(&mixed), ["--bg-color"]);
     }
 
     /// Help › Command-line reference lists every flag `prunr --help`
