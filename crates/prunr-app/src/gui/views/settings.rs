@@ -347,7 +347,7 @@ fn render_tab_general(
     hint(ui, &jobs_hint);
     ui.add_space(theme::SPACE_MD);
 
-    if prunr_core::OrtEngine::detect_active_provider() != "CPU" {
+    if settings.is_gpu() {
         use crate::gui::settings::Processor;
         super::chip::choice_row(ui, "Processor", &[
             super::chip::Choice { value: Processor::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
