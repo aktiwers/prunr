@@ -127,7 +127,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal(|ui| {
         if app.pending_reset_confirm {
-            ui.label(RichText::new("Reset all settings to defaults?")
+            ui.label(RichText::new("Reset settings? Presets, licences, background pictures and the model stay.")
                 .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
@@ -135,11 +135,13 @@ fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
                 if button(ui, ButtonKind::Destructive, "Reset").clicked() {
                     app.settings.reset_preserving_identity();
+                    // The shipped keys go live now, not at the next launch.
+                    app.apply_hotkeys(ui.ctx(), super::shortcuts::Bindings::shipped());
                     app.pending_reset_confirm = false;
                 }
             });
         } else {
-            ui.label(RichText::new("Auto-saved")
+            ui.label(RichText::new("Saved when Settings closes")
                 .color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if button(ui, ButtonKind::Secondary, "Reset to defaults").clicked() {
