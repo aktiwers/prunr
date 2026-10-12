@@ -39,6 +39,9 @@ pub struct Settings {
     /// composite. Single toggle, both export paths.
     #[serde(default)]
     pub export_split_layers: bool,
+    /// File format Save writes (the save dialog's extension can override it).
+    #[serde(default)]
+    pub export_format: prunr_core::ExportFormat,
     /// Named presets (excluding the synthetic "Prunr"). Populated from the
     /// filesystem store at load time; not written to settings.json on save —
     /// each preset lives as its own file in `~/.config/prunr/presets/` so
@@ -696,6 +699,7 @@ impl Default for Settings {
             selection_outline: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
+            export_format: prunr_core::ExportFormat::Png,
             presets: HashMap::new(),
             default_preset: default_preset_name(),
             bg_image_paths: HashMap::new(),
