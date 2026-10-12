@@ -29,6 +29,7 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
     let specks = chip::toggle_row(ui, "Remove specks", &mut bs.magic_remove_specks);
     outcome.committed |= specks.commit;
     super::hint(ui, "Drop tiny islands and fill pinholes where the model is unsure.");
+    outcome.committed |= super::brush_chip::fill_scale_row(ui, bs, model);
     if shows(model, Surface::SelectionStrokes) {
         outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
     }

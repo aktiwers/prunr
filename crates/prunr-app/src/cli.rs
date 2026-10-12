@@ -177,6 +177,13 @@ pub struct Cli {
     /// (no `--inpaint`) errors out instead of silently dropping the flag.
     #[arg(long, requires = "inpaint")]
     pub mask: Option<PathBuf>,
+
+    /// How large the eraser fills the masked area: auto (full size for
+    /// small areas, large ones shrink to fit one model tile), full, half
+    /// or quarter. A large area fills more convincingly at a smaller
+    /// scale, a little softer.
+    #[arg(long, requires = "inpaint", default_value = "auto")]
+    pub fill_scale: prunr_core::inpaint::FillScale,
 }
 
 /// Model selection
@@ -426,7 +433,7 @@ fn run_inpaint(args: &Cli) -> i32 {
         eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
     }
     let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
-    let raw = match prunr_core::inpaint::process_inpaint_with(&img, &mask, prunr_models::ModelId::LaMaFp32, None, args.cpu, &prunr_core::Progress::none()) {
+    let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: inpaint failed: {e}");
