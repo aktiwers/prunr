@@ -95,9 +95,16 @@ pub(crate) fn finish_upscale(
 ) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
     let (shown, reference) = prunr_core::upscale::refine(raw, input, reference, knobs);
     let shown = match faces {
+        // The faces were found in `raw`; over a refined image the blend
+        // takes the photo under each face from it, or it would undo Refine.
         Some(f) => {
+            let refined = !Arc::ptr_eq(&shown, raw);
             let mut faced = Arc::unwrap_or_clone(shown);
-            prunr_core::face::compose_faces_into(&mut faced, &f.faces, f.blend);
+            if refined {
+                prunr_core::face::compose_faces_onto(&mut faced, &f.faces, f.blend);
+            } else {
+                prunr_core::face::compose_faces_into(&mut faced, &f.faces, f.blend);
+            }
             Arc::new(faced)
         }
         None => shown,

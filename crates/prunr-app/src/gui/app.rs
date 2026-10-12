@@ -2455,14 +2455,19 @@ impl PrunrApp {
     /// blend them in; a search for anything else is dropped.
     fn land_faces(&mut self, landed: super::processor::FacesResult) {
         let Some(idx) = self.batch.index_of(landed.item_id) else { return };
+        let stage = self.face_stage();
         let item = &mut self.batch.items[idx];
         if item.pending_for(&landed.photo, landed.model) {
             item.faces_pending = None;
         }
-        if !item.wants_faces(&landed.photo, landed.model) {
+        if !item.wants_faces(&landed.photo, landed.model, stage) {
             return;
         }
         let faces = match landed.result {
+            Ok(faces) if faces.is_empty() => {
+                self.set_temporary_status("No faces found");
+                faces
+            }
             Ok(faces) => faces,
             Err(err) => {
                 tracing::warn!(item_id = landed.item_id, %err, "face restore failed");
@@ -2471,9 +2476,6 @@ impl PrunrApp {
                 Vec::new()
             }
         };
-        if faces.is_empty() {
-            self.set_temporary_status("No faces found");
-        }
         let item = &mut self.batch.items[idx];
         item.found_faces = Some(super::item::FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces) });
         item.faces_changed();
@@ -2486,8 +2488,25 @@ impl PrunrApp {
     fn on_faces_change(&mut self, idx: usize, change: super::views::faces_chip::FacesChange) {
         if change.search || change.blend {
             self.batch.items[idx].faces_changed();
-            self.redo_faces_blend(idx);
+            // Before a result exists there is nothing to blend into, and a
+            // re-cut would publish the plain photo as one.
+            if self.shows_face_result(idx) {
+                self.redo_faces_blend(idx);
+            }
         }
+    }
+
+    /// Restore faces works on the active model's stage.
+    fn face_stage(&self) -> super::item::FaceStage {
+        super::item::FaceStage::of(self.settings.model.role())
+    }
+
+    /// The image shows what Restore faces blends into: a finished result,
+    /// or No model's photo, which is its own result.
+    fn shows_face_result(&self, idx: usize) -> bool {
+        let item = &self.batch.items[idx];
+        let photo_is_result = self.settings.model.role() == super::knob_catalog::ModelRole::Filters;
+        shows(self.settings.model, Surface::Faces) && (item.status == BatchStatus::Done || photo_is_result)
     }
 
     /// Blend the faces again: a Refine re-finish for a shown upscale, a
@@ -2508,7 +2527,7 @@ impl PrunrApp {
     fn after_result_landed(&mut self, item_id: u64) {
         self.recut_with_selection(item_id);
         let Some(idx) = self.batch.index_of(item_id) else { return };
-        if self.batch.items[idx].faces_input().is_some() {
+        if self.batch.items[idx].faces_input(self.face_stage()).is_some() {
             self.redo_faces_blend(idx);
         }
     }
@@ -2521,12 +2540,11 @@ impl PrunrApp {
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &self.batch.items[idx];
-        let shows_result = item.status == BatchStatus::Done || self.settings.model.role() == super::knob_catalog::ModelRole::Filters;
         let installed = self.hardware_install_cache.has_face_model(item.settings.faces.model);
-        if !item.settings.faces.on || !installed || !shows(self.settings.model, Surface::Faces) || !shows_result {
+        if !item.settings.faces.on || !installed || !self.shows_face_result(idx) {
             return;
         }
-        let Some(photo) = item.face_photo() else { return };
+        let Some(photo) = item.face_photo(self.face_stage()) else { return };
         if let Some(model) = item.faces_to_find(&photo) {
             let id = item.id;
             self.batch.items[idx].faces_pending = Some((photo.clone(), model));
@@ -2621,7 +2639,7 @@ impl PrunrApp {
                 correction: None,
                 upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
-                faces: item.faces_input(),
+                faces: item.faces_input(super::item::FaceStage::Upscale),
             });
         }
         let seg_tensor = item.hot_seg_tensor();
@@ -2692,7 +2710,7 @@ impl PrunrApp {
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
         let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
-        let faces = item.faces_input();
+        let faces = item.faces_input(super::item::FaceStage::Photo);
         Some(DispatchInputs {
             version,
             kind, original, start, settings: item.settings,
@@ -3953,7 +3971,7 @@ impl PrunrApp {
                     show_original: self.show_original,
                     can_compare,
                     shown_seed: item.shown_seed(),
-                    faces_found: item.face_photo().zip(item.settings.faces.wanted())
+                    faces_found: item.face_photo(super::item::FaceStage::of(settings_ref.model.role())).zip(item.settings.faces.wanted())
                         .and_then(|(photo, model)| item.found_for(&photo, model)).map(|f| f.faces.len()),
                 };
                 toolbar_change = adjustments_toolbar::render(
@@ -4535,7 +4553,7 @@ mod faces_tests {
     fn found_faces_belong_to_one_photo_and_model() {
         let (mut app, source) = app_with_faces_on();
         let item = &mut app.batch.items[0];
-        let photo = item.face_photo().expect("the source");
+        let photo = item.face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::Gfpgan.id()));
         item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), model: FaceModel::Gfpgan.id(), faces: Arc::default() });
         assert!(item.faces_for(&photo).is_some() && item.faces_to_find(&photo).is_none());
@@ -4565,12 +4583,37 @@ mod faces_tests {
     #[test]
     fn a_blend_change_reblends() {
         let (mut app, _) = app_with_faces_on();
+        app.batch.items[0].status = crate::gui::item::BatchStatus::Done;
         let faced = Arc::new(image::DynamicImage::new_rgba8(8, 8));
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         app.batch.items[0].faced_photo = Some((faced, key));
         app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
         assert!(app.batch.items[0].faced_photo.is_none());
         assert!(app.processor.live_preview.is_pending_for(1));
+    }
+
+    /// Before an image is processed a Faces change has nothing to blend
+    /// into; a re-cut would publish the plain photo as the result.
+    #[test]
+    fn a_faces_change_before_processing_publishes_nothing() {
+        let (mut app, _) = app_with_faces_on();
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { search: true, ..Default::default() });
+        assert!(!app.processor.live_preview.is_pending_for(1));
+    }
+
+    /// Undo / redo can bring back other face settings: the faced photo and
+    /// the cut-out over it are dropped, not reused.
+    #[test]
+    fn undo_drops_what_was_built_with_other_face_settings() {
+        let (mut app, _) = app_with_faces_on();
+        let item = &mut app.batch.items[0];
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.settings.faces.on = false;
+        item.commit(crate::gui::timeline::StepKind::Adjust);
+        item.cached_masked_base = Some((Arc::new(image::RgbaImage::new(8, 8)), prunr_core::MaskRecipe::from(&item.settings.mask_settings()), prunr_core::ModelKind::Silueta));
+        item.undo_step();
+        assert!(item.cached_masked_base.is_none());
     }
 
     /// An image not on screen drops its faced photo; its faces stay.
