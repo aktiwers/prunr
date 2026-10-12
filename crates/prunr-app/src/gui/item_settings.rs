@@ -74,6 +74,9 @@ pub struct ItemSettings {
     /// RGB transformation applied to the masked subject before compose.
     #[serde(default)]
     pub fill_style: prunr_core::FillStyle,
+    /// Sticker outline and shadow around the cut-out.
+    #[serde(default)]
+    pub decoration: prunr_core::Decoration,
     /// A picture made from the photo, shown behind the result.
     #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
@@ -140,6 +143,7 @@ impl Default for ItemSettings {
             compose_mode: prunr_core::ComposeMode::default(),
             line_style: prunr_core::LineStyle::default(),
             fill_style: prunr_core::FillStyle::default(),
+            decoration: prunr_core::Decoration::default(),
             bg_effect: prunr_core::BgEffect::default(),
             input_transform: prunr_core::InputTransform::default(),
             bg_image_hash: None,
@@ -216,6 +220,7 @@ impl ItemSettings {
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
             fill_style: self.fill_style,
+            decoration: self.decoration,
         }
     }
 
@@ -516,6 +521,10 @@ mod tests {
             compose_mode: prunr_core::ComposeMode::Ghost,
             line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
             fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
+            decoration: prunr_core::Decoration {
+                outline_width: 6.0, outline_color: [1, 2, 3], shadow: prunr_core::ShadowKind::Drop,
+                shadow_opacity: 0.3, shadow_blur: 9.0, shadow_distance: 4.0,
+            },
             bg_effect: prunr_core::BgEffect::BlurredSource { radius: 8 },
             input_transform: prunr_core::InputTransform::ContrastBoost { percent: 150 },
             bg_image_hash: std::num::NonZeroU64::new(0xfeedface),

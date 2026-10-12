@@ -131,6 +131,73 @@ pub struct MaskSettings {
     /// How the subject RGB is transformed after masking and before compose.
     #[serde(default)]
     pub fill_style: FillStyle,
+    /// Sticker outline and shadow around the cut-out.
+    #[serde(default)]
+    pub decoration: Decoration,
+}
+
+/// A sticker outline and a shadow drawn around the cut-out, under it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Decoration {
+    /// Outline width in pixels; 0 draws none.
+    pub outline_width: f32,
+    pub outline_color: [u8; 3],
+    pub shadow: ShadowKind,
+    /// Shadow strength, 0–1.
+    pub shadow_opacity: f32,
+    /// Shadow softness in pixels.
+    pub shadow_blur: f32,
+    /// How far a Drop shadow falls below the subject, in pixels.
+    pub shadow_distance: f32,
+}
+
+impl Default for Decoration {
+    fn default() -> Self {
+        Self {
+            outline_width: 0.0,
+            outline_color: [255, 255, 255],
+            shadow: ShadowKind::Off,
+            shadow_opacity: 0.55,
+            shadow_blur: 24.0,
+            shadow_distance: 20.0,
+        }
+    }
+}
+
+impl Decoration {
+    pub fn has_outline(&self) -> bool {
+        self.outline_width >= 0.5
+    }
+
+    pub fn has_shadow(&self) -> bool {
+        self.shadow != ShadowKind::Off && self.shadow_opacity > 0.0
+    }
+
+    /// How far past the subject the decoration can reach, in pixels.
+    pub fn reach_px(&self) -> u32 {
+        let outline = if self.has_outline() { self.outline_width.ceil() } else { 0.0 };
+        let shadow = if self.has_shadow() {
+            let fall = if self.shadow == ShadowKind::Drop { self.shadow_distance } else { 0.0 };
+            // Three box passes of radius blur/2 reach 1.5 × blur.
+            1.5 * self.shadow_blur + fall
+        } else {
+            0.0
+        };
+        (outline + shadow).ceil().max(0.0) as u32 + 2
+    }
+}
+
+/// The kind of shadow under a cut-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowKind {
+    #[default]
+    Off,
+    /// A soft glow all around, as if lit from the front.
+    Soft,
+    /// A shadow falling below the subject.
+    Drop,
 }
 
 impl MaskSettings {
@@ -153,6 +220,7 @@ impl Default for MaskSettings {
             guided_epsilon: 1e-4,
             feather: 0.0,
             fill_style: FillStyle::default(),
+            decoration: Decoration::default(),
         }
     }
 }

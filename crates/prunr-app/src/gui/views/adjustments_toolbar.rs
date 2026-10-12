@@ -203,6 +203,13 @@ pub(crate) fn render(
                 aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
             });
         }
+        if shows(model, Surface::Decoration) {
+            let reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out to outline.");
+            chip::gated(ui, reason, |ui| {
+                let changed = render_decoration_chip(ui, &mut item_settings.decoration);
+                aggregate_bool(changed, StaticKnob::Decoration, &mut change);
+            });
+        }
         if shows(model, Surface::Background) {
             let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
             chip::gated(ui, bg_reason, |ui| {
@@ -733,6 +740,49 @@ fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> boo
                 }
             });
         });
+    });
+    changed
+}
+
+/// The Outline & Shadow chip: a sticker outline and a shadow under the
+/// cut-out. Returns true when a knob moved.
+fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
+    use prunr_core::ShadowKind;
+    let value = match (d.has_outline(), d.has_shadow()) {
+        (false, false) => "Off",
+        (true, false) => "Outline",
+        (false, true) => "Shadow",
+        (true, true) => "Outline + shadow",
+    };
+    let accent = d.has_outline() || d.has_shadow();
+    let resp = chip::tooltip(
+        chip::chip_button(ui, ICON_BORDER_OUTER.codepoint, value, accent),
+        "Outline & Shadow",
+        "A sticker outline and a shadow under the cut-out.",
+        None,
+    );
+    let mut changed = false;
+    chip::flyout_for(ui.make_persistent_id("decoration_popup"), &resp, |ui| {
+        chip::popover_header(ui, "Outline & Shadow", None);
+        chip::section_label(ui, "Outline");
+        changed |= chip::slider_row_f32(ui, "Width", &mut d.outline_width, 0.0..=96.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed;
+        if d.has_outline() {
+            changed |= rgb_picker_row(ui, "Color", &mut d.outline_color);
+        }
+        ui.add_space(theme::SPACE_SM);
+        ui.separator();
+        changed |= chip::choice_row(ui, "Shadow", &[
+            chip::Choice { value: ShadowKind::Off, name: "Off", description: "No shadow", enabled: true },
+            chip::Choice { value: ShadowKind::Soft, name: "Soft", description: "A soft shade all around, as if lit from the front", enabled: true },
+            chip::Choice { value: ShadowKind::Drop, name: "Drop", description: "A shadow falling below the subject", enabled: true },
+        ], &mut d.shadow);
+        if d.shadow != ShadowKind::Off {
+            changed |= chip::slider_row_f32(ui, "Opacity", &mut d.shadow_opacity, 0.0..=1.0, false, fmt::percent).changed;
+            changed |= chip::slider_row_f32(ui, "Blur", &mut d.shadow_blur, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+        }
+        if d.shadow == ShadowKind::Drop {
+            changed |= chip::slider_row_f32(ui, "Distance", &mut d.shadow_distance, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+        }
     });
     changed
 }

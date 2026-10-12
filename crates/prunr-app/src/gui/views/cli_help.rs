@@ -82,6 +82,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--bg-image <path>", "Fill background with an image");
                             opt_row(ui, "--bg-image-fit <fit>", "cover (default) / contain / tile");
                             opt_row(ui, "--effect <name>", "Restyle the subject's colors: sepia, invert, pixelate, halftone, duotone\u{2026}");
+                            opt_row(ui, "--outline <px[:hex]>", "Sticker outline around the subject, e.g. 8 or 8:000000");
+                            opt_row(ui, "--shadow <kind>", "Shadow under the subject: soft or drop");
                             opt_row(ui, "--bg-effect <effect>", "Blurred or black-and-white photo behind: blur, blur:N (1\u{2013}64), bw");
                         });
 
