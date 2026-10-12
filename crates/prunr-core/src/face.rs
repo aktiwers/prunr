@@ -372,6 +372,18 @@ pub fn compose_faces(image: &RgbaImage, faces: &[RestoredFace], blend: FaceBlend
 
 /// `compose_faces` into an image the caller owns, saving the copy.
 pub fn compose_faces_into(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend) {
+    compose(out, faces, blend, false);
+}
+
+/// `compose_faces_into` over an image made from the one the faces were
+/// found in (an upscale after Refine): the photo under each face is taken
+/// from `out` again and the restoration moved to its colour, so what
+/// Refine did there stays. A few ms more per face.
+pub fn compose_faces_onto(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend) {
+    compose(out, faces, blend, true);
+}
+
+fn compose(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend, retake: bool) {
     let strength = blend.strength.clamp(0.0, 1.0);
     if strength == 0.0 || faces.is_empty() {
         return;
@@ -381,7 +393,11 @@ pub fn compose_faces_into(out: &mut RgbaImage, faces: &[RestoredFace], blend: Fa
     let largest = faces.iter().min_by(|a, b| a.to_crop.scale().total_cmp(&b.to_crop.scale()));
     let chosen: Vec<&RestoredFace> = if blend.largest_only { largest.into_iter().collect() } else { faces.iter().collect() };
     use rayon::prelude::*;
-    let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| blend_face(face, strength)).collect();
+    let target: &RgbaImage = out;
+    let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| {
+        let base = if retake { Base::retaken(face, target) } else { Base::stored(face) };
+        blend_face(face, &base, strength)
+    }).collect();
     for (face, blended) in chosen.iter().zip(&blended) {
         paste(out, face, blended, mask);
     }
@@ -421,21 +437,54 @@ fn gaussian(plane: &[f32], side: u32, sigma: f32) -> Vec<f32> {
 }
 
 /// The face at `strength`, in crop space, as RGB planes.
-fn blend_face(face: &RestoredFace, strength: f32) -> [Vec<f32>; 3] {
+fn blend_face(face: &RestoredFace, base: &Base<'_>, strength: f32) -> [Vec<f32>; 3] {
     let detail_take = (2.0 * strength).min(1.0) * detail_reach(face);
     let shading_take = (2.0 * strength - 1.0).max(0.0);
-    let (o, r, o_low, r_low) = (face.original.as_raw(), face.restored.as_raw(), face.original_low.as_raw(), face.restored_low.as_raw());
+    let (o, r, o_low, r_low) = (base.original.as_raw(), face.restored.as_raw(), base.original_low.as_raw(), face.restored_low.as_raw());
     std::array::from_fn(|c| {
+        let shift = base.shift[c];
         (c..o.len())
             .step_by(3)
             .map(|i| {
-                let (o, r, o_low, r_low) = (f32::from(o[i]), f32::from(r[i]), f32::from(o_low[i]), f32::from(r_low[i]));
+                let (o, r, o_low, r_low) = (f32::from(o[i]), f32::from(r[i]) + shift, f32::from(o_low[i]), f32::from(r_low[i]) + shift);
                 let low = o_low + (r_low - o_low) * shading_take;
                 let (o_detail, r_detail) = (o - o_low, r - r_low);
                 low + o_detail + (r_detail - o_detail) * detail_take
             })
             .collect()
     })
+}
+
+/// The photo under a face that a blend starts from, and how far its
+/// colour moved from the one the restoration was matched to.
+struct Base<'a> {
+    original: std::borrow::Cow<'a, RgbImage>,
+    original_low: std::borrow::Cow<'a, RgbImage>,
+    shift: [f32; 3],
+}
+
+impl<'a> Base<'a> {
+    fn stored(face: &'a RestoredFace) -> Self {
+        Self { original: std::borrow::Cow::Borrowed(&face.original), original_low: std::borrow::Cow::Borrowed(&face.original_low), shift: [0.0; 3] }
+    }
+
+    /// The photo under `face` taken from `image` again. Shading and colour
+    /// are a mean shift apart, so moving the restoration by the change in
+    /// the face's mean colour keeps it matched.
+    fn retaken(face: &RestoredFace, image: &RgbaImage) -> Self {
+        let original = warp_to_crop(image, &face.to_crop);
+        let planes: [Vec<f32>; 3] = std::array::from_fn(|c| original.pixels().map(|p| f32::from(p[c])).collect());
+        let low: [Vec<f32>; 3] = std::array::from_fn(|c| gaussian(&planes[c], FACE_SIZE, DETAIL_SIGMA));
+        let original_low = RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
+            let i = (y * FACE_SIZE + x) as usize;
+            Rgb(std::array::from_fn(|c| low[c][i].round().clamp(0.0, 255.0) as u8))
+        });
+        let mask = face_mask(false);
+        let weight = mask.iter().sum::<f32>().max(f32::EPSILON);
+        let mean = |img: &RgbImage, c: usize| img.pixels().zip(mask).map(|(p, m)| f32::from(p[c]) * m).sum::<f32>() / weight;
+        let shift = std::array::from_fn(|c| mean(&original, c) - mean(&face.original, c));
+        Self { original: std::borrow::Cow::Owned(original), original_low: std::borrow::Cow::Owned(original_low), shift }
+    }
 }
 
 /// How far the restored detail reaches, 0.25-1. The restorer draws at
@@ -595,6 +644,24 @@ mod tests {
         assert_eq!(at(0.5), 0.5);
         assert_eq!(at(1.6), 1.0);
         assert_eq!(at(0.1), 0.25, "never below a quarter");
+    }
+
+    /// Onto a refined image (here warmer than the photo the face was found
+    /// in) the blend starts from the refined pixels, not the stored ones.
+    #[test]
+    fn a_blend_onto_a_refined_image_keeps_the_refine() {
+        let original = RgbImage::from_pixel(512, 512, Rgb([100, 100, 100]));
+        let restored = RgbImage::from_pixel(512, 512, Rgb([100, 100, 100]));
+        let face = face_of(original, restored);
+        let refined = RgbaImage::from_pixel(600, 600, Rgba([160, 120, 100, 255]));
+        let half = FaceBlend { strength: 0.5, ..FaceBlend::default() };
+        let mut onto = refined.clone();
+        compose_faces_onto(&mut onto, std::slice::from_ref(&face), half);
+        let p = onto.get_pixel(10 + 256, 20 + 280);
+        assert!(p[0].abs_diff(160) <= 2 && p[1].abs_diff(120) <= 2, "the refined colour stays: {p:?}");
+        let mut into = refined.clone();
+        compose_faces_into(&mut into, std::slice::from_ref(&face), half);
+        assert!(into.get_pixel(10 + 256, 20 + 280)[0] < 140, "the stored photo would undo it");
     }
 
     #[test]

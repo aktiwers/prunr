@@ -261,6 +261,20 @@ impl FacePhoto {
     }
 }
 
+/// Which photo Restore faces works on: the photo a cut-out or No model's
+/// preview starts from, or the shown upscale's output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FaceStage {
+    Photo,
+    Upscale,
+}
+
+impl FaceStage {
+    pub(crate) fn of(role: super::knob_catalog::ModelRole) -> Self {
+        if role == super::knob_catalog::ModelRole::Upscale { Self::Upscale } else { Self::Photo }
+    }
+}
+
 /// Faces found in one photo with one model.
 #[derive(Clone)]
 pub(crate) struct FoundFaces {
@@ -770,6 +784,9 @@ impl BatchItem {
     /// Make the working copy the shown state again.
     pub(crate) fn restore(&mut self) {
         self.hold_for_reveal();
+        // The restored step's face settings may differ from what the faced
+        // photo and the cut-out over it were built with.
+        self.faces_changed();
         self.subject = None;
         let shown = self.timeline.current().clone();
         self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
@@ -940,15 +957,15 @@ impl BatchItem {
         }
     }
 
-    /// The photo Restore faces works on: the shown upscale's output, or
-    /// where a photo model's preview starts, as `build_preview_inputs`
-    /// takes it.
-    pub(crate) fn face_photo(&self) -> Option<FacePhoto> {
-        if let Some(run) = self.kept_upscale() {
-            return Some(FacePhoto::Upscaled(Arc::clone(&run.raw)));
+    /// The photo Restore faces works on at `stage`: the shown upscale's
+    /// output, or where a photo model's preview starts, as
+    /// `build_preview_inputs` takes it.
+    pub(crate) fn face_photo(&self, stage: FaceStage) -> Option<FacePhoto> {
+        match stage {
+            FaceStage::Upscale => self.kept_upscale().map(|run| FacePhoto::Upscaled(Arc::clone(&run.raw))),
+            FaceStage::Photo => self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
+                .or_else(|| self.source_rgba.clone().map(FacePhoto::Source)),
         }
-        self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
-            .or_else(|| self.source_rgba.clone().map(FacePhoto::Source))
     }
 
     /// The faces found in `photo` with `model`, if those are the ones kept.
@@ -963,13 +980,13 @@ impl BatchItem {
 
     /// Whether the image wants faces from `photo` with `model`: Restore
     /// faces is on with that model and `photo` is the one shown.
-    pub(crate) fn wants_faces(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> bool {
-        self.settings.faces.wanted() == Some(model) && self.face_photo().is_some_and(|p| p.same(photo))
+    pub(crate) fn wants_faces(&self, photo: &FacePhoto, model: prunr_models::ModelId, stage: FaceStage) -> bool {
+        self.settings.faces.wanted() == Some(model) && self.face_photo(stage).is_some_and(|p| p.same(photo))
     }
 
-    /// The faces the shown photo's preview blends in.
-    pub(crate) fn faces_input(&self) -> Option<super::live_preview::FacesInput> {
-        self.faces_for(&self.face_photo()?)
+    /// The faces a preview at `stage` blends in.
+    pub(crate) fn faces_input(&self, stage: FaceStage) -> Option<super::live_preview::FacesInput> {
+        self.faces_for(&self.face_photo(stage)?)
     }
 
     /// The faces a preview of `photo` blends in, if Restore faces is on and
@@ -1516,14 +1533,15 @@ mod tests {
         let mut item = fixture_item(1);
         let source = Arc::new(image::RgbaImage::new(4, 4));
         item.source_rgba = Some(Arc::clone(&source));
-        assert!(item.face_photo().is_some_and(|p| p.same(&FacePhoto::Source(Arc::clone(&source)))));
+        assert!(item.face_photo(FaceStage::Photo).is_some_and(|p| p.same(&FacePhoto::Source(Arc::clone(&source)))));
         let raw = Arc::new(image::RgbaImage::new(16, 16));
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.result_rgba = Some(Arc::clone(&raw));
         item.land_upscale(UpscaleCache::new(Arc::clone(&raw), Arc::clone(&source), None));
-        assert!(item.face_photo().is_some_and(|p| p.same(&FacePhoto::Upscaled(Arc::clone(&raw)))));
+        assert!(item.face_photo(FaceStage::Upscale).is_some_and(|p| p.same(&FacePhoto::Upscaled(Arc::clone(&raw)))));
         item.undo_step();
-        assert!(!item.face_photo().is_some_and(|p| p.same(&FacePhoto::Upscaled(raw))));
+        assert!(item.face_photo(FaceStage::Upscale).is_none(), "the earlier step has no upscale of its own");
+        let _ = raw;
     }
 
     /// Pin seed keeps the fill on screen: each fill's seed stays with its

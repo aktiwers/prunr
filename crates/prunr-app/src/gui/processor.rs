@@ -1388,13 +1388,25 @@ impl Processor {
     /// capsule shows it. The photo is unpacked there, never here.
     pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId) {
         let tx = self.faces_tx.clone();
-        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
-        let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        // The capsule belongs to a batch or an upscale while one runs; a
+        // face search taking it would hide theirs and its Cancel.
+        let (progress, run) = if self.dispatch_progress.read().is_none() {
+            let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
+            let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            (progress, Some(run))
+        } else {
+            (prunr_core::Progress::none(), None)
+        };
         std::thread::spawn(move || {
-            let result = photo.load()
-                .ok_or_else(|| "the photo is no longer there".to_string())
-                .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, &progress).map_err(|e| e.to_string()));
-            run.end();
+            let search = std::panic::AssertUnwindSafe(|| {
+                photo.load()
+                    .ok_or_else(|| "the photo is no longer there".to_string())
+                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, &progress).map_err(|e| e.to_string()))
+            });
+            let result = std::panic::catch_unwind(search).unwrap_or_else(|_| Err("the face model stopped unexpectedly".to_string()));
+            if let Some(run) = run {
+                run.end();
+            }
             let _ = tx.send(FacesResult { item_id, photo, model, result });
         });
     }
@@ -1724,6 +1736,25 @@ mod tests {
 
     /// The batch's image count comes from its own bookkeeping, steps from
     /// the worker; ending the batch must not clear another kind of run.
+    /// A face search leaves the capsule to a batch already running, and
+    /// a search that fails still lands.
+    #[test]
+    fn a_face_search_leaves_a_running_batchs_capsule_alone() {
+        use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
+        let mut p = fixture();
+        let _batch = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject"));
+        // Not a face model: the search fails at once, without loading anything.
+        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let landed = loop {
+            if let Some(r) = p.pump_faces_results().pop() { break r; }
+            assert!(std::time::Instant::now() < deadline, "the search never landed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(landed.result.is_err());
+        assert_eq!(p.dispatch_progress().map(|d| d.kind), Some(ProgressKind::Seg), "the batch's capsule stays");
+    }
+
     #[test]
     fn a_batch_counts_its_images_and_keeps_the_reported_step() {
         use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
