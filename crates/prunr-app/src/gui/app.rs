@@ -1951,19 +1951,20 @@ impl PrunrApp {
         };
         if targets.is_empty() { return; }
 
+        let style = self.selection_style();
+        let format = self.settings.export_format;
         let mut payload: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+        let mut without_layers: Vec<String> = Vec::new();
         for id in &targets {
             let Some(item) = self.batch.find_by_id(*id) else { continue };
-            let layers = super::drag_export::render_layer_bytes(item);
+            let layers = super::drag_export::render_layer_bytes(item, style);
             if layers.is_empty() {
-                // No cached tensors — fall back to composite PNG so the user
-                // still lands a file per target.
+                // The cut-out's data is gone (evicted, or never run): one
+                // composite file still lands, and the toast says so.
                 if let Some(rgba) = item.result_rgba.as_ref() {
-                    let baked = item.export_bg().bake(rgba);
-                    if let Ok(bytes) = prunr_core::encode_rgba_png(&baked) {
-                        let stem = Path::new(&item.filename)
-                            .file_stem().and_then(|s| s.to_str()).unwrap_or("image");
-                        payload.push((folder.join(format!("{stem}.prunr.png")), bytes));
+                    if let Ok(bytes) = format.encode(&item.export_bg().bake(rgba)) {
+                        payload.push((folder.join(export_name(&item.filename, format)), bytes));
+                        without_layers.push(item.filename.clone());
                     }
                 }
                 continue;
@@ -1979,6 +1980,12 @@ impl PrunrApp {
         }
         let file_count = payload.len();
         self.toasts.info(format!("Saving {file_count} file(s)..."));
+        if !without_layers.is_empty() {
+            self.toasts.info(format!(
+                "Saved as one image, without layers: {}. Process it again for layers.",
+                without_layers.join(", "),
+            ));
+        }
         let tx = self.batch.bg_io.save_done_tx.clone();
         spawn_save_prerendered(payload, tx);
     }
@@ -2063,10 +2070,11 @@ impl PrunrApp {
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
         let split = self.saves_layers();
+        let style = self.selection_style();
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(item) = self.batch.find_by_id(*id) {
-                match super::drag_export::prepare_for_drag(item, split) {
+                match super::drag_export::prepare_for_drag(item, split, style) {
                     Ok(mut ps) => paths.append(&mut ps),
                     Err(e) => {
                         self.toasts.error(format!("Drag export failed: {e}"));
