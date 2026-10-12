@@ -67,7 +67,7 @@ pub struct ToolbarChange {
     pub render_repaint: bool,
     /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
-    /// Set when the user clicked "More models…" or a not-yet-installed
+    /// Set when the user clicked "Get more models" or a not-yet-installed
     /// dropdown entry. `filter = None` means "show everything"; the
     /// dropdown's not-installed click pre-filters to the entry's category.
     pub open_model_store: Option<ModelStoreRequest>,
@@ -1156,6 +1156,18 @@ pub(crate) fn render_model_only(
     change
 }
 
+const MODEL_PICKER_WIDTH: f32 = 360.0;
+
+fn role_caption(role: crate::gui::knob_catalog::ModelRole) -> &'static str {
+    use crate::gui::knob_catalog::ModelRole;
+    match role {
+        ModelRole::Cutout => "BACKGROUND REMOVAL",
+        ModelRole::Erase => "ERASER",
+        ModelRole::Upscale => "UPSCALE",
+        ModelRole::Filters => "",
+    }
+}
+
 /// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
 /// sets `change.model_changed` + `commit` when the selection flips so caller
 /// can invalidate tensor caches and fire a fresh Tier 1.
@@ -1174,7 +1186,7 @@ pub(super) fn render_model_dropdown(
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
         let info = model_info(app_settings.model);
-        let resp = chip::chip_button(ui, info.icon, info.name, false);
+        let resp = chip::menu_chip_button(ui, info.icon, info.name);
         // The chip is always named "Model"; the hint says what this one does.
         use crate::gui::knob_catalog::ModelRole;
         let body = match app_settings.model.role() {
@@ -1187,17 +1199,22 @@ pub(super) fn render_model_dropdown(
         let resp = chip::tooltip(resp, "Model", body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
-            chip::popover_header(ui, "Model", None);
+            ui.set_width(MODEL_PICKER_WIDTH);
+            let mut role = None;
             for variant in installed_models(installed) {
                 if variant == SettingsModel::None {
+                    ui.add_space(theme::SPACE_XS);
                     ui.separator();
+                } else if role != Some(variant.role()) {
+                    role = Some(variant.role());
+                    chip::panel_section(ui, role_caption(variant.role()), None);
                 }
                 let advisory = variant
                     .to_model_id()
                     .and_then(prunr_models::descriptor)
                     .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
-                let row = chip::picker_row(ui, app_settings.model == variant, info.name, info.blurb);
+                let row = chip::choice_list_row(ui, info.icon, info.name, info.blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,
@@ -1207,8 +1224,8 @@ pub(super) fn render_model_dropdown(
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
             }
-            ui.separator();
-            if chip::button(ui, chip::ButtonKind::Secondary, "More models…").clicked() {
+            let more = chip::choice_list_row(ui, ICON_DOWNLOAD.codepoint, "Get more models", "Open the Model Store", false, chip::LIST_ACTION_FILL);
+            if more.clicked() {
                 change.open_model_store = Some(ModelStoreRequest::default());
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }

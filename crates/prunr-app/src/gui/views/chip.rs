@@ -68,12 +68,20 @@ pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui
 /// Shared chip-button renderer. Returns the response for popup wiring.
 /// `accent` = true draws an accent border (non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
+    chip_face(ui, format!("{icon}  {value}"), accent)
+}
+
+/// A chip that opens a menu: the face ends in a chevron.
+pub(super) fn menu_chip_button(ui: &mut Ui, icon: &str, value: &str) -> Response {
+    chip_face(ui, format!("{icon}  {value}  {}", ICON_EXPAND_MORE.codepoint), false)
+}
+
+fn chip_face(ui: &mut Ui, text: String, accent: bool) -> Response {
     let stroke = if accent {
         egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT_BRIGHT)
     } else {
         egui::Stroke::new(theme::STROKE_DEFAULT, Color32::TRANSPARENT)
     };
-    let text = format!("{icon}  {value}");
     let btn = egui::Button::new(
         RichText::new(text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
     )
@@ -471,6 +479,44 @@ fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
     ui.painter().circle_filled(center + egui::vec2(0.0, 1.0), radius + 1.0, Color32::from_black_alpha(90));
     ui.painter().circle_filled(center, radius, fill);
 }
+
+/// The board's choice-list row: an icon in a dim circle, the title over
+/// a one-line description, and when picked a purple wash and a check.
+/// Reads as a button named title, newline, description.
+pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description: &str, selected: bool, icon_fill: Color32) -> Response {
+    const HEIGHT: f32 = 46.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, format!("{title}\n{description}")));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if selected {
+            theme::ACCENT_BRIGHT.gamma_multiply(0.18)
+        } else if resp.hovered() {
+            Color32::from_white_alpha(10)
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, 12.0, fill);
+        let icon_center = egui::pos2(rect.left() + 12.0 + 15.0, rect.center().y);
+        painter.circle_filled(icon_center, 15.0, icon_fill);
+        painter.text(icon_center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), theme::GLOW);
+        let text_x = icon_center.x + 15.0 + 12.0;
+        let dim = if ui.is_enabled() { 1.0 } else { 0.5 };
+        painter.text(egui::pos2(text_x, rect.center().y - 1.0), egui::Align2::LEFT_BOTTOM, title,
+            egui::FontId::proportional(13.5), theme::TEXT_PRIMARY.gamma_multiply(dim));
+        painter.text(egui::pos2(text_x, rect.center().y + 2.0), egui::Align2::LEFT_TOP, description,
+            egui::FontId::proportional(12.0), theme::TEXT_SECONDARY.gamma_multiply(dim));
+        if selected {
+            painter.text(egui::pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
+                egui::FontId::proportional(16.0), theme::ACCENT_RING);
+        }
+    }
+    resp
+}
+
+/// A choice list's dim icon circle; the board's purple one marks an action.
+pub(super) const LIST_ICON_FILL: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 15);
+pub(super) const LIST_ACTION_FILL: Color32 = Color32::from_rgba_premultiplied(39, 20, 52, 64);
 
 /// A selectable option with a title and a one-line description, for
 /// every picker popover. Returns the row's response.
