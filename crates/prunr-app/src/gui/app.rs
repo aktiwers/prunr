@@ -1074,25 +1074,23 @@ impl PrunrApp {
         // Bridge → inpaint_rx fan-in must run before the drain.
         self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
-        // A cancelled erase records nothing; the painted region stays.
-        let cancelled_count = cancelled.len();
-        for &item_id in &cancelled {
+        // A cancelled or failed erase records nothing; the painted region
+        // stays for another try.
+        for &item_id in cancelled.iter().chain(errors.iter().map(|(id, _)| id)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                item.job = None;
+                item.abandon_job();
             }
-            self.toasts.info("Erase cancelled");
         }
-        if cancelled_count > 0 {
-            // Repaint so the brush overlay clears even if no result
-            // landed this frame.
+        if !cancelled.is_empty() || !errors.is_empty() {
             ctx.request_repaint();
         }
-        for msg in &errors {
-            // Show the worker's message verbatim — the SD RAM-guard
-            // text is already user-friendly ("only X GB free, Y minimum
-            // recommended. Close other apps or use LaMa..."). Future
-            // CoreError variants that surface here can be reformatted
-            // at this seam if their default Display is too technical.
+        for _ in &cancelled {
+            self.toasts.info("Erase cancelled");
+        }
+        for (item_id, msg) in &errors {
+            tracing::warn!(item_id, %msg, "erase failed");
+            // The worker's message is user-facing already (the SD RAM
+            // gate names the free and needed memory).
             self.toasts.error(msg.clone());
         }
         if results.is_empty() {
@@ -4457,6 +4455,20 @@ mod timeline_contract_tests {
         app.processor.land_inpaint_for_test(1, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "landed: only the texture upload is left");
+    }
+
+    /// A refused or failed erase ends its run: the item stops waiting,
+    /// so it is not shown working forever.
+    #[test]
+    fn a_failed_erase_ends_its_run() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
+        app.processor.fail_inpaint_for_test(1, "refused to load: only 6 GB RAM free");
+        app.pump_inpaint_results(&ctx);
+        assert!(app.batch.items[0].job.is_none(), "the run is over");
+        assert!(app.batch.items[0].selection_mask.is_some(), "the painted region stays for another try");
     }
 
     /// An erase result that lands after an undo is dropped.

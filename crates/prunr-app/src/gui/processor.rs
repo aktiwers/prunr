@@ -556,6 +556,13 @@ impl Processor {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_inpaint_for_test(&mut self, item_id: u64, error: &str) {
+        let _ = self.inpaint_tx.send(InpaintResult {
+            item_id, rgba: image::RgbaImage::new(0, 0), generation: 0, cancelled: false, error: Some(error.into()),
+        });
+    }
+
+    #[cfg(test)]
     pub(crate) fn show_progress_for_test(&self, progress: super::dispatch_progress::DispatchProgress) {
         self.dispatch_progress.set(Some(progress));
     }
@@ -951,11 +958,11 @@ impl Processor {
     /// - `cancelled_item_ids` lists items whose stroke was cancelled
     ///   by the user — the GUI surfaces a toast for each so the user
     ///   gets explicit feedback that Esc/Cancel took effect.
-    /// - `errors` carries the user-visible message for any non-Cancelled
+    /// - `errors` carries the item and user-visible message for any non-Cancelled
     ///   dispatch failure (e.g. SD RAM-guard refusal). The GUI shows
     ///   each as an error toast — without this surface the user sees
     ///   the stroke "do nothing" with no idea why.
-    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<InpaintResult>, Vec<u64>, Vec<String>) {
+    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<InpaintResult>, Vec<u64>, Vec<(u64, String)>) {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
         let mut errors = Vec::new();
@@ -981,7 +988,7 @@ impl Processor {
                 continue;
             }
             if let Some(msg) = result.error {
-                errors.push(msg);
+                errors.push((item_id, msg));
                 continue;
             }
             let latest = self.inpaint_latest_gen.get(&item_id).copied().unwrap_or(0);
@@ -1780,7 +1787,8 @@ mod tests {
             "errored stroke is not a cancel");
         assert_eq!(errors.len(), 1,
             "dispatch error must surface for the user toast");
-        assert!(errors[0].contains("13.4 GB"));
+        assert_eq!(errors[0].0, 7);
+        assert!(errors[0].1.contains("13.4 GB"));
     }
 
     #[test]
