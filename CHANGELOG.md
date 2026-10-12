@@ -11,12 +11,12 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Restore and Erase brushes.** On a background-removal result the Paint Brush restores what the model took or erases what it left, the moment the stroke ends, with Shift and Alt overriding the mode. The knobs touched every stroke sit in a strip over the image while a brush is on; its dots open the full panel.
 - **Selections as a first-class object.** Paint Brush and Magic Brush author the same selection. Delete, Copy, Cut, Invert and Clear act on it, with keyboard shortcuts; Feather softens its edge against the photo.
 - **Upscale.** Real-ESRGAN x4plus, 4x NMKD Siax-CX and Superscale, and 4xNomos8kSCHAT-L, at 2×, 3× or 4×; a 2× Real-ESRGAN upscale runs Real-ESRGAN's own 2× model when it is installed, about four times faster. Refine: Denoise before the model; Sharpen, AI blend and Color match after it, previewed live. fp16 variants download automatically on GPUs. Cancel aborts mid-tile.
-- **Eraser with Stable Diffusion.** SD 1.5 Inpaint and its LCM fast variant join LaMa, Big-LaMa and MI-GAN. Prompt and negative prompt, guidance, five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC), steps, denoising strength, pinned seed, and the TAESD fast decoder. Quality presets (Fast / Balanced / Quality) pick scheduler and steps. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
+- **Eraser with Stable Diffusion.** SD 1.5 Inpaint joins LaMa, Big-LaMa and MI-GAN. Quality is Fast (the LCM download, a few steps) or Quality (DPM++ 2M Karras on the full model); without the Fast download it runs Quality. A prompt (empty continues the surroundings) and a negative prompt; under Advanced, steps and guidance in each quality's range, Pin seed, which keeps the seed of the fill on screen, and the TAESD fast decoder, on by default for Fast. Switching quality keeps the prompt and seed. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
 - **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
-- **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM while the app is open.
+- **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
@@ -52,6 +52,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Line color choices (Original, Solid color, styles) live in one list.
 - The window can be made narrower: 1020 px minimum, down from 1100.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
+- The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
 
 ### Performance
 
