@@ -298,7 +298,7 @@ impl PrunrApp {
                 }
             }
             Action::Save => {
-                if app_state == AppState::Done {
+                if self.can_save_intent() {
                     self.handle_save_selected();
                 }
             }
@@ -1901,6 +1901,13 @@ impl PrunrApp {
         });
     }
 
+
+    /// The Save button's and Cmd+S's one gate: the shown image has a
+    /// result, or a ticked image does.
+    pub fn can_save_intent(&self) -> bool {
+        self.batch.app_state() == AppState::Done
+            || self.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done)
+    }
 
     pub fn handle_save_selected(&mut self) {
         let has_selection = self.batch.items.iter()
@@ -4325,6 +4332,19 @@ mod timeline_contract_tests {
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
+    }
+
+    /// Cmd+S works whenever the Save button shows: a ticked finished
+    /// image is enough even while the shown one is still unprocessed.
+    #[test]
+    fn save_is_possible_with_a_ticked_finished_image() {
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        push_test_item(&mut app, 2);
+        app.batch.select_item(1);
+        app.batch.items[0].selected = true;
+        assert!(app.can_save_intent(), "the ticked image is done");
+        app.batch.items[0].selected = false;
+        assert!(!app.can_save_intent(), "nothing finished to save");
     }
 
     /// Auto-process on import runs background removal (or the No-model
