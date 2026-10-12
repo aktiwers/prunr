@@ -63,7 +63,9 @@ fn empty_window_names_every_control() {
     settle(&mut harness);
     assert_all_controls_named(&harness, "empty window");
     let names = names(&harness);
-    for expected in ["Open", "Settings"] {
+    // The Model picker shows before any image, so a model can be picked
+    // or downloaded first (its last row opens the Model Store).
+    for expected in ["Open", "Settings", "Model"] {
         assert!(names.iter().any(|n| n == expected), "{expected} missing from {names:?}");
     }
 }

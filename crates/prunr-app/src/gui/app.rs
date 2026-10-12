@@ -3580,6 +3580,8 @@ impl eframe::App for PrunrApp {
 
         if self.adjustments_should_show(ui.ctx()) {
             self.render_adjustments_toolbar(ui, panel_frame);
+        } else if self.batch.items.is_empty() && !self.adjustments_hidden {
+            self.render_empty_model_bar(ui, panel_frame);
         }
 
         egui::Panel::bottom("statusbar")
@@ -3633,6 +3635,21 @@ impl PrunrApp {
         );
         let hover_in_peek = ctx.input(|i| i.pointer.hover_pos().is_some_and(|p| peek_zone.contains(p)));
         hover_in_peek || egui::Popup::is_any_open(ctx)
+    }
+
+    fn render_empty_model_bar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
+        let installed = self.hardware_install_cache;
+        let change = egui::Panel::top("adjustments_toolbar")
+            .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)
+            .frame(panel_frame)
+            .show_inside(ui, |ui| adjustments_toolbar::render_model_only(ui, &mut self.settings, installed))
+            .inner;
+        if change.model_changed {
+            self.on_model_changed();
+        }
+        if let Some(req) = change.open_model_store {
+            self.model_store = Some(req);
+        }
     }
 
     fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
@@ -3699,6 +3716,47 @@ impl PrunrApp {
         self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| item.refine_only_changed(model))
     }
 
+    /// What a model switch does whatever images are loaded: fit lines and
+    /// brushes to the model, drop runs and cached sessions of the old one.
+    fn on_model_changed(&mut self) {
+        self.batch.fit_line_modes_to(self.settings.model);
+        self.settings.on_model_change_resolve_brush();
+        self.fit_brush_models_to_model();
+        // Cancel any in-flight upscale dispatch when the user
+        // changes model mid-run — the result would land on the
+        // wrong selection otherwise.
+        self.processor.cancel_upscale();
+        // Drop every item's kept upscale run — the buffers
+        // were produced by the previous model. A subsequent Tier-2
+        // preview tick would otherwise display the old model's output
+        // under the new model's knobs.
+        for item in &mut self.batch.items {
+            item.invalidate_upscale_cache();
+        }
+        self.settings.save();
+        self.toasts.info(format!(
+            "{} loaded",
+            crate::gui::views::model_name(self.settings.model),
+        ));
+        // Drop every cached engine on model switch — both the
+        // inpaint subprocess (SD bundle / LaMa subprocess
+        // residual) and the seg subprocess's warm engine pool
+        // (BiRefNetLite ~2 GB, U2Net ~800 MB, etc.). The
+        // in-process LaMa cache was already cleared in
+        // `adjustments_toolbar`'s on-model-changed branch.
+        // Combined: every model switch reclaims RAM from every
+        // backend the user is no longer using, regardless of
+        // direction (inpaint→inpaint, seg→seg, inpaint→seg, …).
+        self.processor.release_inpaint_subprocess();
+        self.processor.release_seg_warm();
+        // Drop the warm upscale engine on every model switch — both
+        // upscale→upscale and upscale→seg/inpaint. ensure_upscale_engine
+        // evicts on ModelKind mismatch anyway, but this explicit drop
+        // covers the switch-away-from-upscale case where ensure is never
+        // called again.
+        self.processor.release_upscale_engine();
+    }
+
     fn apply_toolbar_change(
         &mut self,
         ctx: &egui::Context,
@@ -3719,42 +3777,7 @@ impl PrunrApp {
             self.reconcile_bg_image_after_preset(idx);
         }
         if toolbar_change.model_changed {
-            self.batch.fit_line_modes_to(self.settings.model);
-            self.settings.on_model_change_resolve_brush();
-            self.fit_brush_models_to_model();
-            // Cancel any in-flight upscale dispatch when the user
-            // changes model mid-run — the result would land on the
-            // wrong selection otherwise.
-            self.processor.cancel_upscale();
-            // Drop every item's kept upscale run — the buffers
-            // were produced by the previous model. A subsequent Tier-2
-            // preview tick would otherwise display the old model's output
-            // under the new model's knobs.
-            for item in &mut self.batch.items {
-                item.invalidate_upscale_cache();
-            }
-            self.settings.save();
-            self.toasts.info(format!(
-                "{} loaded",
-                crate::gui::views::model_name(self.settings.model),
-            ));
-            // Drop every cached engine on model switch — both the
-            // inpaint subprocess (SD bundle / LaMa subprocess
-            // residual) and the seg subprocess's warm engine pool
-            // (BiRefNetLite ~2 GB, U2Net ~800 MB, etc.). The
-            // in-process LaMa cache was already cleared in
-            // `adjustments_toolbar`'s on-model-changed branch.
-            // Combined: every model switch reclaims RAM from every
-            // backend the user is no longer using, regardless of
-            // direction (inpaint→inpaint, seg→seg, inpaint→seg, …).
-            self.processor.release_inpaint_subprocess();
-            self.processor.release_seg_warm();
-            // Drop the warm upscale engine on every model switch — both
-            // upscale→upscale and upscale→seg/inpaint. ensure_upscale_engine
-            // evicts on ModelKind mismatch anyway, but this explicit drop
-            // covers the switch-away-from-upscale case where ensure is never
-            // called again.
-            self.processor.release_upscale_engine();
+            self.on_model_changed();
         }
         if toolbar_change.brush_settings_committed {
             self.settings.save();
