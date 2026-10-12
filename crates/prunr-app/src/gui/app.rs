@@ -818,7 +818,7 @@ impl PrunrApp {
                 // The step's image shows its selection as the switch stood
                 // then; the switch may have moved since.
                 let item = &self.batch.items[idx];
-                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
+                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) && item.tensor_made_shown_step() {
                     self.dispatch_brush_rerun(idx);
                 }
                 stepped.push(kind);
