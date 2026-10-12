@@ -100,12 +100,17 @@ Common flags:
 | `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
 | `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |
 | `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
+| `--fill-scale <S>` | Eraser: `auto` (default), `full`, `half`, `quarter` — large areas fill more convincingly smaller |
+| `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
+| `--scale <2\|3\|4>` | Upscale: how much larger (default 4) |
+| `--denoise`, `--sharpen`, `--ai-blend`, `--color-match` | Upscale: the Refine knobs |
+| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Upscale: redraw soft faces with `gfpgan` or `restoreformer` |
 | `--open <PATH>` | Start the GUI with an image already loaded |
 | `--debug` | Verbose diagnostics for bug reports |
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
 
-`prunr --help` for the full list. Magic Brush, Eraser prompts and Upscale are GUI features; the CLI covers background removal, lines and mask-driven erasing.
+`prunr --help` for the full list. Magic Brush and the Stable Diffusion eraser are GUI features; the CLI covers background removal, lines, mask-driven erasing and upscaling. Upscale and face models download in the app's Model Store.
 
 ## Models
 
