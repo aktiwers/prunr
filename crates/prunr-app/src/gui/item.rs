@@ -235,7 +235,12 @@ impl CorrectionCache {
     }
 }
 
-/// The step an undo goes back to, and its image once unpacked.
+/// Where `BatchItem::warm_steps` holds the step an undo goes back to and
+/// the one a redo goes to.
+pub(crate) const BACK: usize = 0;
+pub(crate) const AHEAD: usize = 1;
+
+/// A step next to the shown one, and its image once unpacked.
 pub(crate) struct WarmStep {
     step: super::timeline::StoredImage,
     pub(crate) image: Option<Arc<image::RgbaImage>>,
@@ -276,10 +281,10 @@ pub(crate) struct BatchItem {
     /// The upscale under way's finished tiles, small, each in its square
     /// of a preview of the whole image.
     pub(crate) tile_preview: Option<egui::TextureHandle>,
-    /// The previous step's image, unpacked off the UI thread and held so
-    /// it stays unpacked: an undo shows it without decoding first. Costs
-    /// one image of RAM.
-    pub(crate) warm_previous: Arc<std::sync::Mutex<Option<WarmStep>>>,
+    /// The images of the steps an undo and a redo go to (`BACK`, `AHEAD`),
+    /// unpacked off the UI thread and held so they stay unpacked: either
+    /// shows without decoding first. Costs up to two images of RAM.
+    pub(crate) warm_steps: Arc<std::sync::Mutex<[Option<WarmStep>; 2]>>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -608,30 +613,33 @@ impl BatchItem {
         self.unpark_result();
         let state = self.snapshot(kind);
         self.timeline.push(state);
-        self.warm_previous_step();
+        self.warm_neighbour_steps();
     }
 
-    /// Unpack the previous step's image on a worker and hold it; drop
-    /// whatever was held for an older step.
-    fn warm_previous_step(&self) {
-        let stored = self.timeline.previous().and_then(|s| s.result.clone());
-        let slot = Arc::clone(&self.warm_previous);
-        let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match stored {
-            Some(stored) if held.as_ref().is_some_and(|w| Arc::ptr_eq(&w.step, &stored)) => {}
-            Some(stored) => {
-                *held = Some(WarmStep { step: Arc::clone(&stored), image: None });
-                drop(held);
-                std::thread::spawn(move || {
-                    let image = stored.load();
-                    let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    // A newer step may have taken the slot meanwhile.
-                    if let Some(w) = held.as_mut().filter(|w| Arc::ptr_eq(&w.step, &stored)) {
-                        w.image = image;
-                    }
-                });
+    /// Unpack the images of the steps either side of the shown one on a
+    /// worker and hold them; drop whatever was held for other steps.
+    fn warm_neighbour_steps(&self) {
+        let back = self.timeline.previous().and_then(|s| s.result.clone());
+        let ahead = self.timeline.next().and_then(|s| s.result.clone());
+        for (at, stored) in [(BACK, back), (AHEAD, ahead)] {
+            let slot = Arc::clone(&self.warm_steps);
+            let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match stored {
+                Some(stored) if held[at].as_ref().is_some_and(|w| Arc::ptr_eq(&w.step, &stored)) => {}
+                Some(stored) => {
+                    held[at] = Some(WarmStep { step: Arc::clone(&stored), image: None });
+                    drop(held);
+                    std::thread::spawn(move || {
+                        let image = stored.load();
+                        let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // A newer step may have taken the slot meanwhile.
+                        if let Some(w) = held[at].as_mut().filter(|w| Arc::ptr_eq(&w.step, &stored)) {
+                            w.image = image;
+                        }
+                    });
+                }
+                None => held[at] = None,
             }
-            None => *held = None,
         }
     }
 
@@ -740,7 +748,7 @@ impl BatchItem {
         self.unpark_result();
         let undone = self.timeline.undo()?;
         self.restore();
-        self.warm_previous_step();
+        self.warm_neighbour_steps();
         Some(undone)
     }
 
@@ -749,7 +757,7 @@ impl BatchItem {
         self.unpark_result();
         let redone = self.timeline.redo()?;
         self.restore();
-        self.warm_previous_step();
+        self.warm_neighbour_steps();
         Some(redone)
     }
 
@@ -1127,7 +1135,7 @@ impl BatchItem {
             reveal: None,
             subject: None,
             tile_preview: None,
-            warm_previous: Arc::default(),
+            warm_steps: Arc::default(),
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
@@ -1291,12 +1299,31 @@ mod tests {
         item.commit(StepKind::Adjust);
         let warm = (0..200).find_map(|_| {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            item.warm_previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|w| w.image.clone())
+            item.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[BACK].as_ref().and_then(|w| w.image.clone())
         });
         let warm = warm.expect("the previous step warms up");
         assert_eq!(warm.get_pixel(0, 0).0, [1, 2, 3, 255]);
         let back = item.timeline.previous().and_then(|s| s.result.as_ref()).and_then(|r| r.load()).expect("previous result");
         assert!(Arc::ptr_eq(&warm, &back), "undo reads the held image");
+    }
+
+    /// After an undo, the step a redo goes to is kept unpacked too.
+    #[test]
+    fn the_step_redo_goes_to_stays_unpacked() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))));
+        item.commit(StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))));
+        item.commit(StepKind::Adjust);
+        item.undo_step();
+        let warm = (0..200).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            item.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[AHEAD].as_ref().and_then(|w| w.image.clone())
+        });
+        let warm = warm.expect("the next step warms up");
+        assert_eq!(warm.get_pixel(0, 0).0, [9, 9, 9, 255]);
+        let ahead = item.timeline.next().and_then(|s| s.result.as_ref()).and_then(|r| r.load()).expect("next result");
+        assert!(Arc::ptr_eq(&warm, &ahead), "redo reads the held image");
     }
 
     /// A cut-out made from an edited photo (an object erased first) gets
