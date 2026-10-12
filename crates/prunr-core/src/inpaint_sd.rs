@@ -172,6 +172,29 @@ fn ram_need_mb(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: 
     working_set + margin_mb + if tall { SD_TALL_CROP_EXTRA_MB } else { 0 }
 }
 
+/// How a Stable Diffusion erase fits in `free_mb` with no bundle loaded,
+/// by the same rule as the run-time gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SdRamFit {
+    /// Tall regions run as one crop.
+    Full,
+    /// It runs, but tall regions fall back to 512 px tiles.
+    TilesOnly,
+    /// The gate refuses the erase.
+    Refused,
+}
+
+pub fn sd_ram_fit(free_mb: u64, margin_mb: u64) -> SdRamFit {
+    let id = prunr_models::ModelId::SdV15InpaintFp16;
+    if free_mb < ram_need_mb(id, margin_mb, false, false) {
+        SdRamFit::Refused
+    } else if free_mb < ram_need_mb(id, margin_mb, false, true) {
+        SdRamFit::TilesOnly
+    } else {
+        SdRamFit::Full
+    }
+}
+
 fn available_ram_mb() -> Option<u64> {
     available_ram_bytes().map(|b| b / (1024 * 1024))
 }
@@ -3103,6 +3126,26 @@ mod tests {
     /// seconds old — `Instant::now() - 600 s` then panics with an overflow.
     fn sweep_now() -> Instant {
         Instant::now() + Duration::from_secs(3600)
+    }
+
+    /// The Settings memory note and the run-time gate agree: refused
+    /// exactly where `fit_ram` refuses, tiles exactly where it drops the
+    /// tall crop.
+    #[test]
+    fn sd_ram_fit_matches_the_run_time_gate() {
+        let id = prunr_models::ModelId::SdV15InpaintFp16;
+        let margin = 2048;
+        let base = ram_need_mb(id, margin, false, false);
+        for free in [base - 1, base, base + SD_TALL_CROP_EXTRA_MB - 1, base + SD_TALL_CROP_EXTRA_MB] {
+            let mut t = plan_tuning(false, margin, false);
+            let gate = fit_ram(id, &mut t, free, false);
+            let expected = match (gate.is_ok(), t.tall_crop) {
+                (false, _) => SdRamFit::Refused,
+                (true, false) => SdRamFit::TilesOnly,
+                (true, true) => SdRamFit::Full,
+            };
+            assert_eq!(sd_ram_fit(free, margin), expected, "free {free} MB");
+        }
     }
 
     /// "CPU only" reaches the SD parts through the bundle key, so a
