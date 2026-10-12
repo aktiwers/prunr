@@ -50,7 +50,7 @@ pub(crate) struct HardwareSectionContext {
     pub install_in_progress: bool,
     pub install_status_text: Option<String>,
     pub active_provider: String,
-    pub ram_safety_margin_gb: f32,
+    pub sd_margin_mb: u64,
 }
 
 /// View-layer intent the General tab returns so platform side effects
@@ -92,7 +92,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                                 install_status_text: app.runtime_install.as_ref()
                                     .map(|p| p.last_event.status_text()),
                                 active_provider: app.settings.active_backend.clone(),
-                                ram_safety_margin_gb: app.settings.ram_safety_margin_gb,
+                                sd_margin_mb: app.settings.sd_memory.margin_mb(),
                             };
                             render_tab_general(ui, &mut app.settings, &hw_ctx)
                         }
@@ -223,7 +223,7 @@ fn render_hardware_section(
 
     // The same rule as the gate an erase passes, with the user's margin.
     use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
-    let margin_mb = (ctx.ram_safety_margin_gb.max(0.0) * 1024.0) as u64;
+    let margin_mb = ctx.sd_margin_mb;
     let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), margin_mb) {
         SdRamFit::Full => (
             egui::Color32::from_rgb(0x6c, 0xd1, 0x6c),
@@ -290,9 +290,14 @@ fn render_hardware_section(
     intent
 }
 
-fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
-    super::chip::slider_row_f32(ui, "SD safety margin", value, 0.0..=8.0, false, |v| format!("{v:.1} GB"));
-    hint(ui, "Free memory the SD eraser keeps clear on top of what the model needs. Raise it if other apps use a lot of memory while it runs. Default 2 GB.");
+fn render_sd_memory_row(ui: &mut egui::Ui, value: &mut crate::gui::settings::SdMemoryGuard) {
+    use crate::gui::settings::SdMemoryGuard;
+    use super::chip::Choice;
+    super::chip::choice_row(ui, "SD memory guard", &[
+        Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1 GB free for other apps. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
+        Choice { value: SdMemoryGuard::Balanced, name: "Balanced", description: "Leaves about 2 GB free for other apps", enabled: true },
+        Choice { value: SdMemoryGuard::Strict, name: "Strict", description: "Leaves about 4 GB free, for when other apps grab memory while it runs", enabled: true },
+    ], value);
 }
 
 fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
@@ -309,7 +314,7 @@ fn render_tab_general(
     ctx: &HardwareSectionContext,
 ) -> Option<HardwareSectionIntent> {
     let intent = render_hardware_section(ui, ctx);
-    render_ram_safety_margin_row(ui, &mut settings.ram_safety_margin_gb);
+    render_sd_memory_row(ui, &mut settings.sd_memory);
     ui.add_space(theme::SPACE_MD);
 
     section_heading(ui, "Performance");
