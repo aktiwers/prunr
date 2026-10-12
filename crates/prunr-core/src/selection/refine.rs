@@ -67,7 +67,7 @@ fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
 ///
 /// Peak working set is proportional to the bbox, not the image:
 /// bbox_area × ~54 B (RGBA guide crop, two gray planes, and the guided
-/// filter's eight f32 planes plus integral scratch) plus one i8 copy of
+/// filter's eight f32 planes plus row-sum scratch) plus one i8 copy of
 /// the full mask. Measured on a 4K source:
 ///
 /// | bbox      | transient |

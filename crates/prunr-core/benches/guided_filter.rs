@@ -41,7 +41,7 @@ fn make_inputs(w: u32, h: u32) -> (RgbaImage, GrayImage) {
 pub fn bench(c: &mut Criterion) {
     // Two sizes — 512² is the typical seg output, 2048² is a 4K-ish
     // case where allocation churn matters. Bigger sizes amplify
-    // regressions in the prefix-sum loops.
+    // regressions in the box-filter passes.
     for &(w, h, label) in &[(512u32, 512u32, "512x512"), (2048, 2048, "2048x2048")] {
         let (guide, mask) = make_inputs(w, h);
         let mut group = c.benchmark_group("guided_filter_alpha");

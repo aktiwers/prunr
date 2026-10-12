@@ -608,6 +608,33 @@ mod tests {
         assert_eq!(outside[0], 200);
     }
 
+    /// A nearly flat photo (a night road, snow: a few levels of noise)
+    /// under an erase the size of a person: the seam must stay between the
+    /// photo and the fill, not blow up to pure 0 / 255 colours along the
+    /// edge.
+    #[test]
+    fn seam_blend_stays_in_range_on_a_large_nearly_flat_erase() {
+        let n = 1400u32;
+        let src = RgbaImage::from_fn(n, n, |x, y| {
+            let v = ((x * 7 + y * 13) % 5) as u8;
+            Rgba([190 + v, 160 + v, 90 + v, 255])
+        });
+        let inp = RgbaImage::from_fn(n, n, |x, y| {
+            let v = ((x * 3 + y * 11) % 5) as u8;
+            Rgba([185 + v, 155 + v, 85 + v, 255])
+        });
+        let mask = GrayImage::from_fn(n, n, |x, y| {
+            let (dx, dy) = (x as f32 - 700.0, y as f32 - 700.0);
+            Luma([if dx * dx + dy * dy < 600.0 * 600.0 { 255 } else { 0 }])
+        });
+        let out = seam_guided_blend(&inp, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX);
+        for (x, y, px) in out.enumerate_pixels() {
+            for (c, lo, hi) in [(0, 180, 200), (1, 150, 170), (2, 80, 100)] {
+                assert!((lo..=hi).contains(&px[c]), "({x}, {y}) channel {c} = {}", px[c]);
+            }
+        }
+    }
+
     /// Mask touching the image boundary has fewer source samples on
     /// the clipped side. The function must still produce sensible
     /// output (no panic, no negative-variance NaN, mask interior
