@@ -724,7 +724,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(first_compressed(&batch), "an older result, held by nothing else, is compressed");
-        let warm = |b: &BatchManager| b.items[0].warm_previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|w| w.image.is_some());
+        let warm = |b: &BatchManager| b.items[0].warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[crate::gui::item::BACK].as_ref().is_some_and(|w| w.image.is_some());
         while !warm(&batch) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
