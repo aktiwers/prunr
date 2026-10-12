@@ -101,7 +101,7 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
     }
     if shows(model, Surface::FillRegionKnobs) {
         committed |= chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0)).commit;
-        committed |= chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0)).commit;
+        committed |= chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).commit;
     }
     committed
 }
