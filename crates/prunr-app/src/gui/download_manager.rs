@@ -22,7 +22,7 @@ pub enum DownloadState {
     Queued,
     InProgress { bytes_so_far: u64, total_bytes: u64 },
     Verifying,
-    Failed { error: String, retryable: bool },
+    Failed { error: String },
     Done,
 }
 
@@ -31,7 +31,8 @@ pub enum DownloadEvent {
     Progress { id: ModelId, bytes_so_far: u64, total: u64 },
     Verifying { id: ModelId },
     Complete { id: ModelId },
-    Failed { id: ModelId, error: String, retryable: bool },
+    Failed { id: ModelId, error: String },
+    Cancelled { id: ModelId },
 }
 
 pub(crate) struct DownloadManager {
@@ -125,29 +126,29 @@ impl DownloadManager {
             }
             DownloadEvent::Complete { id } => {
                 self.states.insert(id, DownloadState::Done);
-                self.cancel_flags.remove(&id);
-                if self.active == Some(id) {
-                    self.active = None;
-                }
+                self.end_active(id);
             }
-            DownloadEvent::Failed { id, ref error, retryable } => {
-                self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
-                self.cancel_flags.remove(&id);
-                if self.active == Some(id) {
-                    self.active = None;
-                }
+            DownloadEvent::Failed { id, ref error } => {
+                tracing::warn!(?id, %error, "model download failed");
+                self.states.insert(id, DownloadState::Failed { error: error.clone() });
+                self.end_active(id);
+            }
+            DownloadEvent::Cancelled { id } => {
+                tracing::info!(?id, "model download cancelled");
+                self.states.insert(id, DownloadState::Idle);
+                self.end_active(id);
             }
         }
     }
 
     fn kick_off(&mut self, id: ModelId) {
         let Some(desc) = descriptor(id) else {
-            self.send_failure(id, format!("Unknown model id: {id:?}"), false);
+            self.send_failure(id, format!("Unknown model id: {id:?}"));
             return;
         };
         match desc.source {
             ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => {
-                self.send_failure(id, format!("{id:?} is bundled — no download path"), false);
+                self.send_failure(id, format!("{id:?} is bundled — no download path"));
             }
             ModelSource::OnDemand { url, sha256, filename, size_mb, fp16, .. } => {
                 self.kick_off_single(id, url, sha256, filename, size_mb, fp16);
@@ -168,11 +169,11 @@ impl DownloadManager {
         fp16: Option<OnDemandVariant>,
     ) {
         let Some(dir) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into(), false);
+            self.send_failure(id, "Could not resolve user data directory".into());
             return;
         };
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"), true);
+            self.send_failure(id, format!("Could not create models directory: {e}"));
             return;
         }
         let dest = dir.join(filename);
@@ -199,9 +200,7 @@ impl DownloadManager {
                 }
             };
             if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &on_verifying) {
-                let _ = tx.send(DownloadEvent::Failed {
-                    id, error: e.message, retryable: e.retryable,
-                });
+                let _ = tx.send(failure_event(id, e.message, &cancel));
                 return;
             }
 
@@ -244,12 +243,12 @@ impl DownloadManager {
         parts: &'static [ModelPart],
     ) {
         let Some(root) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into(), false);
+            self.send_failure(id, "Could not resolve user data directory".into());
             return;
         };
         let bundle_dir = root.join(subdir);
         if let Err(e) = std::fs::create_dir_all(&bundle_dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"), true);
+            self.send_failure(id, format!("Could not create models directory: {e}"));
             return;
         }
         let total: u64 = parts.iter().map(|p| p.size_bytes).sum();
@@ -280,11 +279,7 @@ impl DownloadManager {
                 match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &on_verifying) {
                     Ok(()) => { bytes_done += part.size_bytes; }
                     Err(e) => {
-                        let _ = tx.send(DownloadEvent::Failed {
-                            id,
-                            error: format!("{}: {}", part.key, e.message),
-                            retryable: e.retryable,
-                        });
+                        let _ = tx.send(failure_event(id, format!("{}: {}", part.key, e.message), &cancel));
                         return;
                     }
                 }
@@ -305,9 +300,25 @@ impl DownloadManager {
         cancel
     }
 
-    fn send_failure(&mut self, id: ModelId, error: String, retryable: bool) {
-        self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
-        let _ = self.progress_tx.send(DownloadEvent::Failed { id, error, retryable });
+    fn end_active(&mut self, id: ModelId) {
+        self.cancel_flags.remove(&id);
+        if self.active == Some(id) {
+            self.active = None;
+        }
+    }
+
+    fn send_failure(&mut self, id: ModelId, error: String) {
+        self.states.insert(id, DownloadState::Failed { error: error.clone() });
+        let _ = self.progress_tx.send(DownloadEvent::Failed { id, error });
+    }
+}
+
+/// How a download that stopped early ends: cancelled by the user, or failed.
+fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEvent {
+    if cancel.load(Ordering::Acquire) {
+        DownloadEvent::Cancelled { id }
+    } else {
+        DownloadEvent::Failed { id, error }
     }
 }
 
@@ -484,15 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_event_failed_records_retryable_flag() {
+    fn apply_event_failed_records_the_error() {
         let mut dm = fixture();
-        dm.apply_event(&DownloadEvent::Failed {
-            id: ModelId::U2net, error: "timeout".into(), retryable: true,
-        });
-        match dm.state(ModelId::U2net) {
-            DownloadState::Failed { retryable, .. } => assert!(retryable),
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        dm.active = Some(ModelId::U2net);
+        dm.apply_event(&DownloadEvent::Failed { id: ModelId::U2net, error: "timeout".into() });
+        assert_eq!(dm.state(ModelId::U2net), DownloadState::Failed { error: "timeout".into() });
+        assert!(dm.active().is_none());
     }
 
     #[test]
@@ -595,6 +603,18 @@ mod tests {
     }
 
     // ── Queue behaviour ───────────────────────────────────────────────────
+
+    /// A cancelled download goes back to "Download", not to a failure
+    /// whose Retry was disabled until restart.
+    #[test]
+    fn a_cancelled_download_returns_to_idle_and_frees_the_slot() {
+        let mut dm = fixture();
+        dm.active = Some(ModelId::LaMaFp32);
+        dm.states.insert(ModelId::LaMaFp32, DownloadState::InProgress { bytes_so_far: 1, total_bytes: 9 });
+        dm.apply_event(&DownloadEvent::Cancelled { id: ModelId::LaMaFp32 });
+        assert_eq!(dm.state(ModelId::LaMaFp32), DownloadState::Idle);
+        assert!(dm.active().is_none());
+    }
 
     #[test]
     fn cancel_dequeues_a_pending_id() {
