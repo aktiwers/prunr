@@ -359,7 +359,7 @@ fn save_options_name_their_controls_and_follow_the_model() {
 }
 
 /// The Outline & Shadow flyout names every control, with the outline on
-/// and a Drop shadow (every row showing), and a Width change re-cuts.
+/// and a Drop shadow (every row showing).
 #[test]
 fn the_outline_and_shadow_flyout_names_every_control() {
     let mut h = loaded();
@@ -370,9 +370,10 @@ fn the_outline_and_shadow_flyout_names_every_control() {
     }
     settle(&mut h);
     click(&mut h, "Outline & Shadow");
+    click(&mut h, "All outline and shadow settings");
     super::tree_tests::assert_all_controls_named(&h, "outline and shadow");
     let names = super::tree_tests::names(&h);
-    for expected in ["Width", "Red", "Off", "Soft", "Drop", "Opacity", "Blur", "Distance"] {
+    for expected in ["Width", "Color", "No shadow", "Soft", "Drop", "Opacity", "Blur", "Distance"] {
         assert!(names.iter().any(|n| n.starts_with(expected)), "{expected} missing from {names:?}");
     }
 }
