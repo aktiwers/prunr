@@ -244,24 +244,21 @@ pub(crate) struct SamRethresholdRequest {
     pub(crate) reading: prunr_core::MaskReading,
     /// The selection the stroke was merged onto.
     pub(crate) base: Option<Arc<prunr_core::selection::MaskArtifact>>,
-    /// Whether the stroke edits a cut-out (see `merge_stroke`).
-    pub(crate) signed: bool,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
-/// against. On a cut-out (`signed`) its direction wins where it lands;
-/// elsewhere Add grows the selection and Subtract carves it away.
+/// against: Add grows the selection and Subtract carves it away. What a
+/// cut-out's selection then does is the brush's `CutoutAction`.
 pub(crate) fn merge_stroke(
     existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
     stroke: prunr_core::selection::MaskArtifact,
-    signed: bool,
 ) -> prunr_core::selection::MaskArtifact {
-    let Some(existing) = existing else { return stroke.into_selection(signed) };
-    match existing.merge_stroke(&stroke, signed) {
+    let Some(existing) = existing else { return stroke.into_selection(false) };
+    match existing.merge_stroke(&stroke, false) {
         Ok(merged) => merged,
         Err(err) => {
             tracing::warn!(%err, "stroke size differs from the selection; keeping the stroke alone");
-            stroke.into_selection(signed)
+            stroke.into_selection(false)
         }
     }
 }
@@ -1426,7 +1423,7 @@ impl Processor {
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
-            let merged = Arc::new(merge_stroke(req.base, mask, req.signed));
+            let merged = Arc::new(merge_stroke(req.base, mask));
             let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
                 item_id: req.item_id, mode: req.mode, reading: req.reading,
@@ -1628,17 +1625,18 @@ mod sam_dispatch_tests {
         assert!(admission_check(800, 800));
     }
 
+    /// A stroke adds to or takes from the selection, on every model.
     #[test]
-    fn an_erase_result_on_an_empty_selection_stays_negative() {
-        use prunr_core::selection::{BrushMode, MaskArtifact};
-        let erase = MaskArtifact::from_cells(2, 1, vec![-100, 0]);
-        let merged = merge_stroke(None, erase.clone(), true);
-        assert!(merged.cells()[0] < 0, "nothing to subtract from: the stroke itself is the selection");
-        let restore = MaskArtifact::from_cells(2, 1, vec![100, 100]);
-        let merged = merge_stroke(Some(Arc::new(merged)), restore, true);
-        assert!(merged.cells()[0] > 0, "a later restore wins where it lands");
-        assert!(!merge_stroke(None, erase, false).has_selected_region(), "on a selection, subtracting from nothing selects nothing");
-        let _ = BrushMode::Add;
+    fn a_stroke_adds_to_or_takes_from_the_selection() {
+        use prunr_core::selection::MaskArtifact;
+        let add = MaskArtifact::from_cells(2, 1, vec![100, 100]);
+        let take = MaskArtifact::from_cells(2, 1, vec![-127, 0]);
+        let selected = merge_stroke(None, add);
+        assert!(selected.has_selected_region(), "a first Add stroke is the selection");
+        let carved = merge_stroke(Some(Arc::new(selected)), take.clone());
+        assert_eq!(carved.cells()[0], 0, "Subtract carves it away");
+        assert_ne!(carved.cells()[1], 0, "the rest stays");
+        assert!(!merge_stroke(None, take).has_selected_region(), "subtracting from nothing selects nothing");
     }
 
     #[test]
