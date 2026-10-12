@@ -89,14 +89,17 @@ impl DragExportState {
         self.prewritten.get(&id).is_some_and(|p| p.key.matches(key))
     }
 
+    /// A write of `id`'s files is still running.
+    pub(crate) fn is_writing(&self, id: u64) -> bool {
+        self.prewritten.get(&id).is_some_and(|p| matches!(&p.files, PrewriteFiles::Writing(h) if !h.is_finished()))
+    }
+
     /// Write `id`'s files on a worker, replacing any for another state of
     /// it. Waits while a stale write for it still runs: both write the
     /// same names, and the later one must win.
     pub(crate) fn prewrite(&mut self, id: u64, key: DragKey, files: DragFiles) {
-        if let Some(PrewriteFiles::Writing(h)) = self.prewritten.get(&id).map(|p| &p.files) {
-            if !h.is_finished() {
-                return;
-            }
+        if self.is_writing(id) {
+            return;
         }
         let handle = std::thread::spawn(move || files.write());
         self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Writing(handle) });

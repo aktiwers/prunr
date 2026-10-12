@@ -266,16 +266,10 @@ impl MaskArtifact {
         self.map_with(other, merge_cell)
     }
 
-    /// `stroke` combined with this selection. On a cut-out (`signed`) a
-    /// stroke's sign is its direction, restore or erase, and the newer
-    /// one wins where it lands. Elsewhere the selection is only how much
-    /// is selected: an Add stroke grows it and a Subtract stroke carves it
-    /// away. It is kept negative there, so it reads as an erase if a
-    /// background-removal model later uses it.
-    pub fn merge_stroke(&self, stroke: &Self, signed: bool) -> Result<Self, SelectionError> {
-        if signed {
-            return self.add_mask(stroke);
-        }
+    /// `stroke` combined with this selection, which is only how much is
+    /// selected: an Add stroke grows it and a Subtract stroke carves it
+    /// away. It is kept negative, so as it is it reads as an erase.
+    pub fn merge_stroke(&self, stroke: &Self) -> Result<Self, SelectionError> {
         self.map_with(stroke, |a, b| {
             let held = a.unsigned_abs();
             let mag = if b >= 0 { held.max(b as u8) } else { held.saturating_sub(b.unsigned_abs()) };
@@ -288,10 +282,9 @@ impl MaskArtifact {
         self.map(|v| v.unsigned_abs().min(FULL as u8) as i8)
     }
 
-    /// Region inversion: `FULL - |v|`, signed by `mode`.
-    pub fn invert(&self, mode: BrushMode) -> Self {
-        let sign = mode.sign();
-        self.map(|v| sign * (FULL - v.unsigned_abs() as i8))
+    /// Region inversion: `FULL - |v|`, kept negative like any selection.
+    pub fn invert(&self) -> Self {
+        self.map(|v| -(FULL - v.unsigned_abs() as i8))
     }
 
     /// Stable content hash: SipHash-1-3 (`DefaultHasher`) over fixed
@@ -415,10 +408,10 @@ impl MaskArtifact {
         self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| alpha[i] = corrected_alpha(alpha[i], g));
     }
 
-    /// The plane a first stroke makes on an empty selection: the stroke
-    /// itself on a cut-out, its Add part kept as an erase elsewhere.
-    pub fn into_selection(self, signed: bool) -> Self {
-        if signed { self } else { self.map(|b| if b > 0 { -b } else { 0 }) }
+    /// The plane a first stroke makes on an empty selection: its Add part,
+    /// kept negative.
+    pub fn into_selection(self) -> Self {
+        self.map(|b| if b > 0 { -b } else { 0 })
     }
 }
 
@@ -438,21 +431,19 @@ mod tests {
         assert_eq!(selection.as_restore().cells(), &[127, 60, 0, 40]);
     }
 
-    /// On a cut-out the newer stroke's direction wins; on a selection Add
-    /// grows it, Subtract carves it away, and what stays is stored as an
-    /// erase.
+    /// Add grows a selection, Subtract carves it away, and what stays is
+    /// stored as an erase.
     #[test]
-    fn a_stroke_merges_by_direction_on_a_cutout_and_by_amount_elsewhere() {
+    fn a_stroke_merges_by_amount() {
         let held = mask(4, 1, vec![-127, -127, -60, 0]);
         let add = mask(4, 1, vec![0, 100, 100, 127]);
         let sub = mask(4, 1, vec![-127, -100, 0, -127]);
-        assert_eq!(held.merge_stroke(&add, true).unwrap().cells(), &[-127, 100, 100, 127], "restore wins where it lands");
-        assert_eq!(held.merge_stroke(&add, false).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
-        assert_eq!(held.merge_stroke(&sub, false).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
-        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub, false).unwrap().has_selected_region(), "nothing to carve");
+        assert_eq!(held.merge_stroke(&add).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
+        assert_eq!(held.merge_stroke(&sub).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
+        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub).unwrap().has_selected_region(), "nothing to carve");
         for stroke in [add, sub] {
-            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke, false).unwrap();
-            assert_eq!(stroke.into_selection(false), first, "a first stroke equals merging onto nothing");
+            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke).unwrap();
+            assert_eq!(stroke.into_selection(), first, "a first stroke equals merging onto nothing");
         }
     }
 
@@ -552,10 +543,9 @@ mod tests {
     }
 
     #[test]
-    fn invert_flips_coverage_with_requested_sign() {
+    fn invert_flips_coverage_and_keeps_it_negative() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
-        assert_eq!(m.invert(BrushMode::Subtract).cells(), &[-127, -63, 0, -95]);
-        assert_eq!(m.invert(BrushMode::Add).cells(), &[127, 63, 0, 95]);
+        assert_eq!(m.invert().cells(), &[-127, -63, 0, -95]);
     }
 
     #[test]
@@ -595,7 +585,7 @@ mod tests {
         let a = MaskArtifact::new_empty(4, 4);
         let b = MaskArtifact::new_empty(2, 8);
         assert!(matches!(
-            a.merge_stroke(&b, false),
+            a.merge_stroke(&b),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
     }

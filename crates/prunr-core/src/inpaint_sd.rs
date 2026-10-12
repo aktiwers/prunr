@@ -385,11 +385,10 @@ pub fn process_inpaint_with(
                 start(tile_idx);
                 let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-                match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
-                    Ok(painted) => image::imageops::replace(&mut out, &painted, cx as i64, cy as i64),
-                    // A region left as it was would read as a finished erase.
-                    Err(e) => return Err(e),
-                }
+                // A failed region fails the run: left as it was, it would read
+                // as a finished erase.
+                let painted = run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress)?;
+                image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
                 progress.tile(tile_idx, true);
                 tile_idx += 1;
                 continue;
@@ -407,10 +406,8 @@ pub fn process_inpaint_with(
             start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            match run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress) {
-                Ok(painted) => blend_tile(&mut out, &painted, &tile),
-                Err(e) => return Err(e),
-            }
+            let painted = run_one_tile(&bundle, &vae, &cropped_img, &cropped_mask, &req, progress)?;
+            blend_tile(&mut out, &painted, &tile);
             progress.tile(tile_idx, true);
             tile_idx += 1;
         }

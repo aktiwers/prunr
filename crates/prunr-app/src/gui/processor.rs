@@ -261,12 +261,12 @@ pub(crate) fn merge_stroke(
     existing: Option<Arc<prunr_core::selection::MaskArtifact>>,
     stroke: prunr_core::selection::MaskArtifact,
 ) -> prunr_core::selection::MaskArtifact {
-    let Some(existing) = existing else { return stroke.into_selection(false) };
-    match existing.merge_stroke(&stroke, false) {
+    let Some(existing) = existing else { return stroke.into_selection() };
+    match existing.merge_stroke(&stroke) {
         Ok(merged) => merged,
         Err(err) => {
             tracing::warn!(%err, "stroke size differs from the selection; keeping the stroke alone");
-            stroke.into_selection(false)
+            stroke.into_selection()
         }
     }
 }

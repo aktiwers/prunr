@@ -25,7 +25,7 @@ use super::item_settings::ItemSettings;
 use super::settings::LineMode;
 use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
 
-/// Dragging files out of the window works here (see the module notes).
+/// The `drag` crate needs a GTK window on Linux, which eframe can't give it.
 pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 
 /// Subdirectory name under temp_dir for prunr drag files.
@@ -156,7 +156,7 @@ impl LayerJob {
             correction: item.correction_plane(style, action),
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
-            faces: item.face_photo().and_then(|photo| item.faces_for(&photo)),
+            faces: item.faces_input(),
         }
     }
 
@@ -332,6 +332,15 @@ impl Composite {
     }
 }
 
+/// How a drag writes each item: as layers or one composite, and the
+/// correction the layers apply.
+#[derive(Clone, Copy)]
+pub(crate) struct DragSpec {
+    pub split: bool,
+    pub style: super::background_io::SelectionStyle,
+    pub action: super::brush_state::CutoutAction,
+}
+
 /// What dragging one item writes, as shared handles taken on the UI
 /// thread: the composite, or its layers (subject / lines / mask) when
 /// layers are on. Layers the item no longer has are skipped; with none,
@@ -343,13 +352,8 @@ pub(crate) struct DragFiles {
 }
 
 impl DragFiles {
-    pub(crate) fn of(
-        item: &BatchItem,
-        split: bool,
-        style: super::background_io::SelectionStyle,
-        action: super::brush_state::CutoutAction,
-    ) -> Self {
-        Self { composite: Composite::of(item), layers: split.then(|| LayerJob::of(item, style, action)) }
+    pub(crate) fn of(item: &BatchItem, spec: DragSpec) -> Self {
+        Self { composite: Composite::of(item), layers: spec.split.then(|| LayerJob::of(item, spec.style, spec.action)) }
     }
 
     /// Render and write the files; slow on a big image, so off the UI
@@ -394,12 +398,8 @@ struct LayerKey {
 }
 
 impl DragKey {
-    pub(crate) fn of(
-        item: &BatchItem,
-        split: bool,
-        style: super::background_io::SelectionStyle,
-        action: super::brush_state::CutoutAction,
-    ) -> Self {
+    pub(crate) fn of(item: &BatchItem, spec: DragSpec) -> Self {
+        let DragSpec { split, style, action } = spec;
         Self {
             settings: item.settings,
             result: item.result_rgba.as_ref().map(Arc::downgrade),
@@ -652,15 +652,16 @@ mod tests {
     fn a_drag_key_follows_what_the_files_show() {
         use crate::gui::brush_state::CutoutAction;
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let spec = |split| DragSpec { split, style, action: CutoutAction::Restore };
         let mut item = processed_item(1, "key.jpg");
-        let key = DragKey::of(&item, false, style, CutoutAction::Restore);
-        assert!(key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)));
-        assert!(!key.matches(&DragKey::of(&item, true, style, CutoutAction::Restore)), "layers write other files");
+        let key = DragKey::of(&item, spec(false));
+        assert!(key.matches(&DragKey::of(&item, spec(false))));
+        assert!(!key.matches(&DragKey::of(&item, spec(true))), "layers write other files");
         item.settings.bg = Some([255, 0, 0, 255]);
-        assert!(!key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)), "another background");
+        assert!(!key.matches(&DragKey::of(&item, spec(false))), "another background");
         item.settings.bg = None;
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
-        assert!(!key.matches(&DragKey::of(&item, false, style, CutoutAction::Restore)), "a new result");
+        assert!(!key.matches(&DragKey::of(&item, spec(false))), "a new result");
     }
 
     /// A drag takes the files written ahead on a worker; once the item
@@ -670,10 +671,11 @@ mod tests {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::DragExportState;
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let spec = |split| DragSpec { split, style, action: CutoutAction::Restore };
         let mut item = processed_item(9, "ahead-test.jpg");
         let mut state = DragExportState::new();
-        let key = |item: &crate::gui::item::BatchItem| DragKey::of(item, false, style, CutoutAction::Restore);
-        state.prewrite(9, key(&item), DragFiles::of(&item, false, style, CutoutAction::Restore));
+        let key = |item: &crate::gui::item::BatchItem| DragKey::of(item, spec(false));
+        state.prewrite(9, key(&item), DragFiles::of(&item, spec(false)));
         assert!(state.has_current(9, &key(&item)));
 
         let paths = state.take_written(9, &key(&item)).expect("written ahead").expect("written");
@@ -683,7 +685,7 @@ mod tests {
         assert!(state.take_written(9, &key(&item)).is_some(), "kept for the next drag");
 
         let other = processed_item(10, "ahead-other.jpg");
-        state.prewrite(10, key(&other), DragFiles::of(&other, false, style, CutoutAction::Restore));
+        state.prewrite(10, key(&other), DragFiles::of(&other, spec(false)));
         assert!(state.has_current(9, &key(&item)), "hovering another image keeps these: no rewrite on return");
 
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));

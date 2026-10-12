@@ -863,7 +863,7 @@ impl PrunrApp {
     /// MUST follow up with this method. Pairing the two prevents per-model
     /// dispatch rules from drifting between input surfaces.
     pub(crate) fn apply_selection_to_active_model(&mut self, item_id: u64) {
-        let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
+        let Some(idx) = self.batch.index_of(item_id) else { return };
         // A cut-out re-cuts at once; the eraser's region waits for Process;
         // elsewhere the selection only feeds Delete / Copy / Cut.
         if !self.settings.model.edits_cutout() {
@@ -881,7 +881,7 @@ impl PrunrApp {
     /// selection kept across Process (part of that run, so no step of its
     /// own), and when the selection's feathered plane lands.
     pub(crate) fn recut_with_selection(&mut self, item_id: u64) {
-        let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
+        let Some(idx) = self.batch.index_of(item_id) else { return };
         let item = &self.batch.items[idx];
         if (item.selection_mask.is_some() || item.edits.is_some()) && item.shows_cutout() && self.settings.model.edits_cutout() {
             self.dispatch_brush_rerun(idx);
@@ -987,8 +987,7 @@ impl PrunrApp {
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                // A selection is stored with the erase sign on every model.
-                let inverted = mask.invert(prunr_core::selection::BrushMode::Subtract);
+                let inverted = mask.invert();
                 self.commit_selection_and_dispatch(item_id, inverted, StepKind::Selection);
                 ctx.request_repaint();
             }
@@ -1223,7 +1222,6 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Drain completed upscale results and apply them to the matching item.
     /// Paint each finished upscale tile into its square of the item's
     /// preview texture, made on the run's first tile. Only the tile is
     /// uploaded (`set_partial`).
@@ -1252,6 +1250,7 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Drain completed upscale results and apply them to the matching item.
     /// A stale result (the user fired a new dispatch before the previous one
     /// finished, or an admission-refused run delivered nothing) is silently
     /// dropped when no in-flight dispatch is registered. `.try_recv()` keeps
@@ -1289,7 +1288,7 @@ impl PrunrApp {
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
                         item.land_upscale(output.run);
                     }
-                    self.reblend_faces(item_id);
+                    self.after_result_landed(item_id);
                     tracing::info!(item_id, "upscale result applied");
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
@@ -2183,13 +2182,13 @@ impl PrunrApp {
             }
             return;
         }
-        let (split, style, action) = (self.saves_layers(), self.selection_style(), self.settings.brush.cutout_action);
+        let spec = self.drag_spec();
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for id in &ids {
             let Some(item) = self.batch.find_by_id(*id) else { continue };
-            let key = super::drag_export::DragKey::of(item, split, style, action);
+            let key = super::drag_export::DragKey::of(item, spec);
             let written = self.drag_export.take_written(*id, &key)
-                .unwrap_or_else(|| super::drag_export::DragFiles::of(item, split, style, action).write());
+                .unwrap_or_else(|| super::drag_export::DragFiles::of(item, spec).write());
             match written {
                 Ok(mut ps) => paths.append(&mut ps),
                 Err(e) => { self.toasts.error(format!("Drag export failed: {e}")); }
@@ -2236,17 +2235,25 @@ impl PrunrApp {
             return;
         }
         let Some(id) = self.drag_export.due(std::time::Instant::now()) else { return };
-        let Some(idx) = self.batch.items.iter().position(|i| i.id == id) else { return };
+        let Some(idx) = self.batch.index_of(id) else { return };
         let targets = self.batch.drag_targets(idx);
-        let (split, style, action) = (self.saves_layers(), self.selection_style(), self.settings.brush.cutout_action);
+        let spec = self.drag_spec();
         for id in targets {
+            if self.drag_export.is_writing(id) {
+                continue;
+            }
             let Some(item) = self.batch.find_by_id(id) else { continue };
-            let key = super::drag_export::DragKey::of(item, split, style, action);
+            let key = super::drag_export::DragKey::of(item, spec);
             if !self.drag_export.has_current(id, &key) {
-                let files = super::drag_export::DragFiles::of(item, split, style, action);
+                let files = super::drag_export::DragFiles::of(item, spec);
                 self.drag_export.prewrite(id, key, files);
             }
         }
+    }
+
+    /// How a drag writes its files under the current settings.
+    fn drag_spec(&self) -> super::drag_export::DragSpec {
+        super::drag_export::DragSpec { split: self.saves_layers(), style: self.selection_style(), action: self.settings.brush.cutout_action }
     }
 
     pub fn handle_copy(&mut self) {
@@ -2447,14 +2454,12 @@ impl PrunrApp {
     /// Keep faces found for the photo and model the image still wants, and
     /// blend them in; a search for anything else is dropped.
     fn land_faces(&mut self, landed: super::processor::FacesResult) {
-        let Some(idx) = self.batch.items.iter().position(|i| i.id == landed.item_id) else { return };
+        let Some(idx) = self.batch.index_of(landed.item_id) else { return };
         let item = &mut self.batch.items[idx];
-        if item.faces_pending.as_ref().is_some_and(|(p, m)| *m == landed.model && p.same(&landed.photo)) {
+        if item.pending_for(&landed.photo, landed.model) {
             item.faces_pending = None;
         }
-        let current = item.settings.faces.wanted() == Some(landed.model)
-            && item.face_photo().is_some_and(|p| p.same(&landed.photo));
-        if !current {
+        if !item.wants_faces(&landed.photo, landed.model) {
             return;
         }
         let faces = match landed.result {
@@ -2497,11 +2502,13 @@ impl PrunrApp {
         }
     }
 
-    /// A result landed without the faces found for its photo: blend them in.
-    fn reblend_faces(&mut self, item_id: u64) {
-        let Some(idx) = self.batch.items.iter().position(|i| i.id == item_id) else { return };
-        let item = &self.batch.items[idx];
-        if item.face_photo().is_some_and(|photo| item.faces_for(&photo).is_some()) {
+    /// A run's result landed (a cut-out, No model's photo, an upscale):
+    /// what the model can't know goes on top. The selection re-cuts it,
+    /// and the faces found for its photo blend in.
+    fn after_result_landed(&mut self, item_id: u64) {
+        self.recut_with_selection(item_id);
+        let Some(idx) = self.batch.index_of(item_id) else { return };
+        if self.batch.items[idx].faces_input().is_some() {
             self.redo_faces_blend(idx);
         }
     }
@@ -2515,14 +2522,12 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &self.batch.items[idx];
         let shows_result = item.status == BatchStatus::Done || self.settings.model.role() == super::knob_catalog::ModelRole::Filters;
-        if !shows(self.settings.model, Surface::Faces) || !shows_result {
+        let installed = self.hardware_install_cache.has_face_model(item.settings.faces.model);
+        if !item.settings.faces.on || !installed || !shows(self.settings.model, Surface::Faces) || !shows_result {
             return;
         }
         let Some(photo) = item.face_photo() else { return };
         if let Some(model) = item.faces_to_find(&photo) {
-            if !self.hardware_install_cache.has_face_model(item.settings.faces.model) {
-                return;
-            }
             let id = item.id;
             self.batch.items[idx].faces_pending = Some((photo.clone(), model));
             self.processor.dispatch_find_faces(id, photo, model);
@@ -2616,7 +2621,7 @@ impl PrunrApp {
                 correction: None,
                 upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
-                faces: item.face_photo().and_then(|photo| item.faces_for(&photo)),
+                faces: item.faces_input(),
             });
         }
         let seg_tensor = item.hot_seg_tensor();
@@ -2687,7 +2692,7 @@ impl PrunrApp {
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
         let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
-        let faces = item.face_photo().and_then(|photo| item.faces_for(&photo));
+        let faces = item.faces_input();
         Some(DispatchInputs {
             version,
             kind, original, start, settings: item.settings,
@@ -3152,8 +3157,7 @@ impl PrunrApp {
 
         self.refresh_batch_progress_status();
 
-        self.recut_with_selection(item_id);
-        self.reblend_faces(item_id);
+        self.after_result_landed(item_id);
 
         if is_selected {
             self.result_switch_id += 1;
@@ -3588,7 +3592,7 @@ impl PrunrApp {
             self.result_switch_id += 1;
         }
         for item_id in filtered {
-            self.reblend_faces(item_id);
+            self.after_result_landed(item_id);
         }
 
         // Drain files loaded by background thread (max 5 per frame to stay responsive)
@@ -3946,10 +3950,8 @@ impl PrunrApp {
                     show_original: self.show_original,
                     can_compare,
                     shown_seed: item.shown_seed(),
-                    faces_found: item.face_photo().and_then(|photo| {
-                        let model = item.settings.faces.wanted()?;
-                        item.found_faces.as_ref().filter(|f| f.model == model && f.photo.same(&photo)).map(|f| f.faces.len())
-                    }),
+                    faces_found: item.face_photo().zip(item.settings.faces.wanted())
+                        .and_then(|(photo, model)| item.found_for(&photo, model)).map(|f| f.faces.len()),
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
@@ -4373,9 +4375,6 @@ fn spawn_save_single(
     });
 }
 
-/// Write a vec of pre-encoded `(path, bytes)` pairs on a background thread.
-/// Used by the layers-save path — rendering happened on the UI thread (from
-/// cached tensors), this just does disk writes.
 /// One image of a layers save: its layers, and the composite to save
 /// instead when it has none.
 struct LayerSave {
@@ -5171,14 +5170,12 @@ mod selection_action_tests {
     /// Invert: coverage complement, signed by the active brush mode.
     #[test]
     fn invert_action_replaces_mask_with_inverse() {
-        use prunr_core::selection::BrushMode;
         use prunr_core::selection::FULL;
         let original = make_mask(4, 4, true);
-        let inverted = original.invert(BrushMode::Subtract);
+        let inverted = original.invert();
         assert!(inverted.cells().iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
         let partial = MaskArtifact::from_cells(2, 2, vec![0, FULL, 0, FULL]);
-        assert_eq!(partial.invert(BrushMode::Subtract).cells(), &[-FULL, 0, -FULL, 0]);
-        assert_eq!(partial.invert(BrushMode::Add).cells(), &[FULL, 0, FULL, 0]);
+        assert_eq!(partial.invert().cells(), &[-FULL, 0, -FULL, 0]);
     }
 }
 

@@ -191,8 +191,8 @@ pub struct Cli {
     pub upscale: Option<CliUpscaler>,
 
     /// How much larger the upscale makes the image.
-    #[arg(long, requires = "upscale", default_value = "4", value_parser = ["2", "3", "4"])]
-    pub scale: String,
+    #[arg(long, requires = "upscale", default_value_t = 4, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub scale: u8,
 
     /// Denoise before the upscale model, 0 (off) to 1.
     #[arg(long, requires = "upscale", default_value_t = 0.0)]
@@ -468,6 +468,38 @@ pub fn run_remove(args: &Cli) -> i32 {
     run_batch(args)
 }
 
+/// One upscale as the app runs it: denoise, the model, Refine, faces.
+struct UpscaleJob<'a> {
+    engine: &'a prunr_core::OrtEngine,
+    model: prunr_models::ModelId,
+    scale: prunr_core::OutputScale,
+    refine: prunr_core::upscale::Refine,
+    denoise: f32,
+    faces: Option<(prunr_models::ModelId, prunr_core::face::FaceBlend)>,
+}
+
+impl UpscaleJob<'_> {
+    fn run(&self, img: image::RgbaImage) -> Result<image::RgbaImage, String> {
+        let img = std::sync::Arc::new(img);
+        let model_input = if self.denoise > 0.0 {
+            std::sync::Arc::new(prunr_core::denoise::apply_denoise(&img, self.denoise.min(1.0)))
+        } else {
+            img
+        };
+        let progress = prunr_core::Progress::none();
+        let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, self.engine, self.model, self.scale.factor(), &progress, None)
+            .map_err(|e| format!("upscale failed: {e}"))?;
+        let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
+        let mut out = std::sync::Arc::unwrap_or_clone(shown);
+        if let Some((face_model, blend)) = self.faces {
+            let faces = prunr_core::face::find_and_restore(&out, face_model, &progress)
+                .map_err(|e| format!("restore faces failed: {e}"))?;
+            prunr_core::face::compose_faces_into(&mut out, &faces, blend);
+        }
+        Ok(out)
+    }
+}
+
 /// The background-removal flags set on the command line.
 fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
     [
@@ -490,9 +522,9 @@ fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
 /// the app does. The model loads once for the whole batch.
 fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
     use prunr_core::OutputScale;
-    let scale = match args.scale.as_str() {
-        "2" => OutputScale::X2,
-        "3" => OutputScale::X3,
+    let scale = match args.scale {
+        2 => OutputScale::X2,
+        3 => OutputScale::X3,
         _ => OutputScale::X4,
     };
     let model = prunr_core::upscale::model_for_scale(upscaler.model_id(), scale, prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus));
@@ -542,28 +574,10 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         if !args.quiet {
             eprintln!("Upscaling {}...", input.display());
         }
+        let job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces: args.restore_faces.map(|m| (m.model_id(), blend)) };
         let result = image::open(input)
             .map_err(|e| format!("failed to read {}: {e}", input.display()))
-            .and_then(|img| {
-                let img = std::sync::Arc::new(img.into_rgba8());
-                let model_input = if args.denoise > 0.0 {
-                    std::sync::Arc::new(prunr_core::denoise::apply_denoise(&img, args.denoise.min(1.0)))
-                } else {
-                    img
-                };
-                let progress = prunr_core::Progress::none();
-                let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, &engine, model, scale.factor(), &progress, None)
-                    .map_err(|e| format!("upscale failed: {e}"))?;
-                let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &refine);
-                match args.restore_faces {
-                    Some(face_model) => {
-                        let faces = prunr_core::face::find_and_restore(&shown, face_model.model_id(), &progress)
-                            .map_err(|e| format!("restore faces failed: {e}"))?;
-                        Ok(prunr_core::face::compose_faces(&shown, &faces, blend))
-                    }
-                    None => Ok(std::sync::Arc::unwrap_or_clone(shown)),
-                }
-            })
+            .and_then(|img| job.run(img.into_rgba8()))
             .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
         match result {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
@@ -1301,7 +1315,7 @@ mod tests {
     fn the_upscale_flags_need_upscale_mode() {
         let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);
         assert_eq!(cli.upscale, Some(super::CliUpscaler::Nomos));
-        assert_eq!((cli.scale.as_str(), cli.sharpen, cli.face_strength), ("3", -0.5, 70));
+        assert_eq!((cli.scale, cli.sharpen, cli.face_strength), (3, -0.5, 70));
         assert_eq!(cli.restore_faces.map(super::CliFaceModel::model_id), Some(prunr_models::ModelId::FaceRestoreFormerPp));
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--scale", "2"]).is_err(), "--scale needs --upscale");
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "5"]).is_err());

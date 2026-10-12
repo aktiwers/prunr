@@ -82,9 +82,6 @@ pub enum PreviewKind {
     UpscaleTier2,
 }
 
-/// Tier-2 upscale postprocess knob values captured at snapshot time.
-pub type UpscaleTier2Knobs = prunr_core::upscale::Refine;
-
 /// The upscale result to show: Refine over the model's output
 /// (`prunr_core::upscale::refine`), then the restored faces. Faces go in
 /// last: AI blend would mix them back toward the plain enlargement, and
@@ -93,12 +90,16 @@ pub(crate) fn finish_upscale(
     raw: &Arc<RgbaImage>,
     input: &RgbaImage,
     reference: Option<Arc<RgbaImage>>,
-    knobs: &UpscaleTier2Knobs,
+    knobs: &prunr_core::upscale::Refine,
     faces: Option<&FacedKey>,
 ) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
     let (shown, reference) = prunr_core::upscale::refine(raw, input, reference, knobs);
     let shown = match faces {
-        Some(f) => Arc::new(prunr_core::face::compose_faces(&shown, &f.faces, f.blend)),
+        Some(f) => {
+            let mut faced = Arc::unwrap_or_clone(shown);
+            prunr_core::face::compose_faces_into(&mut faced, &f.faces, f.blend);
+            Arc::new(faced)
+        }
         None => shown,
     };
     (shown, reference)
@@ -145,7 +146,7 @@ pub struct PreviewResult {
     /// resolve_tier sees Skip (not UpscaleTier2) on the next frame and
     /// mark_tweak stops firing between settled drags.
     /// `None` for non-UpscaleTier2 kinds.
-    pub applied_tier2_knobs: Option<UpscaleTier2Knobs>,
+    pub applied_tier2_knobs: Option<prunr_core::upscale::Refine>,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -453,8 +454,8 @@ pub struct DispatchInputs {
     /// For `PreviewKind::UpscaleTier2` only — the kept upscale run, which
     /// Tier-2 re-finishes. `None` for other kinds.
     pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
-    /// For `PreviewKind::UpscaleTier2` only — snapshot of the four Tier-2 knobs.
-    pub upscale_tier2_knobs: Option<UpscaleTier2Knobs>,
+    /// For `PreviewKind::UpscaleTier2` only — snapshot of the Refine knobs.
+    pub upscale_tier2_knobs: Option<prunr_core::upscale::Refine>,
     /// Restored faces to blend into `original` before anything else.
     pub faces: Option<FacesInput>,
 }
@@ -650,7 +651,9 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             None
         }
         Some(FacesInput { key, faced: None }) => {
-            let faced = Arc::new(DynamicImage::ImageRgba8(prunr_core::face::compose_faces(&inputs.original.to_rgba8(), &key.faces, key.blend)));
+            let mut photo = inputs.original.to_rgba8();
+            prunr_core::face::compose_faces_into(&mut photo, &key.faces, key.blend);
+            let faced = Arc::new(DynamicImage::ImageRgba8(photo));
             inputs.original = Arc::clone(&faced);
             Some(faced)
         }
@@ -702,7 +705,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     }
                 }
             }
-            PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
+            PreviewKind::UpscaleTier2 => unreachable!("run_preview finishes UpscaleTier2 itself"),
         }
     } else {
         (None, None)
@@ -767,7 +770,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             );
             RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::empty() }
         }
-        PreviewKind::UpscaleTier2 => unreachable!("UpscaleTier2 is handled by the early-return above"),
+        PreviewKind::UpscaleTier2 => unreachable!("run_preview finishes UpscaleTier2 itself"),
     }
 }
 
@@ -1208,7 +1211,7 @@ mod tests {
     fn finishing_an_upscale_compares_against_what_was_upscaled() {
         let raw = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([200, 30, 30, 255])));
         let input = RgbaImage::from_pixel(2, 2, image::Rgba([20, 20, 220, 255]));
-        let knobs = |ai_blend, color_match| UpscaleTier2Knobs { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend, color_match };
+        let knobs = |ai_blend, color_match| prunr_core::upscale::Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend, color_match };
 
         let (shown, reference) = finish_upscale(&raw, &input, None, &knobs(1.0, false), None);
         assert!(Arc::ptr_eq(&shown, &raw), "nothing on: the raw output itself");
@@ -1232,7 +1235,7 @@ mod tests {
         }
         let raw_arc = Arc::new(raw_buf);
 
-        let knobs = UpscaleTier2Knobs {
+        let knobs = prunr_core::upscale::Refine {
             sharpen: 0.0,
             sharpen_sigma: 2.0,
             ai_blend: 1.0,
