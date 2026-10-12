@@ -54,6 +54,9 @@ pub struct BrushSettings {
     /// fills; erosion preserves more original detail at the boundary.
     #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
+    /// LaMa-family only: how large a hole is filled (see `FillScale`).
+    #[serde(default)]
+    pub inpaint_fill_scale: prunr_core::inpaint::FillScale,
     /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.
     #[serde(default, deserialize_with = "own_prompt")]
     pub sd_prompt: String,
@@ -268,6 +271,7 @@ impl BrushSettings {
         self.inpaint_sharpen = source.inpaint_sharpen;
         self.inpaint_feather = source.inpaint_feather;
         self.inpaint_grow = source.inpaint_grow;
+        self.inpaint_fill_scale = source.inpaint_fill_scale;
     }
 
     /// The prompt a fill runs with: the user's, or the shipped one when
@@ -316,6 +320,7 @@ impl Default for BrushSettings {
             inpaint_sharpen: 0.6,
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
+            inpaint_fill_scale: Default::default(),
             sd_prompt: String::new(),
             sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
@@ -819,6 +824,7 @@ mod tests {
             inpaint_sharpen: 1.7,
             inpaint_feather: 24.0,
             inpaint_grow: -8.0,
+            inpaint_fill_scale: prunr_core::inpaint::FillScale::Quarter,
             sd_prompt: "custom prompt".into(),
             sd_negative_prompt: "custom negative".into(),
             sd_guidance_scale: 5.5,

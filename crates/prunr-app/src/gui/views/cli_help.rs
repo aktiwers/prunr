@@ -157,6 +157,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--inpaint", "Switch to Eraser mode");
                             opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
+                            opt_row(ui, "--fill-scale <scale>", "auto, full, half or quarter: large areas fill more convincingly smaller (default auto)");
                         });
 
                     ui.add_space(theme::SPACE_MD);

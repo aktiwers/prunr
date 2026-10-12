@@ -1098,6 +1098,7 @@ impl PrunrApp {
             sharpen: bs.inpaint_sharpen,
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
+            fill_scale: bs.inpaint_fill_scale,
             backend,
             sd_prompt: bs.sd_prompt_for_run(),
             sd_negative_prompt: bs.sd_negative_prompt.clone(),
