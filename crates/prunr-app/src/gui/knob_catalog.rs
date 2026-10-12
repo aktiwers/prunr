@@ -154,6 +154,8 @@ pub enum Surface {
     SelectionStrokes,
     /// Expand region, Feather and Sharpen for the filled region.
     FillRegionKnobs,
+    /// Restore faces: the models whose output is the photo itself.
+    Faces,
 }
 
 /// Whether `surface` shows for `model`: only where it has an effect. A
@@ -170,6 +172,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Brushes => role != Upscale,
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
+        Surface::Faces => matches!(role, Cutout | Filters),
     }
 }
 
@@ -516,9 +519,9 @@ mod tests {
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs];
-        let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes];
-        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes];
+        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces];
+        let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
+        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
         let upscale: &[Surface] = &[Upscale];
