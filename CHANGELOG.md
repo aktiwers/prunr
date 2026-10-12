@@ -28,6 +28,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **A new look.** Panels float as dark glass with round pill corners. Mask, Sketch, Effect, Outline & Shadow, Background and Refine open as a quick strip of their everyday knobs; its dots open the full panel under it. Effects and backgrounds are picture tiles, colors are swatch dots, choices are segmented pills. The model picker groups models by what they do. Settings has a sidebar of pages (Performance, Hardware, Images, Editing, Hotkeys, Credits) and the Model Store is a grid of cards that open in place. The brush panels hold only what their strip lacks, and on a cut-out Erase is drawn in warm red.
 - Refine's Brightness lift and Saturation are gone (Brightness lift clipped highlights and banded shadows; no upscaler offers either), and so is the 4× two-pass Scale.
 - The Fill style chip is called **Effect**, with None first in its list. The Channel swap effect is gone (saved presets with it load as None); Duotone looks as before, now drawn as a two-color gradient map.
 - **Backgrounds are one choice**: Transparent, Solid color, Image, Blurred photo or Black & white photo. Picking one replaces the others. The Inverted background is gone. A solid color is opaque, as it is saved. Image fit is Cover, Contain or Tile: presets with Stretch load as Cover, with Center as Contain.
