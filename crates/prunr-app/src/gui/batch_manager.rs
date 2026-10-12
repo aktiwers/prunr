@@ -683,7 +683,8 @@ mod tests {
 
     /// Recording a step (a switch, an undo, a new result) must cost the UI
     /// thread nothing: a stored state is compressed off-thread once nothing
-    /// else holds it, and reads back unchanged.
+    /// else holds it, and reads back unchanged. The step an undo returns to
+    /// is held unpacked instead.
     #[test]
     fn undo_states_are_compressed_off_the_ui_thread() {
         let mut batch = fixture();
@@ -692,6 +693,8 @@ mod tests {
         item.result_rgba = Some(Arc::clone(&rgba));
         item.status = BatchStatus::Done;
         item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([1, 1, 1, 255]))));
+        item.commit(crate::gui::timeline::StepKind::Edit);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(64, 64)));
         item.commit(crate::gui::timeline::StepKind::Edit);
         batch.items.push(item);
@@ -703,8 +706,15 @@ mod tests {
             batch.compress_history_off_thread();
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(first_compressed(&batch), "the earlier result, held by nothing else, is compressed");
+        assert!(first_compressed(&batch), "an older result, held by nothing else, is compressed");
+        let warm = |b: &BatchManager| b.items[0].warm_previous.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|w| w.image.is_some());
+        while !warm(&batch) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let previous_compressed = batch.items[0].timeline.stored_images().nth(1).is_some_and(|c| c.is_compressed());
+        assert!(warm(&batch) && !previous_compressed, "the step undo returns to stays unpacked");
         let item = &mut batch.items[0];
+        item.undo_step();
         item.undo_step();
         assert_eq!(item.result_rgba.as_ref().unwrap().get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
