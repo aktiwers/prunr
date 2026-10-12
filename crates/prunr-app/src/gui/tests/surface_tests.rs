@@ -376,3 +376,18 @@ fn the_outline_and_shadow_flyout_names_every_control() {
         assert!(names.iter().any(|n| n.starts_with(expected)), "{expected} missing from {names:?}");
     }
 }
+
+/// With the SD eraser's brush on, the strip offers "Try another", greyed
+/// until a fill exists, and names it.
+#[test]
+fn the_sd_eraser_strip_offers_try_another() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
+    settle(&mut h);
+    h.state_mut().brush_state.toggle();
+    settle(&mut h);
+    let tree = super::tree_tests::tree(&h);
+    let node = tree.iter().find(|n| n.name.as_deref() == Some("Try another")).expect("Try another on the strip");
+    assert!(node.disabled, "greyed before any fill");
+    super::tree_tests::assert_all_controls_named(&h, "SD eraser strip");
+}

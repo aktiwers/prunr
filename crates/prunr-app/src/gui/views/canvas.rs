@@ -184,9 +184,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
+            can_reroll: app.can_reroll_intent(),
         };
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
-        app.apply_brush_change(change);
+        app.apply_brush_change(change.brush);
+        if change.try_another {
+            app.handle_reroll_intent();
+        }
     }
 
     if brush_active && !pointer_blocked {
