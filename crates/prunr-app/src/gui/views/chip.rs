@@ -69,7 +69,7 @@ pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui
 /// `accent` = true draws an accent border (non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     let stroke = if accent {
-        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT)
+        egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT_BRIGHT)
     } else {
         egui::Stroke::new(theme::STROKE_DEFAULT, Color32::TRANSPARENT)
     };
@@ -324,7 +324,7 @@ fn outline_when_open(resp: &Response, id: egui::Id) {
         resp.ctx.layer_painter(resp.layer_id).rect_stroke(
             resp.rect,
             theme::BUTTON_ROUNDING,
-            egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT),
+            egui::Stroke::new(theme::STROKE_DEFAULT, theme::ACCENT_BRIGHT),
             egui::StrokeKind::Outside,
         );
     }
