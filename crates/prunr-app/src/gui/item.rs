@@ -398,6 +398,15 @@ impl BatchItem {
         self.selection_texture.as_ref().filter(|t| t.key == (hash, style))
     }
 
+    /// Free the upscale's enlarged input (output-sized; up to ~1 GB for a
+    /// 16K result) while the image is not on screen. AI blend and Color
+    /// match rebuild it when next used (0.1-0.3 s); the run itself stays.
+    pub(crate) fn drop_upscale_reference(&mut self) {
+        if let Some(run) = self.upscale.as_mut() {
+            run.reference = None;
+        }
+    }
+
     /// Clear the cached upscale run.
     /// Called on model switch and on item error. Tier-1 knob changes do NOT
     /// call this — the next dispatch's pump_upscale_results overwrites the

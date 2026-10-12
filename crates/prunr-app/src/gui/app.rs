@@ -2730,6 +2730,7 @@ impl PrunrApp {
                 continue;
             }
             item.drop_hot_tensors();
+            item.drop_upscale_reference();
             item.reveal = None;
             item.subject = None;
             // A full-size picture made from the photo; rebuilt when shown.
@@ -4307,6 +4308,30 @@ impl ClassifiedTiers {
 /// would `is_file()`-stat the disk at 60 Hz.
 pub(crate) fn can_process_upscale(is_in_flight: bool, item_loaded: bool) -> bool {
     item_loaded && !is_in_flight
+}
+
+#[cfg(test)]
+mod background_item_tests {
+    use std::sync::Arc;
+    use crate::gui::item::UpscaleCache;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    /// An image not on screen drops its upscale's enlarged reference (the
+    /// size of the output); the model's output and input stay, so Refine
+    /// rebuilds it on return. The shown image keeps its own.
+    #[test]
+    fn images_not_on_screen_drop_the_upscale_reference() {
+        let mut app = super::PrunrApp::new_for_test();
+        let image = || Arc::new(image::RgbaImage::new(8, 8));
+        for id in [1, 2] {
+            push_test_item(&mut app, id).upscale = Some(UpscaleCache::new(image(), image(), Some(image())));
+        }
+        app.batch.select_item(0);
+        app.evict_background_item_caches(0);
+        let kept = |i: usize| app.batch.items[i].upscale.as_ref().map(|u| u.reference.is_some());
+        assert_eq!(kept(0), Some(true), "the shown image keeps its reference");
+        assert_eq!(kept(1), Some(false), "the other drops it but keeps its run");
+    }
 }
 
 #[cfg(test)]
