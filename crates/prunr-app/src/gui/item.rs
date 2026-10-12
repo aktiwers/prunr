@@ -261,6 +261,24 @@ impl FacePhoto {
     }
 }
 
+/// A result for an export off the UI thread: the one on screen, or one
+/// parked in the timeline while its image is off screen, unpacked where
+/// it is used.
+#[derive(Clone)]
+pub(crate) enum ResultRef {
+    Shown(Arc<image::RgbaImage>),
+    Parked(super::timeline::StoredImage),
+}
+
+impl ResultRef {
+    pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
+        match self {
+            Self::Shown(rgba) => Some(Arc::clone(rgba)),
+            Self::Parked(stored) => stored.load(),
+        }
+    }
+}
+
 /// Which photo Restore faces works on: the photo a cut-out or No model's
 /// preview starts from, or the shown upscale's output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1199,6 +1217,12 @@ impl BatchItem {
         if self.result_parked() {
             self.result_rgba = self.timeline.current().result.as_ref().and_then(|r| r.load());
         }
+    }
+
+    /// The result to export, parked or not; nothing is unpacked here.
+    pub(crate) fn result_ref(&self) -> Option<ResultRef> {
+        self.result_rgba.clone().map(ResultRef::Shown)
+            .or_else(|| self.timeline.current().result.clone().map(ResultRef::Parked))
     }
 
     /// The shown state has a result that the working copy has released.

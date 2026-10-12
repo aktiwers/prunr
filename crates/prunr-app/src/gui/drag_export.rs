@@ -319,7 +319,7 @@ fn write_atomically(
 struct Composite {
     item_id: u64,
     filename: String,
-    result: Option<(Arc<image::RgbaImage>, super::item::ExportBg)>,
+    result: Option<(super::item::ResultRef, super::item::ExportBg)>,
     source: ImageSource,
 }
 
@@ -327,8 +327,8 @@ impl Composite {
     fn of(item: &BatchItem) -> Self {
         Self {
             item_id: item.id,
-            filename: make_filename(&item.filename, item.result_rgba.is_some(), item.settings.line_mode),
-            result: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
+            filename: make_filename(&item.filename, item.result_ref().is_some(), item.settings.line_mode),
+            result: item.result_ref().map(|r| (r, item.export_bg())),
             source: item.source.clone(),
         }
     }
@@ -336,8 +336,9 @@ impl Composite {
     fn write(&self) -> std::io::Result<PathBuf> {
         let path = item_dir(self.item_id).join(&self.filename);
         match &self.result {
-            Some((rgba, bg)) => {
-                let baked = bg.bake(rgba);
+            Some((result, bg)) => {
+                let rgba = result.load().ok_or_else(|| std::io::Error::other("the result is no longer there"))?;
+                let baked = bg.bake(&rgba);
                 write_atomically(&path, |w| prunr_core::encode_rgba_png_into(&baked, w))?;
             }
             None => {
@@ -494,6 +495,23 @@ mod tests {
             make_filename("", true, LineMode::Off),
             "image.prunr.png"
         );
+    }
+
+    /// A ticked image off screen has its result parked in the history; a
+    /// drag still carries that result, not the original photo.
+    #[test]
+    fn a_parked_result_is_what_a_drag_carries() {
+        use crate::gui::brush_state::CutoutAction;
+        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let mut item = processed_item(33, "parked.jpg");
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 200, 0, 255]))));
+        item.commit(crate::gui::timeline::StepKind::Process);
+        assert!(item.park_result());
+        assert!(item.result_rgba.is_none());
+        let paths = DragFiles::of(&item, spec).write().unwrap();
+        assert!(paths[0].ends_with("parked.prunr.png"), "{:?}", paths[0]);
+        assert_eq!(image::open(&paths[0]).unwrap().to_rgba8().get_pixel(0, 0).0, [0, 200, 0, 255]);
+        let _ = std::fs::remove_file(&paths[0]);
     }
 
     /// Two images with one file name get their own drag files.

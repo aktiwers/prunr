@@ -2069,7 +2069,7 @@ impl PrunrApp {
             .filter_map(|id| self.batch.find_by_id(*id))
             .map(|item| LayerSave {
                 layers: super::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
-                composite: item.result_rgba.clone().map(|rgba| (rgba, item.export_bg())),
+                composite: item.result_ref().map(|r| (r, item.export_bg())),
             })
             .collect();
         let without_layers: Vec<&str> = targets.iter()
@@ -2143,9 +2143,9 @@ impl PrunrApp {
     /// One or more sidebar checkboxes selected — pick a folder, write each
     /// as `<source-stem>.prunr.png`. Encode + write run on a background thread.
     fn save_selected_to_folder(&mut self) {
-        let items: Vec<(String, Arc<image::RgbaImage>, super::item::ExportBg)> = self.batch.items.iter()
+        let items: Vec<(String, super::item::ResultRef, super::item::ExportBg)> = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done)
-            .filter_map(|item| Some((item.filename.clone(), item.result_rgba.clone()?, item.export_bg())))
+            .filter_map(|item| Some((item.filename.clone(), item.result_ref()?, item.export_bg())))
             .collect();
         let Some(folder) = self.system.pick_folder_dialog(
             self.last_open_dir.as_deref(),
@@ -2263,7 +2263,7 @@ impl PrunrApp {
         // - 2+ checkbox-selected → copy the first, show a hint toast about drag-out.
         //   (System clipboards can't hold multiple images as bitmaps; drag-out
         //    is the native multi-image export path.)
-        let with_result = |b: &BatchItem| Some((b.result_rgba.clone()?, b.export_bg()));
+        let with_result = |b: &BatchItem| Some((b.result_ref()?, b.export_bg()));
         let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.selected).filter_map(with_result).collect();
         let (to_copy, multi_hint) = match ticked.len() {
             0 => (self.batch.selected_item().and_then(with_result), None),
@@ -2276,16 +2276,20 @@ impl PrunrApp {
             ),
         };
 
-        let Some((rgba, bg)) = to_copy else { return };
+        let Some((result, bg)) = to_copy else { return };
         // The background goes into the clipboard image so it matches the
-        // canvas; a blur of the full photo is baked off the UI thread.
-        if bg.is_empty() {
+        // canvas; a blur of the full photo, or a parked result to unpack,
+        // is made off the UI thread.
+        if let (true, super::item::ResultRef::Shown(rgba)) = (bg.is_empty(), &result) {
+            let rgba = Arc::clone(rgba);
             self.finish_copy(&rgba, multi_hint);
             return;
         }
         let tx = self.batch.bg_io.copy_ready_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send((bg.bake(&rgba), multi_hint));
+            if let Some(rgba) = result.load() {
+                let _ = tx.send((bg.bake(&rgba), multi_hint));
+            }
         });
     }
 
@@ -4400,7 +4404,7 @@ fn spawn_save_single(
 /// instead when it has none.
 struct LayerSave {
     layers: super::drag_export::LayerJob,
-    composite: Option<(Arc<image::RgbaImage>, super::item::ExportBg)>,
+    composite: Option<(super::item::ResultRef, super::item::ExportBg)>,
 }
 
 /// Render and write each image's layers into `folder` on a background
@@ -4412,8 +4416,8 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
         for job in jobs {
             let mut files = job.layers.render_bytes();
             if files.is_empty() {
-                if let Some((rgba, bg)) = &job.composite {
-                    if let Ok(bytes) = format.encode(&bg.bake(rgba)) {
+                if let Some((rgba, bg)) = job.composite.as_ref().and_then(|(r, bg)| Some((r.load()?, bg))) {
+                    if let Ok(bytes) = format.encode(&bg.bake(&rgba)) {
                         files.push((super::drag_export::export_name(job.layers.filename(), format), bytes));
                     }
                 }
@@ -4438,15 +4442,19 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
 /// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
-    items: Vec<(String, Arc<image::RgbaImage>, super::item::ExportBg)>,
+    items: Vec<(String, super::item::ResultRef, super::item::ExportBg)>,
     format: prunr_core::ExportFormat,
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
-        for (filename, rgba, bg) in items {
+        for (filename, result, bg) in items {
             let out_path = folder.join(super::drag_export::export_name(&filename, format));
+            let Some(rgba) = result.load() else {
+                failed += 1;
+                continue;
+            };
             match format.encode(&bg.bake(&rgba)) {
                 Ok(bytes) => match std::fs::write(&out_path, &bytes) {
                     Ok(()) => saved += 1,
