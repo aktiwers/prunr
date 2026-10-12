@@ -74,9 +74,9 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
         outcome.committed |= g.commit;
         super::hint(ui, "Grow or shrink the painted region before the fill.");
         ui.add_space(4.0);
-        let f = chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::px(v, 0));
+        let f = chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)));
         outcome.committed |= f.commit;
-        super::hint(ui, "Soften where the fill meets the photo.");
+        super::hint(ui, "Fade the fill into the photo over a ring just outside the painted region.");
         ui.add_space(4.0);
         // Sharpen displays as 0-100% on a 0-2 internal range.
         let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));

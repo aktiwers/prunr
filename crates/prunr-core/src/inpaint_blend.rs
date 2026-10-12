@@ -47,10 +47,17 @@ pub const SEAM_BLEND_RADIUS: u32 = 6;
 /// trade-off between edge sharpness (lower) and seam smoothness (higher).
 pub const SEAM_BLEND_EPSILON: f32 = 1e-3;
 
-/// Default band width for [`seam_guided_blend`]. Pixels deeper than this
-/// stay as the raw inpainted output; pixels at the edge fade toward the
-/// guided-filter result.
-pub const SEAM_BLEND_BAND_PX: f32 = 8.0;
+/// The eraser's default Expand region and Edge blend, in pixels.
+pub const DEFAULT_GROW_PX: f32 = 2.0;
+pub const DEFAULT_EDGE_BLEND_PX: f32 = 4.0;
+
+/// The region a fill replaces: what was painted, grown by `grow_px`, then
+/// by the `edge_blend_px` ring the fill fades into the photo over. The
+/// ring lies outside the grown region, so the blend never reaches the
+/// object being erased.
+pub fn fill_region(painted: &GrayImage, grow_px: f32, edge_blend_px: f32) -> GrayImage {
+    crate::inpaint::grow_mask(painted, (grow_px + edge_blend_px.max(0.0)).round() as i32)
+}
 
 /// Bounding box of a region inside an image (top-left + size, all in pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,8 +457,8 @@ fn composite_channel(
 /// Single source of truth for the inpaint post-process pipeline:
 /// color match → seam-guided blend → optional sharpen. Used by the
 /// LaMa rayon path and the subprocess worker arm so constants and
-/// order can't drift across call sites. `feather_px == 0.0` falls back
-/// to `SEAM_BLEND_BAND_PX`; `sharpen <= 0.0` skips the sharpen pass.
+/// order can't drift across call sites. `mask` is the [`fill_region`];
+/// `feather_px <= 0.0` skips the blend, `sharpen <= 0.0` the sharpen.
 pub fn finalize_inpaint(
     raw: &RgbaImage,
     source: &RgbaImage,
@@ -460,10 +467,9 @@ pub fn finalize_inpaint(
     sharpen: f32,
 ) -> RgbaImage {
     let color_matched = color_match_inpainted(raw, source, mask, COLOR_MATCH_RING_PX);
-    let band_px = if feather_px > 0.0 { feather_px } else { SEAM_BLEND_BAND_PX };
     let mut out = seam_guided_blend(
         &color_matched, source, mask,
-        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, band_px,
+        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px,
     );
     if sharpen > 0.0 {
         out = crate::inpaint::sharpen_inpainted(&out, mask, sharpen);
@@ -665,5 +671,51 @@ mod tests {
         let mask = GrayImage::from_pixel(32, 32, Luma([255]));
         let bbox = mask_bbox_expanded(&mask, 4, 32, 32);
         assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 32, h: 32 }));
+    }
+
+    /// Edge blend 0 is no blend at all: the fill is only colour-matched.
+    #[test]
+    fn edge_blend_zero_leaves_the_fill_unblended() {
+        let src = solid(48, 48, [90, 120, 150, 255]);
+        let mut raw = solid(48, 48, [90, 120, 150, 255]);
+        let mut mask = empty_mask(48, 48);
+        for y in 16..32 { for x in 16..32 {
+            mask.put_pixel(x, y, Luma([255]));
+            raw.put_pixel(x, y, Rgba([((x * 7) % 255) as u8, 40, 200, 255]));
+        } }
+        let matched = color_match_inpainted(&raw, &src, &mask, COLOR_MATCH_RING_PX);
+        assert_eq!(finalize_inpaint(&raw, &src, &mask, 0.0, 0.0), matched);
+    }
+
+    /// The fill region is the painted one grown by Expand and then by the
+    /// Edge blend ring.
+    #[test]
+    fn the_fill_region_grows_by_expand_plus_edge_blend() {
+        let mut painted = empty_mask(40, 40);
+        painted.put_pixel(20, 20, Luma([255]));
+        let region = fill_region(&painted, 2.0, 3.0);
+        assert_eq!(region.get_pixel(25, 20)[0], 255, "5 px out is filled");
+        assert_eq!(region.get_pixel(26, 20)[0], 0, "6 px out is not");
+        assert_eq!(fill_region(&painted, 0.0, 0.0), painted);
+    }
+
+    /// The blend fades the fill into the photo over the Edge blend ring,
+    /// which lies outside what was painted: the erased object never
+    /// shows through, however wide the blend.
+    #[test]
+    fn a_wide_edge_blend_never_brings_back_the_erased_object() {
+        let mut src = solid(64, 64, [100, 100, 100, 255]);
+        let mut painted = empty_mask(64, 64);
+        for y in 24..40 { for x in 24..40 {
+            src.put_pixel(x, y, Rgba([250, 250, 250, 255]));
+            painted.put_pixel(x, y, Luma([255]));
+        } }
+        let raw = solid(64, 64, [100, 100, 100, 255]);
+        let region = fill_region(&painted, 0.0, 12.0);
+        let out = finalize_inpaint(&raw, &src, &region, 12.0, 0.0);
+        let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
+            .map(|(x, y)| out.get_pixel(x, y)[0])
+            .max().unwrap();
+        assert!(brightest <= 110, "object rim ghosted back: {brightest}");
     }
 }
