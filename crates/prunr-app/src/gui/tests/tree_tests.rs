@@ -324,3 +324,17 @@ fn a_dropdown_keeps_its_flyout_open() {
     assert!(egui::Popup::is_any_open(&h.ctx), "the flyout stayed open");
     assert!(names(&h).iter().any(|n| n.starts_with("Rainbow")), "the list opened");
 }
+
+/// The Model Store names every control, a card's details open in place.
+#[test]
+fn the_model_store_names_every_control() {
+    let mut h = harness();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    settle(&mut h);
+    assert_all_controls_named(&h, "model store");
+    click(&mut h, "Details Silueta");
+    assert!(h.state().model_store.is_some(), "the store stays open");
+    let toggle = tree(&h).iter().find(|n| n.name.as_deref() == Some("Details Silueta")).map(|n| n.toggled);
+    assert_eq!(toggle, Some(Some(true)), "the card opened");
+    assert_all_controls_named(&h, "model store, a card open");
+}
