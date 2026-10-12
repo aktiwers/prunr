@@ -58,6 +58,11 @@ impl BackdropPhoto {
 }
 
 impl ExportBg {
+    /// Nothing goes behind the result: baking returns it as it is.
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self.backdrop, super::item_settings::Backdrop::Transparent)
+    }
+
     pub(crate) fn bake(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
         use super::item_settings::Backdrop;
         let composite = |under: &dyn Fn(&mut image::RgbaImage)| {
