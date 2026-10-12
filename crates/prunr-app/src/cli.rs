@@ -134,6 +134,16 @@ pub struct Cli {
     #[arg(long, value_name = "blur[:N]|bw", value_parser = parse_bg_effect)]
     pub bg_effect: Option<prunr_core::BgEffect>,
 
+    /// Sticker outline around the cut-out: width in px, optionally with a
+    /// color, e.g. `8` (white) or `8:000000`.
+    #[arg(long, value_name = "PX[:HEX]", value_parser = parse_outline)]
+    pub outline: Option<(f32, [u8; 3])>,
+
+    /// Shadow under the cut-out: `soft` (all around) or `drop` (below),
+    /// with the app's default opacity, blur and distance.
+    #[arg(long, value_name = "soft|drop", value_parser = parse_shadow)]
+    pub shadow: Option<prunr_core::ShadowKind>,
+
     /// Run every model on the CPU, even when a GPU is available.
     #[arg(long)]
     pub cpu: bool,
@@ -251,6 +261,24 @@ fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     }
 }
 
+fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
+    let (width, color) = s.split_once(':').unwrap_or((s, "ffffff"));
+    let width: f32 = width.parse().map_err(|_| format!("'{width}' is not an outline width in px"))?;
+    if !(0.0..=96.0).contains(&width) {
+        return Err(format!("outline width {width} is outside 0-96 px"));
+    }
+    let color = parse_hex_color(color).ok_or_else(|| format!("'{color}' is not a hex color like ffffff"))?;
+    Ok((width, color))
+}
+
+fn parse_shadow(s: &str) -> Result<prunr_core::ShadowKind, String> {
+    match s {
+        "soft" => Ok(prunr_core::ShadowKind::Soft),
+        "drop" => Ok(prunr_core::ShadowKind::Drop),
+        _ => Err(format!("'{s}' is not one of soft, drop")),
+    }
+}
+
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
     if s.len() != 6 { return None; }
@@ -270,6 +298,7 @@ impl Cli {
             guided_radius: self.edge_width.clamp(1, 64),
             feather: self.feather.max(0.0),
             fill_style: self.effect.unwrap_or_default(),
+            decoration: self.decoration(),
             ..Default::default()
         }
     }
@@ -278,6 +307,18 @@ impl Cli {
     /// input and the folder for several.
     fn result_path(&self, input: &std::path::Path) -> PathBuf {
         output_path(input, &self.output, self.inputs.len() > 1)
+    }
+
+    fn decoration(&self) -> prunr_core::Decoration {
+        let mut d = prunr_core::Decoration::default();
+        if let Some((width, color)) = self.outline {
+            d.outline_width = width;
+            d.outline_color = color;
+        }
+        if let Some(kind) = self.shadow {
+            d.shadow = kind;
+        }
+        d
     }
 
     fn line_mode(&self) -> LineMode {
@@ -1051,6 +1092,17 @@ mod tests {
         assert_eq!(many.result_path(Path::new("in/b.jpg")), Path::new("out/b.prunr.png"));
         let none = super::Cli::parse_from(["prunr", "in/a.jpg"]);
         assert_eq!(none.result_path(Path::new("in/a.jpg")), Path::new("in/a.prunr.png"));
+    }
+
+    #[test]
+    fn outline_and_shadow_flags_reach_the_mask_settings() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--outline", "8:000000", "--shadow", "drop"]);
+        let d = cli.mask_settings().decoration;
+        assert_eq!((d.outline_width, d.outline_color, d.shadow), (8.0, [0, 0, 0], prunr_core::ShadowKind::Drop));
+        let white = super::Cli::parse_from(["prunr", "a.png", "--outline", "4"]).mask_settings().decoration;
+        assert_eq!(white.outline_color, [255, 255, 255]);
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--outline", "120"]).is_err());
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
     }
 
     /// Help › Command-line reference lists every flag `prunr --help`

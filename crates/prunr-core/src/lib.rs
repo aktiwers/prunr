@@ -7,6 +7,7 @@ pub mod preprocess;
 pub mod postprocess;
 pub mod guided_filter;
 pub mod morphology;
+pub mod decorate;
 pub mod batch;
 pub mod formats;
 pub mod edge;
@@ -35,7 +36,7 @@ pub use postprocess::{tensor_to_mask, tensor_to_mask_from_flat, apply_mask, post
 pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
 pub use formats::{ExportFormat, load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png, encode_rgba_png_into, rgba_view, encode_gray_png, apply_background_color, apply_background_image};
 pub use edge::{EdgeEngine, EdgeInferenceResult, EDGE_SCALE_COUNT, tensor_to_edge_mask, edge_plane, thickened_edges, compose_edges_styled, compose_edges_dual_styled, compose_subject_outline, compose_whole_photo, outline_subject};
-pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, InputTransform};
+pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, InputTransform, Decoration, ShadowKind};
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_bg_effect, apply_fill_style, effect_backdrop};
 pub use selection::{MaskArtifact, SelectionError};

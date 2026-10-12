@@ -68,6 +68,38 @@ pub struct MaskRecipe {
     guided_epsilon_bits: u32,
     feather_bits: u32,
     pub fill_style: FillStyle,
+    #[serde(default)]
+    decoration_bits: DecorationBits,
+}
+
+/// `Decoration` with its floats as bits, so the recipe can be `Eq` and `Hash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct DecorationBits {
+    outline_width: u32,
+    outline_color: [u8; 3],
+    shadow: crate::ShadowKind,
+    shadow_opacity: u32,
+    shadow_blur: u32,
+    shadow_distance: u32,
+}
+
+impl Default for DecorationBits {
+    fn default() -> Self {
+        Self::from(&crate::Decoration::default())
+    }
+}
+
+impl From<&crate::Decoration> for DecorationBits {
+    fn from(d: &crate::Decoration) -> Self {
+        Self {
+            outline_width: d.outline_width.to_bits(),
+            outline_color: d.outline_color,
+            shadow: d.shadow,
+            shadow_opacity: d.shadow_opacity.to_bits(),
+            shadow_blur: d.shadow_blur.to_bits(),
+            shadow_distance: d.shadow_distance.to_bits(),
+        }
+    }
 }
 
 impl From<&crate::MaskSettings> for MaskRecipe {
@@ -81,6 +113,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
             feather_bits: m.feather.to_bits(),
             fill_style: m.fill_style,
+            decoration_bits: DecorationBits::from(&m.decoration),
         }
     }
 }
@@ -95,6 +128,7 @@ impl PartialEq for MaskRecipe {
             && self.guided_epsilon_bits == other.guided_epsilon_bits
             && self.feather_bits == other.feather_bits
             && self.fill_style == other.fill_style
+            && self.decoration_bits == other.decoration_bits
     }
 }
 impl Eq for MaskRecipe {}
@@ -109,6 +143,7 @@ impl std::hash::Hash for MaskRecipe {
         self.guided_epsilon_bits.hash(state);
         self.feather_bits.hash(state);
         self.fill_style.hash(state);
+        self.decoration_bits.hash(state);
     }
 }
 
@@ -468,6 +503,19 @@ mod tests {
         let a = make_recipe(ModelKind::Silueta, 1.0, None);
         let mut b = a.clone();
         b.mask = mask(1.0, 0.5, 0.0, false);
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
+    }
+
+    /// An outline or shadow is drawn from the mask, so changing one
+    /// re-runs the mask from the kept cut-out data, never the model.
+    #[test]
+    fn decoration_change_mask_rerun() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = a.clone();
+        b.mask = crate::MaskRecipe::from(&crate::MaskSettings {
+            decoration: crate::Decoration { outline_width: 6.0, ..crate::Decoration::default() },
+            ..crate::MaskSettings::default()
+        });
         assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
     }
 
