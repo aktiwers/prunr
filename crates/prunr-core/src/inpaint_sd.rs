@@ -2,7 +2,8 @@
 //!
 //! Per-stroke flow: CLIP-tokenize prompt → text encoder; VAE-encode the
 //! masked source; downsample mask to latent space; sample gaussian noise;
-//! denoise via DDIM (with optional classifier-free guidance); VAE-decode
+//! denoise via LCM or DPM++ 2M Karras (with optional classifier-free
+//! guidance); VAE-decode
 //! final latent; composite back through mask.
 //!
 //! Dispatch wraps the per-tile pipeline:
@@ -110,22 +111,6 @@ pub struct SdInpaintRequest {
     /// `Scheduler` variant from this kind.
     #[serde(default)]
     pub scheduler: SchedulerKind,
-    /// Inpaint strength in [0, 1]. 1.0 = pure noise init, fully
-    /// creative rewrite (default, original behavior). 0.7-0.85 =
-    /// VAE-encode the source pixels and add proportional noise →
-    /// preserves structure / lighting, makes targeted edits. 0.0 =
-    /// preserve the original (no work). The dispatcher skips
-    /// `(1-strength) * num_inference_steps` early denoise steps and
-    /// initializes from `add_noise(image_latents, noise, t_start)`.
-    #[serde(default = "default_strength")]
-    pub strength: f32,
-    /// LCM-only: Karras sigma schedule vs linear (the default). Off
-    /// by default — LCM was distilled against the linear schedule, so
-    /// Karras shifts the inference timestep distribution away from
-    /// training. Surface as a user toggle for A/B comparison rather
-    /// than a silent default.
-    #[serde(default)]
-    pub use_karras_sigmas: bool,
     /// How the pipeline runs for this stroke; see `plan_tuning`.
     #[serde(default)]
     pub tuning: SdTuning,
@@ -217,7 +202,6 @@ impl SdSessionKey {
     }
 }
 
-fn default_strength() -> f32 { 1.0 }
 
 /// A seed for a fill nobody pinned.
 pub fn fresh_seed() -> u64 {
@@ -239,8 +223,6 @@ impl Default for SdInpaintRequest {
             seed: None,
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
-            strength: default_strength(),
-            use_karras_sigmas: false,
             tuning: SdTuning::default(),
         }
     }
@@ -719,97 +701,40 @@ fn run_one_tile(
 
     let steps = req.num_inference_steps as usize;
     let mut scheduler = match req.scheduler {
-        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps, req.use_karras_sigmas)),
-        SchedulerKind::Ddim => Scheduler::Ddim(DdimScheduler::new_sd15(steps)),
+        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
         SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
-        SchedulerKind::EulerA => Scheduler::EulerA(EulerAScheduler::new_sd15(steps)),
-        SchedulerKind::UniPc => Scheduler::UniPc(UniPcScheduler::new_sd15(steps)),
     };
     let seed = req.seed.unwrap_or_else(fresh_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    // Strength < 1.0 → skip early denoise steps and initialize from a
-    // VAE-encoded source image mixed with proportional noise. At
-    // strength = 1.0 the path is the original "pure noise init,
-    // run all steps".
-    /// Treat strength near 1.0 as full-noise to avoid skipping a step
-    /// on a 4-step run due to f32 rounding.
-    const STRENGTH_FULL_THRESHOLD: f32 = 0.999;
-    /// init_noise_sigma identity guard — schedulers returning ~1.0 skip
-    /// the in-place latent rescale.
-    const INIT_NOISE_SIGMA_IDENTITY_EPS: f32 = 1e-6;
-
-    let strength = req.strength.clamp(0.0, 1.0);
-    let total_steps = scheduler.timesteps().len();
-    let t_start: usize = if strength >= STRENGTH_FULL_THRESHOLD {
-        0
-    } else {
-        // Floor so a 0.99 doesn't skip a step on a 4-step LCM run.
-        let skipped = ((1.0 - strength) * total_steps as f32).floor() as usize;
-        skipped.min(total_steps - 1)
-    };
-    // Counted over the steps actually run, so a 50%-strength 10-step
-    // run reads "step 1 of 5", not "step 6 of 10".
-    let steps_to_run = (total_steps - t_start) as u32;
+    let total_steps = scheduler.timesteps().len() as u32;
     progress.step(Step::Denoising);
-    progress.inner(0, steps_to_run, Unit::Step);
+    progress.inner(0, total_steps, Unit::Step);
 
     // Hold denoising state as Vec<f32> + captured dim. f16 conversion
     // uses ArrayView4::from_shape (zero-copy on the f32 side); the
     // scheduler writes via step_array_into into a reused scratch buffer.
     let latent_dim = (1_usize, 4_usize, lh, lw);
-    let mut latent_buf: Vec<f32> = if t_start == 0 {
-        let mut l = sample_initial_noise(&mut rng, lw, lh);
-        // σ-space schedulers (Euler-A) lift the initial sample onto
-        // their σ_max scale; α-space schedulers leave unit variance.
-        let init_scale = scheduler.init_noise_sigma();
-        if (init_scale - 1.0).abs() > INIT_NOISE_SIGMA_IDENTITY_EPS {
-            l.mapv_inplace(|v| v * init_scale);
-        }
-        l.into_raw_vec_and_offset().0
-    } else {
-        // Strength < 1: VAE-encode the full source pixels (no mask
-        // gate), then have the scheduler mix in noise at sigmas[t_start].
-        let image_latents = vae_encode_from_input(vae, image_to_minus1_plus1(&padded_image))?;
-        let n = image_latents.len();
-        let dist = StandardNormal;
-        let noise: Vec<f32> = (0..n).map(|_| dist.sample(&mut rng)).collect();
-        scheduler.add_noise(
-            image_latents.as_slice().expect("image latent: standard layout"),
-            &noise,
-            t_start,
-        )
-    };
+    let mut latent_buf: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
 
     // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
     // Without CFG: just one UNet pass with cond.
     let timesteps = scheduler.timesteps().to_vec();
     let scale = req.guidance_scale;
-    let needs_precondition = scheduler.requires_preconditioning();
-    let mut precond_buf: Vec<f32> = Vec::new();
     // Scratch buffer for step output — hoisted outside the loop so
     // mem::swap reuses the allocation across steps (no per-step alloc).
     let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
-    // Skip the first `t_start` entries when strength<1: those are
-    // the high-noise steps we're bypassing.
-    for (i, &t) in timesteps.iter().enumerate().skip(t_start) {
+    for (i, &t) in timesteps.iter().enumerate() {
         // Check cancel between UNet steps. ORT has no per-op cancel, so
         // worst-case latency on cancel is one UNet step (multi-second).
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let latent_f16 = if needs_precondition {
-            scheduler.scale_model_input_into(&latent_buf, i, &mut precond_buf);
-            // Zero-copy view of precond_buf — only the Array4<f16> output stays.
-            let view = ndarray::ArrayView4::from_shape(latent_dim, &precond_buf)
-                .expect("latent_dim matches latent_buf length by construction");
-            f32_to_f16_view(view)
-        } else {
-            // Zero-copy view of latent_buf — only the Array4<f16> output stays.
-            let view = ndarray::ArrayView4::from_shape(latent_dim, &latent_buf)
-                .expect("latent_dim matches latent_buf length by construction");
-            f32_to_f16_view(view)
-        };
+        // Zero-copy view of latent_buf — only the Array4<f16> output stays.
+        let latent_f16 = f32_to_f16_view(
+            ndarray::ArrayView4::from_shape(latent_dim, &latent_buf)
+                .expect("latent_dim matches latent_buf length by construction"),
+        );
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
@@ -828,7 +753,7 @@ fn run_one_tile(
         // latent_buf becomes current and step_out_buf is the stale
         // scratch (overwritten next iteration).
         std::mem::swap(&mut latent_buf, &mut step_out_buf);
-        progress.inner((i - t_start) as u32 + 1, steps_to_run, Unit::Step);
+        progress.inner(i as u32 + 1, total_steps, Unit::Step);
     }
 
     let unet_ms = timer.lap();
@@ -840,7 +765,7 @@ fn run_one_tile(
     let painted = vae_decode(vae, &final_array)?;
     let decode_ms = timer.lap();
     let out = composite(image, &painted, mask, w, h);
-    let steps_run = timesteps.len().saturating_sub(t_start) as u64;
+    let steps_run = timesteps.len() as u64;
     tracing::info!(
         w, h, steps = steps_run, prelude_ms,
         unet_ms_per_step = unet_ms / steps_run.max(1),
@@ -1844,15 +1769,15 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
     a
 }
 
-/// Full-image encode — used by the strength<1 init path so the mixed
-/// init latent retains the original masked-region pixels.
-fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
-    image_to_minus1_plus1_inner(image, None)
-}
-
 fn image_to_minus1_plus1_masked(image: &RgbaImage, mask: &GrayImage) -> Array4<f32> {
     debug_assert_eq!(image.dimensions(), mask.dimensions());
     image_to_minus1_plus1_inner(image, Some(mask))
+}
+
+/// The unmasked conversion, so a test can round-trip the pixel mapping.
+#[cfg(test)]
+fn image_to_minus1_plus1(image: &RgbaImage) -> Array4<f32> {
+    image_to_minus1_plus1_inner(image, None)
 }
 
 fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
@@ -1931,10 +1856,8 @@ fn concat_inpaint_input_f16(
     .expect("concat: shapes pre-validated to (1, *, 64, 64)")
 }
 
-/// Initial gaussian noise scaled by the scheduler's `init_noise_sigma`.
-/// For DDIM with the SD 1.5 schedule, that's 1.0 — the latent itself
-/// starts as plain N(0, 1). Pad here so future schedulers (Euler, DPM++)
-/// that need a different sigma can plug in via the scheduler API.
+/// Initial gaussian noise: LCM and DPM++ hold the latent in α-space, so
+/// it starts as plain N(0, 1).
 fn sample_initial_noise(rng: &mut ChaCha8Rng, lw: usize, lh: usize) -> Array4<f32> {
     let dist = StandardNormal;
     let n = 4 * lw * lh;
@@ -1988,12 +1911,11 @@ fn cfg_blend(
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
-/// Scheduler step dispatched from `run_one_tile`. Writes the new latent
-/// state into `out` (clear + extend on the EulerA arm; assign-from-Vec on
-/// the others — net-zero on those arms but consistent shape for the caller).
+/// Scheduler step dispatched from `run_one_tile`, writing the new latent
+/// state into `out`.
 // `step_idx` is only meaningful to the DPM++ multistep arm, but the
 // dispatch is shared. Threading it through a `StepCtx` struct would
-// force the DDIM/LCM arms to carry a field they never read.
+// force the LCM arm to carry a field it never reads.
 #[allow(clippy::too_many_arguments)]
 fn step_array_into(
     scheduler: &mut Scheduler,
@@ -2007,9 +1929,6 @@ fn step_array_into(
     out: &mut Vec<f32>,
 ) {
     match scheduler {
-        Scheduler::Ddim(s) => {
-            *out = s.step(latent, noise_pred, t, t_prev);
-        }
         Scheduler::Lcm(s) => {
             if is_final_step {
                 *out = s.step(latent, noise_pred, t, true, &[]);
@@ -2025,18 +1944,6 @@ fn step_array_into(
         }
         Scheduler::DpmPp2M(s) => {
             *out = s.step(latent, noise_pred, step_idx);
-        }
-        Scheduler::UniPc(s) => {
-            *out = s.step(noise_pred, latent);
-        }
-        Scheduler::EulerA(s) => {
-            // Ancestral noise sampled per step from the same seeded
-            // RNG so the whole denoise stays reproducible from
-            // `seed`. Final step has σ_to=0 → sigma_up=0, so the
-            // noise contribution vanishes regardless of value.
-            let dist = StandardNormal;
-            let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
-            s.step_into(latent, noise_pred, step_idx, &noise, out);
         }
     }
 }
@@ -2152,7 +2059,7 @@ impl Drop for SdSession {
     }
 }
 
-// ── DDIM scheduler ──────────────────────────────────────────────────────
+// ── SD-1.5 noise schedule and samplers ──────────────────────────────────
 
 /// SD-1.5 train-timestep count (`num_train_timesteps` in Diffusers).
 const SD15_NUM_TRAIN_TIMESTEPS: usize = 1000;
@@ -2192,8 +2099,7 @@ fn compute_log_sigmas_sd15() -> &'static [f32] {
 
 /// Karras sigma schedule (Karras et al. 2022, ρ=7.0) descending from
 /// `sigma_max` to `sigma_min` over `num_inference` points. The terminal
-/// sigma is the caller's responsibility — DPM++ appends `sigma_min`,
-/// Euler-A appends 0.
+/// sigma is the caller's responsibility — DPM++ appends `sigma_min`.
 fn compute_karras_sigmas(num_inference: usize, sigma_min: f32, sigma_max: f32) -> Vec<f32> {
     const RHO: f32 = 7.0;
     if num_inference <= 1 {
@@ -2207,82 +2113,6 @@ fn compute_karras_sigmas(num_inference: usize, sigma_min: f32, sigma_max: f32) -
             (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)).powf(RHO)
         })
         .collect()
-}
-
-/// DDIM (Denoising Diffusion Implicit Models) scheduler — pure math,
-/// matches the SD 1.5 reference defaults. Drives the per-timestep
-/// latent update inside the denoising loop.
-///
-/// Defaults match diffusers' `DDIMScheduler(beta_start=0.00085,
-/// beta_end=0.012, beta_schedule="scaled_linear",
-/// num_train_timesteps=1000)` — the canonical SD 1.5 setting.
-pub struct DdimScheduler {
-    /// `α̅_t` for every training timestep `t ∈ [0, num_train)`.
-    /// Pre-computed at construction; `step` indexes into this with the
-    /// inference timestep and the previous inference timestep.
-    alphas_cumprod: Vec<f32>,
-    /// Subset of training timesteps (length `num_inference`) used by the
-    /// inference loop, descending from near-num_train to 0.
-    timesteps: Vec<i64>,
-    pub num_train: usize,
-    pub num_inference: usize,
-}
-
-impl DdimScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
-        let alphas_cumprod = compute_alphas_cumprod_sd15();
-
-        // Diffusers DDIMScheduler default: timestep_spacing="leading" +
-        // steps_offset=1. step_ratio = floor(num_train / num_inference)
-        // (integer division, matching Python's // operator). Then:
-        //   arange(0, N) * step_ratio + 1, reversed.
-        // For 20 steps: [951, 901, 851, ..., 51, 1].
-        let step_ratio = SD15_NUM_TRAIN_TIMESTEPS / num_inference;
-        let mut timesteps: Vec<i64> = (0..num_inference)
-            .rev()
-            .map(|i| (i * step_ratio + 1) as i64)
-            .collect();
-        for t in &mut timesteps {
-            *t = (*t).clamp(0, SD15_NUM_TRAIN_TIMESTEPS as i64 - 1);
-        }
-
-        Self {
-            alphas_cumprod,
-            timesteps,
-            num_train: SD15_NUM_TRAIN_TIMESTEPS,
-            num_inference,
-        }
-    }
-
-    pub fn timesteps(&self) -> &[i64] {
-        &self.timesteps
-    }
-
-    pub fn alpha_cumprod(&self, t: i64) -> f32 {
-        let idx = t.clamp(0, self.num_train as i64 - 1) as usize;
-        self.alphas_cumprod[idx]
-    }
-
-    /// Standard DDIM update with `eta = 0` (deterministic).
-    pub fn step(&self, latent_t: &[f32], noise_pred: &[f32], t: i64, t_prev: i64) -> Vec<f32> {
-        debug_assert_eq!(latent_t.len(), noise_pred.len(),
-            "DDIM step: latent and noise_pred shapes must match");
-        let alpha_t = self.alpha_cumprod(t);
-        // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
-        // alphas_cumprod[0] (≈0.99915), not 1.0.
-        let alpha_prev = if t_prev < 0 { self.alpha_cumprod(0) } else { self.alpha_cumprod(t_prev) };
-        let sqrt_alpha_t = alpha_t.sqrt();
-        let sqrt_one_minus_alpha_t = (1.0 - alpha_t).sqrt();
-        let sqrt_alpha_prev = alpha_prev.sqrt();
-        let sqrt_one_minus_alpha_prev = (1.0 - alpha_prev).sqrt();
-
-        latent_t.iter().zip(noise_pred.iter())
-            .map(|(&l, &eps)| {
-                let pred_x0 = (l - sqrt_one_minus_alpha_t * eps) / sqrt_alpha_t;
-                sqrt_alpha_prev * pred_x0 + sqrt_one_minus_alpha_prev * eps
-            })
-            .collect()
-    }
 }
 
 /// LCM (Latent Consistency Model) scheduler — port of HuggingFace
@@ -2319,39 +2149,28 @@ pub struct LcmScheduler {
 }
 
 impl LcmScheduler {
-    pub fn new_sd15(num_inference: usize, use_karras: bool) -> Self {
+    pub fn new_sd15(num_inference: usize) -> Self {
         const ORIGINAL_INFERENCE_STEPS: usize = 50;
         let alphas_cumprod = compute_alphas_cumprod_sd15();
 
-        let timesteps: Vec<i64> = if use_karras {
-            // Karras sigmas mapped back to train timesteps via sigma_to_t.
-            // LCM's sigma range matches the SD-1.5 training noise schedule.
-            let log_sigmas = compute_log_sigmas_sd15();
-            let sigma_min = (1.0_f32 - alphas_cumprod[0]).sqrt() / alphas_cumprod[0].sqrt();
-            let sigma_max = (1.0_f32 - alphas_cumprod[SD15_NUM_TRAIN_TIMESTEPS - 1]).sqrt()
-                / alphas_cumprod[SD15_NUM_TRAIN_TIMESTEPS - 1].sqrt();
-            let sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-            sigmas.iter().map(|&s| sigma_to_t(s, log_sigmas)).collect()
-        } else {
-            // Diffusers' LCMScheduler timestep selection:
-            //   k = num_train / original_inference_steps  (= 20 for SD-1.5)
-            //   lcm_origin descending = [999, 979, 959, ..., 19]
-            //   Pick `num_inference` indices via floor(linspace(0, len, num,
-            //   endpoint=False)) into the descending array.
-            let k = SD15_NUM_TRAIN_TIMESTEPS / ORIGINAL_INFERENCE_STEPS;
-            let lcm_origin_descending: Vec<i64> = (0..ORIGINAL_INFERENCE_STEPS)
-                .rev()
-                .map(|i| ((i + 1) * k - 1) as i64)
-                .collect();
-            let n_origin = lcm_origin_descending.len() as f32;
-            let n_inf = num_inference as f32;
-            (0..num_inference)
-                .map(|i| {
-                    let idx = ((i as f32) * n_origin / n_inf).floor() as usize;
-                    lcm_origin_descending[idx.min(lcm_origin_descending.len() - 1)]
-                })
-                .collect()
-        };
+        // Diffusers' LCMScheduler timestep selection:
+        //   k = num_train / original_inference_steps  (= 20 for SD-1.5)
+        //   lcm_origin descending = [999, 979, 959, ..., 19]
+        //   Pick `num_inference` indices via floor(linspace(0, len, num,
+        //   endpoint=False)) into the descending array.
+        let k = SD15_NUM_TRAIN_TIMESTEPS / ORIGINAL_INFERENCE_STEPS;
+        let lcm_origin_descending: Vec<i64> = (0..ORIGINAL_INFERENCE_STEPS)
+            .rev()
+            .map(|i| ((i + 1) * k - 1) as i64)
+            .collect();
+        let n_origin = lcm_origin_descending.len() as f32;
+        let n_inf = num_inference as f32;
+        let timesteps: Vec<i64> = (0..num_inference)
+            .map(|i| {
+                let idx = ((i as f32) * n_origin / n_inf).floor() as usize;
+                lcm_origin_descending[idx.min(lcm_origin_descending.len() - 1)]
+            })
+            .collect();
 
         Self {
             alphas_cumprod,
@@ -2572,398 +2391,6 @@ impl DpmPp2MScheduler {
     }
 }
 
-/// Euler-Ancestral scheduler — port of Diffusers'
-/// `EulerAncestralDiscreteScheduler` at SD-1.5 epsilon prediction.
-///
-/// σ-space parameterization: the latent state is held in σ-space
-/// (initial sample = noise * √(σ_max²+1) for "leading" timestep
-/// spacing). Before each UNet call, `scale_model_input` divides by
-/// √(σ²+1) to map back to the α-space input the UNet was trained
-/// on. DDIM/LCM/DPM++ hold the latent in α-space and don't need
-/// preconditioning.
-pub struct EulerAScheduler {
-    /// Length `num_inference + 1`. Karras schedule descending from
-    /// sigma_max to 0 (terminal sigma=0 makes `sigma_up` vanish on
-    /// the final step → no leftover noise contamination).
-    sigmas: Vec<f32>,
-    timesteps: Vec<i64>,
-    pub num_train: usize,
-    pub num_inference: usize,
-}
-
-impl EulerAScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
-        let log_sigmas = compute_log_sigmas_sd15();
-        let sigma_min = log_sigmas[0].exp();
-        let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
-        let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-        // Euler-A terminates at 0 — sigma_up² = σ_to²·(σ²-σ_to²)/σ²
-        // vanishes when σ_to=0, giving a deterministic final step
-        // and zero residual noise. Different terminal convention
-        // from DPM++ (which uses sigma_min to avoid lambda=+∞ in
-        // the multistep formula).
-        sigmas.push(0.0);
-
-        let timesteps: Vec<i64> = sigmas[..num_inference].iter()
-            .map(|&sigma| sigma_to_t(sigma, log_sigmas))
-            .collect();
-
-        Self {
-            sigmas,
-            timesteps,
-            num_train: SD15_NUM_TRAIN_TIMESTEPS,
-            num_inference,
-        }
-    }
-
-    pub fn timesteps(&self) -> &[i64] { &self.timesteps }
-
-    /// Multiplier applied to the initial standard-normal noise before
-    /// the denoise loop. Diffusers' "leading" timestep spacing:
-    /// `init_noise_sigma = √(σ_max² + 1)`.
-    pub fn init_noise_sigma(&self) -> f32 {
-        let sigma_max = self.sigmas[0];
-        (sigma_max * sigma_max + 1.0).sqrt()
-    }
-
-    /// Pre-UNet preconditioning: σ-space sample → α-space UNet input.
-    /// `α(σ) = 1/√(σ²+1)`, so `α-input = sample · α(σ) = sample / √(σ²+1)`.
-    pub fn scale_model_input_into(&self, latent: &[f32], step_idx: usize, out: &mut Vec<f32>) {
-        let sigma = self.sigmas[step_idx];
-        let scale = 1.0 / (sigma * sigma + 1.0).sqrt();
-        out.clear();
-        out.extend(latent.iter().map(|&v| v * scale));
-    }
-
-    /// Euler-Ancestral update at inference step `step_idx`, writing the
-    /// new latent into a caller-owned `out` (clear + extend — no per-step
-    /// allocation when `out` already has the right capacity).
-    pub fn step_into(
-        &self,
-        latent: &[f32],
-        noise_pred: &[f32],
-        step_idx: usize,
-        noise: &[f32],
-        out: &mut Vec<f32>,
-    ) {
-        debug_assert_eq!(latent.len(), noise_pred.len(),
-            "Euler-A step: latent and noise_pred shapes must match");
-        debug_assert_eq!(latent.len(), noise.len(),
-            "Euler-A step: latent and noise shapes must match");
-        debug_assert!(step_idx + 1 < self.sigmas.len());
-
-        let sigma = self.sigmas[step_idx];
-        let sigma_to = self.sigmas[step_idx + 1];
-
-        // Ancestral noise split:
-        //   sigma_up² = σ_to² · (σ² - σ_to²) / σ²
-        //   sigma_down = √(σ_to² - sigma_up²)
-        // At terminal (σ_to=0), sigma_up = sigma_down = 0 → next = sample + ε * (-σ).
-        let sigma_up = if sigma > 0.0 {
-            let raw = sigma_to * sigma_to * (sigma * sigma - sigma_to * sigma_to)
-                / (sigma * sigma);
-            raw.max(0.0).sqrt()
-        } else {
-            0.0
-        };
-        let sigma_down = (sigma_to * sigma_to - sigma_up * sigma_up).max(0.0).sqrt();
-
-        // For epsilon prediction: derivative = (sample - pred_x0) / σ = ε.
-        // Step: prev = sample + ε · (σ_down - σ) + noise · σ_up.
-        let dt = sigma_down - sigma;
-        out.clear();
-        out.extend(
-            latent.iter().zip(noise_pred.iter()).zip(noise.iter())
-                .map(|((&l, &eps), &n)| l + eps * dt + n * sigma_up),
-        );
-    }
-
-    /// Thin wrapper around `step_into` for backwards compatibility with
-    /// existing tests and any future callers that don't own a scratch buffer.
-    pub fn step(
-        &self,
-        latent: &[f32],
-        noise_pred: &[f32],
-        step_idx: usize,
-        noise: &[f32],
-    ) -> Vec<f32> {
-        let mut out = Vec::with_capacity(latent.len());
-        self.step_into(latent, noise_pred, step_idx, noise, &mut out);
-        out
-    }
-}
-
-/// UniPC (Unified Predictor-Corrector) multistep scheduler.
-///
-/// Port of Diffusers' `UniPCMultistepScheduler` at SD-1.5 defaults:
-/// `solver_order=2`, `predict_x0=True`, `solver_type="bh2"`,
-/// `use_karras_sigmas=True`, `lower_order_final=True`,
-/// `final_sigmas_type="zero"`.
-///
-/// UniPC's corrector solves a 2×2 linear system (Cramer's rule) to
-/// compensate for the predictor's hardcoded `rhos_p=0.5`
-/// approximation, yielding better convergence per step than DPM++ 2M
-/// at the same step budget — best quality in the 8-12 step range.
-pub struct UniPcScheduler {
-    pub(super) sigmas: Vec<f32>,
-    timesteps: Vec<i64>,
-    /// Ring buffer of converted x0 predictions (solver_order=2).
-    /// [0]=m_{k-2}, [1]=m_{k-1} after ring shift; new output goes to [1].
-    pub(super) model_outputs: [Option<Vec<f32>>; 2],
-    timestep_list: [Option<i64>; 2],
-    /// Warmup counter — saturates at solver_order (2).
-    pub(super) lower_order_nums: usize,
-    /// Corrected sample from the previous step; input for the corrector.
-    pub(super) last_sample: Option<Vec<f32>>,
-    /// Order used by predictor at step k; read by corrector at step k+1.
-    /// After the terminal step (no corrector call follows), this_order is set
-    /// to 1 (lower_order_final cap) but never read — dangling state, not a bug.
-    pub(super) this_order: usize,
-    pub(super) step_index: usize,
-    pub num_train: usize,
-    pub num_inference: usize,
-}
-
-/// Floor for Cramer's-rule denominators in the UniPC corrector.
-/// Prevents ±∞/NaN when `rk → 1` (det = 1−rk → 0) or `rk → 0` at very
-/// low step counts or unusual sigma schedules.
-const CRAMER_DET_FLOOR: f32 = 1e-6;
-
-impl UniPcScheduler {
-    pub fn new_sd15(num_inference: usize) -> Self {
-        let log_sigmas = compute_log_sigmas_sd15();
-        let sigma_min = log_sigmas[0].exp();
-        let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
-        let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-        // Terminal 0: lower_order_final reduces the last predictor to
-        // order=1, which doesn't have the lambda=+∞ NaN issue, so 0
-        // is safe here (unlike DPM++ which needs sigma_min).
-        sigmas.push(0.0);
-
-        let timesteps: Vec<i64> = sigmas[..num_inference].iter()
-            .map(|&s| sigma_to_t(s, log_sigmas))
-            .collect();
-
-        Self {
-            sigmas,
-            timesteps,
-            model_outputs: [None, None],
-            timestep_list: [None, None],
-            lower_order_nums: 0,
-            last_sample: None,
-            this_order: 1,
-            step_index: 0,
-            num_train: SD15_NUM_TRAIN_TIMESTEPS,
-            num_inference,
-        }
-    }
-
-    pub fn timesteps(&self) -> &[i64] { &self.timesteps }
-
-    /// Full UniPC step (predictor-corrector). Returns the denoised
-    /// latent estimate for the next timestep.
-    ///
-    /// # Arguments
-    /// - `epsilon`: UNet noise prediction (ε) at the current timestep.
-    /// - `sample`: Current latent x_k in α-space.
-    pub fn step(&mut self, epsilon: &[f32], sample: &[f32]) -> Vec<f32> {
-        debug_assert!(self.step_index + 1 < self.sigmas.len(),
-            "UniPC step: step_index {} out of range (sigmas len {})",
-            self.step_index, self.sigmas.len());
-
-        let m_new = self.convert_model_output(epsilon, sample);
-
-        // Corrector — reads self.this_order set by the PREVIOUS step.
-        // take() avoids a simultaneous borrow of self through last_sample and
-        // through the method receiver; we restore it immediately after.
-        let working_sample = if self.step_index > 0 {
-            if let Some(ls) = self.last_sample.take() {
-                let out = self.uni_c_bh_update(&m_new, &ls, sample, self.this_order);
-                self.last_sample = Some(ls); // restore allocation
-                out
-            } else {
-                sample.to_vec()
-            }
-        } else {
-            sample.to_vec()
-        };
-
-        self.model_outputs[0] = self.model_outputs[1].take();
-        self.timestep_list[0] = self.timestep_list[1];
-        self.model_outputs[1] = Some(m_new);
-        self.timestep_list[1] = Some(self.timesteps[self.step_index]);
-
-        // Choose order for this step's predictor (stored for the NEXT step's
-        // corrector to read). Must be computed AFTER the corrector (which uses
-        // the previous step's this_order) and BEFORE saving last_sample
-        // (predictor reads it); reordering silently feeds the wrong order to
-        // one or both.
-        let mut order = 2_usize;
-        if order > self.num_inference - self.step_index {
-            order = self.num_inference - self.step_index;
-        }
-        order = order.min(self.lower_order_nums + 1);
-        self.this_order = order;
-
-        // Move working_sample into last_sample before the predictor call so
-        // the predictor can borrow from it via &. No clone needed —
-        // one Vec<f32> persists across steps, saving ~64 KB per step.
-        self.last_sample = Some(working_sample);
-        // just stored above, non-empty
-        let last_ref = self.last_sample.as_deref().unwrap();
-
-        let prev_sample = self.uni_p_bh_update(last_ref, order);
-
-        if self.lower_order_nums < 2 {
-            self.lower_order_nums += 1;
-        }
-        self.step_index += 1;
-
-        prev_sample
-    }
-
-    /// ε → x0_pred conversion for epsilon-prediction mode.
-    fn convert_model_output(&self, epsilon: &[f32], sample: &[f32]) -> Vec<f32> {
-        convert_epsilon_to_x0(sample, epsilon, self.sigmas[self.step_index])
-    }
-
-    /// Predictor update: `multistep_uni_p_bh_update`.
-    ///
-    /// `k = step_index`. Source sigma = sigmas[k], target = sigmas[k+1].
-    /// Pitfall #2: predictor uses [k+1, k] sigmas; corrector uses [k, k-1] —
-    /// the index windows are offset by one step relative to each other.
-    fn uni_p_bh_update(&self, sample: &[f32], order: usize) -> Vec<f32> {
-        let k = self.step_index;
-        // sigmas[k] is the EDM-parameterised σ; sigma_to_alpha_sigma converts
-        // it to DDPM-style (α, σ_eff). Pitfall #5: sigma_t here is σ_eff(sigmas[k+1]),
-        // NOT the raw EDM sigma — don't confuse them in the step formula.
-        let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k]);
-        let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k + 1]);
-
-        let lambda_s0 = sigma_to_lambda(self.sigmas[k]);
-        let lambda_t = sigma_to_lambda(self.sigmas[k + 1]);
-        let h = lambda_t - lambda_s0;
-        let hh = -h;
-        let h_phi_1 = hh.exp_m1();
-        let b_h = h_phi_1;
-
-        // model_outputs[1] = m_k (just inserted during ring shift).
-        let m0 = self.model_outputs[1].as_deref().expect("ring[1] populated before predictor");
-
-        if order == 1 {
-            sample.iter().zip(m0.iter())
-                .map(|(&x, &m)| (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m)
-                .collect()
-        } else {
-            // order == 2: model_outputs[0] = m_{k-1}.
-            // Pitfall #3: model_outputs[0] is None at step 1 (only one output has
-            // been accumulated). The lower_order_nums warmup counter gates order to
-            // 1 until two outputs are available, so this branch is never reached then.
-            let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 predictor");
-            let lambda_si = sigma_to_lambda(self.sigmas[k - 1]);
-            let rk = (lambda_si - lambda_s0) / h;
-            let d1: Vec<f32> = m1.iter().zip(m0.iter())
-                .map(|(&a, &b)| (a - b) / rk)
-                .collect();
-
-            // Adams-Bashforth-style approximation: rho_p = 0.5 hardcoded for the
-            // predictor; the corrector solves the full 2×2 system to compensate.
-            sample.iter().zip(m0.iter()).zip(d1.iter())
-                .map(|((&x, &m), &d)| {
-                    (sigma_t / sigma_s0) * x - alpha_t * h_phi_1 * m - alpha_t * b_h * (0.5 * d)
-                })
-                .collect()
-        }
-    }
-
-    /// Corrector update: `multistep_uni_c_bh_update`.
-    ///
-    /// Pitfall #2 (index asymmetry): corrector source/target are [k-1]/[k];
-    /// predictor is [k]/[k+1]. Windows are shifted by one step.
-    fn uni_c_bh_update(
-        &self,
-        model_t: &[f32],
-        last_sample: &[f32],
-        // Retained for signature parity with the Diffusers reference; the
-        // corrector formula doesn't use the current-step sample directly.
-        _this_sample: &[f32],
-        order: usize,
-    ) -> Vec<f32> {
-        let k = self.step_index;
-        // Pitfall #5: sigma_s0/sigma_t are σ_eff (DDPM-style), not raw EDM sigmas.
-        let (_, sigma_s0) = sigma_to_alpha_sigma(self.sigmas[k - 1]);
-        let (alpha_t, sigma_t) = sigma_to_alpha_sigma(self.sigmas[k]);
-
-        let lambda_s0 = sigma_to_lambda(self.sigmas[k - 1]);
-        let lambda_t = sigma_to_lambda(self.sigmas[k]);
-        let h = lambda_t - lambda_s0;
-        let hh = -h;
-        let h_phi_1 = hh.exp_m1();
-        let b_h = h_phi_1;
-
-        // model_outputs[1] = m_{k-1} (BEFORE ring shift — pitfall #4).
-        let m0 = self.model_outputs[1].as_deref().expect("ring[1] populated before corrector");
-
-        if order == 1 {
-            // Corrector order-1: rho_c = 0.5 hardcoded.
-            let d1_t: Vec<f32> = model_t.iter().zip(m0.iter())
-                .map(|(&mt, &m)| mt - m)
-                .collect();
-            last_sample.iter().zip(m0.iter()).zip(d1_t.iter())
-                .map(|((&ls, &m), &d)| {
-                    (sigma_t / sigma_s0) * ls - alpha_t * h_phi_1 * m - alpha_t * b_h * (0.5 * d)
-                })
-                .collect()
-        } else {
-            // order == 2: solve full 2×2 via Cramer's rule.
-            let lambda_si = sigma_to_lambda(self.sigmas[k - 2]);
-            let rk = (lambda_si - lambda_s0) / h;
-
-            // Phi recurrence: factorial_i must update BEFORE h_phi_k in each step.
-            // Reversing the order silently swaps b[0] and b[1], causing the
-            // corrector to weight the wrong derivatives and break the 2nd-order rule.
-            let mut factorial_i: f32 = 1.0;
-            let mut h_phi_k = h_phi_1 / hh - 1.0;
-            let b0 = h_phi_k * factorial_i / b_h;
-            factorial_i = 2.0;
-            h_phi_k = h_phi_k / hh - 1.0 / factorial_i;
-            let b1 = h_phi_k * factorial_i / b_h;
-
-            // Cramer: R = [[1,1],[rk,1]], det = 1 - rk.
-            // Guard rk → 1 (det → 0) and rk → 0 (d1 blows up).
-            let det = 1.0 - rk;
-            debug_assert!(det.abs() > CRAMER_DET_FLOOR,
-                "UniPC corrector: rk too close to 1.0 ({rk}); Cramer det = {det}");
-            debug_assert!(rk.abs() > CRAMER_DET_FLOOR,
-                "UniPC corrector: rk too close to 0 ({rk})");
-            let det_guarded = if det.abs() < CRAMER_DET_FLOOR {
-                CRAMER_DET_FLOOR.copysign(if det == 0.0 { 1.0 } else { det })
-            } else {
-                det
-            };
-            let rk_guarded = rk.abs().max(CRAMER_DET_FLOOR).copysign(rk);
-            let rho_c0 = (b0 - b1) / det_guarded;
-            let rho_c1 = b0 - rho_c0;
-
-            let m1 = self.model_outputs[0].as_deref().expect("ring[0] populated for order-2 corrector");
-            let d1: Vec<f32> = m1.iter().zip(m0.iter())
-                .map(|(&a, &b)| (a - b) / rk_guarded)
-                .collect();
-            let d1_t: Vec<f32> = model_t.iter().zip(m0.iter())
-                .map(|(&mt, &m)| mt - m)
-                .collect();
-
-            last_sample.iter().zip(m0.iter()).zip(d1.iter()).zip(d1_t.iter())
-                .map(|(((&ls, &m), &d), &dt)| {
-                    (sigma_t / sigma_s0) * ls
-                        - alpha_t * h_phi_1 * m
-                        - alpha_t * b_h * (rho_c0 * d + rho_c1 * dt)
-                })
-                .collect()
-        }
-    }
-}
-
 /// VP-parameterization sigma → (α, σ_eff). For SD-1.5:
 /// α = 1/√(1+σ²),  σ_eff = σ * α. The model's noise prediction is
 /// scaled by σ_eff in the ε→x₀ formula.
@@ -3017,111 +2444,25 @@ fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
 /// 5 scheduler choices through to the worker.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SchedulerKind {
-    Ddim,
     #[default]
     Lcm,
     DpmPp2MKarras,
-    UniPc,
-    EulerA,
 }
 
 /// Runtime-selected scheduler for SD denoise. Constructed worker-side
 /// from `SchedulerKind` carried on `SdInpaintRequest`.
 pub enum Scheduler {
-    Ddim(DdimScheduler),
     Lcm(LcmScheduler),
     DpmPp2M(DpmPp2MScheduler),
-    UniPc(UniPcScheduler),
-    EulerA(EulerAScheduler),
 }
 
 impl Scheduler {
     pub fn timesteps(&self) -> &[i64] {
         match self {
-            Scheduler::Ddim(s) => s.timesteps(),
             Scheduler::Lcm(s) => s.timesteps(),
             Scheduler::DpmPp2M(s) => s.timesteps(),
-            Scheduler::UniPc(s) => s.timesteps(),
-            Scheduler::EulerA(s) => s.timesteps(),
         }
     }
-
-    /// Multiplier on the initial standard-normal noise. 1.0 for
-    /// α-space schedulers (DDIM/LCM/DPM++/UniPC); √(σ_max²+1) for
-    /// σ-space schedulers (Euler-A).
-    pub fn init_noise_sigma(&self) -> f32 {
-        match self {
-            Scheduler::Ddim(_)
-            | Scheduler::Lcm(_)
-            | Scheduler::DpmPp2M(_)
-            | Scheduler::UniPc(_) => 1.0,
-            Scheduler::EulerA(s) => s.init_noise_sigma(),
-        }
-    }
-
-    /// Returns true if this scheduler needs `scale_model_input_into`
-    /// applied to the latent before each UNet call. Lets the dispatch
-    /// loop skip the per-step copy on α-space schedulers.
-    pub fn requires_preconditioning(&self) -> bool {
-        matches!(self, Scheduler::EulerA(_))
-    }
-
-    /// Pre-UNet preconditioning into a caller-owned buffer (so the
-    /// allocation can be reused across denoise steps). Caller only
-    /// invokes this when `requires_preconditioning()` is true.
-    pub fn scale_model_input_into(&self, latent: &[f32], step_idx: usize, out: &mut Vec<f32>) {
-        match self {
-            Scheduler::EulerA(s) => s.scale_model_input_into(latent, step_idx, out),
-            _ => {
-                out.clear();
-                out.extend_from_slice(latent);
-            }
-        }
-    }
-
-    /// Mix a clean signal `sample` (e.g. VAE-encoded source image)
-    /// with `noise` at the noise level corresponding to inference
-    /// step `step_idx`. Used for strength<1 inpaint init.
-    /// α-space schedulers: `√α̅ · sample + √(1-α̅) · noise`.
-    /// σ-space schedulers (Euler-A): `sample + σ · noise`.
-    pub fn add_noise(&self, sample: &[f32], noise: &[f32], step_idx: usize) -> Vec<f32> {
-        debug_assert_eq!(sample.len(), noise.len());
-        match self {
-            Scheduler::Ddim(s) => {
-                let t = s.timesteps()[step_idx];
-                add_noise_alpha_space(sample, noise, s.alpha_cumprod(t))
-            }
-            Scheduler::Lcm(s) => {
-                let t = s.timesteps()[step_idx];
-                add_noise_alpha_space(sample, noise, s.alpha_cumprod(t))
-            }
-            Scheduler::DpmPp2M(s) => {
-                let sigma = s.sigmas[step_idx];
-                let alpha = 1.0 / (sigma * sigma + 1.0).sqrt();
-                add_noise_alpha_space(sample, noise, alpha * alpha)
-            }
-            Scheduler::UniPc(s) => {
-                let sigma = s.sigmas[step_idx];
-                let alpha = 1.0 / (sigma * sigma + 1.0).sqrt();
-                add_noise_alpha_space(sample, noise, alpha * alpha)
-            }
-            Scheduler::EulerA(s) => {
-                let sigma = s.sigmas[step_idx];
-                sample.iter().zip(noise.iter())
-                    .map(|(&x, &n)| x + sigma * n)
-                    .collect()
-            }
-        }
-    }
-}
-
-/// SD-1.5 forward-noise convention shared by DDIM, LCM, and DPM++ at inference.
-fn add_noise_alpha_space(sample: &[f32], noise: &[f32], alpha_cumprod: f32) -> Vec<f32> {
-    let sqrt_alpha = alpha_cumprod.sqrt();
-    let sqrt_one_minus = (1.0 - alpha_cumprod).max(0.0).sqrt();
-    sample.iter().zip(noise.iter())
-        .map(|(&s, &n)| sqrt_alpha * s + sqrt_one_minus * n)
-        .collect()
 }
 
 #[cfg(test)]
@@ -3129,108 +2470,13 @@ mod tests {
     use super::*;
     use image::{Luma, Rgba};
 
-    #[test]
-    fn ddim_alpha_cumprod_is_monotonically_decreasing() {
-        let s = DdimScheduler::new_sd15(20);
-        let mut prev = s.alpha_cumprod(0);
-        for t in 1..s.num_train as i64 {
-            let cur = s.alpha_cumprod(t);
-            assert!(cur < prev, "α̅ should decrease with t: t={t}, prev={prev}, cur={cur}");
-            prev = cur;
-        }
-    }
-
-    #[test]
-    fn ddim_alpha_cumprod_endpoints_match_sd15_reference() {
-        let s = DdimScheduler::new_sd15(20);
-        let a0 = s.alpha_cumprod(0);
-        let a_last = s.alpha_cumprod(s.num_train as i64 - 1);
-        assert!((a0 - 0.99915_f32).abs() < 1e-3, "α̅_0 = {a0}");
-        assert!((a_last - 0.0047_f32).abs() < 1e-3, "α̅_999 = {a_last}");
-    }
-
-    #[test]
-    fn ddim_timesteps_descend_from_high_to_low() {
-        let s = DdimScheduler::new_sd15(20);
-        let t = s.timesteps();
-        assert_eq!(t.len(), 20);
-        for w in t.windows(2) {
-            assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
-        }
-        assert!(*t.last().unwrap() < 100, "last timestep should be near 0, got {:?}", t.last());
-    }
-
-    /// Diffusers DDIMScheduler default: timestep_spacing="leading" + steps_offset=1.
-    /// step_ratio = 1000 // 20 = 50; timesteps = arange(0, 20) * 50 + 1, reversed.
-    /// Values verified against Diffusers' Python DDIMScheduler for SD-1.5 at 20 steps.
-    #[test]
-    fn ddim_timesteps_match_diffusers_leading_with_offset_1() {
-        let s = DdimScheduler::new_sd15(20);
-        let t = s.timesteps();
-        assert_eq!(t[0], 951, "first timestep must be 951 (leading+offset=1)");
-        assert_eq!(t[10], 451, "mid timestep (index 10) must be 451");
-        assert_eq!(t[19], 1, "last timestep must be 1 (offset=1, not 0)");
-    }
-
-    #[test]
-    fn ddim_step_returns_input_shape() {
-        let s = DdimScheduler::new_sd15(20);
-        let latent = vec![0.1_f32; 16];
-        let noise = vec![0.05_f32; 16];
-        let next = s.step(&latent, &noise, 500, 450);
-        assert_eq!(next.len(), latent.len());
-    }
-
-    #[test]
-    fn ddim_step_at_t_prev_neg_one_uses_alphas_cumprod_zero() {
-        // set_alpha_to_one=false: final step uses alphas_cumprod[0], not 1.0.
-        let s = DdimScheduler::new_sd15(20);
-        let latent = vec![0.5, 0.6, 0.7, 0.8];
-        let noise = vec![0.1, 0.1, 0.1, 0.1];
-        let alpha_t = s.alpha_cumprod(500);
-        let alpha_prev = s.alpha_cumprod(0);
-        let next = s.step(&latent, &noise, 500, -1);
-        for (i, &n) in next.iter().enumerate() {
-            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise[i]) / alpha_t.sqrt();
-            let expected = alpha_prev.sqrt() * pred_x0 + (1.0 - alpha_prev).sqrt() * noise[i];
-            assert!((n - expected).abs() < 1e-5, "step[{i}] = {n}, expected {expected}");
-        }
-    }
-
-    /// Pins the invariant: DDIM with t_prev=-1 uses alphas_cumprod[0] (≈0.99915),
-    /// not 1.0. Verifies both that the result differs from the 1.0 baseline AND
-    /// matches the expected per-element computation, so any regression is caught.
-    #[test]
-    fn ddim_final_step_uses_alphas_cumprod_zero_not_one() {
-        let s = DdimScheduler::new_sd15(20);
-        let latent = vec![0.3_f32, -0.4, 0.8, 0.1];
-        let noise_pred = vec![0.05_f32, 0.05, 0.05, 0.05];
-        let t = 500_i64;
-        let alpha_t = s.alpha_cumprod(t);
-        let alpha_prev = s.alpha_cumprod(0);
-
-        let next = s.step(&latent, &noise_pred, t, -1);
-
-        for (i, &n) in next.iter().enumerate() {
-            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
-            let expected_correct = alpha_prev.sqrt() * pred_x0
-                + (1.0 - alpha_prev).sqrt() * noise_pred[i];
-            // If the old 1.0 path were taken the result would be just pred_x0.
-            let expected_wrong = pred_x0;
-            assert!((n - expected_correct).abs() < 1e-5,
-                "step[{i}] = {n}, expected alphas_cumprod[0]-based {expected_correct}");
-            assert!((n - expected_wrong).abs() > 1e-6,
-                "step[{i}] = {n} matches the wrong 1.0-based result — regression?");
-        }
-    }
-
     /// LCM timestep schedule matches Diffusers' subsampling pattern: pick
     /// every k-th index from the reversed `lcm_origin_timesteps`. Values
     /// computed by running Diffusers' Python `LCMScheduler.set_timesteps(8)`
     /// and copying the resulting tensor.
     #[test]
     fn lcm_timesteps_match_diffusers_reference_for_8_steps() {
-        let s = LcmScheduler::new_sd15(8, false);
+        let s = LcmScheduler::new_sd15(8);
         let t = s.timesteps();
         assert_eq!(t.len(), 8);
         // Reversed lcm_origin = [999, 979, 959, 939, ..., 19].
@@ -3246,7 +2492,7 @@ mod tests {
     /// linspace-floor index math at the extremes.
     #[test]
     fn lcm_timesteps_match_diffusers_reference_for_4_steps() {
-        let s = LcmScheduler::new_sd15(4, false);
+        let s = LcmScheduler::new_sd15(4);
         // floor(linspace(0, 50, 4, endpoint=False)) = [0, 12, 25, 37]
         // → reversed[indices] = [999, 759, 499, 259]
         assert_eq!(s.timesteps(), &[999, 759, 499, 259],
@@ -3254,41 +2500,25 @@ mod tests {
     }
 
     /// LCM timesteps must descend (driving denoising from high noise
-    /// to low) — same direction contract as DDIM. A regression here
+    /// to low). A regression here
     /// would silently invert the noise schedule.
     #[test]
     fn lcm_timesteps_descend_strictly() {
-        let s = LcmScheduler::new_sd15(8, false);
+        let s = LcmScheduler::new_sd15(8);
         for w in s.timesteps().windows(2) {
             assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
         }
     }
 
-    /// LCM and DDIM share the same beta schedule (scaled_linear,
-    /// β_start=0.00085, β_end=0.012). A regression in the beta
-    /// computation would diverge α̅ between schedulers, silently
-    /// breaking LCM math.
-    #[test]
-    fn lcm_alphas_cumprod_match_ddim() {
-        let lcm = LcmScheduler::new_sd15(8, false);
-        let ddim = DdimScheduler::new_sd15(20);
-        for &t in &[0_i64, 100, 500, 999] {
-            let l = lcm.alpha_cumprod(t);
-            let d = ddim.alpha_cumprod(t);
-            assert!((l - d).abs() < 1e-7,
-                "α̅[{t}] mismatch: LCM={l}, DDIM={d}");
-        }
-    }
 
     /// Final-step LCM reduces to `c_out * pred_x0 + c_skip * sample`
-    /// — no noise injection. The math is equivalent to DDIM's
-    /// `t_prev = -1` collapse-to-x0 in spirit (deterministic), but
-    /// scaled by the consistency-function coefficients. This test
+    /// — no noise injection, scaled by the consistency-function
+    /// coefficients. This test
     /// verifies the formula directly so a regression in the LCM
     /// boundary conditions is loud.
     #[test]
     fn lcm_final_step_matches_consistency_formula() {
-        let s = LcmScheduler::new_sd15(4, false);
+        let s = LcmScheduler::new_sd15(4);
         let latent = vec![0.5_f32; 4];
         let noise = vec![0.1_f32; 4];
         let t = 500_i64;
@@ -3309,6 +2539,77 @@ mod tests {
         }
     }
 
+    /// DPM++ shares the SD-1.5 alpha schedule with LCM.
+    /// Drift in the shared `compute_alphas_cumprod_sd15` would
+    /// silently desync the schedulers; this test pins parity at
+    /// representative timesteps.
+    #[test]
+    fn dpmpp2m_uses_shared_sd15_alpha_schedule() {
+        // The scheduler doesn't expose alphas_cumprod, but we can
+        // derive sigma at a known timestep from the public sigma
+        // schedule: the first sigma equals √((1-α̅_999)/α̅_999).
+        let s = DpmPp2MScheduler::new_sd15(25);
+        // The first sigma in the Karras schedule is sigma_max,
+        // derived from α̅[num_train-1].
+        let alpha_max = compute_alphas_cumprod_sd15()[999];
+        let expected_sigma_max = ((1.0 - alpha_max) / alpha_max).sqrt();
+        let actual_sigma_max = s.sigmas[0];
+        assert!((actual_sigma_max - expected_sigma_max).abs() < 1e-3,
+            "first sigma must match √((1-α̅_999)/α̅_999): expected {expected_sigma_max}, got {actual_sigma_max}");
+    }
+
+    /// Non-final LCM step adds the stochastic `√β_prev · noise` term
+    /// on top of the consistency-function denoise. With zero noise
+    /// input, the formula collapses to `√α_prev · denoised`, giving
+    /// us a clean reference to verify against.
+    #[test]
+    fn lcm_step_at_with_zero_noise_collapses_to_alpha_prev_scaled_denoise() {
+        let s = LcmScheduler::new_sd15(8);
+        let latent = vec![0.5_f32; 4];
+        let noise_pred = vec![0.1_f32; 4];
+        let zero_noise = vec![0.0_f32; 4];
+        let t = 500_i64;
+        let t_prev = 379_i64;
+        let next = s.step_at(&latent, &noise_pred, t, t_prev, &zero_noise);
+
+        let alpha_t = s.alpha_cumprod(t);
+        let alpha_prev = s.alpha_cumprod(t_prev);
+        let scaled_t = (t as f32) * 10.0;
+        let sigma2 = 0.25_f32;
+        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
+        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
+
+        for (i, &n) in next.iter().enumerate() {
+            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
+            let denoised = c_out * pred_x0 + c_skip * latent[i];
+            let expected = alpha_prev.sqrt() * denoised;  // zero-noise → β_prev term vanishes
+            assert!((n - expected).abs() < 1e-5,
+                "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
+        }
+    }
+
+    #[test]
+    fn non_square_crops_round_trip_through_the_conversions() {
+        let (w, h) = (128u32, 192u32);
+        let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x * 2) as u8, (y) as u8, 7, 255]));
+        let arr = image_to_minus1_plus1(&img);
+        assert_eq!(arr.dim(), (1, 3, h as usize, w as usize));
+        let back = minus1_plus1_to_image(&arr);
+        assert_eq!(back.dimensions(), (w, h));
+        // The u8 → [-1, 1] → u8 trip truncates, so odd values land one low.
+        let off = back.as_raw().iter().zip(img.as_raw()).filter(|(a, b)| a.abs_diff(**b) > 1).count();
+        assert_eq!(off, 0);
+        let mut mask = GrayImage::new(w, h);
+        for y in 0..8 { for x in 0..8 { mask.put_pixel(x, y + 184, Luma([255])); } }
+        let lat = mask_to_latent(&mask);
+        assert_eq!(lat.dim(), (1, 1, 24, 16));
+        assert!((lat[(0, 0, 23, 0)] - 1.0).abs() < 1e-6);
+        assert_eq!(lat[(0, 0, 0, 0)], 0.0);
+        let noise = sample_initial_noise(&mut ChaCha8Rng::seed_from_u64(1), 16, 24);
+        assert_eq!(noise.dim(), (1, 4, 24, 16));
+    }
+
+
     /// DPM++ 2M Karras must descend through the noise schedule like
     /// any SD scheduler, AND the Karras transformation should
     /// concentrate sigmas in the mid-noise band (rho=7.0 — values
@@ -3327,26 +2628,6 @@ mod tests {
         // len == 25 just asserted, .last() is non-empty.
         let last = *t.last().unwrap();
         assert!(last < 50, "last timestep should be near 0, got {last}");
-    }
-
-    /// DPM++ shares the SD-1.5 alpha schedule with DDIM and LCM.
-    /// Drift in the shared `compute_alphas_cumprod_sd15` would
-    /// silently desync the schedulers; this test pins parity at
-    /// representative timesteps.
-    #[test]
-    fn dpmpp2m_uses_shared_sd15_alpha_schedule() {
-        // The scheduler doesn't expose alphas_cumprod, but we can
-        // derive sigma at a known timestep from the public sigma
-        // schedule: the first sigma equals √((1-α̅_999)/α̅_999).
-        let s = DpmPp2MScheduler::new_sd15(25);
-        let ddim = DdimScheduler::new_sd15(25);
-        // The first sigma in the Karras schedule is sigma_max,
-        // derived from α̅[num_train-1].
-        let alpha_max = ddim.alpha_cumprod(999);
-        let expected_sigma_max = ((1.0 - alpha_max) / alpha_max).sqrt();
-        let actual_sigma_max = s.sigmas[0];
-        assert!((actual_sigma_max - expected_sigma_max).abs() < 1e-3,
-            "first sigma must match √((1-α̅_999)/α̅_999): expected {expected_sigma_max}, got {actual_sigma_max}");
     }
 
     /// Terminal sigma must be `sigma_min` not 0, otherwise the
@@ -3405,143 +2686,6 @@ mod tests {
         // After first step, latent should have moved.
         assert!(next.iter().any(|&v| (v - 0.5).abs() > 1e-4),
             "first step must produce a non-trivial update");
-    }
-
-    /// Euler-A `init_noise_sigma` for "leading" timestep spacing
-    /// must be √(σ_max² + 1) — the σ-space sample needs to start on
-    /// the scheduler's max sigma scale, not at unit variance.
-    #[test]
-    fn eulera_init_noise_sigma_matches_leading_convention() {
-        let s = EulerAScheduler::new_sd15(25);
-        let sigma_max = s.sigmas[0];
-        let expected = (sigma_max * sigma_max + 1.0).sqrt();
-        assert!((s.init_noise_sigma() - expected).abs() < 1e-5,
-            "init_noise_sigma {} != √(σ_max² + 1) = {}", s.init_noise_sigma(), expected);
-    }
-
-    /// Pre-UNet preconditioning must divide the σ-space sample by
-    /// √(σ²+1) so the α-space UNet sees the right scale.
-    #[test]
-    fn eulera_scale_model_input_divides_by_sqrt_sigma_squared_plus_one() {
-        let s = EulerAScheduler::new_sd15(8);
-        let latent = vec![1.0_f32; 4];
-        let mut out = Vec::new();
-        s.scale_model_input_into(&latent, 0, &mut out);
-        let sigma = s.sigmas[0];
-        let expected = 1.0 / (sigma * sigma + 1.0).sqrt();
-        for v in &out {
-            assert!((v - expected).abs() < 1e-6,
-                "scaled latent {v} != 1.0 / √(σ²+1) = {expected}");
-        }
-    }
-
-    /// Terminal step (sigma_to=0) must zero out `sigma_up` so noise
-    /// doesn't leak into the final sample. Predicted output collapses
-    /// to `latent + eps · (-σ)` regardless of the noise vector.
-    #[test]
-    fn eulera_terminal_step_zeroes_ancestral_noise() {
-        let s = EulerAScheduler::new_sd15(8);
-        let latent = vec![0.5_f32; 4];
-        let eps = vec![0.1_f32; 4];
-        // Non-zero noise that should be erased by sigma_up=0.
-        let noise = vec![100.0_f32; 4];
-        let terminal = s.num_inference - 1;
-        let next = s.step(&latent, &eps, terminal, &noise);
-        let sigma = s.sigmas[terminal];
-        let expected: Vec<f32> = latent.iter().zip(eps.iter())
-            .map(|(&l, &e)| l + e * (0.0 - sigma))
-            .collect();
-        for (a, b) in next.iter().zip(expected.iter()) {
-            assert!((a - b).abs() < 1e-5,
-                "terminal step leaked ancestral noise: got {a}, expected {b}");
-        }
-    }
-
-    /// Timesteps must descend strictly through the Karras schedule;
-    /// last timestep near zero (sigma_to=0 by construction).
-    #[test]
-    fn eulera_timesteps_descend_and_terminate_near_zero() {
-        let s = EulerAScheduler::new_sd15(25);
-        let t = s.timesteps();
-        assert_eq!(t.len(), 25);
-        for w in t.windows(2) {
-            assert!(w[0] > w[1],
-                "Euler-A Karras timesteps must descend: {} → {}", w[0], w[1]);
-        }
-        assert!(t[0] >= 950, "first timestep should be near max noise, got {}", t[0]);
-    }
-
-    /// `add_noise` for α-space schedulers must implement the VP
-    /// forward process: noisy = √α̅·clean + √(1-α̅)·noise. At step 0
-    /// (high noise, α̅ near 0) the result should be dominated by the
-    /// noise vector; at the final step (low noise, α̅ near 1) it
-    /// should be dominated by the clean signal.
-    #[test]
-    fn ddim_add_noise_at_high_t_is_noise_dominated_at_low_t_is_sample_dominated() {
-        let s = Scheduler::Ddim(DdimScheduler::new_sd15(20));
-        let clean = vec![1.0_f32; 4];
-        let noise = vec![0.1_f32; 4]; // small noise vs clean=1.0
-        // step_idx = 0 → high noise → output dominated by 0.1 (noise scaled by √(1-α̅) ≈ 1)
-        let mixed_high = s.add_noise(&clean, &noise, 0);
-        // Each entry should be much closer to 0.1 (noise · ~1) than to 1.0 (clean · ~0).
-        for v in &mixed_high {
-            assert!(*v < 0.5,
-                "high-t add_noise should be noise-dominated, got {v}");
-        }
-        // step_idx = num_inference - 1 → low noise → output close to clean signal
-        let mixed_low = s.add_noise(&clean, &noise, 19);
-        for v in &mixed_low {
-            assert!(*v > 0.85,
-                "low-t add_noise should be sample-dominated, got {v}");
-        }
-    }
-
-    /// Euler-A `add_noise` is σ-space: noisy = sample + σ·noise.
-    /// No square-root mixing — the σ-scale is applied to noise directly.
-    #[test]
-    fn eulera_add_noise_is_sample_plus_sigma_times_noise() {
-        let euler = EulerAScheduler::new_sd15(8);
-        let s = Scheduler::EulerA(EulerAScheduler::new_sd15(8));
-        let clean = vec![0.5_f32; 4];
-        let noise = vec![1.0_f32; 4];
-        let step_idx = 3;
-        let sigma = euler.sigmas[step_idx];
-        let mixed = s.add_noise(&clean, &noise, step_idx);
-        for v in &mixed {
-            let expected = 0.5 + sigma * 1.0;
-            assert!((v - expected).abs() < 1e-5,
-                "Euler-A add_noise: got {v}, expected {expected}");
-        }
-    }
-
-    /// Non-final LCM step adds the stochastic `√β_prev · noise` term
-    /// on top of the consistency-function denoise. With zero noise
-    /// input, the formula collapses to `√α_prev · denoised`, giving
-    /// us a clean reference to verify against.
-    #[test]
-    fn lcm_step_at_with_zero_noise_collapses_to_alpha_prev_scaled_denoise() {
-        let s = LcmScheduler::new_sd15(8, false);
-        let latent = vec![0.5_f32; 4];
-        let noise_pred = vec![0.1_f32; 4];
-        let zero_noise = vec![0.0_f32; 4];
-        let t = 500_i64;
-        let t_prev = 379_i64;
-        let next = s.step_at(&latent, &noise_pred, t, t_prev, &zero_noise);
-
-        let alpha_t = s.alpha_cumprod(t);
-        let alpha_prev = s.alpha_cumprod(t_prev);
-        let scaled_t = (t as f32) * 10.0;
-        let sigma2 = 0.25_f32;
-        let c_skip = sigma2 / (scaled_t * scaled_t + sigma2);
-        let c_out = scaled_t / (scaled_t * scaled_t + sigma2).sqrt();
-
-        for (i, &n) in next.iter().enumerate() {
-            let pred_x0 = (latent[i] - (1.0 - alpha_t).sqrt() * noise_pred[i]) / alpha_t.sqrt();
-            let denoised = c_out * pred_x0 + c_skip * latent[i];
-            let expected = alpha_prev.sqrt() * denoised;  // zero-noise → β_prev term vanishes
-            assert!((n - expected).abs() < 1e-5,
-                "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
-        }
     }
 
     #[test]
@@ -3865,27 +3009,6 @@ mod tests {
     }
 
     #[test]
-    fn non_square_crops_round_trip_through_the_conversions() {
-        let (w, h) = (128u32, 192u32);
-        let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x * 2) as u8, (y) as u8, 7, 255]));
-        let arr = image_to_minus1_plus1(&img);
-        assert_eq!(arr.dim(), (1, 3, h as usize, w as usize));
-        let back = minus1_plus1_to_image(&arr);
-        assert_eq!(back.dimensions(), (w, h));
-        // The u8 → [-1, 1] → u8 trip truncates, so odd values land one low.
-        let off = back.as_raw().iter().zip(img.as_raw()).filter(|(a, b)| a.abs_diff(**b) > 1).count();
-        assert_eq!(off, 0);
-        let mut mask = GrayImage::new(w, h);
-        for y in 0..8 { for x in 0..8 { mask.put_pixel(x, y + 184, Luma([255])); } }
-        let lat = mask_to_latent(&mask);
-        assert_eq!(lat.dim(), (1, 1, 24, 16));
-        assert!((lat[(0, 0, 23, 0)] - 1.0).abs() < 1e-6);
-        assert_eq!(lat[(0, 0, 0, 0)], 0.0);
-        let noise = sample_initial_noise(&mut ChaCha8Rng::seed_from_u64(1), 16, 24);
-        assert_eq!(noise.dim(), (1, 4, 24, 16));
-    }
-
-    #[test]
     fn compute_sd_crop_centres_on_bbox_in_large_image() {
         let bbox = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1100, y_max: 1100 };
         let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
@@ -4043,296 +3166,6 @@ mod tests {
             "OnceLock must run the build closure exactly once across concurrent callers");
     }
 
-    /// LCM with `use_karras=true` must produce a non-linear timestep
-    /// schedule. With Karras sigmas mapped through `sigma_to_t`, the
-    /// timesteps are clustered at the schedule endpoints (not uniform).
-    #[test]
-    fn lcm_karras_timesteps_differ_from_linear_when_enabled() {
-        let linear = LcmScheduler::new_sd15(8, false);
-        let karras = LcmScheduler::new_sd15(8, true);
-        let lin = linear.timesteps();
-        let kar = karras.timesteps();
-        assert_eq!(lin.len(), 8);
-        assert_eq!(kar.len(), 8);
-        // Both descend.
-        for w in lin.windows(2) { assert!(w[0] > w[1], "linear not descending: {:?}", lin); }
-        for w in kar.windows(2) { assert!(w[0] > w[1], "karras not descending: {:?}", kar); }
-        // Schedules MUST differ — at least one timestep should not match.
-        assert_ne!(lin, kar,
-            "Karras and linear LCM schedules should produce different timesteps");
-    }
-
-    // ── UniPC tests ─────────────────────────────────────────────────────────
-
-    /// At step 0, no history is available, so UniPC falls back to
-    /// first-order (= DDIM-equivalent formula). Compute the predictor
-    /// output manually and compare with the scheduler's output.
-    #[test]
-    fn unipc_order_1_step_zero_matches_first_order_predictor() {
-        let mut s = UniPcScheduler::new_sd15(8);
-        let dim = 4_usize;
-        let sample: Vec<f32> = vec![0.5_f32; dim];
-        let eps:    Vec<f32> = vec![0.1_f32; dim];
-
-        let result = s.step(&eps, &sample);
-
-        // Manually compute first-order predictor.
-        let sigma_s0_edm = s.sigmas[0]; // before step() advanced step_index
-        let sigma_t_edm  = s.sigmas[1];
-        let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
-        let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
-        let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
-        let lambda_t  = sigma_to_lambda(sigma_t_edm);
-        let h = lambda_t - lambda_s0;
-        let h_phi_1 = (-h).exp_m1();
-
-        let m_ref = convert_epsilon_to_x0(&sample, &eps, sigma_s0_edm);
-        let expected: Vec<f32> = sample.iter().zip(m_ref.iter())
-            .map(|(&x, &m0)| {
-                (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m0
-            })
-            .collect();
-
-        for (i, (&r, &ex)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((r - ex).abs() < 1e-5,
-                "unipc step-0 output[{i}]: got {r}, expected {ex}");
-        }
-    }
-
-    /// At the terminal step (N-1), `lower_order_final` must cap the
-    /// predictor at order=1 — no D1 correction term. Verified by
-    /// constructing an isolated first-order predictor with the same
-    /// inputs (bypassing the corrector) and asserting the scheduler
-    /// output equals the pure first-order formula to within f32 tol.
-    #[test]
-    fn unipc_lower_order_final_caps_predictor_at_terminal() {
-        let n = 4_usize;
-        let dim = 4_usize;
-        let eps  = vec![0.1_f32; dim];
-        let samp = vec![0.5_f32; dim];
-
-        // Run N-1 steps to get to the state just before the terminal step.
-        let mut s = UniPcScheduler::new_sd15(n);
-        let mut state = samp.clone();
-        for _ in 0..(n - 1) {
-            state = s.step(&eps, &state);
-        }
-        // step_index is now n-1. D in step() computes:
-        //   order = min(2, n - (n-1)) = 1.
-        // That order is set as this_order during the terminal call.
-
-        // Build a pure first-order predictor reference WITHOUT the corrector.
-        // We use `state` directly as the working_sample (i.e., we bypass the
-        // corrector path that would modify it) to isolate the predictor-order
-        // guard.
-        let k = s.step_index; // n-1
-        let sigma_s0_edm = s.sigmas[k];
-        let sigma_t_edm  = s.sigmas[k + 1];
-        let (_, sigma_s0_ddpm) = sigma_to_alpha_sigma(sigma_s0_edm);
-        let (alpha_t,  sigma_t_ddpm)  = sigma_to_alpha_sigma(sigma_t_edm);
-        let lambda_s0 = sigma_to_lambda(sigma_s0_edm);
-        let lambda_t  = sigma_to_lambda(sigma_t_edm);
-        let h = lambda_t - lambda_s0;
-        let h_phi_1 = (-h).exp_m1();
-
-        // ε → x0_pred conversion on `state`:
-        let m_new = convert_epsilon_to_x0(&state, &eps, sigma_s0_edm);
-        // Pure first-order predictor (no D1 correction term):
-        let first_order_pred: Vec<f32> = state.iter().zip(m_new.iter())
-            .map(|(&x, &m)| (sigma_t_ddpm / sigma_s0_ddpm) * x - alpha_t * h_phi_1 * m)
-            .collect();
-
-        // Run the actual terminal step through the scheduler.
-        let terminal_out = s.step(&eps, &state);
-
-        // Must be finite.
-        assert!(terminal_out.iter().all(|v| v.is_finite()),
-            "terminal step produced non-finite output: {terminal_out:?}");
-
-        // step_index must be n after all steps.
-        assert_eq!(s.step_index, n,
-            "step_index must equal num_inference after all steps");
-
-        // this_order must be 1 — the lower_order_final guard fired.
-        assert_eq!(s.this_order, 1,
-            "this_order after terminal step must be 1 (lower_order_final guard)");
-
-        // The terminal predictor (order=1, no D1 term) must match the
-        // reference formula element-wise. The corrector also runs at the
-        // terminal step and may adjust `working_sample`, so we allow a
-        // small tolerance (1e-3) to accommodate that correction pass.
-        for (i, (&sched, &ref_val)) in terminal_out.iter().zip(first_order_pred.iter()).enumerate() {
-            assert!((sched - ref_val).abs() < 1e-3,
-                "terminal output[{i}]: scheduler={sched}, first-order-ref={ref_val} (diff > 1e-3)");
-        }
-    }
-
-    /// Verify the Cramer's-rule 2×2 corrector coefficients analytically
-    /// for a known (rk, hh) pair and compare with the scheduler output.
-    #[test]
-    fn unipc_corrector_2x2_cramer_matches_analytical() {
-        // Chosen values: hh = -0.5, rk = -0.3 (typical mid-schedule ratios).
-        let hh: f32 = -0.5;
-        let rk: f32 = -0.3;
-        let b_h = hh.exp_m1();
-        let h_phi_1 = b_h;
-
-        // Phi recurrence (pitfall #7: factorial_i updates BEFORE h_phi_k).
-        let mut factorial_i: f32 = 1.0;
-        let mut h_phi_k = h_phi_1 / hh - 1.0;
-        let b0 = h_phi_k * factorial_i / b_h;
-        factorial_i = 2.0;
-        h_phi_k = h_phi_k / hh - 1.0 / factorial_i;
-        let b1 = h_phi_k * factorial_i / b_h;
-
-        // Cramer: det = 1 - rk.
-        let rho_c0 = (b0 - b1) / (1.0 - rk);
-        let rho_c1 = b0 - rho_c0;
-
-        // Sanity: rho_c0 + rho_c1 = b0 (from derivation).
-        assert!((rho_c0 + rho_c1 - b0).abs() < 1e-6,
-            "rho_c0 + rho_c1 must equal b0: {rho_c0} + {rho_c1} != {b0}");
-
-        // Alternatively: rho_c1 = (b1 - rk*b0)/(1-rk).
-        let rho_c1_alt = (b1 - rk * b0) / (1.0 - rk);
-        assert!((rho_c1 - rho_c1_alt).abs() < 1e-6,
-            "two Cramer forms must agree: {rho_c1} vs {rho_c1_alt}");
-
-        // Verify b[0] and b[1] via the phi definitions directly.
-        // NOTE: an earlier draft of the port spec stated b[1] ≈ 0.401 for hh = -0.5,
-        // but the correct value via the direct phi formula is ≈ 0.376. The spec had
-        // a typo; this test uses the phi derivation, not the stated approximation.
-        // phi_1(-0.5) = (e^-0.5 - 1) / (-0.5) ≈ 0.787
-        // phi_2(-0.5) = (phi_1 - 1) / (-0.5) ≈ 0.426 → b[0] = phi_2/phi_1 ≈ 0.541
-        // phi_3(-0.5) = (phi_2 - 0.5) / (-0.5) ≈ 0.148 → b[1] = 2*phi_3/phi_1 ≈ 0.376
-        let phi1 = (hh.exp() - 1.0) / hh;
-        let phi2 = (phi1 - 1.0) / hh;
-        let phi3 = (phi2 - 0.5) / hh;
-        let b0_ref = phi2 / phi1;
-        let b1_ref = 2.0 * phi3 / phi1;
-        assert!((b0 - b0_ref).abs() < 1e-5,
-            "b[0] mismatch: recurrence {b0} vs direct {b0_ref}");
-        assert!((b1 - b1_ref).abs() < 1e-5,
-            "b[1] mismatch: recurrence {b1} vs direct {b1_ref}");
-    }
-
-    /// Cramer guard regression: sigmas packed close together collapse the
-    /// lambda spacing, driving `det = 1 − rk` toward 0 or `rk` toward 0.
-    /// The corrector must return all-finite output instead of ±∞/NaN.
-    #[test]
-    fn unipc_cramer_guard_prevents_nan_on_collapsed_lambda_spacing() {
-        // A 4-step schedule with close sigmas at the start so that by step 2
-        // the corrector sees near-degenerate rk values.
-        let mut s = UniPcScheduler::new_sd15(4);
-        let dim = 8_usize;
-        let eps    = vec![0.1_f32; dim];
-        let sample = vec![0.5_f32; dim];
-
-        // Force two adjacent sigmas very close so lambda spacing collapses.
-        // Replace sigmas[1] and sigmas[2] with nearly identical values to
-        // stress both the det=1-rk and rk denominators in the corrector.
-        s.sigmas[1] = s.sigmas[0] * 0.9999;
-        s.sigmas[2] = s.sigmas[0] * 0.9998;
-
-        let mut out = sample.clone();
-        for _ in 0..4 {
-            out = s.step(&eps, &out);
-        }
-        assert!(out.iter().all(|v| v.is_finite()),
-            "Cramer guard failed: output contains NaN/Inf when lambda spacing collapses: {out:?}");
-    }
-
-    /// After step_index advances to 3, the ring must hold:
-    /// model_outputs[1] = m_2 (most recent), model_outputs[0] = m_1.
-    #[test]
-    fn unipc_ring_state_after_three_steps() {
-        let mut s = UniPcScheduler::new_sd15(8);
-        let sample: Vec<f32> = vec![0.5_f32; 4];
-        let eps:    Vec<f32> = vec![0.1_f32; 4];
-
-        // Track the converted x0 at each step by pre-computing.
-        // We call step() 3 times and verify ring contents.
-        let mut st = sample.clone();
-        // Capture m1 = convert_model_output at step 1 (after first step
-        // incremented step_index to 1).
-        for i in 0..3_usize {
-            // Record what m_new will be before calling step.
-            let expected_m: Vec<f32> = {
-                let (alpha, sigma_ddpm) = sigma_to_alpha_sigma(s.sigmas[i]);
-                st.iter().zip(eps.iter())
-                    .map(|(&x, &e)| (x - sigma_ddpm * e) / alpha)
-                    .collect()
-            };
-            st = s.step(&eps, &st);
-            // After step 0: ring[1]=m0, ring[0]=None; step_index=1.
-            // After step 1: ring[1]=m1, ring[0]=m0; step_index=2.
-            // After step 2: ring[1]=m2, ring[0]=m1; step_index=3.
-            if i == 0 {
-                assert!(s.model_outputs[1].is_some(), "ring[1] must be set after step 0");
-                assert!(s.model_outputs[0].is_none(), "ring[0] must still be None after step 0");
-            }
-            if i == 2 {
-                // ring[1] must be m2 — the x0 conversion at step 2.
-                let ring1 = s.model_outputs[1].as_ref().unwrap();
-                for (j, (&r, &ex)) in ring1.iter().zip(expected_m.iter()).enumerate() {
-                    assert!((r - ex).abs() < 1e-5,
-                        "ring[1] at step 2 mismatch at [{j}]: {r} vs {ex}");
-                }
-                assert_eq!(s.step_index, 3, "step_index must be 3 after 3 calls");
-            }
-        }
-    }
-
-    /// Running UniPC to the terminal step must produce all-finite values.
-    #[test]
-    fn unipc_terminal_step_produces_finite_output() {
-        let mut s = UniPcScheduler::new_sd15(8);
-        let mut sample = vec![0.5_f32; 4];
-        let eps = vec![0.1_f32; 4];
-        for _ in 0..8 {
-            sample = s.step(&eps, &sample);
-        }
-        assert!(sample.iter().all(|v| v.is_finite()),
-            "UniPC terminal step produced non-finite output: {sample:?}");
-    }
-
-    /// Karras schedule must be strictly descending and terminate at 0.
-    #[test]
-    fn unipc_karras_sigmas_descend_and_terminate_at_zero() {
-        let s = UniPcScheduler::new_sd15(20);
-        assert_eq!(s.sigmas.len(), 21, "sigmas len must be num_inference + 1");
-        for w in s.sigmas.windows(2) {
-            assert!(w[0] >= w[1],
-                "sigmas must be non-increasing: {} → {}", w[0], w[1]);
-        }
-        assert!(s.sigmas[0] > 1.0, "first sigma should be well above 1.0");
-        assert_eq!(s.sigmas[20], 0.0, "terminal sigma must be exactly 0.0");
-    }
-
-    /// Dispatch-level integration: `Scheduler::UniPc` dispatched through
-    /// `step_array_into` must not panic and must produce output of the
-    /// expected length. Pins the wiring from SchedulerKind → Scheduler →
-    /// step_array_into without requiring a live ORT session.
-    #[test]
-    fn unipc_step_array_into_dispatch_roundtrip() {
-        use rand::SeedableRng;
-        use rand_chacha::ChaCha8Rng;
-
-        let n = 8_usize;
-        let dim = 16_usize;
-        let mut sched = Scheduler::UniPc(UniPcScheduler::new_sd15(n));
-        let latent:    Vec<f32> = (0..dim).map(|i| 0.1 * i as f32).collect();
-        let noise_pred:Vec<f32> = (0..dim).map(|i| 0.05 * i as f32).collect();
-        let mut out = Vec::new();
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
-
-        let ts = sched.timesteps().to_vec();
-        step_array_into(&mut sched, &latent, &noise_pred, 0, ts[0], ts[0], false, &mut rng, &mut out);
-
-        assert_eq!(out.len(), dim, "step_array_into output length must match input");
-        assert!(out.iter().all(|v| v.is_finite()),
-            "step_array_into must produce finite output: {out:?}");
-    }
 
     /// `image_to_minus1_plus1_masked` must use a binary cliff at byte
     /// 127, NOT a float-alpha blend. A blend toward mid-grey at
