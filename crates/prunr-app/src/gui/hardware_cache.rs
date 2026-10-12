@@ -11,6 +11,8 @@ pub(crate) struct HardwareInstallCache {
     /// The LCM eraser bundle, as `Settings::can_select_lcm_scheduler` sees it.
     pub lcm_bundle: bool,
     pub x2plus: bool,
+    /// The face models, in `FaceModel::ALL` order.
+    pub faces: [bool; 2],
     /// Bit `SettingsModel::index()` set when that model is installed.
     models: u32,
 }
@@ -23,10 +25,15 @@ impl HardwareInstallCache {
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
+            faces: crate::gui::item_settings::FaceModel::ALL.map(|m| prunr_models::is_available(m.id())),
             models: crate::gui::settings::SettingsModel::ALL.iter()
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))
                 .fold(0, |bits, m| bits | 1 << m.index()),
         }
+    }
+
+    pub fn has_face_model(&self, model: crate::gui::item_settings::FaceModel) -> bool {
+        self.faces[model as usize]
     }
 
     /// Whether `model` can be picked: bundled, downloaded, or No model.

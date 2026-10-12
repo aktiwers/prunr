@@ -235,6 +235,39 @@ impl CorrectionCache {
     }
 }
 
+/// The photo faces are found in: a run's start image or the source.
+/// Compared by identity, never unpacked to compare.
+#[derive(Clone)]
+pub(crate) enum FacePhoto {
+    Start(super::timeline::StoredImage),
+    Source(Arc<image::RgbaImage>),
+}
+
+impl FacePhoto {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Start(a), Self::Start(b)) => Arc::ptr_eq(a, b),
+            (Self::Source(a), Self::Source(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
+        match self {
+            Self::Start(stored) => stored.load(),
+            Self::Source(rgba) => Some(Arc::clone(rgba)),
+        }
+    }
+}
+
+/// Faces found in one photo with one model.
+#[derive(Clone)]
+pub(crate) struct FoundFaces {
+    pub(crate) photo: FacePhoto,
+    pub(crate) model: prunr_models::ModelId,
+    pub(crate) faces: Arc<Vec<prunr_core::face::RestoredFace>>,
+}
+
 /// Where `BatchItem::warm_steps` holds the step an undo goes back to and
 /// the one a redo goes to.
 pub(crate) const BACK: usize = 0;
@@ -285,6 +318,15 @@ pub(crate) struct BatchItem {
     /// unpacked off the UI thread and held so they stay unpacked: either
     /// shows without decoding first. Costs up to two images of RAM.
     pub(crate) warm_steps: Arc<std::sync::Mutex<[Option<WarmStep>; 2]>>,
+    /// The faces found for Restore faces, and the photo and model they
+    /// were found with; a few MB per face.
+    pub(crate) found_faces: Option<FoundFaces>,
+    /// A face search under way: for which photo, with which model.
+    pub(crate) faces_pending: Option<(FacePhoto, prunr_models::ModelId)>,
+    /// The photo with the found faces blended in, as a preview built it,
+    /// so other knobs' previews reuse it. One image of RAM while Restore
+    /// faces is on.
+    pub(crate) faced_photo: Option<(Arc<image::DynamicImage>, super::live_preview::FacedKey)>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// Every state this image has been in, and which one is shown. The
@@ -892,6 +934,39 @@ impl BatchItem {
         }
     }
 
+    /// The photo Restore faces works on for a photo model: where a preview
+    /// starts, as `build_preview_inputs` takes it.
+    pub(crate) fn face_photo(&self) -> Option<FacePhoto> {
+        self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
+            .or_else(|| self.source_rgba.clone().map(FacePhoto::Source))
+    }
+
+    /// The faces a preview of `photo` blends in, if Restore faces is on and
+    /// they were found for that photo with the chosen model.
+    pub(crate) fn faces_for(&self, photo: &FacePhoto) -> Option<super::live_preview::FacesInput> {
+        let model = self.settings.faces.wanted()?;
+        let found = self.found_faces.as_ref().filter(|f| f.model == model && f.photo.same(photo))?;
+        let key = super::live_preview::FacedKey { faces: Arc::clone(&found.faces), blend: self.settings.faces.blend() };
+        let faced = self.faced_photo.as_ref().filter(|(_, k)| k.matches(&key)).map(|(p, _)| Arc::clone(p));
+        Some(super::live_preview::FacesInput { key, faced })
+    }
+
+    /// The found faces or how they blend changed: the faced photo and the
+    /// cut-out built over it are out of date.
+    pub(crate) fn faces_changed(&mut self) {
+        self.faced_photo = None;
+        self.cached_masked_base = None;
+    }
+
+    /// The face search `photo` needs, if any: Restore faces is on and
+    /// nothing found or under way matches.
+    pub(crate) fn faces_to_find(&self, photo: &FacePhoto) -> Option<prunr_models::ModelId> {
+        let model = self.settings.faces.wanted()?;
+        let found = self.found_faces.as_ref().is_some_and(|f| f.model == model && f.photo.same(photo));
+        let pending = self.faces_pending.as_ref().is_some_and(|(p, m)| *m == model && p.same(photo));
+        (!found && !pending).then_some(model)
+    }
+
     /// The pixels a run of `engine` starts from (`None`: the original).
     pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
         self.run_start(engine).and_then(|s| s.image.load())
@@ -1136,6 +1211,9 @@ impl BatchItem {
             subject: None,
             tile_preview: None,
             warm_steps: Arc::default(),
+            found_faces: None,
+            faces_pending: None,
+            faced_photo: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,

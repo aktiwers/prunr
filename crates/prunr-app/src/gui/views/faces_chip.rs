@@ -1,0 +1,122 @@
+//! The Faces chip: Restore faces on or off and its strength on the strip;
+//! the panel picks the model, which faces, and whether hair goes too.
+//! Without a face model installed the strip offers the Model Store.
+
+use egui::Ui;
+use egui_material_icons::icons::ICON_FACE;
+
+use crate::gui::hardware_cache::HardwareInstallCache;
+use crate::gui::item_settings::{FaceModel, FaceSettings};
+
+use super::chip;
+use super::{fmt, hint};
+
+const PANEL_WIDTH: f32 = 360.0;
+
+/// What the chip changed this frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FacesChange {
+    /// On/off or the model: the faces have to be found again.
+    pub search: bool,
+    /// Strength, which faces or hair: only the blend.
+    pub blend: bool,
+    /// "Get a face model" was clicked.
+    pub open_store: bool,
+}
+
+/// How many faces were found in the shown photo, when a search ran.
+pub(crate) type FoundCount = Option<usize>;
+
+const ON_OFF: [chip::Choice<bool>; 2] = [
+    chip::Choice { value: false, name: "Off", description: "", enabled: true },
+    chip::Choice { value: true, name: "On", description: "", enabled: true },
+];
+
+const WHICH: [chip::Choice<bool>; 2] = [
+    chip::Choice { value: false, name: "All", description: "Every face in the photo", enabled: true },
+    chip::Choice { value: true, name: "Largest", description: "Only the biggest face: a portrait with people behind", enabled: true },
+];
+
+pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
+    let mut change = FacesChange::default();
+    let any_installed = FaceModel::ALL.iter().any(|&m| installed.has_face_model(m));
+    let summary = if s.on { fmt::percent(f32::from(s.strength_pct) / 100.0) } else { "Off".to_string() };
+    let group = chip::GroupChip {
+        id_salt: "faces",
+        icon: ICON_FACE.codepoint,
+        label: "Faces",
+        summary: &summary,
+        tooltip: "Redraw soft, small or compressed faces.",
+        tuned: s.on,
+        width: PANEL_WIDTH,
+        live: true,
+    };
+    let header = chip::PanelHeader { note: "", reset: "Reset" };
+    chip::strip_chip(ui, group, "More face settings", header, |ui, part| match part {
+        chip::Part::Quick => {
+            if !any_installed {
+                ui.label(egui::RichText::new("Needs a face model (about 300 MB).").color(crate::gui::theme::TEXT_SECONDARY));
+                change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get a face model").clicked();
+                return;
+            }
+            change.search |= chip::choice_buttons(ui, &ON_OFF, &mut s.on);
+            change.blend |= strength_row(ui, s);
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                let model = s.model;
+                *s = FaceSettings { model, ..FaceSettings::default() };
+                change.search = true;
+            }
+            let models = FaceModel::ALL.map(|m| chip::Choice {
+                value: m,
+                name: model_name(m),
+                description: model_description(m),
+                enabled: installed.has_face_model(m),
+            });
+            change.search |= chip::choice_row(ui, "Model", &models, &mut s.model);
+            if FaceModel::ALL.iter().any(|&m| !installed.has_face_model(m)) {
+                change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get face models").clicked();
+            }
+            change.blend |= strength_row(ui, s);
+            hint(ui, "Up to 50% adds detail and keeps the photo's own shading; above, the redrawn shading too.");
+            change.blend |= chip::choice_row(ui, "Faces", &WHICH, &mut s.largest_only);
+            change.blend |= chip::toggle_row(ui, "Include hair", &mut s.hair).commit;
+            hint(ui, &found_text(s.on, found));
+        }
+    });
+    change
+}
+
+fn strength_row(ui: &mut Ui, s: &mut FaceSettings) -> bool {
+    let mut v = f32::from(s.strength_pct) / 100.0;
+    let changed = chip::slider_row_f32(ui, "Strength", &mut v, 0.0..=1.0, false, fmt::percent).changed;
+    if changed {
+        s.strength_pct = (v * 100.0).round() as u8;
+    }
+    changed
+}
+
+fn model_name(m: FaceModel) -> &'static str {
+    match m {
+        FaceModel::Gfpgan => "GFPGAN",
+        FaceModel::RestoreFormerPp => "RestoreFormer++",
+    }
+}
+
+fn model_description(m: FaceModel) -> &'static str {
+    match m {
+        FaceModel::Gfpgan => "The crispest",
+        FaceModel::RestoreFormerPp => "Closest to the person's own features",
+    }
+}
+
+fn found_text(on: bool, found: FoundCount) -> std::borrow::Cow<'static, str> {
+    match (on, found) {
+        (false, _) => "Faces are found and redrawn when this is on.".into(),
+        (true, None) => "Faces are found once the image is processed.".into(),
+        (true, Some(0)) => "No faces found.".into(),
+        (true, Some(1)) => "1 face found.".into(),
+        (true, Some(n)) => format!("{n} faces found.").into(),
+    }
+}

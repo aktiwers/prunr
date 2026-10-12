@@ -96,6 +96,7 @@ fn each_model_toolbar_shows_only_its_chips() {
         ("Mask", Surface::Mask),
         ("Sketch", Surface::Lines),
         ("Effect", Surface::Effect),
+        ("Faces", Surface::Faces),
         ("Background", Surface::Background),
         ("Scale", Surface::Upscale),
         ("Refine", Surface::Upscale),
@@ -298,6 +299,7 @@ fn quick_strips_name_every_control() {
         ("Mask", None, "All mask settings", "Contrast"),
         ("Sketch", Some("Whole photo"), "All line settings", "Style"),
         ("Effect", Some("Duotone"), "All effects", "Shadows"),
+        ("Faces", None, "More face settings", "Include hair"),
         ("Background", Some("Cream"), "All background settings", "Custom color"),
     ] {
         let mut h = loaded();
