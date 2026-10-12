@@ -23,8 +23,7 @@ pub(crate) enum CardAction {
     Cancel,
     Verifying,
     Delete,
-    /// `retryable=false` renders disabled (e.g. SHA-mismatch is fatal).
-    Retry { retryable: bool },
+    Retry,
 }
 
 pub(crate) fn card_action(
@@ -41,23 +40,27 @@ pub(crate) fn card_action(
     match download_state {
         DownloadState::InProgress { .. } | DownloadState::Queued => CardAction::Cancel,
         DownloadState::Verifying => CardAction::Verifying,
-        DownloadState::Failed { retryable, .. } if !is_installed => {
-            CardAction::Retry { retryable: *retryable }
-        }
+        DownloadState::Failed { .. } if !is_installed => CardAction::Retry,
         DownloadState::Failed { .. } | DownloadState::Done | DownloadState::Idle => {
             if is_installed { CardAction::Delete } else { CardAction::Download }
         }
     }
 }
 
-fn disk_usage_bytes_uncached() -> u64 {
-    let Some(dir) = on_demand_dir() else { return 0 };
-    REGISTRY.iter().filter_map(|d| match d.source {
-        ModelSource::OnDemand { filename, .. } => {
-            std::fs::metadata(dir.join(filename)).ok().map(|m| m.len())
+/// Bytes the downloaded models take in `dir`, multi-part bundles included.
+fn disk_usage_in(dir: &std::path::Path) -> u64 {
+    let size = |p: std::path::PathBuf| std::fs::metadata(p).map_or(0, |m| m.len());
+    REGISTRY.iter().map(|d| match d.source {
+        ModelSource::OnDemand { filename, .. } => size(dir.join(filename)),
+        ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
+            parts.iter().map(|p| size(dir.join(subdir).join(p.filename))).sum()
         }
-        _ => None,
+        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => 0,
     }).sum()
+}
+
+fn disk_usage_bytes_uncached() -> u64 {
+    on_demand_dir().map_or(0, |dir| disk_usage_in(&dir))
 }
 
 /// 1 s TTL cache around the per-OnDemand-model `fs::metadata` walk —
@@ -137,7 +140,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
 
     for (id, action) in pending_actions {
         match action {
-            CardAction::Download | CardAction::Retry { retryable: true } => {
+            CardAction::Download | CardAction::Retry => {
                 if requires_license_gate(id, &app.settings) {
                     app.pending_license_request = Some(id);
                 } else {
@@ -150,9 +153,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
             CardAction::Delete => {
                 delete_installed_model(app, id);
             }
-            CardAction::Bundled
-            | CardAction::Verifying
-            | CardAction::Retry { retryable: false } => {}
+            CardAction::Bundled | CardAction::Verifying => {}
         }
     }
 
@@ -186,8 +187,12 @@ fn render_card(
 
     let mut clicked = None;
 
-    ui.horizontal(|ui| {
+    // A fixed button column, so the text wraps beside it instead of
+    // running under it.
+    const BUTTON_COLUMN: f32 = 110.0;
+    ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
+            ui.set_width((ui.available_width() - BUTTON_COLUMN).max(0.0));
             ui.label(
                 RichText::new(desc.display_name)
                     .size(theme::FONT_SIZE_HEADING)
@@ -229,7 +234,13 @@ fn render_card(
                     .size(theme::FONT_SIZE_MONO)
                     .color(theme::TEXT_SECONDARY),
                 );
-            } else if let DownloadState::Failed { error, .. } = state {
+            } else if *state == DownloadState::Queued {
+                ui.label(
+                    RichText::new("Queued: starts when the current download finishes")
+                        .size(theme::FONT_SIZE_MONO)
+                        .color(theme::TEXT_SECONDARY),
+                );
+            } else if let DownloadState::Failed { error } = state {
                 ui.label(
                     RichText::new(format!("Last attempt failed: {error}"))
                         .size(theme::FONT_SIZE_MONO)
@@ -244,15 +255,16 @@ fn render_card(
                 );
             }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             if let Some(label) = button_label(action) {
                 let kind = match action {
                     CardAction::Delete => ButtonKind::Destructive,
-                    CardAction::Download | CardAction::Retry { .. } => ButtonKind::Primary,
+                    CardAction::Download | CardAction::Retry => ButtonKind::Primary,
                     _ => ButtonKind::Secondary,
                 };
                 let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
                 let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
+                let resp = super::chip::named(resp, &format!("{label} {}", desc.display_name));
                 if resp.clicked() {
                     clicked = Some(action);
                 }
@@ -270,16 +282,12 @@ fn button_label(action: CardAction) -> Option<&'static str> {
         CardAction::Cancel => Some("Cancel"),
         CardAction::Verifying => Some("Verifying…"),
         CardAction::Delete => Some("Delete"),
-        CardAction::Retry { .. } => Some("Retry"),
+        CardAction::Retry => Some("Retry"),
     }
 }
 
 fn action_enabled(action: CardAction) -> bool {
-    !matches!(action,
-        CardAction::Bundled
-        | CardAction::Verifying
-        | CardAction::Retry { retryable: false }
-    )
+    !matches!(action, CardAction::Bundled | CardAction::Verifying)
 }
 
 fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
@@ -393,10 +401,10 @@ mod tests {
     fn dl_verifying() -> DownloadState { DownloadState::Verifying }
     fn dl_done() -> DownloadState { DownloadState::Done }
     fn dl_failed_retryable() -> DownloadState {
-        DownloadState::Failed { error: "x".into(), retryable: true }
+        DownloadState::Failed { error: "timeout".into() }
     }
     fn dl_failed_fatal() -> DownloadState {
-        DownloadState::Failed { error: "x".into(), retryable: false }
+        DownloadState::Failed { error: "No space left on device".into() }
     }
     fn synthetic(gpu: prunr_models::GpuRequirement) -> prunr_models::ModelDescriptor {
         prunr_models::ModelDescriptor {
@@ -483,16 +491,34 @@ mod tests {
     fn ondemand_failed_retryable_uninstalled_is_retry_clickable() {
         let d = synthetic(prunr_models::GpuRequirement::None);
         let a = card_action(&d, false, &dl_failed_retryable());
-        assert_eq!(a, CardAction::Retry { retryable: true });
+        assert_eq!(a, CardAction::Retry);
         assert!(action_enabled(a));
     }
 
+    /// A failure the network retry gave up on (disk full, 404, bad
+    /// checksum) can still be retried by hand once the cause is fixed.
     #[test]
-    fn ondemand_failed_fatal_uninstalled_is_retry_disabled() {
+    fn ondemand_failed_fatal_uninstalled_is_retry_clickable() {
         let d = synthetic(prunr_models::GpuRequirement::None);
         let a = card_action(&d, false, &dl_failed_fatal());
-        assert_eq!(a, CardAction::Retry { retryable: false });
-        assert!(!action_enabled(a));
+        assert_eq!(a, CardAction::Retry);
+        assert!(action_enabled(a));
+    }
+
+    /// Disk usage counts the multi-part bundles (Stable Diffusion) too.
+    #[test]
+    fn disk_usage_counts_single_files_and_multi_part_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = REGISTRY.iter().find_map(|d| match d.source {
+            ModelSource::OnDemand { filename, .. } => Some(filename), _ => None,
+        }).unwrap();
+        let (subdir, part) = REGISTRY.iter().find_map(|d| match d.source {
+            ModelSource::MultiPartOnDemand { subdir, parts, .. } => Some((subdir, parts[0].filename)), _ => None,
+        }).unwrap();
+        std::fs::write(dir.path().join(single), [0u8; 10]).unwrap();
+        std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
+        std::fs::write(dir.path().join(subdir).join(part), [0u8; 32]).unwrap();
+        assert_eq!(disk_usage_in(dir.path()), 42);
     }
 
     #[test]
