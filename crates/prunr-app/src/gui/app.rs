@@ -2860,6 +2860,7 @@ impl PrunrApp {
             if let Some(idx) = idx {
                 self.evict_background_item_caches(idx);
                 self.batch.items[idx].unpark_result();
+                self.batch.items[idx].warm_neighbour_steps();
             }
             self.show_original = false;
         }
@@ -2889,6 +2890,8 @@ impl PrunrApp {
             // The photo with faces blended in, one image of RAM; the faces
             // themselves (a few MB) stay, so it is rebuilt without a search.
             item.faced_photo = None;
+            // Up to two images; warmed again when the image is shown.
+            item.release_warm_steps();
             // A full-size picture made from the photo; rebuilt when shown.
             if matches!(item.settings.backdrop(), super::item_settings::Backdrop::Effect(_)) {
                 item.backdrop_texture = None;
@@ -4584,6 +4587,25 @@ mod faces_tests {
         app.evict_background_item_caches(1);
         assert!(app.batch.items[0].faced_photo.is_none());
         assert!(app.batch.items[0].found_faces.is_some());
+    }
+
+    /// An image not on screen lets go of its unpacked undo / redo steps
+    /// (up to two images each across a whole batch).
+    #[test]
+    fn images_not_on_screen_release_their_warm_steps() {
+        let mut app = super::PrunrApp::new_for_test();
+        for id in [1, 2] {
+            let item = push_test_item(&mut app, id);
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.commit(crate::gui::timeline::StepKind::Process);
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.commit(crate::gui::timeline::StepKind::Adjust);
+        }
+        let held = |app: &super::PrunrApp, i: usize| app.batch.items[i].warm_steps.lock().unwrap().iter().any(Option::is_some);
+        assert!(held(&app, 0) && held(&app, 1));
+        app.evict_background_item_caches(1);
+        assert!(!held(&app, 0), "off screen: released");
+        assert!(held(&app, 1), "the shown image keeps its own");
     }
 }
 
