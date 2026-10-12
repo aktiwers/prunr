@@ -349,6 +349,11 @@ impl Timeline {
         self.cursor.checked_sub(1).map(|i| &self.states[i])
     }
 
+    /// The state a redo goes to.
+    pub(crate) fn next(&self) -> Option<&DocState> {
+        self.states.get(self.cursor + 1)
+    }
+
     /// Fill in the shown state as a job it started lands: no new step.
     pub(crate) fn current_mut(&mut self) -> &mut DocState {
         &mut self.states[self.cursor]
