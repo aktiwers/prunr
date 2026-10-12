@@ -352,9 +352,6 @@ fn render_tab_general(
         ui.add_space(theme::SPACE_MD);
     }
 
-    ui.checkbox(&mut settings.live_preview, RichText::new("Live preview")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Auto-rerun mask and edge tweaks while you drag sliders.");
     intent
 }
 
