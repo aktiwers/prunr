@@ -286,6 +286,14 @@ pub(crate) struct Origin {
     pub(crate) region: Option<StoredSelection>,
 }
 
+impl Origin {
+    /// A run of `engine` from `start` (`None`: the original), with no seed,
+    /// kept upscale run or region.
+    pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
+        Self { engine, start, upscale_run: None, seed: None, region: None }
+    }
+}
+
 /// An image a run starts from: a stored timeline image, loaded only when
 /// the run reads it, and its size.
 #[derive(Clone)]
