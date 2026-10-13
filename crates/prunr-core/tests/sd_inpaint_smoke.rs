@@ -150,26 +150,10 @@ fn sd_bench() {
         let v: Vec<_> = list("PRUNR_SD_BENCH_FILL").iter().map(|v| v.parse().expect("PRUNR_SD_BENCH_FILL")).collect();
         if v.is_empty() { vec![Default::default()] } else { v }
     };
-    // The shipped plan, with the same overrides the app honours.
-    let flag = |name: &str| match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    };
-    let planned = inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB);
-    let tuning = inpaint_sd::SdTuning {
-        keep_loaded: flag("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
-        tall_crop: flag("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
-        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
-        // `PRUNR_SD_MEM_PATTERN=0`, `PRUNR_SD_DEV_INIT=1`, `PRUNR_SD_THREADS=n`
-        // try the session memory knobs.
-        mem: inpaint_sd::SdMemPlan {
-            no_memory_pattern: flag("PRUNR_SD_MEM_PATTERN").map_or(planned.mem.no_memory_pattern, |on| !on),
-            device_initializers: flag("PRUNR_SD_DEV_INIT").unwrap_or(planned.mem.device_initializers),
-            intra_threads: std::env::var("PRUNR_SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(planned.mem.intra_threads),
-        },
-        ..planned
-    };
+    // The shipped plan, with the same overrides the app honours
+    // (`PRUNR_SD_KEEP_LOADED`, `_TALL_CROP`, `_OV_DEVICE`, `_MEM_PATTERN`,
+    // `_DEV_INIT`, `_THREADS`).
+    let tuning = inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB).with_env_overrides();
     // `PRUNR_SD_BENCH_OUT=dir` saves each fill blended into its photo.
     let out_dir = std::env::var("PRUNR_SD_BENCH_OUT").ok();
     let progress = prunr_core::Progress::none();
