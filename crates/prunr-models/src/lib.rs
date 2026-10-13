@@ -173,7 +173,7 @@ pub enum ModelCategory {
     Inpaint,
     Upscale,
     /// Magic Brush — authors a selection mask rather than a final
-    /// segmentation. Routes through Phase 33 SAM dispatch, not the
+    /// segmentation. Routes through the SAM dispatch, not the
     /// BG-removal pipeline. Encoder + decoder ship as separate ONNX
     /// files (`MultiPartOnDemand`).
     Selection,
@@ -1989,7 +1989,7 @@ mod tests {
         // here would be machine-dependent):
         //   Silueta, U2net, BiRefNetLite — seg fp16/int8 dev artifacts
         //   RealEsrganX4Plus, RealEsrganX2Plus, FourXNmkdSiaxCx,
-        //   FourXNmkdSuperscale — RRDB upscale fp16 siblings (32-14)
+        //   FourXNmkdSuperscale — RRDB upscale fp16 siblings
         let resolves_to_filename_stem = |id| matches!(
             id,
             ModelId::Silueta
@@ -2275,7 +2275,7 @@ mod tests {
         assert_eq!(esrgan2.upscale.unwrap().tile_overlap(), 16);
     }
 
-    // ── NMKD community RRDB models (32-13) ────────────────────────────────
+    // ── NMKD community RRDB models ────────────────────────────────────────
 
     #[test]
     fn nmkd_siax_cx_in_all() {
@@ -2323,7 +2323,7 @@ mod tests {
         }
     }
 
-    // ── fp16 variants (32-14) ─────────────────────────────────────────────
+    // ── fp16 variants ─────────────────────────────────────────────────────
 
     #[test]
     fn rrdb_upscale_models_carry_fp16_companion() {
@@ -2342,7 +2342,7 @@ mod tests {
                 _ => panic!("{id:?} must be OnDemand"),
             };
             let variant = fp16.unwrap_or_else(|| {
-                panic!("{id:?} RRDB upscale model must declare an fp16 companion (Plan 32-14)")
+                panic!("{id:?} RRDB upscale model must declare an fp16 companion")
             });
             assert!(
                 variant.filename.ends_with("_fp16.onnx"),

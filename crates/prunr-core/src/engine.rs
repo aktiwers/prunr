@@ -635,10 +635,9 @@ mod tests {
 
     /// Boundary contract: when `was_cached=true`, the cache file is
     /// deleted AND `ep_compat::record_failure` is NOT called. This is
-    /// the bug P25-IssueA fixed — the EPContext spike's malformed
-    /// compiled.onnx triggered `record_failure` and persistently
-    /// disabled OpenVINO for SD, requiring manual `rm ep_compat.json`
-    /// to recover.
+    /// A malformed compiled.onnx from the EPContext path would otherwise
+    /// trigger `record_failure` and persistently disable OpenVINO for SD,
+    /// until `ep_compat.json` was removed by hand.
     ///
     /// Uses `(EpKind::Cuda, ModelId::TaesdFp16)` to dodge other tests
     /// that touch `ep_compat` under the parallel runner.

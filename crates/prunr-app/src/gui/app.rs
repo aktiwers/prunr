@@ -230,9 +230,9 @@ impl PrunrApp {
         if let Some(v) = super::env_overrides::auto_process_override() {
             settings.auto_process_on_import = v;
         }
-        // Phase 17 upgrade path: if the user's saved model is now OnDemand
-        // and the file isn't on disk, queue a one-time toast pointing
-        // them to the Model Store. Bundled-only users see nothing.
+        // A saved model that has since become OnDemand may not be on disk:
+        // queue a one-time toast pointing at the Model Store. Bundled-only
+        // users see nothing.
         let onboarding_toast = settings.model.to_model_id()
             .filter(|id| !prunr_models::is_available(*id))
             .and_then(prunr_models::descriptor)
@@ -3012,6 +3012,7 @@ impl PrunrApp {
                 let rgba = item.source_rgba.as_ref()?;
                 item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
             }
+            // invariant: source_dyn was filled just above when it was None.
             Arc::clone(item.source_dyn.as_ref().unwrap())
         };
         let edge_tensor = Self::edge_tensor_for_active_scale(item);

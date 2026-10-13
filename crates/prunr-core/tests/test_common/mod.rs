@@ -29,9 +29,9 @@ pub fn skip_if_no_ort(label: &str) -> bool {
 
 // ---------- synthetic fixture catalog (shared by both golden harnesses) ----------
 
-/// Spec for one synthetic fixture. Each id maps to a past-bug category from
-/// `.planning/phases/20-golden-image-suite/PLAN.md`. The draw fn paints into
-/// a pre-allocated RGBA buffer (zero-init = transparent black).
+/// Spec for one synthetic fixture. Each id maps to a category of past bug.
+/// The draw fn paints into a pre-allocated RGBA buffer (zero-init =
+/// transparent black).
 pub struct SyntheticSpec {
     pub id: &'static str,
     pub width: u32,
