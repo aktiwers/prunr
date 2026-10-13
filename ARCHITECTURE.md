@@ -33,7 +33,7 @@ assets/                    # Icon, Info.plist, .desktop
 
 ## GUI Coordinators
 
-`PrunrApp` (`gui/app.rs`) is a **coordinator, not an owner**: it holds UI visibility flags, view state with no other home, and the domain coordinators below. The coordinators don't know about each other; cross-domain work (a finished image updating the batch, the history and admission) is orchestrated on `PrunrApp`.
+`PrunrApp` (`gui/app/`, one file per concern: dispatch, results, preview, tools, import, export, textures, adjustments) is a **coordinator, not an owner**: it holds UI visibility flags, view state with no other home, and the domain coordinators below. The coordinators don't know about each other; cross-domain work (a finished image updating the batch, the history and admission) is orchestrated on `PrunrApp`.
 
 | Coordinator        | Owns                                                                                                   |
 |--------------------|--------------------------------------------------------------------------------------------------------|
