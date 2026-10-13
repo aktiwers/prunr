@@ -1397,6 +1397,44 @@ impl Processor {
         self.admission_tx = None;
     }
 
+    /// Open streamed admission over the full runs queued on `ctrl`: what
+    /// fits the RAM budget now is admitted, and its ids come back with
+    /// the receiver the worker takes the rest from as `release_and_admit`
+    /// sends them.
+    pub(crate) fn open_admission(&mut self, mut ctrl: AdmissionController) -> (Vec<u64>, mpsc::Receiver<WorkItem>) {
+        let mut admitted = Vec::new();
+        while let Some(id) = ctrl.try_admit_next() {
+            admitted.push(id);
+        }
+        let (tx, rx) = mpsc::channel();
+        self.admission = Some(ctrl);
+        self.admission_tx = Some(tx);
+        (admitted, rx)
+    }
+
+    /// `completed` frees its share of the budget, and the images that
+    /// now fit are sent to the worker, each prepared by `work` (`None`:
+    /// it can't be sent). Admission ends once every image is through.
+    pub(crate) fn release_and_admit(&mut self, completed: u64, mut work: impl FnMut(u64) -> Option<WorkItem>) {
+        let Some(ctrl) = self.admission.as_mut() else { return };
+        ctrl.release(completed);
+        let mut streamed = Vec::new();
+        while let Some(next) = ctrl.try_admit_next() {
+            let Some(item) = work(next) else { continue };
+            match self.admission_tx.as_ref() {
+                Some(tx) if tx.send(item).is_ok() => streamed.push(next),
+                _ => break, // worker gone
+            }
+        }
+        let complete = ctrl.is_complete();
+        for id in streamed {
+            self.track_streamed(id);
+        }
+        if complete {
+            self.clear_admission();
+        }
+    }
+
     /// Spawn a background thread that upscales the input and posts the
     /// result back through `pump_upscale_results`. The caller is
     /// responsible for having verified that the model is installed before
@@ -2385,6 +2423,33 @@ mod tests {
         assert!(p.admission_tx.is_none());
         assert!(p.cancels.is_cancelled(999),
             "clear_admission must leave cancel registry untouched — that's the caller's protocol");
+    }
+
+    /// Streamed admission: images beyond the RAM budget go one at a time,
+    /// the next sent as one completes and counted into the batch; one
+    /// that can't be prepared is passed over; admission ends with the
+    /// last one through.
+    #[test]
+    fn admission_streams_the_next_image_as_one_completes() {
+        use crate::gui::memory::ImageMemCost;
+        let mut p = fixture();
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 4), (2, 3), (3, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (admitted, rx) = p.open_admission(ctrl);
+        assert_eq!(admitted, vec![3], "only the smallest is forced in");
+        p.track_dispatch(fixture_recipe(), admitted);
+        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
+
+        p.release_and_admit(3, work);
+        assert_eq!(rx.try_recv().map(|w| w.0), Ok(2), "the next smallest is sent");
+        assert_eq!(p.current_dispatch_progress(), Some((0, 2)), "and counted");
+
+        p.release_and_admit(2, |_| None);
+        assert!(rx.try_recv().is_err(), "an image that can't be prepared is not sent");
+        assert!(p.admission.is_some(), "the batch is still open");
+
+        p.release_and_admit(1, work);
+        assert!(p.admission.is_none() && p.admission_tx.is_none(), "every image is through");
     }
 
     #[test]

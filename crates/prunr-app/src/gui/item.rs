@@ -1317,6 +1317,16 @@ impl BatchItem {
         self.job.as_ref()?.start.as_ref()?.image.load()
     }
 
+    /// What a full run on this image sends: its file and the pixels the
+    /// run starts from; the image shows as processing. `None` when the
+    /// file can't be read.
+    pub(crate) fn full_run_work(&mut self) -> Option<super::worker::WorkItem> {
+        let bytes = self.source.load_bytes().ok()?;
+        let input = self.job_input();
+        self.status = BatchStatus::Processing;
+        Some((self.id, bytes, input))
+    }
+
     /// Whether the awaited run works on the result on screen, so the
     /// canvas shows that result while it runs.
     pub(crate) fn job_builds_on_shown_result(&self) -> bool {

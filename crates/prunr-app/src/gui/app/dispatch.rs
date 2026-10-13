@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Engine, ImageSource};
 use crate::gui::timeline::StepKind;
-use crate::gui::worker::{AddEdgeWorkItem, WorkerMessage};
+use crate::gui::worker::{AddEdgeWorkItem, WorkItem, WorkerMessage};
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -258,46 +258,25 @@ impl PrunrApp {
         &mut self,
         tier1_ids: &HashSet<u64>,
         tier2_work: Vec<crate::gui::worker::Tier2WorkItem>,
-        add_edge_work: Vec<crate::gui::worker::AddEdgeWorkItem>,
+        add_edge_work: Vec<AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
-        use crate::gui::memory::{AdmissionController, ImageMemCost};
-
-        let mut ctrl = AdmissionController::new(model, jobs);
-        let costs: Vec<ImageMemCost> = self.batch.items.iter()
-            .filter(|i| tier1_ids.contains(&i.id))
-            .map(|i| AdmissionController::estimate_cost(
-                i.id, i.dimensions, i.source.estimated_size(), crate::gui::memory::RESIDENT_HISTORY_STEPS,
-            ))
+        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs);
+        ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
+        let (admitted, additional_items_rx) = self.processor.open_admission(ctrl);
+        let initial_items: Vec<WorkItem> = admitted.into_iter()
+            .filter_map(|id| self.batch.find_by_id_mut(id).and_then(BatchItem::full_run_work))
             .collect();
-        ctrl.enqueue(costs);
-
-        let mut initial_items = Vec::new();
-        while let Some(admitted_id) = ctrl.try_admit_next() {
-            if let Some(item) = self.batch.find_by_id_mut(admitted_id) {
-                if let Ok(bytes) = item.source.load_bytes() {
-                    let input = item.job_input();
-                    initial_items.push((item.id, bytes, input));
-                    item.status = BatchStatus::Processing;
-                }
-            }
-        }
-
-        for item in &mut self.batch.items {
-            if tier1_ids.contains(&item.id) && item.status != BatchStatus::Processing {
-                item.status = BatchStatus::Pending;
-            }
-        }
+        self.batch.mark_waiting(tier1_ids);
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
         // skip dispatch.
-        if initial_items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() { return; }
-
-        let (atx, arx) = mpsc::channel();
-        self.processor.admission = Some(ctrl);
-        self.processor.admission_tx = Some(atx);
-        self.dispatch_batch(initial_items, tier2_work, add_edge_work, model, jobs, Some(arx));
+        if initial_items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() {
+            self.processor.clear_admission();
+            return;
+        }
+        self.dispatch_batch(initial_items, tier2_work, add_edge_work, model, jobs, Some(additional_items_rx));
     }
 
     /// Single-item or small-batch fast path — skip admission entirely.
@@ -305,19 +284,11 @@ impl PrunrApp {
         &mut self,
         tier1_ids: &HashSet<u64>,
         tier2_work: Vec<crate::gui::worker::Tier2WorkItem>,
-        add_edge_work: Vec<crate::gui::worker::AddEdgeWorkItem>,
+        add_edge_work: Vec<AddEdgeWorkItem>,
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
-        let items: Vec<_> = self.batch.items.iter_mut()
-            .filter(|i| tier1_ids.contains(&i.id))
-            .filter_map(|i| {
-                let bytes = i.source.load_bytes().ok()?;
-                let input = i.job_input();
-                i.status = BatchStatus::Processing;
-                Some((i.id, bytes, input))
-            })
-            .collect();
+        let items = self.batch.full_run_work(tier1_ids);
 
         // If all prep failed, don't dispatch an empty batch.
         if items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() { return; }
@@ -380,34 +351,8 @@ impl PrunrApp {
 
     /// Release an item's memory budget and greedily admit the next fitting items.
     pub(super) fn admission_release_and_admit(&mut self, completed_id: u64) {
-        let Some(ref mut ctrl) = self.processor.admission else { return; };
-        ctrl.release(completed_id);
-
-        let mut streamed_ids = Vec::new();
-        while let Some(next_id) = ctrl.try_admit_next() {
-            if let Some(item) = self.batch.find_by_id_mut(next_id) {
-                let Ok(bytes) = item.source.load_bytes() else { continue; };
-                let input = item.job_input();
-                let tuple = (next_id, bytes, input);
-                item.status = BatchStatus::Processing;
-
-                if let Some(ref tx) = self.processor.admission_tx {
-                    if tx.send(tuple).is_err() {
-                        break; // worker gone
-                    }
-                    streamed_ids.push(next_id);
-                }
-            }
-        }
-
-        let admission_complete = ctrl.is_complete();
-        // ctrl borrow ends here so we can re-borrow processor.
-        for id in streamed_ids {
-            self.processor.track_streamed(id);
-        }
-        if admission_complete {
-            self.processor.clear_admission();
-        }
+        let batch = &mut self.batch;
+        self.processor.release_and_admit(completed_id, |id| batch.find_by_id_mut(id).and_then(BatchItem::full_run_work));
     }
 }
 
