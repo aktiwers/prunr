@@ -80,7 +80,18 @@ impl ModelId {
     /// previously duplicated in `prunr-core::inpaint` and
     /// `prunr-app::gui::processor`.
     pub fn is_sd_family(&self) -> bool {
-        matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 | ModelId::RoremFp16)
+        self.sd_spec().is_some()
+    }
+
+    /// What the SD pipeline needs to know about an SD-family bundle;
+    /// `None` for every other model.
+    pub fn sd_spec(&self) -> Option<SdSpec> {
+        const SD15: SdSpec = SdSpec { vae_scale: 0.18215, cpu_output_correct: false, takes_taesd: true };
+        match self {
+            ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 => Some(SD15),
+            ModelId::RoremFp16 => Some(SdSpec { vae_scale: 0.13025, cpu_output_correct: true, takes_taesd: false }),
+            _ => None,
+        }
     }
 
     /// Canonical iteration of every variant. Drift catcher: a test below
@@ -685,9 +696,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // RORem-4S: exported by scripts/export_rorem.py, weights split into
-    // files under GitHub's 2 GiB asset limit by scripts/split_onnx_data.py.
-    // The graph names its data files; they sit next to it in the subdir.
+    // RORem-4S: the UNet's weights are split into files under GitHub's
+    // 2 GiB asset limit; the graph names them, so they sit beside it.
     ModelDescriptor {
         id: ModelId::RoremFp16,
         display_name: "Eraser (RORem)",
@@ -1320,6 +1330,19 @@ pub fn keeps_weights_apart(id: ModelId) -> bool {
         ModelSource::MultiPartOnDemand { parts, .. } => parts.iter().any(|p| p.filename.ends_with(".data")),
         _ => false,
     })
+}
+
+/// See `ModelId::sd_spec`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SdSpec {
+    /// Diffusers' `vae.config.scaling_factor`: SD 1.5's VAE or SDXL's.
+    pub vae_scale: f32,
+    /// The ORT CPU EP's output is right. SD 1.5's FP16 bundles come out
+    /// as text-like artifacts on it, so they need a GPU EP; RORem's
+    /// matches its PyTorch reference.
+    pub cpu_output_correct: bool,
+    /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
+    pub takes_taesd: bool,
 }
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:

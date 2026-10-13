@@ -1639,37 +1639,37 @@ fn run_sam_decoder_inline(
 /// The SD pipeline's request for an erase under `tuning`; `None` for an
 /// eraser outside the SD family.
 fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
+    use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
+    let base = SdInpaintRequest {
+        seed: tuning.sd_seed,
+        tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
+        fill_scale: tuning.fill_scale,
+        ..Default::default()
+    };
     match tuning.backend {
         prunr_models::ModelId::SdV15InpaintFp16
         | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
-            use prunr_core::inpaint_sd::SchedulerKind;
-            let scheduler: SchedulerKind = tuning.sd_scheduler.into();
             let plan = resolve_sd_dispatch(
                 tuning.backend,
                 tuning.use_taesd,
                 tuning.sd_guidance_scale,
             );
-            Some(prunr_core::inpaint_sd::SdInpaintRequest {
+            Some(SdInpaintRequest {
                 prompt: tuning.sd_prompt.clone(),
                 negative_prompt: tuning.sd_negative_prompt.clone(),
                 num_inference_steps: tuning.sd_steps,
                 guidance_scale: plan.effective_cfg,
-                seed: tuning.sd_seed,
                 use_taesd: plan.use_taesd,
-                scheduler,
-                tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
-                fill_scale: tuning.fill_scale,
+                scheduler: tuning.sd_scheduler.into(),
+                ..base
             })
         }
         // The prompt is baked in: the user's prompt, guidance and TAESD
         // do not apply.
-        prunr_models::ModelId::RoremFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
+        prunr_models::ModelId::RoremFp16 => Some(SdInpaintRequest {
             num_inference_steps: prunr_core::inpaint_sd::ROREM_STEPS,
-            scheduler: prunr_core::inpaint_sd::SchedulerKind::Lcm,
-            seed: tuning.sd_seed,
-            tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
-            fill_scale: tuning.fill_scale,
-            ..Default::default()
+            scheduler: SchedulerKind::Lcm,
+            ..base
         }),
         _ => None,
     }

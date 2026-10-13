@@ -25,7 +25,7 @@ pub(crate) const HOVER_DWELL: Duration = Duration::from_millis(250);
 /// a baked copy of its image.
 pub(crate) fn writers() -> usize {
     static WRITERS: OnceLock<usize> = OnceLock::new();
-    *WRITERS.get_or_init(|| std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 4))
+    *WRITERS.get_or_init(|| (num_cpus::get() / 2).clamp(1, 4))
 }
 
 /// One item's drag files, written ahead of a drag on a worker.
@@ -73,6 +73,10 @@ pub(crate) struct DragExportState {
     /// Files written ahead, kept per image until it changes so hovering
     /// it again writes nothing; the drag folder is emptied at exit.
     prewritten: HashMap<u64, Prewrite>,
+    /// The hovered thumbnail whose drag files were all current when last
+    /// checked: nothing is due until the pointer moves to another one.
+    /// An edit made while it rests there is written by the drag itself.
+    settled: Option<u64>,
 }
 
 impl DragExportState {
@@ -84,6 +88,7 @@ impl DragExportState {
             linux_notified: false,
             hover: None,
             prewritten: HashMap::new(),
+            settled: None,
         }
     }
 
@@ -95,6 +100,9 @@ impl DragExportState {
             (Some((id, pressed)), _) => Some((id, now, pressed)),
             (None, _) => None,
         };
+        if self.hover.map(|(id, ..)| id) != self.settled {
+            self.settled = None;
+        }
         let (_, since, _) = self.hover?;
         Some(since + HOVER_DWELL)
     }
@@ -102,7 +110,7 @@ impl DragExportState {
     /// The thumbnail whose drag files are due now: pressed, or rested on
     /// long enough, and no drag under way.
     pub(crate) fn due(&self, now: Instant) -> Option<u64> {
-        let (id, since, pressed) = self.hover?;
+        let (id, since, pressed) = self.hover.filter(|(id, ..)| self.settled != Some(*id))?;
         let idle = self.pending.is_none() && !self.active.load(Ordering::Acquire);
         (idle && (pressed || now >= since + HOVER_DWELL)).then_some(id)
     }
@@ -157,6 +165,7 @@ impl DragExportState {
             free -= 1;
             more = true;
         }
+        self.settled = (!more).then_some(hovered);
         more
     }
 
@@ -165,7 +174,7 @@ impl DragExportState {
     }
 
     #[cfg(test)]
-    pub(crate) fn started(&self) -> usize {
+    pub(crate) fn prewrite_count(&self) -> usize {
         self.prewritten.len()
     }
 
