@@ -51,9 +51,6 @@ impl PrunrApp {
             // gate names the free and needed memory).
             self.toasts.error(msg.clone());
         }
-        if results.is_empty() {
-            return;
-        }
         for crate::gui::processor::LandedFill { item_id, rgba, fill_scale } in results {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.job_is_current() {
@@ -69,6 +66,8 @@ impl PrunrApp {
                 item.note_fill_scale(fill_scale);
             }
         }
+        // The slot is free for the next ticked image.
+        self.dispatch_next_queued_run();
     }
 
     /// Install a new result the way every result producer must: the old

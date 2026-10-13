@@ -26,7 +26,9 @@ impl PrunrApp {
             if let Some(shown) = self.batch.selected_idx_clamped() {
                 self.batch.share_settings(shown, &HashSet::from([item_id]));
             }
-            let started = if self.settings.model.is_colorize() {
+            let started = if self.settings.model.is_inpaint() {
+                self.batch.index_of(item_id).is_some_and(|idx| self.dispatch_inpaint_for_item(idx))
+            } else if self.settings.model.is_colorize() {
                 self.dispatch_colorize_for(item_id)
             } else {
                 self.dispatch_upscale_for(item_id)
@@ -83,7 +85,9 @@ impl PrunrApp {
         true
     }
 
-    pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
+    /// Start the erase of the image at `idx`; false when it has nothing
+    /// to fill or no pixels to fill it on.
+    pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) -> bool {
         let item = &self.batch.items[idx];
         let item_id = item.id;
         // selection_mask is the single source of truth for the inpaint
@@ -91,7 +95,7 @@ impl PrunrApp {
         // whenever any selection exists — no separate "last_inpaint" cache.
         let Some(selection) = item.selection_mask.as_ref().cloned() else {
             tracing::debug!(item_id, "inpaint dispatch skipped: no selection_mask");
-            return;
+            return false;
         };
         // Stack-based inpaint: each stroke runs against the previous
         // result so earlier strokes stay intact. source_for_inpaint
@@ -99,7 +103,7 @@ impl PrunrApp {
         // handling memory-pressure eviction.
         let Some(source) = item.source_for_inpaint() else {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
-            return;
+            return false;
         };
         let raw_backend = self.erase_backend();
         let seed = raw_backend.is_sd_family()
@@ -108,6 +112,7 @@ impl PrunrApp {
         let tuning = self.erase_tuning(seed);
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
         self.batch.items[idx].start_erase(seed);
+        true
     }
 
     /// The eraser model the Model picker names (LaMa without one).
@@ -397,6 +402,26 @@ mod process_targets_tests {
         assert_eq!(app.erase_targets(), (vec![1], 0));
         app.batch.items[0].selected = true;
         assert_eq!(app.erase_targets(), (vec![1], 1), "the ticked one without a region is counted");
+
+        // Erases go one at a time through the run queue, like upscales:
+        // a fill's working set can be most of the machine's RAM.
+        app.processor.queue_runs(vec![1, 2]);
+        app.processor.set_inpaint_in_flight_for_test(1, true);
+        assert!(!app.can_process_intent(), "one erase at a time");
+        assert_eq!(app.processor.next_queued_run(), None, "the next waits for the slot");
+        app.processor.set_inpaint_in_flight_for_test(1, false);
+        assert_eq!(app.processor.next_queued_run(), Some(1));
+    }
+
+    /// A finished (or failed) erase frees the slot and the next ticked
+    /// image starts; one with nothing to fill passes its turn on.
+    #[test]
+    fn a_finished_erase_starts_the_next_ticked_one() {
+        let ctx = egui::Context::default();
+        let mut app = two_images(SettingsModel::Inpaint);
+        app.processor.queue_runs(vec![2, 1]);
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(app.processor.next_queued_run(), None, "neither image had a region: both turns passed");
     }
 
     /// Process gives every ticked image the shown image's settings before

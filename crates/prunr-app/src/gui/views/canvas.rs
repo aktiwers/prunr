@@ -170,7 +170,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
             if let Some(target) = cancel_target_for(progress.kind, active_inpaint_item) {
                 match target {
-                    CancelTarget::InpaintForItem(id) => app.cancel_inpaint_for(id),
+                    CancelTarget::InpaintForItem(id) => {
+                        app.processor.clear_run_queue();
+                        app.cancel_inpaint_for(id);
+                    }
                     // The capsule counts the queued images too: its Cancel ends them all.
                     CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
