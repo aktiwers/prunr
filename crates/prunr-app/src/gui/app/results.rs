@@ -9,6 +9,15 @@ use crate::gui::timeline::StepKind;
 use crate::gui::worker::WorkerResult;
 use super::PrunrApp;
 
+/// Why a run gives its image nothing.
+#[derive(Clone, Copy)]
+enum RunLost {
+    /// A knob change, a stroke or an undo while the run was under way.
+    ImageChanged,
+    /// The batch ended and the worker never answered for the image.
+    Unanswered,
+}
+
 /// Cap on `WorkerResult` messages drained per frame from `processor.worker_rx`.
 /// Keeps the UI responsive during heavy batch processing — remaining messages
 /// are picked up on the next frame (request_repaint_after ensures continuity).
@@ -194,14 +203,28 @@ impl PrunrApp {
     /// waiting on, and the user hears why. Silent when nothing was awaited
     /// any more (an undo already showed the earlier state).
     fn end_stale_run(&mut self, item_id: u64, run: &str) {
+        self.end_run_without_result(item_id, run, RunLost::ImageChanged);
+    }
+
+    /// The image stops waiting on a run that will give it nothing, and
+    /// the user hears why.
+    fn end_run_without_result(&mut self, item_id: u64, run: &str, why: RunLost) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         if item.status != BatchStatus::Processing && item.job.is_none() {
             return;
         }
-        tracing::warn!(item_id, run, "result dropped: the image changed while the run was under way");
         let name = item.filename.clone();
         item.abandon_job();
-        self.toasts.warning(format!("{name} changed while it was processing, so that result was dropped. Run it again."));
+        match why {
+            RunLost::ImageChanged => {
+                tracing::warn!(item_id, run, "result dropped: the image changed while the run was under way");
+                self.toasts.warning(format!("{name} changed while it was processing, so that result was dropped. Run it again."));
+            }
+            RunLost::Unanswered => {
+                tracing::warn!(item_id, run, "the batch ended without an answer for this image");
+                self.toasts.warning(format!("{name} was not finished: the processing worker lost it. Run it again."));
+            }
+        }
         self.refresh_batch_progress_status();
         self.admission_release_and_admit(item_id);
     }
@@ -644,8 +667,7 @@ impl PrunrApp {
             .map(|i| i.id)
             .collect();
         for item_id in unanswered {
-            tracing::warn!(item_id, "the batch ended with this image still processing");
-            self.end_stale_run(item_id, "processing");
+            self.end_run_without_result(item_id, "processing", RunLost::Unanswered);
         }
         let counts = self.batch.status_counts();
         let still_processing = counts.processing > 0;
