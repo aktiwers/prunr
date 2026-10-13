@@ -5,20 +5,16 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Engine, ImageSource};
 use crate::gui::timeline::StepKind;
-use crate::gui::worker::{AddEdgeWorkItem, WorkItem, WorkerMessage};
+use crate::gui::worker::{CachedTensorWork, WorkItem, WorkerMessage};
 use super::PrunrApp;
 
 impl PrunrApp {
     /// The target images an erase runs on (those with a painted region),
     /// and how many targets have none.
     pub(super) fn erase_targets(&self) -> (Vec<usize>, usize) {
-        let mut without = 0;
-        let with_region = self.batch.targeted_indices().into_iter().filter(|&idx| {
-            let has = self.batch.items[idx].selection_mask.as_ref().is_some_and(|m| m.has_selected_region());
-            if !has { without += 1; }
-            has
-        }).collect();
-        (with_region, without)
+        let (with_region, without): (Vec<usize>, Vec<usize>) = self.batch.targeted_indices().into_iter()
+            .partition(|&idx| self.batch.items[idx].has_painted_region());
+        (with_region, without.len())
     }
 
     /// Start the next queued upscale or colorize when the slot is free,
@@ -203,7 +199,7 @@ impl PrunrApp {
         }
 
         let tier2_work = self.batch.cached_tensor_work(&tiers.tier2);
-        let add_edge_work: Vec<AddEdgeWorkItem> = self.batch.cached_tensor_work(&tiers.tier_add_edge).into_iter().map(Into::into).collect();
+        let add_edge_work = self.batch.cached_tensor_work(&tiers.tier_add_edge);
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
         if tiers.tier1.len() > 1 {
@@ -258,8 +254,8 @@ impl PrunrApp {
     fn dispatch_with_admission(
         &mut self,
         tier1_ids: &HashSet<u64>,
-        tier2_work: Vec<crate::gui::worker::Tier2WorkItem>,
-        add_edge_work: Vec<AddEdgeWorkItem>,
+        tier2_work: Vec<CachedTensorWork>,
+        add_edge_work: Vec<CachedTensorWork>,
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
@@ -284,8 +280,8 @@ impl PrunrApp {
     fn dispatch_small_batch(
         &mut self,
         tier1_ids: &HashSet<u64>,
-        tier2_work: Vec<crate::gui::worker::Tier2WorkItem>,
-        add_edge_work: Vec<AddEdgeWorkItem>,
+        tier2_work: Vec<CachedTensorWork>,
+        add_edge_work: Vec<CachedTensorWork>,
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
@@ -307,8 +303,8 @@ impl PrunrApp {
     fn dispatch_batch(
         &mut self,
         items: Vec<crate::gui::worker::WorkItem>,
-        tier2_items: Vec<crate::gui::worker::Tier2WorkItem>,
-        add_edge_items: Vec<crate::gui::worker::AddEdgeWorkItem>,
+        tier2_items: Vec<CachedTensorWork>,
+        add_edge_items: Vec<CachedTensorWork>,
         model: prunr_core::ModelKind,
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<crate::gui::worker::WorkItem>>,
@@ -394,6 +390,16 @@ mod process_targets_tests {
         assert_eq!(app.erase_targets(), (vec![1], 0));
         app.batch.items[0].selected = true;
         assert_eq!(app.erase_targets(), (vec![1], 1), "the ticked one without a region is counted");
+    }
+
+    /// The picker lists a model that is not on disk with "Get"; Process
+    /// stays off until it is.
+    #[test]
+    fn process_is_off_while_the_saved_model_is_not_installed() {
+        let mut app = two_images(SettingsModel::Silueta);
+        assert!(app.can_process_intent());
+        app.hardware_install_cache = Default::default();
+        assert!(!app.can_process_intent());
     }
 
     #[test]

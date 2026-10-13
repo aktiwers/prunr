@@ -572,6 +572,10 @@ pub(crate) struct BatchItem {
     /// The key of the picture a background thread is building, so the
     /// next frame doesn't start the same one again.
     pub(crate) backdrop_tex_pending: Option<u64>,
+    /// Where a lens-blur backdrop focuses, measured once per depth map
+    /// and result (their pointers): a preview tick that leaves the
+    /// subject where it was keeps the backdrop it has.
+    lens_focus: Option<(usize, usize, f32)>,
 
     /// Shared selection mask. Both Paint Brush and Magic Brush write
     /// here. Signed i8 plane at source image resolution.
@@ -833,9 +837,20 @@ impl BatchItem {
         self.last_decode.as_mut()
     }
 
+    /// What was made from the source pixels goes with them: the
+    /// selection, the Magic Brush embedding and the depth map. Returns
+    /// whether a selection or embedding was there.
+    pub(crate) fn invalidate_source_derived(&mut self) -> bool {
+        let any = self.selection_mask.is_some() || self.magic_brush_embedding.is_some();
+        self.invalidate_selection();
+        self.invalidate_magic_brush_embedding();
+        self.invalidate_depth();
+        any
+    }
+
     /// Clear every selection-related cache: mask, hash, texture, pending build.
     /// Called by `BatchManager::clear_selection` (Esc / Clear) and
-    /// `invalidate_selection_on_source_change`.
+    /// `invalidate_source_derived`.
     pub(crate) fn invalidate_selection(&mut self) {
         self.selection_mask = None;
         self.selection_hash = None;
@@ -1058,6 +1073,7 @@ impl BatchItem {
                 // Live-preview DynamicImage cache is built from source_rgba;
                 // invalidate so the next dispatch rebuilds against the new one.
                 self.source_dyn = None;
+                self.invalidate_source_derived();
                 true
             }
             Err(msg) => {
@@ -1082,29 +1098,37 @@ impl BatchItem {
         if self.selection_hash != Some(result.key.0) {
             return false;
         }
-        let Some(shown) = self.selection_mask.clone() else { return false };
-        match result.image {
+        if self.selection_mask.is_none() {
+            return false;
+        }
+        let super::background_io::SelectionTextureResult { image, key, shown, .. } = result;
+        match image {
             SelectionImage::Full { image, feathered } => {
                 // Re-cut only for a feathered plane the cut-out has not
                 // had yet; a rebuild for zoom keeps the same one.
                 let had_it = self.selection_texture.as_ref().is_some_and(|t| {
-                    t.feathered.is_some() && t.key.0 == result.key.0 && t.key.1.edge_feather_px == result.key.1.edge_feather_px
+                    t.feathered.is_some() && t.key.0 == key.0 && t.key.1.edge_feather_px == key.1.edge_feather_px
                 });
                 let new_plane = feathered.is_some() && !had_it;
-                self.selection_texture = Some(SelectionTexture { key: result.key, handle: load(image), shown, feathered });
+                self.selection_texture = Some(SelectionTexture { key, handle: load(image), shown, feathered });
                 new_plane
             }
             // A patch whose base texture has moved on is dropped; the
             // per-frame check asks again against the new base.
             SelectionImage::Patch { base_hash, pos, image } => {
-                if let Some(tex) = self.selection_texture.as_mut().filter(|t| t.key == (base_hash, result.key.1)) {
+                if let Some(tex) = self.selection_texture.as_mut().filter(|t| t.key == (base_hash, key.1)) {
                     tex.handle.set_partial(pos, image, egui::TextureOptions::LINEAR);
-                    tex.key = result.key;
+                    tex.key = key;
                     tex.shown = shown;
                 }
                 false
             }
         }
+    }
+
+    /// Whether an erase has something to fill.
+    pub(crate) fn has_painted_region(&self) -> bool {
+        self.selection_mask.as_ref().is_some_and(|m| m.has_selected_region())
     }
 
     /// A picture built for the backdrop lands when it is still the
@@ -1840,6 +1864,7 @@ impl BatchItem {
             applied_preset,
             bg_image: None,
             backdrop_texture: None,
+            lens_focus: None,
             backdrop_tex_pending: None,
             selection_mask: None,
             selection_hash: None,
@@ -1945,11 +1970,27 @@ impl BatchItem {
         Some(match backdrop {
             Backdrop::Effect(effect) if effect.needs_depth() => {
                 let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
-                let result = self.result_rgba.as_ref().map_or(0, |r| Arc::as_ptr(r) as u64);
-                key ^ depth.rotate_left(29) ^ result.rotate_left(43)
+                let focus = self.lens_focus.map_or(0, |(_, _, f)| u64::from(f.to_bits()));
+                key ^ depth.rotate_left(29) ^ focus.rotate_left(43)
             }
             _ => key,
         })
+    }
+
+    /// Measure the lens-blur focus again when the depth map or the result
+    /// is another one; a result with the subject where it was gives the
+    /// same focus, so `backdrop_key` stays and nothing is rebuilt.
+    pub(crate) fn refresh_lens_focus(&mut self) {
+        let Some(depth) = &self.depth else {
+            self.lens_focus = None;
+            return;
+        };
+        let ids = (Arc::as_ptr(depth) as usize, self.result_rgba.as_ref().map_or(0, |r| Arc::as_ptr(r) as usize));
+        if self.lens_focus.is_some_and(|(d, r, _)| (d, r) == ids) {
+            return;
+        }
+        let value = prunr_core::depth::backdrop_focus(depth, self.result_rgba.as_deref());
+        self.lens_focus = Some((ids.0, ids.1, value));
     }
 
 
@@ -2327,6 +2368,7 @@ mod tests {
             item_id: 1,
             image: SelectionImage::Full { image: image(), feathered: feathered.then(|| make_mask(hash, 2, 2)) },
             key: (hash, style),
+            shown: make_mask(hash, 2, 2),
         };
         let mut item = fixture_item(1);
         item.selection_mask = Some(make_mask(7, 2, 2));

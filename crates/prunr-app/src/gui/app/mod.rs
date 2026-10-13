@@ -382,12 +382,14 @@ impl PrunrApp {
         // Test stub: no real platform clipboard available; SystemBridge::new
         // gracefully no-ops copy_image when the clipboard handle failed to
         // initialize, so this is safe in headless test envs.
-        Self::init_state(
+        let mut app = Self::init_state(
             Settings::default(),
             super::system_bridge::SystemBridge::new(),
             worker_tx,
             worker_rx,
-        )
+        );
+        app.hardware_install_cache = super::hardware_cache::HardwareInstallCache::all_installed();
+        app
     }
 
     /// Shared field-init for both `new` and `new_for_test`. SystemBridge and
@@ -594,19 +596,18 @@ impl PrunrApp {
     /// this so the button's disabled state and the dispatch's gating can't
     /// drift independently.
     pub fn can_process_intent(&self) -> bool {
+        // A saved model that is gone from disk: the picker says Get.
+        if !self.hardware_install_cache.has_model(self.settings.model) {
+            return false;
+        }
         if self.settings.model.is_upscale() {
-            // Install-state is not re-checked here: the dropdown filter
-            // already restricts selection to `is_available` models, and
-            // an `is_file()` syscall per frame would add 60 stats/sec
-            // while the toolbar is visible. Deletion-after-select is
-            // surfaced at dispatch time by the error toast.
             return can_start_run(self.processor.is_upscale_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_colorize() {
             return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_inpaint() {
-            self.batch.any_target_can(|i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()))
+            self.batch.any_target_can(BatchItem::has_painted_region)
         } else {
             self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
         }
@@ -1065,7 +1066,11 @@ impl eframe::App for PrunrApp {
         super::automation::pump(self, ctx);
         self.flush_settings_save(ctx);
         drain_screenshot_replies(ctx);
-        self.drain_background_channels(ctx);
+        // Anything landing restarts the quiet clock: a long import keeps
+        // landing images, so it never reads as stuck.
+        if self.drain_background_channels(ctx) {
+            self.busy_since = None;
+        }
         if self.prewrite_drag_files() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }

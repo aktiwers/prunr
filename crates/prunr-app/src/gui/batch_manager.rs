@@ -20,7 +20,7 @@ use super::background_io::BackgroundIO;
 use super::item::{BatchItem, BatchStatus, ImageSource, RunTier};
 use super::memory::{AdmissionController, ImageMemCost, RESIDENT_HISTORY_STEPS};
 use super::state::AppState;
-use super::worker::{Tier2WorkItem, WorkItem};
+use super::worker::{CachedTensorWork, WorkItem};
 
 /// Per-status counts across the batch. Produced by `status_counts` for
 /// callers that need to render progress strings, decide "all done" vs
@@ -656,19 +656,6 @@ impl BatchManager {
         baked
     }
 
-    /// Called when source_rgba is replaced on an item (re-decode, image
-    /// switch into a previously-evicted item). Drops the selection AND
-    /// the SAM encoder embedding — both are bound to the source bytes
-    /// they were derived from.
-    pub(crate) fn invalidate_selection_on_source_change(&mut self, item_id: u64) -> bool {
-        let Some(item) = self.find_by_id_mut(item_id) else { return false };
-        let any = item.selection_mask.is_some() || item.magic_brush_embedding.is_some();
-        item.invalidate_selection();
-        item.invalidate_magic_brush_embedding();
-        item.invalidate_depth();
-        any
-    }
-
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
     pub fn share_settings(&mut self, from: usize, ids: &std::collections::HashSet<u64>) {
@@ -751,7 +738,7 @@ impl BatchManager {
     /// The work for the images in `ids` that run again from their cached
     /// tensor. One whose cache or file can't be read fails, and starts
     /// over next time.
-    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<Tier2WorkItem> {
+    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<CachedTensorWork> {
         fn start_over(item: &mut BatchItem, why: String) {
             item.status = BatchStatus::Error(why);
             item.set_cached_tensor(None);
@@ -762,7 +749,7 @@ impl BatchManager {
             let Some(ct) = &item.cached_tensor else { continue };
             match (ct.decompress(), item.source.load_bytes()) {
                 (Some(data), Ok(bytes)) => {
-                    out.push(Tier2WorkItem {
+                    out.push(CachedTensorWork {
                         item_id: item.id,
                         tensor_data: data,
                         tensor_height: ct.height,
@@ -1606,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_selection_on_source_change_drops_embedding() {
+    fn a_source_change_drops_the_selection_and_embedding() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         {
@@ -1619,7 +1606,7 @@ mod tests {
                 high_res_feats_1: vec![0.0; 1_048_576],
             }));
         }
-        bm.invalidate_selection_on_source_change(1);
+        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
         let item = bm.find_by_id(1).unwrap();
         assert!(item.selection_mask.is_none(), "selection_mask must be cleared on source change");
         assert!(item.magic_brush_embedding.is_none(), "embedding must be cleared on source change");
@@ -1638,7 +1625,7 @@ mod tests {
         let old_epoch = item.depth_run.epoch;
         assert!(item.land_depth(old_epoch, map()));
         item.depth_run.pending = true;
-        bm.invalidate_selection_on_source_change(1);
+        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
         let item = bm.find_by_id_mut(1).unwrap();
         assert!(item.depth.is_none() && !item.depth_run.pending, "the map and its run are dropped");
         assert!(item.needs_depth_run());

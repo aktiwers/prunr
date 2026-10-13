@@ -35,6 +35,21 @@ impl HardwareInstallCache {
         }
     }
 
+    /// Every model and runtime present, for tests that drive runs; a
+    /// test that wants something missing starts from `Default`.
+    #[cfg(test)]
+    pub(crate) fn all_installed() -> Self {
+        Self {
+            openvino: true,
+            taesd: true,
+            lcm_bundle: true,
+            x2plus: true,
+            faces: [true; 2],
+            depth: true,
+            models: crate::gui::settings::SettingsModel::ALL.iter().fold(0, |bits, m| bits | 1 << m.index()),
+        }
+    }
+
     pub fn has_face_model(&self, model: crate::gui::item_settings::FaceModel) -> bool {
         self.faces[model as usize]
     }

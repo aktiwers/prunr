@@ -33,6 +33,9 @@ pub(crate) struct SelectionTextureResult {
     pub(crate) item_id: u64,
     pub(crate) image: SelectionImage,
     pub(crate) key: SelectionTextureKey,
+    /// The plane the texture now shows: the painted mask, or under an
+    /// eraser its reach, which the next stroke patches from.
+    pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
 }
 
 pub(crate) enum SelectionImage {
@@ -215,23 +218,31 @@ impl BackgroundIO {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
             let style = key.1;
-            // An eraser's region reaches beyond the painted cells, so its
-            // overlay is rebuilt whole, from the reach rather than the paint.
-            let image = match style.shown_region(&mask) {
-                Some(reach) => SelectionImage::Full { image: build_selection_image(&reach, style), feathered: None },
+            let patch_from = |base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>, plane: &prunr_core::selection::MaskArtifact| {
+                base.and_then(|(base_hash, base)| {
+                    let (pos, image) = build_selection_patch(&base, plane, style)?;
+                    Some(SelectionImage::Patch { base_hash, pos, image })
+                })
+            };
+            // An eraser's region reaches beyond the painted cells: its
+            // overlay is drawn from the reach, and patched from the last
+            // reach rather than from the paint.
+            let (image, shown) = match style.shown_region(&mask) {
+                Some(reach) => {
+                    let image = patch_from(base, &reach)
+                        .unwrap_or_else(|| SelectionImage::Full { image: build_selection_image(&reach, style), feathered: None });
+                    (image, reach)
+                }
                 None => {
-                    let patch = base.and_then(|(base_hash, base)| {
-                        let (pos, image) = build_selection_patch(&base, &mask, style)?;
-                        Some(SelectionImage::Patch { base_hash, pos, image })
-                    });
-                    patch.unwrap_or_else(|| {
+                    let image = patch_from(base, &mask).unwrap_or_else(|| {
                         let feathered = style.feather(&mask, source.as_deref());
                         let shown = feathered.as_ref().unwrap_or(&mask);
                         SelectionImage::Full { image: build_selection_image(shown, style), feathered }
-                    })
+                    });
+                    (image, mask)
                 }
             };
-            let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
+            let _ = texture_tx.send(SelectionTextureResult { item_id, image, key, shown });
             // Some compositors drop thread-initiated wake-ups while the
             // window is idle; the pending key's poll in `logic()` is the
             // fallback.
@@ -424,6 +435,38 @@ mod tests {
         let reach = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..style }.shown_region(&painted).expect("an eraser shows the reach");
         assert_eq!(reach.cells()[4 * 9 + 3], FULL, "the overlay shows the grown region");
         assert!(SelectionStyle::with_fill(0.5).shown_region(&painted).is_none());
+    }
+
+    /// An eraser's overlay is drawn from the reach and a stroke patches it
+    /// from the last reach: the patch over the first build equals a fresh
+    /// build of the new reach.
+    #[test]
+    fn an_erasers_overlay_patches_from_its_last_reach() {
+        let style = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..SelectionStyle::with_fill(0.5) };
+        let painted = |cells: &[usize]| {
+            let mut v = vec![0i8; 16 * 16];
+            for &c in cells { v[c] = FULL; }
+            Arc::new(MaskArtifact::from_cells(16, 16, v))
+        };
+        let (a, b) = (painted(&[5 * 16 + 5]), painted(&[5 * 16 + 5, 9 * 16 + 9]));
+        let io = BackgroundIO::new();
+        let ctx = egui::Context::default();
+        let wait = std::time::Duration::from_secs(10);
+        io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, None, ctx.clone());
+        let first = io.selection_texture_rx.recv_timeout(wait).expect("the first build");
+        let SelectionImage::Full { image: full_a, .. } = first.image else { panic!("a first build is whole") };
+        assert_eq!(first.shown.cells(), style.shown_region(&a).expect("an eraser").cells(), "the texture remembers the reach it drew");
+        io.request_selection_visualization(1, Arc::clone(&b), (2, style), None, Some((1, Arc::clone(&first.shown))), ctx);
+        let second = io.selection_texture_rx.recv_timeout(wait).expect("the second build");
+        let SelectionImage::Patch { base_hash: 1, pos, image: patch } = second.image else { panic!("a stroke patches the last reach") };
+        let mut pasted = full_a;
+        for (row, chunk) in patch.pixels.chunks(patch.width()).enumerate() {
+            let start = (pos[1] + row) * 16 + pos[0];
+            pasted.pixels[start..start + patch.width()].copy_from_slice(chunk);
+        }
+        let fresh = build_selection_image(&style.shown_region(&b).expect("an eraser"), style);
+        assert_eq!(pasted.pixels, fresh.pixels);
+        assert_eq!(second.shown.cells(), style.shown_region(&b).expect("an eraser").cells());
     }
 
     fn centre_block() -> MaskArtifact {
