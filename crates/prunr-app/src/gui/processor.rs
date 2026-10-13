@@ -876,30 +876,7 @@ impl Processor {
             };
             if cancelled() { send_cancelled(); return; }
             let mask = tuning.fill_region(&correction, image.dimensions());
-            let sd_req = match tuning.backend {
-                prunr_models::ModelId::SdV15InpaintFp16
-                | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
-                    use prunr_core::inpaint_sd::SchedulerKind;
-                    let scheduler: SchedulerKind = tuning.sd_scheduler.into();
-                    let plan = resolve_sd_dispatch(
-                        tuning.backend,
-                        tuning.use_taesd,
-                        tuning.sd_guidance_scale,
-                    );
-                    Some(prunr_core::inpaint_sd::SdInpaintRequest {
-                        prompt: tuning.sd_prompt.clone(),
-                        negative_prompt: tuning.sd_negative_prompt.clone(),
-                        num_inference_steps: tuning.sd_steps,
-                        guidance_scale: plan.effective_cfg,
-                        seed: tuning.sd_seed,
-                        use_taesd: plan.use_taesd,
-                        scheduler,
-                        tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
-                        fill_scale: tuning.fill_scale,
-                    })
-                }
-                _ => None,
-            };
+            let sd_req = sd_request(&tuning);
             let dir = crate::subprocess::protocol::ipc_temp_dir();
             let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_gen(dir, item_id, gen);
             let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_gen(dir, item_id, gen);
@@ -1658,6 +1635,77 @@ fn run_sam_decoder_inline(
 // Tests avoid constructing Processor (which initialises ORT RunOptions and
 // spawns the inpaint bridge thread). Admission and enum correctness use the
 // shared `admission_check` free function directly.
+
+/// The SD pipeline's request for an erase under `tuning`; `None` for an
+/// eraser outside the SD family.
+fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
+    match tuning.backend {
+        prunr_models::ModelId::SdV15InpaintFp16
+        | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
+            use prunr_core::inpaint_sd::SchedulerKind;
+            let scheduler: SchedulerKind = tuning.sd_scheduler.into();
+            let plan = resolve_sd_dispatch(
+                tuning.backend,
+                tuning.use_taesd,
+                tuning.sd_guidance_scale,
+            );
+            Some(prunr_core::inpaint_sd::SdInpaintRequest {
+                prompt: tuning.sd_prompt.clone(),
+                negative_prompt: tuning.sd_negative_prompt.clone(),
+                num_inference_steps: tuning.sd_steps,
+                guidance_scale: plan.effective_cfg,
+                seed: tuning.sd_seed,
+                use_taesd: plan.use_taesd,
+                scheduler,
+                tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
+                fill_scale: tuning.fill_scale,
+            })
+        }
+        // The prompt is baked in: the user's prompt, guidance and TAESD
+        // do not apply.
+        prunr_models::ModelId::RoremFp16 => Some(prunr_core::inpaint_sd::SdInpaintRequest {
+            num_inference_steps: prunr_core::inpaint_sd::ROREM_STEPS,
+            scheduler: prunr_core::inpaint_sd::SchedulerKind::Lcm,
+            seed: tuning.sd_seed,
+            tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
+            fill_scale: tuning.fill_scale,
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sd_request_tests {
+    use super::*;
+
+    /// RORem runs its own 4 LCM steps whatever the SD chips say; the SD
+    /// 1.5 settings never reach it, the seed does (for Try another).
+    #[test]
+    fn rorem_runs_its_own_steps_and_keeps_the_seed() {
+        let tuning = InpaintTuning {
+            backend: prunr_models::ModelId::RoremFp16,
+            sd_prompt: "a cat".into(),
+            sd_guidance_scale: 7.5,
+            sd_scheduler: super::super::brush_state::SdScheduler::DpmPlusPlus2MKarras,
+            sd_steps: 25,
+            sd_seed: Some(42),
+            use_taesd: true,
+            ..Default::default()
+        };
+        let req = sd_request(&tuning).expect("RORem runs through the SD pipeline");
+        assert_eq!(req.num_inference_steps, prunr_core::inpaint_sd::ROREM_STEPS);
+        assert_eq!(req.scheduler, prunr_core::inpaint_sd::SchedulerKind::Lcm);
+        assert!(req.prompt.is_empty() && req.guidance_scale <= 1.0 && !req.use_taesd);
+        assert_eq!(req.seed, Some(42));
+    }
+
+    #[test]
+    fn non_sd_erasers_have_no_sd_request() {
+        assert!(sd_request(&InpaintTuning::default()).is_none());
+    }
+}
+
 #[cfg(test)]
 mod sam_dispatch_tests {
     use super::*;

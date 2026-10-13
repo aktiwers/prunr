@@ -44,6 +44,14 @@ fn fixture_mask() -> GrayImage {
 }
 
 fn run_inpaint_test(model_id: ModelId, label: &str) {
+    run_inpaint_test_with(model_id, label, |image, mask| process_inpaint(image, mask, model_id));
+}
+
+fn run_inpaint_test_with(
+    model_id: ModelId,
+    label: &str,
+    run: impl Fn(&RgbaImage, &GrayImage) -> Result<RgbaImage, prunr_core::CoreError>,
+) {
     if skip_if_no_ort(label) { return; }
     if !is_available(model_id) {
         eprintln!(
@@ -54,7 +62,7 @@ fn run_inpaint_test(model_id: ModelId, label: &str) {
     }
     let image = fixture_source();
     let mask = fixture_mask();
-    let out = process_inpaint(&image, &mask, model_id)
+    let out = run(&image, &mask)
         .unwrap_or_else(|e| panic!("{label}: process_inpaint failed: {e:?}"));
 
     // Dimensions invariant.
@@ -103,4 +111,14 @@ fn inpaint_big_lama_runs_end_to_end() {
 #[test]
 fn inpaint_migan_runs_end_to_end() {
     run_inpaint_test(ModelId::Migan, "migan");
+}
+
+#[test]
+#[ignore = "5.5 GB bundle; a minute or more per run on a CPU"]
+fn inpaint_rorem_runs_end_to_end() {
+    use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
+    run_inpaint_test_with(ModelId::RoremFp16, "rorem", |image, mask| {
+        let req = SdInpaintRequest { num_inference_steps: 4, scheduler: SchedulerKind::Lcm, seed: Some(7), ..Default::default() };
+        prunr_core::inpaint_sd::process_inpaint_with(image, mask, ModelId::RoremFp16, req, &prunr_core::Progress::none())
+    });
 }

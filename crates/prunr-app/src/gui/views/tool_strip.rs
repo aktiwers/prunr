@@ -85,7 +85,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         "",
                         None,
                     ));
-                    if tool == Tool::Paint && facts.model == SettingsModel::SdInpaint {
+                    if tool == Tool::Paint && facts.model.generates() {
                         ui.separator();
                         let reason = (!facts.can_reroll).then_some("Erase something first; this generates that fill again.");
                         let resp = chip::gated(ui, reason, |ui| {

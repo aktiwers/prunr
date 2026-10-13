@@ -69,8 +69,16 @@ pub fn fit(req: &SdInpaintRequest) -> crate::inpaint::Fit {
 
 /// The UNet downsamples three times, so a crop side is a multiple of 64.
 const SD_SIDE_STEP: u32 = 64;
-/// SD 1.5 latent scaling factor. Diffusers calls this `vae.config.scaling_factor`.
-const VAE_SCALING_FACTOR: f32 = 0.18215;
+/// The steps RORem's LCM LoRA was distilled for.
+pub const ROREM_STEPS: u32 = 4;
+
+/// Diffusers' `vae.config.scaling_factor` for SD 1.5's VAE and SDXL's.
+const SD15_VAE_SCALE: f32 = 0.18215;
+const SDXL_VAE_SCALE: f32 = 0.13025;
+
+fn vae_scale(id: prunr_models::ModelId) -> f32 {
+    if id == prunr_models::ModelId::RoremFp16 { SDXL_VAE_SCALE } else { SD15_VAE_SCALE }
+}
 
 /// Minimum free RAM (bytes) required before we'll load the SD bundle.
 /// The 4 ONNX files total ~2 GB on disk; ORT graph optimization roughly
@@ -351,7 +359,8 @@ pub fn process_inpaint_with(
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
     // silently fall back to standard VAE — same graceful pattern as LCM.
-    let taesd = if req.use_taesd { TaesdSession::get().ok() } else { None };
+    // TAESD is SD 1.5's latent space; SDXL's VAE differs.
+    let taesd = if req.use_taesd && vae_scale(id) == SD15_VAE_SCALE { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
@@ -784,25 +793,32 @@ fn run_one_tile(
     // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
     // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
     // all the user wants, so we skip the second to halve UNet cost.
-    let use_cfg = req.guidance_scale > 1.0 + 1e-3;
+    // A baked-in prompt runs unguided: there is no prompt to steer by.
+    let prompted = bundle.text_encoder.is_some();
+    let use_cfg = prompted && req.guidance_scale > 1.0 + 1e-3;
 
     // Pre-loop independent ops in parallel: text encode (cond + uncond
     // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
     // distinct session mutex (or none) so they run concurrently.
-    progress.step(Step::ReadingPrompt);
+    if prompted {
+        progress.step(Step::ReadingPrompt);
+    }
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
-            let cond_h = s.spawn(|| text_embedding_f16(bundle, &prompt));
+            let cond_h = prompted.then(|| s.spawn(|| text_embedding_f16(bundle, &prompt)));
             let uncond_h = neg_prompt.as_ref().map(|np| {
                 let np = np.clone();
                 s.spawn(move || text_embedding_f16(bundle, &np))
             });
             let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
             let mask_lat = mask_to_latent(&padded_mask);
-            let cond = cond_h.join()
-                .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??;
+            let cond = match cond_h {
+                Some(h) => Some(h.join()
+                    .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??),
+                None => None,
+            };
             let uncond = match uncond_h {
                 Some(h) => Some(h.join()
                     .map_err(|_| CoreError::Inference("text encoder (uncond) thread panicked".into()))??),
@@ -861,9 +877,10 @@ fn run_one_tile(
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
-        let noise_pred = match text_emb_uncond_f16.as_ref() {
-            Some(uncond_f16) => cfg_noise_pred(bundle, latent_in_f16, t, &text_emb_cond_f16, uncond_f16, scale)?,
-            None => unet_step(bundle, latent_in_f16, t, &text_emb_cond_f16)?,
+        let noise_pred = match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
+            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale)?,
+            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, cond)?,
+            (None, _) => unet_step_sized(bundle, latent_in_f16, t, (ph, pw))?,
         };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
@@ -1032,20 +1049,24 @@ impl TaesdSession {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct SdSession {
     unet: Mutex<Session>,
     vae_encoder: Mutex<Session>,
     vae_decoder: Mutex<Session>,
-    text_encoder: Mutex<Session>,
+    /// SD 1.5's CLIP encoder. `None` for a bundle with its prompt baked
+    /// into the UNet (RORem), whose third UNet input is SDXL's size
+    /// conditioning instead of a text embedding.
+    text_encoder: Option<TextEncoder>,
     /// Discovered input names per session (positional order from the ONNX).
     /// SD exports use stable names (sample / timestep / encoder_hidden_states
-    /// for UNet, sample for VAEs, input_ids for text encoder) but we look
-    /// them up by introspection so a non-standard export still works.
+    /// or time_ids for UNet, sample for VAEs, input_ids for text encoder) but
+    /// we look them up by introspection so a non-standard export still works.
     unet_inputs: [String; 3],
     vae_encoder_input: String,
     vae_decoder_input: String,
-    text_encoder_input: String,
+    vae_scale: f32,
+    /// The VAE takes f32: SDXL's overflows in f16.
+    vae_f32: bool,
     /// Set once a batched UNet call fails (a static batch-1 export, the
     /// LCM bundle); guided steps then run cond and uncond one after the
     /// other for this session's lifetime.
@@ -1057,6 +1078,11 @@ pub(crate) struct SdSession {
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
+
+struct TextEncoder {
+    session: Mutex<Session>,
+    input: String,
+}
 
 
 /// `Arc<T>` so idle eviction can drop the cache's ref while in-flight
@@ -1257,12 +1283,16 @@ impl SdSession {
                 Ok((key, s, ep))
             };
 
+        // A bundle with its prompt baked in ships no text encoder.
+        let wanted: Vec<(&'static str, SmokeFn)> = PARTS.iter().copied()
+            .filter(|(key, _)| *key != "text_encoder" || by_key.contains_key("text_encoder"))
+            .collect();
         let mut parts: Vec<(&'static str, Session, String)> =
             if crate::engine::directml_active() {
-                PARTS.iter().map(build).collect::<Result<_, _>>()?
+                wanted.iter().map(build).collect::<Result<_, _>>()?
             } else {
                 use rayon::prelude::*;
-                PARTS.par_iter().map(build).collect::<Result<_, _>>()?
+                wanted.par_iter().map(build).collect::<Result<_, _>>()?
             };
 
         // Match by key so the destructure below survives reordering of
@@ -1274,7 +1304,7 @@ impl SdSession {
             let (_, s, ep) = parts.swap_remove(pos);
             Ok((s, ep))
         };
-        let (text_encoder, text_ep) = take("text_encoder")?;
+        let text = by_key.contains_key("text_encoder").then(|| take("text_encoder")).transpose()?;
         let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
         let (vae_decoder,  vae_dec_ep) = take("vae_decoder")?;
         let (unet,         unet_ep)    = take("unet")?;
@@ -1282,12 +1312,16 @@ impl SdSession {
         let unet_inputs = take_three_inputs(&unet, "unet")?;
         let vae_encoder_input = take_first_input(&vae_encoder, "vae_encoder")?;
         let vae_decoder_input = take_first_input(&vae_decoder, "vae_decoder")?;
-        let text_encoder_input = take_first_input(&text_encoder, "text_encoder")?;
+        let text_encoder = text.map(|(session, ep)| -> Result<(TextEncoder, String), String> {
+            let input = take_first_input(&session, "text_encoder")?;
+            Ok((TextEncoder { session: Mutex::new(session), input }, ep))
+        }).transpose()?;
+        let vae_f32 = input_is_f32(&vae_encoder, 0);
 
         let rss_after_mb = process_rss_mb();
         tracing::info!(
             ?id,
-            text_encoder_ep = %text_ep,
+            text_encoder_ep = ?text_encoder.as_ref().map(|(_, ep)| ep),
             vae_encoder_ep = %vae_enc_ep,
             vae_decoder_ep = %vae_dec_ep,
             unet_ep = %unet_ep,
@@ -1301,11 +1335,12 @@ impl SdSession {
             unet: Mutex::new(unet),
             vae_encoder: Mutex::new(vae_encoder),
             vae_decoder: Mutex::new(vae_decoder),
-            text_encoder: Mutex::new(text_encoder),
+            text_encoder: text_encoder.map(|(t, _)| t),
             unet_inputs,
             vae_encoder_input,
             vae_decoder_input,
-            text_encoder_input,
+            vae_scale: vae_scale(id),
+            vae_f32,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
         })
@@ -1435,11 +1470,9 @@ fn build_part_with_ep_ladder(
         }
     }
 
-    // SD bundle weights are FP16; the ORT CPU EP runs them but produces
-    // text-like artifacts instead of a coherent fill. GPU EP required.
     debug_assert!(id.is_sd_family(),
         "build_part_with_ep_ladder is SD-only; non-SD id reached CPU fallback");
-    if id.is_sd_family() {
+    if cpu_output_is_wrong(id) {
         tracing::warn!(?id, part = %key,
             "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
         if session_key.cpu_only {
@@ -1467,11 +1500,28 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
+/// SD 1.5's FP16 bundles: the ORT CPU EP runs them but produces
+/// text-like artifacts instead of a coherent fill, so they need a GPU
+/// EP. RORem's CPU output matches its PyTorch reference.
+fn cpu_output_is_wrong(id: prunr_models::ModelId) -> bool {
+    matches!(id, prunr_models::ModelId::SdV15InpaintFp16 | prunr_models::ModelId::SdV15LcmInpaintFp16)
+}
+
 fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("SD: optimization level: {e}"))
+        .map_err(|e| format!("SD: optimization level: {e}"))?
+        // Prepacking keeps a second, repacked copy of the CPU EP's
+        // weights: RORem peaked at 15.2 GB with it, 12.9 GB without,
+        // loaded in 45 s instead of 96, and stepped as fast.
+        .with_prepacking(false)
+        .map_err(|e| format!("SD: prepacking: {e}"))?
+        // ORT's default is the physical cores; the UNet's fp16 matmuls
+        // also use the hyper-threads (RORem: 26 s a step on 4 of the
+        // i7-6700's threads).
+        .with_intra_threads(num_cpus::get().max(1))
+        .map_err(|e| format!("SD: threads: {e}"))
 }
 
 /// Path-based ORT-graph-optimization cache for SD's `commit_from_file`
@@ -1486,6 +1536,10 @@ fn sd_apply_path_cache<'a>(
     ep_name: &str,
     part: &str,
 ) -> (ort::session::builder::SessionBuilder, Cow<'a, Path>) {
+    // An optimized copy elsewhere would not find the weights' data files.
+    if prunr_models::keeps_weights_apart(model_id) {
+        return (builder, Cow::Borrowed(source_path));
+    }
     let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part) else {
         return (builder, Cow::Borrowed(source_path));
     };
@@ -1525,8 +1579,15 @@ fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
 }
 
 fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
-    let img = Array4::<f16>::zeros((1, 3, SD_TILE as usize, SD_TILE as usize));
-    let t = Tensor::from_array(img)
+    smoke_test_vae(s, label, (1, 3, SD_TILE as usize, SD_TILE as usize))
+}
+
+fn smoke_test_vae_decoder(s: &mut Session, label: &str) -> Result<(), String> {
+    smoke_test_vae(s, label, (1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize))
+}
+
+fn smoke_test_vae(s: &mut Session, label: &str, shape: (usize, usize, usize, usize)) -> Result<(), String> {
+    let t = tensor_in(Array4::<f32>::zeros(shape), input_is_f32(s, 0))
         .map_err(|e| format!("{label}: smoke input: {e}"))?;
     let inputs = s.inputs();
     let name = inputs.first().map(|i| i.name().to_string())
@@ -1536,26 +1597,44 @@ fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn smoke_test_vae_decoder(s: &mut Session, label: &str) -> Result<(), String> {
-    let lat = Array4::<f16>::zeros((1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize));
-    let t = Tensor::from_array(lat)
-        .map_err(|e| format!("{label}: smoke input: {e}"))?;
-    let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
-        .ok_or_else(|| format!("{label}: no inputs"))?;
-    s.run(inputs![name.as_str() => &t])
-        .map_err(|e| format!("{label}: smoke run: {e}"))?;
-    Ok(())
+/// Whether input `idx` of `s` takes f32 (else f16).
+fn input_is_f32(s: &Session, idx: usize) -> bool {
+    s.inputs().get(idx).and_then(|i| i.dtype().tensor_type()) == Some(ort::value::TensorElementType::Float32)
+}
+
+/// `arr` as the tensor a session input takes: as it is, or narrowed to f16.
+fn tensor_in(arr: Array4<f32>, f32_input: bool) -> ort::Result<ort::value::DynValue> {
+    if f32_input {
+        Ok(Tensor::from_array(arr)?.into_dyn())
+    } else {
+        Ok(Tensor::from_array(f32_to_f16_4d(&arr))?.into_dyn())
+    }
+}
+
+/// The UNet's third input: SDXL's size conditioning, else a text embedding.
+fn takes_size_ids(s: &Session) -> bool {
+    s.inputs().get(2).is_some_and(|i| i.name() == "time_ids")
+}
+
+/// SDXL's `time_ids` for an `h × w` crop: original size, crop origin,
+/// target size.
+fn size_ids(h: u32, w: u32) -> ndarray::Array2<f16> {
+    let (h, w) = (f16::from_f32(h as f32), f16::from_f32(w as f32));
+    let zero = f16::from_f32(0.0);
+    ndarray::Array2::from_shape_vec((1, 6), vec![h, w, zero, zero, h, w]).expect("6 values for (1, 6)")
 }
 
 fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
     let l = SD_LATENT_SIDE as usize;
     let lat = Array4::<f16>::zeros((1, 9, l, l));
     let ts = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(0.0));
-    let emb = Array3::<f16>::zeros((1, CLIP_SEQ_LEN, 768));
     let lat_t = Tensor::from_array(lat).map_err(|e| format!("{label}: smoke latent: {e}"))?;
     let ts_t = Tensor::from_array(ts).map_err(|e| format!("{label}: smoke ts: {e}"))?;
-    let emb_t = Tensor::from_array(emb).map_err(|e| format!("{label}: smoke emb: {e}"))?;
+    let emb_t = if takes_size_ids(s) {
+        Tensor::from_array(size_ids(SD_TILE, SD_TILE)).map(|t| t.into_dyn())
+    } else {
+        Tensor::from_array(Array3::<f16>::zeros((1, CLIP_SEQ_LEN, 768))).map(|t| t.into_dyn())
+    }.map_err(|e| format!("{label}: smoke conditioning: {e}"))?;
     let inputs = s.inputs();
     if inputs.len() < 3 {
         return Err(format!("{label}: smoke needs ≥3 inputs, got {}", inputs.len()));
@@ -1644,9 +1723,11 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
     let tokens = clip_tokenize(prompt);
     let t = Tensor::from_array(tokens)
         .map_err(|e| CoreError::Inference(format!("SD text encoder: input tensor: {e}")))?;
-    let mut session = bundle.text_encoder.lock()
+    let encoder = bundle.text_encoder.as_ref()
+        .ok_or_else(|| CoreError::Inference("SD: this bundle has no text encoder".into()))?;
+    let mut session = encoder.session.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![bundle.text_encoder_input.as_str() => &t])
+    let outputs = session.run(inputs![encoder.input.as_str() => &t])
         .map_err(|e| CoreError::Inference(format!("SD text encoder: run: {e}")))?;
     extract_3d(&outputs[0], "text encoder")
 }
@@ -1677,15 +1758,8 @@ fn vae_encode_masked(
 }
 
 fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
-    let input_f16 = f32_to_f16_4d(&input);
-    // Belt-and-suspenders: NLL would drop `input` at end of statement
-    // anyway since it's unused below. The explicit drop documents
-    // intent — the f32 buffer (~3 MB at 512×512) is dead the moment
-    // the f16 mirror exists, and the next op acquires the VAE session
-    // mutex (potentially a held-lock window if another thread is
-    // running). Free first.
-    drop(input);
-    let t = Tensor::from_array(input_f16)
+    let f32_input = matches!(backend, VaeBackend::Standard(b) if b.vae_f32);
+    let t = tensor_in(input, f32_input)
         .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
     match backend {
         VaeBackend::Standard(bundle) => {
@@ -1694,7 +1768,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
             let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
             let mut latent = extract_4d(&outputs[0], "vae encoder")?;
-            latent *= VAE_SCALING_FACTOR;
+            latent *= bundle.vae_scale;
             Ok(latent)
         }
         VaeBackend::Taesd(taesd) => {
@@ -1710,11 +1784,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
 fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
     match backend {
         VaeBackend::Standard(bundle) => {
-            // Fuse the unscale divide with the f16 narrow — saves the
-            // intermediate `latent / VAE_SCALING_FACTOR` Array4 (~64 KB
-            // at 64×64 latent) that was immediately consumed and dropped.
-            let unscaled_f16 = latent.mapv(|v| f16::from_f32(v / VAE_SCALING_FACTOR));
-            let t = Tensor::from_array(unscaled_f16)
+            let t = tensor_in(latent / bundle.vae_scale, bundle.vae_f32)
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
             let mut session = bundle.vae_decoder.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1765,6 +1835,32 @@ fn unet_step(
         bundle.unet_inputs[0].as_str() => &lat_t,
         bundle.unet_inputs[1].as_str() => &ts_t,
         bundle.unet_inputs[2].as_str() => &emb_t,
+    ])
+        .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
+    extract_4d(&outputs[0], "unet")
+}
+
+/// One step of a bundle with its prompt baked in: the third input is
+/// SDXL's size conditioning for the `(h, w)` crop.
+fn unet_step_sized(
+    bundle: &SdSession,
+    latent_9ch_f16: Array4<f16>,
+    t: i64,
+    (h, w): (u32, u32),
+) -> Result<Array4<f32>, CoreError> {
+    let timestep = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(t as f32));
+    let lat_t = Tensor::from_array(latent_9ch_f16)
+        .map_err(|e| CoreError::Inference(format!("SD unet: latent tensor: {e}")))?;
+    let ts_t = Tensor::from_array(timestep)
+        .map_err(|e| CoreError::Inference(format!("SD unet: timestep tensor: {e}")))?;
+    let ids_t = Tensor::from_array(size_ids(h, w))
+        .map_err(|e| CoreError::Inference(format!("SD unet: time_ids tensor: {e}")))?;
+    let mut session = bundle.unet.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outputs = session.run(inputs![
+        bundle.unet_inputs[0].as_str() => &lat_t,
+        bundle.unet_inputs[1].as_str() => &ts_t,
+        bundle.unet_inputs[2].as_str() => &ids_t,
     ])
         .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
     extract_4d(&outputs[0], "unet")

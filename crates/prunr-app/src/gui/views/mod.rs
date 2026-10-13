@@ -121,6 +121,7 @@ pub fn model_info(model: SettingsModel) -> ModelInfo {
         SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "Sharper fills \u{00b7} ~199 MB"),
         SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "Compact \u{00b7} ~26 MB"),
         SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "Generative \u{00b7} ~2 GB"),
+        SettingsModel::RoremInpaint => (ICON_BRUSH.codepoint, "Eraser (RORem)", "Large objects \u{00b7} ~5.5 GB"),
         SettingsModel::RealEsrganUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Real-ESRGAN)", "4\u{00d7} \u{00b7} ~64 MB"),
         SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4\u{00d7} photos \u{00b7} ~155 MB"),
         SettingsModel::FourXNmkdSiaxCxUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Siax-CX)", "4\u{00d7} clean photos \u{00b7} ~64 MB"),
