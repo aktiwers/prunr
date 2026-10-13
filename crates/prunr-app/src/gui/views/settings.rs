@@ -663,7 +663,7 @@ fn render_tab_model_credits(ui: &mut egui::Ui) {
                 RichText::new("No models installed yet.")
                     .color(theme::TEXT_SECONDARY),
             );
-            super::hint(ui, "Visit the Model Store to download models.");
+            super::hint(ui, "Get models in the Model Store.");
         });
         return;
     }

@@ -7,7 +7,6 @@ use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::background_io::TexTarget;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::WorkerResult;
-use crate::gui::views::adjustments_toolbar;
 use super::PrunrApp;
 
 /// Cap on `WorkerResult` messages drained per frame from `processor.worker_rx`.
@@ -440,8 +439,9 @@ impl PrunrApp {
         if self.hardware_install_cache.depth {
             return;
         }
-        self.toasts.info("Depth effects need the Depth Anything model (95 MB).");
-        self.open_model_store(adjustments_toolbar::ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Depth) }, ctx);
+        use crate::gui::views::{depth_chip::DEPTH_MODEL, get_model};
+        self.toasts.info(get_model::needs("Depth", DEPTH_MODEL));
+        self.open_model_store(get_model::store_request(DEPTH_MODEL), ctx);
     }
 
     /// The next click on the image picks the Depth chip's focus.
