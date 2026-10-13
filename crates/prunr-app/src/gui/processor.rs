@@ -202,7 +202,7 @@ pub(crate) struct SamSessions {
 type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
 
 fn build_sam_session(part: &str) -> Result<ort::session::Session, String> {
-    let bytes = prunr_models::resolve_part_bytes(prunr_models::ModelId::Sam2HieraSmall, part)
+    let bytes = prunr_models::resolve_part_bytes(prunr_models::ModelId::Sam21HieraSmall, part)
         .map_err(|e| format!("resolve {part} bytes: {e:?}"))?;
     prunr_core::ort_runtime::session_builder()
         .map_err(|e| e.to_string())?

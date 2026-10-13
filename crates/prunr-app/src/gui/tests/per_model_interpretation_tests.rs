@@ -5,7 +5,7 @@
 //! via `LivePreview::is_pending_for`, which returns true when
 //! `dispatch_brush_rerun` called `mark_tweak` for the item.
 //!
-//! Limitation: `SettingsModel` has no Sam2HieraSmall variant (the Selection-
+//! Limitation: `SettingsModel` has no Sam21HieraSmall variant (the Selection-
 //! category model is not user-selectable as a top-level mode). The
 //! ModelCategory::Selection arm is therefore verified via code inspection.
 //! `SettingsModel::None` covers the no-model path, which is the closest
@@ -245,7 +245,7 @@ fn no_model_loaded_does_not_dispatch() {
 
 // ── Selection category → no auto-dispatch ────────────────────────────────────
 //
-// Sam2HieraSmall (ModelCategory::Selection) is not user-selectable via
+// Sam21HieraSmall (ModelCategory::Selection) is not user-selectable via
 // SettingsModel — it's an internal Magic Brush model dispatched by the canvas,
 // not a top-level user-facing mode. There is no SettingsModel::Sam2 variant, so
 // this category is not reachable through the settings path.

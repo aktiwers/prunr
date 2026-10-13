@@ -56,11 +56,11 @@ pub enum ModelId {
     /// restoration upscaler — handles noise and JPEG artifacts on real
     /// photos. WTFPL — no attribution required.
     FourXNmkdSuperscale,
-    /// SAM 2 Hiera Small. Two-part OnDemand bundle (encoder + decoder
+    /// SAM 2.1 Hiera Small. Two-part bundled pair (encoder + decoder
     /// ONNX). Apache 2.0 from Meta. Used by Magic Brush for selection
     /// authoring. Encoder cached on BatchItem; decoder runs per
     /// click/stroke.
-    Sam2HieraSmall,
+    Sam21HieraSmall,
     /// GFPGAN v1.4 face restorer with the YuNet face detector. Two-part
     /// OnDemand bundle; Apache-2.0 (restorer) + MIT (detector).
     FaceGfpgan,
@@ -113,7 +113,7 @@ impl ModelId {
         ModelId::RealEsrganX2Plus,
         ModelId::FourXNmkdSiaxCx,
         ModelId::FourXNmkdSuperscale,
-        ModelId::Sam2HieraSmall,
+        ModelId::Sam21HieraSmall,
         ModelId::FaceGfpgan,
         ModelId::FaceRestoreFormerPp,
         ModelId::RoremFp16,
@@ -142,7 +142,7 @@ impl ModelId {
             ModelId::RealEsrganX2Plus => "real_esrgan_x2plus",
             ModelId::FourXNmkdSiaxCx => "four_x_nmkd_siax_cx",
             ModelId::FourXNmkdSuperscale => "four_x_nmkd_superscale",
-            ModelId::Sam2HieraSmall => "sam2_hiera_small",
+            ModelId::Sam21HieraSmall => "sam2_1_hiera_small",
             ModelId::FaceGfpgan => "face_gfpgan",
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
             ModelId::RoremFp16 => "rorem_fp16",
@@ -1000,32 +1000,32 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             uses_window_attention: false,
         }),
     },
-    // SAM 2 Hiera Small: Phase 33 Magic Brush. Apache 2.0 from Meta.
+    // SAM 2.1 Hiera Small: Magic Brush. Apache 2.0 from Meta.
     // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
     // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
-    // Bundled as zstd-compressed include_bytes! (~162 MiB combined) to
+    // Bundled as zstd-compressed include_bytes! (~147 MiB combined) to
     // avoid a first-run download gate.
     ModelDescriptor {
-        id: ModelId::Sam2HieraSmall,
-        display_name: "Magic Brush (SAM 2 Hiera Small)",
+        id: ModelId::Sam21HieraSmall,
+        display_name: "Magic Brush (SAM 2.1 Hiera Small)",
         description: "Click or stroke to select objects automatically. Apache 2.0 from Meta. Encoder runs once per image; decoder runs per click for real-time feel.",
         category: ModelCategory::Selection,
         source: ModelSource::MultiPartBundled {
             parts: &[
                 BundledPart {
                     key: "encoder",
-                    filename: "sam2_hiera_small.encoder.onnx",
+                    filename: "sam2.1_hiera_small.encoder.onnx",
                 },
                 BundledPart {
                     key: "decoder",
-                    filename: "sam2_hiera_small.decoder.onnx",
+                    filename: "sam2.1_hiera_small.decoder.onnx",
                 },
             ],
             license: LicenseInfo {
                 author: "Meta / facebookresearch",
                 license: "Apache 2.0",
-                license_url: "https://github.com/facebookresearch/segment-anything-2/blob/main/LICENSE",
-                source_url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models",
+                license_url: "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+                source_url: "https://github.com/facebookresearch/sam2",
             },
         },
         version: "1.0.0",
@@ -1391,7 +1391,7 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
         | ModelId::FourXNmkdSuperscale
-        | ModelId::Sam2HieraSmall
+        | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
         | ModelId::RoremFp16 => {
@@ -1411,9 +1411,9 @@ static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.
 #[cfg(not(feature = "dev-models"))]
 static DEXINED_ZST: &[u8] = include_bytes!("../../../models/dexined.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
-static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2_hiera_small.encoder.onnx.zst");
+static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.encoder.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
-static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2_hiera_small.decoder.onnx.zst");
+static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.decoder.onnx.zst");
 
 #[cfg(not(feature = "dev-models"))]
 static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -1523,12 +1523,12 @@ pub fn dexined_bytes() -> &'static [u8] {
 
 #[cfg(feature = "dev-models")]
 pub fn sam2_encoder_bytes() -> &'static [u8] {
-    DEV_SAM2_ENCODER.get_or_init(|| dev_model_bytes("sam2_hiera_small.encoder.onnx"))
+    DEV_SAM2_ENCODER.get_or_init(|| dev_model_bytes("sam2.1_hiera_small.encoder.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
 pub fn sam2_decoder_bytes() -> &'static [u8] {
-    DEV_SAM2_DECODER.get_or_init(|| dev_model_bytes("sam2_hiera_small.decoder.onnx"))
+    DEV_SAM2_DECODER.get_or_init(|| dev_model_bytes("sam2.1_hiera_small.decoder.onnx"))
 }
 
 /// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
@@ -1538,8 +1538,8 @@ pub fn sam2_decoder_bytes() -> &'static [u8] {
 /// against a REGISTRY row that declares a part with no backing bytes.
 fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> &'static [u8] {
     match (id, part_key) {
-        (ModelId::Sam2HieraSmall, "encoder") => sam2_encoder_bytes(),
-        (ModelId::Sam2HieraSmall, "decoder") => sam2_decoder_bytes(),
+        (ModelId::Sam21HieraSmall, "encoder") => sam2_encoder_bytes(),
+        (ModelId::Sam21HieraSmall, "decoder") => sam2_decoder_bytes(),
         _ => panic!(
             "bundled_multipart_bytes called for unknown ({id:?}, {part_key:?}) — \
              REGISTRY declares a part that has no byte accessor"
@@ -1586,7 +1586,7 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
         | ModelId::TaesdFp16
-        | ModelId::Sam2HieraSmall
+        | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
         | ModelId::RoremFp16 => return None,
@@ -1685,7 +1685,7 @@ mod tests {
                 | ModelId::RealEsrganX2Plus
                 | ModelId::FourXNmkdSiaxCx
                 | ModelId::FourXNmkdSuperscale
-                | ModelId::Sam2HieraSmall
+                | ModelId::Sam21HieraSmall
                 | ModelId::FaceGfpgan
                 | ModelId::FaceRestoreFormerPp
                 | ModelId::RoremFp16 => {}
@@ -2265,12 +2265,12 @@ mod tests {
         }
     }
 
-    // ── SAM 2 Hiera Small boundary tests ─────────────────────────────────
+    // ── SAM 2.1 Hiera Small boundary tests ─────────────────────────────────
 
     #[test]
     fn sam2_registry_entry() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall)
-            .expect("Sam2HieraSmall must be registered");
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall)
+            .expect("Sam21HieraSmall must be registered");
         assert_eq!(desc.category, ModelCategory::Selection);
         assert!(matches!(desc.source, ModelSource::MultiPartBundled { .. }));
         assert_eq!(desc.working_set_mb, 800);
@@ -2280,7 +2280,7 @@ mod tests {
 
     #[test]
     fn sam2_has_encoder_and_decoder_parts() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
@@ -2292,7 +2292,7 @@ mod tests {
 
     #[test]
     fn sam2_license_is_apache_2_no_acceptance_required() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { license, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
@@ -2305,7 +2305,7 @@ mod tests {
     /// consolidates them into one part, this test fails.
     #[test]
     fn sam2_encoder_decoder_separate_engines() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam2HieraSmall).unwrap();
+        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
@@ -2319,7 +2319,7 @@ mod tests {
 
     #[test]
     fn sam2_is_always_available_when_bundled() {
-        assert!(is_available(ModelId::Sam2HieraSmall),
+        assert!(is_available(ModelId::Sam21HieraSmall),
             "MultiPartBundled SAM 2 must report available without disk presence");
     }
 
@@ -2328,9 +2328,9 @@ mod tests {
     /// any prior download step.
     #[test]
     fn sam2_bundled_resolve_returns_bytes() {
-        let enc = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder")
+        let enc = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder")
             .expect("encoder bytes must resolve");
-        let dec = resolve_part_bytes(ModelId::Sam2HieraSmall, "decoder")
+        let dec = resolve_part_bytes(ModelId::Sam21HieraSmall, "decoder")
             .expect("decoder bytes must resolve");
         // ONNX files start with the protobuf magic bytes 0x08 0x07 0x12 (or
         // similar varint headers); 4 MiB is a sane lower-bound smoke test —
@@ -2345,8 +2345,8 @@ mod tests {
     /// per-click decoder dispatch doesn't re-decompress 150 MiB each time.
     #[test]
     fn sam2_bundled_resolve_is_cached() {
-        let a = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder").unwrap();
-        let b = resolve_part_bytes(ModelId::Sam2HieraSmall, "encoder").unwrap();
+        let a = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
+        let b = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
         assert_eq!(a.as_ptr(), b.as_ptr(),
             "MultiPartBundled bytes must be cached, not re-decompressed");
     }
@@ -2369,7 +2369,7 @@ mod tests {
 
     #[test]
     fn resolve_part_bytes_unknown_key_returns_unknown_part() {
-        let result = resolve_part_bytes(ModelId::Sam2HieraSmall, "nonexistent");
+        let result = resolve_part_bytes(ModelId::Sam21HieraSmall, "nonexistent");
         assert!(
             matches!(result, Err(ResolveError::UnknownPart(_))),
             "expected UnknownPart, got {result:?}"

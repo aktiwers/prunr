@@ -45,8 +45,8 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (lines), SAM 2 (Magic Brush)
-- **Magic Brush** — click or drag over anything and SAM 2 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
+- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (lines), SAM 2.1 (Magic Brush)
+- **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
 - **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
 - **Line extraction** — edges/outlines via DexiNed at four scales, standalone or combined with background removal, with colour styles and compositions
 - **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN or Stable Diffusion 1.5 (with prompts) fill it in
@@ -119,7 +119,7 @@ Common flags:
 | BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) — **default** |
 | Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects |
 | DexiNed | ~140 MB | yes | full-res | Line / edge extraction |
-| SAM 2 Hiera Small | encoder + decoder | yes | 1024 input | Magic Brush selections |
+| SAM 2.1 Hiera Small | encoder + decoder | yes | 1024 input | Magic Brush selections |
 | U2Net | ~170 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |
 | Big-LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Sharper fills than LaMa, same architecture trained on more data |
