@@ -1,4 +1,4 @@
-//! Phase 23-04: each inpaint model runs end-to-end on a representative
+//! Each inpaint model runs end-to-end on a representative
 //! mask. Skip-on-missing-model mirrors `golden_e2e`'s ORT skip — these
 //! models are OnDemand, so a clean dev box won't have them until the
 //! user runs the Model Store.

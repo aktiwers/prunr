@@ -432,12 +432,12 @@ pub const CHECKER_SIZE: f32 = 16.0;
 // === Logo ===
 pub const LOGO_ASPECT: f32 = 416.0 / 512.0;
 
-// === Phase 5: Sidebar ===
+// === Sidebar ===
 pub const SIDEBAR_WIDTH: f32 = 170.0;
 pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
-// === Phase 5: Settings Dialog ===
+// === Settings Dialog ===
 pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
 /// The glass panel's colour at full cover, for a modal page of text.
 pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);
@@ -465,7 +465,7 @@ pub const STATUS_ICON_PENDING: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 pub const INSERTION_LINE: Color32 = ACCENT;
 
 
-// === Phase 5: Zoom ===
+// === Zoom ===
 pub const ZOOM_MIN: f32 = 0.10;
 pub const ZOOM_MAX: f32 = 20.0;
 pub const ZOOM_STEP: f32 = 1.1;

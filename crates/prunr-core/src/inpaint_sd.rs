@@ -162,7 +162,11 @@ pub struct SdTuning {
     pub cpu_only: bool,
 }
 
-/// The headroom when the caller names none.
+/// The headroom when the caller names none. It covers the free-RAM drop
+/// between the gate and the allocations deep in ORT (5-30 s later for
+/// SD): another app spiking, swapping, or compile transients the working
+/// set under-models. 2 GB covers what we see without making the gate
+/// unfriendly to 16-GB machines.
 pub const SD_DEFAULT_MARGIN_MB: u64 = 2_000;
 
 fn default_margin_mb() -> u64 { SD_DEFAULT_MARGIN_MB }
@@ -1938,6 +1942,7 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
     let mut a = Array4::<f32>::zeros((1, 3, h_us, w_us));
+    // invariant: freshly allocated, standard layout — the slice view is valid.
     let buf = a.as_slice_mut().unwrap();
     let plane = w_us * h_us;
     let raw = image.as_raw();
@@ -2030,6 +2035,7 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let (w_us, h_us) = (w as usize, h as usize);
     let (lw, lh) = (w_us.div_ceil(8), h_us.div_ceil(8));
     let mut a = Array4::<f32>::zeros((1, 1, lh, lw));
+    // invariant: freshly allocated, standard layout — the slice view is valid.
     let buf = a.as_slice_mut().unwrap();
     let raw = mask.as_raw();
     let inv = 1.0_f32 / (64.0 * 255.0);
@@ -2226,14 +2232,6 @@ fn process_rss_mb() -> Option<u64> {
     })
 }
 
-/// Headroom on top of `working_set_mb` so the gate survives a
-/// snapshot-shifting-mid-load: between `check_ram_for` and the actual
-/// allocations deep in ORT (5–30 s later for SD), another app may
-/// spike, kernel may start swapping, our own bundle build may hit
-/// compile transients we under-modelled. 2 GB is enough to cover the
-/// "free RAM at gate time minus free RAM during build" delta we see
-/// in practice without being so large the gate becomes unfriendly to
-/// 16-GB machines. Phase 4 / E1 will surface this as a Settings slider.
 /// The run-time RAM gate for a stroke. Refuses when the model's base
 /// need is not free; when only the tall crop's extra is missing, the
 /// plan falls back to tiles instead. Unknown free RAM passes.

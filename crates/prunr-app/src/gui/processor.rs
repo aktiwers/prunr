@@ -1690,7 +1690,7 @@ impl Processor {
 
     /// Dispatch the SAM 2 encoder for `item_id`. Runs once per source image;
     /// the result is cached on `BatchItem.magic_brush_embedding`. Admission
-    /// gate: refuses when `available_ram_mb < 800 MB` (RESEARCH.md estimate).
+    /// gate: refuses when `available_ram_mb < 800 MB`.
     ///
     /// Returns `Err(reason)` synchronously on admission failure (caller shows
     /// a toast). Returns `Ok(())` after spawning the background rayon job;

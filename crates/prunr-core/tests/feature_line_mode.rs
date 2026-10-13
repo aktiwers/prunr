@@ -1,4 +1,4 @@
-//! Phase 23-03: every `LineMode` variant runs the TEED edge-detection
+//! Every `LineMode` variant runs the TEED edge-detection
 //! path end-to-end and produces a structurally-valid result. Plus
 //! representative samples across `EdgeScale`, `ComposeMode`, and
 //! `LineStyle` so a refactor that breaks one combo without breaking the

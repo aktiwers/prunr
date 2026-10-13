@@ -28,8 +28,7 @@
 //! production caller — `Processor::dispatch_upscale::build_inference_input`
 //! (crates/prunr-app/src/gui/processor.rs) — invokes `apply_denoise`
 //! BEFORE the ORT session is created or driven. It is not nested inside
-//! the tiled-inference inner loop or any ort callback. Verified
-//! 2026-05-16 (Phase 32-DEFER-4 closed).
+//! the tiled-inference inner loop or any ort callback.
 
 use image::RgbaImage;
 use rayon::prelude::*;

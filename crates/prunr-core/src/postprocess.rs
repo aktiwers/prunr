@@ -147,9 +147,9 @@ fn tensor_to_mask_core(
     let contiguous;
     let pred_slice = match pred.as_slice() {
         Some(s) => s,
-        // invariant: as_standard_layout() produces a contiguous view, so as_slice() is Some.
         None => {
             contiguous = pred.as_standard_layout();
+            // invariant: as_standard_layout() produces a contiguous view, so as_slice() is Some.
             contiguous.as_slice().unwrap()
         }
     };

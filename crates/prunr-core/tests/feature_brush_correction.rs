@@ -1,4 +1,4 @@
-//! Phase 23-05: brush correction strokes affect the postprocess result.
+//! Brush correction strokes affect the postprocess result.
 //!
 //! Drives the full Tier-1 + Tier-2 path: `infer_only` → tensor → two
 //! `postprocess_from_flat` runs (without and with a selection applied).
