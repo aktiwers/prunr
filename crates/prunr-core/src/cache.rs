@@ -46,12 +46,18 @@ pub fn cache_root() -> Option<PathBuf> {
 /// `cache_dir_for` instead, which creates it.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
-    let descriptor = prunr_models::descriptor(id)?;
-    let key = format!(
-        "{}-{}-v{}",
-        id.stable_name(), descriptor.version, CACHE_FORMAT_VERSION,
-    );
+    let key = cache_key(id, crate::ort_runtime::runtime_tag())?;
     Some(root.join(ep_name.to_ascii_lowercase()).join(key))
+}
+
+/// `<model>-<version>-ort<runtime tag>-v<format>`: an optimized graph is
+/// tied to the ORT build that wrote it.
+fn cache_key(id: ModelId, runtime: Option<&str>) -> Option<String> {
+    let descriptor = prunr_models::descriptor(id)?;
+    Some(format!(
+        "{}-{}-ort{}-v{}",
+        id.stable_name(), descriptor.version, runtime.unwrap_or("unknown"), CACHE_FORMAT_VERSION,
+    ))
 }
 
 /// Per-`(model, ep)` cache directory, **created** if missing. Use
@@ -254,6 +260,27 @@ mod tests {
     pub(super) fn temp_root() -> Option<PathBuf> {
         static ROOT: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
         ROOT.get_or_init(|| tempfile::tempdir().ok()).as_ref().map(|d| d.path().join("ep_cache"))
+    }
+
+    /// A graph ORT optimized is tied to that ORT build: one made by an
+    /// older runtime loaded into a newer one ran the upscalers 33% slower
+    /// until rebuilt. Each runtime gets its own cache entry.
+    #[test]
+    fn the_cache_key_names_the_runtime_that_built_it() {
+        use crate::ort_runtime::tag_for;
+        let old = tag_for(Some("1.24.1"), 30_000_000, 1_700_000_000);
+        let same_name_new_file = tag_for(None, 31_000_000, 1_760_000_000);
+        let other_build = tag_for(None, 30_000_000, 1_760_000_000);
+        assert_ne!(cache_key(ModelId::Silueta, Some(&old)), cache_key(ModelId::Silueta, Some(&same_name_new_file)));
+        assert_ne!(same_name_new_file, other_build, "a build whose info names no version still differs");
+        assert!(old.starts_with("1.24.1-"), "{old}");
+    }
+
+    #[test]
+    fn the_runtime_version_is_read_from_the_build_info() {
+        let info = "ORT Build Info: git-branch=rel-1.24.1, git-commit-id=abc, build type=Release";
+        assert_eq!(crate::ort_runtime::runtime_version_from_info(info).as_deref(), Some("1.24.1"));
+        assert_eq!(crate::ort_runtime::runtime_version_from_info("no branch here"), None);
     }
 
     #[test]

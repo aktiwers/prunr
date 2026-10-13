@@ -54,6 +54,37 @@ pub fn ensure_initialized() -> Result<DylibSource, String> {
     RESULT.get_or_init(init).clone()
 }
 
+/// Names the loaded runtime build ("1.24.1-3fa2c901"), once it has
+/// loaded: its version where the build info carries one (Microsoft's
+/// own builds say `git-branch=HEAD`), and a fingerprint of the library
+/// file, which every runtime upgrade changes.
+pub fn runtime_tag() -> Option<&'static str> {
+    static TAG: OnceLock<Option<String>> = OnceLock::new();
+    TAG.get_or_init(|| {
+        ensure_initialized().ok()?;
+        let meta = std::fs::metadata(LOADED.get()?).ok()?;
+        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(tag_for(runtime_version_from_info(ort::info()).as_deref(), meta.len(), modified))
+    }).as_deref()
+}
+
+/// The library loaded by `init`.
+static LOADED: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn tag_for(version: Option<&str>, len: u64, modified: u64) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in len.to_le_bytes().into_iter().chain(modified.to_le_bytes()) {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    format!("{}-{hash:08x}", version.unwrap_or("build"))
+}
+
+/// The version in ORT's build info, whose branch is `rel-<version>`.
+pub fn runtime_version_from_info(info: &str) -> Option<String> {
+    let branch = info.split("git-branch=").nth(1)?.split(',').next()?.trim();
+    branch.strip_prefix("rel-").map(str::to_string)
+}
+
 /// A session builder on the loaded runtime.
 pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     ensure_initialized().map_err(CoreError::Inference)?;
@@ -69,6 +100,7 @@ fn init() -> Result<DylibSource, String> {
     // false means an env was already committed; ORT is initialised either way.
     let _ = env.commit();
     tracing::info!(path = %path.display(), %source, "ORT runtime loaded");
+    let _ = LOADED.set(path);
     Ok(source)
 }
 
