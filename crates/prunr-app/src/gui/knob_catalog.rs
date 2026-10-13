@@ -51,6 +51,11 @@ pub enum StaticKnob {
 
     // Mask tier, appended to keep the other ordinals stable.
     Decoration,
+    /// The Depth chip: lens blur, fog, aerial perspective and focus.
+    /// Re-renders the photo from the kept depth map.
+    DepthLook,
+    /// Sketch's Fade with distance.
+    LineFade,
 }
 
 impl StaticKnob {
@@ -76,6 +81,8 @@ impl StaticKnob {
             StaticKnob::BgImageFit => 16,
             StaticKnob::Model => 17,
             StaticKnob::Decoration => 18,
+            StaticKnob::DepthLook => 19,
+            StaticKnob::LineFade => 20,
         }
     }
 
@@ -100,6 +107,8 @@ impl StaticKnob {
         StaticKnob::BgImageFit,
         StaticKnob::Model,
         StaticKnob::Decoration,
+        StaticKnob::DepthLook,
+        StaticKnob::LineFade,
     ];
 }
 
@@ -166,6 +175,8 @@ pub enum Surface {
     FillRegionKnobs,
     /// Restore faces: every model whose output is the photo.
     Faces,
+    /// The Depth chip: lens blur, fog and aerial perspective on the photo.
+    Depth,
 }
 
 /// Whether `surface` shows for `model`: only where it has an effect. A
@@ -184,6 +195,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
         Surface::Faces => matches!(role, Cutout | Filters | Upscale),
+        Surface::Depth => role == Filters,
     }
 }
 
@@ -252,6 +264,8 @@ impl StaticKnob {
             | StaticKnob::SolidLineColor
             | StaticKnob::ComposeMode
             | StaticKnob::LineStyle
+            | StaticKnob::LineFade
+            | StaticKnob::DepthLook
             | StaticKnob::Model => KnobRequirement::Always,
         }
     }
@@ -372,14 +386,16 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::GuidedEpsilon
         | StaticKnob::Feather
         | StaticKnob::FillStyle
-        | StaticKnob::Decoration => s(MaskRerun, Nothing, LivePreviewMask, true),
+        | StaticKnob::Decoration
+        | StaticKnob::DepthLook => s(MaskRerun, Nothing, LivePreviewMask, true),
 
         StaticKnob::LineStrength
         | StaticKnob::EdgeThickness
         | StaticKnob::EdgeScale
         | StaticKnob::SolidLineColor
         | StaticKnob::ComposeMode
-        | StaticKnob::LineStyle => s(EdgeRerun, Nothing, LivePreviewEdge, true),
+        | StaticKnob::LineStyle
+        | StaticKnob::LineFade => s(EdgeRerun, Nothing, LivePreviewEdge, true),
 
         StaticKnob::BgColor
         | StaticKnob::BgEffect
@@ -517,6 +533,8 @@ mod tests {
             (StaticKnob::BgImageFit, TransparencyProduced),
             (StaticKnob::Model, Always),
             (StaticKnob::Decoration, MaskProduced),
+            (StaticKnob::DepthLook, Always),
+            (StaticKnob::LineFade, Always),
         ];
         assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
         for &(knob, req) in expected {
@@ -530,9 +548,9 @@ mod tests {
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, Colorize, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces];
+        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, Colorize, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces, Depth];
         let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
-        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces];
+        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces, Depth];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
         let upscale: &[Surface] = &[Upscale, Faces];
@@ -801,6 +819,8 @@ mod tests {
                     _ => prunr_core::BgImageFit::Cover,
                 };
             }
+            StaticKnob::DepthLook => new.depth.fog_pct = base.depth.fog_pct + 30,
+            StaticKnob::LineFade => new.line_fade_pct = base.line_fade_pct + 30,
             StaticKnob::Model => {
                 // Model lives outside ItemSettings; tested via
                 // dedicated recipe-level mutations in the integration tests.
@@ -984,6 +1004,7 @@ mod tests {
                 edge_scale: EdgeScale::Fused,
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
+                line_fade_pct: 0,
             },
             mask: (&MaskSettings {
                 fill_style: FillStyle::None,
@@ -992,6 +1013,7 @@ mod tests {
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
             colorize: Default::default(),
+            depth: Default::default(),
         };
 
         assert_eq!(

@@ -97,6 +97,7 @@ fn each_model_toolbar_shows_only_its_chips() {
         ("Sketch", Surface::Lines),
         ("Effect", Surface::Effect),
         ("Faces", Surface::Faces),
+        ("Depth", Surface::Depth),
         ("Background", Surface::Background),
         ("Scale", Surface::Upscale),
         ("Refine", Surface::Upscale),
@@ -333,6 +334,46 @@ fn quick_strips_name_every_control() {
         assert!(names(&h).iter().any(|n| n == in_panel), "{chip}: {in_panel} missing from the full panel");
         assert_all_controls_named(&h, &format!("{chip} panel"));
     }
+}
+
+/// No model's Depth chip: its strip and full panel name every control,
+/// and Set focus waits for a click on the image.
+#[test]
+fn the_depth_chip_names_every_control() {
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+        app.hardware_install_cache.depth = true;
+        push_test_item(app, 1).status = BatchStatus::Done;
+        app.batch.select_item(0);
+    }
+    settle(&mut h);
+    click(&mut h, "Depth");
+    for knob in ["Off", "Point", "Tilt-shift", "Amount", "Fog"] {
+        assert!(names(&h).iter().any(|n| n == knob), "{knob} missing from the Depth strip");
+    }
+    assert_all_controls_named(&h, "Depth strip");
+    click(&mut h, "Point");
+    assert_eq!(h.state().batch.items[0].settings.depth.blur, prunr_core::depth::LensBlurMode::Point);
+    click(&mut h, "All depth settings");
+    for knob in ["Set focus", "Aerial perspective"] {
+        assert!(names(&h).iter().any(|n| n == knob), "{knob} missing from the Depth panel");
+    }
+    assert_all_controls_named(&h, "Depth panel");
+    click(&mut h, "Set focus");
+    assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
+}
+
+/// Sketch's full panel names Fade with distance.
+#[test]
+fn the_sketch_panel_names_fade_with_distance() {
+    let mut h = super::surface_tests::loaded();
+    click(&mut h, "Sketch");
+    click(&mut h, "Whole photo");
+    click(&mut h, "All line settings");
+    assert!(names(&h).iter().any(|n| n == "Fade with distance"));
+    assert_all_controls_named(&h, "Sketch panel");
 }
 
 /// A dropdown in a flyout opens its list in place: a popup list would

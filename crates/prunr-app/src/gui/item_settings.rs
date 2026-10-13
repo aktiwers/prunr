@@ -127,6 +127,13 @@ pub struct ItemSettings {
     /// to `COLOR_STRENGTH_MAX_PCT`.
     #[serde(default = "default_color_strength_pct")]
     pub color_strength_pct: u8,
+    /// The Depth chip (No model): lens blur and haze from the photo's
+    /// depth map, applied to the photo before lines and effects.
+    #[serde(default)]
+    pub depth: prunr_core::depth::DepthLook,
+    /// Sketch: lines lighten with distance, 0-100.
+    #[serde(default)]
+    pub line_fade_pct: u8,
 }
 
 /// The face restorer a run uses.
@@ -217,6 +224,8 @@ impl Default for ItemSettings {
             color_match: false,
             faces: FaceSettings::default(),
             color_strength_pct: default_color_strength_pct(),
+            depth: prunr_core::depth::DepthLook::default(),
+            line_fade_pct: 0,
         }
     }
 }
@@ -258,6 +267,24 @@ impl ItemSettings {
     /// Contrast for a hard edge, what the old hard threshold was.
     pub const HARD_EDGE: f32 = 1.0;
     pub const COLOR_STRENGTH_MAX_PCT: u8 = (prunr_core::colorize::STRENGTH_MAX * 100.0) as u8;
+
+    /// Fade with distance as `fade_lines_by_depth` takes it, while lines
+    /// are drawn.
+    pub fn line_fade(&self) -> f32 {
+        if self.line_mode == LineMode::Off { 0.0 } else { f32::from(self.line_fade_pct.min(100)) / 100.0 }
+    }
+
+    /// Whether what this image shows under `role` reads its depth map:
+    /// the Depth chip (No model), lines that fade with distance, or a
+    /// lens-blur background.
+    pub fn wants_depth(&self, role: crate::gui::knob_catalog::ModelRole) -> bool {
+        use crate::gui::knob_catalog::ModelRole;
+        let photo_look = role == ModelRole::Filters && self.depth.is_active();
+        let lines = matches!(role, ModelRole::Cutout | ModelRole::Filters) && self.line_fade() > 0.0;
+        let backdrop = matches!(role, ModelRole::Cutout | ModelRole::Filters)
+            && matches!(self.backdrop(), Backdrop::Effect(e) if e.needs_depth());
+        photo_look || lines || backdrop
+    }
 
     /// Strength as the colorizer takes it: 1 = as predicted.
     pub fn color_strength(&self) -> f32 {
@@ -338,6 +365,7 @@ impl ItemSettings {
         if self.line_mode != LineMode::SubjectOutline {
             edge.compose_mode = prunr_core::ComposeMode::default();
         }
+        edge.line_fade_pct = if uses_edge_detection { self.line_fade_pct } else { 0 };
 
         prunr_core::ProcessingRecipe {
             inference: prunr_core::InferenceRecipe {
@@ -371,6 +399,7 @@ impl ItemSettings {
             } else {
                 prunr_core::ColorizeRecipe::default()
             },
+            depth: self.depth,
         }
     }
 }
@@ -515,8 +544,8 @@ mod tests {
         // miss on cold access, never on the per-pixel hot path. Bump in
         // coarse steps to avoid a churn of test-only commits.
         assert!(
-            std::mem::size_of::<ItemSettings>() <= 128,
-            "ItemSettings is {} bytes, budget is 128",
+            std::mem::size_of::<ItemSettings>() <= 160,
+            "ItemSettings is {} bytes, budget is 160",
             std::mem::size_of::<ItemSettings>()
         );
     }
@@ -630,6 +659,10 @@ mod tests {
             color_match: true,
             faces: FaceSettings { on: true, model: FaceModel::RestoreFormerPp, strength_pct: 70, largest_only: true, hair: true },
             color_strength_pct: 70,
+            depth: prunr_core::depth::DepthLook {
+                blur: prunr_core::depth::LensBlurMode::TiltShift, blur_pct: 40, focus: Some([5000, 2500]), fog_pct: 30, aerial_pct: 20,
+            },
+            line_fade_pct: 60,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
@@ -845,12 +878,43 @@ mod tests {
         assert_eq!(loaded.sharpen, 0.4);
     }
 
+    /// The depth knobs: the Depth chip re-renders like a mask change, Fade
+    /// with distance like a line change (only while lines are drawn), and a
+    /// lens-blur background composites; presets saved before them load off.
     #[test]
-    fn budget_still_under_128_bytes() {
-        assert!(
-            std::mem::size_of::<ItemSettings>() <= 128,
-            "ItemSettings is {} bytes after Phase-32 fields, budget is 128",
-            std::mem::size_of::<ItemSettings>()
-        );
+    fn depth_knobs_resolve_to_their_tiers() {
+        use prunr_core::depth::{DepthLook, LensBlurMode};
+        use prunr_core::{BgEffect, ModelKind, RequiredTier};
+        let tier = |a: &ItemSettings, b: &ItemSettings| prunr_core::resolve_tier(&a.current_recipe(ModelKind::Silueta), &b.current_recipe(ModelKind::Silueta));
+        let lines = ItemSettings { line_mode: LineMode::EdgesOnly, ..ItemSettings::default() };
+        let rows: [(&str, ItemSettings, ItemSettings, RequiredTier); 6] = [
+            ("lens blur", ItemSettings::default(), ItemSettings { depth: DepthLook { blur: LensBlurMode::Point, blur_pct: 50, ..DepthLook::default() }, ..ItemSettings::default() }, RequiredTier::MaskRerun),
+            ("fog", ItemSettings::default(), ItemSettings { depth: DepthLook { fog_pct: 30, ..DepthLook::default() }, ..ItemSettings::default() }, RequiredTier::MaskRerun),
+            ("focus", ItemSettings::default(), ItemSettings { depth: DepthLook { focus: Some([1, 2]), ..DepthLook::default() }, ..ItemSettings::default() }, RequiredTier::MaskRerun),
+            ("fade with lines", lines, ItemSettings { line_fade_pct: 50, ..lines }, RequiredTier::EdgeRerun),
+            ("fade without lines", ItemSettings::default(), ItemSettings { line_fade_pct: 50, ..ItemSettings::default() }, RequiredTier::Skip),
+            ("lens blur background", ItemSettings::default(), ItemSettings { bg_effect: BgEffect::LensBlur { amount_pct: 50 }, ..ItemSettings::default() }, RequiredTier::CompositeOnly),
+        ];
+        for (name, old, new, want) in rows {
+            assert_eq!(tier(&old, &new), want, "{name}");
+        }
+        let loaded: ItemSettings = serde_json::from_str(r#"{ "gamma": 1.0 }"#).unwrap();
+        assert_eq!((loaded.depth, loaded.line_fade_pct), (DepthLook::default(), 0));
+    }
+
+    #[test]
+    fn depth_is_wanted_only_where_it_shows() {
+        use crate::gui::knob_catalog::ModelRole;
+        use prunr_core::depth::DepthLook;
+        let look = ItemSettings { depth: DepthLook { fog_pct: 20, ..DepthLook::default() }, ..ItemSettings::default() };
+        assert!(look.wants_depth(ModelRole::Filters));
+        assert!(!look.wants_depth(ModelRole::Cutout), "the Depth chip is No model's");
+        let fade = ItemSettings { line_fade_pct: 20, ..ItemSettings::default() };
+        assert!(!fade.wants_depth(ModelRole::Cutout), "no lines, nothing to fade");
+        assert!(ItemSettings { line_mode: LineMode::EdgesOnly, ..fade }.wants_depth(ModelRole::Cutout));
+        let lens = ItemSettings { bg_effect: prunr_core::BgEffect::LensBlur { amount_pct: 40 }, ..ItemSettings::default() };
+        assert!(lens.wants_depth(ModelRole::Cutout));
+        assert!(!lens.wants_depth(ModelRole::Upscale));
+        assert!(!ItemSettings::default().wants_depth(ModelRole::Filters));
     }
 }

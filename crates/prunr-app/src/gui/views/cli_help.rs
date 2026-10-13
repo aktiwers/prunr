@@ -78,13 +78,14 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--line-composition <mode>", "With --lines-after-bg: lines-only / subject-filled / engraving / ghost");
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
                             opt_row(ui, "--line-scale <scale>", "Line scale: fine / bold / fused (default)");
+                            opt_row(ui, "--line-fade <0-100>", "Lines lighten with distance (needs the depth model)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
                             opt_row(ui, "--bg-image <path>", "Fill background with an image");
                             opt_row(ui, "--bg-image-fit <fit>", "cover (default) / contain / tile");
                             opt_row(ui, "--effect <name>", "Restyle the subject's colors: sepia, invert, pixelate, halftone, duotone\u{2026}");
                             opt_row(ui, "--outline <px[:hex]>", "Sticker outline around the subject, e.g. 8 or 8:000000");
                             opt_row(ui, "--shadow <kind>", "Shadow under the subject: soft or drop");
-                            opt_row(ui, "--bg-effect <effect>", "Blurred or black-and-white photo behind: blur, blur:N (1\u{2013}64), bw");
+                            opt_row(ui, "--bg-effect <effect>", "Photo behind: blur, blur:N (1\u{2013}64), lens, lens:N (0\u{2013}100, needs the depth model), bw");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -209,6 +210,18 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         });
                     example_row(ui, toasts, "prunr --colorize old_photo.jpg",
                         "Color it, save old_photo_color.png");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Depth");
+                    egui::Grid::new("cli_depth_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--depth-map", "Also save {stem}-depth.png: 16-bit grey, white = near");
+                            opt_row(ui, "--depth-only", "With --depth-map: save only the depth maps");
+                        });
+                    example_row(ui, toasts, "prunr --depth-map --depth-only landscape.jpg",
+                        "Save landscape-depth.png only");
                 }
 
                 // ── Advanced ──

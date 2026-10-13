@@ -28,9 +28,10 @@ const FORMAT_CHOICES: [super::chip::Choice<prunr_core::ExportFormat>; 3] = [
 /// The arrow beside Save: the file format, and Separate layers for a
 /// cut-out. A pick is saved as the setting at once.
 fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    let resp = tooltip(icon_button(ui, ICON_EXPAND_MORE.codepoint), "Save options", "File format and separate layers.", None);
+    let resp = tooltip(icon_button(ui, ICON_EXPAND_MORE.codepoint), "Save options", "File format, separate layers and the depth map.", None);
     let id = egui::Id::new("save_options");
     let mut changed = false;
+    let mut depth_turned_on = false;
     popup_for(ui, id, &resp, |ui| {
         popover_header(ui, "Save options", None);
         changed |= super::chip::choice_row(ui, "Format", &FORMAT_CHOICES, &mut app.settings.export_format);
@@ -39,9 +40,18 @@ fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
             changed |= ui.checkbox(&mut app.settings.export_split_layers, "Separate layers").changed();
             super::hint(ui, "Subject, lines and mask as separate PNG files.");
         }
+        ui.add_space(theme::SPACE_SM);
+        if ui.checkbox(&mut app.settings.export_depth_map, "Depth map").changed() {
+            changed = true;
+            depth_turned_on = app.settings.export_depth_map;
+        }
+        super::hint(ui, "Also saves each image's depth as a 16-bit grey PNG, white = near.");
     });
     if changed {
         app.settings.save();
+    }
+    if depth_turned_on {
+        app.offer_depth_model(ui.ctx());
     }
 }
 

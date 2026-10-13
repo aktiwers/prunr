@@ -101,6 +101,14 @@ pub struct BrushSettings {
     /// returns.
     #[serde(default = "default_magic_remove_specks")]
     pub magic_remove_specks: bool,
+    /// Magic Brush only: a click selects everything at about the clicked
+    /// depth (the depth map) instead of the clicked object (SAM).
+    #[serde(default)]
+    pub magic_depth: bool,
+    /// How far in nearness (0-1) from the clicked depth a Depth click
+    /// reaches.
+    #[serde(default = "default_magic_depth_range")]
+    pub magic_depth_range: f32,
 }
 
 /// The SD eraser's quality: which sampler runs the fill. Wired into
@@ -164,6 +172,11 @@ fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
+fn default_magic_depth_range() -> f32 { DEPTH_RANGE_DEFAULT }
+
+/// The Range slider's span and starting point for a Depth click.
+pub const DEPTH_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.3;
+const DEPTH_RANGE_DEFAULT: f32 = 0.08;
 fn default_cfg() -> f32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).guidance_scale }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
@@ -331,6 +344,8 @@ impl Default for BrushSettings {
             edge_feather: 0.0,
             magic_confidence_threshold: default_magic_confidence_threshold(),
             magic_remove_specks: default_magic_remove_specks(),
+            magic_depth: false,
+            magic_depth_range: default_magic_depth_range(),
         }
     }
 }
@@ -835,6 +850,8 @@ mod tests {
             edge_feather: 5.0,
             magic_confidence_threshold: 0.7,
             magic_remove_specks: false,
+            magic_depth: true,
+            magic_depth_range: 0.2,
             cutout_action: CutoutAction::Erase,
         };
         s.reset_popover_fields_from(&BrushSettings::default());
@@ -859,6 +876,19 @@ mod tests {
         assert_eq!(s.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(s.sd_steps, 30);
         assert_eq!(s.sd_seed, Some(42));
+        assert!(s.magic_depth && s.magic_depth_range == 0.2, "Depth is a strip knob, not the popover's");
+    }
+
+    #[test]
+    fn brush_settings_saved_before_depth_load_with_depth_off() {
+        let mut json = serde_json::to_value(BrushSettings::default()).unwrap();
+        let map = json.as_object_mut().unwrap();
+        map.remove("magic_depth");
+        map.remove("magic_depth_range");
+        let loaded: BrushSettings = serde_json::from_value(json).unwrap();
+        assert!(!loaded.magic_depth);
+        assert_eq!(loaded.magic_depth_range, DEPTH_RANGE_DEFAULT);
+        assert!(DEPTH_RANGE.contains(&loaded.magic_depth_range));
     }
 
     #[test]

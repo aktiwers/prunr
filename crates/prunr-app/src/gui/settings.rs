@@ -42,6 +42,9 @@ pub struct Settings {
     /// composite. Single toggle, both export paths.
     #[serde(default)]
     pub export_split_layers: bool,
+    /// Save also writes each image's depth map as `<stem>-depth.png`.
+    #[serde(default)]
+    pub export_depth_map: bool,
     /// File format Save writes (the save dialog's extension can override it).
     #[serde(default)]
     pub export_format: prunr_core::ExportFormat,
@@ -750,6 +753,9 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
             ModelKind::FourXNomos2RealPlksr => SettingsModel::Nomos2Upscale,
             ModelKind::DdcolorTiny => SettingsModel::ColorizeDdcolor,
+            ModelKind::DepthAnythingV2Small => {
+                unreachable!("the depth model feeds effects; it is never the selected model")
+            }
             ModelKind::RealEsrganX2Plus => {
                 // RealEsrganX2Plus is never the user-selected active model — it
                 // runs for a 2x Real-ESRGAN upscale. This conversion is
@@ -777,6 +783,7 @@ impl Default for Settings {
             animations: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
+            export_depth_map: false,
             export_format: prunr_core::ExportFormat::Png,
             presets: HashMap::new(),
             default_preset: default_preset_name(),
@@ -878,6 +885,7 @@ mod tests {
         assert!(s.selection_outline);
         assert!(!s.auto_hide_adjustments);
         assert!(!s.export_split_layers);
+        assert!(!s.export_depth_map);
         assert!(s.presets.is_empty());
         assert_eq!(s.default_preset, PRUNR_PRESET);
         assert!(s.bg_image_paths.is_empty());

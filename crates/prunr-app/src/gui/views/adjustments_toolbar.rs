@@ -88,6 +88,8 @@ pub struct ToolbarChange {
     pub(crate) toggle_compare: bool,
     /// What the Faces chip changed.
     pub(crate) faces: super::faces_chip::FacesChange,
+    /// The Depth chip's "Set focus" was clicked.
+    pub(crate) pick_depth_focus: bool,
 }
 
 /// Read-only per-frame facts the toolbar renders against. Built by the
@@ -111,6 +113,8 @@ pub(crate) struct ToolbarState<'a> {
     pub shown_seed: Option<u64>,
     /// How many faces Restore faces found in the shown photo.
     pub faces_found: super::faces_chip::FoundCount,
+    /// The next click on the image sets the Depth chip's focus.
+    pub picking_depth_focus: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -138,6 +142,7 @@ impl Default for ToolbarChange {
             toggle_magic: false,
             toggle_compare: false,
             faces: Default::default(),
+            pick_depth_focus: false,
         }
     }
 }
@@ -149,6 +154,16 @@ pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, s
         change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Face) });
     }
     change.faces = faces;
+}
+
+/// The Depth chip; "Get the depth model" opens the Model Store on Depth.
+fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let depth = super::depth_chip::render(ui, &mut item_settings.depth, state.installed.depth, state.picking_depth_focus);
+    if depth.open_store {
+        change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Depth) });
+    }
+    change.pick_depth_focus |= depth.pick_focus;
+    aggregate_knob(depth.look, StaticKnob::DepthLook, change);
 }
 
 // Starting values for knobs whose factory default is "off": the slider
@@ -232,6 +247,9 @@ pub(crate) fn render(
         }
         if shows(model, Surface::Faces) {
             render_faces_chip(ui, item_settings, &state, &mut change);
+        }
+        if shows(model, Surface::Depth) {
+            render_depth_chip(ui, item_settings, &state, &mut change);
         }
         if shows(model, Surface::Decoration) {
             let reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out to outline.");
@@ -369,6 +387,7 @@ const LINES_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::LineStyle), differs: |s, d| s.line_style != d.line_style, reset: |s, d| s.line_style = d.line_style },
     chip::Field { knob: Some(StaticKnob::SolidLineColor), differs: |s, d| s.solid_line_color != d.solid_line_color, reset: |s, d| s.solid_line_color = d.solid_line_color },
     chip::Field { knob: None, differs: |s, d| s.input_transform != d.input_transform, reset: |s, d| s.input_transform = d.input_transform },
+    chip::Field { knob: Some(StaticKnob::LineFade), differs: |s, d| s.line_fade_pct != d.line_fade_pct, reset: |s, d| s.line_fade_pct = d.line_fade_pct },
 ];
 
 /// Put a group back to its defaults and dispatch every knob that changed.
@@ -613,6 +632,13 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     line_detail(ui, s, change);
     hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
     line_width(ui, s, change);
+    let mut fade = f32::from(s.line_fade_pct) / 100.0;
+    let faded = chip::slider_row_f32(ui, "Fade with distance", &mut fade, 0.0..=1.0, false, |v| fmt::off_or(v, 0.005, fmt::percent));
+    if faded.changed {
+        s.line_fade_pct = (fade * 100.0).round() as u8;
+    }
+    aggregate_knob(faded, StaticKnob::LineFade, change);
+    hint(ui, "Lines lighten the farther away they are. Uses the depth model.");
 
     if s.line_mode == LineMode::SubjectOutline {
         let compositions = [
@@ -875,12 +901,12 @@ fn outline_width(ui: &mut Ui, label: &str, d: &mut prunr_core::Decoration) -> bo
 
 /// The backgrounds a user can choose, read from `ItemSettings::backdrop`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BgKind { Transparent, Solid, Image, BlurredSource, DesaturatedSource }
+enum BgKind { Transparent, Solid, Image, BlurredSource, LensBlur, DesaturatedSource }
 
 impl BgKind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Transparent, Self::Solid, Self::Image,
-        Self::BlurredSource, Self::DesaturatedSource,
+        Self::BlurredSource, Self::LensBlur, Self::DesaturatedSource,
     ];
 
     fn name(self) -> &'static str {
@@ -889,6 +915,7 @@ impl BgKind {
             Self::Solid => "Solid color",
             Self::Image => "Image",
             Self::BlurredSource => "Blurred photo",
+            Self::LensBlur => "Lens blur",
             Self::DesaturatedSource => "Black & white photo",
         }
     }
@@ -910,6 +937,7 @@ impl BgKind {
             Backdrop::Image(_) => Self::Image,
             Backdrop::Effect(BgEffect::BlurredSource { .. }) => Self::BlurredSource,
             Backdrop::Effect(BgEffect::DesaturatedSource) => Self::DesaturatedSource,
+            Backdrop::Effect(BgEffect::LensBlur { .. }) => Self::LensBlur,
             Backdrop::Effect(BgEffect::None) => Self::Transparent,
         }
     }
@@ -953,7 +981,7 @@ fn render_background_chip(
         icon: ICON_PALETTE.codepoint,
         label: "Background",
         summary: current.name(),
-        tooltip: "What fills the transparent area behind the subject: a solid color, an image, or a blurred or black-and-white copy of the photo.",
+        tooltip: "What fills the transparent area behind the subject: a solid color, an image, or a blurred, lens-blurred or black-and-white copy of the photo.",
         tuned: current != BgKind::Transparent,
         width: BACKGROUND_PANEL_WIDTH,
         live: true,
@@ -1063,6 +1091,18 @@ fn render_background_chip(
                         aggregate_bool(r.changed, StaticKnob::BgEffect, change);
                     }
                 }
+                BgKind::LensBlur => {
+                    if let BgEffect::LensBlur { amount_pct } = bg_effect {
+                        chip::panel_section(ui, "Lens blur", None);
+                        let mut amount = f32::from(*amount_pct) / 100.0;
+                        let r = chip::slider_row_f32(ui, "Blur amount", &mut amount, 0.0..=1.0, false, fmt::percent);
+                        if r.changed {
+                            *amount_pct = (amount * 100.0).round() as u8;
+                        }
+                        aggregate_knob(r, StaticKnob::BgEffect, change);
+                        hint(ui, "Focused on the subject; the farther something is behind it, the softer. Uses the depth model.");
+                    }
+                }
                 BgKind::DesaturatedSource => {
                     hint(ui, "A black-and-white copy of the photo fills the transparent area.");
                 }
@@ -1082,9 +1122,10 @@ const BG_SWATCHES: [chip::Swatch; 4] = [
     chip::Swatch { name: "Plum", rgb: [0x7b, 0x2d, 0x8e] },
 ];
 
-const BG_QUICK_KINDS: [chip::Choice<BgKind>; 2] = [
+const BG_QUICK_KINDS: [chip::Choice<BgKind>; 3] = [
     chip::Choice { value: BgKind::Image, name: "Image", description: "A picture of your choice", enabled: true },
     chip::Choice { value: BgKind::BlurredSource, name: "Blurred", description: "A blurred copy of the photo", enabled: true },
+    chip::Choice { value: BgKind::LensBlur, name: "Lens blur", description: "The photo blurred more the farther it is behind the subject", enabled: true },
 ];
 
 fn checker(u: f32, v: f32, cells: f32) -> Color32 {
@@ -1110,6 +1151,11 @@ fn paint_bg_tile(painter: &egui::Painter, rect: egui::Rect, kind: BgKind, solid:
         BgKind::Image => paint_rounded_mesh(painter, rect, RADIUS, |_, v| if v < 0.6 { sky } else { field }),
         BgKind::BlurredSource => paint_rounded_mesh(painter, rect, RADIUS, |u, v| sky.lerp_to_gamma(field, (v * 0.8 + u * 0.2).clamp(0.0, 1.0))),
         BgKind::DesaturatedSource => paint_rounded_mesh(painter, rect, RADIUS, |_, v| Color32::from_gray(200).lerp_to_gamma(Color32::from_gray(90), v)),
+        // Soft sky above a sharp near field: blur grows with distance.
+        BgKind::LensBlur => paint_rounded_mesh(painter, rect, RADIUS, |u, v| {
+            let near = v > 0.6 && ((u * 8.0) as i32 + (v * 8.0) as i32) % 2 == 0;
+            if near { field.lerp_to_gamma(Color32::WHITE, 0.25) } else { sky.lerp_to_gamma(field, (v * 0.9).clamp(0.0, 1.0)) }
+        }),
     }
 }
 
@@ -1138,6 +1184,10 @@ fn apply_bg_kind(
         BgKind::DesaturatedSource => {
             *bg = None;
             *bg_effect = BgEffect::DesaturatedSource;
+        }
+        BgKind::LensBlur => {
+            *bg = None;
+            *bg_effect = BgEffect::LensBlur { amount_pct: 50 };
         }
         // Image bg lives on BatchItem, not on these two ItemSettings fields —
         // the chip emits `change.pick_bg_image` and skips this fn for Image.

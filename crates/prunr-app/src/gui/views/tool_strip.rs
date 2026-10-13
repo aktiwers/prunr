@@ -4,7 +4,7 @@
 use egui::{Align2, Id, Order, Rect, RichText, Ui};
 use egui_material_icons::icons::ICON_MORE_HORIZ;
 
-use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE};
+use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE, DEPTH_RANGE};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
@@ -138,6 +138,12 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
 
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = brush_chip::mode_buttons(ui, model, s);
-    committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
+    if s.magic_depth {
+        committed |= chip::slider_row_f32(ui, "Range", &mut s.magic_depth_range, DEPTH_RANGE, false, |v| fmt::plain(v, 2)).commit;
+    } else {
+        committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
+    }
+    let depth = chip::inline_switch(ui, "By depth", &mut s.magic_depth);
+    committed |= depth.commit;
     committed
 }

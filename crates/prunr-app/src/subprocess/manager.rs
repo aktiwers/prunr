@@ -55,6 +55,15 @@ enum ReaderEvent {
     Disconnected,
 }
 
+/// The lines a worker draws: the mode, their settings, and how much
+/// they fade with distance (0-100).
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerLines {
+    pub mode: LineMode,
+    pub edge: EdgeSettings,
+    pub fade_pct: u8,
+}
+
 impl SubprocessManager {
     /// Spawn a `prunr --worker` subprocess and send the Init command.
     /// Blocks until the child sends `Ready` or `InitError`.
@@ -70,7 +79,18 @@ impl SubprocessManager {
         line_mode: LineMode,
         edge: EdgeSettings,
     ) -> Result<(Self, String), String> {
-        Self::spawn_inner(model, jobs, mask, force_cpu, line_mode, edge, false)
+        Self::spawn_inner(model, jobs, mask, force_cpu, WorkerLines { mode: line_mode, edge, fade_pct: 0 }, false)
+    }
+
+    /// `spawn` whose worker fades the lines with distance itself (the CLI).
+    pub fn spawn_with_lines(
+        model: ModelKind,
+        jobs: usize,
+        mask: MaskSettings,
+        force_cpu: bool,
+        lines: WorkerLines,
+    ) -> Result<(Self, String), String> {
+        Self::spawn_inner(model, jobs, mask, force_cpu, lines, false)
     }
 
     /// Spawn a SD-inpaint-only subprocess. The worker skips engine
@@ -82,7 +102,7 @@ impl SubprocessManager {
         Self::spawn_inner(
             ModelKind::Silueta, 1,
             MaskSettings::default(), false,
-            LineMode::Off, EdgeSettings::default(),
+            WorkerLines { mode: LineMode::Off, edge: EdgeSettings::default(), fade_pct: 0 },
             true,
         )
     }
@@ -92,10 +112,10 @@ impl SubprocessManager {
         jobs: usize,
         mask: MaskSettings,
         force_cpu: bool,
-        line_mode: LineMode,
-        edge: EdgeSettings,
+        lines: WorkerLines,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
+        let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct } = lines;
         // Stale-file cleanup is owned by `ipc_temp_dir()`'s init-time
         // sweep. Spawning a subprocess must NOT touch the temp dir —
         // callers like the CLI downscale path and the inpaint bridge's
@@ -125,6 +145,7 @@ impl SubprocessManager {
             model, jobs, mask, force_cpu, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
+            line_fade_pct,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
         flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
 

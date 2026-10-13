@@ -86,7 +86,7 @@ impl EdgeEngine {
     /// One-shot: the lines over the whole photo. Runs only the scales
     /// `edge` draws.
     pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
-        Ok(compose_whole_photo(&self.infer_scales(original, edge.drawn_scales())?, original, edge))
+        Ok(compose_whole_photo(&self.infer_scales(original, edge.drawn_scales())?, original, edge, None))
     }
 
     /// Every scale, for a caller that keeps them so a scale switch needs
@@ -446,24 +446,24 @@ pub fn compose_subject_outline(
     edge_res: &EdgeInferenceResult,
     masked_rgba: &RgbaImage,
     edge: &crate::EdgeSettings,
+    fade: Option<crate::depth::LineFade<'_>>,
 ) -> RgbaImage {
     use crate::{EdgeScale, LineStyle};
     let primary_scale = edge.primary_scale();
     let active = &edge_res.tensors[primary_scale as usize];
     let (ph, pw) = edge_res.dims(primary_scale);
-    let primary_mask = edge_plane(
-        active, ph, pw,
-        masked_rgba.width(), masked_rgba.height(),
-        edge.line_strength, edge.edge_thickness,
-    );
+    let plane = |tensor: &[f32], th: u32, tw: u32| {
+        let mut p = edge_plane(tensor, th, tw, masked_rgba.width(), masked_rgba.height(), edge.line_strength, edge.edge_thickness);
+        if let Some(fade) = fade {
+            fade.apply(&mut p);
+        }
+        p
+    };
+    let primary_mask = plane(active, ph, pw);
     if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
         let bold = &edge_res.tensors[EdgeScale::Bold as usize];
         let (bh, bw) = edge_res.dims(EdgeScale::Bold);
-        let bold_mask = edge_plane(
-            bold, bh, bw,
-            masked_rgba.width(), masked_rgba.height(),
-            edge.line_strength, edge.edge_thickness,
-        );
+        let bold_mask = plane(bold, bh, bw);
         // Fine and Bold must come from distinct tensor slots — equal raw
         // pointers mean the caller collapsed to single-scale output.
         debug_assert_ne!(
@@ -493,13 +493,14 @@ pub fn outline_subject(
     subject: RgbaImage,
     fill: crate::FillStyle,
     edge: &crate::EdgeSettings,
+    fade: Option<crate::depth::LineFade<'_>>,
     trace: impl FnOnce(&DynamicImage) -> Result<EdgeInferenceResult, CoreError>,
 ) -> Result<(RgbaImage, EdgeInferenceResult), CoreError> {
     let plain = DynamicImage::ImageRgba8(subject);
     let traced = trace(&apply_input_transform(&plain, edge.input_transform))?;
     let mut subject = plain.into_rgba8();
     crate::postprocess::apply_fill_style(&mut subject, fill);
-    Ok((compose_subject_outline(&traced, &subject, edge), traced))
+    Ok((compose_subject_outline(&traced, &subject, edge, fade), traced))
 }
 
 /// The lines over the whole photo (Sketch on Full): every line colour
@@ -509,9 +510,10 @@ pub fn compose_whole_photo(
     edge_res: &EdgeInferenceResult,
     original: &DynamicImage,
     edge: &crate::EdgeSettings,
+    fade: Option<crate::depth::LineFade<'_>>,
 ) -> RgbaImage {
     let lines_only = crate::EdgeSettings { compose_mode: crate::types::ComposeMode::LinesOnly, ..*edge };
-    compose_subject_outline(edge_res, &crate::formats::rgba_view(original), &lines_only)
+    compose_subject_outline(edge_res, &crate::formats::rgba_view(original), &lines_only, fade)
 }
 
 /// Pre-process an image according to the user's `InputTransform`. The
@@ -902,7 +904,7 @@ mod tests {
         let subject = RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]));
         let mut traced_from = None;
         let edge = crate::EdgeSettings { compose_mode: crate::ComposeMode::SubjectFilled, ..crate::EdgeSettings::default() };
-        let (out, _) = outline_subject(subject.clone(), crate::FillStyle::Invert, &edge, |img| {
+        let (out, _) = outline_subject(subject.clone(), crate::FillStyle::Invert, &edge, None, |img| {
             traced_from = Some(img.to_rgba8());
             Ok(EdgeInferenceResult { tensors: std::array::from_fn(|_| vec![0.0; 4]), height: 2, width: 2 })
         })
@@ -940,7 +942,7 @@ mod tests {
         let original = solid_rgb(64, 48);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
         let top_half_lines = every_scale(|i, len| if i < len / 2 { 1.0 } else { 0.0 });
-        let out = compose_whole_photo(&top_half_lines, &original, &edge);
+        let out = compose_whole_photo(&top_half_lines, &original, &edge, None);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
         let strong_red = out.get_pixel(0, 0);
@@ -976,7 +978,7 @@ mod tests {
             },
             input_transform: crate::InputTransform::default(),
         };
-        let out = compose_subject_outline(&edge_res, &masked, &edge);
+        let out = compose_subject_outline(&edge_res, &masked, &edge, None);
         let p = out.get_pixel(32, 24);
         // Fine tensor saturates → primary mask ≈ 255 → blend pulls all
         // the way to fine_color. Pre-fix this pixel would be ≈[10,10,10]
@@ -1153,10 +1155,24 @@ mod tests {
     fn whole_photo_preserves_original_rgb_when_no_line_color() {
         let original = solid_rgb(32, 32);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
-        let out = compose_whole_photo(&every_scale(|_, _| 1.0), &original, &edge);
+        let out = compose_whole_photo(&every_scale(|_, _| 1.0), &original, &edge, None);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
         assert_eq!(out.get_pixel(0, 0)[1], 120);
         assert_eq!(out.get_pixel(0, 0)[2], 120);
+    }
+
+    /// Fade with distance thins the lines toward the far top of a ground
+    /// plane and leaves the near bottom at full strength.
+    #[test]
+    fn faded_lines_lose_alpha_with_distance() {
+        let original = solid_rgb(32, 32);
+        let edge = crate::EdgeSettings::default();
+        let ramp = crate::depth::DepthMap::from_raw(1, 32, (0..32).map(|y| y as f32).collect());
+        let fade = crate::depth::LineFade { depth: &ramp, amount: 1.0 };
+        let plain = compose_whole_photo(&every_scale(|_, _| 1.0), &original, &edge, None);
+        let faded = compose_whole_photo(&every_scale(|_, _| 1.0), &original, &edge, Some(fade));
+        assert!(faded.get_pixel(5, 0)[3] < plain.get_pixel(5, 0)[3] / 4, "far lines fade");
+        assert!(u16::from(faded.get_pixel(5, 31)[3]) + 8 >= u16::from(plain.get_pixel(5, 31)[3]), "near lines keep their strength");
     }
 }
