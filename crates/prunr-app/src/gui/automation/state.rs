@@ -57,7 +57,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             "none"
         },
         selected: app.batch.selected_item().map(|it| it.id),
-        busy: app.processor.live_preview.is_busy()
+        busy: app.quiet_background_work().is_some()
             || app.processor.is_run_in_flight()
             || app.batch.items.iter().any(|it| it.is_busy()),
         items: app
