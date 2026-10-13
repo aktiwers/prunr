@@ -165,8 +165,10 @@ pub struct SdTuning {
     pub mem: SdMemPlan,
 }
 
-/// Session memory knobs, for finding RORem's smallest working set:
-/// each one trades some speed for RAM. The default is ORT's behaviour.
+/// Session memory knobs. The default is ORT's behaviour; `plan_tuning`
+/// ships the plan measured on RORem (`prunr-export/rorem_mem`): memory
+/// pattern off peaks 15 GB instead of 20.5 at the same speed, the other
+/// two change nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SdMemPlan {
     /// ORT's memory-pattern planning off: on, it pre-sizes every
@@ -202,7 +204,8 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
 pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem: SdMemPlan::default() }
+    let mem = SdMemPlan { no_memory_pattern: true, ..SdMemPlan::default() };
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -3261,7 +3264,7 @@ mod tests {
         assert_eq!(fit(m, true), Ok(false));
         let t = plan_tuning(true, m);
         assert!(t.keep_loaded && t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
-        assert_eq!(t.session_key(), SdSessionKey::default());
+        assert_eq!(t.session_key(), SdSessionKey { mem: t.mem, ..SdSessionKey::default() }, "only the memory plan is off ORT's defaults");
         assert!(t.session_key().records_ep_failures());
         assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());
     }
@@ -3612,5 +3615,14 @@ mod mem_plan_tests {
         let lean = SdTuning { mem: SdMemPlan { no_memory_pattern: true, device_initializers: true, intra_threads: 4 }, ..tuning.clone() };
         assert_ne!(lean.session_key(), tuning.session_key(), "the plan is part of what a bundle was built with");
         assert_eq!(SdTuning { mem: tuning.mem, ..lean.clone() }.session_key(), tuning.session_key());
+    }
+
+    /// The shipped plan runs the sessions without ORT's memory-pattern
+    /// planning, which is where RORem's extra 5.5 GB went.
+    #[test]
+    fn the_shipped_plan_turns_memory_pattern_off() {
+        let mem = super::plan_tuning(false, 0).mem;
+        assert!(mem.no_memory_pattern);
+        assert!(!mem.device_initializers && mem.intra_threads == 0, "and changes nothing else");
     }
 }
