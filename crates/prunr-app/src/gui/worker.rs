@@ -339,12 +339,10 @@ pub fn spawn_worker(
                             line_mode = ?config.line_mode,
                             "subprocess cold-start",
                         );
-                        run_batch_with_retry(
-                            reuse,
-                            items, tier2_items, add_edge_items, *config, &cancels,
-                            additional_items_rx,
-                            &res_tx, &ctx,
+                        let state = BatchRunState::new(
+                            items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
+                        run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx);
                     }
                 }
             }
@@ -354,15 +352,68 @@ pub fn spawn_worker(
     (msg_tx, res_rx)
 }
 
-/// Batch-wide state carried across subprocess spawns. `max_jobs` halves on
-/// each crash retry; `completed` lets the crash handler skip already-delivered
-/// items when re-queueing in-flight work.
+/// Batch-wide state carried across subprocess spawns. `max_jobs` starts at
+/// `config.jobs` and halves on each crash retry; `completed` lets the crash
+/// handler skip already-delivered items when re-queueing in-flight work.
 struct BatchRunState {
+    config: ProcessingConfig,
     pending: VecDeque<WorkItem>,
     pending_tier2: VecDeque<Tier2WorkItem>,
     pending_add_edge: VecDeque<AddEdgeWorkItem>,
+    /// Items admitted by the memory controller after the batch started.
+    additional_rx: Option<mpsc::Receiver<WorkItem>>,
     completed: std::collections::HashSet<u64>,
     max_jobs: usize,
+}
+
+impl BatchRunState {
+    fn new(
+        items: Vec<WorkItem>,
+        tier2_items: Vec<Tier2WorkItem>,
+        add_edge_items: Vec<AddEdgeWorkItem>,
+        additional_rx: Option<mpsc::Receiver<WorkItem>>,
+        config: ProcessingConfig,
+    ) -> Self {
+        Self {
+            max_jobs: config.jobs,
+            config,
+            pending: items.into(),
+            pending_tier2: tier2_items.into(),
+            pending_add_edge: add_edge_items.into(),
+            additional_rx,
+            completed: std::collections::HashSet::new(),
+        }
+    }
+}
+
+/// Work sent to the current subprocess that it hasn't reported back yet.
+#[derive(Default)]
+struct SentWork {
+    items: Vec<WorkItem>,
+    tier2_ids: Vec<u64>,
+    add_edge_ids: Vec<u64>,
+}
+
+impl SentWork {
+    fn len(&self) -> usize {
+        self.items.len() + self.tier2_ids.len() + self.add_edge_ids.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn forget(&mut self, item_id: u64) {
+        self.items.retain(|(id, _, _)| *id != item_id);
+        self.tier2_ids.retain(|id| *id != item_id);
+        self.add_edge_ids.retain(|id| *id != item_id);
+    }
+
+    fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.items.iter().map(|(id, _, _)| *id)
+            .chain(self.tier2_ids.iter().copied())
+            .chain(self.add_edge_ids.iter().copied())
+    }
 }
 
 /// Outcome of one subprocess's event loop. `Cancelled` means the user cancel
@@ -387,35 +438,21 @@ enum WaitAction {
 #[tracing::instrument(
     skip_all,
     fields(
-        tier1_count = initial_items.len(),
-        tier2_count = initial_tier2.len(),
+        tier1_count = state.pending.len(),
+        tier2_count = state.pending_tier2.len(),
         // Snapshot of the user's requested job count — tracing fields are
         // captured at span entry. The effective count halves on each crash
         // retry; see the per-spawn span on `SubprocessManager::spawn`.
-        initial_jobs = config.jobs,
+        initial_jobs = state.max_jobs,
     ),
 )]
-#[allow(clippy::too_many_arguments)]
 fn run_batch_with_retry(
     prewarm: Option<SubprocessManager>,
-    initial_items: Vec<WorkItem>,
-    initial_tier2: Vec<Tier2WorkItem>,
-    initial_add_edge: Vec<AddEdgeWorkItem>,
-    config: ProcessingConfig,
+    mut state: BatchRunState,
     cancels: &super::processor::CancelRegistry,
-    additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let ProcessingConfig { model, jobs: initial_jobs, mask, force_cpu, line_mode, edge } = config;
-    let mut state = BatchRunState {
-        pending: initial_items.into(),
-        pending_tier2: initial_tier2.into(),
-        pending_add_edge: initial_add_edge.into(),
-        completed: std::collections::HashSet::new(),
-        max_jobs: initial_jobs,
-    };
-    let additional_items_rx = additional_items_rx.as_ref();
     // Pre-warm sub is consumed on the first iteration; crash retries
     // always spawn fresh.
     let mut prewarm = prewarm;
@@ -429,7 +466,7 @@ fn run_batch_with_retry(
             return;
         }
 
-        match poll_additional_items(&mut state, additional_items_rx) {
+        match poll_additional_items(&mut state) {
             WaitAction::Complete => {
                 let _ = res_tx.send(WorkerResult::BatchComplete);
                 ctx.request_repaint();
@@ -442,31 +479,23 @@ fn run_batch_with_retry(
             WaitAction::Continue => {}
         }
 
-        let Some(burst) = spawn_and_initial_burst(
-            prewarm.take(), &mut state, model, mask, force_cpu, line_mode, edge, cancels, res_tx, ctx,
-        ) else {
+        let Some(burst) = spawn_and_initial_burst(prewarm.take(), &mut state, cancels, res_tx, ctx) else {
             return; // spawn failed — errors + BatchComplete already sent
         };
-        let InitialBurst { mut sub, mut sent_tier1, mut sent_tier2_ids, mut sent_add_edge_ids } = burst;
+        let InitialBurst { mut sub, mut sent } = burst;
 
-        let outcome = run_event_loop(
-            &mut sub, &mut state, &mut sent_tier1, &mut sent_tier2_ids, &mut sent_add_edge_ids,
-            additional_items_rx, cancels, model, res_tx, ctx,
-        );
+        let outcome = run_event_loop(&mut sub, &mut state, &mut sent, cancels, res_tx, ctx);
 
         match outcome {
             EventLoopOutcome::Cancelled => return,
             EventLoopOutcome::Crashed(reason) => {
-                let should_retry = handle_crash_and_retry(
-                    &mut state, sent_tier1, sent_tier2_ids, sent_add_edge_ids, reason,
-                    &mut sub, additional_items_rx, res_tx, ctx,
-                );
+                let should_retry = handle_crash_and_retry(&mut state, sent, reason, &mut sub, res_tx, ctx);
                 if !should_retry {
                     return;
                 }
             }
             EventLoopOutcome::Finished => {
-                if !finalize_or_continue(&mut state, &mut sub, additional_items_rx, res_tx, ctx) {
+                if !finalize_or_continue(&mut state, &mut sub, res_tx, ctx) {
                     return;
                 }
             }
@@ -495,14 +524,11 @@ fn emit_loading_status(
 
 /// When the batch queues are empty, check if the admission controller has
 /// more to send. Returns immediately — the caller owns the sleep/cancel cadence.
-fn poll_additional_items(
-    state: &mut BatchRunState,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
-) -> WaitAction {
+fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
     if !state.pending.is_empty() || !state.pending_tier2.is_empty() || !state.pending_add_edge.is_empty() {
         return WaitAction::Continue;
     }
-    let Some(rx) = additional_items_rx else {
+    let Some(rx) = state.additional_rx.as_ref() else {
         return WaitAction::Complete;
     };
     match rx.try_recv() {
@@ -520,24 +546,16 @@ fn poll_additional_items(
 /// pinned only by a comment.
 struct InitialBurst {
     sub: SubprocessManager,
-    sent_tier1: Vec<WorkItem>,
-    sent_tier2_ids: Vec<u64>,
-    sent_add_edge_ids: Vec<u64>,
+    sent: SentWork,
 }
 
 /// Spawn a subprocess (or accept a pre-warmed one) and send the initial
 /// burst (Tier 2 first — no inference needed — then Tier 1 up to
 /// `max_jobs`). On spawn failure, reports errors for every pending item
 /// and sends `BatchComplete`; returns `None`.
-#[allow(clippy::too_many_arguments)]
 fn spawn_and_initial_burst(
     prewarm: Option<SubprocessManager>,
     state: &mut BatchRunState,
-    model: ModelKind,
-    mask: MaskSettings,
-    force_cpu: bool,
-    line_mode: LineMode,
-    edge: EdgeSettings,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -558,7 +576,8 @@ fn spawn_and_initial_burst(
     let mut sub = match prewarm {
         Some(sub) => sub,
         None => match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
+            state.config.model, effective_jobs, state.config.mask, state.config.force_cpu,
+            state.config.line_mode, state.config.edge,
         ) {
             Ok((s, active_provider)) => {
                 let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
@@ -574,14 +593,12 @@ fn spawn_and_initial_burst(
         },
     };
 
-    let mut sent_items: Vec<WorkItem> = Vec::new();
-    let mut sent_tier2_ids: Vec<u64> = Vec::new();
-    let mut sent_add_edge_ids: Vec<u64> = Vec::new();
+    let mut sent = SentWork::default();
     let burst = state.max_jobs.min(total_pending);
     let mut sent_count = 0;
     while sent_count < burst {
-        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent_tier2_ids)
-            || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent_add_edge_ids)
+        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent.tier2_ids)
+            || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent.add_edge_ids)
         {
             sent_count += 1;
         } else if let Some(item) = state.pending.pop_front() {
@@ -589,32 +606,22 @@ fn spawn_and_initial_burst(
                 state.pending.push_front(item);
                 break;
             }
-            sent_items.push(item);
+            sent.items.push(item);
             sent_count += 1;
         } else {
             break;
         }
     }
-    Some(InitialBurst {
-        sub,
-        sent_tier1: sent_items,
-        sent_tier2_ids,
-        sent_add_edge_ids,
-    })
+    Some(InitialBurst { sub, sent })
 }
 
 /// Drive one subprocess through its lifecycle — poll events, admit more work
 /// on ImageDone, detect crash / hang, stop on Finished or cancel.
-#[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
-    sent_items: &mut Vec<WorkItem>,
-    sent_tier2_ids: &mut Vec<u64>,
-    sent_add_edge_ids: &mut Vec<u64>,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    sent: &mut SentWork,
     cancels: &super::processor::CancelRegistry,
-    model: ModelKind,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> EventLoopOutcome {
@@ -632,9 +639,7 @@ fn run_event_loop(
 
         // Notify subprocess of newly cancelled in-flight items so it can drop
         // them at the next dispatch check instead of finishing the work.
-        forward_item_cancels(
-            sub, sent_items, sent_tier2_ids, sent_add_edge_ids, cancels, &mut cancel_notified,
-        );
+        forward_item_cancels(sub, sent, cancels, &mut cancel_notified);
 
         // Real-crash check first so a segfault is reported as such rather
         // than masked by the watchdog firing on the same silence.
@@ -642,8 +647,7 @@ fn run_event_loop(
             return EventLoopOutcome::Crashed(sub.crash_reason());
         }
 
-        let in_flight_count = sent_items.len() + sent_tier2_ids.len() + sent_add_edge_ids.len();
-        if is_stalled(last_event_at.elapsed(), in_flight_count, HANG_TIMEOUT) {
+        if is_stalled(last_event_at.elapsed(), sent.len(), HANG_TIMEOUT) {
             sub.kill();
             return EventLoopOutcome::Crashed(format!(
                 "Worker stopped responding (no events for {}s)",
@@ -663,16 +667,12 @@ fn run_event_loop(
                 subprocess_finished = true;
                 continue;
             }
-            handle_subprocess_event(
-                event, sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids,
-                additional_items_rx, cancels, model, res_tx, ctx,
-            );
+            handle_subprocess_event(event, sub, state, sent, cancels, res_tx, ctx);
         }
 
         // If everything drained and no more coming, mark finished.
-        let all_sent_empty = sent_items.is_empty() && sent_tier2_ids.is_empty() && sent_add_edge_ids.is_empty();
-        if all_sent_empty && state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
-            if let Some(rx) = additional_items_rx {
+        if sent.is_empty() && state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
+            if let Some(rx) = state.additional_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(item) => state.pending.push_back(item),
                     Err(mpsc::TryRecvError::Disconnected) => subprocess_finished = true,
@@ -689,17 +689,12 @@ fn run_event_loop(
 /// Route one `SubprocessEvent` to its handler. `Finished` is handled by the
 /// event loop itself (sets the exit flag); `RssUpdate` is absorbed by
 /// `SubprocessManager` internally.
-#[allow(clippy::too_many_arguments)]
 fn handle_subprocess_event(
     event: SubprocessEvent,
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
-    sent_items: &mut Vec<WorkItem>,
-    sent_tier2_ids: &mut Vec<u64>,
-    sent_add_edge_ids: &mut Vec<u64>,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    sent: &mut SentWork,
     cancels: &super::processor::CancelRegistry,
-    model: ModelKind,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
@@ -715,29 +710,25 @@ fn handle_subprocess_event(
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
             let tensor_cache = read_tensor_cache(
-                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, model,
+                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.model,
             );
             let edge_cache = read_edge_tensor_cache(
                 edge_cache_path.as_ref(), edge_cache_height, edge_cache_width,
             );
 
             state.completed.insert(item_id);
-            sent_items.retain(|(id, _, _)| *id != item_id);
-            sent_tier2_ids.retain(|id| *id != item_id);
-            sent_add_edge_ids.retain(|id| *id != item_id);
+            sent.forget(item_id);
 
             let _ = res_tx.send(WorkerResult::BatchItemDone {
                 item_id, result, tensor_cache, edge_cache,
             });
             ctx.request_repaint();
 
-            admit_next_item(sub, state, sent_items, sent_tier2_ids, sent_add_edge_ids, additional_items_rx, cancels, res_tx, ctx);
+            admit_next_item(sub, state, sent, cancels, res_tx, ctx);
         }
         SubprocessEvent::ImageError { item_id, error } => {
             state.completed.insert(item_id);
-            sent_items.retain(|(id, _, _)| *id != item_id);
-            sent_tier2_ids.retain(|id| *id != item_id);
-            sent_add_edge_ids.retain(|id| *id != item_id);
+            sent.forget(item_id);
             let _ = res_tx.send(WorkerResult::BatchItemDone {
                 item_id,
                 result: Err(error),
@@ -847,14 +838,10 @@ fn read_edge_tensor_cache(
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
 /// Prefers Tier 2 (no inference), then Tier 1 pending, then the admission
 /// overflow channel.
-#[allow(clippy::too_many_arguments)]
 fn admit_next_item(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
-    sent_items: &mut Vec<WorkItem>,
-    sent_tier2_ids: &mut Vec<u64>,
-    sent_add_edge_ids: &mut Vec<u64>,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
+    sent: &mut SentWork,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -863,26 +850,26 @@ fn admit_next_item(
     if sub.should_pause_admission() {
         return;
     }
-    if try_send_tier2(sub, &mut state.pending_tier2, sent_tier2_ids) {
+    if try_send_tier2(sub, &mut state.pending_tier2, &mut sent.tier2_ids) {
         return;
     }
-    if try_send_add_edge(sub, &mut state.pending_add_edge, sent_add_edge_ids) {
+    if try_send_add_edge(sub, &mut state.pending_add_edge, &mut sent.add_edge_ids) {
         return;
     }
     if let Some(item) = state.pending.pop_front() {
         if send_item_to_sub(sub, &item).is_ok() {
-            sent_items.push(item);
+            sent.items.push(item);
         } else {
             state.pending.push_front(item);
         }
         return;
     }
-    if let Some(rx) = additional_items_rx {
+    if let Some(rx) = state.additional_rx.as_ref() {
         if let Ok(item) = rx.try_recv() {
             if cancels.is_cancelled(item.0) {
                 report_cancelled(item.0, state, res_tx, ctx);
             } else if send_item_to_sub(sub, &item).is_ok() {
-                sent_items.push(item);
+                sent.items.push(item);
             } else {
                 state.pending.push_back(item);
             }
@@ -919,16 +906,11 @@ fn drop_cancelled_pending(
 /// winds down the job.
 fn forward_item_cancels(
     sub: &mut SubprocessManager,
-    sent_items: &[WorkItem],
-    sent_tier2_ids: &[u64],
-    sent_add_edge_ids: &[u64],
+    sent: &SentWork,
     cancels: &super::processor::CancelRegistry,
     notified: &mut std::collections::HashSet<u64>,
 ) {
-    let in_flight = sent_items.iter().map(|(id, _, _)| *id)
-        .chain(sent_tier2_ids.iter().copied())
-        .chain(sent_add_edge_ids.iter().copied());
-    for id in in_flight {
+    for id in sent.ids() {
         if cancels.is_cancelled(id) && notified.insert(id) {
             let _ = sub.send_cancel_item(id);
         }
@@ -970,22 +952,18 @@ fn cancel_subprocess(
 /// (tensor data already consumed by IPC), halve `max_jobs`, and either
 /// continue (return `true`) or bail if we were already at 1 job (return
 /// `false` after emitting terminal errors + `BatchComplete`).
-#[allow(clippy::too_many_arguments)]
 fn handle_crash_and_retry(
     state: &mut BatchRunState,
-    sent_items: Vec<WorkItem>,
-    sent_tier2_ids: Vec<u64>,
-    sent_add_edge_ids: Vec<u64>,
+    sent: SentWork,
     crash_reason: String,
     sub: &mut SubprocessManager,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
     // Tier 2 + AddEdge can't be re-queued — their tensor data is owned by the
     // IPC temp file, already cleaned up. Parent errors the item so a follow-up
     // Process runs the full pipeline.
-    for tid in sent_tier2_ids.into_iter().chain(sent_add_edge_ids) {
+    for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
                 item_id: tid,
@@ -996,14 +974,14 @@ fn handle_crash_and_retry(
         }
     }
 
-    let re_queued: Vec<WorkItem> = sent_items.into_iter()
+    let re_queued: Vec<WorkItem> = sent.items.into_iter()
         .filter(|(id, _, _)| !state.completed.contains(id))
         .collect();
     let re_count = re_queued.len();
 
     // Drain late additions before re-queuing so the original in-flight
     // order stays at the front.
-    if let Some(rx) = additional_items_rx {
+    if let Some(rx) = state.additional_rx.as_ref() {
         while let Ok(item) = rx.try_recv() {
             state.pending.push_back(item);
         }
@@ -1075,12 +1053,11 @@ fn emit_pending_errors(
 fn finalize_or_continue(
     state: &mut BatchRunState,
     sub: &mut SubprocessManager,
-    additional_items_rx: Option<&mpsc::Receiver<WorkItem>>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
     if state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
-        if let Some(rx) = additional_items_rx {
+        if let Some(rx) = state.additional_rx.as_ref() {
             match rx.try_recv() {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     let _ = res_tx.send(WorkerResult::BatchComplete);
