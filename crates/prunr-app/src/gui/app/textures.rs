@@ -87,6 +87,7 @@ impl PrunrApp {
         use crate::gui::item_settings::Backdrop;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let backdrop = item.settings.backdrop();
+        item.refresh_lens_focus();
         let Some(key) = item.backdrop_key() else {
             item.backdrop_texture = None;
             return;

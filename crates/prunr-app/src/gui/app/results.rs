@@ -685,7 +685,7 @@ impl PrunrApp {
     /// textures. Throttles uploads so a 50-image import doesn't burst all
     /// `ctx.load_texture` calls into one frame and overwhelm the egui
     /// command buffer. Requests a repaint while the queue is still saturated.
-    fn pump_thumbnail_results(&mut self, ctx: &egui::Context) {
+    fn pump_thumbnail_results(&mut self, ctx: &egui::Context) -> bool {
         const THUMB_UPLOADS_PER_FRAME: usize = 3;
         let mut uploaded = 0;
         while uploaded < THUMB_UPLOADS_PER_FRAME {
@@ -707,20 +707,18 @@ impl PrunrApp {
         if uploaded == THUMB_UPLOADS_PER_FRAME {
             ctx.request_repaint();
         }
+        uploaded > 0
     }
 
-    pub(super) fn drain_background_channels(&mut self, ctx: &egui::Context) {
+    /// Returns whether anything landed on an image this frame.
+    pub(super) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
+        let mut landed = false;
         let mut decode_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if item.land_decode(result) {
-                decode_arrived = true;
-                // Selection mask + SAM encoder embedding were derived from
-                // the old source bytes — drop them so the next stroke /
-                // dispatch rebuilds against the new image.
-                self.batch.invalidate_selection_on_source_change(item_id);
-            }
+            decode_arrived |= item.land_decode(result);
         }
+        landed |= decode_arrived;
         if decode_arrived {
             // Freshly-decoded RGBA for the viewed item: clear zoom state
             // entirely (not just re-arm the flag). A bare flag keeps
@@ -734,6 +732,7 @@ impl PrunrApp {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.land_texture(tex, target);
+                landed = true;
             }
         }
 
@@ -764,6 +763,7 @@ impl PrunrApp {
         }
         if filter_only_arrived {
             self.result_switch_id += 1;
+            landed = true;
         }
         for item_id in filtered {
             self.after_result_landed(item_id);
@@ -782,7 +782,7 @@ impl PrunrApp {
             }
         }
 
-        self.pump_thumbnail_results(ctx);
+        landed |= self.pump_thumbnail_results(ctx);
         self.batch.compress_history_off_thread();
 
         // Drain off-thread selection textures. `ctx.load_texture` is
@@ -807,6 +807,7 @@ impl PrunrApp {
 
         while let Ok(load) = self.batch.bg_io.bg_image_rx.try_recv() {
             self.land_bg_image(load);
+            landed = true;
             ctx.request_repaint();
         }
 
@@ -814,7 +815,9 @@ impl PrunrApp {
         // was built) is dropped; the next kick builds the current one.
         while let Ok((item_id, key, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if !item.land_backdrop(key, ci, ctx) {
+            if item.land_backdrop(key, ci, ctx) {
+                landed = true;
+            } else {
                 ctx.request_repaint();
             }
         }
@@ -841,6 +844,7 @@ impl PrunrApp {
             }
             self.auto_process_imported(id_floor);
         }
+        landed
     }
 }
 
