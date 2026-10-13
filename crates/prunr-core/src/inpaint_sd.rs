@@ -72,12 +72,10 @@ const SD_SIDE_STEP: u32 = 64;
 /// The steps RORem's LCM LoRA was distilled for.
 pub const ROREM_STEPS: u32 = 4;
 
-/// Diffusers' `vae.config.scaling_factor` for SD 1.5's VAE and SDXL's.
-const SD15_VAE_SCALE: f32 = 0.18215;
-const SDXL_VAE_SCALE: f32 = 0.13025;
-
-fn vae_scale(id: prunr_models::ModelId) -> f32 {
-    if id == prunr_models::ModelId::RoremFp16 { SDXL_VAE_SCALE } else { SD15_VAE_SCALE }
+/// The SD pipeline's facts about `id`; every id it is given is SD-family.
+fn sd_spec(id: prunr_models::ModelId) -> prunr_models::SdSpec {
+    // sd_spec is Some for every id routed here (is_sd_family is defined by it)
+    id.sd_spec().expect("the SD pipeline runs SD-family models only")
 }
 
 /// Minimum free RAM (bytes) required before we'll load the SD bundle.
@@ -359,8 +357,7 @@ pub fn process_inpaint_with(
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
     // silently fall back to standard VAE — same graceful pattern as LCM.
-    // TAESD is SD 1.5's latent space; SDXL's VAE differs.
-    let taesd = if req.use_taesd && vae_scale(id) == SD15_VAE_SCALE { TaesdSession::get().ok() } else { None };
+    let taesd = if req.use_taesd && sd_spec(id).takes_taesd { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
@@ -814,11 +811,9 @@ fn run_one_tile(
             });
             let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
             let mask_lat = mask_to_latent(&padded_mask);
-            let cond = match cond_h {
-                Some(h) => Some(h.join()
-                    .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))??),
-                None => None,
-            };
+            let cond = cond_h.map(|h| h.join()
+                .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))?)
+                .transpose()?;
             let uncond = match uncond_h {
                 Some(h) => Some(h.join()
                     .map_err(|_| CoreError::Inference("text encoder (uncond) thread panicked".into()))??),
@@ -879,8 +874,8 @@ fn run_one_tile(
         );
         let noise_pred = match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
             (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale)?,
-            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, cond)?,
-            (None, _) => unet_step_sized(bundle, latent_in_f16, t, (ph, pw))?,
+            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond))?,
+            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw))?,
         };
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
@@ -969,8 +964,8 @@ fn cfg_noise_pred(
             }
         }
     }
-    let pred_cond = unet_step(bundle, latent_in.clone(), t, cond)?;
-    let pred_uncond = unet_step(bundle, latent_in, t, uncond)?;
+    let pred_cond = unet_step(bundle, latent_in.clone(), t, Cond::Text(cond))?;
+    let pred_uncond = unet_step(bundle, latent_in, t, Cond::Text(uncond))?;
     Ok(cfg_blend(pred_uncond.view(), pred_cond.view(), scale))
 }
 
@@ -1284,8 +1279,9 @@ impl SdSession {
             };
 
         // A bundle with its prompt baked in ships no text encoder.
+        let has_text = by_key.contains_key("text_encoder");
         let wanted: Vec<(&'static str, SmokeFn)> = PARTS.iter().copied()
-            .filter(|(key, _)| *key != "text_encoder" || by_key.contains_key("text_encoder"))
+            .filter(|(key, _)| *key != "text_encoder" || has_text)
             .collect();
         let mut parts: Vec<(&'static str, Session, String)> =
             if crate::engine::directml_active() {
@@ -1304,7 +1300,7 @@ impl SdSession {
             let (_, s, ep) = parts.swap_remove(pos);
             Ok((s, ep))
         };
-        let text = by_key.contains_key("text_encoder").then(|| take("text_encoder")).transpose()?;
+        let text = has_text.then(|| take("text_encoder")).transpose()?;
         let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
         let (vae_decoder,  vae_dec_ep) = take("vae_decoder")?;
         let (unet,         unet_ep)    = take("unet")?;
@@ -1339,7 +1335,7 @@ impl SdSession {
             unet_inputs,
             vae_encoder_input,
             vae_decoder_input,
-            vae_scale: vae_scale(id),
+            vae_scale: sd_spec(id).vae_scale,
             vae_f32,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
@@ -1470,9 +1466,7 @@ fn build_part_with_ep_ladder(
         }
     }
 
-    debug_assert!(id.is_sd_family(),
-        "build_part_with_ep_ladder is SD-only; non-SD id reached CPU fallback");
-    if cpu_output_is_wrong(id) {
+    if !sd_spec(id).cpu_output_correct {
         tracing::warn!(?id, part = %key,
             "SD bundle build refused: no compatible GPU EP, CPU produces wrong output");
         if session_key.cpu_only {
@@ -1500,26 +1494,21 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
-/// SD 1.5's FP16 bundles: the ORT CPU EP runs them but produces
-/// text-like artifacts instead of a coherent fill, so they need a GPU
-/// EP. RORem's CPU output matches its PyTorch reference.
-fn cpu_output_is_wrong(id: prunr_models::ModelId) -> bool {
-    matches!(id, prunr_models::ModelId::SdV15InpaintFp16 | prunr_models::ModelId::SdV15LcmInpaintFp16)
-}
-
 fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))?
-        // Prepacking keeps a second, repacked copy of the CPU EP's
-        // weights: RORem peaked at 15.2 GB with it, 12.9 GB without,
-        // loaded in 45 s instead of 96, and stepped as fast.
+        // Both settings act on ORT's own CPU EP, the only one RORem runs
+        // on; SD 1.5 runs on a GPU EP or OpenVINO, which keep their own.
+        // Prepacking keeps a second, repacked copy of the weights: RORem
+        // peaked at 15.2 GB with it, 12.9 GB without, loaded in 45 s
+        // instead of 96, and stepped as fast.
         .with_prepacking(false)
         .map_err(|e| format!("SD: prepacking: {e}"))?
         // ORT's default is the physical cores; the UNet's fp16 matmuls
         // also use the hyper-threads (RORem: 26 s a step on 4 of the
-        // i7-6700's threads).
+        // i7-6700's threads, 22.5 s on 8).
         .with_intra_threads(num_cpus::get().max(1))
         .map_err(|e| format!("SD: threads: {e}"))
 }
@@ -1809,58 +1798,38 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
 
 // ── UNet step ───────────────────────────────────────────────────────────
 
-/// SD-1.5 fp16 ONNX export uses f16 for sample/text/timestep. Caller
-/// owns the loop-varying `latent_9ch_f16` (consumed by Tensor::from_array)
-/// and the loop-invariant `text_emb_f16` (cloned cheaply once per step).
+/// What a UNet step is conditioned on: a prompt's CLIP embedding (SD
+/// 1.5), or SDXL's size conditioning for a crop of `(h, w)` when the
+/// prompt is baked in (RORem).
+enum Cond<'a> {
+    Text(&'a Array3<f16>),
+    Size(u32, u32),
+}
+
 fn unet_step(
     bundle: &SdSession,
     latent_9ch_f16: Array4<f16>,
     t: i64,
-    text_emb_f16: &Array3<f16>,
+    cond: Cond<'_>,
 ) -> Result<Array4<f32>, CoreError> {
     // Timestep is integer-valued at the diffusers level but flows through
     // sinusoidal embeddings inside the UNet, so the f16 cast is precision-
     // safe (timesteps fit in the f16 mantissa for SD's 1000-step grid).
     let timestep = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(t as f32));
-
     let lat_t = Tensor::from_array(latent_9ch_f16)
         .map_err(|e| CoreError::Inference(format!("SD unet: latent tensor: {e}")))?;
     let ts_t = Tensor::from_array(timestep)
         .map_err(|e| CoreError::Inference(format!("SD unet: timestep tensor: {e}")))?;
-    let emb_t = Tensor::from_array(text_emb_f16.clone())
-        .map_err(|e| CoreError::Inference(format!("SD unet: text emb tensor: {e}")))?;
+    let cond_t = match cond {
+        Cond::Text(emb) => Tensor::from_array(emb.clone()).map(|t| t.into_dyn()),
+        Cond::Size(h, w) => Tensor::from_array(size_ids(h, w)).map(|t| t.into_dyn()),
+    }.map_err(|e| CoreError::Inference(format!("SD unet: conditioning tensor: {e}")))?;
     let mut session = bundle.unet.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let outputs = session.run(inputs![
         bundle.unet_inputs[0].as_str() => &lat_t,
         bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &emb_t,
-    ])
-        .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
-    extract_4d(&outputs[0], "unet")
-}
-
-/// One step of a bundle with its prompt baked in: the third input is
-/// SDXL's size conditioning for the `(h, w)` crop.
-fn unet_step_sized(
-    bundle: &SdSession,
-    latent_9ch_f16: Array4<f16>,
-    t: i64,
-    (h, w): (u32, u32),
-) -> Result<Array4<f32>, CoreError> {
-    let timestep = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(t as f32));
-    let lat_t = Tensor::from_array(latent_9ch_f16)
-        .map_err(|e| CoreError::Inference(format!("SD unet: latent tensor: {e}")))?;
-    let ts_t = Tensor::from_array(timestep)
-        .map_err(|e| CoreError::Inference(format!("SD unet: timestep tensor: {e}")))?;
-    let ids_t = Tensor::from_array(size_ids(h, w))
-        .map_err(|e| CoreError::Inference(format!("SD unet: time_ids tensor: {e}")))?;
-    let mut session = bundle.unet.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![
-        bundle.unet_inputs[0].as_str() => &lat_t,
-        bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &ids_t,
+        bundle.unet_inputs[2].as_str() => &cond_t,
     ])
         .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
     extract_4d(&outputs[0], "unet")
