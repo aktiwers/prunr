@@ -186,15 +186,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 let label = app.batch.process_button_label();
                 let has_processable = app.can_process_intent();
 
-                let (label_text, is_all) = if inpaint_mode {
-                    ("Process".to_string(), false)
-                } else {
-                    match label {
-                        ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
-                        ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
-                        ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
-                        ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
-                    }
+                let (label_text, is_all) = match label {
+                    ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
+                    ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
+                    ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
+                    ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
                 };
 
                 let text_color = if has_processable {
@@ -216,10 +212,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
                 let body: std::borrow::Cow<'static, str> = if inpaint_mode {
-                    if has_processable {
-                        "Run the eraser again over the painted region with the current settings.".into()
-                    } else {
-                        "Paint a region first; Process then runs the eraser over it.".into()
+                    match label {
+                        _ if !has_processable => "Paint a region first; Process then runs the eraser over it.".into(),
+                        ProcessButtonLabel::ProcessSelected(n) | ProcessButtonLabel::ProcessAll(n) if n > 1 => {
+                            format!("Run the eraser over the painted regions of the {n} selected images.").into()
+                        }
+                        _ => "Run the eraser again over the painted region with the current settings.".into(),
                     }
                 } else {
                     match label {
