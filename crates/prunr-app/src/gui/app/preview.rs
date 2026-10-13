@@ -14,7 +14,7 @@ impl PrunrApp {
     pub(crate) fn quiet_background_work(&self) -> Option<&'static str> {
         if self.processor.live_preview.is_busy() {
             Some("Rendering\u{2026}")
-        } else if self.batch.items.iter().any(|it| it.has_pending_work()) {
+        } else if self.batch.has_pending_work() {
             Some("Preparing\u{2026}")
         } else {
             None

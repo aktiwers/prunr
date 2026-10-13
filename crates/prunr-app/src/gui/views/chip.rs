@@ -407,6 +407,16 @@ fn scrubbing_in(ui: &Ui) -> bool {
 }
 
 /// Float slider row with the log scale and formatter float knobs need.
+/// A percent stored as `u8`, shown and dragged as 0–100 %.
+pub fn slider_row_pct(ui: &mut Ui, label: &str, pct: &mut u8, format: impl Fn(f32) -> String) -> ChipChange {
+    let mut v = f32::from(*pct) / 100.0;
+    let change = slider_row_f32(ui, label, &mut v, 0.0..=1.0, false, format);
+    if change.changed {
+        *pct = (v * 100.0).round() as u8;
+    }
+    change
+}
+
 pub fn slider_row_f32(
     ui: &mut Ui,
     label: &str,
