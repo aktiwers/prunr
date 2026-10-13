@@ -178,6 +178,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
         ui.ctx().request_repaint();
+    } else if let Some(label) = app.busy_pill(std::time::Instant::now()) {
+        super::progress_widget::render_working_pill(ui, canvas_rect, label);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     if let Some(tool) = app.active_tool() {

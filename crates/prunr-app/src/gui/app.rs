@@ -18,6 +18,10 @@ use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_
 use super::views::selection_action_bar::SelectionAction;
 use super::brush_state::Tool;
 
+/// Quiet work shorter than this needs no pill; longer, the user wonders
+/// whether anything is happening.
+const BUSY_PILL_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt. 14 picked to balance "don't nag" with "remind on a
 /// reasonable cadence as the SD experience improves."
@@ -65,6 +69,8 @@ pub struct PrunrApp {
     /// "Set focus" was clicked on the Depth chip: the next click on the
     /// image sets the focus point instead of panning or painting.
     pub(crate) picking_depth_focus: bool,
+    /// Since when quiet background work has gone on with nothing landing.
+    busy_since: Option<std::time::Instant>,
     /// Which item the view was last brought up to date for; a change
     /// runs the selection-change work in `reconcile_selected`.
     synced_selected: Option<u64>,
@@ -422,6 +428,7 @@ impl PrunrApp {
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
             picking_depth_focus: false,
+            busy_since: None,
             synced_selected: None,
             title_state: TitleState::default(),
             last_drift_check: None,
@@ -1458,6 +1465,42 @@ impl PrunrApp {
     /// feathered plane the overlay built.
     pub(crate) fn selection_style(&self) -> super::background_io::SelectionStyle {
         super::background_io::SelectionStyle::from_settings(&self.settings).at_zoom(self.zoom_state.zoom)
+    }
+
+    /// Background work with nothing on the canvas to show for it: a live
+    /// render, or a texture, thumbnail, decode or backdrop a thread owes
+    /// an image. Model runs show their own capsule.
+    pub(crate) fn quiet_background_work(&self) -> Option<&'static str> {
+        if self.processor.live_preview.is_busy() {
+            Some("Rendering\u{2026}")
+        } else if self.batch.items.iter().any(|it| it.has_pending_work()) {
+            Some("Preparing\u{2026}")
+        } else {
+            None
+        }
+    }
+
+    /// Each frame: when quiet work started, if any is under way. A result
+    /// landing restarts the clock, so a live drag whose renders keep up
+    /// never shows the pill.
+    pub(crate) fn note_quiet_work(&mut self, now: std::time::Instant) {
+        if self.quiet_background_work().is_some() {
+            self.busy_since.get_or_insert(now);
+        } else {
+            self.busy_since = None;
+        }
+    }
+
+    /// The pill's words once quiet work has gone on for `BUSY_PILL_AFTER`;
+    /// none while a run's capsule or Magic Brush's own pill shows.
+    pub(crate) fn busy_pill(&self, now: std::time::Instant) -> Option<&'static str> {
+        let long_enough = self.busy_since.is_some_and(|since| now.duration_since(since) >= BUSY_PILL_AFTER);
+        let shown_otherwise = self.processor.dispatch_progress().is_some()
+            || (self.magic_brush_state.is_active() && self.magic_brush_preparing());
+        if !long_enough || shown_otherwise {
+            return None;
+        }
+        self.quiet_background_work()
     }
 
     pub(crate) fn magic_brush_preparing(&self) -> bool {
@@ -3063,6 +3106,11 @@ impl PrunrApp {
     ) {
         use super::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
+        // A result the image still wants restarts the quiet-work clock; a
+        // stale one changes nothing on screen.
+        if results.iter().any(|r| self.batch.find_by_id(r.item_id).is_some_and(|i| r.version == i.timeline.version())) {
+            self.busy_since = None;
+        }
         for r in results {
             let (item_id, source, is_final, landed) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
@@ -4162,6 +4210,14 @@ impl eframe::App for PrunrApp {
         self.update_window_title(ctx);
         self.status.tick();
         self.reconcile_selected(ctx);
+        let now = std::time::Instant::now();
+        self.note_quiet_work(now);
+        if let Some(since) = self.busy_since {
+            // A frame at the one-second mark, so the pill appears without
+            // waiting for input.
+            let wait = BUSY_PILL_AFTER.saturating_sub(now.duration_since(since));
+            ctx.request_repaint_after(wait.max(std::time::Duration::from_millis(16)));
+        }
         // Keep the event loop awake while any async texture / decode work is
         // pending. `ctx.request_repaint()` from the tex_prep / decode threads
         // is supposed to wake egui, but some compositors (notably Wayland)
@@ -5805,6 +5861,55 @@ mod selection_action_tests {
         assert!(inverted.cells().iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
         let partial = MaskArtifact::from_cells(2, 2, vec![0, FULL, 0, FULL]);
         assert_eq!(partial.invert().cells(), &[-FULL, 0, -FULL, 0]);
+    }
+}
+
+/// The pill for quiet background work: it waits a second, so a drag whose
+/// renders keep up never shows it, and never doubles another indicator.
+#[cfg(test)]
+mod busy_pill_tests {
+    use std::time::{Duration, Instant};
+    use super::PrunrApp;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    fn app() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        push_test_item(&mut app, 1);
+        app.batch.select_item(0);
+        app
+    }
+
+    #[test]
+    fn the_pill_waits_a_second_and_leaves_with_the_work() {
+        let mut app = app();
+        let t0 = Instant::now();
+        app.note_quiet_work(t0);
+        assert_eq!(app.busy_pill(t0 + Duration::from_secs(5)), None, "nothing under way");
+
+        app.batch.items[0].result_tex_pending = true;
+        app.note_quiet_work(t0);
+        assert_eq!(app.busy_pill(t0 + Duration::from_millis(500)), None, "too soon to worry");
+        app.note_quiet_work(t0 + Duration::from_millis(1500));
+        assert_eq!(app.busy_pill(t0 + Duration::from_millis(1500)), Some("Preparing\u{2026}"));
+
+        app.batch.items[0].result_tex_pending = false;
+        app.note_quiet_work(t0 + Duration::from_secs(2));
+        assert_eq!(app.busy_pill(t0 + Duration::from_secs(9)), None, "the work landed");
+        app.batch.items[0].result_tex_pending = true;
+        app.note_quiet_work(t0 + Duration::from_secs(10));
+        assert_eq!(app.busy_pill(t0 + Duration::from_millis(10_500)), None, "the clock restarted");
+    }
+
+    #[test]
+    fn a_runs_capsule_outranks_the_pill() {
+        let mut app = app();
+        let t0 = Instant::now();
+        app.batch.items[0].result_tex_pending = true;
+        app.note_quiet_work(t0);
+        app.processor.show_progress_for_test(crate::gui::dispatch_progress::DispatchProgress::new(
+            crate::gui::dispatch_progress::ProgressKind::Seg, "Starting",
+        ));
+        assert_eq!(app.busy_pill(t0 + Duration::from_secs(3)), None);
     }
 }
 
