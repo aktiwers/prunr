@@ -6,10 +6,18 @@ use egui::Ui;
 use egui_material_icons::icons::ICON_LANDSCAPE;
 use prunr_core::depth::{DepthLook, LensBlurMode};
 
-use super::chip;
+use super::{chip, get_model};
 use super::{fmt, hint};
 
 const PANEL_WIDTH: f32 = 380.0;
+/// The one model every depth effect reads.
+pub(crate) const DEPTH_MODEL: prunr_models::ModelId = prunr_models::ModelId::DepthAnythingV2Small;
+
+/// "Depth needs Depth Anything V2 Small · 94 MB.", built once.
+fn needs_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| get_model::needs("Depth", DEPTH_MODEL))
+}
 
 /// What the chip changed this frame.
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,7 +49,7 @@ const BLUR_MODES: [chip::Choice<LensBlurMode>; 3] = [
 /// `picking` is true while the next click on the image sets the focus.
 pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking: bool) -> DepthChange {
     let mut change = DepthChange::default();
-    let summary = summary(look);
+    let summary = if installed { summary(look) } else { get_model::BADGE.to_string() };
     let group = chip::GroupChip {
         id_salt: "depth",
         icon: ICON_LANDSCAPE.codepoint,
@@ -55,8 +63,8 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
     chip::strip_chip(ui, group, "All depth settings", chip::PanelHeader::RESET, |ui, part| match part {
         chip::Part::Quick => {
             if !installed {
-                ui.label(egui::RichText::new("Needs the depth model (95 MB).").color(crate::gui::theme::TEXT_SECONDARY));
-                change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get the depth model").clicked();
+                ui.label(egui::RichText::new(needs_text()).color(crate::gui::theme::TEXT_SECONDARY));
+                change.open_store |= get_model::button(ui, DEPTH_MODEL);
                 return;
             }
             change.picked(chip::choice_buttons(ui, &BLUR_MODES, &mut look.blur));
@@ -69,7 +77,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 change.picked(true);
             }
             if !installed {
-                change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get the depth model").clicked();
+                change.open_store |= get_model::button(ui, DEPTH_MODEL);
             }
             change.picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur));
             change.merge(percent_row(ui, "Amount", &mut look.blur_pct));

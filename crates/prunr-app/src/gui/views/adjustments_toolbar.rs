@@ -27,7 +27,7 @@ use crate::gui::views::effects::paint_rounded_mesh;
 use prunr_core::{EdgeScale, LineMode};
 
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
-use super::{differs, installed_models, model_info};
+use super::{differs, model_info};
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -147,7 +147,7 @@ impl Default for ToolbarChange {
     }
 }
 
-/// The Faces chip; "Get a face model" opens the Model Store on Faces.
+/// The Faces chip; a missing face model opens the Model Store on Faces.
 pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
     let faces = super::faces_chip::render(ui, &mut item_settings.faces, state.installed, state.faces_found);
     if faces.open_store {
@@ -156,11 +156,11 @@ pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, s
     change.faces = faces;
 }
 
-/// The Depth chip; "Get the depth model" opens the Model Store on Depth.
+/// The Depth chip; a missing depth model opens the Model Store on Depth.
 fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
     let depth = super::depth_chip::render(ui, &mut item_settings.depth, state.installed.depth, state.picking_depth_focus);
     if depth.open_store {
-        change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Depth) });
+        change.open_model_store = Some(super::get_model::store_request(super::depth_chip::DEPTH_MODEL));
     }
     change.pick_depth_focus |= depth.pick_focus;
     aggregate_knob(depth.look, StaticKnob::DepthLook, change);
@@ -1292,7 +1292,10 @@ pub(super) fn render_model_dropdown(
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
         let info = model_info(app_settings.model);
-        let resp = chip::menu_chip_button(ui, info.icon, info.name);
+        // A saved model that is no longer on disk says so on the face.
+        let missing = !installed.has_model(app_settings.model);
+        let face = if missing { format!("{} \u{00b7} {}", info.name, super::get_model::BADGE) } else { info.name.to_string() };
+        let resp = chip::menu_chip_button(ui, info.icon, &face);
         // The chip is always named "Model"; the hint says what this one does.
         use crate::gui::knob_catalog::ModelRole;
         let body = match app_settings.model.role() {
@@ -1308,7 +1311,10 @@ pub(super) fn render_model_dropdown(
         chip::popup_for(ui, pop_id, &resp, |ui| {
             ui.set_width(MODEL_PICKER_WIDTH);
             let mut role = None;
-            for variant in installed_models(installed) {
+            let models = SettingsModel::ALL.iter().copied()
+                .filter(|v| *v != SettingsModel::None)
+                .chain(std::iter::once(SettingsModel::None));
+            for variant in models {
                 if variant == SettingsModel::None {
                     ui.add_space(theme::SPACE_XS);
                     ui.separator();
@@ -1316,18 +1322,25 @@ pub(super) fn render_model_dropdown(
                     role = Some(variant.role());
                     chip::panel_section(ui, role_caption(variant.role()), None);
                 }
-                let advisory = variant
-                    .to_model_id()
+                let id = variant.to_model_id();
+                let advisory = id
                     .and_then(prunr_models::descriptor)
                     .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
-                let row = chip::choice_list_row(ui, info.icon, info.name, info.blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
+                // A model not downloaded yet shows "Get" and its size; picking
+                // it opens the Model Store on its section.
+                let missing = id.filter(|_| !installed.has_model(variant));
+                let blurb = missing.map_or(info.blurb, super::get_model::badge_and_size);
+                let row = chip::choice_list_row(ui, info.icon, info.name, blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,
                 };
                 if row.clicked() {
-                    app_settings.model = variant;
+                    match missing {
+                        Some(id) => change.open_model_store = Some(super::get_model::store_request(id)),
+                        None => app_settings.model = variant,
+                    }
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
             }

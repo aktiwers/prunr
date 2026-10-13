@@ -26,6 +26,7 @@ pub(crate) mod effects;
 mod effect_chip;
 pub(crate) mod faces_chip;
 pub(crate) mod depth_chip;
+pub(crate) mod get_model;
 pub(crate) mod selection_overlay;
 pub(crate) mod selection_action_bar;
 
@@ -135,15 +136,6 @@ pub fn model_info(model: SettingsModel) -> ModelInfo {
 
 /// Models the dropdown offers, in display order: installed AI models,
 /// then "No model" pinned last.
-pub(crate) fn installed_models(installed: crate::gui::hardware_cache::HardwareInstallCache) -> impl Iterator<Item = SettingsModel> {
-    SettingsModel::ALL
-        .iter()
-        .copied()
-        .filter(|v| *v != SettingsModel::None)
-        .filter(move |v| installed.has_model(*v))
-        .chain(std::iter::once(SettingsModel::None))
-}
-
 #[cfg(test)]
 mod format_byte_size_tests {
     use super::format_byte_size;

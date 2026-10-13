@@ -242,8 +242,9 @@ impl PrunrApp {
             .filter(|id| !prunr_models::is_available(*id))
             .and_then(prunr_models::descriptor)
             .map(|d| format!(
-                "{} is now an on-demand download — open the Model Store from the model dropdown.",
+                "{} is a download now. {} in the Model Store.",
                 d.display_name,
+                crate::gui::views::get_model::label(d.id),
             ));
 
         // Subprocess worker: inference runs in a child process for OOM
