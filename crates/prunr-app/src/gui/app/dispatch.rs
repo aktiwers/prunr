@@ -183,7 +183,13 @@ impl PrunrApp {
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
-        // A background image's result is released; a run may start from it.
+        // What you see is what you process: every target takes the shown
+        // image's settings first, so one that was up to date under its own
+        // reruns under these. A background image's result is released; a
+        // run may start from it.
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &candidate_ids);
+        }
         for item in self.batch.in_set(&candidate_ids) {
             item.unpark_result();
         }
@@ -312,17 +318,11 @@ impl PrunrApp {
         self.processor.cancels.reset();
 
         let current_settings = self.run_settings();
-
-        // Broadcast: every item about to be processed inherits current.settings
-        // so their `applied_recipe` ends up consistent with what ran.
         let process_ids: std::collections::HashSet<u64> = items.iter()
             .map(|wi| wi.0)
             .chain(tier2_items.iter().map(|ti| ti.item_id))
             .chain(add_edge_items.iter().map(|ai| ai.item_id))
             .collect();
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &process_ids);
-        }
 
         let recipe = current_settings.current_recipe(model);
         self.processor.track_dispatch(recipe, process_ids.iter().copied());
@@ -390,6 +390,27 @@ mod process_targets_tests {
         assert_eq!(app.erase_targets(), (vec![1], 0));
         app.batch.items[0].selected = true;
         assert_eq!(app.erase_targets(), (vec![1], 1), "the ticked one without a region is counted");
+    }
+
+    /// Process gives every ticked image the shown image's settings before
+    /// deciding what to run, so an image that was up to date under its own
+    /// settings reruns under the shown ones, as the status bar promises.
+    #[test]
+    fn process_applies_the_shown_settings_to_every_ticked_image() {
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        let mut app = two_images(SettingsModel::Silueta);
+        for item in &mut app.batch.items {
+            // Both are done under their own settings, with the tensor a mask rerun needs.
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+            item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
+            item.status = crate::gui::item::BatchStatus::Done;
+            item.selected = true;
+        }
+        app.batch.items[0].settings.feather = 3.0;
+        app.process_items(|i| i.selected, Some(StepKind::Process));
+        let other = &app.batch.items[1];
+        assert_eq!(other.settings.feather, 3.0, "the ticked image took the shown settings");
+        assert_eq!(other.status, crate::gui::item::BatchStatus::Processing, "and reruns under them");
     }
 
     /// The picker lists a model that is not on disk with "Get"; Process
