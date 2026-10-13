@@ -6,12 +6,15 @@ use image::RgbaImage;
 use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
-use crate::color::{lab_to_srgb, srgb_to_lab};
+use crate::color::{lab_to_srgb, srgb_lightness};
 use crate::progress::{Progress, Step};
 use crate::{CoreError, OrtEngine};
 
 /// Edge length of the model's square input and of its colour output.
 pub const COLORIZE_INPUT: u32 = 512;
+
+/// The strongest colour Strength allows: half again the prediction.
+pub const STRENGTH_MAX: f32 = 1.5;
 
 /// The predicted colour: `a` then `b`, each `COLORIZE_INPUT²` values in
 /// Lab units, row-major.
@@ -32,8 +35,7 @@ pub fn colorize_input(src: &RgbaImage) -> Vec<f32> {
     let n = (COLORIZE_INPUT * COLORIZE_INPUT) as usize;
     let mut out = vec![0.0f32; 3 * n];
     for (i, px) in resized.as_raw().chunks_exact(4).enumerate() {
-        let (l, _, _) = srgb_to_lab(px[0], px[1], px[2]);
-        let (r, g, b) = lab_to_srgb(l, 0.0, 0.0);
+        let (r, g, b) = lab_to_srgb(srgb_lightness(px[0], px[1], px[2]), 0.0, 0.0);
         out[i] = r as f32 / 255.0;
         out[n + i] = g as f32 / 255.0;
         out[2 * n + i] = b as f32 / 255.0;
@@ -112,35 +114,35 @@ pub fn colorized(src: &RgbaImage, plane: &[f32], strength: f32) -> RgbaImage {
     let (w, h) = src.dimensions();
     let (xs, ys) = (taps(w), taps(h));
     let stride = COLORIZE_INPUT as usize;
-    let mut out = src.clone();
-    out.as_mut()
-        .par_chunks_exact_mut(w as usize * 4)
+    let row_len = w as usize * 4;
+    let mut out = vec![0u8; src.as_raw().len()];
+    out.par_chunks_exact_mut(row_len)
+        .zip(src.as_raw().par_chunks_exact(row_len))
         .zip(ys.par_iter())
-        .for_each(|(row, ty)| {
+        .for_each(|((row, src_row), ty)| {
             let (r0, r1) = (ty.lo * stride, ty.hi * stride);
             let sample = |p: &[f32], tx: &Tap| {
                 let top = p[r0 + tx.lo] + (p[r0 + tx.hi] - p[r0 + tx.lo]) * tx.t;
                 let bot = p[r1 + tx.lo] + (p[r1 + tx.hi] - p[r1 + tx.lo]) * tx.t;
                 top + (bot - top) * ty.t
             };
-            for (px, tx) in row.chunks_exact_mut(4).zip(&xs) {
-                let (l, _, _) = srgb_to_lab(px[0], px[1], px[2]);
+            for ((px, s), tx) in row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).zip(&xs) {
                 let (r, g, b) = lab_to_srgb(
-                    l,
+                    srgb_lightness(s[0], s[1], s[2]),
                     sample(a_plane, tx) * strength,
                     sample(b_plane, tx) * strength,
                 );
-                px[0] = r;
-                px[1] = g;
-                px[2] = b;
+                px.copy_from_slice(&[r, g, b, s[3]]);
             }
         });
-    out
+    // same dimensions as `src`, so the buffer length matches
+    RgbaImage::from_raw(w, h, out).expect("buffer sized from src")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::srgb_to_lab;
 
     fn plane(a: f32, b: f32) -> ColorPlane {
         let n = (COLORIZE_INPUT * COLORIZE_INPUT) as usize;
