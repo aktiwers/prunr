@@ -284,11 +284,10 @@ pub(crate) struct DocState {
 pub(crate) struct Origin {
     pub(crate) engine: Engine,
     pub(crate) start: Option<RunStart>,
-    /// The upscale run kept for Refine when this step is one
-    /// (`UpscaleCache::run`), so another step never re-finishes it.
-    pub(crate) upscale_run: Option<u64>,
-    /// The same for a colorize run (`ColorizeCache::run`).
-    pub(crate) colorize_run: Option<u64>,
+    /// The kept run (an upscale for Refine, a colorize for Strength) that
+    /// made this step, so another step never re-renders it. Run ids are
+    /// unique across both kinds.
+    pub(crate) kept_run: Option<u64>,
     /// The seed a generated fill ran with, for Pin seed.
     pub(crate) seed: Option<u64>,
     /// The region an erase filled, so "Try another" can fill it again
@@ -298,9 +297,9 @@ pub(crate) struct Origin {
 
 impl Origin {
     /// A run of `engine` from `start` (`None`: the original), with no seed,
-    /// kept upscale run or region.
+    /// kept run or region.
     pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
-        Self { engine, start, upscale_run: None, colorize_run: None, seed: None, region: None }
+        Self { engine, start, kept_run: None, seed: None, region: None }
     }
 }
 

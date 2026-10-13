@@ -425,8 +425,9 @@ pub(crate) struct BatchItem {
     /// reference. Not under the tensor budget (`evictable_tensor_bytes`).
     pub(crate) upscale: Option<UpscaleCache>,
     /// The last colorize run, so Strength re-renders it without a model
-    /// run. Kept and cleared like `upscale`. RAM: the 2 MB colour plane
-    /// and the input image (shared with the timeline when it is one).
+    /// run. Not cleared by `reset_result_caches()`; cleared on a model
+    /// switch. RAM: the 2 MB colour plane and the input image (shared
+    /// with the timeline when it is one).
     pub(crate) colorize: Option<ColorizeCache>,
     /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
     /// whichever scale the user has picked without re-inferring).
@@ -637,7 +638,7 @@ impl BatchItem {
         self.upscale = None;
     }
 
-    /// Clear the kept colorize run; same rules as the upscale one.
+    /// Clear the kept colorize run, on a model switch and on item error.
     pub(crate) fn invalidate_colorize_cache(&mut self) {
         self.colorize = None;
     }
@@ -1004,13 +1005,24 @@ impl BatchItem {
         self.start_faced(stage.engine())
     }
 
+    /// A run that keeps its output lands: its step is recorded, claiming
+    /// the kept run `run` as its own.
+    fn finish_job_keeping(&mut self, run: u64) {
+        self.finish_job();
+        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
+            origin.kept_run = Some(run);
+        }
+    }
+
+    /// The kept run the shown step claims, if any.
+    fn shown_kept_run(&self) -> Option<u64> {
+        self.timeline.current().origin.as_ref().and_then(|o| o.kept_run)
+    }
+
     /// An upscale lands: its step is recorded, and the run is kept for
     /// Refine as that step's own.
     pub(crate) fn land_upscale(&mut self, run: UpscaleCache) {
-        self.finish_job();
-        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
-            origin.upscale_run = Some(run.run);
-        }
+        self.finish_job_keeping(run.run);
         self.upscale = Some(run);
     }
 
@@ -1024,16 +1036,13 @@ impl BatchItem {
     /// A colorize lands: its step is recorded, and the run is kept for
     /// Strength as that step's own.
     pub(crate) fn land_colorize(&mut self, run: ColorizeCache) {
-        self.finish_job();
-        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
-            origin.colorize_run = Some(run.run);
-        }
+        self.finish_job_keeping(run.run);
         self.colorize = Some(run);
     }
 
     /// The kept colorize run, when it is the shown step's own.
     pub(crate) fn kept_colorize(&self) -> Option<&ColorizeCache> {
-        let shown = self.timeline.current().origin.as_ref().and_then(|o| o.colorize_run);
+        let shown = self.shown_kept_run();
         self.colorize.as_ref().filter(|run| shown == Some(run.run))
     }
 
@@ -1046,7 +1055,7 @@ impl BatchItem {
 
     /// The kept upscale run, when it is the shown step's own.
     pub(crate) fn kept_upscale(&self) -> Option<&UpscaleCache> {
-        let shown = self.timeline.current().origin.as_ref().and_then(|o| o.upscale_run);
+        let shown = self.shown_kept_run();
         self.upscale.as_ref().filter(|run| shown == Some(run.run))
     }
 
@@ -1143,6 +1152,16 @@ impl BatchItem {
     /// The pixels a run of `engine` starts from (`None`: the original).
     pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
         self.run_start(engine).and_then(|s| s.image.load())
+    }
+
+    /// What an upscale or colorize run of `engine` reads: where its
+    /// timeline says it starts, else the decoded original, else the
+    /// source for the run's thread to decode. Shared via `Arc`: the full
+    /// RGBA would otherwise be deep-cloned (tens of MB at 4K) per run.
+    pub(crate) fn run_input_or_source(&self, engine: Engine) -> super::processor::RunInput {
+        self.run_input(engine)
+            .or_else(|| self.source_rgba.clone())
+            .map_or_else(|| super::processor::RunInput::Source(self.source.clone()), super::processor::RunInput::Decoded)
     }
 
     /// The size of the image a run of `engine` starts from.
@@ -1670,7 +1689,7 @@ mod tests {
         let mut item = fixture_item(1);
         let img = || Arc::new(image::RgbaImage::new(4, 4));
         let plane = Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]);
-        let model = prunr_core::ModelKind::DdcolorTiny;
+        let model = crate::gui::settings::COLORIZER;
         for _ in 0..2 {
             item.start_job(Some(StepKind::Colorize), Engine::Colorize);
             item.result_rgba = Some(img());

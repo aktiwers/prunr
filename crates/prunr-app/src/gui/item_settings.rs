@@ -257,11 +257,16 @@ impl Backdrop {
 impl ItemSettings {
     /// Contrast for a hard edge, what the old hard threshold was.
     pub const HARD_EDGE: f32 = 1.0;
-    pub const COLOR_STRENGTH_MAX_PCT: u8 = 150;
+    pub const COLOR_STRENGTH_MAX_PCT: u8 = (prunr_core::colorize::STRENGTH_MAX * 100.0) as u8;
 
     /// Strength as the colorizer takes it: 1 = as predicted.
     pub fn color_strength(&self) -> f32 {
         f32::from(self.color_strength_pct.min(Self::COLOR_STRENGTH_MAX_PCT)) / 100.0
+    }
+
+    /// Set Strength from the colorizer's scale, to the nearest percent.
+    pub fn set_color_strength(&mut self, strength: f32) {
+        self.color_strength_pct = (strength * 100.0).round().clamp(0.0, f32::from(Self::COLOR_STRENGTH_MAX_PCT)) as u8;
     }
 
     /// What sits behind the result. One choice; settings saved while the
@@ -361,8 +366,8 @@ impl ItemSettings {
                 ai_blend_bits: self.ai_blend.to_bits(),
                 color_match: self.color_match,
             },
-            colorize: if model == prunr_core::ModelKind::DdcolorTiny {
-                prunr_core::ColorizeRecipe { model: Some(model.into()), strength_bits: self.color_strength().to_bits() }
+            colorize: if model == super::settings::COLORIZER {
+                prunr_core::ColorizeRecipe { strength_bits: self.color_strength().to_bits() }
             } else {
                 prunr_core::ColorizeRecipe::default()
             },
@@ -798,12 +803,23 @@ mod tests {
     /// Strength is the colorizer's live knob: a change re-renders the kept
     /// colour (ColorizeTier2), and it leaves every other model's recipe alone.
     #[test]
+    fn color_strength_round_trips_through_whole_percent() {
+        let mut s = ItemSettings::default();
+        for pct in [0u8, 37, 100, ItemSettings::COLOR_STRENGTH_MAX_PCT] {
+            s.set_color_strength(f32::from(pct) / 100.0);
+            assert_eq!(s.color_strength_pct, pct);
+        }
+        s.set_color_strength(9.0);
+        assert_eq!(s.color_strength_pct, ItemSettings::COLOR_STRENGTH_MAX_PCT);
+    }
+
+    #[test]
     fn color_strength_is_live_for_the_colorizer_only() {
         use prunr_core::{ModelKind, RequiredTier};
         let base = ItemSettings::default();
         let weaker = ItemSettings { color_strength_pct: 30, ..base };
-        let colorize = |s: &ItemSettings| s.current_recipe(ModelKind::DdcolorTiny);
-        assert_eq!(colorize(&base).colorize.model, Some(prunr_models::ModelId::DdcolorTiny));
+        let colorize = |s: &ItemSettings| s.current_recipe(crate::gui::settings::COLORIZER);
+        assert_eq!(colorize(&weaker).colorize.strength(), 0.3);
         assert_eq!(prunr_core::resolve_tier(&colorize(&base), &colorize(&weaker)), RequiredTier::ColorizeTier2);
         for kind in [ModelKind::Silueta, ModelKind::RealEsrganX4Plus] {
             assert_eq!(prunr_core::resolve_tier(&base.current_recipe(kind), &weaker.current_recipe(kind)), RequiredTier::Skip, "{kind:?}");

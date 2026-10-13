@@ -555,23 +555,10 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
             return 1;
         }
     }
-    let Some(descriptor) = prunr_models::descriptor(model) else {
-        eprintln!("error: {model:?} is not a known model");
-        return 1;
-    };
-    let level = prunr_core::upscale::pick_optimization_level(descriptor);
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let engine = prunr_core::ModelKind::try_from(model)
-        .map_err(|id| prunr_core::CoreError::Model(format!("{id:?} is not an upscaler")))
-        .and_then(|kind| if args.cpu {
-            prunr_core::OrtEngine::new_cpu_only_with_optimization_level(kind, threads, level)
-        } else {
-            prunr_core::OrtEngine::new_with_optimization_level(kind, threads, level)
-        });
-    let engine = match engine {
+    let engine = match load_engine(model, args.cpu, "upscale") {
         Ok(engine) => engine,
         Err(e) => {
-            eprintln!("error: cannot load the upscale model: {e}");
+            eprintln!("error: {e}");
             return 1;
         }
     };
@@ -590,77 +577,73 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         }
     };
     let mut job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces };
-    let is_batch = args.inputs.len() > 1;
-    let suffix = format!("_x{}.png", scale.factor());
-    let mut failed = 0;
-    for input in &args.inputs {
-        let out_path = output_path_with_suffix(input, &args.output, is_batch, &suffix);
-        if let Err(e) = check_overwrite(&out_path, args.force) {
-            eprintln!("error: {e}");
-            failed += 1;
-            continue;
-        }
-        if !args.quiet {
-            eprintln!("Upscaling {}...", input.display());
-        }
-        let result = image::open(input)
-            .map_err(|e| format!("failed to read {}: {e}", input.display()))
-            .and_then(|img| job.run(img.into_rgba8()))
-            .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
-        match result {
-            Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("error: {e}");
-                failed += 1;
-            }
-        }
-    }
-    i32::from(failed > 0)
+    run_each_input(args, &format!("_x{}.png", scale.factor()), "Upscaling", |img| job.run(img))
 }
 
 /// Colorize mode: colour each input with DDColor at `--color-strength`.
 /// The model loads once for the whole batch.
 fn run_colorize(args: &Cli) -> i32 {
-    let model = prunr_models::ModelId::DdcolorTiny;
+    let model = crate::gui::settings::COLORIZER.into();
     if !prunr_models::is_available(model) {
         eprintln!("error: {}", prunr_models::not_installed_error(model));
         return 1;
     }
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let engine = if args.cpu {
-        prunr_core::OrtEngine::new_cpu_only(prunr_core::ModelKind::DdcolorTiny, threads)
-    } else {
-        prunr_core::OrtEngine::new(prunr_core::ModelKind::DdcolorTiny, threads)
-    };
-    let engine = match engine {
+    let engine = match load_engine(model, args.cpu, "colorize") {
         Ok(engine) => engine,
         Err(e) => {
-            eprintln!("error: cannot load the colorize model: {e}");
+            eprintln!("error: {e}");
             return 1;
         }
     };
-    let strength = args.color_strength.clamp(0.0, 1.5);
+    let strength = args.color_strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX);
+    run_each_input(args, "_color.png", "Colorizing", |img| {
+        let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
+            .map_err(|e| format!("colorize failed: {e}"))?;
+        Ok(prunr_core::colorize::colorized(&img, &plane, strength))
+    })
+}
+
+/// `model`'s session as the app builds it: every core, the model's graph
+/// optimisation level, the CPU alone with `--cpu`. The error is the line
+/// to print.
+fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Result<prunr_core::OrtEngine, String> {
+    let descriptor = prunr_models::descriptor(model).ok_or_else(|| format!("{model:?} is not a known model"))?;
+    let level = prunr_core::upscale::pick_optimization_level(descriptor);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    prunr_core::ModelKind::try_from(model)
+        .map_err(|id| prunr_core::CoreError::Model(format!("{id:?} has no session kind")))
+        .and_then(|kind| if cpu {
+            prunr_core::OrtEngine::new_cpu_only_with_optimization_level(kind, threads, level)
+        } else {
+            prunr_core::OrtEngine::new_with_optimization_level(kind, threads, level)
+        })
+        .map_err(|e| format!("cannot load the {what} model: {e}"))
+}
+
+/// Read each input, `run` it, and save it beside the input with `suffix`
+/// (or into `--output`), reporting each as `doing` it. Returns the exit
+/// code: 1 when any input failed.
+fn run_each_input(
+    args: &Cli,
+    suffix: &str,
+    doing: &str,
+    mut run: impl FnMut(image::RgbaImage) -> Result<image::RgbaImage, String>,
+) -> i32 {
     let is_batch = args.inputs.len() > 1;
     let mut failed = 0;
     for input in &args.inputs {
-        let out_path = output_path_with_suffix(input, &args.output, is_batch, "_color.png");
+        let out_path = output_path_with_suffix(input, &args.output, is_batch, suffix);
         if let Err(e) = check_overwrite(&out_path, args.force) {
             eprintln!("error: {e}");
             failed += 1;
             continue;
         }
         if !args.quiet {
-            eprintln!("Colorizing {}...", input.display());
+            eprintln!("{doing} {}...", input.display());
         }
         let result = image::open(input)
             .map_err(|e| format!("failed to read {}: {e}", input.display()))
-            .and_then(|img| {
-                let img = img.into_rgba8();
-                let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
-                    .map_err(|e| format!("colorize failed: {e}"))?;
-                Ok(prunr_core::colorize::colorized(&img, &plane, strength))
-            })
+            .and_then(|img| run(img.into_rgba8()))
             .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
         match result {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),

@@ -229,17 +229,17 @@ impl UpscaleRecipe {
     #[inline] pub fn ai_blend(&self) -> f32 { f32::from_bits(self.ai_blend_bits) }
 }
 
-/// Colorize settings. `None` model means no colorizer is picked.
+/// Colorize settings; the default for every other model. Which model
+/// colours is `inference.model`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ColorizeRecipe {
-    pub model: Option<prunr_models::ModelId>,
     /// How much of the predicted colour shows, 0 = grey, 1 = as predicted.
     pub strength_bits: u32,
 }
 
 impl Default for ColorizeRecipe {
     fn default() -> Self {
-        Self { model: None, strength_bits: 1.0_f32.to_bits() }
+        Self { strength_bits: 1.0_f32.to_bits() }
     }
 }
 
@@ -297,10 +297,9 @@ pub enum RequiredTier {
     /// re-upscale; no mask or inference work needed.
     UpscaleRerun,
     /// Only the colorize strength changed — re-render from the kept
-    /// colour prediction; no re-inference needed.
+    /// colour prediction; no re-inference needed. A colorizer change is a
+    /// model change, so FullPipeline.
     ColorizeTier2,
-    /// The colorize model changed — run the colorizer again.
-    ColorizeRerun,
     /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
     MaskRerun,
     /// Edge settings changed — re-threshold cached DexiNed tensor (~20-100ms).
@@ -328,7 +327,7 @@ fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
 ///
 /// Cost ordering (cheapest → most expensive), matching the `ordered()` table
 /// in `knob_catalog.rs` and the top-down "most-expensive-wins" checks below:
-/// Skip < CompositeOnly < UpscaleTier2 < ColorizeTier2 < UpscaleRerun < ColorizeRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
+/// Skip < CompositeOnly < UpscaleTier2 < ColorizeTier2 < UpscaleRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
@@ -377,10 +376,7 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         return RequiredTier::UpscaleRerun;
     }
     if old.colorize != new.colorize {
-        if old.colorize.model == new.colorize.model {
-            return RequiredTier::ColorizeTier2;
-        }
-        return RequiredTier::ColorizeRerun;
+        return RequiredTier::ColorizeTier2;
     }
     // Composite changes (bg color) do not invalidate the cached upscale — user re-runs Process for upscale-on-new-bg.
     if old.composite != new.composite {
@@ -951,9 +947,7 @@ mod tests {
     }
 
     fn make_colorize_recipe() -> ProcessingRecipe {
-        let mut r = make_recipe(ModelKind::DdcolorTiny, 1.0, None);
-        r.colorize.model = Some(prunr_models::ModelId::DdcolorTiny);
-        r
+        make_recipe(ModelKind::DdcolorTiny, 1.0, None)
     }
 
     #[test]
@@ -965,10 +959,11 @@ mod tests {
     }
 
     #[test]
-    fn colorize_model_change_returns_colorize_rerun() {
-        let a = make_recipe(ModelKind::DdcolorTiny, 1.0, None);
-        let b = make_colorize_recipe();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::ColorizeRerun);
+    fn switching_to_the_colorizer_returns_full_pipeline() {
+        let a = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut b = make_colorize_recipe();
+        b.colorize.strength_bits = 0.4_f32.to_bits();
+        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
     }
 
     #[test]

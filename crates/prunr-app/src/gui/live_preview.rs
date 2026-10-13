@@ -477,6 +477,31 @@ pub struct DispatchInputs {
     pub faces: Option<FacesInput>,
 }
 
+impl DispatchInputs {
+    /// A `kind` preview of `original` with `settings` and nothing cached,
+    /// kept or found yet; callers set what their kind reads.
+    pub(crate) fn new(kind: PreviewKind, version: u64, original: Arc<DynamicImage>, settings: ItemSettings) -> Self {
+        Self {
+            kind,
+            version,
+            original,
+            start: None,
+            settings,
+            seg_tensor: None,
+            edge_tensor: None,
+            secondary_edge_tensor: None,
+            cached_edge: EdgePlanes::default(),
+            cached_bold: EdgePlanes::default(),
+            cached_masked_base: None,
+            correction: None,
+            upscale: None,
+            upscale_tier2_knobs: None,
+            colorize: None,
+            faces: None,
+        }
+    }
+}
+
 /// The faces found for a preview's photo and how they go back; `faced` is
 /// the photo with them blended in, when a dispatch already built it for
 /// this blend.
@@ -1278,22 +1303,12 @@ mod tests {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let output = run_preview(
             DispatchInputs {
-                version: 0,
-                kind: PreviewKind::UpscaleTier2,
-                original: Arc::new(image::DynamicImage::ImageRgba8((*raw_arc).clone())),
-                start: None,
-                settings: ItemSettings::default(),
-                seg_tensor: None,
-                edge_tensor: None,
-                secondary_edge_tensor: None,
-                cached_edge: EdgePlanes::default(),
-                cached_bold: EdgePlanes::default(),
-                cached_masked_base: None,
-                correction: None,
                 upscale: Some(crate::gui::item::UpscaleCache::new(raw_arc.clone(), raw_arc.clone(), None)),
                 upscale_tier2_knobs: Some(knobs),
-                colorize: None,
-                faces: None,
+                ..DispatchInputs::new(
+                    PreviewKind::UpscaleTier2, 0,
+                    Arc::new(image::DynamicImage::ImageRgba8((*raw_arc).clone())), ItemSettings::default(),
+                )
             },
             &cancel,
         );
@@ -1314,22 +1329,11 @@ mod tests {
         let run = crate::gui::item::ColorizeCache::new(Arc::new(plane), Arc::clone(&input));
         let render = |color_strength_pct| {
             let inputs = DispatchInputs {
-                version: 0,
-                kind: PreviewKind::ColorizeTier2,
-                original: Arc::new(image::DynamicImage::new_rgba8(0, 0)),
-                start: None,
-                settings: ItemSettings { color_strength_pct, ..ItemSettings::default() },
-                seg_tensor: None,
-                edge_tensor: None,
-                secondary_edge_tensor: None,
-                cached_edge: EdgePlanes::default(),
-                cached_bold: EdgePlanes::default(),
-                cached_masked_base: None,
-                correction: None,
-                upscale: None,
-                upscale_tier2_knobs: None,
                 colorize: Some(run.clone()),
-                faces: None,
+                ..DispatchInputs::new(
+                    PreviewKind::ColorizeTier2, 0,
+                    Arc::new(image::DynamicImage::new_rgba8(0, 0)), ItemSettings { color_strength_pct, ..ItemSettings::default() },
+                )
             };
             run_preview(inputs, &std::sync::atomic::AtomicBool::new(false)).rgba.expect("rendered")
         };
@@ -1377,22 +1381,11 @@ mod tests {
             let subject_mode = mode == LineMode::SubjectOutline;
             let preview = run_preview(
                 DispatchInputs {
-                    version: 0,
-                    kind: PreviewKind::Edge,
-                    original: Arc::new(photo.clone()),
-                    start: None,
-                    settings,
                     seg_tensor: subject_mode.then(|| Arc::new(SegTensor { data: vec![0.0; 4], height: 2, width: 2, model: ModelKind::Silueta })),
                     edge_tensor: Some(tensor(edge.primary_scale())),
                     secondary_edge_tensor: matches!(style, LineStyle::DualScale { .. }).then(|| tensor(EdgeScale::Bold)),
-                    cached_edge: EdgePlanes::default(),
-                    cached_bold: EdgePlanes::default(),
                     cached_masked_base: subject_mode.then(|| Arc::clone(&subject)),
-                    correction: None,
-                    upscale: None,
-                    upscale_tier2_knobs: None,
-                    colorize: None,
-                    faces: None,
+                    ..DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(photo.clone()), settings)
                 },
                 &std::sync::atomic::AtomicBool::new(false),
             )

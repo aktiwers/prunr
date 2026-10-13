@@ -133,6 +133,12 @@ impl ModelRole {
     pub fn edits_cutout(self) -> bool {
         self == ModelRole::Cutout
     }
+
+    /// Runs only on the image picked, when asked (an eraser also needs a
+    /// painted region), so never on import.
+    pub fn runs_on_demand(self) -> bool {
+        matches!(self, ModelRole::Erase | ModelRole::Upscale | ModelRole::Colorize)
+    }
 }
 
 /// A surface or control that exists only for some models.
@@ -820,11 +826,10 @@ mod tests {
                 UpscaleTier2 => 2,
                 ColorizeTier2 => 3,
                 UpscaleRerun => 4,
-                ColorizeRerun => 5,
-                EdgeRerun => 6,
-                MaskRerun => 7,
-                AddEdgeInference => 8,
-                FullPipeline => 9,
+                EdgeRerun => 5,
+                MaskRerun => 6,
+                AddEdgeInference => 7,
+                FullPipeline => 8,
             }
         };
         for knob in StaticKnob::ALL {

@@ -26,14 +26,15 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         // The canvas capsule carries the step and counts; this text is
         // the terse fallback for eyes off the canvas, without counters.
+        let running = |step: prunr_core::Step| format!("{}\u{2026}", step.label());
         let status_text = if app.processor.is_upscale_in_flight() {
-            "Upscaling\u{2026}".to_string()
+            running(prunr_core::Step::Upscaling)
         } else if app.processor.is_colorize_in_flight() {
-            "Adding color\u{2026}".to_string()
+            running(prunr_core::Step::Colorizing)
         } else if inpaint_busy {
             // Eraser dispatch lives outside the seg-pipeline status track,
             // so check it first — otherwise the "All done" branch wins.
-            "Erasing\u{2026}".to_string()
+            running(prunr_core::Step::Erasing)
         } else if batch_processing {
             format!("Processing {batch_done_count}/{batch_total} images...")
         } else if batch_total >= 2 && batch_done_count == batch_total {
