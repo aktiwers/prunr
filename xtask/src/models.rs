@@ -113,24 +113,24 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos8kSCHAT-L.onnx",
         sha256: "919dff28836ff10fef2d5462e5b82c951211abf24f05196b0a6e2c24f20ed1de",
     },
-    // SAM 2 Hiera Small — bundled (MultiPartBundled) so each file ships
+    // SAM 2.1 Hiera Small — bundled (MultiPartBundled) so each file ships
     // as a zstd-compressed `include_bytes!` blob in the release binary.
     // Two rows share the same ModelId because the model is a single
     // logical entry with two parts; `ondemand_target` returns None for
     // MultiPartBundled, so xtask fetches + compresses but does not mirror
-    // to the user data dir. URLs are HuggingFace upstream (vietanhdev's
-    // ONNX exports of Meta's SAM 2 Hiera Small).
+    // to the user data dir. Exported from Meta's checkpoint with
+    // vietanhdev/samexporter (opset 17), mirrored on models-v1.
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.encoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.encoder.onnx",
-        sha256: "f6a7c74dee5b2e71cce3f0475b778f0f28fa3e6c3646c79027302123d2197f40",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.encoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.encoder.onnx",
+        sha256: "d15d9f152326e95f788a6122343b1f055cbae4b689dba041a90548782dbdd4e2",
     },
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.decoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.decoder.onnx",
-        sha256: "e07f799d2afe8640ef21f47096ad154d9289bb53041191499ebbea8933ef047b",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.decoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.decoder.onnx",
+        sha256: "f059fb650ec6cd7c512f9fa59bcd76469cb24359969ad3898dfd85a81e13d92e",
     },
 ];
 

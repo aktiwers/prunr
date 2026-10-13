@@ -198,9 +198,9 @@ Each image has one timeline (`gui/timeline.rs`): the states it has been in and a
 
 **Jobs bind to a version.** The timeline's version changes on every step, undo and redo. A run (Process, erase, upscale) notes it at dispatch and lands only if it still matches: as its own step, or, when a knob change or preset asked for it, folded into that step. A live-preview re-cut carries the version the same way and fills in the shown step. A result for a state the image has left is dropped, and undo asks a running job to stop. Switching images releases the working result; the timeline holds it.
 
-### Magic Brush (SAM 2)
+### Magic Brush (SAM 2.1)
 
-SAM 2 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
+SAM 2.1 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
 
 **Encoder.** The selected image is encoded in the background once its source is decoded and it has stayed on screen for 250 ms (paging past images must not queue an encode each; an encode cannot be cancelled), even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB), dropped when the source changes. The shown image keeps its embedding, and with the tool on so does the one shown before it, so flipping between two stays instant; a refused speculative encode is not retried. Until the shown image has an embedding the tool reads as Preparing and holds clicks.
 
@@ -463,7 +463,7 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 | Source | Models |
 |--------|--------|
 | `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, DexiNed |
-| `MultiPartBundled` | SAM 2 Hiera Small, so Magic Brush works offline on first click |
+| `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
 | `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (with an fp16 sibling for GPU EPs) |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
 
