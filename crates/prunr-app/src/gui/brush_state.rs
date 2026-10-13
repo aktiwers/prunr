@@ -128,8 +128,8 @@ impl SdScheduler {
 
     pub fn description(&self) -> &'static str {
         match self {
-            SdScheduler::Lcm => "a few seconds per fill",
-            SdScheduler::DpmPlusPlus2MKarras => "the best fill, several times slower",
+            SdScheduler::Lcm => "A few seconds per fill",
+            SdScheduler::DpmPlusPlus2MKarras => "The best fill, several times slower",
         }
     }
 

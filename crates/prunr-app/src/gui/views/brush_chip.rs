@@ -93,7 +93,7 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsMod
 /// the Magic Brush chip. Returns `true` if any slider committed this frame.
 pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSettings) -> bool {
     let mut committed = false;
-    chip::panel_section(ui, "SELECTION", None);
+    chip::panel_section(ui, "Selection", None);
     let fe = chip::slider_row_f32(
         ui, "Feather", &mut s.edge_feather, 0.0..=20.0, false,
         |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0)),

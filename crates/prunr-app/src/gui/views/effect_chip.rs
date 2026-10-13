@@ -57,7 +57,7 @@ pub(super) fn render(ui: &mut Ui, style: &mut FillStyle) -> bool {
                 }
             });
             if !matches!(style, FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia) {
-                chip::panel_section(ui, &style.name().to_uppercase(), None);
+                chip::panel_section(ui, style.name(), None);
                 changed |= params(ui, style, false);
             }
         }

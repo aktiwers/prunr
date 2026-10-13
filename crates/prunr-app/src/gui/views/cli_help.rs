@@ -6,11 +6,13 @@ use super::{kv_row, section_heading};
 
 /// Returns true if the modal should close.
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
-    theme::standard_modal_window(
+    theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",
         [theme::SETTINGS_DIALOG_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
-        |ui| {
+        |ui| egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
             theme::apply_modal_visuals(ui);
+            let close = super::chip::modal_header(ui, "Command-line reference", "");
+            ui.add_space(theme::SPACE_MD);
 
             // Tab state
             let tab_id = egui::Id::new("cli_help_tab");
@@ -259,7 +261,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .color(theme::TEXT_HINT),
                 );
             });
-        },
+            close
+        }).inner,
     )
 }
 
@@ -282,7 +285,7 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
             ICON_CONTENT_COPY.codepoint
         };
         let copy = ui.add(
-            egui::Button::new(RichText::new(icon_text).size(12.0).color(icon_color))
+            egui::Button::new(RichText::new(icon_text).size(theme::FONT_SIZE_SECONDARY).color(icon_color))
                 .frame(false)
                 .min_size(egui::vec2(18.0, 18.0)),
         );

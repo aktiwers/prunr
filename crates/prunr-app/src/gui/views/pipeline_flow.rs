@@ -79,10 +79,12 @@ const PIPELINES: [Pipeline; 4] = [
 
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
+    theme::bare_modal_window(
         ctx, "pipeline_flow", "Pipelines",
         [MODAL_WIDTH, MODAL_HEIGHT],
-        |ui| {
+        |ui| egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
+            let close = chip::modal_header(ui, "Pipelines", "");
+            ui.add_space(theme::SPACE_MD);
             let tab_id = egui::Id::new("pipeline_flow_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
             let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
@@ -113,7 +115,8 @@ pub fn render(ctx: &egui::Context) -> bool {
                     .color(theme::TEXT_PRIMARY),
                 );
             });
-        },
+            close
+        }).inner,
     )
 }
 

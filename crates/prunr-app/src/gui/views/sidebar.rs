@@ -302,7 +302,7 @@ fn paint_item_background(ui: &egui::Ui, item_rect: Rect, is_selected: bool) {
 
 fn draw_loading_spinner(ui: &mut egui::Ui, item_rect: Rect) {
     let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
-    ui.put(spinner_rect, egui::Spinner::new().size(20.0).color(theme::ACCENT));
+    ui.put(spinner_rect, egui::Spinner::new().size(theme::FONT_SIZE_MODAL_TITLE).color(theme::ACCENT));
 }
 
 fn paint_thumbnail(
