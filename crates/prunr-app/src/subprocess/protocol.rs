@@ -21,6 +21,26 @@ pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 /// was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
 
+/// Which line scales a worker runs the detector at for each image.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InferredScales {
+    /// Every scale, so the app's later scale switch needs no new run.
+    #[default]
+    All,
+    /// Only the ones the lines draw: the CLI never switches scale, and
+    /// skipping Fine saves most of the detector's work.
+    Drawn,
+}
+
+impl InferredScales {
+    pub fn of(self, edge: &EdgeSettings) -> &'static [prunr_core::EdgeScale] {
+        match self {
+            Self::All => &prunr_core::EdgeScale::ALL,
+            Self::Drawn => edge.drawn_scales(),
+        }
+    }
+}
+
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
@@ -46,6 +66,8 @@ pub enum SubprocessCommand {
         /// lines it shows from its own depth map.
         #[serde(default)]
         line_fade_pct: u8,
+        #[serde(default)]
+        edge_scales: InferredScales,
     },
     /// Process a single image. `image_path` points to a temp file with
     /// the raw image bytes (avoids piping large payloads through stdin).
@@ -484,6 +506,7 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: false,
             line_fade_pct: 40,
+            edge_scales: InferredScales::All,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -495,6 +518,7 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: true,
             line_fade_pct: 0,
+            edge_scales: InferredScales::Drawn,
         });
     }
 
@@ -949,6 +973,7 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: false,
             line_fade_pct: 40,
+            edge_scales: InferredScales::All,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -960,7 +985,21 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: true,
             line_fade_pct: 0,
+            edge_scales: InferredScales::Drawn,
         });
+    }
+
+    /// The app keeps every scale so a scale switch reads a cached plane;
+    /// the CLI runs only the ones its lines draw.
+    #[test]
+    fn inferred_scales_are_every_scale_or_the_drawn_ones() {
+        use prunr_core::EdgeScale;
+        assert_eq!(InferredScales::default(), InferredScales::All);
+        for edge_scale in EdgeScale::ALL {
+            let edge = EdgeSettings { edge_scale, ..EdgeSettings::default() };
+            assert_eq!(InferredScales::All.of(&edge), &EdgeScale::ALL);
+            assert_eq!(InferredScales::Drawn.of(&edge), &[edge_scale]);
+        }
     }
 
     /// `Inpaint.feather_px` and `Inpaint.sharpen` default to 0.0 (no

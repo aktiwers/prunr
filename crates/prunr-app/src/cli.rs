@@ -1083,7 +1083,10 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         line_style: prunr_core::LineStyle::default(),
         input_transform: prunr_core::InputTransform::default(),
     };
-    let lines = prunr_app::subprocess::manager::WorkerLines { mode: line_mode, edge, fade_pct: args.line_fade };
+    let lines = prunr_app::subprocess::manager::WorkerLines {
+        mode: line_mode, edge, fade_pct: args.line_fade,
+        scales: prunr_app::subprocess::protocol::InferredScales::Drawn,
+    };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
         lines, &backdrop,
@@ -1221,7 +1224,7 @@ fn run_batch_subprocess(
 
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
-        let (mut sub, _provider) = match SubprocessManager::spawn_with_lines(
+        let (mut sub, _provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, force_cpu, lines,
         ) {
             Ok(s) => s,

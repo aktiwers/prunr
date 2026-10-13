@@ -15,14 +15,14 @@ use super::item_settings::ItemSettings;
 /// untouched. Bad values are silently ignored — defensive parse so a typo
 /// in a harness script doesn't kill the launch.
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
-    if let Some(v) = read_f32("PRUNR_GAMMA") { item.gamma = v; }
-    if let Some(v) = read_f32("PRUNR_CONTRAST") { item.contrast = v; }
-    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
+    if let Some(v) = read("PRUNR_GAMMA") { item.gamma = v; }
+    if let Some(v) = read("PRUNR_CONTRAST") { item.contrast = v; }
+    if let Some(v) = read("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
     if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
-    if let Some(v) = read_f32("PRUNR_FEATHER") { item.feather = v; }
+    if let Some(v) = read("PRUNR_FEATHER") { item.feather = v; }
     if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
     if let Some(v) = read_line_mode("PRUNR_LINE_MODE") { item.line_mode = v; }
-    if let Some(v) = read_f32("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
+    if let Some(v) = read("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
     if let Some(v) = read_fill_style("PRUNR_FILL_STYLE") { item.fill_style = v; }
     if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") { item.bg_effect = v; }
 }
@@ -36,11 +36,11 @@ pub fn auto_process_override() -> Option<bool> {
 
 /// `PRUNR_CONTROL_PORT=<port>` opens the control socket on localhost.
 pub fn control_port() -> Option<u16> {
-    std::env::var("PRUNR_CONTROL_PORT").ok()?.trim().parse().ok()
+    read("PRUNR_CONTROL_PORT")
 }
 
-fn read_f32(var: &str) -> Option<f32> {
-    std::env::var(var).ok()?.parse().ok()
+fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
+    std::env::var(var).ok()?.trim().parse().ok()
 }
 
 /// `planned` with the SD overrides applied (scripts/sd_bench.sh):

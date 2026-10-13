@@ -173,6 +173,25 @@ fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     }
 }
 
+/// The detector's planes as the item's edge cache: path, base height and
+/// width, or all `None` when nothing was written. A run that skipped a
+/// scale writes none — the app splits the file into every scale's plane,
+/// and a partial cache could not serve a scale switch anyway.
+fn write_edge_cache(
+    ipc: &std::path::Path,
+    item_id: u64,
+    res: &prunr_core::EdgeInferenceResult,
+) -> (Option<std::path::PathBuf>, Option<u32>, Option<u32>) {
+    if res.tensors.iter().any(Vec::is_empty) {
+        return (None, None, None);
+    }
+    let path = IpcKind::Edge.path_for(ipc, item_id);
+    match write_edge_tensors(&path, res) {
+        Ok(()) => (Some(path), Some(res.height), Some(res.width)),
+        Err(_) => (None, None, None),
+    }
+}
+
 /// Stream an `EdgeInferenceResult`'s per-scale tensors to a path as one LE
 /// byte sequence — same layout the parent expects in `read_edge_tensor_cache`,
 /// but without the ~16 MB intermediate `Vec<u8>` that `std::fs::write(path,
@@ -236,7 +255,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct,
+        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -272,6 +291,7 @@ pub fn run_worker() -> ! {
     let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
 
     let line_depth = (needs_edge && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
+    let traced_scales = edge_scales.of(&edge);
     let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
             Ok(e) => Some(Arc::new(e)),
@@ -457,7 +477,7 @@ pub fn run_worker() -> ! {
                                 // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
-                                eng_ref.infer_all_tensors(&transformed).map(|res| {
+                                eng_ref.infer_scales(&transformed, traced_scales).map(|res| {
                                     let measured = line_depth.as_ref().and_then(|d| d.measure(img));
                                     let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge, measured.as_ref().map(Measured::fade));
                                     edge_tensor_for_cache = Some(res);
@@ -477,7 +497,7 @@ pub fn run_worker() -> ! {
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let measured = line_depth.as_ref().and_then(|d| d.measure(img));
-                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, measured.as_ref().map(Measured::fade), |i| eng_ref.infer_all_tensors(i))
+                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, measured.as_ref().map(Measured::fade), |i| eng_ref.infer_scales(i, traced_scales))
                                     .map(|(rgba_image, res)| {
                                         edge_tensor_for_cache = Some(res);
                                         ProcessResult { rgba_image, active_provider: provider.clone() }
@@ -528,7 +548,7 @@ pub fn run_worker() -> ! {
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let measured = line_depth.as_ref().and_then(|d| d.measure(original));
                                         let (rgba_image, edge_res) = prunr_core::outline_subject(
-                                            subject, mask.fill_style, &edge, measured.as_ref().map(Measured::fade), |img| eng_ref.infer_all_tensors(img),
+                                            subject, mask.fill_style, &edge, measured.as_ref().map(Measured::fade), |img| eng_ref.infer_scales(img, traced_scales),
                                         )?;
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -636,17 +656,8 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
-                            // Write TEED multi-scale cache (every scale concatenated
-                            // into a single temp file; parent splits by scale size).
-                            let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
-                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
-                                match write_edge_tensors(&ep, res) {
-                                    Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
-                                    Err(_) => (None, None, None),
-                                }
-                            } else {
-                                (None, None, None)
-                            };
+                            let (ecp, ech, ecw) = edge_tensor_for_cache.as_ref()
+                                .map_or((None, None, None), |res| write_edge_cache(&ipc, item_id, res));
 
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
@@ -841,7 +852,7 @@ pub fn run_worker() -> ! {
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
                         let measured = line_depth.as_ref().and_then(|d| d.measure(&original));
-                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, measured.as_ref().map(Measured::fade), |img| eng_ref.infer_all_tensors(img))
+                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, measured.as_ref().map(Measured::fade), |img| eng_ref.infer_scales(img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
 
@@ -850,13 +861,7 @@ pub fn run_worker() -> ! {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
-                            let (ecp, ech, ecw) = {
-                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
-                                match write_edge_tensors(&ep, &edge_res) {
-                                    Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
-                                    Err(_) => (None, None, None),
-                                }
-                            };
+                            let (ecp, ech, ecw) = write_edge_cache(&ipc, item_id, &edge_res);
 
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
                             drop(rgba);

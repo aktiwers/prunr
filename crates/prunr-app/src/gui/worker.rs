@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
-use crate::subprocess::manager::SubprocessManager;
+use crate::subprocess::manager::{SubprocessManager, WorkerLines};
 
 /// Maximum time the subprocess may stay silent with in-flight work before we
 /// treat it as a hung crash. Real batches emit Progress events every few
@@ -103,8 +103,8 @@ impl CompressedEdgeTensors {
                 .ok().unwrap_or_default()
         }).collect();
         if parts.iter().any(|p| p.is_empty()) { return None; }
-        let [a, b, c] = parts.try_into().ok()?;
-        Some(Self { tensors: [a.into(), b.into(), c.into()], height: raw.height, width: raw.width })
+        let tensors: [Vec<u8>; EDGE_SCALE_COUNT] = parts.try_into().ok()?;
+        Some(Self { tensors: tensors.map(Into::into), height: raw.height, width: raw.width })
     }
 
     /// Decompress one scale's tensor. Called per-dispatch in the hot path,
@@ -157,8 +157,9 @@ impl CompressedTensor {
     }
 }
 
-/// A Tier 2 re-postprocess item: cached tensor + original image bytes.
-pub struct Tier2WorkItem {
+/// Work that starts from an item's cached seg tensor instead of a seg run:
+/// a mask re-postprocess, or edge detection added on top of the mask.
+pub struct CachedTensorWork {
     pub item_id: u64,
     pub tensor_data: Vec<f32>,
     pub tensor_height: u32,
@@ -168,32 +169,6 @@ pub struct Tier2WorkItem {
     pub mask: MaskSettings,
 }
 
-/// An AddEdgeInference work item: cached seg tensor + original image bytes.
-/// Same shape as Tier2WorkItem — kept as a distinct type so the worker bridge
-/// can't confuse them at dispatch time (different IPC commands).
-pub struct AddEdgeWorkItem {
-    pub item_id: u64,
-    pub tensor_data: Vec<f32>,
-    pub tensor_height: u32,
-    pub tensor_width: u32,
-    pub model: ModelKind,
-    pub original_bytes: Arc<Vec<u8>>,
-    pub mask: MaskSettings,
-}
-
-impl From<Tier2WorkItem> for AddEdgeWorkItem {
-    fn from(w: Tier2WorkItem) -> Self {
-        Self {
-            item_id: w.item_id,
-            tensor_data: w.tensor_data,
-            tensor_height: w.tensor_height,
-            tensor_width: w.tensor_width,
-            model: w.model,
-            original_bytes: w.original_bytes,
-            mask: w.mask,
-        }
-    }
-}
 
 /// Bundled processing settings — avoids passing 6+ individual fields.
 /// Clone/PartialEq enable the pre-warm path to check whether the warm
@@ -213,11 +188,11 @@ pub enum WorkerMessage {
     BatchProcess {
         items: Vec<WorkItem>,
         /// Tier 2 items: re-postprocess from cached tensor (skip inference).
-        tier2_items: Vec<Tier2WorkItem>,
+        tier2_items: Vec<CachedTensorWork>,
         /// AddEdgeInference items: cached seg tensor + TEED on masked image.
         /// Used for Off → SubjectOutline transitions so enabling the outline
         /// doesn't force a full seg re-inference.
-        add_edge_items: Vec<AddEdgeWorkItem>,
+        add_edge_items: Vec<CachedTensorWork>,
         config: Box<ProcessingConfig>,
         cancels: super::processor::CancelRegistry,
         /// Channel for additional items admitted by the memory controller.
@@ -288,7 +263,7 @@ pub fn spawn_worker(
             if let Some(cfg) = prewarm {
                 let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
                 let started = std::time::Instant::now();
-                match SubprocessManager::spawn(model, jobs, mask, force_cpu, line_mode, edge) {
+                match SubprocessManager::spawn(model, jobs, mask, force_cpu, WorkerLines::app(line_mode, edge)) {
                     Ok((sub, provider)) => {
                         let elapsed_ms = started.elapsed().as_millis();
                         tracing::info!(
@@ -372,8 +347,8 @@ pub fn spawn_worker(
 struct BatchRunState {
     config: ProcessingConfig,
     pending: VecDeque<WorkItem>,
-    pending_tier2: VecDeque<Tier2WorkItem>,
-    pending_add_edge: VecDeque<AddEdgeWorkItem>,
+    pending_tier2: VecDeque<CachedTensorWork>,
+    pending_add_edge: VecDeque<CachedTensorWork>,
     /// Items admitted by the memory controller after the batch started.
     additional_rx: Option<mpsc::Receiver<WorkItem>>,
     completed: std::collections::HashSet<u64>,
@@ -383,8 +358,8 @@ struct BatchRunState {
 impl BatchRunState {
     fn new(
         items: Vec<WorkItem>,
-        tier2_items: Vec<Tier2WorkItem>,
-        add_edge_items: Vec<AddEdgeWorkItem>,
+        tier2_items: Vec<CachedTensorWork>,
+        add_edge_items: Vec<CachedTensorWork>,
         additional_rx: Option<mpsc::Receiver<WorkItem>>,
         config: ProcessingConfig,
     ) -> Self {
@@ -397,6 +372,10 @@ impl BatchRunState {
             additional_rx,
             completed: std::collections::HashSet::new(),
         }
+    }
+
+    fn nothing_pending(&self) -> bool {
+        self.pending.is_empty() && self.pending_tier2.is_empty() && self.pending_add_edge.is_empty()
     }
 }
 
@@ -539,7 +518,7 @@ fn emit_loading_status(
 /// When the batch queues are empty, check if the admission controller has
 /// more to send. Returns immediately — the caller owns the sleep/cancel cadence.
 fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
-    if !state.pending.is_empty() || !state.pending_tier2.is_empty() || !state.pending_add_edge.is_empty() {
+    if !state.nothing_pending() {
         return WaitAction::Continue;
     }
     let Some(rx) = state.additional_rx.as_ref() else {
@@ -591,7 +570,7 @@ fn spawn_and_initial_burst(
         Some(sub) => sub,
         None => match SubprocessManager::spawn(
             state.config.model, effective_jobs, state.config.mask, state.config.force_cpu,
-            state.config.line_mode, state.config.edge,
+            WorkerLines::app(state.config.line_mode, state.config.edge),
         ) {
             Ok((s, active_provider)) => {
                 let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
@@ -685,7 +664,7 @@ fn run_event_loop(
         }
 
         // If everything drained and no more coming, mark finished.
-        if sent.is_empty() && state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
+        if sent.is_empty() && state.nothing_pending() {
             if let Some(rx) = state.additional_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(item) => state.pending.push_back(item),
@@ -1070,7 +1049,7 @@ fn finalize_or_continue(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
-    if state.pending.is_empty() && state.pending_tier2.is_empty() && state.pending_add_edge.is_empty() {
+    if state.nothing_pending() {
         if let Some(rx) = state.additional_rx.as_ref() {
             match rx.try_recv() {
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1108,7 +1087,7 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), 
 /// Try to send a Tier 2 item to the subprocess. Returns true if sent.
 fn try_send_tier2(
     sub: &mut SubprocessManager,
-    pending_tier2: &mut VecDeque<Tier2WorkItem>,
+    pending_tier2: &mut VecDeque<CachedTensorWork>,
     sent_tier2_ids: &mut Vec<u64>,
 ) -> bool {
     if let Some(t2) = pending_tier2.pop_front() {
@@ -1133,7 +1112,7 @@ fn try_send_tier2(
 /// Try to send an AddEdgeInference item to the subprocess. Returns true if sent.
 fn try_send_add_edge(
     sub: &mut SubprocessManager,
-    pending_add_edge: &mut VecDeque<AddEdgeWorkItem>,
+    pending_add_edge: &mut VecDeque<CachedTensorWork>,
     sent_add_edge_ids: &mut Vec<u64>,
 ) -> bool {
     if let Some(ae) = pending_add_edge.pop_front() {

@@ -45,21 +45,19 @@ impl PrunrApp {
         if results.is_empty() {
             return;
         }
-        for r in results {
-            let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
+        for crate::gui::processor::LandedFill { item_id, rgba, fill_scale } in results {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.job_is_current() {
-                self.end_stale_run(r.item_id, "erase");
+                self.end_stale_run(item_id, "erase");
                 continue;
             }
-            self.publish_result(r.item_id, Arc::new(r.rgba), "inpaint", ctx);
-            if let Some(item) = self.batch.find_by_id_mut(r.item_id) {
+            self.publish_result(item_id, Arc::new(rgba), "inpaint", ctx);
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 // The region is filled: the step shows the result without
                 // its brush marks; undoing it brings both back.
                 item.invalidate_selection();
                 item.finish_job();
-                if let Some(scale) = r.fill_scale {
-                    item.note_fill_scale(scale);
-                }
+                item.note_fill_scale(fill_scale);
             }
         }
     }

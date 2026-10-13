@@ -325,9 +325,6 @@ impl PrunrApp {
     }
 }
 
-/// Encode + write one image on a background thread, then send the result
-/// toast text on `tx`. Stays at module scope so neither save method needs
-/// `&mut self` once they've kicked off the work.
 /// One image to save: its result, what goes behind it, and its depth map
 /// when Save options asks for it.
 struct SaveOne {
@@ -336,6 +333,9 @@ struct SaveOne {
     depth: Option<crate::gui::item::DepthExport>,
 }
 
+/// Encode + write one image on a background thread, then send the result
+/// toast text on `tx`. Stays at module scope so neither save method needs
+/// `&mut self` once they've kicked off the work.
 fn spawn_save_single(
     path: PathBuf,
     one: SaveOne,
@@ -413,8 +413,6 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
     });
 }
 
-/// Encode + write N images into `folder` (named by `drag_export::export_name`) on a
-/// background thread; report aggregate counts when done.
 /// One image of a batch save.
 struct BatchSave {
     filename: String,
@@ -423,6 +421,8 @@ struct BatchSave {
     depth: Option<crate::gui::item::DepthExport>,
 }
 
+/// Encode + write N images into `folder` (named by `drag_export::export_name`) on a
+/// background thread; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<BatchSave>,

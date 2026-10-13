@@ -258,7 +258,7 @@ pub fn process_inpaint_with(
     // Short-circuit before the 200 MB session load — empty masks are
     // common during live preview when the user hasn't started painting.
     if mask_is_empty(mask) {
-        return Ok(Filled { rgba: image.clone(), scale: 1.0 });
+        return Ok(Filled::full(image.clone()));
     }
     if id.is_sd_family() {
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
@@ -278,6 +278,12 @@ pub fn process_inpaint_with(
 pub struct Filled {
     pub rgba: RgbaImage,
     pub scale: f32,
+}
+
+impl Filled {
+    pub fn full(rgba: RgbaImage) -> Self {
+        Self { rgba, scale: 1.0 }
+    }
 }
 
 /// How large an eraser fills a hole. LaMa works in 512 px tiles and SD
@@ -355,7 +361,7 @@ pub fn process_lama(
     progress: &Progress,
 ) -> Result<Filled, CoreError> {
     if mask_is_empty(mask) {
-        return Ok(Filled { rgba: image.clone(), scale: 1.0 });
+        return Ok(Filled::full(image.clone()));
     }
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
@@ -379,7 +385,7 @@ pub(crate) fn fill_at_scale(
     mut fill: impl FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
 ) -> Result<Filled, CoreError> {
     if scale == FillScale::Full {
-        return Ok(Filled { rgba: fill(image, mask)?, scale: 1.0 });
+        return Ok(Filled::full(fill(image, mask)?));
     }
     let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
         .map(|r| {
@@ -389,7 +395,7 @@ pub(crate) fn fill_at_scale(
         .filter(|&(_, f)| f < 1.0)
         .collect();
     if shrunk.is_empty() {
-        return Ok(Filled { rgba: fill(image, mask)?, scale: 1.0 });
+        return Ok(Filled::full(fill(image, mask)?));
     }
     let smallest = shrunk.iter().map(|&(_, f)| f).fold(1.0f32, f32::min);
     let mut out = image.clone();
