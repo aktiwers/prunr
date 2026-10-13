@@ -345,7 +345,7 @@ pub const PROCESSING_SWEEP: Color32 = Color32::from_rgba_premultiplied(24, 9, 28
 pub const DROP_HOVER_BORDER: Color32 = ACCENT;
 
 /// Drop zone border default
-pub const DROP_BORDER: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff, 0xff, 0x40);
+pub const DROP_BORDER: Color32 = Color32::from_rgba_premultiplied(0x40, 0x40, 0x40, 0x40);
 
 // === Spacing (from UI-SPEC, multiples of 4) ===
 
@@ -413,7 +413,7 @@ pub const FONT_SIZE_MONO: f32 = 12.0;
 /// Overlay background: #1a1a1a at 95% alpha
 pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x3a, 0x3a, 0x3a, 0xf8);
 /// Overlay border: #ffffff20 (white 12.5%)
-pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0xff, 0xff, 0xff, 0x20);
+pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20);
 
 // === Checkerboard ===
 
