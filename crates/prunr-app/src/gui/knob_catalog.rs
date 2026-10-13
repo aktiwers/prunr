@@ -534,6 +534,7 @@ mod tests {
             (SettingsModel::BigInpaint, erase),
             (SettingsModel::MiganInpaint, erase),
             (SettingsModel::SdInpaint, sd),
+            (SettingsModel::RoremInpaint, erase),
             (SettingsModel::RealEsrganUpscale, upscale),
             (SettingsModel::Nomos8kUpscale, upscale),
             (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),

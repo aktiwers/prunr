@@ -570,6 +570,9 @@ pub enum SettingsModel {
     /// multi-part bundle. Generative — produces plausible content
     /// rather than smooth fills.
     SdInpaint,
+    /// RORem (SDXL tuned for object removal). Fills large holes with
+    /// background instead of drawing something new; ~5.5 GB bundle.
+    RoremInpaint,
     /// Real-ESRGAN x4plus upscaler. General-purpose 4× super-resolution.
     RealEsrganUpscale,
     /// 4xNomos8kSCHAT-L HAT-L upscaler (fp16). Photo-tuned; higher quality
@@ -585,7 +588,7 @@ pub enum SettingsModel {
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
@@ -594,6 +597,7 @@ impl SettingsModel {
         Self::BigInpaint,
         Self::MiganInpaint,
         Self::SdInpaint,
+        Self::RoremInpaint,
         Self::RealEsrganUpscale,
         Self::Nomos8kUpscale,
         Self::FourXNmkdSiaxCxUpscale,
@@ -623,7 +627,13 @@ impl SettingsModel {
     /// True for any object-removal mode. Branches that drive the inpaint
     /// pipeline (brush auto-enable, popover simplification) check this.
     pub fn is_inpaint(self) -> bool {
-        matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint)
+        matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint | Self::RoremInpaint)
+    }
+
+    /// An eraser that generates its fill from a seed, so "Try another"
+    /// can fill the same region again differently.
+    pub fn generates(self) -> bool {
+        matches!(self, Self::SdInpaint | Self::RoremInpaint)
     }
 
     /// True for any super-resolution upscale mode. Dispatch routes through
@@ -674,6 +684,7 @@ impl SettingsModel {
             | Self::BigInpaint
             | Self::MiganInpaint
             | Self::SdInpaint
+            | Self::RoremInpaint
             | Self::RealEsrganUpscale
             | Self::Nomos8kUpscale
             | Self::FourXNmkdSiaxCxUpscale
@@ -700,6 +711,7 @@ impl SettingsModel {
             Self::BigInpaint => Some(prunr_models::ModelId::BigLaMa),
             Self::MiganInpaint => Some(prunr_models::ModelId::Migan),
             Self::SdInpaint => Some(prunr_models::ModelId::SdV15InpaintFp16),
+            Self::RoremInpaint => Some(prunr_models::ModelId::RoremFp16),
             Self::RealEsrganUpscale => Some(prunr_models::ModelId::RealEsrganX4Plus),
             Self::Nomos8kUpscale => Some(prunr_models::ModelId::Nomos8kSchatL),
             Self::FourXNmkdSiaxCxUpscale => Some(prunr_models::ModelId::FourXNmkdSiaxCx),
@@ -1266,7 +1278,8 @@ mod tests {
                 SettingsModel::Inpaint
                     | SettingsModel::BigInpaint
                     | SettingsModel::MiganInpaint
-                    | SettingsModel::SdInpaint,
+                    | SettingsModel::SdInpaint
+                    | SettingsModel::RoremInpaint,
             );
             assert_eq!(m.is_inpaint(), expected, "{m:?}");
         }
