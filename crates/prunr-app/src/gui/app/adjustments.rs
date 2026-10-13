@@ -170,7 +170,7 @@ impl PrunrApp {
             self.offer_depth_model(ctx);
         }
         if toolbar_change.pick_depth_focus {
-            self.picking_depth_focus = true;
+            self.begin_focus_pick();
         }
 
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
