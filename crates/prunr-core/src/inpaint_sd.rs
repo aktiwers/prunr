@@ -160,6 +160,22 @@ pub struct SdTuning {
     /// The Processor setting's "CPU only": no GPU provider for the parts.
     #[serde(default)]
     pub cpu_only: bool,
+    /// How the sessions use memory; the default is ORT's own.
+    #[serde(default)]
+    pub mem: SdMemPlan,
+}
+
+/// Session memory knobs, for finding RORem's smallest working set:
+/// each one trades some speed for RAM. The default is ORT's behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SdMemPlan {
+    /// ORT's memory-pattern planning off: on, it pre-sizes every
+    /// activation for the first shape it sees.
+    pub no_memory_pattern: bool,
+    /// The weights outside the arena, so it does not grow around them.
+    pub device_initializers: bool,
+    /// Threads for the UNet's matmuls; 0 is every hardware thread.
+    pub intra_threads: u8,
 }
 
 /// The headroom when the caller names none. It covers the free-RAM drop
@@ -173,7 +189,7 @@ fn default_margin_mb() -> u64 { SD_DEFAULT_MARGIN_MB }
 
 impl Default for SdTuning {
     fn default() -> Self {
-        Self { keep_loaded: false, ov_device: None, tall_crop: false, margin_mb: SD_DEFAULT_MARGIN_MB, cpu_only: false }
+        Self { keep_loaded: false, ov_device: None, tall_crop: false, margin_mb: SD_DEFAULT_MARGIN_MB, cpu_only: false, mem: SdMemPlan::default() }
     }
 }
 
@@ -186,7 +202,7 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
 pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false }
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem: SdMemPlan::default() }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -233,7 +249,7 @@ fn resident(id: prunr_models::ModelId) -> bool {
 
 impl SdTuning {
     fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only }
+        SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only, mem: self.mem }
     }
 }
 
@@ -244,6 +260,7 @@ impl SdTuning {
 pub(crate) struct SdSessionKey {
     ov_device: Option<String>,
     cpu_only: bool,
+    mem: SdMemPlan,
 }
 
 impl SdSessionKey {
@@ -1373,7 +1390,7 @@ fn build_part_with_ep_ladder(
             continue;
         }
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match sd_base_builder() {
+        let builder = match sd_base_builder(session_key.mem) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
@@ -1487,7 +1504,7 @@ fn build_part_with_ep_ladder(
         ));
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder()
+    let builder = sd_base_builder(session_key.mem)
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
@@ -1498,11 +1515,23 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
-fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
-    crate::ort_runtime::session_builder()
+fn sd_base_builder(mem: SdMemPlan) -> Result<ort::session::builder::SessionBuilder, String> {
+    let builder = crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("SD: optimization level: {e}"))?
+        .map_err(|e| format!("SD: optimization level: {e}"))?;
+    let builder = if mem.no_memory_pattern {
+        builder.with_memory_pattern(false).map_err(|e| format!("SD: memory pattern: {e}"))?
+    } else {
+        builder
+    };
+    let builder = if mem.device_initializers {
+        builder.with_device_allocated_initializers().map_err(|e| format!("SD: initializers: {e}"))?
+    } else {
+        builder
+    };
+    let threads = if mem.intra_threads > 0 { mem.intra_threads as usize } else { num_cpus::get().max(1) };
+    builder
         // Both settings act on ORT's own CPU EP, the only one RORem runs
         // on; SD 1.5 runs on a GPU EP or OpenVINO, which keep their own.
         // Prepacking keeps a second, repacked copy of the weights: RORem
@@ -1513,7 +1542,7 @@ fn sd_base_builder() -> Result<ort::session::builder::SessionBuilder, String> {
         // ORT's default is the physical cores; the UNet's fp16 matmuls
         // also use the hyper-threads (RORem: 26 s a step on 4 of the
         // i7-6700's threads, 22.5 s on 8).
-        .with_intra_threads(num_cpus::get().max(1))
+        .with_intra_threads(threads)
         .map_err(|e| format!("SD: threads: {e}"))
 }
 
@@ -3566,5 +3595,22 @@ mod tests {
             "boundary cell straddling the 4-pixel shift should average to ~0.5 \
              (proves average-pool, not center-sample), got {mid_cell}"
         );
+    }
+}
+
+#[cfg(test)]
+mod mem_plan_tests {
+    use super::{SdMemPlan, SdTuning};
+
+    /// A request saved before the memory knobs loads with ORT's defaults,
+    /// and a different plan is a different session bundle.
+    #[test]
+    fn the_memory_plan_defaults_to_orts_and_keys_the_bundle() {
+        let old = r#"{"keep_loaded":false,"ov_device":null,"tall_crop":true,"margin_mb":2000,"cpu_only":false}"#;
+        let tuning: SdTuning = serde_json::from_str(old).expect("loads without mem");
+        assert_eq!(tuning.mem, SdMemPlan::default());
+        let lean = SdTuning { mem: SdMemPlan { no_memory_pattern: true, device_initializers: true, intra_threads: 4 }, ..tuning.clone() };
+        assert_ne!(lean.session_key(), tuning.session_key(), "the plan is part of what a bundle was built with");
+        assert_eq!(SdTuning { mem: tuning.mem, ..lean.clone() }.session_key(), tuning.session_key());
     }
 }
