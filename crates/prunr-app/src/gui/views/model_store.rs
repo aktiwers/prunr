@@ -95,7 +95,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
 
     let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", theme::fit_to_window(ctx, STORE_SIZE), |ui| {
         let mut close = false;
-        egui::Frame::NONE.inner_margin(egui::Margin { left: 26, right: 18, top: 20, bottom: 20 }).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -114,7 +114,9 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
 
-            let card_width = ((ui.available_width() - 2.0 * CARD_GAP) / 3.0).floor();
+            // The scroll bar takes its own lane instead of overlapping the cards.
+            let lane = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_outer_margin;
+            let card_width = ((ui.available_width() - 2.0 * CARD_GAP - lane) / 3.0).floor();
             // Cards in a row stretch to its tallest, measured last frame,
             // so a row's footers line up.
             let heights_id = egui::Id::new(("store_row_heights", new_filter.map(|c| c as u8)));
@@ -175,7 +177,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
 }
 
 const STORE_SIZE: [f32; 2] = [1000.0, 700.0];
-const CARD_GAP: f32 = 14.0;
+const CARD_GAP: f32 = 16.0;
 const CARD_MIN_HEIGHT: f32 = 150.0;
 const CARD_PADDING: f32 = 16.0;
 const FOOTER_HEIGHT: f32 = 30.0;

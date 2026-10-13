@@ -88,7 +88,7 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 /// A row control's width before it has been measured once.
 const CONTROL_GUESS: f32 = 160.0;
 const SIDEBAR_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 31);
-const PAGE_MARGIN: egui::Margin = egui::Margin { left: 28, right: 20, top: 18, bottom: 20 };
+const PAGE_MARGIN: egui::Margin = egui::Margin { left: 24, right: 24, top: 18, bottom: 20 };
 
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
@@ -275,7 +275,8 @@ fn render_reset_confirm(ui: &mut egui::Ui, app: &mut PrunrApp) {
 fn group_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(18.0);
     ui.horizontal(|ui| {
-        ui.add_space(4.0);
+        // Lines up with the rows' text: the card's 16 px padding and 1 px edge.
+        ui.add_space(17.0);
         ui.label(RichText::new(text).size(12.0).color(theme::TEXT_SECONDARY));
     });
     ui.add_space(4.0);
