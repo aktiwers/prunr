@@ -165,15 +165,13 @@ pub struct SdTuning {
     pub mem: SdMemPlan,
 }
 
-/// Session memory knobs. The default is ORT's behaviour; `plan_tuning`
-/// ships the plan measured on RORem (`prunr-export/rorem_mem`): memory
-/// pattern off peaks 15 GB instead of 20.5 at the same speed, the other
-/// two change nothing.
+/// Session memory knobs for experiments (`prunr-export/rorem_mem`); the
+/// default leaves each to the model (`SdSpec::lean_sessions`) or ORT.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SdMemPlan {
-    /// ORT's memory-pattern planning off: on, it pre-sizes every
-    /// activation for the first shape it sees.
-    pub no_memory_pattern: bool,
+    /// ORT's memory-pattern planning, which pre-sizes every activation
+    /// for the first shape it sees; `None` is the model's own choice.
+    pub memory_pattern: Option<bool>,
     /// The weights outside the arena, so it does not grow around them.
     pub device_initializers: bool,
     /// Threads for the UNet's matmuls; 0 is every hardware thread.
@@ -204,8 +202,35 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
 pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    let mem = SdMemPlan { no_memory_pattern: true, ..SdMemPlan::default() };
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem }
+    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem: SdMemPlan::default() }
+}
+
+impl SdTuning {
+    /// `self` with the bench overrides from the environment, for
+    /// experiments the app and the bench run the same way:
+    /// `PRUNR_SD_KEEP_LOADED`, `PRUNR_SD_TALL_CROP`, `PRUNR_SD_OV_DEVICE`,
+    /// `PRUNR_SD_MEM_PATTERN`, `PRUNR_SD_DEV_INIT` and `PRUNR_SD_THREADS`.
+    pub fn with_env_overrides(self) -> Self {
+        Self {
+            keep_loaded: env_flag("PRUNR_SD_KEEP_LOADED").unwrap_or(self.keep_loaded),
+            tall_crop: env_flag("PRUNR_SD_TALL_CROP").unwrap_or(self.tall_crop),
+            ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(self.ov_device),
+            mem: SdMemPlan {
+                memory_pattern: env_flag("PRUNR_SD_MEM_PATTERN").or(self.mem.memory_pattern),
+                device_initializers: env_flag("PRUNR_SD_DEV_INIT").unwrap_or(self.mem.device_initializers),
+                intra_threads: std::env::var("PRUNR_SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(self.mem.intra_threads),
+            },
+            ..self
+        }
+    }
+}
+
+fn env_flag(name: &str) -> Option<bool> {
+    match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Free RAM a stroke needs: the model's working set unless its bundle
@@ -1393,7 +1418,7 @@ fn build_part_with_ep_ladder(
             continue;
         }
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match sd_base_builder(session_key.mem) {
+        let builder = match sd_base_builder(session_key.mem, id.sd_spec().is_some_and(|s| s.lean_sessions)) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
@@ -1507,7 +1532,7 @@ fn build_part_with_ep_ladder(
         ));
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder(session_key.mem)
+    let builder = sd_base_builder(session_key.mem, id.sd_spec().is_some_and(|s| s.lean_sessions))
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
@@ -1518,15 +1543,17 @@ fn build_part_with_ep_ladder(
     Ok((session, "CPU".to_string()))
 }
 
-fn sd_base_builder(mem: SdMemPlan) -> Result<ort::session::builder::SessionBuilder, String> {
+/// `lean`: the model's sessions skip ORT's memory-pattern planning unless
+/// the plan says otherwise.
+fn sd_base_builder(mem: SdMemPlan, lean: bool) -> Result<ort::session::builder::SessionBuilder, String> {
     let builder = crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))?;
-    let builder = if mem.no_memory_pattern {
-        builder.with_memory_pattern(false).map_err(|e| format!("SD: memory pattern: {e}"))?
-    } else {
+    let builder = if mem.memory_pattern.unwrap_or(!lean) {
         builder
+    } else {
+        builder.with_memory_pattern(false).map_err(|e| format!("SD: memory pattern: {e}"))?
     };
     let builder = if mem.device_initializers {
         builder.with_device_allocated_initializers().map_err(|e| format!("SD: initializers: {e}"))?
@@ -3264,7 +3291,7 @@ mod tests {
         assert_eq!(fit(m, true), Ok(false));
         let t = plan_tuning(true, m);
         assert!(t.keep_loaded && t.tall_crop && t.ov_device.is_none() && t.margin_mb == m);
-        assert_eq!(t.session_key(), SdSessionKey { mem: t.mem, ..SdSessionKey::default() }, "only the memory plan is off ORT's defaults");
+        assert_eq!(t.session_key(), SdSessionKey::default());
         assert!(t.session_key().records_ep_failures());
         assert!(!SdTuning { ov_device: Some("GPU".into()), ..Default::default() }.session_key().records_ep_failures());
     }
@@ -3612,17 +3639,23 @@ mod mem_plan_tests {
         let old = r#"{"keep_loaded":false,"ov_device":null,"tall_crop":true,"margin_mb":2000,"cpu_only":false}"#;
         let tuning: SdTuning = serde_json::from_str(old).expect("loads without mem");
         assert_eq!(tuning.mem, SdMemPlan::default());
-        let lean = SdTuning { mem: SdMemPlan { no_memory_pattern: true, device_initializers: true, intra_threads: 4 }, ..tuning.clone() };
+        let lean = SdTuning { mem: SdMemPlan { memory_pattern: Some(false), device_initializers: true, intra_threads: 4 }, ..tuning.clone() };
         assert_ne!(lean.session_key(), tuning.session_key(), "the plan is part of what a bundle was built with");
         assert_eq!(SdTuning { mem: tuning.mem, ..lean.clone() }.session_key(), tuning.session_key());
     }
 
-    /// The shipped plan runs the sessions without ORT's memory-pattern
-    /// planning, which is where RORem's extra 5.5 GB went.
+    /// The plan leaves the memory pattern to the model: RORem's sessions
+    /// run without it (where its extra 6 GB went), SD 1.5's keep ORT's
+    /// default, and the bench flag overrides either way.
     #[test]
-    fn the_shipped_plan_turns_memory_pattern_off() {
-        let mem = super::plan_tuning(false, 0).mem;
-        assert!(mem.no_memory_pattern);
-        assert!(!mem.device_initializers && mem.intra_threads == 0, "and changes nothing else");
+    fn the_memory_pattern_is_the_models_own_unless_overridden() {
+        use prunr_models::ModelId;
+        assert_eq!(super::plan_tuning(false, 0).mem, SdMemPlan::default());
+        let lean = |id: ModelId| id.sd_spec().expect("an SD model").lean_sessions;
+        assert!(lean(ModelId::RoremFp16) && !lean(ModelId::SdV15InpaintFp16) && !lean(ModelId::SdV15LcmInpaintFp16));
+        let plan = |memory_pattern| SdMemPlan { memory_pattern, ..SdMemPlan::default() };
+        assert!(!plan(None).memory_pattern.unwrap_or(!lean(ModelId::RoremFp16)), "RORem: off");
+        assert!(plan(None).memory_pattern.unwrap_or(!lean(ModelId::SdV15InpaintFp16)), "SD 1.5: ORT's");
+        assert!(plan(Some(true)).memory_pattern.unwrap_or(!lean(ModelId::RoremFp16)), "the flag turns it back on");
     }
 }
