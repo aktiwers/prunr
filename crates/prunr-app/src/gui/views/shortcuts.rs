@@ -463,6 +463,8 @@ fn key_name(key: Key) -> &'static str {
         Key::Space => "Space",
         Key::Num0 => "0",
         Key::Num1 => "1",
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
         other => other.name(),
     }
 }

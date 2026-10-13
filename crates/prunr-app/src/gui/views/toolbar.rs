@@ -6,7 +6,7 @@ use crate::gui::batch_manager::ProcessButtonLabel;
 use crate::gui::item::BatchStatus;
 use crate::gui::theme;
 
-use super::chip::{picker_row, popover_header, popup_for, tooltip, with_fill};
+use super::chip::{popover_header, popup_for, tooltip, with_fill};
 use super::shortcuts::{keys, Action};
 
 /// Row-1 icon button: taller than a chip, filled like one.
@@ -86,7 +86,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ];
             let mut chosen = false;
             for (label, action) in entries {
-                if picker_row(ui, false, label, &keys(ui.ctx(), action)).clicked() {
+                if super::chip::menu_row(ui, label, &keys(ui.ctx(), action)).clicked() {
                     app.perform(action, &ui.ctx().clone());
                     chosen = true;
                 }

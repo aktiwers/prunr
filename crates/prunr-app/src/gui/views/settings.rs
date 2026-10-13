@@ -106,7 +106,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
                 ui.set_width(ui.available_width());
                 ui.set_height(height - (PAGE_MARGIN.top + PAGE_MARGIN.bottom) as f32);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(app.settings_tab.label()).size(20.0).color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(app.settings_tab.label()).size(theme::FONT_SIZE_MODAL_TITLE).color(theme::TEXT_PRIMARY));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
                         close = super::chip::named(x, "Close settings").clicked();
@@ -210,7 +210,7 @@ fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(12.0);
-        ui.label(RichText::new("Settings").size(16.0).color(theme::TEXT_PRIMARY));
+        ui.label(RichText::new("Settings").size(theme::FONT_SIZE_HEADING).color(theme::TEXT_PRIMARY));
     });
     ui.add_space(14.0);
     for tab in SettingsTab::ALL {
@@ -277,7 +277,7 @@ fn group_heading(ui: &mut egui::Ui, text: &str) {
     ui.horizontal(|ui| {
         // Lines up with the rows' text: the card's 16 px padding and 1 px edge.
         ui.add_space(17.0);
-        ui.label(RichText::new(text).size(12.0).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
     });
     ui.add_space(4.0);
 }
@@ -322,9 +322,9 @@ impl Rows<'_> {
                 ui.vertical(|ui| {
                     ui.set_width((ui.available_width() - control_width - theme::SPACE_MD).max(120.0));
                     ui.add_space(6.0);
-                    ui.label(RichText::new(title).size(13.5).color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(title).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
                     if !description.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(description).size(12.0).color(theme::TEXT_SECONDARY)).wrap());
+                        ui.add(egui::Label::new(RichText::new(description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
                     }
                     ui.add_space(6.0);
                 });
@@ -351,7 +351,7 @@ fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::Ra
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let step = |ui: &mut egui::Ui, enabled: bool, glyph: &str, tip: &str| {
-                let b = egui::Button::new(RichText::new(glyph).size(15.0).color(theme::TEXT_PRIMARY))
+                let b = egui::Button::new(RichText::new(glyph).size(theme::FONT_SIZE_HEADING).color(theme::TEXT_PRIMARY))
                     .frame(false)
                     .min_size(egui::vec2(26.0, 26.0));
                 super::chip::named(ui.add_enabled(enabled, b), tip).clicked()
@@ -421,9 +421,9 @@ fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Opti
         let kv = |ui: &mut egui::Ui, key: &str, value: &str| {
             ui.horizontal(|ui| {
                 ui.set_min_height(26.0);
-                ui.label(RichText::new(key).size(13.0).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(key).size(theme::FONT_SIZE_BODY).color(theme::TEXT_SECONDARY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(value).size(13.0).color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(value).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
                 });
             });
         };
@@ -456,7 +456,7 @@ fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Opti
             ui.set_min_height(28.0);
             let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 4.0, color);
-            ui.label(RichText::new(text).size(12.5).color(color));
+            ui.label(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(color));
         });
         ui.add_space(4.0);
     });
@@ -695,7 +695,7 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
             ui.label(
                 RichText::new(" CC-BY")
                     .size(theme::FONT_SIZE_MONO)
-                    .color(theme::ACCENT),
+                    .color(theme::ACCENT_RING),
             );
         }
     });

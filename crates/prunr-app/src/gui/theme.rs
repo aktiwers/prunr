@@ -121,7 +121,7 @@ pub fn mark_color(erase: bool) -> Color32 {
 pub const ERASE_PICKED: Color32 = Color32::from_rgb(0xc9, 0x57, 0x3a);
 /// A hint under its row: smaller and greyer than a label.
 pub const HINT: Color32 = Color32::from_rgb(0x9c, 0x9c, 0x9c);
-pub const FONT_SIZE_HINT: f32 = 11.5;
+pub const FONT_SIZE_HINT: f32 = FONT_SIZE_CAPTION;
 pub const PANEL_RADIUS: u8 = 18;
 pub const PILL_RADIUS: u8 = 255;
 pub const INPUT_RADIUS: u8 = 10;
@@ -164,6 +164,7 @@ pub fn apply_building_blocks(visuals: &mut egui::Visuals, spacing: &mut egui::st
     visuals.window_shadow = glass_shadow();
     visuals.popup_shadow = glass_shadow();
     visuals.selection.bg_fill = ACCENT_BRIGHT;
+    visuals.hyperlink_color = ACCENT_RING;
     visuals.slider_trailing_fill = true;
     visuals.handle_shape = egui::style::HandleShape::Circle;
     for w in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
@@ -404,7 +405,11 @@ pub const MIN_WINDOW_SIZE: [f32; 2] = [900.0, 540.0];
 
 // === Typography (sizes for egui TextStyle overrides) ===
 
+// The type scale: five steps.
+pub const FONT_SIZE_CAPTION: f32 = 11.0;
+pub const FONT_SIZE_SECONDARY: f32 = 12.0;
 pub const FONT_SIZE_BODY: f32 = 14.0;
+pub const FONT_SIZE_MODAL_TITLE: f32 = 20.0;
 pub const FONT_SIZE_HEADING: f32 = 16.0;
 pub const FONT_SIZE_MONO: f32 = 12.0;
 

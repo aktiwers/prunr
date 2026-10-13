@@ -624,7 +624,7 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
         }
     }
 
-    chip::panel_section(ui, "PRE-FILTER", Some("Requires reprocessing."));
+    chip::panel_section(ui, "Pre-filter", Some("Requires reprocessing."));
     let filters: [_; FILTER_COUNT] = std::array::from_fn(|i| chip::Choice {
         value: i,
         name: InputTransform::ALL[i].name(),
@@ -651,7 +651,7 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
         mark_input_transform_change(change);
     }
 
-    chip::panel_section(ui, "LINE COLOR", None);
+    chip::panel_section(ui, "Line color", None);
     line_color(ui, s, change);
 }
 
@@ -685,7 +685,7 @@ fn line_color(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
         }
         ui.add_space(theme::SPACE_XS);
         let own = lines_in_photo_colors(s);
-        let text = RichText::new("or the photo's own colors").size(12.0).color(if own { theme::GLOW } else { theme::TEXT_SECONDARY });
+        let text = RichText::new("or the photo's own colors").size(theme::FONT_SIZE_SECONDARY).color(if own { theme::GLOW } else { theme::TEXT_SECONDARY });
         if ui.add(egui::Button::new(text).frame(false)).clicked() && !own {
             set_solid(s, None, change);
             custom_open = false;
@@ -837,12 +837,12 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
                 *d = prunr_core::Decoration::default();
                 changed = true;
             }
-            chip::panel_section(ui, "OUTLINE", None);
+            chip::panel_section(ui, "Outline", None);
             changed |= outline_width(ui, "Width", d);
             if d.has_outline() {
                 changed |= chip::color_row(ui, "Color", &mut d.outline_color);
             }
-            chip::panel_section(ui, "SHADOW", None);
+            chip::panel_section(ui, "Shadow", None);
             changed |= chip::choice_row(ui, "Kind", &SHADOW_KINDS, &mut d.shadow);
             if d.shadow != prunr_core::ShadowKind::Off {
                 changed |= chip::slider_row_f32(ui, "Opacity", &mut d.shadow_opacity, 0.0..=1.0, false, fmt::percent).changed;
@@ -1014,7 +1014,7 @@ fn render_background_chip(
                     hint(ui, "No background; the exported PNG keeps its transparency.");
                 }
                 BgKind::Solid => {
-                    chip::panel_section(ui, "SOLID COLOR", None);
+                    chip::panel_section(ui, "Solid color", None);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         if let Some(rgb) = chip::swatch_dots(ui, &BG_SWATCHES, solid) {
@@ -1033,7 +1033,7 @@ fn render_background_chip(
                     }
                 }
                 BgKind::Image => {
-                    chip::panel_section(ui, "IMAGE", bg_image_label);
+                    chip::panel_section(ui, "Image", bg_image_label);
                     ui.horizontal(|ui| {
                         if chip::button(ui, chip::ButtonKind::Secondary, "Choose image\u{2026}").clicked() {
                             change.pick_bg_image = true;
@@ -1054,7 +1054,7 @@ fn render_background_chip(
                 }
                 BgKind::BlurredSource => {
                     if let BgEffect::BlurredSource { radius } = bg_effect {
-                        chip::panel_section(ui, "BLURRED PHOTO", None);
+                        chip::panel_section(ui, "Blurred photo", None);
                         let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
                         aggregate_bool(r.changed, StaticKnob::BgEffect, change);
                     }

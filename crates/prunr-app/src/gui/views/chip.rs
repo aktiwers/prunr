@@ -563,9 +563,9 @@ pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description:
         let text_x = icon_center.x + 15.0 + 12.0;
         let dim = if ui.is_enabled() { 1.0 } else { 0.5 };
         painter.text(egui::pos2(text_x, rect.center().y - 1.0), egui::Align2::LEFT_BOTTOM, title,
-            egui::FontId::proportional(13.5), theme::TEXT_PRIMARY.gamma_multiply(dim));
+            egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY.gamma_multiply(dim));
         painter.text(egui::pos2(text_x, rect.center().y + 2.0), egui::Align2::LEFT_TOP, description,
-            egui::FontId::proportional(12.0), theme::TEXT_SECONDARY.gamma_multiply(dim));
+            egui::FontId::proportional(theme::FONT_SIZE_SECONDARY), theme::TEXT_SECONDARY.gamma_multiply(dim));
         if selected {
             painter.text(egui::pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
                 egui::FontId::proportional(16.0), theme::ACCENT_RING);
@@ -619,6 +619,45 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
             painter.text(egui::pos2(rect.right() - PAD.x, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
                 egui::FontId::proportional(16.0), theme::ACCENT_RING);
         }
+    }
+    resp
+}
+
+/// A modal's header row: its title, a line under it, and the round close
+/// button at the right. True on the frame close was clicked.
+pub(super) fn modal_header(ui: &mut Ui, title: &str, subtitle: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).size(theme::FONT_SIZE_MODAL_TITLE).color(theme::TEXT_PRIMARY));
+            if !subtitle.is_empty() {
+                ui.label(RichText::new(subtitle).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let x = icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
+            named(x, &format!("Close {title}")).clicked()
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A menu item on one line: its name, and its shortcut right-aligned.
+pub(super) fn menu_row(ui: &mut Ui, title: &str, shortcut: &str) -> Response {
+    const PAD: f32 = 12.0;
+    let title_galley = ui.painter().layout_no_wrap(title.to_owned(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY);
+    let key_galley = ui.painter().layout_no_wrap(shortcut.to_owned(), egui::FontId::proportional(theme::FONT_SIZE_SECONDARY), theme::TEXT_SECONDARY);
+    let width = ui.available_width().max(title_galley.size().x + key_galley.size().x + 4.0 * PAD);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, theme::CHIP_HEIGHT), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if resp.hovered() {
+            painter.rect_filled(rect, 10.0, theme::ROW_HOVER);
+        }
+        let y = rect.center().y;
+        painter.galley(egui::pos2(rect.left() + PAD, y - title_galley.size().y / 2.0), title_galley, theme::TEXT_PRIMARY);
+        painter.galley(egui::pos2(rect.right() - PAD - key_galley.size().x, y - key_galley.size().y / 2.0), key_galley, theme::TEXT_SECONDARY);
     }
     resp
 }
@@ -813,7 +852,7 @@ fn panel_header(ui: &mut Ui, title: &str, header: PanelHeader<'_>, at_default: b
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clicked = reset_button(ui, header.reset, !at_default).clicked();
                 if !header.note.is_empty() {
-                    ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(12.0));
+                    ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
                 }
                 clicked
             })
@@ -977,7 +1016,7 @@ pub(super) fn gated<R>(ui: &mut Ui, reason: Option<&str>, body: impl FnOnce(&mut
 pub(super) fn panel_section(ui: &mut Ui, caption: &str, note: Option<&str>) {
     ui.add_space(theme::SPACE_SM);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(caption).size(10.5).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(caption).size(theme::FONT_SIZE_CAPTION).color(theme::TEXT_SECONDARY));
         if let Some(note) = note {
             ui.label(RichText::new(note).size(theme::FONT_SIZE_HINT).color(theme::HINT));
         }
@@ -1050,7 +1089,7 @@ pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &
                 let mut changed = false;
                 for opt in options {
                     let selected = *value == opt.value;
-                    let text = RichText::new(opt.name).size(12.5);
+                    let text = RichText::new(opt.name).size(theme::FONT_SIZE_SECONDARY);
                     let resp = ui.add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, text)).inner;
                     let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
                     if resp.clicked() && !selected {

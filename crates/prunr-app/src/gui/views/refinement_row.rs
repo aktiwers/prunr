@@ -46,10 +46,10 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
             if reset {
                 chip::reset_fields(REFINE_FIELDS, s, &d);
             }
-            chip::panel_section(ui, "BEFORE UPSCALING", Some("Requires reprocessing."));
+            chip::panel_section(ui, "Before upscaling", Some("Requires reprocessing."));
             chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));
             hint(ui, "Smooth grain and speckles first, so the upscaler does not sharpen them.");
-            chip::panel_section(ui, "AFTER UPSCALING", None);
+            chip::panel_section(ui, "After upscaling", None);
             sharpen(ui, s);
             hint(ui, "Negative softens, positive sharpens.");
             ai_blend(ui, s);
