@@ -98,7 +98,7 @@ fn a_window_with_no_room_renders_with_a_brush_on() {
         item.dimensions = (64, 64);
         item.status = BatchStatus::Done;
         app.batch.select_item(0);
-        app.brush_state.toggle();
+        app.brush_state.enable();
     }
     settle(&mut harness);
     harness.set_size(egui::vec2(1.0, 1.0));

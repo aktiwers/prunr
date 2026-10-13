@@ -117,7 +117,7 @@ fn the_tool_strip_follows_the_paint_brush() {
     use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip without a tool");
-    h.state_mut().brush_state.toggle();
+    h.state_mut().brush_state.enable();
     settle(&mut h);
     let present = names(&h);
     for knob in ["Restore", "Erase", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
@@ -219,7 +219,7 @@ fn picking_the_focus_takes_the_canvas_click() {
 #[test]
 fn bracket_keys_step_the_brush_size() {
     let mut h = loaded();
-    h.state_mut().brush_state.toggle();
+    h.state_mut().brush_state.enable();
     settle(&mut h);
     let start = h.state().settings.brush.radius;
     h.key_press(egui::Key::CloseBracket);
@@ -469,7 +469,7 @@ fn the_sd_eraser_strip_offers_try_another() {
     let mut h = loaded();
     h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
     settle(&mut h);
-    h.state_mut().brush_state.toggle();
+    h.state_mut().brush_state.enable();
     settle(&mut h);
     let tree = super::tree_tests::tree(&h);
     let node = tree.iter().find(|n| n.name.as_deref() == Some("Try another")).expect("Try another on the strip");

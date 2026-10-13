@@ -4,7 +4,7 @@
 use egui::{Align2, Id, Order, Rect, RichText, Ui};
 use egui_material_icons::icons::ICON_MORE_HORIZ;
 
-use crate::gui::brush_state::{BrushSettings, BRUSH_RADIUS_RANGE, DEPTH_RANGE};
+use crate::gui::brush_state::{BrushSettings, Tool, BRUSH_RADIUS_RANGE, DEPTH_RANGE};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
@@ -17,12 +17,6 @@ const SLIDER_WIDTH: f32 = 110.0;
 const SLIDER_WIDTH_MIN: f32 = 56.0;
 /// Everything in the strip but its three sliders, at the widest.
 const FIXED_WIDTH: f32 = 760.0;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tool {
-    Paint,
-    Magic,
-}
 
 impl Tool {
     fn title(self) -> &'static str {
@@ -145,5 +139,9 @@ fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
     }
     let depth = chip::inline_switch(ui, "By depth", &mut s.magic_depth);
     committed |= depth.commit;
+    if shows(model, Surface::FillRegionKnobs) {
+        committed |= brush_chip::expand_region_row(ui, s).commit;
+        committed |= brush_chip::feather_row(ui, s).commit;
+    }
     committed
 }

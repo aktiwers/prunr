@@ -412,16 +412,20 @@ pub(crate) struct BrushState {
     active: Option<ActiveStroke>,
 }
 
+/// A brush tool; the app keeps at most one on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tool {
+    Paint,
+    Magic,
+}
+
 impl BrushState {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    pub fn toggle(&mut self) {
-        self.enabled = !self.enabled;
-        if !self.enabled {
-            self.active = None;
-        }
+    pub fn enable(&mut self) {
+        self.enabled = true;
     }
 
     /// Force the brush off. Used when the active model changes to a
@@ -746,11 +750,11 @@ mod tests {
     }
 
     #[test]
-    fn toggle_flips_enabled() {
+    fn enable_and_disable_flip_enabled() {
         let mut s = BrushState::default();
-        s.toggle();
+        s.enable();
         assert!(s.is_enabled());
-        s.toggle();
+        s.disable();
         assert!(!s.is_enabled());
     }
 
@@ -759,13 +763,13 @@ mod tests {
     }
 
     #[test]
-    fn toggle_off_drops_active_stroke() {
+    fn disabling_drops_the_active_stroke() {
         let mut s = BrushState::default();
-        s.toggle();
+        s.enable();
         s.begin_stroke(64, 64, BrushShape::Circle);
         s.extend_stroke_with_radius(32.0, 32.0, 8.0, default_stamp());
         assert!(s.has_active_stroke());
-        s.toggle();
+        s.disable();
         assert!(!s.has_active_stroke());
     }
 
