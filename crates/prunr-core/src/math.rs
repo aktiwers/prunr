@@ -8,6 +8,28 @@ pub fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// One bilinear tap along an axis: the two source indices and the
+/// weight of the second.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tap {
+    pub(crate) lo: usize,
+    pub(crate) hi: usize,
+    pub(crate) t: f32,
+}
+
+/// Half-pixel-centred taps from `out_len` output samples onto a
+/// `src_len`-long axis, clamped at the ends.
+pub(crate) fn bilinear_taps(src_len: u32, out_len: u32) -> Vec<Tap> {
+    let last = src_len.max(1) as usize - 1;
+    (0..out_len)
+        .map(|o| {
+            let x = ((o as f32 + 0.5) * src_len as f32 / out_len as f32 - 0.5).clamp(0.0, last as f32);
+            let lo = x.floor() as usize;
+            Tap { lo, hi: (lo + 1).min(last), t: x - lo as f32 }
+        })
+        .collect()
+}
+
 /// Single-pass min / max / mean over a slice.
 ///
 /// Returns `(f32::INFINITY, f32::NEG_INFINITY, 0.0)` for an empty slice —

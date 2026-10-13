@@ -7,6 +7,7 @@ use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
 use crate::color::{lab_to_srgb, srgb_lightness};
+use crate::math::{bilinear_taps, Tap};
 use crate::progress::{Progress, Step};
 use crate::{CoreError, OrtEngine};
 
@@ -73,29 +74,6 @@ pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) 
     Ok(plane)
 }
 
-/// One bilinear tap along an axis: the two source indices and the
-/// weight of the second.
-#[derive(Clone, Copy)]
-struct Tap {
-    lo: usize,
-    hi: usize,
-    t: f32,
-}
-
-/// Half-pixel-centred taps from `out_len` output samples onto a
-/// `COLORIZE_INPUT`-long axis.
-fn taps(out_len: u32) -> Vec<Tap> {
-    let src = COLORIZE_INPUT as f32;
-    let last = COLORIZE_INPUT as usize - 1;
-    (0..out_len)
-        .map(|o| {
-            let x = ((o as f32 + 0.5) * src / out_len as f32 - 0.5).clamp(0.0, last as f32);
-            let lo = x.floor() as usize;
-            Tap { lo, hi: (lo + 1).min(last), t: x - lo as f32 }
-        })
-        .collect()
-}
-
 /// `src` with its lightness kept and the colour taken from `plane`,
 /// scaled by `strength` (0 = grey, 1 = as predicted, above 1 more
 /// saturated). Alpha is unchanged.
@@ -112,7 +90,7 @@ pub fn colorized(src: &RgbaImage, plane: &[f32], strength: f32) -> RgbaImage {
     debug_assert_eq!(plane.len(), 2 * n);
     let (a_plane, b_plane) = plane.split_at(n);
     let (w, h) = src.dimensions();
-    let (xs, ys) = (taps(w), taps(h));
+    let (xs, ys) = (bilinear_taps(COLORIZE_INPUT, w), bilinear_taps(COLORIZE_INPUT, h));
     let stride = COLORIZE_INPUT as usize;
     let row_len = w as usize * 4;
     let mut out = vec![0u8; src.as_raw().len()];
