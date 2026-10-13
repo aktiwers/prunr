@@ -1331,15 +1331,24 @@ impl Processor {
     /// fits the RAM budget now is admitted, and its ids come back with
     /// the receiver the worker takes the rest from as `release_and_admit`
     /// sends them.
-    pub(crate) fn open_admission(&mut self, mut ctrl: AdmissionController) -> (Vec<u64>, mpsc::Receiver<WorkItem>) {
-        let mut admitted = Vec::new();
+    pub(crate) fn open_admission(
+        &mut self,
+        mut ctrl: AdmissionController,
+        mut work: impl FnMut(u64) -> Option<WorkItem>,
+    ) -> (Vec<WorkItem>, mpsc::Receiver<WorkItem>) {
+        let mut items = Vec::new();
         while let Some(id) = ctrl.try_admit_next() {
-            admitted.push(id);
+            match work(id) {
+                Some(item) => items.push(item),
+                // An image that can't be sent gives its share back at
+                // once, so the next one can take it.
+                None => ctrl.release(id),
+            }
         }
         let (tx, rx) = mpsc::channel();
         self.admission = Some(ctrl);
         self.admission_tx = Some(tx);
-        (admitted, rx)
+        (items, rx)
     }
 
     /// `completed` frees its share of the budget, and the images that
@@ -2366,10 +2375,11 @@ mod tests {
         let mut p = fixture();
         let mut ctrl = AdmissionController::with_budget(1);
         ctrl.enqueue([(1, 4), (2, 3), (3, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
-        let (admitted, rx) = p.open_admission(ctrl);
+        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
+        let (admitted, rx) = p.open_admission(ctrl, work);
+        let admitted: Vec<u64> = admitted.into_iter().map(|w| w.0).collect();
         assert_eq!(admitted, vec![3], "only the smallest is forced in");
         p.track_dispatch(fixture_recipe(), admitted);
-        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
 
         p.release_and_admit(3, work);
         assert_eq!(rx.try_recv().map(|w| w.0), Ok(2), "the next smallest is sent");
@@ -2379,6 +2389,25 @@ mod tests {
         p.release_and_admit(2, |_| None);
         assert!(rx.try_recv().is_err(), "an image that can't be prepared is not sent");
         assert!(p.admission.is_none() && p.admission_tx.is_none(), "and holds no budget: every image is through");
+    }
+
+    /// An image admitted at the start that cannot be sent frees its share
+    /// right there, so the next image takes it and the batch can end.
+    #[test]
+    fn an_image_that_cannot_start_frees_its_admission_at_once() {
+        use crate::gui::memory::ImageMemCost;
+        let mut p = fixture();
+        let mut ctrl = AdmissionController::with_budget(4);
+        ctrl.enqueue([(1, 3), (2, 3), (3, 3)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (items, _rx) = p.open_admission(ctrl, |id| (id != 1).then(|| (id, Arc::new(Vec::new()), None)));
+        let sent: Vec<u64> = items.iter().map(|w| w.0).collect();
+        assert_eq!(sent, vec![2], "1 fits first but can't be sent; its share lets 2 in");
+        p.track_dispatch(fixture_recipe(), sent);
+        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
+        p.release_and_admit(2, work);
+        assert_eq!(_rx.try_recv().map(|w| w.0), Ok(3), "3 goes out behind 2");
+        p.release_and_admit(3, work);
+        assert!(p.admission.is_none(), "nothing holds the budget: 1's share was given back");
     }
 
     #[test]
