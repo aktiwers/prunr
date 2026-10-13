@@ -95,12 +95,12 @@ fn sd_inpaint_modifies_painted_region() {
 fn sd_bench() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_bench") { return; }
-    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle at the app's defaults
-    // for it instead of SD 1.5.
-    let (id, steps, guidance, scheduler) = if std::env::var("PRUNR_SD_BENCH_MODEL").is_ok_and(|v| v == "lcm") {
-        (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm)
-    } else {
-        (prunr_models::ModelId::SdV15InpaintFp16, 25, 4.0, inpaint_sd::SchedulerKind::DpmPp2MKarras)
+    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
+    // eraser, each at the app's defaults for it, instead of SD 1.5.
+    let (id, steps, guidance, scheduler) = match std::env::var("PRUNR_SD_BENCH_MODEL").as_deref() {
+        Ok("lcm") => (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm),
+        Ok("rorem") => (prunr_models::ModelId::RoremFp16, inpaint_sd::ROREM_STEPS, 1.0, inpaint_sd::SchedulerKind::Lcm),
+        _ => (prunr_models::ModelId::SdV15InpaintFp16, 25, 4.0, inpaint_sd::SchedulerKind::DpmPp2MKarras),
     };
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: {id:?} bundle not installed");
