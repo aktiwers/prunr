@@ -83,7 +83,7 @@ pub enum InpaintBridgeMsg {
 /// only subprocess can't emit anyway.
 pub enum InpaintBridgeResult {
     Report { item_id: u64, update: prunr_core::ProgressUpdate },
-    Done { item_id: u64, gen: u64, rgba_path: std::path::PathBuf, width: u32, height: u32 },
+    Done { item_id: u64, gen: u64, rgba_path: std::path::PathBuf, width: u32, height: u32, fill_scale: f32 },
     Error { item_id: u64, error: String },
 }
 
@@ -246,10 +246,10 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     SubprocessEvent::Report { item_id, update } => {
                         let _ = res_tx.send(InpaintBridgeResult::Report { item_id, update });
                     }
-                    SubprocessEvent::InpaintDone { item_id, rgba_path, width, height } => {
+                    SubprocessEvent::InpaintDone { item_id, rgba_path, width, height, fill_scale } => {
                         last_used = Instant::now();
                         let gen = inflight_gens.remove(&item_id).unwrap_or(0);
-                        let _ = res_tx.send(InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height });
+                        let _ = res_tx.send(InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale });
                     }
                     SubprocessEvent::InpaintError { item_id, error } => {
                         last_used = Instant::now();

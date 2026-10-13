@@ -112,6 +112,8 @@ pub(crate) struct InpaintResult {
     /// `drain_inpaint_results` so the user sees WHY the stroke did
     /// nothing instead of guessing it was lost.
     pub error: Option<String>,
+    /// How large the fill ran: 1 is full size. `None` on a marker.
+    pub fill_scale: Option<f32>,
 }
 
 /// Result from a background SAM encoder thread. Carries the embedding or
@@ -835,14 +837,20 @@ impl Processor {
 
     #[cfg(test)]
     pub(crate) fn land_inpaint_for_test(&mut self, item_id: u64, rgba: image::RgbaImage) {
+        self.land_inpaint_scaled_for_test(item_id, rgba, 1.0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn land_inpaint_scaled_for_test(&mut self, item_id: u64, rgba: image::RgbaImage, fill_scale: f32) {
         let generation = *self.inpaint_latest_gen.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
-        let _ = self.inpaint_tx.send(InpaintResult { item_id, rgba, generation, cancelled: false, error: None });
+        let _ = self.inpaint_tx.send(InpaintResult { item_id, rgba, generation, cancelled: false, error: None, fill_scale: Some(fill_scale) });
     }
 
     #[cfg(test)]
     pub(crate) fn fail_inpaint_for_test(&mut self, item_id: u64, error: &str) {
         let _ = self.inpaint_tx.send(InpaintResult {
             item_id, rgba: image::RgbaImage::new(0, 0), generation: 0, cancelled: false, error: Some(error.into()),
+            fill_scale: None,
         });
     }
 
@@ -934,13 +942,13 @@ impl Processor {
             if outcome.is_ok() {
                 progress.step(prunr_core::Step::Blending);
             }
-            let outcome = outcome.map(|rgba| prunr_core::inpaint_blend::finalize_inpaint(
-                &rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
-            ));
+            let outcome = outcome.map(|filled| (prunr_core::inpaint_blend::finalize_inpaint(
+                &filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
+            ), filled.scale));
             run.end();
             match outcome {
-                Ok(out) => {
-                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None });
+                Ok((out, scale)) => {
+                    let _ = tx.send(InpaintResult { item_id, rgba: out, generation: gen, cancelled: false, error: None, fill_scale: Some(scale) });
                 }
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
@@ -952,6 +960,7 @@ impl Processor {
                         generation: 0,
                         cancelled: true,
                         error: None,
+                        fill_scale: None,
                     });
                 }
                 Err(e) => {
@@ -968,6 +977,7 @@ impl Processor {
                         generation: 0,
                         cancelled: false,
                         error: Some(msg),
+                        fill_scale: None,
                     });
                 }
             }
@@ -1106,6 +1116,7 @@ impl Processor {
                     generation: 0,
                     cancelled: true,
                     error: None,
+                    fill_scale: None,
                 });
             };
             if cancelled() { send_cancelled(); return; }
@@ -1131,6 +1142,7 @@ impl Processor {
                     generation: 0,
                     cancelled: false,
                     error: Some(e),
+                    fill_scale: None,
                 });
                 return;
             }
@@ -1161,7 +1173,7 @@ impl Processor {
                         prunr_core::ProgressSink::report(run, update);
                     }
                 }
-                InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height } => {
+                InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale } => {
                     let result = match super::worker::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
                             Ok(img) => {
@@ -1173,7 +1185,7 @@ impl Processor {
                                 // one was in the subprocess.
                                 InpaintResult {
                                     item_id, rgba, generation: gen,
-                                    cancelled: false, error: None,
+                                    cancelled: false, error: None, fill_scale: Some(fill_scale),
                                 }
                             }
                             Err(e) => InpaintResult {
@@ -1181,6 +1193,7 @@ impl Processor {
                                 rgba: image::RgbaImage::new(0, 0),
                                 generation: 0, cancelled: false,
                                 error: Some(format!("decode SD result: {e}")),
+                                fill_scale: None,
                             },
                         },
                         None => InpaintResult {
@@ -1188,6 +1201,7 @@ impl Processor {
                             rgba: image::RgbaImage::new(0, 0),
                             generation: 0, cancelled: false,
                             error: Some(format!("read SD result missing: {}", rgba_path.display())),
+                            fill_scale: None,
                         },
                     };
                     let _ = self.inpaint_tx.send(result);
@@ -1215,6 +1229,7 @@ impl Processor {
                         generation: 0,
                         cancelled,
                         error: user_error,
+                        fill_scale: None,
                     });
                     self.end_inpaint_run(item_id);
                 }
@@ -2228,9 +2243,11 @@ mod tests {
         p.inpaint_latest_gen.insert(7, 2);
         p.inpaint_tx.send(InpaintResult {
             item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 1, cancelled: false, error: None,
+            fill_scale: None,
         }).unwrap();
         p.inpaint_tx.send(InpaintResult {
             item_id: 7, rgba: image::RgbaImage::new(1, 1), generation: 2, cancelled: false, error: None,
+            fill_scale: None,
         }).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
@@ -2247,6 +2264,7 @@ mod tests {
         p.inpaint_tx.send(InpaintResult {
             item_id: 7, rgba: image::RgbaImage::new(0, 0),
             generation: 0, cancelled: true, error: None,
+            fill_scale: None,
         }).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert!(drained.is_empty(),
@@ -2265,6 +2283,7 @@ mod tests {
             item_id: 7, rgba: image::RgbaImage::new(0, 0),
             generation: 0, cancelled: false,
             error: Some("SD inpaint refused to load: only 13.4 GB free".to_string()),
+            fill_scale: None,
         }).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert!(drained.is_empty(),
