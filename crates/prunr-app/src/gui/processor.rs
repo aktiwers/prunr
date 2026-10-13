@@ -132,31 +132,32 @@ pub(crate) struct FacesResult {
 
 /// Which selection operation the Magic Brush click/stroke was performing.
 /// Mirrors the Shift/Alt modifier semantics from 33-UI-SPEC.
-/// Single-slot warm upscale engine. Shared with the dispatch thread so
-/// session construction (seconds on a cold EP) never runs on the GUI
-/// thread; single-slot because caching several upscale engines is YAGNI.
-type WarmUpscaleEngine =
-    Arc<Mutex<Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>>>;
+/// Single-slot warm engine for an in-process model run (upscale,
+/// colorize). Shared with the dispatch thread so session construction
+/// (seconds on a cold EP) never runs on the GUI thread; single-slot
+/// because caching several engines of one kind is YAGNI.
+type WarmEngine =
+    Arc<Mutex<Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)>>>;
 
-/// What a warm upscale engine was built for: the model, and whether the
+/// What a warm engine was built for: the model, and whether the
 /// user chose "CPU only" (an engine built under the other choice misses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UpscaleEngineKey {
+pub(crate) struct WarmEngineKey {
     kind: prunr_core::ModelKind,
     cpu_only: bool,
 }
 
 fn lock_warm_engine(
-    slot: &WarmUpscaleEngine,
-) -> std::sync::MutexGuard<'_, Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>> {
+    slot: &WarmEngine,
+) -> std::sync::MutexGuard<'_, Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)>> {
     slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The cached engine on a key hit; a mismatch evicts the slot and
 /// returns `None`. Never constructs an engine.
-fn cached_upscale_engine(
-    slot: &WarmUpscaleEngine,
-    key: UpscaleEngineKey,
+fn cached_warm_engine(
+    slot: &WarmEngine,
+    key: WarmEngineKey,
 ) -> Option<Arc<prunr_core::OrtEngine>> {
     let mut guard = lock_warm_engine(slot);
     match guard.as_ref() {
@@ -172,13 +173,13 @@ fn cached_upscale_engine(
 /// Cached engine for `key`, constructing and caching one when absent.
 /// The lock is released during construction so the GUI thread's
 /// `release_upscale_engine` never waits on a session build.
-fn ensure_upscale_engine(
-    slot: &WarmUpscaleEngine,
-    key: UpscaleEngineKey,
+fn ensure_warm_engine(
+    slot: &WarmEngine,
+    key: WarmEngineKey,
     intra_threads: usize,
     level: prunr_core::engine::GraphOptimizationLevel,
 ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
-    if let Some(cached) = cached_upscale_engine(slot, key) {
+    if let Some(cached) = cached_warm_engine(slot, key) {
         return Ok(cached);
     }
     let engine = if key.cpu_only {
@@ -326,6 +327,20 @@ pub(crate) struct UpscaleOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
+/// A finished colorize, keyed and stamped like `UpscaleResult`.
+pub(crate) struct ColorizeResult {
+    pub item_id: u64,
+    pub result: Result<ColorizeOutput, prunr_core::CoreError>,
+    pub recipe: ProcessingRecipe,
+}
+
+/// The run kept for Strength, and the image to show at the dispatch's
+/// strength (rendered in the colorize thread, not on the UI thread).
+pub(crate) struct ColorizeOutput {
+    pub run: super::item::ColorizeCache,
+    pub shown: Arc<image::RgbaImage>,
+}
+
 /// Pure admission check: returns `true` when `free_ram_mb >= working_set_mb`.
 /// Extracted as a free function so unit tests can exercise it without
 /// constructing a `Processor`.
@@ -333,19 +348,19 @@ pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
 }
 
-/// What an upscale starts from: the image, or its source when it is not
-/// decoded yet (Process right after opening a large photo), which the
-/// upscale thread decodes instead of the run being skipped.
-pub(crate) enum UpscaleInput {
+/// What an upscale or colorize starts from: the image, or its source when
+/// it is not decoded yet (Process right after opening a large photo),
+/// which the run's thread decodes instead of the run being skipped.
+pub(crate) enum RunInput {
     Decoded(Arc<image::RgbaImage>),
     Source(super::item::ImageSource),
 }
 
-impl UpscaleInput {
+impl RunInput {
     fn load(self) -> Result<Arc<image::RgbaImage>, prunr_core::CoreError> {
         match self {
-            UpscaleInput::Decoded(img) => Ok(img),
-            UpscaleInput::Source(source) => source.decode_rgba().map_err(prunr_core::CoreError::ImageFormat),
+            RunInput::Decoded(img) => Ok(img),
+            RunInput::Source(source) => source.decode_rgba().map_err(prunr_core::CoreError::ImageFormat),
         }
     }
 }
@@ -541,7 +556,15 @@ pub(crate) struct Processor {
     /// multiple upscale engines simultaneously is YAGNI. Evicted on
     /// model swap (any switch away from the cached ModelKind) and on
     /// full release.
-    warm_upscale_engine: WarmUpscaleEngine,
+    warm_upscale_engine: WarmEngine,
+    /// The colorize run in flight (one at a time), its cancel flag (read
+    /// before and after the model's one run), its results and its warm
+    /// engine, released with every other session on a model switch.
+    colorize_active: Arc<AtomicBool>,
+    colorize_cancel: Arc<AtomicBool>,
+    colorize_result_tx: mpsc::Sender<ColorizeResult>,
+    colorize_result_rx: mpsc::Receiver<ColorizeResult>,
+    warm_colorize_engine: WarmEngine,
     /// SAM 2 encoder results channel. The rayon job sends here when
     /// the embedding is ready (or an error). Drained each frame from
     /// pump_sam_encoder_results (called via drain_background_channels).
@@ -564,6 +587,7 @@ impl Processor {
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
         let (upscale_result_tx, upscale_result_rx) = mpsc::channel();
         let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
+        let (colorize_result_tx, colorize_result_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         let (faces_tx, faces_rx) = mpsc::channel();
@@ -593,6 +617,11 @@ impl Processor {
             upscale_preview_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
             warm_upscale_engine: Arc::new(Mutex::new(None)),
+            colorize_active: Arc::new(AtomicBool::new(false)),
+            colorize_cancel: Arc::new(AtomicBool::new(false)),
+            colorize_result_tx,
+            colorize_result_rx,
+            warm_colorize_engine: Arc::new(Mutex::new(None)),
             sam_encoder_tx,
             sam_encoder_rx,
             sam_decoder_tx,
@@ -801,11 +830,13 @@ impl Processor {
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
     }
 
-    /// Drop every cached model session: the in-process LaMa and upscale
-    /// ones, and both workers'. On a model switch or a Processor change.
+    /// Drop every cached model session: the in-process LaMa, upscale and
+    /// colorize ones, and both workers'. On a model switch or a Processor
+    /// change.
     pub(crate) fn release_all_sessions(&mut self) {
         prunr_core::inpaint::release_all_lama_sessions();
         self.release_upscale_engine();
+        *lock_warm_engine(&self.warm_colorize_engine) = None;
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -816,7 +847,7 @@ impl Processor {
         model_kind: prunr_core::ModelKind,
         cpu_only: bool,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
-        cached_upscale_engine(&self.warm_upscale_engine, UpscaleEngineKey { kind: model_kind, cpu_only })
+        cached_warm_engine(&self.warm_upscale_engine, WarmEngineKey { kind: model_kind, cpu_only })
     }
 
     /// Drops the cached upscale engine. Call on:
@@ -832,7 +863,7 @@ impl Processor {
     #[cfg(test)]
     pub(crate) fn warm_upscale_engine_for_test(
         &mut self,
-    ) -> std::sync::MutexGuard<'_, Option<(UpscaleEngineKey, Arc<prunr_core::OrtEngine>)>> {
+    ) -> std::sync::MutexGuard<'_, Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)>> {
         lock_warm_engine(&self.warm_upscale_engine)
     }
 
@@ -1150,7 +1181,7 @@ impl Processor {
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
-        input: UpscaleInput,
+        input: RunInput,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
         cpu_only: bool,
@@ -1246,8 +1277,8 @@ impl Processor {
             // the window must stay responsive so Cancel is reachable. The
             // thread holds its own Arc, so a model swap that evicts the slot
             // mid-run never invalidates this session.
-            let engine_for_thread = match ensure_upscale_engine(
-                &engine_slot, UpscaleEngineKey { kind: cache_model_kind, cpu_only }, intra_threads, level,
+            let engine_for_thread = match ensure_warm_engine(
+                &engine_slot, WarmEngineKey { kind: cache_model_kind, cpu_only }, intra_threads, level,
             ) {
                 Ok(engine) => engine,
                 Err(err) => {
@@ -1329,6 +1360,74 @@ impl Processor {
             out.push(r);
         }
         out
+    }
+
+    /// `true` while a colorize run is in flight.
+    pub fn is_colorize_in_flight(&self) -> bool {
+        self.colorize_active.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_colorize_in_flight_for_test(&self, active: bool) {
+        self.colorize_active.store(active, Ordering::Release);
+    }
+
+    /// Colorize `input` on a background thread; the result comes back
+    /// through `pump_colorize_results`. Refused (logged) when free RAM is
+    /// below the model's working set, like `dispatch_upscale`.
+    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: RunInput, cpu_only: bool, recipe: ProcessingRecipe) {
+        let model_id = prunr_models::ModelId::DdcolorTiny;
+        let free_mb = crate::hardware::available_ram_mb_throttled();
+        if let Some(d) = prunr_models::descriptor(model_id) {
+            if !admission_check(d.working_set_mb, free_mb) {
+                tracing::warn!(model = ?model_id, working_set_mb = d.working_set_mb, free_mb, "colorize admission refused: insufficient RAM");
+                return;
+            }
+        }
+        let intra_threads = prunr_core::batch::ort_intra_threads(1);
+        self.colorize_active.store(true, Ordering::Release);
+        self.colorize_cancel.store(false, Ordering::Release);
+        let run = self.dispatch_progress.begin(
+            super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Colorize, prunr_core::Step::LoadingModel.label()),
+        );
+        let progress = prunr_core::Progress::new(Arc::new(run.clone())).with_cancel(Arc::clone(&self.colorize_cancel));
+        let active_flag = Arc::clone(&self.colorize_active);
+        let result_tx = self.colorize_result_tx.clone();
+        let engine_slot = Arc::clone(&self.warm_colorize_engine);
+        std::thread::spawn(move || {
+            let key = WarmEngineKey { kind: prunr_core::ModelKind::DdcolorTiny, cpu_only };
+            let level = prunr_core::engine::GraphOptimizationLevel::Level3;
+            let result = input.load().and_then(|input| {
+                let engine = ensure_warm_engine(&engine_slot, key, intra_threads, level)?;
+                let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
+                let run = super::item::ColorizeCache::new(Arc::new(plane), input);
+                let shown = Arc::new(run.render(recipe.colorize.strength()));
+                Ok(ColorizeOutput { run, shown })
+            });
+            if let Err(err) = &result {
+                tracing::warn!(item_id, %err, "colorize run did not finish");
+            }
+            // Sent before the active flag clears, so Process never enables
+            // ahead of the result landing.
+            let _ = result_tx.send(ColorizeResult { item_id, result, recipe });
+            active_flag.store(false, Ordering::Release);
+            run.end();
+        });
+    }
+
+    /// Cancel the colorize run in flight. The model's one run is not
+    /// interrupted; its result is dropped when it returns. Idempotent.
+    pub(crate) fn cancel_colorize(&self) {
+        if !self.is_colorize_in_flight() {
+            return;
+        }
+        self.colorize_cancel.store(true, Ordering::Release);
+        self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
+    }
+
+    /// Drain finished colorize runs. Non-blocking.
+    pub(crate) fn pump_colorize_results(&mut self) -> Vec<ColorizeResult> {
+        self.colorize_result_rx.try_iter().collect()
     }
 
     /// Dispatch the SAM 2 encoder for `item_id`. Runs once per source image;
@@ -2066,6 +2165,7 @@ mod tests {
             mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
+            colorize: Default::default(),
         }
     }
 
@@ -2250,14 +2350,14 @@ mod upscale_dispatch_tests {
     /// upscale thread rather than being skipped.
     #[test]
     fn an_undecoded_upscale_input_decodes_from_its_source() {
-        use super::UpscaleInput;
+        use super::RunInput;
         let mut png = Vec::new();
         image::DynamicImage::ImageRgba8(grey_image(3, 2, 77)).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(png));
-        let img = UpscaleInput::Source(source).load().expect("decodes");
+        let img = RunInput::Source(source).load().expect("decodes");
         assert_eq!((img.dimensions(), img.get_pixel(0, 0).0[0]), ((3, 2), 77));
         let broken = crate::gui::item::ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
-        assert!(UpscaleInput::Source(broken).load().is_err());
+        assert!(RunInput::Source(broken).load().is_err());
     }
 
     #[test]
@@ -2347,7 +2447,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         let got = p
             .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, false)
             .expect("cache hit must return the sentinel Arc");
@@ -2369,7 +2469,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL, false);
         assert!(
             got.is_none(),
@@ -2389,7 +2489,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((UpscaleEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         p.release_upscale_engine();
         assert!(
             p.warm_upscale_engine_for_test().is_none(),

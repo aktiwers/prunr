@@ -219,6 +219,15 @@ pub struct Cli {
     /// the photo's shading, above it the redrawn shading too.
     #[arg(long, requires = "restore_faces", default_value_t = 50, value_parser = clap::value_parser!(u8).range(0..=100))]
     pub face_strength: u8,
+
+    /// Colorize mode: color a black-and-white photo with DDColor
+    /// (downloaded in the app's Model Store). Saves {stem}_color.png.
+    #[arg(long)]
+    pub colorize: bool,
+
+    /// Color strength: 0 is grey, 1 the predicted color, up to 1.5.
+    #[arg(long, requires = "colorize", default_value_t = 1.0)]
+    pub color_strength: f32,
 }
 
 /// Upscale model selection.
@@ -441,15 +450,12 @@ pub fn run_remove(args: &Cli) -> i32 {
 
     // Eraser and upscale modes ignore the background-removal flags; say so
     // up front rather than quietly throw them away.
-    let mode = match (args.inpaint, args.upscale) {
-        (true, Some(_)) => {
-            eprintln!("error: --upscale cannot be combined with --inpaint.");
-            return 1;
-        }
-        (true, None) => Some("--inpaint"),
-        (false, Some(_)) => Some("--upscale"),
-        (false, None) => None,
-    };
+    let modes = selected_modes(args);
+    if modes.len() > 1 {
+        eprintln!("error: {} cannot be combined.", modes.join(" and "));
+        return 1;
+    }
+    let mode = modes.first().copied();
     if let Some(mode) = mode {
         let conflicts = background_removal_flags(args);
         if !conflicts.is_empty() {
@@ -465,6 +471,9 @@ pub fn run_remove(args: &Cli) -> i32 {
     }
     if let Some(upscaler) = args.upscale {
         return run_upscale(args, upscaler);
+    }
+    if args.colorize {
+        return run_colorize(args);
     }
 
     // All processing uses subprocess isolation for OOM protection
@@ -502,6 +511,14 @@ impl UpscaleJob<'_> {
         }
         Ok(out)
     }
+}
+
+/// The mode flags set on the command line; at most one may be.
+fn selected_modes(args: &Cli) -> Vec<&'static str> {
+    [(args.inpaint, "--inpaint"), (args.upscale.is_some(), "--upscale"), (args.colorize, "--colorize")]
+        .into_iter()
+        .filter_map(|(set, flag)| set.then_some(flag))
+        .collect()
 }
 
 /// The background-removal flags set on the command line.
@@ -589,6 +606,61 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         let result = image::open(input)
             .map_err(|e| format!("failed to read {}: {e}", input.display()))
             .and_then(|img| job.run(img.into_rgba8()))
+            .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
+        match result {
+            Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                failed += 1;
+            }
+        }
+    }
+    i32::from(failed > 0)
+}
+
+/// Colorize mode: colour each input with DDColor at `--color-strength`.
+/// The model loads once for the whole batch.
+fn run_colorize(args: &Cli) -> i32 {
+    let model = prunr_models::ModelId::DdcolorTiny;
+    if !prunr_models::is_available(model) {
+        eprintln!("error: {}", prunr_models::not_installed_error(model));
+        return 1;
+    }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let engine = if args.cpu {
+        prunr_core::OrtEngine::new_cpu_only(prunr_core::ModelKind::DdcolorTiny, threads)
+    } else {
+        prunr_core::OrtEngine::new(prunr_core::ModelKind::DdcolorTiny, threads)
+    };
+    let engine = match engine {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("error: cannot load the colorize model: {e}");
+            return 1;
+        }
+    };
+    let strength = args.color_strength.clamp(0.0, 1.5);
+    let is_batch = args.inputs.len() > 1;
+    let mut failed = 0;
+    for input in &args.inputs {
+        let out_path = output_path_with_suffix(input, &args.output, is_batch, "_color.png");
+        if let Err(e) = check_overwrite(&out_path, args.force) {
+            eprintln!("error: {e}");
+            failed += 1;
+            continue;
+        }
+        if !args.quiet {
+            eprintln!("Colorizing {}...", input.display());
+        }
+        let result = image::open(input)
+            .map_err(|e| format!("failed to read {}: {e}", input.display()))
+            .and_then(|img| {
+                let img = img.into_rgba8();
+                let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
+                    .map_err(|e| format!("colorize failed: {e}"))?;
+                Ok(prunr_core::colorize::colorized(&img, &plane, strength))
+            })
             .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
         match result {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
@@ -1332,6 +1404,21 @@ mod tests {
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "5"]).is_err());
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--face-strength", "50"]).is_err(), "strength needs a face model");
         let mixed = super::Cli::parse_from(["prunr", "a.png", "--upscale", "siax", "--bg-color", "ff0000"]);
+        assert_eq!(super::background_removal_flags(&mixed), ["--bg-color"]);
+    }
+
+    /// Colorize is its own mode: Strength needs it, and it takes no other
+    /// mode alongside.
+    #[test]
+    fn the_colorize_flags_need_colorize_mode() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--color-strength", "0.6"]);
+        assert!(cli.colorize);
+        assert_eq!(cli.color_strength, 0.6);
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "--colorize"]).color_strength, 1.0);
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--color-strength", "0.5"]).is_err(), "--color-strength needs --colorize");
+        let both = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--upscale", "nomos"]);
+        assert_eq!(super::selected_modes(&both), ["--upscale", "--colorize"]);
+        let mixed = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--bg-color", "ff0000"]);
         assert_eq!(super::background_removal_flags(&mixed), ["--bg-color"]);
     }
 

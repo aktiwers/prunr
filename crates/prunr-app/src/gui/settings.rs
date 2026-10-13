@@ -586,11 +586,13 @@ pub enum SettingsModel {
     FourXNmkdSuperscaleUpscale,
     /// 4xNomos2 RealPLKSR. Fast, natural texture on skin and hair.
     Nomos2Upscale,
+    /// DDColor: colours a black-and-white photo.
+    ColorizeDdcolor,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
@@ -605,6 +607,7 @@ impl SettingsModel {
         Self::FourXNmkdSiaxCxUpscale,
         Self::FourXNmkdSuperscaleUpscale,
         Self::Nomos2Upscale,
+        Self::ColorizeDdcolor,
     ];
 
     /// This model's position in `ALL`.
@@ -652,6 +655,10 @@ impl SettingsModel {
         )
     }
 
+    pub fn is_colorize(self) -> bool {
+        self == Self::ColorizeDdcolor
+    }
+
     /// What this model does to the image, which decides what it shows.
     pub fn role(self) -> crate::gui::knob_catalog::ModelRole {
         use crate::gui::knob_catalog::ModelRole;
@@ -661,6 +668,8 @@ impl SettingsModel {
             ModelRole::Erase
         } else if self.is_upscale() {
             ModelRole::Upscale
+        } else if self.is_colorize() {
+            ModelRole::Colorize
         } else {
             ModelRole::Filters
         }
@@ -693,7 +702,8 @@ impl SettingsModel {
             | Self::Nomos8kUpscale
             | Self::FourXNmkdSiaxCxUpscale
             | Self::FourXNmkdSuperscaleUpscale
-            | Self::Nomos2Upscale => None,
+            | Self::Nomos2Upscale
+            | Self::ColorizeDdcolor => None,
         }
     }
 
@@ -722,6 +732,7 @@ impl SettingsModel {
             Self::FourXNmkdSiaxCxUpscale => Some(prunr_models::ModelId::FourXNmkdSiaxCx),
             Self::FourXNmkdSuperscaleUpscale => Some(prunr_models::ModelId::FourXNmkdSuperscale),
             Self::Nomos2Upscale => Some(prunr_models::ModelId::FourXNomos2RealPlksr),
+            Self::ColorizeDdcolor => Some(prunr_models::ModelId::DdcolorTiny),
             Self::None => None,
         }
     }
@@ -738,6 +749,7 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::FourXNmkdSiaxCx => SettingsModel::FourXNmkdSiaxCxUpscale,
             ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
             ModelKind::FourXNomos2RealPlksr => SettingsModel::Nomos2Upscale,
+            ModelKind::DdcolorTiny => SettingsModel::ColorizeDdcolor,
             ModelKind::RealEsrganX2Plus => {
                 // RealEsrganX2Plus is never the user-selected active model — it
                 // runs for a 2x Real-ESRGAN upscale. This conversion is
@@ -1318,9 +1330,17 @@ mod tests {
     }
 
     #[test]
+    fn is_colorize_classifies_every_variant() {
+        for m in SettingsModel::ALL {
+            assert_eq!(m.is_colorize(), m == SettingsModel::ColorizeDdcolor, "{m:?}");
+            assert_eq!(m.role() == crate::gui::knob_catalog::ModelRole::Colorize, m.is_colorize(), "{m:?}");
+        }
+    }
+
+    #[test]
     fn upscale_inpaint_seg_mutually_exclusive() {
         for m in SettingsModel::ALL {
-            let count = [m.is_upscale(), m.is_inpaint(), m.uses_segmentation()]
+            let count = [m.is_upscale(), m.is_inpaint(), m.uses_segmentation(), m.is_colorize()]
                 .iter()
                 .filter(|&&b| b)
                 .count();

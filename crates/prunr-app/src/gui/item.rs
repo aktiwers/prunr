@@ -24,9 +24,34 @@ pub(crate) struct UpscaleCache {
 
 impl UpscaleCache {
     pub(crate) fn new(raw: Arc<image::RgbaImage>, input: Arc<image::RgbaImage>, reference: Option<Arc<image::RgbaImage>>) -> Self {
-        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        Self { raw, input, reference, run: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+        Self { raw, input, reference, run: next_run() }
     }
+}
+
+/// A colorize run kept for Strength: the predicted colour and the image
+/// it was predicted for.
+#[derive(Clone)]
+pub(crate) struct ColorizeCache {
+    pub(crate) plane: Arc<prunr_core::colorize::ColorPlane>,
+    pub(crate) input: Arc<image::RgbaImage>,
+    run: u64,
+}
+
+impl ColorizeCache {
+    pub(crate) fn new(plane: Arc<prunr_core::colorize::ColorPlane>, input: Arc<image::RgbaImage>) -> Self {
+        Self { plane, input, run: next_run() }
+    }
+
+    /// The image at `strength`.
+    pub(crate) fn render(&self, strength: f32) -> image::RgbaImage {
+        prunr_core::colorize::colorized(&self.input, &self.plane, strength)
+    }
+}
+
+/// A fresh id for a kept run, for the step it lands on to claim.
+fn next_run() -> u64 {
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A result's background for export, baked by `bake` (in a save thread
@@ -193,6 +218,7 @@ pub(crate) enum Engine {
     Segment,
     Erase,
     Upscale,
+    Colorize,
 }
 
 /// `selection` applied over `edits`: restored (made positive) or erased
@@ -398,6 +424,10 @@ pub(crate) struct BatchItem {
     /// plus as much again while AI blend or Color match keep the enlarged
     /// reference. Not under the tensor budget (`evictable_tensor_bytes`).
     pub(crate) upscale: Option<UpscaleCache>,
+    /// The last colorize run, so Strength re-renders it without a model
+    /// run. Kept and cleared like `upscale`. RAM: the 2 MB colour plane
+    /// and the input image (shared with the timeline when it is one).
+    pub(crate) colorize: Option<ColorizeCache>,
     /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
     /// whichever scale the user has picked without re-inferring).
     pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
@@ -605,6 +635,11 @@ impl BatchItem {
     /// and the stale buffer is from the wrong model.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
         self.upscale = None;
+    }
+
+    /// Clear the kept colorize run; same rules as the upscale one.
+    pub(crate) fn invalidate_colorize_cache(&mut self) {
+        self.colorize = None;
     }
 
     /// Clear the cached SAM encoder embedding. Called on source image
@@ -986,6 +1021,29 @@ impl BatchItem {
         model.is_upscale() && prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) == prunr_core::RequiredTier::UpscaleTier2
     }
 
+    /// A colorize lands: its step is recorded, and the run is kept for
+    /// Strength as that step's own.
+    pub(crate) fn land_colorize(&mut self, run: ColorizeCache) {
+        self.finish_job();
+        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
+            origin.colorize_run = Some(run.run);
+        }
+        self.colorize = Some(run);
+    }
+
+    /// The kept colorize run, when it is the shown step's own.
+    pub(crate) fn kept_colorize(&self) -> Option<&ColorizeCache> {
+        let shown = self.timeline.current().origin.as_ref().and_then(|o| o.colorize_run);
+        self.colorize.as_ref().filter(|run| shown == Some(run.run))
+    }
+
+    /// Whether only Strength changed since this step's own colorize, so
+    /// its kept run can be re-rendered.
+    pub(crate) fn strength_only_changed(&self, model: prunr_core::ModelKind) -> bool {
+        let (Some(_), Some(old)) = (self.kept_colorize(), &self.applied_recipe) else { return false };
+        prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) == prunr_core::RequiredTier::ColorizeTier2
+    }
+
     /// The kept upscale run, when it is the shown step's own.
     pub(crate) fn kept_upscale(&self) -> Option<&UpscaleCache> {
         let shown = self.timeline.current().origin.as_ref().and_then(|o| o.upscale_run);
@@ -1213,6 +1271,7 @@ impl BatchItem {
                 self.set_cached_tensor(None);
                 self.invalidate_edge_cache();
                 self.invalidate_upscale_cache();
+                self.invalidate_colorize_cache();
                 self.applied_recipe = None;
                 None
             }
@@ -1352,6 +1411,7 @@ impl BatchItem {
             applied_recipe: None,
             cached_tensor: None,
             upscale: None,
+            colorize: None,
             cached_edge_tensors: None,
             volatile_edge_tensor: None,
             volatile_seg_tensor: None,
@@ -1601,6 +1661,32 @@ mod tests {
         assert!(item.upscale.is_some());
         item.invalidate_upscale_cache();
         assert!(item.upscale.is_none());
+    }
+
+    /// The kept colorize run belongs to the step it landed on, and only a
+    /// Strength change since that step re-renders it.
+    #[test]
+    fn the_kept_colorize_run_belongs_to_its_step() {
+        let mut item = fixture_item(1);
+        let img = || Arc::new(image::RgbaImage::new(4, 4));
+        let plane = Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]);
+        let model = prunr_core::ModelKind::DdcolorTiny;
+        for _ in 0..2 {
+            item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+            item.result_rgba = Some(img());
+            item.applied_recipe = Some(item.settings.current_recipe(model));
+            item.land_colorize(ColorizeCache::new(Arc::clone(&plane), img()));
+        }
+        assert!(item.kept_colorize().is_some(), "the shown step's own run");
+        assert!(!item.strength_only_changed(model), "nothing changed yet");
+        item.settings.color_strength_pct = 50;
+        assert!(item.strength_only_changed(model));
+        item.undo_step();
+        assert!(item.kept_colorize().is_none(), "an earlier colorize step: the kept run is not its own");
+        item.redo_step();
+        assert!(item.kept_colorize().is_some());
+        item.invalidate_colorize_cache();
+        assert!(item.kept_colorize().is_none());
     }
 
     /// The kept upscale run belongs to the step it landed on: undo to an

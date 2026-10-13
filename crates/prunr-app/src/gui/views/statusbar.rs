@@ -28,6 +28,8 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         // the terse fallback for eyes off the canvas, without counters.
         let status_text = if app.processor.is_upscale_in_flight() {
             "Upscaling\u{2026}".to_string()
+        } else if app.processor.is_colorize_in_flight() {
+            "Adding color\u{2026}".to_string()
         } else if inpaint_busy {
             // Eraser dispatch lives outside the seg-pipeline status track,
             // so check it first — otherwise the "All done" branch wins.

@@ -31,6 +31,7 @@ pub enum Step {
     LoadingMagicBrush,
     FindingFaces,
     RestoringFaces,
+    Colorizing,
 }
 
 impl Step {
@@ -51,6 +52,7 @@ impl Step {
             Step::LoadingMagicBrush => "Loading Magic Brush",
             Step::FindingFaces => "Finding faces",
             Step::RestoringFaces => "Restoring faces",
+            Step::Colorizing => "Adding color",
         }
     }
 }

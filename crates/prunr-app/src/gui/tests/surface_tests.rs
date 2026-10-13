@@ -302,6 +302,26 @@ fn the_upscale_surfaces_name_every_control() {
     }
 }
 
+/// Colorize's Strength is a flyout: it names its slider and stays open
+/// while the canvas is used.
+#[test]
+fn the_colorize_strength_flyout_names_its_control_and_stays_open() {
+    use super::tree_tests::assert_all_controls_named;
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::ColorizeDdcolor;
+    settle(&mut h);
+    click(&mut h, "Strength");
+    assert!(egui::Popup::is_any_open(&h.ctx), "Strength opened");
+    assert_all_controls_named(&h, "Strength on the colorizer");
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    press(&mut h, CANVAS_POINT, false);
+    settle(&mut h);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the canvas click did not close it");
+    click(&mut h, "Strength");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "its chip closes it");
+}
+
 /// The SD eraser's Quality and Prompt popovers and Advanced flyout name
 /// every control, the prompts included.
 #[test]

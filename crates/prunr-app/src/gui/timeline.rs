@@ -37,6 +37,7 @@ pub(crate) enum StepKind {
     Edit,
     Erase,
     Upscale,
+    Colorize,
     Preset,
     Adjust,
 }
@@ -52,6 +53,7 @@ impl StepKind {
             StepKind::Edit => "Edit",
             StepKind::Erase => "Erase",
             StepKind::Upscale => "Upscale",
+            StepKind::Colorize => "Colorize",
             StepKind::Preset => "Preset",
             StepKind::Adjust => "Adjustment",
         }
@@ -285,6 +287,8 @@ pub(crate) struct Origin {
     /// The upscale run kept for Refine when this step is one
     /// (`UpscaleCache::run`), so another step never re-finishes it.
     pub(crate) upscale_run: Option<u64>,
+    /// The same for a colorize run (`ColorizeCache::run`).
+    pub(crate) colorize_run: Option<u64>,
     /// The seed a generated fill ran with, for Pin seed.
     pub(crate) seed: Option<u64>,
     /// The region an erase filled, so "Try another" can fill it again
@@ -296,7 +300,7 @@ impl Origin {
     /// A run of `engine` from `start` (`None`: the original), with no seed,
     /// kept upscale run or region.
     pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
-        Self { engine, start, upscale_run: None, seed: None, region: None }
+        Self { engine, start, upscale_run: None, colorize_run: None, seed: None, region: None }
     }
 }
 

@@ -74,6 +74,9 @@ pub enum ModelId {
     /// 4-step LCM LoRA fused in and the fixed removal prompt baked into
     /// the UNet (no text encoder). Runs through the SD pipeline.
     RoremFp16,
+    /// DDColor paper-tiny colorizer (fp32). OnDemand; predicts the
+    /// colour of a black-and-white photo. Apache-2.0.
+    DdcolorTiny,
 }
 
 impl ModelId {
@@ -121,6 +124,7 @@ impl ModelId {
         ModelId::FaceGfpgan,
         ModelId::FaceRestoreFormerPp,
         ModelId::RoremFp16,
+        ModelId::DdcolorTiny,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -151,6 +155,7 @@ impl ModelId {
             ModelId::FaceGfpgan => "face_gfpgan",
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
             ModelId::RoremFp16 => "rorem_fp16",
+            ModelId::DdcolorTiny => "ddcolor_tiny",
         }
     }
 
@@ -170,6 +175,8 @@ pub enum ModelCategory {
     /// Face restoration: a detector finds faces, a restorer redraws each
     /// one. Runs after the photo's own model, never in its place.
     Face,
+    /// Colorize: predicts colour for a black-and-white photo.
+    Colorize,
 }
 
 /// Hardware requirement for a model. Drives Model Store + dropdown
@@ -1037,6 +1044,34 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             uses_window_attention: false,
         }),
     },
+    ModelDescriptor {
+        id: ModelId::DdcolorTiny,
+        display_name: "DDColor",
+        description: "Colours a black-and-white photo. Strength sets how much of the predicted colour shows.",
+        category: ModelCategory::Colorize,
+        source: ModelSource::OnDemand {
+            filename: "ddcolor_paper_tiny.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/ddcolor_paper_tiny.onnx",
+            sha256: "5b4396ff19dbc9729a39fbebd6d7857dee6ff58a35d8820467efa168ecf7b17b",
+            size_mb: 270,
+            license: LicenseInfo {
+                author: "piddnad (Kang et al., ICCV 2023)",
+                license: "Apache-2.0",
+                license_url: "https://github.com/piddnad/DDColor/blob/master/LICENSE",
+                source_url: "https://github.com/piddnad/DDColor",
+            },
+            fp16: None,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
+        working_set_mb: 1600,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
     // SAM 2.1 Hiera Small: Magic Brush. Apache 2.0 from Meta.
     // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
     // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
@@ -1432,7 +1467,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
-        | ModelId::RoremFp16 => {
+        | ModelId::RoremFp16
+        | ModelId::DdcolorTiny => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1628,7 +1664,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
-        | ModelId::RoremFp16 => return None,
+        | ModelId::RoremFp16
+        | ModelId::DdcolorTiny => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1728,7 +1765,8 @@ mod tests {
                 | ModelId::Sam21HieraSmall
                 | ModelId::FaceGfpgan
                 | ModelId::FaceRestoreFormerPp
-                | ModelId::RoremFp16 => {}
+                | ModelId::RoremFp16
+                | ModelId::DdcolorTiny => {}
             }
         }
     }
@@ -2303,6 +2341,15 @@ mod tests {
             // returns None cleanly.
             let _ = model_fp16_bytes(id);
         }
+    }
+
+    #[test]
+    fn ddcolor_is_on_demand_colorize() {
+        let desc = descriptor(ModelId::DdcolorTiny).expect("DdcolorTiny in REGISTRY");
+        assert_eq!(desc.category, ModelCategory::Colorize);
+        assert!(matches!(desc.source, ModelSource::OnDemand { filename: "ddcolor_paper_tiny.onnx", .. }));
+        assert!(desc.upscale.is_none());
+        assert_eq!(descriptors_for(ModelCategory::Colorize).map(|d| d.id).collect::<Vec<_>>(), [ModelId::DdcolorTiny]);
     }
 
     // ── SAM 2.1 Hiera Small boundary tests ─────────────────────────────────

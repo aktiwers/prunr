@@ -33,12 +33,13 @@ pub enum ModelKind {
     FourXNmkdSiaxCx,
     FourXNmkdSuperscale,
     FourXNomos2RealPlksr,
+    DdcolorTiny,
 }
 
 impl ModelKind {
     pub fn is_upscale(self) -> bool {
         match self {
-            ModelKind::Silueta | ModelKind::U2net | ModelKind::BiRefNetLite => false,
+            ModelKind::Silueta | ModelKind::U2net | ModelKind::BiRefNetLite | ModelKind::DdcolorTiny => false,
             ModelKind::RealEsrganX4Plus
             | ModelKind::Nomos8kSchatL
             | ModelKind::RealEsrganX2Plus
@@ -61,6 +62,7 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::FourXNmkdSiaxCx => prunr_models::ModelId::FourXNmkdSiaxCx,
             ModelKind::FourXNmkdSuperscale => prunr_models::ModelId::FourXNmkdSuperscale,
             ModelKind::FourXNomos2RealPlksr => prunr_models::ModelId::FourXNomos2RealPlksr,
+            ModelKind::DdcolorTiny => prunr_models::ModelId::DdcolorTiny,
         }
     }
 }
@@ -68,7 +70,7 @@ impl From<ModelKind> for prunr_models::ModelId {
 impl TryFrom<prunr_models::ModelId> for ModelKind {
     type Error = prunr_models::ModelId;
 
-    /// Maps seg + upscale ModelIds to ModelKind. Inpaint / SD / TAESD /
+    /// Maps seg + upscale + colorize ModelIds to ModelKind. Inpaint / SD / TAESD /
     /// edge variants have no ModelKind mapping and return `Err(id)`;
     /// callers must filter by category first (e.g. via `is_upscale()`
     /// or `uses_segmentation()`) before reaching this conversion.
@@ -83,6 +85,7 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
             prunr_models::ModelId::FourXNmkdSiaxCx => Ok(ModelKind::FourXNmkdSiaxCx),
             prunr_models::ModelId::FourXNmkdSuperscale => Ok(ModelKind::FourXNmkdSuperscale),
             prunr_models::ModelId::FourXNomos2RealPlksr => Ok(ModelKind::FourXNomos2RealPlksr),
+            prunr_models::ModelId::DdcolorTiny => Ok(ModelKind::DdcolorTiny),
             other => Err(other),
         }
     }

@@ -197,6 +197,18 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Enlarge 4x, save photo_x4.png");
                     example_row(ui, toasts, "prunr --upscale realesrgan --scale 2 --restore-faces gfpgan portrait.jpg",
                         "Enlarge 2x and restore the faces");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Colorize");
+                    egui::Grid::new("cli_colorize_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--colorize", "Color a black-and-white photo with DDColor");
+                            opt_row(ui, "--color-strength <0-1.5>", "0 is grey, 1 the predicted colour (default 1)");
+                        });
+                    example_row(ui, toasts, "prunr --colorize old_photo.jpg",
+                        "Color it, save old_photo_color.png");
                 }
 
                 // ── Advanced ──

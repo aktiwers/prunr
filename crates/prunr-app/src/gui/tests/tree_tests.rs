@@ -100,6 +100,7 @@ fn each_model_toolbar_shows_only_its_chips() {
         ("Background", Surface::Background),
         ("Scale", Surface::Upscale),
         ("Refine", Surface::Upscale),
+        ("Strength", Surface::Colorize),
         ("Prompt", Surface::SdChips),
         ("Paint Brush", Surface::Brushes),
         ("Magic Brush", Surface::Brushes),
@@ -291,6 +292,26 @@ fn an_upscale_run_holds_its_scale_and_refine_chips() {
     }
 }
 
+
+/// While a colorize runs, Strength can't be touched, like Refine.
+#[test]
+fn a_colorize_run_holds_its_strength_chip() {
+    use crate::gui::settings::SettingsModel;
+    for running in [false, true] {
+        let mut harness = harness();
+        {
+            let app = harness.state_mut();
+            app.settings.model = SettingsModel::ColorizeDdcolor;
+            push_test_item(app, 1).status = BatchStatus::Done;
+            app.batch.select_item(0);
+            app.processor.set_colorize_in_flight_for_test(running);
+        }
+        settle(&mut harness);
+        let tree = tree(&harness);
+        let node = tree.iter().find(|n| n.name.as_deref() == Some("Strength")).expect("Strength shown");
+        assert_eq!(node.disabled, running, "Strength while running: {running}");
+    }
+}
 
 /// Each quick strip and the full panel its dots open name every control.
 #[test]
