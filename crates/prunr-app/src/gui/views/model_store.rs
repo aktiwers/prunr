@@ -97,19 +97,10 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
         let mut close = false;
         egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Model Store").size(19.0).color(theme::TEXT_PRIMARY));
-                    ui.label(RichText::new(format!(
-                        "Everything runs on this computer. Download what you need. {} on disk.",
-                        format_byte_size(disk_usage_bytes()),
-                    )).size(12.5).color(theme::TEXT_SECONDARY));
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
-                    close = super::chip::named(x, "Close Model Store").clicked();
-                });
-            });
+            close = super::chip::modal_header(ui, "Model Store", &format!(
+                "Everything runs on this computer. Download what you need. {} on disk.",
+                format_byte_size(disk_usage_bytes()),
+            ));
             ui.add_space(14.0);
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
@@ -256,12 +247,12 @@ fn render_card(
                 ui.painter().circle_filled(rect.center(), 18.0, theme::ACCENT_BRIGHT.gamma_multiply(0.18));
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(17.0), theme::GLOW);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(desc.display_name).size(14.0).strong().color(theme::TEXT_PRIMARY));
-                    ui.label(RichText::new(tag).size(11.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(desc.display_name).size(theme::FONT_SIZE_BODY).strong().color(theme::TEXT_PRIMARY));
+                    ui.label(RichText::new(tag).size(theme::FONT_SIZE_CAPTION).color(theme::TEXT_SECONDARY));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     let chevron = if open { ICON_EXPAND_LESS.codepoint } else { ICON_EXPAND_MORE.codepoint };
-                    ui.label(RichText::new(chevron).size(16.0).color(theme::TEXT_SECONDARY));
+                    ui.label(RichText::new(chevron).size(theme::FONT_SIZE_HEADING).color(theme::TEXT_SECONDARY));
                 });
             }).response;
             let details = ui.interact(top.rect, open_id.with("toggle"), egui::Sense::click())
@@ -270,9 +261,9 @@ fn render_card(
             if details.clicked() {
                 open = !open;
             }
-            ui.add(egui::Label::new(RichText::new(desc.description).size(12.5).color(theme::TEXT_PRIMARY.gamma_multiply(0.8))).wrap());
+            ui.add(egui::Label::new(RichText::new(desc.description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY.gamma_multiply(0.8))).wrap());
             if let Some(msg) = advisory {
-                ui.label(RichText::new(msg).size(12.0).color(ADVISORY_TEXT));
+                ui.label(RichText::new(msg).size(theme::FONT_SIZE_SECONDARY).color(ADVISORY_TEXT));
             }
             if open {
                 card_details(ui, desc, state);
@@ -291,7 +282,7 @@ fn render_card(
             let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
             ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let (meta, color) = card_meta(desc, state, advisory.is_some());
-                ui.label(RichText::new(meta).size(12.0).color(color));
+                ui.label(RichText::new(meta).size(theme::FONT_SIZE_SECONDARY).color(color));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(action, CardAction::Bundled) || (installed && action == CardAction::Delete) {
                         badge(ui, if action == CardAction::Bundled { "Ready" } else { "Installed" });
@@ -346,26 +337,26 @@ fn card_details(ui: &mut egui::Ui, desc: &ModelDescriptor, state: &DownloadState
     ui.add_space(theme::SPACE_XS);
     let line = |ui: &mut egui::Ui, key: &str, value: &str| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(key).size(12.0).color(theme::TEXT_SECONDARY));
-            ui.label(RichText::new(value).size(12.0).color(theme::TEXT_PRIMARY));
+            ui.label(RichText::new(key).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new(value).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY));
         });
     };
     match license {
         Some(l) => {
             line(ui, "License", l.license);
             line(ui, "Author", l.author);
-            ui.hyperlink_to(RichText::new("Source \u{2197}").size(12.0), l.source_url);
+            ui.hyperlink_to(RichText::new("Source \u{2197}").size(theme::FONT_SIZE_SECONDARY), l.source_url);
         }
         None => line(ui, "License", "Bundled with Prunr"),
     }
     if let DownloadState::Failed { error } = state {
-        ui.label(RichText::new(format!("Last attempt: {error}")).size(12.0).color(FAILED_TEXT));
+        ui.label(RichText::new(format!("Last attempt: {error}")).size(theme::FONT_SIZE_SECONDARY).color(FAILED_TEXT));
     }
 }
 
 fn badge(ui: &mut egui::Ui, text: &str) {
     egui::Frame::NONE.fill(READY_FILL).corner_radius(theme::PILL_RADIUS).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
-        ui.label(RichText::new(text).size(11.5).color(READY_TEXT));
+        ui.label(RichText::new(text).size(theme::FONT_SIZE_CAPTION).color(READY_TEXT));
     });
 }
 
