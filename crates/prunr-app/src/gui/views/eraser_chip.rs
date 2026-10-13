@@ -5,8 +5,9 @@ use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT,
+    BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE,
 };
+use prunr_core::inpaint_sd::ROREM_STEPS;
 use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
@@ -77,16 +78,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         hint(ui, "How closely the fill follows the prompt and avoids the negative prompt. 1 turns both off; higher follows closer but burns colors.");
         ui.add_space(theme::SPACE_XS);
 
-        let mut pinned = brush.sd_seed.is_some();
-        let seed_label = match brush.sd_seed {
-            Some(seed) => format!("Pin seed  \u{2026}{:06}", seed % 1_000_000),
-            None => "Pin seed".to_string(),
-        };
-        if chip::toggle_row(ui, &seed_label, &mut pinned).changed {
-            brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
-            committed = true;
-        }
-        hint(ui, "Keeps the seed of the fill on screen, so the same prompt and settings give that fill again.");
+        committed |= seed_row(ui, brush, shown_seed);
         ui.add_space(theme::SPACE_XS);
 
         let mut fast = brush.sd_use_taesd_effective_with_avail(taesd_installed);
@@ -96,6 +88,51 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             committed = true;
         }
         hint(ui, "About three times faster decoding at a slight quality cost.");
+    });
+    committed
+}
+
+/// Pin the seed of the fill on screen, or let each fill draw its own.
+fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
+    let mut pinned = brush.sd_seed.is_some();
+    let seed_label = match brush.sd_seed {
+        Some(seed) => format!("Pin seed  \u{2026}{:06}", seed % 1_000_000),
+        None => "Pin seed".to_string(),
+    };
+    let changed = chip::toggle_row(ui, &seed_label, &mut pinned).changed;
+    if changed {
+        brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
+    }
+    hint(ui, "Keeps the seed of the fill on screen, so the same settings give that fill again.");
+    changed
+}
+
+/// RORem's Advanced group: steps and seed. Its prompt is baked in, so
+/// there is nothing else to tell it.
+pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
+    let tuned = usize::from(brush.rorem_steps != ROREM_STEPS) + usize::from(brush.sd_seed.is_some());
+    let summary = chip::tuned_summary(tuned);
+    let group = GroupChip {
+        id_salt: "rorem_advanced",
+        icon: ICON_TUNE.codepoint,
+        label: "Advanced",
+        summary: &summary,
+        tooltip: "How the eraser generates the fill: steps and seed.",
+        tuned: tuned > 0,
+        width: theme::POPOVER_WIDTH,
+        live: false,
+    };
+    let mut committed = false;
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            brush.rorem_steps = ROREM_STEPS;
+            brush.sd_seed = None;
+            committed = true;
+        }
+        committed |= chip::slider_row(ui, "Steps", &mut brush.rorem_steps, ROREM_STEPS_RANGE).commit;
+        hint(ui, "More steps refine the fill and take longer; the model was trained for 4.");
+        ui.add_space(theme::SPACE_XS);
+        committed |= seed_row(ui, brush, shown_seed);
     });
     committed
 }

@@ -77,6 +77,9 @@ pub struct BrushSettings {
     /// SD-only: number of denoise steps, within `SdScheduler::steps_range`.
     #[serde(default = "default_sd_steps")]
     pub sd_steps: u32,
+    /// RORem only: its denoise steps, within `ROREM_STEPS_RANGE`.
+    #[serde(default = "default_rorem_steps")]
+    pub rorem_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
     /// random per stroke (the historical behavior).
     #[serde(default)]
@@ -202,6 +205,9 @@ fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string
 
 fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
 fn default_sd_steps() -> u32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).steps }
+fn default_rorem_steps() -> u32 { prunr_core::inpaint_sd::ROREM_STEPS }
+/// The steps RORem's chip offers around the 4 it was distilled for.
+pub const ROREM_STEPS_RANGE: std::ops::RangeInclusive<u32> = 2..=8;
 
 impl BrushSettings {
     pub fn stamp(&self) -> Stamp {
@@ -339,6 +345,7 @@ impl Default for BrushSettings {
             sd_guidance_scale: default_cfg(),
             sd_scheduler: default_sd_scheduler(),
             sd_steps: default_sd_steps(),
+            rorem_steps: default_rorem_steps(),
             sd_seed: None,
             sd_use_taesd: None,
             edge_feather: 0.0,
@@ -849,6 +856,7 @@ mod tests {
             sd_guidance_scale: 5.5,
             sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 30,
+            rorem_steps: 6,
             sd_seed: Some(42),
             sd_use_taesd: Some(true),
             edge_feather: 5.0,
