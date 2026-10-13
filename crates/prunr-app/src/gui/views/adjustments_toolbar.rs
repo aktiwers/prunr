@@ -334,12 +334,6 @@ pub(crate) fn render(
         }
     }));
 
-    // Inpaint mode: paint is the only input — auto-enable brush so
-    // the user doesn't have to click two buttons.
-    if change.model_changed && app_settings.model.is_inpaint() && !brush_state.is_enabled() {
-        brush_state.toggle();
-    }
-
     // Line-mode transition: record the signal + cache impact (deterministic
     // in `(from, to)`). The dispatcher owns dispatch resolution — folding a
     // worst-case here would dominate the refined fast path via `.max()`
