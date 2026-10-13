@@ -1302,7 +1302,7 @@ mod timeline_contract_tests {
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.input_transform = prunr_core::InputTransform::Grayscale;
         let ids = std::collections::HashSet::from([1]);
-        let tiers = app.classify_candidates(&ids, prunr_core::ModelKind::Silueta);
+        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta);
         assert!(tiers.tier_add_edge.is_empty(), "no lines composed onto the cached cut-out");
         assert!(tiers.tier1.contains(&1), "the lines run again on the whole photo");
     }
