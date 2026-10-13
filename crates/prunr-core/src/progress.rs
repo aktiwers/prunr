@@ -32,6 +32,7 @@ pub enum Step {
     FindingFaces,
     RestoringFaces,
     Colorizing,
+    EstimatingDepth,
 }
 
 impl Step {
@@ -53,6 +54,7 @@ impl Step {
             Step::FindingFaces => "Finding faces",
             Step::RestoringFaces => "Restoring faces",
             Step::Colorizing => "Adding color",
+            Step::EstimatingDepth => "Measuring depth",
         }
     }
 }
