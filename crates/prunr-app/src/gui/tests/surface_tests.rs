@@ -133,6 +133,21 @@ fn the_tool_strip_follows_the_paint_brush() {
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
 }
 
+/// Under an eraser both brushes carry the region knobs, since either
+/// paints the region the erase fills.
+#[test]
+fn an_erasers_magic_brush_strip_has_the_region_knobs() {
+    use super::tree_tests::names;
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::Inpaint;
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    let present = names(&h);
+    for knob in ["Expand region", "Feather"] {
+        assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
+    }
+}
+
 #[test]
 fn the_tool_strip_follows_the_magic_brush() {
     use super::tree_tests::{assert_all_controls_named, names};

@@ -215,15 +215,22 @@ impl BackgroundIO {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
             let style = key.1;
-            let patch = base.and_then(|(base_hash, base)| {
-                let (pos, image) = build_selection_patch(&base, &mask, style)?;
-                Some(SelectionImage::Patch { base_hash, pos, image })
-            });
-            let image = patch.unwrap_or_else(|| {
-                let feathered = style.feather(&mask, source.as_deref());
-                let shown = feathered.as_ref().unwrap_or(&mask);
-                SelectionImage::Full { image: build_selection_image(shown, style), feathered }
-            });
+            // An eraser's region reaches beyond the painted cells, so its
+            // overlay is rebuilt whole, from the reach rather than the paint.
+            let image = match style.shown_region(&mask) {
+                Some(reach) => SelectionImage::Full { image: build_selection_image(&reach, style), feathered: None },
+                None => {
+                    let patch = base.and_then(|(base_hash, base)| {
+                        let (pos, image) = build_selection_patch(&base, &mask, style)?;
+                        Some(SelectionImage::Patch { base_hash, pos, image })
+                    });
+                    patch.unwrap_or_else(|| {
+                        let feathered = style.feather(&mask, source.as_deref());
+                        let shown = feathered.as_ref().unwrap_or(&mask);
+                        SelectionImage::Full { image: build_selection_image(shown, style), feathered }
+                    })
+                }
+            };
             let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
             // Some compositors drop thread-initiated wake-ups while the
             // window is idle; the pending key's poll in `logic()` is the
@@ -246,6 +253,16 @@ pub(crate) struct SelectionStyle {
     /// Outline width in image pixels; 0 draws no outline.
     pub(crate) outline_thickness: f32,
     pub(crate) edge_feather_px: u32,
+    /// Under an eraser, the overlay shows the region the erase will
+    /// touch: the painted one grown, plus its blend band.
+    pub(crate) fill: Option<FillRegionPx>,
+}
+
+/// An eraser's Expand region and Feather, in image pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FillRegionPx {
+    pub(crate) grow: f32,
+    pub(crate) blend: f32,
 }
 
 impl SelectionStyle {
@@ -258,13 +275,20 @@ impl SelectionStyle {
             erase: s.brush_erases(),
             outline_thickness: if s.selection_outline { Self::OUTLINE_PX } else { 0.0 },
             edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
+            fill: s.model.is_inpaint().then_some(FillRegionPx { grow: s.brush.inpaint_grow, blend: s.brush.inpaint_feather }),
         }
+    }
+
+    /// Under an eraser, the plane the overlay draws for `mask`: what the
+    /// erase will touch. `None` shows `mask` as it is.
+    pub(crate) fn shown_region(&self, mask: &prunr_core::selection::MaskArtifact) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.fill.map(|f| Arc::new(prunr_core::inpaint_blend::fill_preview(mask, f.grow, f.blend)))
     }
 
     /// The default outline and no feather, with `fill_opacity`.
     #[cfg(test)]
     pub(crate) fn with_fill(fill_opacity: f32) -> Self {
-        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0 }
+        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0, fill: None }
     }
 
     /// The feathered selection, or `None` when this style shows `mask` as
@@ -380,6 +404,27 @@ mod tests {
 
     use super::*;
     use prunr_core::selection::{MaskArtifact, FULL};
+
+    /// Under an eraser the overlay shows the erase's reach, and the
+    /// region knobs are part of its key, so a change redraws it.
+    #[test]
+    fn an_erasers_region_knobs_shape_the_overlay() {
+        use crate::gui::settings::{Settings, SettingsModel};
+        let mut s = Settings { model: SettingsModel::BiRefNetLite, ..Default::default() };
+        assert_eq!(SelectionStyle::from_settings(&s).fill, None, "a cut-out shows the paint as it is");
+        s.model = SettingsModel::Inpaint;
+        let style = SelectionStyle::from_settings(&s);
+        assert_eq!(style.fill, Some(FillRegionPx { grow: s.brush.inpaint_grow, blend: s.brush.inpaint_feather }));
+        s.brush.inpaint_grow += 3.0;
+        assert_ne!(SelectionStyle::from_settings(&s), style, "a knob change is a new key");
+
+        let mut cells = vec![0i8; 9 * 9];
+        cells[4 * 9 + 4] = FULL;
+        let painted = MaskArtifact::from_cells(9, 9, cells);
+        let reach = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..style }.shown_region(&painted).expect("an eraser shows the reach");
+        assert_eq!(reach.cells()[4 * 9 + 3], FULL, "the overlay shows the grown region");
+        assert!(SelectionStyle::with_fill(0.5).shown_region(&painted).is_none());
+    }
 
     fn centre_block() -> MaskArtifact {
         let mut data = vec![0i8; 64];

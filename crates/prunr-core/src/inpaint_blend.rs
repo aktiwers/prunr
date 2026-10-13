@@ -59,6 +59,25 @@ pub fn fill_region(painted: &GrayImage, grow_px: f32, edge_blend_px: f32) -> Gra
     crate::inpaint::grow_mask(painted, (grow_px + edge_blend_px.max(0.0)).round() as i32)
 }
 
+/// What an erase of `painted` will touch, for the overlay to show before
+/// it runs: the painted region grown by `grow_px` at full strength, and
+/// the `edge_blend_px` band beyond it at half, where the fill is blended
+/// into the photo. The same `fill_region` the erase uses draws both.
+///
+/// Peak working set: two grey planes of the mask's size (1 B/px each)
+/// and the returned cells (1 B/px).
+pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge_blend_px: f32) -> crate::selection::MaskArtifact {
+    use crate::selection::{MaskArtifact, FULL};
+    let (w, h) = (painted.width, painted.height);
+    let region = painted.region_mask(w, h);
+    let core = fill_region(&region, grow_px, 0.0);
+    let reach = fill_region(&region, grow_px, edge_blend_px);
+    let cells = core.as_raw().iter().zip(reach.as_raw())
+        .map(|(&c, &r)| if c >= 128 { FULL } else if r >= 128 { FULL / 2 } else { 0 })
+        .collect();
+    MaskArtifact::from_cells(w, h, cells)
+}
+
 /// Bounding box of a region inside an image (top-left + size, all in pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bbox {
@@ -484,6 +503,26 @@ mod tests {
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba(rgba))
+    }
+
+    /// The preview shows the grown region at full strength and the
+    /// blend band beyond it at half, exactly as far as the erase reaches.
+    #[test]
+    fn fill_preview_shows_the_grown_region_and_the_blend_band() {
+        use crate::selection::{MaskArtifact, FULL};
+        let mut cells = vec![0i8; 11 * 11];
+        cells[5 * 11 + 5] = FULL;
+        let painted = MaskArtifact::from_cells(11, 11, cells);
+        let shown = fill_preview(&painted, 1.0, 1.0);
+        let at = |x: usize, y: usize| shown.cells()[y * 11 + x];
+        assert_eq!(at(5, 5), FULL);
+        assert_eq!(at(4, 5), FULL, "grown by one");
+        assert_eq!(at(3, 5), FULL / 2, "the blend band");
+        assert_eq!(at(2, 5), 0, "beyond the erase's reach");
+        let reach = fill_region(&painted.region_mask(11, 11), 1.0, 1.0);
+        let touched: Vec<bool> = reach.as_raw().iter().map(|&v| v >= 128).collect();
+        let previewed: Vec<bool> = shown.cells().iter().map(|&v| v != 0).collect();
+        assert_eq!(touched, previewed, "the preview covers what the erase touches, no more");
     }
     fn empty_mask(w: u32, h: u32) -> GrayImage {
         GrayImage::from_pixel(w, h, Luma([0]))
