@@ -171,8 +171,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             if let Some(target) = cancel_target_for(progress.kind, active_inpaint_item) {
                 match target {
                     CancelTarget::InpaintForItem(id) => app.cancel_inpaint_for(id),
-                    CancelTarget::Upscale => app.processor.cancel_upscale(),
-                    CancelTarget::Colorize => app.processor.cancel_colorize(),
+                    // The capsule counts the queued images too: its Cancel ends them all.
+                    CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
                 }
             }
