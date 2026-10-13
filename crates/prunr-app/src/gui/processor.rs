@@ -1498,7 +1498,6 @@ impl Processor {
     ///
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
-        self.clear_run_queue();
         // Esc and the model-change hook call this unconditionally.
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         if !self.upscale.cancel() {
@@ -1599,14 +1598,18 @@ impl Processor {
     /// Cancel the colorize run in flight. The model's one run is not
     /// interrupted; its result is dropped when it returns. Idempotent.
     pub(crate) fn cancel_colorize(&self) {
-        self.clear_run_queue();
         if self.colorize.cancel() {
             self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
         }
     }
 
-    /// Cancel the upscale or colorize in flight, whichever it is.
+    /// Cancel the upscale or colorize in flight, whichever it is, and
+    /// the images queued behind it: Esc, the capsule's Cancel and a model
+    /// change end the whole batch. An undo on one image cancels only its
+    /// own run (`cancel_upscale` / `cancel_colorize`) and leaves the
+    /// queue to the others.
     pub(crate) fn cancel_runs(&self) {
+        self.clear_run_queue();
         self.cancel_upscale();
         self.cancel_colorize();
     }
@@ -2279,6 +2282,8 @@ mod tests {
         p.set_upscale_in_flight_for_test(false);
         assert_eq!(p.next_queued_run(), Some(5));
         assert_eq!(p.queued_run_position(), Some((2, 3)));
+        p.cancel_upscale();
+        assert_eq!(p.next_queued_run(), Some(6), "one image's own cancel leaves the others queued");
         p.cancel_runs();
         assert_eq!(p.next_queued_run(), None, "cancel drops the queue");
         p.queue_runs(vec![9]);
