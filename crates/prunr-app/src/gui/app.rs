@@ -186,7 +186,7 @@ impl PrunrApp {
         );
         style.text_styles.insert(
             egui::TextStyle::Monospace,
-            egui::FontId::monospace(theme::FONT_SIZE_MONO),
+            egui::FontId::monospace(theme::FONT_SIZE_SECONDARY),
         );
         theme::apply_building_blocks(&mut style.visuals, &mut style.spacing);
         // Disable debug red-border warnings that fire on layout shifts
@@ -441,7 +441,7 @@ impl PrunrApp {
             result_switch_id: 0,
             pending_batch_sync: false,
             pending_open_dialog: false,
-            // Above the brush's modifier hint, which sits in the same corner.
+            // Clears the brush's modifier hint in the same corner.
             toasts: super::toasts::Toasts::new(
                 egui_notify::Anchor::BottomLeft,
                 egui::vec2(theme::SPACE_MD, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM + theme::SPACE_LG),
@@ -4428,8 +4428,7 @@ fn is_supported_image_ext(path: &Path) -> bool {
 
 /// The second toolbar row's panel, with or without an image loaded.
 fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
-    // The row is a chip plus SPACE_SM above and below: with no vertical
-    // margin the chips sat on the top rule.
+    // A chip with SPACE_SM above and below.
     let margin = egui::Margin::symmetric(theme::SPACE_SM as i8, theme::SPACE_SM as i8);
     egui::Panel::top("adjustments_toolbar")
         .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)

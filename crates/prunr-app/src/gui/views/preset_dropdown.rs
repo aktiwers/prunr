@@ -141,8 +141,8 @@ pub(crate) fn render(
                         |ui| {
                             // Delete — hidden for Prunr (non-deletable).
                             if !is_prunr {
-                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
-                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
+                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
+                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
                                 if crate::gui::views::chip::confirm_button(ui, delete_scope, &name, idle, armed, "Delete preset") {
                                     settings.presets.remove(&name);
                                     // Remove the on-disk file too; presets are
@@ -172,7 +172,7 @@ pub(crate) fn render(
                             };
                             let star_btn = ui.small_button(
                                 RichText::new(star_icon)
-                                    .size(theme::FONT_SIZE_MONO)
+                                    .size(theme::FONT_SIZE_SECONDARY)
                                     .color(star_color),
                             );
                             let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
@@ -198,7 +198,7 @@ pub(crate) fn render(
             ui.label(
                 RichText::new(format!("Default for new images: {}", settings.default_preset))
                     .color(theme::TEXT_HINT)
-                    .size(theme::FONT_SIZE_MONO),
+                    .size(theme::FONT_SIZE_SECONDARY),
             );
         },
     );
@@ -225,13 +225,13 @@ pub(crate) fn render(
                     ui.label(
                         RichText::new("\"Prunr\" is reserved — pick another name.")
                             .color(theme::DESTRUCTIVE)
-                            .size(theme::FONT_SIZE_MONO),
+                            .size(theme::FONT_SIZE_SECONDARY),
                     );
                 } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
                     ui.label(
                         RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
                             .color(theme::DESTRUCTIVE)
-                            .size(theme::FONT_SIZE_MONO),
+                            .size(theme::FONT_SIZE_SECONDARY),
                     );
                 }
 
@@ -256,7 +256,7 @@ pub(crate) fn render(
                     ui.label(
                         RichText::new("Or overwrite an existing preset:")
                             .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_MONO),
+                            .size(theme::FONT_SIZE_SECONDARY),
                     );
                     ui.add_space(theme::SPACE_XS);
                     egui::ScrollArea::vertical().max_height(OVERWRITE_LIST_HEIGHT).show(ui, |ui| {

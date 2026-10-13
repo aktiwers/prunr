@@ -29,7 +29,7 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
             ui.add_space(theme::SPACE_XS);
             ui.label(
                 RichText::new("You can install it later from Settings → Hardware.")
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(theme::SPACE_MD);

@@ -56,21 +56,21 @@ pub fn hint(ui: &mut egui::Ui, text: &str) {
         egui::Label::new(
             RichText::new(text)
                 .color(theme::HINT)
-                .size(theme::FONT_SIZE_HINT),
+                .size(theme::FONT_SIZE_CAPTION),
         )
         .wrap(),
     );
 }
 
 /// Two-column key/value row for use inside `egui::Grid::new(..).num_columns(2)`.
-/// Key uses monospace at FONT_SIZE_MONO; value uses sans at FONT_SIZE_BODY in
+/// Key uses monospace at FONT_SIZE_SECONDARY; value uses sans at FONT_SIZE_BODY in
 /// TEXT_PRIMARY. `key_color` lets callers pick TEXT_PRIMARY (CLI flags,
 /// shortcut keys) vs TEXT_SECONDARY (hardware labels).
 pub fn kv_row(ui: &mut egui::Ui, key: &str, value: &str, key_color: egui::Color32) {
     ui.label(
         RichText::new(key)
             .monospace()
-            .size(theme::FONT_SIZE_MONO)
+            .size(theme::FONT_SIZE_SECONDARY)
             .color(key_color),
     );
     ui.label(

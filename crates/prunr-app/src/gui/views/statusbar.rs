@@ -63,7 +63,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.label(
                 RichText::new(format!("{depth} undo"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
         }
@@ -73,7 +73,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.label(
                 RichText::new(format!("{pct}%"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
 
@@ -110,7 +110,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                         "Live editing applies to the viewed image only \u{2014} \
                          click Process to apply to all selected."
                     )
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
                 );
             }
@@ -123,7 +123,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.label(
                 RichText::new(format!("Backend: {backend_display}"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
 
