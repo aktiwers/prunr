@@ -82,6 +82,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Performance
 
+- Eraser (RORem) peaks at 15 GB of memory instead of 20.5 GB, at the same speed: its sessions run without ONNX Runtime's memory-pattern planning.
 - Edge shift runs in constant time per pixel: a 4K mask at the knob's 50 px limit went from 2.5 s to 16 ms, and 1 px from 52 ms to 16 ms.
 - Magic Brush decode (logits to a 4K selection) went from 147 ms to 8 ms per click.
 - The selection overlay uploads only the changed region per stroke instead of a full-size texture.
