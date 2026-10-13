@@ -195,6 +195,14 @@ fn ensure_warm_engine(
 /// An in-process model run, one at a time (upscale, colorize): its
 /// in-flight and cancel flags, the channel its result comes back on, and
 /// its warm engine.
+/// Images waiting for the whole-image run slot, and how far the queue is.
+#[derive(Default)]
+struct RunQueue {
+    waiting: std::collections::VecDeque<u64>,
+    started: u32,
+    total: u32,
+}
+
 struct RunSlot<R> {
     active: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -722,6 +730,10 @@ pub(crate) struct Processor {
     /// (Level3 for ESRGAN, Level2 for HAT); evicted on a switch away from
     /// the cached ModelKind and on full release.
     upscale: RunSlot<UpscaleResult>,
+    /// The images still to run after the one in flight, when Process was
+    /// pressed with several ticked: an upscale or colorize takes one image
+    /// at a time.
+    run_queue: Mutex<RunQueue>,
     /// Shared ORT `RunOptions` for the in-flight upscale session. The GUI
     /// thread calls `.terminate()` on this from `cancel_upscale()` to
     /// abort the running `Session::run` within ~50ms instead of waiting
@@ -790,6 +802,7 @@ impl Processor {
             inpaint_bridge_tx,
             inpaint_bridge_rx,
             upscale: RunSlot::new(),
+            run_queue: Mutex::new(RunQueue::default()),
             upscale_run_options: std::sync::OnceLock::new(),
             upscale_preview_tx,
             upscale_preview_rx,
@@ -1439,9 +1452,7 @@ impl Processor {
         // Clear any sticky terminate flag from the prior dispatch's cancel.
         let _ = run_options.unterminate();
         // The run shows "Loading the model" until the first tile reports.
-        let run = self.dispatch_progress.begin(
-            super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Upscale, prunr_core::Step::LoadingModel.label()),
-        );
+        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale));
         // Release stores in `begin` pair with the Acquire load in
         // `upscale::tiling::upscale_tiled` (cancel flag) and in
         // `is_upscale_in_flight` (active flag).
@@ -1515,6 +1526,7 @@ impl Processor {
     ///
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
+        self.clear_run_queue();
         // Esc and the model-change hook call this unconditionally.
         // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         if !self.upscale.cancel() {
@@ -1592,9 +1604,7 @@ impl Processor {
         }
         let level = prunr_core::upscale::pick_optimization_level(descriptor);
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
-        let run = self.dispatch_progress.begin(
-            super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Colorize, prunr_core::Step::LoadingModel.label()),
-        );
+        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize));
         let done = self.colorize.begin(run.clone());
         let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(Arc::clone(&self.colorize.cancel));
         let engine_slot = Arc::clone(&self.colorize.warm);
@@ -1617,6 +1627,7 @@ impl Processor {
     /// Cancel the colorize run in flight. The model's one run is not
     /// interrupted; its result is dropped when it returns. Idempotent.
     pub(crate) fn cancel_colorize(&self) {
+        self.clear_run_queue();
         if self.colorize.cancel() {
             self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
         }
@@ -1626,6 +1637,50 @@ impl Processor {
     pub(crate) fn cancel_runs(&self) {
         self.cancel_upscale();
         self.cancel_colorize();
+    }
+
+    fn run_queue(&self) -> std::sync::MutexGuard<'_, RunQueue> {
+        self.run_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Line up `ids` for the run slot, replacing any earlier queue.
+    pub(crate) fn queue_runs(&self, ids: Vec<u64>) {
+        let mut q = self.run_queue();
+        q.total = ids.len() as u32;
+        q.started = 0;
+        q.waiting = ids.into();
+    }
+
+    /// The next queued image, to dispatch now; none while a run is in
+    /// flight or the queue is empty.
+    pub(crate) fn next_queued_run(&self) -> Option<u64> {
+        if self.is_run_in_flight() {
+            return None;
+        }
+        let mut q = self.run_queue();
+        let next = q.waiting.pop_front()?;
+        q.started += 1;
+        Some(next)
+    }
+
+    /// Where the queue stands, as the capsule's outer count: none when
+    /// Process was pressed for one image.
+    fn queued_run_position(&self) -> Option<(u32, u32)> {
+        let q = self.run_queue();
+        (q.total > 1).then_some((q.started.max(1), q.total))
+    }
+
+    pub(crate) fn clear_run_queue(&self) {
+        *self.run_queue() = RunQueue::default();
+    }
+
+    /// A run's first snapshot: "Loading the model", counting images when
+    /// it is one of several queued.
+    fn queued_initial(&self, kind: super::dispatch_progress::ProgressKind) -> super::dispatch_progress::DispatchProgress {
+        let mut initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label());
+        initial.outer = self.queued_run_position();
+        initial.outer_unit = initial.outer.map(|_| prunr_core::Unit::Image);
+        initial
     }
 
     /// Drain finished colorize runs. Non-blocking.
@@ -2236,6 +2291,26 @@ mod tests {
         Processor::new(tx, rx)
     }
 
+
+    /// Queued images come out in order, one per free slot, counted for
+    /// the capsule; a cancel drops the rest.
+    #[test]
+    fn queued_runs_come_out_in_order_and_a_cancel_drops_them() {
+        let p = fixture();
+        assert_eq!(p.next_queued_run(), None);
+        p.queue_runs(vec![4, 5, 6]);
+        assert_eq!(p.next_queued_run(), Some(4));
+        assert_eq!(p.queued_run_position(), Some((1, 3)));
+        p.set_upscale_in_flight_for_test(true);
+        assert_eq!(p.next_queued_run(), None, "the slot is taken");
+        p.set_upscale_in_flight_for_test(false);
+        assert_eq!(p.next_queued_run(), Some(5));
+        assert_eq!(p.queued_run_position(), Some((2, 3)));
+        p.cancel_runs();
+        assert_eq!(p.next_queued_run(), None, "cancel drops the queue");
+        p.queue_runs(vec![9]);
+        assert_eq!(p.queued_run_position(), None, "one image counts nothing");
+    }
 
     #[test]
     fn drain_filters_stale_generations() {
