@@ -3,6 +3,13 @@
 
 // ── sRGB ↔ linear helpers ──────────────────────────────────────────────────
 
+/// `srgb_to_linear` of each 8-bit value, so per-pixel conversions skip
+/// the `powf`. Built from the same expression, so results are identical.
+fn srgb_u8_to_linear(v: u8) -> f32 {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|i| srgb_to_linear(i as f32 / 255.0)))[v as usize]
+}
+
 /// sRGB encoded → linear-light (IEC 61966-2-1).
 #[inline(always)]
 fn srgb_to_linear(v: f32) -> f32 {
@@ -75,12 +82,7 @@ fn lab_f_inv(t: f32) -> f32 {
 /// sRGB u8 pixel → CIE Lab (L in [0,100], a/b unbounded typical ±128).
 #[inline(always)]
 pub(crate) fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let (lr, lg, lb) = (
-        srgb_to_linear(r as f32 / 255.0),
-        srgb_to_linear(g as f32 / 255.0),
-        srgb_to_linear(b as f32 / 255.0),
-    );
-    let (x, y, z) = linear_rgb_to_xyz(lr, lg, lb);
+    let (x, y, z) = linear_rgb_to_xyz(srgb_u8_to_linear(r), srgb_u8_to_linear(g), srgb_u8_to_linear(b));
     let fx = lab_f(x / D65_X);
     let fy = lab_f(y / D65_Y);
     let fz = lab_f(z / D65_Z);
@@ -88,6 +90,13 @@ pub(crate) fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     let a = 500.0 * (fx - fy);
     let b_lab = 200.0 * (fy - fz);
     (l, a, b_lab)
+}
+
+/// The `L` of `srgb_to_lab`, without the colour channels' work.
+#[inline(always)]
+pub(crate) fn srgb_lightness(r: u8, g: u8, b: u8) -> f32 {
+    let (_, y, _) = linear_rgb_to_xyz(srgb_u8_to_linear(r), srgb_u8_to_linear(g), srgb_u8_to_linear(b));
+    116.0 * lab_f(y / D65_Y) - 16.0
 }
 
 /// CIE Lab → sRGB u8, clamped.
@@ -104,4 +113,16 @@ pub(crate) fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     let g = (linear_to_srgb(lg) * 255.0).clamp(0.0, 255.0) as u8;
     let b = (linear_to_srgb(lb) * 255.0).clamp(0.0, 255.0) as u8;
     (r, g, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lightness_is_the_l_of_the_full_conversion() {
+        for (r, g, b) in [(0, 0, 0), (255, 255, 255), (200, 40, 40), (12, 130, 250), (90, 160, 210)] {
+            assert_eq!(srgb_lightness(r, g, b), srgb_to_lab(r, g, b).0, "{r},{g},{b}");
+        }
+    }
 }
