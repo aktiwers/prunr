@@ -200,15 +200,6 @@ fn category_label(c: ModelCategory) -> (&'static str, &'static str) {
     }
 }
 
-/// The download size in MB, for a model that downloads.
-fn download_mb(desc: &ModelDescriptor) -> Option<u64> {
-    match desc.source {
-        ModelSource::OnDemand { size_mb, .. } => Some(size_mb as u64),
-        ModelSource::MultiPartOnDemand { parts, .. } => Some(parts.iter().map(|p| p.size_bytes).sum::<u64>() / (1024 * 1024)),
-        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => None,
-    }
-}
-
 /// One card: icon, name and kind; what it is for; and a footer with its
 /// size and what can be done with it. The name row opens the licence,
 /// author and source in place.
@@ -306,7 +297,7 @@ fn render_card(
 
 /// The footer's text: the size, or what the download is doing.
 fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (String, Color32) {
-    let size = download_mb(desc).map(|mb| format!("{mb} MB"));
+    let size = desc.size_mb().map(super::get_model::size_label);
     match state {
         DownloadState::InProgress { bytes_so_far, total_bytes } => {
             let pct = if *total_bytes > 0 { bytes_so_far * 100 / total_bytes } else { 0 };
@@ -415,12 +406,8 @@ pub fn render_license_dialog(
     id: ModelId,
 ) -> (bool, bool) {
     let Some(desc) = model_descriptor(id) else { return (true, false) };
-    let license = match desc.source {
-        ModelSource::MultiPartOnDemand { license, .. } => license,
-        ModelSource::OnDemand { license, .. } => license,
-        // Bundled variants never require acceptance — defensive, shouldn't reach here.
-        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => return (true, false),
-    };
+    // A bundled model was accepted at build time and never asks.
+    let Some(license) = desc.license() else { return (true, false) };
 
     let mut close_requested = false;
     let mut accepted = false;

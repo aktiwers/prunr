@@ -188,7 +188,7 @@ impl PrunrApp {
             .collect();
         if candidate_ids.is_empty() { return; }
         // A background image's result is released; a run may start from it.
-        for item in self.batch.items.iter_mut().filter(|i| candidate_ids.contains(&i.id)) {
+        for item in self.batch.in_set(&candidate_ids) {
             item.unpark_result();
         }
 

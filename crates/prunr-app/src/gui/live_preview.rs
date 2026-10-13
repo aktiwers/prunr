@@ -570,7 +570,7 @@ impl EdgePlaneKey {
             strength_bits: settings.line_strength.to_bits(),
             scale,
             thickness: u32::from(settings.edge_thickness),
-            fade_pct: if has_depth && settings.line_fade() > 0.0 { settings.line_fade_pct } else { 0 },
+            fade_pct: fade_pct(settings, has_depth),
         }
     }
 }
@@ -969,12 +969,19 @@ fn resolve_edge_mask(
     (Arc::clone(&dilated), EdgePlanes { base: built_base, dilated: Some(dilated) })
 }
 
+/// How much a render fades its lines, in percent: only where the depth
+/// map is there to fade them by. The plane cache key and the render read
+/// this one value, so a cached plane always matches what is drawn.
+fn fade_pct(settings: &ItemSettings, has_depth: bool) -> u8 {
+    if has_depth { settings.line_fade_pct.min(100) } else { 0 }
+}
+
 /// Fade with distance for a render of `inputs`, when it fades and the
 /// map is there.
 fn line_fade(inputs: &DispatchInputs) -> Option<LineFade<'_>> {
-    let amount = inputs.settings.line_fade();
     let depth = inputs.depth.as_ref()?;
-    (amount > 0.0).then_some(LineFade { depth: &depth.map, amount })
+    let pct = fade_pct(&inputs.settings, true);
+    (pct > 0).then(|| LineFade { depth: &depth.map, amount: f32::from(pct) / 100.0 })
 }
 
 #[cfg(test)]

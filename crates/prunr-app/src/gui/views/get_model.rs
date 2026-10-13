@@ -16,13 +16,14 @@ pub(crate) const BADGE: &str = "Get";
 pub(crate) fn name_and_size(id: ModelId) -> String {
     let Some(d) = descriptor(id) else { return format!("{id:?}") };
     match d.size_mb() {
-        Some(mb) => format!("{} \u{00b7} {}", d.display_name, size(mb)),
+        Some(mb) => format!("{} \u{00b7} {}", d.display_name, size_label(mb)),
         None => d.display_name.to_string(),
     }
 }
 
-fn size(mb: u32) -> String {
-    if mb >= 1000 { format!("{:.1} GB", f64::from(mb) / 1024.0) } else { format!("{mb} MB") }
+/// A download size the way every surface shows it: "168 MB", "2.0 GB".
+pub(crate) fn size_label(mb: u32) -> String {
+    super::format_byte_size(u64::from(mb) * 1024 * 1024)
 }
 
 /// "Get Depth Anything V2 Small · 94 MB", built once per model so a
@@ -40,7 +41,7 @@ fn words(id: ModelId) -> &'static (String, String) {
     static WORDS: OnceLock<Vec<(String, String)>> = OnceLock::new();
     let words = WORDS.get_or_init(|| {
         ModelId::ALL.iter().map(|&id| {
-            let size = descriptor(id).and_then(|d| d.size_mb()).map(size);
+            let size = descriptor(id).and_then(|d| d.size_mb()).map(size_label);
             let badge = match size {
                 Some(size) => format!("{BADGE} \u{00b7} {size}"),
                 None => BADGE.to_string(),
@@ -62,8 +63,8 @@ pub(crate) fn needs(feature: &str, id: ModelId) -> String {
 pub(crate) fn needs_one_of(feature: &str, what: &str, ids: &[ModelId]) -> String {
     let sizes: Vec<u32> = ids.iter().filter_map(|&id| descriptor(id)?.size_mb()).collect();
     match (sizes.iter().min(), sizes.iter().max()) {
-        (Some(lo), Some(hi)) if lo != hi => format!("{feature} needs {what}, {} to {}.", size(*lo), size(*hi)),
-        (Some(one), _) => format!("{feature} needs {what}, {}.", size(*one)),
+        (Some(lo), Some(hi)) if lo != hi => format!("{feature} needs {what}, {} to {}.", size_label(*lo), size_label(*hi)),
+        (Some(one), _) => format!("{feature} needs {what}, {}.", size_label(*one)),
         _ => format!("{feature} needs {what}."),
     }
 }
@@ -94,8 +95,8 @@ mod tests {
         assert!(badge_and_size(depth).starts_with("Get \u{00b7} "));
         assert_eq!(label(ModelId::Silueta), "Get Silueta", "a bundled model has no download size");
         assert_eq!(badge_and_size(ModelId::Silueta), "Get");
-        assert_eq!(size(2048), "2.0 GB");
-        assert_eq!(size(94), "94 MB");
+        assert_eq!(size_label(2048), "2.0 GB");
+        assert_eq!(size_label(94), "94 MB");
         let faces = needs_one_of("Faces", "a face model", &[ModelId::FaceGfpgan, ModelId::FaceRestoreFormerPp]);
         assert!(faces.starts_with("Faces needs a face model, ") && faces.contains(" to ") && faces.ends_with(" MB."), "{faces}");
         assert_eq!(store_request(depth).filter, Some(prunr_models::ModelCategory::Depth));

@@ -724,10 +724,20 @@ impl ClassifiedTiers {
 }
 
 impl BatchManager {
+    /// The items whose id is in `ids`, in batch order.
+    pub(crate) fn in_set<'a>(&'a mut self, ids: &'a HashSet<u64>) -> impl Iterator<Item = &'a mut BatchItem> + 'a {
+        self.items.iter_mut().filter(move |i| ids.contains(&i.id))
+    }
+
+    /// Whether any image has a decode, thumbnail or texture on its way.
+    pub(crate) fn has_pending_work(&self) -> bool {
+        self.items.iter().any(BatchItem::has_pending_work)
+    }
+
     /// Sort the images in `ids` by the run each needs (`BatchItem::run_tier`).
     pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind) -> ClassifiedTiers {
         let mut tiers = ClassifiedTiers::default();
-        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+        for item in self.in_set(ids) {
             match item.run_tier(model) {
                 RunTier::UpToDate => tiers.skip_count += 1,
                 RunTier::Full => { tiers.tier1.insert(item.id); }
@@ -748,7 +758,7 @@ impl BatchManager {
             item.applied_recipe = None;
         }
         let mut out = Vec::new();
-        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+        for item in self.in_set(ids) {
             let Some(ct) = &item.cached_tensor else { continue };
             match (ct.decompress(), item.source.load_bytes()) {
                 (Some(data), Ok(bytes)) => {
@@ -781,15 +791,12 @@ impl BatchManager {
     /// The work for full runs on the images in `ids`, in batch order;
     /// one whose file can't be read is left out.
     pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
-        self.items.iter_mut()
-            .filter(|i| ids.contains(&i.id))
-            .filter_map(BatchItem::full_run_work)
-            .collect()
+        self.in_set(ids).filter_map(BatchItem::full_run_work).collect()
     }
 
     /// The images in `ids` not under way wait their turn.
     pub(crate) fn mark_waiting(&mut self, ids: &HashSet<u64>) {
-        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id) && i.status != BatchStatus::Processing) {
+        for item in self.in_set(ids).filter(|i| i.status != BatchStatus::Processing) {
             item.status = BatchStatus::Pending;
         }
     }

@@ -629,11 +629,7 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     line_detail(ui, s, change);
     hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
     line_width(ui, s, change);
-    let mut fade = f32::from(s.line_fade_pct) / 100.0;
-    let faded = chip::slider_row_f32(ui, "Fade with distance", &mut fade, 0.0..=1.0, false, |v| fmt::off_or(v, 0.005, fmt::percent));
-    if faded.changed {
-        s.line_fade_pct = (fade * 100.0).round() as u8;
-    }
+    let faded = chip::slider_row_pct(ui, "Fade with distance", &mut s.line_fade_pct, |v| fmt::off_or(v, 0.005, fmt::percent));
     aggregate_knob(faded, StaticKnob::LineFade, change);
     hint(ui, "Lines lighten the farther away they are. Uses the depth model.");
 
@@ -1091,11 +1087,7 @@ fn render_background_chip(
                 BgKind::LensBlur => {
                     if let BgEffect::LensBlur { amount_pct } = bg_effect {
                         chip::panel_section(ui, "Lens blur", None);
-                        let mut amount = f32::from(*amount_pct) / 100.0;
-                        let r = chip::slider_row_f32(ui, "Blur amount", &mut amount, 0.0..=1.0, false, fmt::percent);
-                        if r.changed {
-                            *amount_pct = (amount * 100.0).round() as u8;
-                        }
+                        let r = chip::slider_row_pct(ui, "Blur amount", amount_pct, fmt::percent);
                         aggregate_knob(r, StaticKnob::BgEffect, change);
                         hint(ui, "Focused on the subject; the farther something is behind it, the softer. Uses the depth model.");
                     }
@@ -1294,7 +1286,7 @@ pub(super) fn render_model_dropdown(
         let info = model_info(app_settings.model);
         // A saved model that is no longer on disk says so on the face.
         let missing = !installed.has_model(app_settings.model);
-        let face = if missing { format!("{} \u{00b7} {}", info.name, super::get_model::BADGE) } else { info.name.to_string() };
+        let face: std::borrow::Cow<str> = if missing { format!("{} \u{00b7} {}", info.name, super::get_model::BADGE).into() } else { info.name.into() };
         let resp = chip::menu_chip_button(ui, info.icon, &face);
         // The chip is always named "Model"; the hint says what this one does.
         use crate::gui::knob_catalog::ModelRole;
@@ -1330,8 +1322,11 @@ pub(super) fn render_model_dropdown(
                 // A model not downloaded yet shows "Get" and its size; picking
                 // it opens the Model Store on its section.
                 let missing = id.filter(|_| !installed.has_model(variant));
-                let blurb = missing.map_or(info.blurb, super::get_model::badge_and_size);
-                let row = chip::choice_list_row(ui, info.icon, info.name, blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
+                let blurb = match missing {
+                    Some(id) => std::borrow::Cow::Borrowed(super::get_model::badge_and_size(id)),
+                    None => super::model_blurb(variant),
+                };
+                let row = chip::choice_list_row(ui, info.icon, info.name, &blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,
