@@ -581,9 +581,11 @@ impl PrunrApp {
         }
         if self.settings.model.is_inpaint() {
             let (with_region, without) = self.erase_targets();
-            for idx in with_region {
-                self.dispatch_inpaint_for_item(idx);
-            }
+            // One at a time through the same queue as upscales: a fill's
+            // working set can be most of the machine's RAM.
+            let ids = with_region.iter().map(|&idx| self.batch.items[idx].id).collect();
+            self.processor.queue_runs(ids);
+            self.dispatch_next_queued_run();
             if without > 0 {
                 self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
             }
@@ -607,7 +609,7 @@ impl PrunrApp {
             return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_inpaint() {
-            self.batch.any_target_can(BatchItem::has_painted_region)
+            can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(BatchItem::has_painted_region))
         } else {
             self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
         }
