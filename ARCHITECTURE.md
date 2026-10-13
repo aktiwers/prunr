@@ -25,7 +25,6 @@ crates/
     subprocess/            # IPC protocol, framing, parent-side manager
     gui/                   # egui app: coordinators, views/, automation/, tests/
 xtask/                     # fetch-models, install-runtime, golden diffs
-scripts/                   # Model export/conversion, prunrctl.py
 packaging/                 # AUR, Homebrew
 assets/                    # Icon, Info.plist, .desktop
 ```
@@ -70,7 +69,7 @@ Tests and outside tools drive the app through **the control tree**: the AccessKi
 
 **In tests**, `egui_kittest` runs the real `PrunrApp` without a display; tests find controls by name, click, step frames and assert on state. `gui/tests/tree_tests.rs` renders every surface and fails on any nameless control, so the naming rule enforces itself.
 
-**At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (client: `scripts/prunrctl.py`). Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
+**At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost. Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
 
 ## Progress
 
