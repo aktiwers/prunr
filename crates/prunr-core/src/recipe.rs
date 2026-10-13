@@ -10,7 +10,7 @@ use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEf
 /// Tier 1: settings that require AI model inference.
 ///
 /// `line_strength` and `solid_line_color` are NOT here — those are applied
-/// AFTER DexiNed in the edge postprocess stage and live in `EdgeRecipe`.
+/// AFTER TEED in the edge postprocess stage and live in `EdgeRecipe`.
 /// This lets a `line_strength` tweak fire a Tier 2 (EdgeRerun) instead of
 /// a full re-inference, as long as the cached edge tensor is still valid
 /// (i.e. `uses_edge_detection` hasn't changed).
@@ -22,16 +22,16 @@ pub struct InferenceRecipe {
     /// Whether edge detection model runs (true when line_mode is not Off).
     pub uses_edge_detection: bool,
     /// Pre-inference image transform. Changing this invalidates the edge
-    /// tensor cache because DexiNed sees different input.
+    /// tensor cache because TEED sees different input.
     pub input_transform: InputTransform,
 }
 
-/// Tier 2 (edge variant): settings re-applied to the cached DexiNed tensor.
+/// Tier 2 (edge variant): settings re-applied to the cached TEED tensor.
 /// Changes here trigger an EdgeRerun, not a full pipeline — ~20-100ms vs 200ms-10s.
 ///
-/// `edge_scale` lives here (not in `InferenceRecipe`) because all 4 scales are
-/// extracted from a single DexiNed run; switching between them is a tensor
-/// lookup, not a new inference.
+/// `edge_scale` lives here (not in `InferenceRecipe`) because every scale is
+/// kept from the one line-detection pass; switching between them is a
+/// tensor lookup, not a new inference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EdgeRecipe {
     pub line_strength_bits: u32,
@@ -251,7 +251,7 @@ impl ColorizeRecipe {
 /// These can be applied without re-running inference or masking.
 ///
 /// `solid_line_color` deliberately lives in `EdgeRecipe`, not here — a
-/// line-colour change is an EdgeRerun (re-threshold the cached DexiNed
+/// line-colour change is an EdgeRerun (re-threshold the cached TEED
 /// tensor), never a composite-only repaint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct CompositeRecipe {
@@ -302,11 +302,11 @@ pub enum RequiredTier {
     ColorizeTier2,
     /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
     MaskRerun,
-    /// Edge settings changed — re-threshold cached DexiNed tensor (~20-100ms).
+    /// Edge settings changed — re-threshold cached TEED tensor (~20-100ms).
     EdgeRerun,
     /// Turning edge detection on while the segmentation side is unchanged.
-    /// Reuse the cached seg tensor, run only DexiNed on the masked image,
-    /// compose (~DexiNed inference time, no seg re-inference).
+    /// Reuse the cached seg tensor, run only TEED on the masked image,
+    /// compose (~TEED inference time, no seg re-inference).
     AddEdgeInference,
     /// Model / mode changed — full pipeline needed.
     FullPipeline,
@@ -346,7 +346,7 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
         }
         match (old.inference.uses_edge_detection, new.inference.uses_edge_detection) {
             // Enabling edges (or already on with `input_transform` flipped):
-            // seg tensor cached → skip seg inference, run DexiNed on the
+            // seg tensor cached → skip seg inference, run TEED on the
             // masked image. Lines over the whole photo have no cut-out to
             // build on, so they rerun whole.
             (false, true) | (true, true) if new.inference.uses_segmentation => return RequiredTier::AddEdgeInference,
@@ -357,7 +357,7 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
             (true, false) => return RequiredTier::MaskRerun,
             // Both edges off: only `input_transform` could differ here, and
             // it's dead state with edges off (the field's only effect is on
-            // the DexiNed input). Fall through to mask/edge/composite checks
+            // the TEED input). Fall through to mask/edge/composite checks
             // so a simultaneous mask/edge/composite change still wins; if
             // nothing else changed the bottom of the function returns Skip.
             (false, false) => {}
@@ -510,12 +510,17 @@ mod tests {
 
     #[test]
     fn edge_scale_change_edge_rerun() {
-        // Scale change picks a different cached output from the same DexiNed
-        // run — an EdgeRerun (pick a different tensor), never FullPipeline.
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.edge.edge_scale = EdgeScale::Bold;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
+        // Every scale is cached, Fine's larger run included, so any switch
+        // is an EdgeRerun (pick a different tensor), never FullPipeline.
+        for from in EdgeScale::ALL {
+            for to in EdgeScale::ALL.into_iter().filter(|&s| s != from) {
+                let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
+                a.edge.edge_scale = from;
+                let mut b = a.clone();
+                b.edge.edge_scale = to;
+                assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun, "{from:?} → {to:?}");
+            }
+        }
     }
 
     #[test]
@@ -629,8 +634,8 @@ mod tests {
     fn input_transform_change_with_edges_on_is_add_edge_inference() {
         // Per InferenceRecipe.input_transform doc-comment: changing the
         // pre-inference image transform invalidates the edge tensor cache
-        // because DexiNed sees different input. With seg + edges both on
-        // and the model unchanged, the tier must re-run DexiNed only —
+        // because TEED sees different input. With seg + edges both on
+        // and the model unchanged, the tier must re-run TEED only —
         // seg tensor stays valid because seg is run on the original image
         // before the transform reaches the edge leg.
         let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
@@ -697,7 +702,7 @@ mod tests {
                 r
             }, RequiredTier::FullPipeline),
             // input_transform with edges off both sides: dead state (the
-            // field only affects the DexiNed input), so output is bit-
+            // field only affects the TEED input), so output is bit-
             // identical → Skip rather than MaskRerun.
             ("input_transform alone, edges off → skip", base.clone(), {
                 let mut r = base.clone();

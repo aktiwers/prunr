@@ -68,7 +68,7 @@ use crate::gui::worker::CompressedTensor;
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
-/// different cached tensors (segmentation vs DexiNed) and different pipeline
+/// different cached tensors (segmentation vs TEED) and different pipeline
 /// stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn edge_planes_keep_bold_and_the_newest_other_scale() {
-        use prunr_core::EdgeScale::{Balanced, Bold, Fine};
+        use prunr_core::EdgeScale::{Bold, Fine, Fused};
         let key = |scale, thickness| EdgePlaneKey { strength_bits: 1, scale, thickness };
         let plane = || Some(Arc::new(GrayImage::new(1, 1)));
         let built = || EdgePlanes { base: plane(), dilated: plane() };
@@ -911,11 +911,11 @@ mod tests {
         assert!(cache.lookup(key(Bold, 2)).dilated.is_some());
         let thicker = cache.lookup(key(Fine, 3));
         assert!(thicker.base.is_some() && thicker.dilated.is_none(), "a thickness change keeps only the base");
-        cache.store(EdgePlanes::default(), key(Balanced, 2));
+        cache.store(EdgePlanes::default(), key(Fused, 2));
         assert!(cache.lookup(key(Fine, 2)).base.is_some(), "a dispatch that built nothing evicts nothing");
-        cache.store(built(), key(Balanced, 2));
+        cache.store(built(), key(Fused, 2));
         assert!(cache.lookup(key(Fine, 2)).base.is_none(), "a new scale replaces the old one");
-        assert!(cache.lookup(key(Bold, 2)).base.is_some() && cache.lookup(key(Balanced, 2)).base.is_some(), "Bold stays");
+        assert!(cache.lookup(key(Bold, 2)).base.is_some() && cache.lookup(key(Fused, 2)).base.is_some(), "Bold stays");
     }
     use std::sync::Mutex;
 
@@ -1354,14 +1354,18 @@ mod tests {
         use crate::gui::item_settings::ItemSettings;
         use prunr_core::{ComposeMode, EdgeInferenceResult, EdgeScale, LineMode, LineStyle};
         let (th, tw) = (12u32, 16u32);
-        let pattern = |seed: usize| -> Vec<f32> {
-            (0..(th * tw) as usize).map(|i| if (i * 7 + seed * 3) % 5 < 2 { 6.0 } else { -6.0 }).collect()
+        let pattern = |scale: EdgeScale| -> Vec<f32> {
+            let (sh, sw) = prunr_core::edge_scale_dims(scale, th, tw);
+            (0..(sh * sw) as usize).map(|i| if (i * 7 + scale as usize * 3) % 5 < 2 { 0.9 } else { 0.0 }).collect()
         };
-        let res = EdgeInferenceResult { tensors: std::array::from_fn(pattern), height: th, width: tw };
+        let res = EdgeInferenceResult { tensors: EdgeScale::ALL.map(pattern), height: th, width: tw };
         let (w, h) = (40u32, 30u32);
         let photo = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 6) as u8, (y * 8) as u8, 90])));
         let subject = Arc::new(RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 90, if x > 10 { 255 } else { 40 }])));
-        let tensor = |scale: EdgeScale| EdgeTensor { data: Arc::new(res.tensors[scale as usize].clone()), height: th, width: tw };
+        let tensor = |scale: EdgeScale| {
+            let (height, width) = res.dims(scale);
+            EdgeTensor { data: Arc::new(res.tensors[scale as usize].clone()), height, width }
+        };
 
         let cases = LineStyle::ALL.iter().flat_map(|style| {
             ComposeMode::ALL.iter().map(move |c| (LineMode::SubjectOutline, *style, *c))

@@ -75,7 +75,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.0)]
     pub feather: f32,
 
-    /// Extract lines/edges instead of removing background (uses DexiNed model).
+    /// Extract lines/edges instead of removing background (uses TEED model).
     #[arg(long)]
     pub lines: bool,
 
@@ -101,8 +101,9 @@ pub struct Cli {
     #[arg(long)]
     pub line_color: Option<String>,
 
-    /// DexiNed output scale: `fine` (micro-edges), `balanced` (mid-scale),
-    /// `bold` (abstract outlines), `fused` (default, combined).
+    /// Line scale: `fine` (thin, detailed lines), `bold` (big outlines
+    /// only), `fused` (default, every scale combined). `balanced` is read
+    /// as `fused`.
     #[arg(long, default_value_t = prunr_core::EdgeScale::Fused)]
     pub line_scale: prunr_core::EdgeScale,
 
@@ -1467,6 +1468,15 @@ mod tests {
         let old = super::Cli::try_parse_from(["prunr", "--line-strength", "0.2", "x.png"]).unwrap();
         assert_eq!(old.line_strength, 0.2);
         assert!(super::Cli::try_parse_from(["prunr", "--line-composition", "inverse", "x.png"]).is_err());
+    }
+
+    /// Scripts written for the retired Balanced scale keep working.
+    #[test]
+    fn line_scale_balanced_reads_as_fused() {
+        let a = super::Cli::try_parse_from(["prunr", "--line-scale", "balanced", "x.png"]).unwrap();
+        assert_eq!(a.line_scale, prunr_core::EdgeScale::Fused);
+        let fine = super::Cli::try_parse_from(["prunr", "--line-scale", "fine", "x.png"]).unwrap();
+        assert_eq!(fine.line_scale, prunr_core::EdgeScale::Fine);
     }
 
     /// Every Mask panel knob has a flag: Feather and Edge width reach the

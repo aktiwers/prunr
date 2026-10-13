@@ -1,4 +1,4 @@
-//! Phase 23-03: every `LineMode` variant runs the DexiNed edge-detection
+//! Phase 23-03: every `LineMode` variant runs the TEED edge-detection
 //! path end-to-end and produces a structurally-valid result. Plus
 //! representative samples across `EdgeScale`, `ComposeMode`, and
 //! `LineStyle` so a refactor that breaks one combo without breaking the
@@ -28,7 +28,7 @@ fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyl
     }
 }
 
-/// `LineMode::Off` runs the segmentation pipeline only — no DexiNed
+/// `LineMode::Off` runs the segmentation pipeline only — no TEED
 /// inference. Already covered by golden_e2e + bg_effect; this test pins
 /// "no error, dimensions match" for the LineMode::Off branch directly.
 #[test]
@@ -44,7 +44,7 @@ fn line_mode_off_runs_seg_only() {
     assert_eq!(result.rgba_image.dimensions(), (256, 256));
 }
 
-/// `LineMode::EdgesOnly` runs DexiNed on the source and finalizes lines
+/// `LineMode::EdgesOnly` runs TEED on the source and finalizes lines
 /// without segmentation. Tests the standalone edge path.
 #[test]
 fn line_mode_edges_only_produces_lines_from_source() {
@@ -56,7 +56,7 @@ fn line_mode_edges_only_produces_lines_from_source() {
     assert_eq!(out.dimensions(), (256, 256));
 }
 
-/// `LineMode::SubjectOutline` runs segmentation + DexiNed and composites
+/// `LineMode::SubjectOutline` runs segmentation + TEED and composites
 /// edges within the subject only. Exercises the full two-engine pipeline.
 #[test]
 fn line_mode_subject_outline_combines_seg_and_edge() {

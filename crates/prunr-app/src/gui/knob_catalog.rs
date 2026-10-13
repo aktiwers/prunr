@@ -34,7 +34,7 @@ pub enum StaticKnob {
     FillStyle,
     BgEffect,
 
-    // Edge tier — cached DexiNed tensor reused.
+    // Edge tier — cached TEED tensor reused.
     LineStrength,
     EdgeThickness,
     EdgeScale,
@@ -104,7 +104,7 @@ impl StaticKnob {
 }
 
 /// Context-sensitive event: line-mode transition. Dispatch depends on
-/// whether the DexiNed tensor is cached — `line_mode_spec` consumes it.
+/// whether the TEED tensor is cached — `line_mode_spec` consumes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineModeChange {
     pub from: LineMode,
@@ -393,12 +393,12 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
 /// Precise spec for a line-mode transition.
 ///
 /// `cached_edge` gates the `Off → SubjectOutline` fast path: with the
-/// DexiNed tensor in memory we recompose via live-preview; otherwise we
-/// rerun DexiNed on the cached seg (AddEdgeInference subprocess).
+/// TEED tensor in memory we recompose via live-preview; otherwise we
+/// rerun TEED on the cached seg (AddEdgeInference subprocess).
 ///
-/// Transitions to/from `Off` preserve the DexiNed tensor — `Off` doesn't
+/// Transitions to/from `Off` preserve the TEED tensor — `Off` doesn't
 /// use it. `SubjectOutline ↔ EdgesOnly` invalidates edge cache because
-/// DexiNed sees different input (masked-subject vs raw scene).
+/// TEED sees different input (masked-subject vs raw scene).
 pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
     use CacheImpact::*;
     use DispatchKind::*;
@@ -428,7 +428,7 @@ pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
 }
 
 /// Precise spec for an input-transform change. With a cached seg tensor
-/// we reuse it and rerun DexiNed only; otherwise a full pipeline is needed.
+/// we reuse it and rerun TEED only; otherwise a full pipeline is needed.
 pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
     use CacheImpact::EdgeCache;
     use DispatchKind::{SubprocessAddEdge, SubprocessFullPipeline};
@@ -705,7 +705,7 @@ mod tests {
     /// If a caller folds the cold dispatch into an aggregate and the
     /// dispatcher then `.max()`es in the refined warm dispatch, the warm
     /// fast path is silently poisoned — every Off→Subject toggle takes the
-    /// subprocess path, spawning a cold DexiNed rerun on each flip. Guard
+    /// subprocess path, spawning a cold TEED rerun on each flip. Guard
     /// by asserting the ordering explicitly so the bug can't return.
     #[test]
     fn cold_line_mode_dispatch_outranks_warm_under_max() {
@@ -1014,7 +1014,7 @@ mod tests {
         );
 
         // Off → SubjectOutline: seg valid, edge tensor still valid (Off
-        // didn't run DexiNed). Cache stays Nothing.
+        // didn't run TEED). Cache stays Nothing.
         let mut to_subject = base.clone();
         to_subject.inference.uses_edge_detection = true;
         assert_eq!(

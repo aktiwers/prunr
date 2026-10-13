@@ -136,10 +136,10 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 
 | Tier | When | Work |
 |------|------|------|
-| `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes DexiNed's input | Full inference |
-| `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | DexiNed only |
+| `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes TEED's input | Full inference |
+| `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | TEED only |
 | `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
-| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
+| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached TEED tensor |
 | `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
 | `ColorizeTier2` | Colorize Strength (a colorizer change is a model change) | Re-render the kept colour plane at the new strength |
 | `CompositeOnly` | Background colour or image | Render-time only |
@@ -147,7 +147,7 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 
 The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on the item, so a result landing after a settings edit is stamped with what actually ran.
 
-**Two tensor caches.** The seg tensor and the DexiNed tensors are separate zstd-compressed fields on the item, so a model swap invalidates only one and a line-mode change only the other; both share a 512 MB budget, evicted in batch order, the selected item exempt.
+**Two tensor caches.** The seg tensor and the TEED tensors are separate zstd-compressed fields on the item, so a model swap invalidates only one and a line-mode change only the other; both share a 512 MB budget, evicted in batch order, the selected item exempt.
 
 **Batch vs interactive Tier 2.** Batch reruns go through the subprocess (a mask rerun with lines on takes the AddEdge path so the outline is recomposed; edge reruns run the full pipeline). Interactive reruns of the selected item run in-process; see [Live Preview](#live-preview).
 
@@ -169,9 +169,9 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 | `LineStyle` | Edge colouring (solid, gradients, rainbow, noise, DualScale, …) | EdgeRerun |
 | `FillStyle` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
 | `BgEffect` | Source-derived backdrop baked into transparent areas | MaskRerun |
-| `InputTransform` | Transform of DexiNed's input | AddEdgeInference |
+| `InputTransform` | Transform of TEED's input | AddEdgeInference |
 
-`DualScale` draws the Fine and Bold DexiNed scales at once. The Bold tensor is decompressed only while it is on, and never replaces the hot active-scale tensor, so the next edge tweak still hits the cache.
+`DualScale` draws the Fine and Bold TEED scales at once. The Bold tensor is decompressed only while it is on, and never replaces the hot active-scale tensor, so the next edge tweak still hits the cache.
 
 ### Selection and brushes
 
@@ -270,7 +270,7 @@ One gate, `prunr_core::inpaint_sd::check_ram_for`, run by the process that runs 
 ### Segmentation batch
 
 ```
-UI      resolve_tier per item → skip | RePostProcess (cached tensor) | DexiNed-only | full pipeline
+UI      resolve_tier per item → skip | RePostProcess (cached tensor) | TEED-only | full pipeline
         archive results, snapshot dispatch recipe, admit full-pipeline items
 bridge  inputs / tensors / chain input → IPC temp files → commands
 worker  ImageDone { result, tensor + edge cache paths }
@@ -347,9 +347,9 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 - **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms. OpenVINO checks only between tiles, so its tiles are capped at 256: on an HD 530 a cancel lands in 11 s instead of 51 s, for 5 % more run time.
 - **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
 
-## Edge Detection (DexiNed)
+## Edge Detection (TEED)
 
-`EdgeEngine` owns its own DexiNed session. Input is 640×480 BGR with mean subtraction, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
+`EdgeEngine` owns its own TEED session (58 k parameters). Input is 640×480 BGR with mean subtraction, whatever the photo's aspect, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
 
 | `LineMode` | Label | Behaviour |
 |------------|-------|-----------|
@@ -357,7 +357,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 | `EdgesOnly` | Full | Skip segmentation; lines of the whole image |
 | `SubjectOutline` | Subject | Segment first, then draw lines over the masked subject |
 
-**One inference, four scales.** `Fine`, `Balanced`, `Bold` and `Fused` are DexiNed's `block0`, `block3`, `block5` and `block_cat`, and `EdgeEngine::new` rejects any other output layout. All four tensors are kept zstd-compressed on the item, so a scale switch costs a decompress (`EdgeRerun`), never an inference.
+**Two runs, three scales.** `Bold` and `Fused` are TEED's `out_3` and `block_cat` from the 640×480 run; `Fine` is `block_cat` from a second run at 1280×960, so its lines are half as wide. TEED's sigmoid floor is not 0 (≈ 0.44 on `block_cat`), so each plane is stretched min..max to 0..1 as TEED's own inference does, with the range floored so a flat image does not stretch its noise into lines; the cached planes hold these probabilities. All three are kept zstd-compressed on the item, so a scale switch costs a decompress (`EdgeRerun`), never an inference.
 
 **Live-preview plane caches.** A Lines tweak redoes only the stage whose inputs changed:
 
@@ -463,7 +463,7 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 
 | Source | Models |
 |--------|--------|
-| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, DexiNed |
+| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
 | `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |

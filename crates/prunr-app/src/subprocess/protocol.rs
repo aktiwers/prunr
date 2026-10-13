@@ -65,7 +65,7 @@ pub enum SubprocessCommand {
         /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
     },
-    /// AddEdgeInference tier: seg tensor is cached, run only DexiNed on the
+    /// AddEdgeInference tier: seg tensor is cached, run only TEED on the
     /// masked image and compose. Used for Off → SubjectOutline transitions so
     /// enabling the outline doesn't re-run seg inference.
     AddEdgeInference {
@@ -170,11 +170,12 @@ pub enum SubprocessEvent {
         tensor_cache_path: Option<std::path::PathBuf>,
         tensor_cache_height: Option<u32>,
         tensor_cache_width: Option<u32>,
-        /// Path to cached DexiNed edge tensor (full-resolution f32, pre-threshold).
+        /// Path to cached TEED edge planes (f32 probabilities, pre-threshold).
         /// Parent compresses and stores for Tier 2 edge reruns on line_strength tweaks.
-        /// Only present when the run used DexiNed (EdgesOnly or SubjectOutline modes).
+        /// Only present when the run used TEED (EdgesOnly or SubjectOutline modes).
         #[serde(default)]
         edge_cache_path: Option<std::path::PathBuf>,
+        /// Base plane size; each scale's own size is `edge_scale_dims`.
         #[serde(default)]
         edge_cache_height: Option<u32>,
         #[serde(default)]
@@ -295,7 +296,7 @@ pub enum IpcKind {
     Orig,
     /// Seg worker → parent: composited RGBA result.
     Result,
-    /// Seg worker → parent: DexiNed multi-scale edge tensor cache.
+    /// Seg worker → parent: TEED multi-scale edge tensor cache.
     Edge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,
@@ -976,7 +977,7 @@ mod tests {
     }
 
     /// `ImageDone.edge_cache_*` fields default to `None`. Roundtrip the
-    /// all-None case (no DexiNed run) and the all-Some case so a default
+    /// all-None case (no TEED run) and the all-Some case so a default
     /// drift from `None` to some garbage path is caught immediately.
     #[test]
     fn event_image_done_edge_cache_fields_roundtrip_none_and_some() {
