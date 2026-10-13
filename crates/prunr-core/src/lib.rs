@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod color;
 pub mod ort_runtime;
 pub mod engine;
 pub mod types;
