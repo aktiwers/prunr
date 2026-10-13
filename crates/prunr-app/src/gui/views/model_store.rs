@@ -31,7 +31,7 @@ pub(crate) fn card_action(
     is_installed: bool,
     download_state: &DownloadState,
 ) -> CardAction {
-    if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
+    if matches!(desc.source, ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. }) {
         return CardAction::Bundled;
     }
     // Exhaustive on purpose — adding a new `DownloadState` variant
@@ -55,7 +55,7 @@ fn disk_usage_in(dir: &std::path::Path) -> u64 {
         ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
             parts.iter().map(|p| size(dir.join(subdir).join(p.filename))).sum()
         }
-        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => 0,
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => 0,
     }).sum()
 }
 
@@ -203,7 +203,7 @@ fn download_mb(desc: &ModelDescriptor) -> Option<u64> {
     match desc.source {
         ModelSource::OnDemand { size_mb, .. } => Some(size_mb as u64),
         ModelSource::MultiPartOnDemand { parts, .. } => Some(parts.iter().map(|p| p.size_bytes).sum::<u64>() / (1024 * 1024)),
-        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => None,
     }
 }
 
@@ -323,12 +323,7 @@ fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (
 /// What the name row opens: the licence, the author and the source, and
 /// why the last download failed.
 fn card_details(ui: &mut egui::Ui, desc: &ModelDescriptor, state: &DownloadState) {
-    let license = match desc.source {
-        ModelSource::OnDemand { license, .. }
-        | ModelSource::MultiPartOnDemand { license, .. }
-        | ModelSource::MultiPartBundled { license, .. } => Some(license),
-        ModelSource::Bundled => None,
-    };
+    let license = desc.license();
     ui.add_space(theme::SPACE_XS);
     let line = |ui: &mut egui::Ui, key: &str, value: &str| {
         ui.horizontal_wrapped(|ui| {
@@ -379,7 +374,7 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
     let result = match desc.source {
         ModelSource::OnDemand { filename, .. } => std::fs::remove_file(dir.join(filename)),
         ModelSource::MultiPartOnDemand { subdir, .. } => std::fs::remove_dir_all(dir.join(subdir)),
-        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => return,
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => return,
     };
     match result {
         Ok(()) => {
@@ -422,7 +417,7 @@ pub fn render_license_dialog(
         ModelSource::MultiPartOnDemand { license, .. } => license,
         ModelSource::OnDemand { license, .. } => license,
         // Bundled variants never require acceptance — defensive, shouldn't reach here.
-        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => return (true, false),
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => return (true, false),
     };
 
     let mut close_requested = false;
@@ -522,7 +517,7 @@ mod tests {
             display_name: "test",
             description: "test",
             category: prunr_models::ModelCategory::Segmentation,
-            source: ModelSource::Bundled,
+            source: ModelSource::Bundled { license: None },
             version: "1.0.0",
             gpu: prunr_models::GpuRequirement::None,
             incompatible_eps: &[],

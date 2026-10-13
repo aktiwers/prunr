@@ -672,13 +672,7 @@ fn render_tab_model_credits(ui: &mut egui::Ui) {
 }
 
 fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDescriptor) {
-    let license_info = match descriptor.source {
-        prunr_models::ModelSource::OnDemand { license, .. } => Some(license),
-        prunr_models::ModelSource::MultiPartOnDemand { license, .. } => Some(license),
-        prunr_models::ModelSource::MultiPartBundled { license, .. } => Some(license),
-        prunr_models::ModelSource::Bundled => None,
-    };
-    let (author, license_name, source_url) = match license_info {
+    let (author, license_name, source_url) = match descriptor.license() {
         Some(info) => (info.author, info.license, info.source_url),
         None => ("Bundled with Prunr", "Project license", ""),
     };
@@ -728,7 +722,7 @@ mod model_credits_tests {
             display_name,
             description: "",
             category: ModelCategory::Segmentation,
-            source: ModelSource::Bundled,
+            source: ModelSource::Bundled { license: None },
             version: "1.0.0",
             gpu: GpuRequirement::None,
             incompatible_eps: &[],

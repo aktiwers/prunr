@@ -599,7 +599,7 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     use prunr_core::{ComposeMode, InputTransform, LineStyle};
     // Dual scale draws Fine and Bold itself, so the scale has no effect.
     let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
-    let scales = [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused].map(|sc| chip::Choice {
+    let scales = EdgeScale::ALL.map(|sc| chip::Choice {
         value: sc,
         name: scale_label(sc),
         description: scale_description(sc),

@@ -8,55 +8,61 @@ use ort::{inputs, session::Session, value::Tensor};
 
 use crate::types::{CoreError, EdgeScale};
 
-const DEXINED_H: u32 = 480;
-const DEXINED_W: u32 = 640;
-// BGR mean for DexiNed (OpenCV Zoo variant)
-const MEAN_BGR: [f32; 3] = [103.5, 116.2, 123.6];
+/// The size TEED reads a photo at, whatever its aspect: Bold and Fused
+/// come from this run, Fine from one at twice the size.
+const BASE_H: u32 = 480;
+const BASE_W: u32 = 640;
+// BGR mean of TEED's training set (BIPED).
+const MEAN_BGR: [f32; 3] = [104.007, 116.669, 122.679];
 
-/// Number of DexiNed outputs we surface as `EdgeScale` variants.
-pub const EDGE_SCALE_COUNT: usize = 4;
+const BOLD_OUTPUT: &str = "out_3";
+const FUSED_OUTPUT: &str = "block_cat";
 
-/// All 4 outputs from one DexiNed inference, indexed by `EdgeScale as usize`.
+/// Number of `EdgeScale` variants, one plane each.
+pub const EDGE_SCALE_COUNT: usize = EdgeScale::ALL.len();
+
+/// The detector's planes as edge probabilities in `0..=1`, indexed by
+/// `EdgeScale as usize`. `height` × `width` is the base run's size; a
+/// scale's own plane size is `dims(scale)`. A scale nobody asked for
+/// holds an empty plane.
 pub struct EdgeInferenceResult {
     pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
 }
 
-/// Opaque wrapper around the DexiNed ORT session.
+impl EdgeInferenceResult {
+    pub fn dims(&self, scale: EdgeScale) -> (u32, u32) {
+        edge_scale_dims(scale, self.height, self.width)
+    }
+}
+
+/// `scale`'s plane size, height first, for a base run of `base_h` × `base_w`.
+pub fn edge_scale_dims(scale: EdgeScale, base_h: u32, base_w: u32) -> (u32, u32) {
+    let k = if scale == EdgeScale::Fine { 2 } else { 1 };
+    (base_h * k, base_w * k)
+}
+
+/// Opaque wrapper around the TEED ORT session.
 /// Thread-safe via internal Mutex (same pattern as OrtEngine).
 pub struct EdgeEngine {
     session: Mutex<Session>,
 }
 
-/// Compile-time lock on `EdgeScale` discriminants. `infer_all_tensors` builds
-/// the result array as `[fine, balanced, bold, fused]` and callers index by
-/// `scale as usize`; reordering the enum without updating the array would
-/// silently point every scale at the wrong tensor. This assertion fails the
-/// build before that can ship.
+/// Compile-time lock on `EdgeScale` discriminants: callers index
+/// `EdgeInferenceResult::tensors` by `scale as usize`.
 const _: () = {
-    assert!(EdgeScale::Fine as usize == 0);
-    assert!(EdgeScale::Balanced as usize == 1);
-    assert!(EdgeScale::Bold as usize == 2);
-    assert!(EdgeScale::Fused as usize == 3);
-    assert!(EDGE_SCALE_COUNT == 4);
+    let mut i = 0;
+    while i < EDGE_SCALE_COUNT {
+        assert!(EdgeScale::ALL[i] as usize == i);
+        i += 1;
+    }
 };
 
-/// Layout assumption: `block0..block5` (fine → coarse), then fused `block_cat`.
-/// Validated at `EdgeEngine::new`.
-fn scale_to_output_index(scale: EdgeScale, last: usize) -> usize {
-    match scale {
-        EdgeScale::Fine => 0,
-        EdgeScale::Balanced => 3,
-        EdgeScale::Bold => 5,
-        EdgeScale::Fused => last,
-    }
-}
-
 impl EdgeEngine {
-    /// Create a new DexiNed edge detection engine.
+    /// Create a new TEED edge detection engine.
     pub fn new() -> Result<Self, CoreError> {
-        let edge_bytes = prunr_models::dexined_bytes();
+        let edge_bytes = prunr_models::teed_bytes();
         let session = crate::ort_runtime::session_builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
             .map_err(|e| CoreError::Inference(format!("Edge set opt level failed: {e}")))?
@@ -65,72 +71,82 @@ impl EdgeEngine {
             .commit_from_memory(edge_bytes)
             .map_err(|e| CoreError::Inference(format!("Edge model load failed: {e}")))?;
 
-        // Validate the output layout. If a model re-export ever renames /
-        // reorders the outputs, we want a clear init error instead of a
-        // silent wrong-scale result downstream.
-        let names: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
-        tracing::info!(?names, "DexiNed output layout");
-        let last = names.last().map(String::as_str);
-        if last != Some("block_cat") {
+        // A re-export that renames the outputs would otherwise surface as
+        // a wrong-scale result instead of an init error.
+        let names: Vec<&str> = session.outputs().iter().map(|o| o.name()).collect();
+        tracing::info!(?names, "TEED output layout");
+        if let Some(missing) = [BOLD_OUTPUT, FUSED_OUTPUT].into_iter().find(|n| !names.contains(n)) {
             return Err(CoreError::Inference(format!(
-                "DexiNed export layout changed: expected last output 'block_cat', got {:?}. \
-                 Scale selection would pick the wrong tensor.",
-                last,
+                "TEED export layout changed: no '{missing}' output in {names:?}",
             )));
         }
-        if names.len() < 6 {
-            return Err(CoreError::Inference(format!(
-                "DexiNed export layout changed: expected ≥6 side outputs + block_cat, got {} total.",
-                names.len(),
-            )));
-        }
-
         Ok(Self { session: Mutex::new(session) })
     }
 
-    /// One-shot: the lines over the whole photo.
+    /// One-shot: the lines over the whole photo. Runs only the scales
+    /// `edge` draws.
     pub fn detect(&self, original: &DynamicImage, edge: &crate::EdgeSettings) -> Result<RgbaImage, CoreError> {
-        Ok(compose_whole_photo(&self.infer_all_tensors(original)?, original, edge))
+        Ok(compose_whole_photo(&self.infer_scales(original, edge.drawn_scales())?, original, edge))
     }
 
-    /// Extract a single scale from one inference run. Use when the caller
-    /// doesn't cache per-scale tensors (CLI).
-    pub fn infer_tensor(&self, original: &DynamicImage, scale: EdgeScale) -> Result<(Vec<f32>, u32, u32), CoreError> {
-        let mut session = self.session.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let outputs = run_inference(&mut session, original)?;
-        let idx = scale_to_output_index(scale, outputs.len() - 1);
-        let tensor = extract_output(&outputs, idx)?;
-        Ok((tensor, DEXINED_H, DEXINED_W))
-    }
-
-    /// Extract all 4 scales from one inference run. Used by the GUI subprocess
-    /// path so scale switching in live preview is a cached tensor lookup.
+    /// Every scale, for a caller that keeps them so a scale switch needs
+    /// no new run.
     pub fn infer_all_tensors(&self, original: &DynamicImage) -> Result<EdgeInferenceResult, CoreError> {
+        self.infer_scales(original, &EdgeScale::ALL)
+    }
+
+    /// The `scales` asked for; the rest stay empty. Bold and Fused share
+    /// one run at 640×480, Fine is its own run at 1280×960.
+    ///
+    /// Peak working set (f32, ORT activations measured separately):
+    ///
+    /// | run       | input  | outputs (4 planes) | kept planes |
+    /// |-----------|--------|--------------------|-------------|
+    /// | 640×480   | 3.7 MB | 4.9 MB             | 2.5 MB      |
+    /// | 1280×960  | 15 MB  | 20 MB              | 4.9 MB      |
+    ///
+    /// The runs go one after the other, each run's outputs dropped before
+    /// the next, so the peak is the 1280×960 run plus the 2.5 MB already
+    /// kept, plus one full-size RGBA copy (W×H×4 bytes) while an input
+    /// with alpha is flattened onto white. A whole Sketch on a 20 MP photo
+    /// peaks at about 0.9 GB resident in the CLI (DexiNed: 1.4 GB).
+    pub fn infer_scales(&self, original: &DynamicImage, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let outputs = run_inference(&mut session, original)?;
-        let last = outputs.len() - 1;
-        // Order must match `EdgeScale as usize` so callers can index by it.
-        let fine = extract_output(&outputs, scale_to_output_index(EdgeScale::Fine, last))?;
-        let balanced = extract_output(&outputs, scale_to_output_index(EdgeScale::Balanced, last))?;
-        let bold = extract_output(&outputs, scale_to_output_index(EdgeScale::Bold, last))?;
-        let fused = extract_output(&outputs, scale_to_output_index(EdgeScale::Fused, last))?;
-        Ok(EdgeInferenceResult {
-            tensors: [fine, balanced, bold, fused],
-            height: DEXINED_H,
-            width: DEXINED_W,
-        })
+        let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
+        let flattened;
+        let original = if original.color().has_alpha() {
+            flattened = flatten_on_white(original);
+            &flattened
+        } else {
+            original
+        };
+        let wants = |s: EdgeScale| scales.contains(&s);
+        if wants(EdgeScale::Bold) || wants(EdgeScale::Fused) {
+            let outputs = run_inference(&mut session, original, BASE_W, BASE_H)?;
+            for (scale, name) in [(EdgeScale::Bold, BOLD_OUTPUT), (EdgeScale::Fused, FUSED_OUTPUT)] {
+                if wants(scale) {
+                    tensors[scale as usize] = extract_probabilities(&outputs, name, BASE_H, BASE_W)?;
+                }
+            }
+        }
+        if wants(EdgeScale::Fine) {
+            let (h, w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
+            let outputs = run_inference(&mut session, original, w, h)?;
+            tensors[EdgeScale::Fine as usize] = extract_probabilities(&outputs, FUSED_OUTPUT, h, w)?;
+        }
+        Ok(EdgeInferenceResult { tensors, height: BASE_H, width: BASE_W })
     }
 }
 
-/// Run the ONNX session once and return the raw outputs vec. Shared by the
-/// single-scale and multi-scale extraction paths.
+/// Run the ONNX session once on `original` (opaque) resized to `w` × `h`.
 fn run_inference<'s>(
     session: &'s mut Session,
     original: &DynamicImage,
+    w: u32,
+    h: u32,
 ) -> Result<ort::session::SessionOutputs<'s>, CoreError> {
-    let input_array = preprocess(original);
+    let input_array = preprocess(original, w, h);
     let input_name = session.inputs()[0].name().to_string();
     let input_tensor = Tensor::from_array(input_array)
         .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
@@ -139,32 +155,71 @@ fn run_inference<'s>(
         .map_err(|e| CoreError::Inference(format!("Edge detection failed: {e}")))
 }
 
-/// Pull one output tensor from a session result by index, copying into a Vec.
-fn extract_output(outputs: &ort::session::SessionOutputs, idx: usize) -> Result<Vec<f32>, CoreError> {
-    let edge_map = outputs[idx]
+/// One output plane by name, copied out and calibrated into probabilities.
+fn extract_probabilities(
+    outputs: &ort::session::SessionOutputs,
+    name: &str,
+    h: u32,
+    w: u32,
+) -> Result<Vec<f32>, CoreError> {
+    let edge_map = outputs[name]
         .try_extract_array::<f32>()
-        .map_err(|e| CoreError::Inference(format!("Failed to extract edge output at index {idx}: {e}")))?;
+        .map_err(|e| CoreError::Inference(format!("Failed to extract edge output '{name}': {e}")))?;
     let slice = edge_map.as_slice()
         .ok_or_else(|| CoreError::Inference("Edge output tensor is not contiguous".to_string()))?;
-    Ok(slice.to_vec())
+    if slice.len() != (h * w) as usize {
+        return Err(CoreError::Inference(format!(
+            "Edge output '{name}' has {} values, expected {h}×{w}", slice.len(),
+        )));
+    }
+    let mut plane = slice.to_vec();
+    calibrate_plane(&mut plane, h as usize, w as usize);
+    Ok(plane)
 }
 
-/// Threshold + resize a DexiNed tensor into a full-resolution edge mask.
-/// Depends only on `line_strength`; callers can cache the result and reuse it
-/// across `edge_thickness` / `solid_line_color` tweaks.
+/// Turn one plane of TEED logits into edge probabilities, in place.
+///
+/// TEED's sigmoid does not sit at 0 on plain background (`block_cat`'s
+/// floor is ≈ 0.44 on every photo), so TEED's own inference stretches
+/// each plane's min..max to 0..1; this does the same. The range is
+/// floored at `MIN_RANGE`: a flat image spans under 0.02, and stretched
+/// to 0..1 its noise would draw lines everywhere. A photo's planes span
+/// over 0.5, where the floor never binds.
+///
+/// TEED also marks a small patch in the corners of any input, a flat
+/// one too; those pixels are set to the floor before the stretch, so
+/// they neither draw a dot nor set the plane's max.
+pub(crate) fn calibrate_plane(plane: &mut [f32], h: usize, w: usize) {
+    const MIN_RANGE: f32 = 0.25;
+    const CORNER: usize = 8;
+    plane.par_iter_mut().for_each(|v| *v = 1.0 / (1.0 + (-*v).exp()));
+    let min = plane.par_iter().copied().reduce(|| f32::INFINITY, f32::min);
+    if h >= 2 * CORNER && w >= 2 * CORNER {
+        for y in (0..CORNER).chain(h - CORNER..h) {
+            for x in (0..CORNER).chain(w - CORNER..w) {
+                plane[y * w + x] = min;
+            }
+        }
+    }
+    let max = plane.par_iter().copied().reduce(|| f32::NEG_INFINITY, f32::max);
+    let inv_range = 1.0 / (max - min).max(MIN_RANGE);
+    plane.par_iter_mut().for_each(|v| *v = (*v - min) * inv_range);
+}
+
+/// Threshold + resize a plane of edge probabilities into a
+/// full-resolution edge mask. Depends only on `line_strength`; callers
+/// can cache the result and reuse it across `edge_thickness` /
+/// `solid_line_color` tweaks.
 pub fn tensor_to_edge_mask(
-    edge_tensor: &[f32],
+    edge_probs: &[f32],
     tensor_h: u32,
     tensor_w: u32,
     out_w: u32,
     out_h: u32,
     line_strength: f32,
 ) -> image::GrayImage {
-    let h = tensor_h as usize;
-    let w = tensor_w as usize;
-
-    // Sigmoid → edge probability, then apply strength as contrast/threshold control.
-    // Exponential curve: slider 0.0→threshold 0.95, slider 0.5→0.3, slider 1.0→0.01
+    // Strength as contrast/threshold control on an exponential curve:
+    // slider 0.0→threshold 0.95, slider 0.5→0.3, slider 1.0→0.01
     let s = line_strength.clamp(0.0, 1.0);
     let threshold = (1.0 - s).powi(2) * 0.95 + 0.01;
     // Clamp the transition window floor at 0: for line_strength > 0.75 the
@@ -172,25 +227,15 @@ pub fn tensor_to_edge_mask(
     // the clamp, background pixels (prob ≈ 0) land in the negative-floored
     // window and produce ~50% alpha — a gray haze across the whole image.
     let lo = (threshold - 0.1_f32).max(0.0);
-    let mut mask_buf = vec![0u8; h * w];
-    for i in 0..h * w {
-        let prob = 1.0 / (1.0 + (-edge_tensor[i]).exp());
-        // Remap [lo, threshold+0.1] to [0, 1] for anti-aliased edges.
-        let edge = ((prob - lo) / 0.2).clamp(0.0, 1.0);
-        mask_buf[i] = (crate::math::smoothstep(edge) * 255.0) as u8;
-    }
-    // DexiNed marks a tiny patch in each corner of every input, a flat grey
-    // one too; drawn wide it becomes a dot in each corner of the photo.
-    const CORNER: usize = 3;
-    if h >= 2 * CORNER && w >= 2 * CORNER {
-        for y in (0..CORNER).chain(h - CORNER..h) {
-            for x in (0..CORNER).chain(w - CORNER..w) {
-                mask_buf[y * w + x] = 0;
-            }
-        }
-    }
-
-    let mask = image::GrayImage::from_raw(w as u32, h as u32, mask_buf)
+    let mask_buf: Vec<u8> = edge_probs[..(tensor_h * tensor_w) as usize]
+        .iter()
+        .map(|&prob| {
+            // Remap [lo, threshold+0.1] to [0, 1] for anti-aliased edges.
+            let edge = ((prob - lo) / 0.2).clamp(0.0, 1.0);
+            (crate::math::smoothstep(edge) * 255.0) as u8
+        })
+        .collect();
+    let mask = image::GrayImage::from_raw(tensor_w, tensor_h, mask_buf)
         .expect("edge mask buffer size matches dimensions");
     crate::formats::resize_gray_lanczos3(&mask, out_w, out_h)
 }
@@ -324,7 +369,7 @@ where
         });
 }
 
-/// Compose two dilated edge planes from different DexiNed scales with
+/// Compose two dilated edge planes from different detector scales with
 /// independent colours. Used by `LineStyle::DualScale` — fine details at
 /// `fine_color`, structural edges at `bold_color`. Alpha merges via the
 /// same ComposeMode formulas, using the max of the two edges.
@@ -392,7 +437,7 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
     ]
 }
 
-/// Compose subject outline: builds the edge mask(s) from a DexiNed result
+/// Compose subject outline: builds the edge mask(s) from a detector result
 /// and calls `compose_edges_styled` (or `compose_edges_dual_styled` for
 /// `LineStyle::DualScale`) onto the supplied masked subject RGBA. Used by
 /// the subprocess worker and the animation-sweep path so they share the
@@ -405,15 +450,17 @@ pub fn compose_subject_outline(
     use crate::{EdgeScale, LineStyle};
     let primary_scale = edge.primary_scale();
     let active = &edge_res.tensors[primary_scale as usize];
+    let (ph, pw) = edge_res.dims(primary_scale);
     let primary_mask = edge_plane(
-        active, edge_res.height, edge_res.width,
+        active, ph, pw,
         masked_rgba.width(), masked_rgba.height(),
         edge.line_strength, edge.edge_thickness,
     );
     if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
         let bold = &edge_res.tensors[EdgeScale::Bold as usize];
+        let (bh, bw) = edge_res.dims(EdgeScale::Bold);
         let bold_mask = edge_plane(
-            bold, edge_res.height, edge_res.width,
+            bold, bh, bw,
             masked_rgba.width(), masked_rgba.height(),
             edge.line_strength, edge.edge_thickness,
         );
@@ -486,7 +533,7 @@ pub fn apply_input_transform<'a>(
         // would shrink away with the photo before the detector sees it.
         InputTransform::Smooth => {
             let flat = if img.color().has_alpha() { Cow::Owned(flatten_on_white(img)) } else { Cow::Borrowed(img) };
-            let seen = crate::formats::resize_rgb_lanczos3(&flat, DEXINED_W, DEXINED_H);
+            let seen = crate::formats::resize_rgb_lanczos3(&flat, BASE_W, BASE_H);
             return Cow::Owned(DynamicImage::ImageRgb8(image::imageops::blur(&seen, SMOOTH_SIGMA)));
         }
         _ => {}
@@ -524,7 +571,6 @@ pub fn apply_input_transform<'a>(
     Cow::Owned(DynamicImage::ImageRgba8(rgba))
 }
 
-/// Preprocess an image for DexiNed: resize, BGR float32, subtract mean.
 /// Flatten RGBA onto white: transparent pixels become white so edge detection
 /// doesn't see ghost content behind removed backgrounds.
 ///
@@ -553,22 +599,16 @@ fn flatten_on_white(img: &DynamicImage) -> DynamicImage {
     DynamicImage::ImageRgba8(rgba)
 }
 
-fn preprocess(img: &DynamicImage) -> Array4<f32> {
-    let flattened;
-    let source = if img.color().has_alpha() {
-        flattened = flatten_on_white(img);
-        &flattened
-    } else {
-        img
-    };
-    let resized = crate::formats::resize_rgb_lanczos3(source, DEXINED_W, DEXINED_H);
+/// Resize to `w` × `h`, BGR float32, subtract mean (no /255).
+/// `source` is already flattened onto white.
+fn preprocess(source: &DynamicImage, w: u32, h: u32) -> Array4<f32> {
+    let resized = crate::formats::resize_rgb_lanczos3(source, w, h);
     let raw = resized.as_raw();
-    let h = DEXINED_H as usize;
-    let w = DEXINED_W as usize;
+    let h = h as usize;
+    let w = w as usize;
 
     // Skip the zero-fill; the loop writes every element of all three planes.
     let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, h, w));
-    // DexiNed expects BGR with mean subtraction (no /255)
     for c in 0..3 {
         let bgr_c = 2 - c; // RGB→BGR: channel 0(R)→2(B), 1(G)→1(G), 2(B)→0(R)
         let mut plane = out.slice_mut(ndarray::s![0, bgr_c, .., ..]);
@@ -593,29 +633,67 @@ mod tests {
         for (w, h) in [(3200u32, 2400u32), (320, 240)] {
             let step = |x: u32| if x < w / 2 { image::Rgba([0, 0, 0, 255]) } else { image::Rgba([255, 255, 255, 255]) };
             let img = DynamicImage::ImageRgba8(RgbaImage::from_fn(w, h, |x, _| step(x)));
-            let seen = |i: &DynamicImage| crate::formats::resize_rgb_lanczos3(i, DEXINED_W, DEXINED_H);
+            let seen = |i: &DynamicImage| crate::formats::resize_rgb_lanczos3(i, BASE_W, BASE_H);
             let plain = seen(&img);
             let smooth = seen(&apply_input_transform(&img, crate::types::InputTransform::Smooth));
-            let x = DEXINED_W / 2 - 2;
+            let x = BASE_W / 2 - 2;
             let (p, s) = (plain.get_pixel(x, 240)[0], smooth.get_pixel(x, 240)[0]);
             assert!(s > p.saturating_add(10), "{w}×{h}: Smooth lightens the dark side next to the step: {p} → {s}");
         }
     }
 
-    /// The detector marks a tiny patch in each corner of any input, a flat
-    /// one too; those are not lines. A real line along the border stays.
+    fn logit(p: f32) -> f32 {
+        (p / (1.0 - p)).ln()
+    }
+
+    /// TEED's background sits at sigmoid ≈ 0.44, not 0: calibrated, the
+    /// background reads 0 and the strongest line 1, so a threshold means
+    /// the same on every plane.
+    #[test]
+    fn calibration_maps_an_offset_background_to_zero() {
+        let (h, w) = (BASE_H as usize, BASE_W as usize);
+        let mut plane = vec![logit(0.44); h * w];
+        plane[(h / 2) * w..(h / 2 + 1) * w].fill(logit(0.98));
+        calibrate_plane(&mut plane, h, w);
+        assert!(plane[0..w].iter().all(|&p| p.abs() < 1e-5), "background is 0");
+        assert!((plane[(h / 2) * w + w / 2] - 1.0).abs() < 1e-5, "the line is 1");
+        let mask = tensor_to_edge_mask(&plane, h as u32, w as u32, w as u32, h as u32, 0.5);
+        assert_eq!(mask.get_pixel(w as u32 / 2, 10)[0], 0, "no line on the background");
+        assert_eq!(mask.get_pixel(w as u32 / 2, h as u32 / 2)[0], 255, "the line is drawn");
+    }
+
+    /// A flat photo's plane spans almost nothing; stretched to 0..1 its
+    /// noise would draw lines everywhere.
+    #[test]
+    fn calibration_keeps_a_flat_plane_flat() {
+        let (h, w) = (BASE_H as usize, BASE_W as usize);
+        let mut plane: Vec<f32> = (0..h * w).map(|i| logit(0.438 + 0.005 * ((i * 7919) % 101) as f32 / 100.0)).collect();
+        calibrate_plane(&mut plane, h, w);
+        let mask = tensor_to_edge_mask(&plane, h as u32, w as u32, w as u32, h as u32, 0.5);
+        assert!(mask.as_raw().iter().all(|&v| v == 0), "no lines on a flat image");
+    }
+
+    /// The detector marks a small patch in each corner of any input, a
+    /// flat one too; those are not lines, and must not set the plane's
+    /// max either. A real line along the border stays.
     #[test]
     fn the_detectors_corner_marks_are_not_lines() {
-        let (h, w) = (DEXINED_H as usize, DEXINED_W as usize);
-        let mut tensor = vec![-10.0_f32; h * w];
-        for (y, x) in [(0, 0), (1, 1), (0, w - 2), (1, w - 1), (h - 2, 0), (h - 1, 1), (h - 1, w - 1), (h - 2, w - 2)] {
-            tensor[y * w + x] = 10.0;
+        let (h, w) = (BASE_H as usize, BASE_W as usize);
+        let mut plane = vec![logit(0.44); h * w];
+        for (y, x) in [(0, 0), (3, 5), (0, w - 2), (6, w - 1), (h - 2, 0), (h - 1, 7), (h - 1, w - 1), (h - 8, w - 8)] {
+            plane[y * w + x] = logit(0.99);
         }
-        let mask = tensor_to_edge_mask(&tensor, h as u32, w as u32, 1600, 1200, 0.5);
-        assert!(mask.as_raw().iter().all(|&v| v == 0), "no mark left at the corners");
+        plane[(h / 2) * w + w / 2] = logit(0.7);
+        calibrate_plane(&mut plane, h, w);
+        assert!((plane[(h / 2) * w + w / 2] - 1.0).abs() < 1e-5, "the real edge, not a corner mark, is the max");
+        let mask = tensor_to_edge_mask(&plane, h as u32, w as u32, 1600, 1200, 0.5);
+        for (x, y) in [(0, 0), (1599, 0), (0, 1199), (1599, 1199)] {
+            assert_eq!(mask.get_pixel(x, y)[0], 0, "no mark left at corner ({x}, {y})");
+        }
 
-        let mut border = vec![-10.0_f32; h * w];
-        border[..w].fill(10.0);
+        let mut border = vec![logit(0.44); h * w];
+        border[..w].fill(logit(0.99));
+        calibrate_plane(&mut border, h, w);
         let mask = tensor_to_edge_mask(&border, h as u32, w as u32, w as u32, h as u32, 0.5);
         assert_eq!(mask.get_pixel(w as u32 / 2, 0)[0], 255, "a line along the top edge stays");
     }
@@ -826,7 +904,7 @@ mod tests {
         let edge = crate::EdgeSettings { compose_mode: crate::ComposeMode::SubjectFilled, ..crate::EdgeSettings::default() };
         let (out, _) = outline_subject(subject.clone(), crate::FillStyle::Invert, &edge, |img| {
             traced_from = Some(img.to_rgba8());
-            Ok(EdgeInferenceResult { tensors: std::array::from_fn(|_| vec![-10.0; 4]), height: 2, width: 2 })
+            Ok(EdgeInferenceResult { tensors: std::array::from_fn(|_| vec![0.0; 4]), height: 2, width: 2 })
         })
         .expect("traces");
         assert_eq!(traced_from.expect("traced").get_pixel(0, 0).0, [200, 40, 40, 255], "the plain subject");
@@ -847,26 +925,24 @@ mod tests {
         DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([120, 120, 120])))
     }
 
-    fn every_scale(tensor: Vec<f32>) -> EdgeInferenceResult {
-        let tensors = std::array::from_fn(|_| tensor.clone());
-        EdgeInferenceResult { tensors, height: DEXINED_H, width: DEXINED_W }
+    /// Every scale's plane at its own size, each pixel `prob(index, len)`.
+    fn every_scale(prob: impl Fn(usize, usize) -> f32) -> EdgeInferenceResult {
+        let tensors = EdgeScale::ALL.map(|scale| {
+            let (h, w) = edge_scale_dims(scale, BASE_H, BASE_W);
+            let len = (h * w) as usize;
+            (0..len).map(|j| prob(j, len)).collect()
+        });
+        EdgeInferenceResult { tensors, height: BASE_H, width: BASE_W }
     }
 
     #[test]
     fn whole_photo_solid_color_paints_edges() {
-        // Synthetic edge tensor: half high logits, half zero.
-        let w = DEXINED_W as usize;
-        let h = DEXINED_H as usize;
-        let mut tensor = vec![0.0_f32; h * w];
-        for slot in tensor.iter_mut().take(h * w / 2) {
-            *slot = 10.0; // sigmoid → ~1 → edge
-        }
         let original = solid_rgb(64, 48);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
-        let out = compose_whole_photo(&every_scale(tensor), &original, &edge);
+        let top_half_lines = every_scale(|i, len| if i < len / 2 { 1.0 } else { 0.0 });
+        let out = compose_whole_photo(&top_half_lines, &original, &edge);
         assert_eq!(out.width(), 64);
         assert_eq!(out.height(), 48);
-        // With high-logit side → opaque red, zero-logit → transparent.
         let strong_red = out.get_pixel(0, 0);
         assert_eq!([strong_red[0], strong_red[1], strong_red[2]], [255, 0, 0]);
     }
@@ -882,20 +958,8 @@ mod tests {
     /// drives the primary mask regardless of `edge.edge_scale`.
     #[test]
     fn dual_scale_uses_fine_for_primary_even_when_edge_scale_is_bold() {
-        let h = DEXINED_H as usize;
-        let w = DEXINED_W as usize;
-        let fine_tensor: Vec<f32> = vec![10.0; h * w];   // sigmoid → ~1
-        let bold_tensor: Vec<f32> = vec![-10.0; h * w];  // sigmoid → ~0
-        let edge_res = EdgeInferenceResult {
-            tensors: [
-                fine_tensor,
-                vec![0.0; h * w],
-                bold_tensor,
-                vec![0.0; h * w],
-            ],
-            height: DEXINED_H,
-            width: DEXINED_W,
-        };
+        let fine_len = (BASE_H * BASE_W * 4) as usize;
+        let edge_res = every_scale(|_, len| if len == fine_len { 1.0 } else { 0.0 });
         let masked = RgbaImage::from_pixel(64, 48, image::Rgba([10, 10, 10, 255]));
         let edge = crate::EdgeSettings {
             line_strength: 0.5,
@@ -1069,14 +1133,9 @@ mod tests {
     /// → alpha = 0. Pin both ends of the range so no regression sneaks back.
     #[test]
     fn tensor_to_edge_mask_no_haze_at_max_line_strength() {
-        // Use a tiny 2×2 tensor: 4 representative probability logits.
-        // sigmoid(logit):
-        //   -100  → prob ≈ 0.0  (pure background)
-        //    -2.9 → prob ≈ 0.05 (very faint, below threshold even at max strength)
-        //     0.0 → prob = 0.5  (mid-strength)
-        //     3.0 → prob ≈ 0.95 (strong edge — must remain opaque)
-        let logits = vec![-100.0_f32, -2.9, 0.0, 3.0];
-        let mask = tensor_to_edge_mask(&logits, 2, 2, 2, 2, 1.0);
+        // Background, very faint, mid-strength, strong edge.
+        let probs = vec![0.0_f32, 0.05, 0.5, 0.95];
+        let mask = tensor_to_edge_mask(&probs, 2, 2, 2, 2, 1.0);
         let raw = mask.as_raw();
         assert!(
             raw[0] <= 5,
@@ -1092,12 +1151,9 @@ mod tests {
 
     #[test]
     fn whole_photo_preserves_original_rgb_when_no_line_color() {
-        let w = DEXINED_W as usize;
-        let h = DEXINED_H as usize;
-        let tensor = vec![10.0_f32; h * w]; // all edges
         let original = solid_rgb(32, 32);
         let edge = crate::EdgeSettings { line_strength: 0.5, solid_line_color: None, edge_thickness: 0, edge_scale: crate::EdgeScale::Fused, compose_mode: crate::ComposeMode::default(), line_style: crate::LineStyle::default(), input_transform: crate::InputTransform::default() };
-        let out = compose_whole_photo(&every_scale(tensor), &original, &edge);
+        let out = compose_whole_photo(&every_scale(|_, _| 1.0), &original, &edge);
         // Original color preserved
         assert_eq!(out.get_pixel(0, 0)[0], 120);
         assert_eq!(out.get_pixel(0, 0)[1], 120);

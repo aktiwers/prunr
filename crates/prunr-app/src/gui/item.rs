@@ -429,8 +429,8 @@ pub(crate) struct BatchItem {
     /// switch. RAM: the 2 MB colour plane and the input image (shared
     /// with the timeline when it is one).
     pub(crate) colorize: Option<ColorizeCache>,
-    /// All 4 DexiNed scales from one inference (Tier 2 edge reruns read
-    /// whichever scale the user has picked without re-inferring).
+    /// Every TEED scale (Tier 2 edge reruns read whichever scale the
+    /// user has picked without re-inferring).
     pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
     /// Decompressed hot copy of the active scale. Lets a slider drag reuse
     /// the same Arc instead of paying zstd per dispatch.
