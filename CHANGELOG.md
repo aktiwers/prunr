@@ -98,6 +98,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- A photo whose file is gone by the time a batch reaches it fails with "Failed to load" instead of staying Pending forever and holding its share of the batch's memory budget.
+- A No-model result no longer blanks the image for a frame while its texture is rebuilt: the old one stays until the new one is uploaded, as every other result does.
 - The Stable Diffusion eraser on Fast no longer finishes with nothing changed on a wide or tall area: its fast decoder only takes 512 px squares, so such an area failed and was skipped silently. It now runs at 512 px, and a part that fails stops the erase with a message.
 - Erasing a large object no longer leaves a ring of stray coloured pixels along the edge on flat backgrounds (a road at night, snow, a wall). The same fix makes Refine edges exact on large photos.
 - Upscale Sharpen starts off and sharpens detail rather than grain: it defaulted on with a one-pixel radius that boosted the model's texture on every upscale. Its radius now follows the enlargement.
