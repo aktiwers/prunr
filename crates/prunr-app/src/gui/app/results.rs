@@ -79,14 +79,7 @@ impl PrunrApp {
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        item.hold_for_reveal();
-        item.unpark_result();
-        item.result_rgba = Some(rgba.clone());
-        if item.status == BatchStatus::Pending {
-            item.status = BatchStatus::Done;
-        }
-        item.result_tex_pending = true;
-        item.thumb_pending = true;
+        item.show_result(Arc::clone(&rgba));
         let source = item.source.clone();
         Self::spawn_tex_prep(
             rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), TexTarget::Result, handles, ctx.clone(),
@@ -186,12 +179,7 @@ impl PrunrApp {
             self.end_stale_run(item_id, tex_kind);
             return false;
         }
-        item.result_rgba = Some(Arc::clone(&shown));
-        item.applied_recipe = Some(recipe);
-        item.status = BatchStatus::Done;
-        item.hold_tile_preview_for_reveal();
-        item.result_tex_pending = true;
-        item.thumb_pending = true;
+        item.show_run_result(Arc::clone(&shown), recipe);
         keep(item);
         let source = item.source.clone();
         Self::spawn_tex_prep(
@@ -293,29 +281,17 @@ impl PrunrApp {
     /// blend them in; a search for anything else is dropped.
     fn land_faces(&mut self, landed: crate::gui::processor::FacesResult) {
         let Some(idx) = self.batch.index_of(landed.item_id) else { return };
+        let item_id = landed.item_id;
         let stage = self.face_stage();
-        let item = &mut self.batch.items[idx];
-        if item.pending_for(&landed.photo, landed.model) {
-            item.faces_pending = None;
-        }
-        if !item.wants_faces(&landed.photo, landed.model, stage) {
-            return;
-        }
-        let (faces, failed) = match landed.result {
-            Ok(faces) if faces.is_empty() => {
-                self.set_temporary_status("No faces found");
-                (faces, false)
-            }
-            Ok(faces) => (faces, false),
-            Err(err) => {
-                tracing::warn!(item_id = landed.item_id, %err, "face restore failed");
+        match self.batch.items[idx].keep_faces(landed, stage) {
+            None => return,
+            Some(Ok(0)) => self.set_temporary_status("No faces found"),
+            Some(Ok(_)) => {}
+            Some(Err(err)) => {
+                tracing::warn!(item_id, %err, "face restore failed");
                 self.toasts.error(format!("Restore faces failed: {err}"));
-                (Vec::new(), true)
             }
-        };
-        let item = &mut self.batch.items[idx];
-        item.found_faces = Some(crate::gui::item::FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces), failed });
-        item.faces_changed();
+        }
         self.redo_faces_blend(idx);
     }
 
@@ -738,25 +714,9 @@ impl PrunrApp {
     pub(super) fn drain_background_channels(&mut self, ctx: &egui::Context) {
         let mut decode_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
-            let source_replaced = {
-                let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                item.decode_pending = false;
-                match result {
-                    Ok(rgba) => {
-                        item.source_rgba = Some(rgba);
-                        // Live-preview DynamicImage cache is built from source_rgba;
-                        // invalidate so the next dispatch rebuilds against the new one.
-                        item.source_dyn = None;
-                        decode_arrived = true;
-                        true
-                    }
-                    Err(msg) => {
-                        item.status = BatchStatus::Error(msg);
-                        false
-                    }
-                }
-            };
-            if source_replaced {
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if item.land_decode(result) {
+                decode_arrived = true;
                 // Selection mask + SAM encoder embedding were derived from
                 // the old source bytes — drop them so the next stroke /
                 // dispatch rebuilds against the new image.
@@ -775,18 +735,7 @@ impl PrunrApp {
         while let Ok((item_id, name, color_image, target)) = self.batch.bg_io.tex_prep_rx.try_recv() {
             let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                if target != TexTarget::Source {
-                    item.result_texture = Some(tex);
-                    item.result_tex_pending = false;
-                    if target == TexTarget::Result {
-                        item.start_reveal();
-                    }
-                    tracing::info!(item_id, kind = "result", "texture uploaded");
-                } else {
-                    item.source_texture = Some(tex);
-                    item.source_tex_pending = false;
-                    tracing::info!(item_id, kind = "source", "texture uploaded");
-                }
+                item.land_texture(tex, target);
             }
         }
 
@@ -802,13 +751,11 @@ impl PrunrApp {
             }
             match result {
                 Ok(rgba) => {
-                    item.hold_for_reveal();
-                    item.unpark_result();
-                    item.result_rgba = Some(rgba);
-                    item.result_texture = None;
-                    item.thumb_texture = None;
-                    item.status = BatchStatus::Done;
-                    item.finish_job();
+                    self.publish_result(item_id, rgba, "filter", ctx);
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.status = BatchStatus::Done;
+                        item.finish_job();
+                    }
                 }
                 Err(msg) => {
                     item.job = None;
@@ -846,41 +793,11 @@ impl PrunrApp {
         // `ensure_selection_texture` already requested the current one.
         let mut feathered_landed = Vec::new();
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
-            if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                if item.selection_tex_pending == Some(result.key) {
-                    item.selection_tex_pending = None;
-                }
-                if item.selection_hash != Some(result.key.0) {
-                    continue;
-                }
-                let Some(shown) = item.selection_mask.clone() else { continue };
-                match result.image {
-                    crate::gui::background_io::SelectionImage::Full { image, feathered } => {
-                        let handle = ctx.load_texture(
-                            format!("selection_{}", result.item_id),
-                            image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        // Re-cut only for a feathered plane the cut-out has not
-                        // had yet; a rebuild for zoom keeps the same one.
-                        let had_it = item.selection_texture.as_ref().is_some_and(|t| {
-                            t.feathered.is_some() && t.key.0 == result.key.0 && t.key.1.edge_feather_px == result.key.1.edge_feather_px
-                        });
-                        if feathered.is_some() && !had_it {
-                            feathered_landed.push(result.item_id);
-                        }
-                        item.selection_texture = Some(crate::gui::item::SelectionTexture { key: result.key, handle, shown, feathered });
-                    }
-                    // A patch whose base texture has moved on is dropped; the
-                    // per-frame check asks again against the new base.
-                    crate::gui::background_io::SelectionImage::Patch { base_hash, pos, image } => {
-                        if let Some(tex) = item.selection_texture.as_mut().filter(|t| t.key == (base_hash, result.key.1)) {
-                            tex.handle.set_partial(pos, image, egui::TextureOptions::LINEAR);
-                            tex.key = result.key;
-                            tex.shown = shown;
-                        }
-                    }
-                }
+            let item_id = result.item_id;
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            let load = |image| ctx.load_texture(format!("selection_{item_id}"), image, egui::TextureOptions::LINEAR);
+            if item.land_selection_texture(result, load) {
+                feathered_landed.push(item_id);
             }
         }
 
@@ -899,28 +816,10 @@ impl PrunrApp {
         // was built) is dropped; the next kick builds the current one.
         while let Ok((item_id, key, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if item.backdrop_tex_pending == Some(key) {
-                item.backdrop_tex_pending = None;
-            }
-            // A stale or empty build frees the slot: the next frame builds
-            // the current picture.
-            let Some(ci) = ci.filter(|_| item.backdrop_key() == Some(key)) else {
+            if !item.land_backdrop(key, ci, ctx) {
                 ctx.request_repaint();
-                continue;
-            };
-            // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0
-            // wraps); other fits keep UVs in [0, 1] so the wrap is a
-            // no-op.
-            let opts = egui::TextureOptions {
-                magnification: egui::TextureFilter::Linear,
-                minification: egui::TextureFilter::Linear,
-                wrap_mode: egui::TextureWrapMode::Repeat,
-                mipmap_mode: None,
-            };
-            let tex = ctx.load_texture(format!("backdrop_{key:x}"), ci, opts);
-            item.backdrop_texture = Some((key, tex));
+            }
         }
-
 
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
@@ -1305,6 +1204,27 @@ mod timeline_contract_tests {
         let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta);
         assert!(tiers.tier_add_edge.is_empty(), "no lines composed onto the cached cut-out");
         assert!(tiers.tier1.contains(&1), "the lines run again on the whole photo");
+    }
+
+    /// A filters-only result lands the way every result does: the texture
+    /// on screen stays until the new one is uploaded, and the step records.
+    #[test]
+    fn a_filters_result_keeps_the_old_texture_until_its_own_lands() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::None);
+        let old = ctx.load_texture("old", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        let item = &mut app.batch.items[0];
+        item.result_texture = Some(old.clone());
+        item.status = BatchStatus::Processing;
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)))).unwrap();
+        app.drain_background_channels(&ctx);
+        let item = &app.batch.items[0];
+        assert_eq!(shown(&app), Some(5));
+        assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays until the new one lands");
+        assert!(item.result_tex_pending);
+        assert_eq!(item.status, BatchStatus::Done);
+        assert!(item.job.is_none(), "the step is recorded");
     }
 
     /// An erase lands as one step that shows the filled image without its
