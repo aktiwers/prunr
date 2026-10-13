@@ -38,12 +38,14 @@ assets/                    # Icon, Info.plist, .desktop
 | Coordinator        | Owns                                                                                                   |
 |--------------------|--------------------------------------------------------------------------------------------------------|
 | `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
-| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, the depth queue, SAM 2 sessions, the shared progress slot |
+| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, the depth queue, SAM 2.1 sessions, the shared progress slot, and the run queue that takes ticked images one at a time through the single upscale / colorize slot |
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
 | `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard)                                     |
 | `Automation`       | The control socket; `None` unless `PRUNR_CONTROL_PORT` is set                                          |
+
+**Who decides what.** A decision about one image is a method on `BatchItem` (how much of a run it needs, what a landed decode, texture, overlay or result does to it, whether a run's result still fits the state it started from); a loop over the batch is a method on `BatchManager` (classify a batch, prepare its work, mark what waits); admission and the streams to the workers are on `Processor`. `PrunrApp` routes between them and owns nothing a coordinator could. Process targets the ticked images for every model: cut-outs as one admitted batch, upscales, colorize and erasers one after the other.
 
 **Frame loop.** `logic()` drains channels, handles input, then runs `reconcile_selected`, one idempotent step that tops up the selected image's lazy state (decoded source, textures, Magic Brush embedding) and, on a selection change, frees the other items' results. `ui()` only renders. Wayland drops other threads' wake-ups while the window is idle, so the UI thread polls every 50 ms while work is pending.
 
@@ -59,7 +61,7 @@ Every popover, panel and dialog is one of five kinds, chosen by how the user wor
 | Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Sketch, Effect, Background, Refine, the strip's full panels |
 | Popover | `chip::popup_for`; a click outside or a pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
 | Modal | `theme::standard_modal_window`, listed in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, help references, Save preset |
-| Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, toasts |
+| Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, the Rendering / Preparing pill once quiet background work (a preview, a thumbnail, a texture) has run for a second with nothing else to show for it, toasts |
 
 The canvas stays live under strips and flyouts; only a popover holds it still, so the click that dismisses one is not also a stroke. Escape does one thing per press: close the open popup, else the top-most modal, else cancel a run, else clear the selection. `gui/tests/surface_tests.rs` pins these contracts.
 
@@ -200,6 +202,8 @@ Each image has one timeline (`gui/timeline.rs`): the states it has been in and a
 
 **Jobs bind to a version.** The timeline's version changes on every step, undo and redo. A run (Process, erase, upscale) notes it at dispatch and lands only if it still matches: as its own step, or, when a knob change or preset asked for it, folded into that step. A live-preview re-cut carries the version the same way and fills in the shown step. A result for a state the image has left is dropped, and undo asks a running job to stop. Switching images releases the working result; the timeline holds it.
 
+**A result that cannot land ends its run.** When a result arrives for a state the image has left (a knob change, a stroke, an undo while the run was under way), the image stops waiting, the user hears why, and under streamed admission its share of the budget is released; when a batch completes, any image the worker never answered is ended the same way. Nothing is ever left "processing" with nothing in flight.
+
 ### Magic Brush (SAM 2.1)
 
 SAM 2.1 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
@@ -215,11 +219,15 @@ Eraser models are on-demand downloads. The region is `MaskArtifact::region_mask`
 | Family | Runs | Why |
 |---|---|---|
 | LaMa, Big-LaMa, MI-GAN | In-process on rayon (`prunr_core::inpaint`) | Under 1 GB |
-| Stable Diffusion 1.5 / LCM | Inpaint-only subprocess (`gui/inpaint_bridge.rs`), spawned on first use, dropped after 5 min idle | Multi-GB; an OOM must kill the worker, not the GUI |
+| Stable Diffusion 1.5 / LCM, RORem | Inpaint-only subprocess (`gui/inpaint_bridge.rs`), spawned on first use, dropped after 5 min idle | Multi-GB; an OOM must kill the worker, not the GUI |
+
+**Fill scale.** Every eraser fills the hole at the size its model likes (`FillScale::Auto`: a hole's long side near 400 px, so a large region fills at half or quarter resolution and is resampled back); the footer reports what ran. Full resolution tiles a large hole and shows the seams, so Auto is the default and Full suits small regions only.
 
 **LaMa family.** 512 px tiles with 64 px feathered overlap; empty masks return before the session loads. Tiles run sequentially on one session (ORT already uses every core; do not parallelise). Sessions try GPU EPs through the same compatibility cache as seg models and are released after 5 min idle or on a model switch.
 
 **Stable Diffusion.** CLIP, VAE, the 9-channel UNet and five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC) are in `inpaint_sd.rs`, checked against Diffusers. The UNet always gets a binary mask, as SD 1.5 was trained on. Free RAM picks one tall crop up to 768 px or 512² tiles (see [SD RAM policy](#sd-ram-policy)); CPU fallback is refused. Inside the worker, sessions are dropped after each stroke unless "Keep the Stable Diffusion eraser loaded" is on (~16 GB resident); the worker itself stays until 5 min idle.
+
+**RORem** is SDXL distilled to four LCM steps for object removal: its prompt is baked into the export, so it takes no prompt or guidance, only Steps (2–8; fewer are a faster rough draft, more change the fill about as much as a new seed does) and the shared seed. Its sessions run without ONNX Runtime's memory-pattern planning, measured on it as the same speed at 15 GB peak instead of 21.7 (`SdMemPlan`, part of the session key); the other session knobs changed nothing and stay off.
 
 **Cancel and progress.** The `Progress` handle carries the cancel flag, checked between tiles and SD steps (ORT has no per-op cancel), and reports the masked tiles, crops and denoising steps.
 
@@ -348,6 +356,24 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 - **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms. OpenVINO checks only between tiles, so its tiles are capped at 256: on an HD 530 a cancel lands in 11 s instead of 51 s, for 5 % more run time.
 - **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
 
+## Colorize (DDColor)
+
+Colorize is its own role (`ModelRole::Colorize`), not a filter: the picker shows DDColor, the toolbar shows a Strength chip and nothing that cuts out. `prunr_core::colorize` runs the model at 512² on the photo's lightness and keeps the predicted colour planes (`ColorizeCache` on the item's step, like a kept upscale run); Strength (0–150 %) scales them against the photo's own colour in a live re-render (`ColorizeTier2`), so the model runs once per photo. Colorize shares the single run slot with upscale and goes through the same run queue for ticked images.
+
+## Depth
+
+Depth Anything V2 Small measures a photo once (518 px long side, ~0.5 s) into a `DepthMap` kept on the item; every depth feature reads that map, and a photo with no map asks the depth queue on `Processor` for one (epoch-tagged, so a late map for an earlier source is dropped). Readers:
+
+| Feature | Where | How |
+|---|---|---|
+| Lens blur, Point / Tilt-shift | Depth chip (No model); Background → Lens blur (cut-outs) | Blur grows with distance from the focus depth (or the band); the cut-out's own subject sets the focus behind a cut-out. `blur::blur_rgba` is a parallel three-box Gaussian (22 MP in 2.6 s) |
+| Fog, Aerial perspective | Depth chip | Haze thickening with distance; far parts turn cooler and paler |
+| Fade with distance | Sketch | `line_fade_pct` on the edge recipe: lines lighten by depth (an `EdgeRerun`) |
+| By depth | Magic Brush | The click's depth ± Range selects a band of the scene, ground included |
+| Depth map | Save options, `--depth-map` | 16-bit PNG, white = near |
+
+The depth look re-renders the photo in the live preview (`MaskRerun` for a cut-out, the photo rerun under No model), never the model, so a drag costs a re-render and no inference.
+
 ## Edge Detection (TEED)
 
 `EdgeEngine` owns its own TEED session (58 k parameters). Input is 640×480 BGR with mean subtraction, whatever the photo's aspect, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
@@ -466,10 +492,10 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 |--------|--------|
 | `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small |
-| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
+| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts); restrictive licenses need an explicit accept |
 
-`resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
+`resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. In the GUI every surface says the same thing about a model that isn't installed (`views::get_model`: "Get <model> · <size>", from the registry) and opens the Store on that model's section; a chip whose model is missing shows "Get" on its face, and the Model picker lists every model, downloaded or not. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
 
 Our exports live on this repo's GitHub releases (`models-v1`, `lcm-inpaint-v1.0.1`, `taesd-v1.0.0`) under versioned names, so a URL an old build knows never changes; a fixed export gets a new name. SD 1.5 Inpaint comes from Hugging Face.
 

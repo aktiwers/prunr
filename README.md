@@ -49,12 +49,14 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
 - **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
 - **Line extraction** — edges/outlines via TEED at three scales, standalone or combined with background removal, with colour styles and compositions
-- **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN or Stable Diffusion 1.5 (with prompts) fill it in
-- **Upscale** — Real-ESRGAN, NMKD and HAT models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
+- **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN, Stable Diffusion 1.5 (with prompts) or RORem (large objects) fill it in; the footer shows how large the fill ran, Try another re-rolls a generated fill
+- **Upscale** — Real-ESRGAN, NMKD, HAT and RealPLKSR models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
+- **Colorize** — DDColor colours a black-and-white photo; Strength up to 150 % re-renders live
+- **Restore faces** — GFPGAN or RestoreFormer++ redraw soft, small or compressed faces on cut-outs, upscales and plain photos, blended by strength
 - **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / tile) or a blurred, lens-blurred or black-and-white version of the photo
 - **Depth effects** — Depth Anything V2 measures how near each part of the photo is: lens blur and tilt-shift, fog, aerial perspective, lines that fade with distance, select by depth, and 16-bit depth map export
 - **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel iGPU/NPU), automatic CPU fallback
-- **Batch processing** — parallel inference across multiple images, switch between them while they work, chain background removal into lines or upscale
+- **Batch processing** — tick images and Process runs any model on each: cut-outs in parallel, upscales, colorize and erasers one after the other; switch between images while they work, chain background removal into lines or upscale
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
 - **Presets and undo** — per-model presets, Compare toggle, undo across strokes, results and presets
 - **Drag-and-drop** — in and out of the window (drop into Finder/Explorer/Word/PowerPoint)
@@ -102,10 +104,11 @@ Common flags:
 | `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |
 | `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
 | `--fill-scale <S>` | Eraser: `auto` (default), `full`, `half`, `quarter` — large areas fill more convincingly smaller |
-| `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
+| `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `nomos2`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
 | `--scale <2\|3\|4>` | Upscale: how much larger (default 4) |
 | `--denoise`, `--sharpen`, `--ai-blend`, `--color-match` | Upscale: the Refine knobs |
-| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Upscale: redraw soft faces with `gfpgan` or `restoreformer` |
+| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Redraw soft faces with `gfpgan` or `restoreformer` |
+| `--colorize`, `--color-strength <0-1.5>` | Colorize mode: colour a black-and-white photo with DDColor; saves `{stem}_color.png` |
 | `--bg-effect lens[:N]` | Lens-blur the photo behind the subject, 0–100 (needs the depth model) |
 | `--line-fade <0-100>` | Lines lighten with distance (needs the depth model) |
 | `--depth-map`, `--depth-only` | Also write `{stem}-depth.png` (16-bit, white = near); with `--depth-only`, only that |
@@ -114,7 +117,7 @@ Common flags:
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
 
-`prunr --help` for the full list. Magic Brush and the Stable Diffusion eraser are GUI features; the CLI covers background removal, lines, mask-driven erasing and upscaling. Upscale and face models download in the app's Model Store.
+`prunr --help` for the full list. Magic Brush and the generative erasers are GUI features; the CLI covers background removal, lines, mask-driven erasing with LaMa, upscaling, colorizing and depth maps. On-demand models download in the app's Model Store.
 
 ## Models
 
@@ -131,12 +134,16 @@ Common flags:
 | Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint with prompts — phone-app-class quality. **GPU strongly recommended.** |
 | SD 1.5 LCM Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Same, distilled to converge in 4–8 steps — the Fast quality preset |
 | TAESD | ~5 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
+| RORem (Eraser) | ~5.1 GB | **on-demand** | 512×512 (crop or tiled) | Removes large objects and fills with background, never with something new (SDXL, 4 steps). Needs ~15 GB of free RAM |
 | Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
 | 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
+| 4xNomos2 RealPLKSR | ~30 MB | **on-demand** | tiled | Fast upscale with natural skin and hair texture; can crackle on flat snow |
+| DDColor | ~270 MB | **on-demand** | 512×512 | Colorize black-and-white photos |
+| GFPGAN v1.4 / RestoreFormer++ | ~340 / ~295 MB | **on-demand** | 512×512 per face | Restore faces: the crispest / closest to the person's own features |
 | Depth Anything V2 Small | ~95 MB | **on-demand** | 518 long side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
 
-The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2 for the common cases. Heavier models download on first use from prunr's GitHub releases. Open the model dropdown and pick **More models…** for the Model Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
+The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 for the common cases. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 
 ## Hardware Acceleration
 
