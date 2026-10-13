@@ -734,9 +734,8 @@ mod tests {
 
     #[test]
     fn serde_loads_old_preset_with_upscale_scale_int() {
-        // Phase-30 preset JSON with `"upscale_scale": 2` — the field is
-        // unknown to ItemSettings after this plan; serde silently drops it
-        // and defaults `output_scale` to X4.
+        // An old preset's `"upscale_scale": 2` is unknown to ItemSettings;
+        // serde silently drops it and defaults `output_scale` to X4.
         let old_json = r#"{
             "gamma": 1.0,
             "contrast": 0.0,
@@ -791,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn serde_roundtrip_all_phase32_fields() {
+    fn serde_roundtrip_all_upscale_fields() {
         let s = ItemSettings {
             pre_denoise: 0.4,
             sharpen: 0.3,
@@ -806,8 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn serde_loads_old_preset_missing_phase32_fields() {
-        // Phase-30 preset JSON missing all Phase-32 fields must load with
+    fn serde_loads_old_preset_missing_upscale_tuning_fields() {
+        // An old preset missing the upscale-tuning fields must load with
         // sensible defaults: pre_denoise=0, sharpen off (from default_sharpen()),
         // ai_blend=1 (the critical one — zero here would disable AI output).
         let old_json = r#"{

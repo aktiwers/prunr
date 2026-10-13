@@ -189,7 +189,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p prunr-app
 
       # On macOS the custom ORT build sits in ort-build/, not next to the
-      # binary. Stage it into target/release/ so the existing Phase 6-01
+      # binary. Stage it into target/release/ so the existing
       # bundling steps pick it up.
       - name: Stage custom ORT dylib for bundling (macOS)
         if: matrix.name == 'macos-aarch64'

@@ -103,7 +103,7 @@ jobs:
       - name: Build
         run: cargo build --workspace --target ${{ matrix.target }}
 
-      # Phase 20-05: install the ORT runtime on Linux x86_64 so the
+      # Install the ORT runtime on Linux x86_64 so the
       # `golden_e2e` integration test (and `reference_test` family)
       # exercises real Silueta inference instead of soft-skipping.
       # Other platforms: tests soft-skip when no runtime is found —

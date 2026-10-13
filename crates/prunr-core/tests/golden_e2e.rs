@@ -232,8 +232,8 @@ fn compare_pixels(actual: &RgbaImage, expected: &RgbaImage) -> Result<(), String
 // ---------- bootstrap: committed synthetic fixtures ----------
 
 /// Generate committed fixture inputs procedurally. Idempotent — skips fixtures
-/// whose `source.png` already exists. Each fixture targets a specific past-bug
-/// category from `.planning/phases/20-golden-image-suite/PLAN.md`.
+/// whose `source.png` already exists. Each fixture targets a specific category
+/// of past bug.
 fn bootstrap_committed(root: &Path) {
     bootstrap_circle_silueta_e2e(root);
     bootstrap_synthetic_e2e_fixtures(root);

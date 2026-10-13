@@ -808,6 +808,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 if let Some(cached) = inputs.cached_masked_base.clone() {
                     (Some(cached), None)
                 } else {
+                    // invariant: is_subject_outline → seg_tensor is Some.
                     let seg = inputs.seg_tensor.as_ref().unwrap();
                     match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
                         Some(img) => {

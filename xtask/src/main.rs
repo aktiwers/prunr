@@ -56,14 +56,14 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Usage: cargo xtask <task>");
             eprintln!("Tasks:");
             eprintln!("  fetch-models           Download and verify ONNX model files to models/");
-            eprintln!("  probe-load-dynamic     [Phase 19-02b] Verify ort's `load-dynamic` mechanism");
-            eprintln!("                         can swap libonnxruntime at runtime end-to-end.");
+            eprintln!("  probe-load-dynamic     Verify ort's `load-dynamic` mechanism can swap");
+            eprintln!("                         libonnxruntime at runtime end-to-end.");
             eprintln!("                         Pass dylib path as second arg, or set ORT_DYLIB_PATH.");
-            eprintln!("  install-runtime        [Phase 19-09] Download + extract an `onnxruntime-*`");
+            eprintln!("  install-runtime        Download + extract an `onnxruntime-*`");
             eprintln!("                         PyPI wheel into the user runtime store. Args:");
             eprintln!("                         <package> <version> [target-name]");
             eprintln!("                         e.g. install-runtime onnxruntime-openvino 1.24.1");
-            eprintln!("  render-golden-diff     [Phase 20-04] After UPDATE_GOLDEN regenerates");
+            eprintln!("  render-golden-diff     After UPDATE_GOLDEN regenerates");
             eprintln!("                         expected.png files, produce side-by-side");
             eprintln!("                         <before | after | diff> triptych PNGs for every");
             eprintln!("                         changed golden. Lets a reviewer visually inspect");
@@ -74,10 +74,9 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 19-02b verification: load an externally-provided libonnxruntime via
-/// `ort::init_from`, build a Session against a real ONNX model, run one
-/// inference. Confirms the `load-dynamic` path that Phase 19's Runtime
-/// Store will rely on.
+/// Load an externally-provided libonnxruntime via `ort::init_from`, build
+/// a Session against a real ONNX model, run one inference. Confirms the
+/// `load-dynamic` path that the runtime store relies on.
 ///
 /// Usage:
 ///   cargo xtask probe-load-dynamic <path-to-libonnxruntime.so>
@@ -107,7 +106,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         anyhow::bail!("dylib not found: {}", dylib_path.display());
     }
 
-    println!("=== Phase 19-02b probe: load-dynamic verification ===");
+    println!("=== probe: load-dynamic verification ===");
     println!("Loading: {}", dylib_path.display());
 
     // The probe loads exactly the dylib it was handed, bypassing the
@@ -143,8 +142,8 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!();
     println!("=== load-dynamic VERIFIED ===");
     println!("`ort::init_from(path)` successfully loaded an external libonnxruntime");
-    println!("and built+ran a Session against it. This is the mechanism Phase 19's");
-    println!("Runtime Store will use to swap in EP-specific ORT bundles per-user.");
+    println!("and built+ran a Session against it. This is the mechanism the runtime");
+    println!("store uses to swap in EP-specific ORT bundles per-user.");
     Ok(())
 }
 
@@ -297,7 +296,7 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Phase 19-09 / J-7: download + extract a `onnxruntime-*` PyPI wheel.
+/// Download + extract a `onnxruntime-*` PyPI wheel.
 ///
 /// Default target: `<user data>/prunr/runtimes/<package>-<version>-<rid>/`
 /// (the runtime store, hot-loaded by `ort_runtime::resolve_dylib_path`).
@@ -422,7 +421,7 @@ fn install_runtime() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 20-04: render side-by-side `<before | after | diff>` triptych PNGs for any
+/// Render side-by-side `<before | after | diff>` triptych PNGs for any
 /// `expected.png` under `crates/prunr-core/tests/golden_data/{postprocess,e2e}/`
 /// that differs from its `git HEAD` version. Run after `UPDATE_GOLDEN=1 cargo
 /// test ...` regenerates expected PNGs — the triptychs let a reviewer visually

@@ -17,11 +17,11 @@ dirs = { workspace = true }
 prunr-models = { path = "../crates/prunr-models", features = ["dev-models"] }
 prunr-runtime-install = { path = "../crates/prunr-runtime-install" }
 
-# Phase 19-02b probe — see `probe_load_dynamic` in src/main.rs.
+# Used by the load-dynamic probe task.
 ort = { workspace = true }
 ndarray = { workspace = true }
-# 19-09: extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
+# Extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
 zip = { workspace = true }
 
-# 20-04: read/write PNGs for the `render-golden-diff` subcommand.
+# Read/write PNGs for the `render-golden-diff` subcommand.
 image = { workspace = true }
