@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 use super::background_io::BackgroundIO;
 use super::item::{BatchItem, BatchStatus, ImageSource, RunTier};
+use super::memory::{AdmissionController, ImageMemCost, RESIDENT_HISTORY_STEPS};
 use super::state::AppState;
-use super::worker::Tier2WorkItem;
+use super::worker::{Tier2WorkItem, WorkItem};
 
 /// Per-status counts across the batch. Produced by `status_counts` for
 /// callers that need to render progress strings, decide "all done" vs
@@ -767,6 +768,30 @@ impl BatchManager {
             }
         }
         out
+    }
+
+    /// What a full run on each image in `ids` is expected to hold in RAM.
+    pub(crate) fn full_run_costs(&self, ids: &HashSet<u64>) -> Vec<ImageMemCost> {
+        self.items.iter()
+            .filter(|i| ids.contains(&i.id))
+            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size(), RESIDENT_HISTORY_STEPS))
+            .collect()
+    }
+
+    /// The work for full runs on the images in `ids`, in batch order;
+    /// one whose file can't be read is left out.
+    pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
+        self.items.iter_mut()
+            .filter(|i| ids.contains(&i.id))
+            .filter_map(BatchItem::full_run_work)
+            .collect()
+    }
+
+    /// The images in `ids` not under way wait their turn.
+    pub(crate) fn mark_waiting(&mut self, ids: &HashSet<u64>) {
+        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id) && i.status != BatchStatus::Processing) {
+            item.status = BatchStatus::Pending;
+        }
     }
 }
 
