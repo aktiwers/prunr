@@ -34,16 +34,8 @@ pub(crate) fn dismissable_popup_open(ctx: &egui::Context) -> bool {
 
 use egui::{Color32, Stroke};
 
-/// Draw a semi-transparent backdrop behind a modal.
-/// Call `backdrop_clicked` after the modal window is rendered to check if
-/// the user clicked the backdrop (outside the window).
-pub fn draw_modal_backdrop(ctx: &egui::Context, id: &str) {
-    let screen_rect = ctx.content_rect();
-    let layer_id = egui::LayerId::new(egui::Order::Foreground, egui::Id::new(id));
-    let painter = ctx.layer_painter(layer_id);
-    painter.rect_filled(screen_rect, 0.0,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 100));
-}
+/// The dimming over the app behind a modal.
+const MODAL_SCRIM: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 100);
 
 /// Check if the user clicked the backdrop (outside the modal window).
 /// Must be called AFTER the window is rendered so we know the window rect.
@@ -247,8 +239,17 @@ fn show_modal(
     });
     let debounce_passed = (now - opened_at) >= MODAL_BACKDROP_DEBOUNCE_SECS;
 
-    let backdrop_id = format!("{id}_backdrop");
-    draw_modal_backdrop(ctx, &backdrop_id);
+    // An area on the window's own level with the window as its sublayer,
+    // which egui draws directly after it: the modal over the dimming over
+    // the rest. (A bare painter layer is drawn after every area, on top.)
+    let screen = ctx.content_rect();
+    let backdrop = egui::Area::new(egui::Id::new(id).with("backdrop"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .interactable(false)
+        .show(ctx, |ui| ui.painter().rect_filled(screen, 0.0, MODAL_SCRIM))
+        .response
+        .layer_id;
 
     let mut open = true;
     let resp = window
@@ -258,6 +259,9 @@ fn show_modal(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .fixed_size(size)
         .show(ctx, body);
+    if let Some(shown) = &resp {
+        ctx.set_sublayer(backdrop, shown.response.layer_id);
+    }
 
     let close = !open || (debounce_passed && backdrop_clicked(ctx, &resp));
     if close {
@@ -471,5 +475,36 @@ mod motion_tests {
         apply_motion(&ctx, true);
         assert!(motion(&ctx));
         assert_eq!(fade_secs(&ctx, 0.2), 0.2);
+    }
+}
+
+#[cfg(test)]
+mod modal_tests {
+    use super::*;
+
+    /// The dimming goes under the modal, not over it: drawn over, it
+    /// darkened the modal's own text by 39%.
+    #[test]
+    fn the_backdrop_is_painted_under_the_modal() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut out = None;
+        for _ in 0..3 {
+            out = Some(ctx.run_ui(input.clone(), |ui| {
+                standard_modal_window(ui.ctx(), "modal_test", "Test", [200.0, 100.0], |ui| {
+                    ui.label("inside the modal");
+                });
+            }));
+        }
+        let shapes = out.expect("ran").shapes;
+        let is_backdrop = |s: &egui::epaint::ClippedShape| matches!(&s.shape,
+            egui::Shape::Rect(r) if r.rect.width() >= 800.0 && r.fill.a() > 0 && r.fill.r() == 0);
+        let is_text = |s: &egui::epaint::ClippedShape| matches!(&s.shape, egui::Shape::Text(_));
+        let backdrop = shapes.iter().position(is_backdrop).expect("a backdrop is painted");
+        let text = shapes.iter().position(is_text).expect("the modal's text is painted");
+        assert!(backdrop < text, "backdrop at {backdrop}, modal text at {text}: the backdrop covers the modal");
     }
 }
