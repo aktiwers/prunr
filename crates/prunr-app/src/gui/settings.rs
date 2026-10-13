@@ -741,31 +741,6 @@ impl SettingsModel {
     }
 }
 
-impl From<ModelKind> for SettingsModel {
-    fn from(m: ModelKind) -> Self {
-        match m {
-            ModelKind::Silueta => SettingsModel::Silueta,
-            ModelKind::U2net => SettingsModel::U2net,
-            ModelKind::BiRefNetLite => SettingsModel::BiRefNetLite,
-            ModelKind::RealEsrganX4Plus => SettingsModel::RealEsrganUpscale,
-            ModelKind::Nomos8kSchatL => SettingsModel::Nomos8kUpscale,
-            ModelKind::FourXNmkdSiaxCx => SettingsModel::FourXNmkdSiaxCxUpscale,
-            ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
-            ModelKind::FourXNomos2RealPlksr => SettingsModel::Nomos2Upscale,
-            ModelKind::DdcolorTiny => SettingsModel::ColorizeDdcolor,
-            ModelKind::DepthAnythingV2Small => {
-                unreachable!("the depth model feeds effects; it is never the selected model")
-            }
-            ModelKind::RealEsrganX2Plus => {
-                // RealEsrganX2Plus is never the user-selected active model — it
-                // runs for a 2x Real-ESRGAN upscale. This conversion is
-                // unreachable in production; guard loudly if it ever fires.
-                unreachable!("RealEsrganX2Plus is an internal dispatch model — it has no SettingsModel variant")
-            }
-        }
-    }
-}
-
 /// The model every colorize run uses, in the app and the CLI.
 pub const COLORIZER: ModelKind = ModelKind::DdcolorTiny;
 
