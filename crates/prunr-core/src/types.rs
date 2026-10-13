@@ -34,12 +34,13 @@ pub enum ModelKind {
     FourXNmkdSuperscale,
     FourXNomos2RealPlksr,
     DdcolorTiny,
+    DepthAnythingV2Small,
 }
 
 impl ModelKind {
     pub fn is_upscale(self) -> bool {
         match self {
-            ModelKind::Silueta | ModelKind::U2net | ModelKind::BiRefNetLite | ModelKind::DdcolorTiny => false,
+            ModelKind::Silueta | ModelKind::U2net | ModelKind::BiRefNetLite | ModelKind::DdcolorTiny | ModelKind::DepthAnythingV2Small => false,
             ModelKind::RealEsrganX4Plus
             | ModelKind::Nomos8kSchatL
             | ModelKind::RealEsrganX2Plus
@@ -63,6 +64,7 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::FourXNmkdSuperscale => prunr_models::ModelId::FourXNmkdSuperscale,
             ModelKind::FourXNomos2RealPlksr => prunr_models::ModelId::FourXNomos2RealPlksr,
             ModelKind::DdcolorTiny => prunr_models::ModelId::DdcolorTiny,
+            ModelKind::DepthAnythingV2Small => prunr_models::ModelId::DepthAnythingV2Small,
         }
     }
 }
@@ -86,6 +88,7 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
             prunr_models::ModelId::FourXNmkdSuperscale => Ok(ModelKind::FourXNmkdSuperscale),
             prunr_models::ModelId::FourXNomos2RealPlksr => Ok(ModelKind::FourXNomos2RealPlksr),
             prunr_models::ModelId::DdcolorTiny => Ok(ModelKind::DdcolorTiny),
+            prunr_models::ModelId::DepthAnythingV2Small => Ok(ModelKind::DepthAnythingV2Small),
             other => Err(other),
         }
     }
@@ -600,13 +603,23 @@ pub enum BgEffect {
     BlurredSource { radius: u32 },
     /// Fill transparent areas with the luma grayscale of the source.
     DesaturatedSource,
+    /// The photo blurred like a wide-open lens focused on the subject:
+    /// the farther from the subject's depth, the softer. `amount_pct`
+    /// sets the strongest blur, 0-100.
+    LensBlur { amount_pct: u8 },
 }
 
 impl BgEffect {
+    /// Whether its picture is made with the photo's depth map.
+    pub fn needs_depth(self) -> bool {
+        matches!(self, BgEffect::LensBlur { .. })
+    }
+
     pub const ALL: &'static [Self] = &[
         BgEffect::None,
         BgEffect::BlurredSource { radius: 12 },
         BgEffect::DesaturatedSource,
+        BgEffect::LensBlur { amount_pct: 50 },
     ];
 
     pub fn name(&self) -> &'static str {
@@ -614,6 +627,7 @@ impl BgEffect {
             BgEffect::None => "Transparent",
             BgEffect::BlurredSource { .. } => "Blurred photo",
             BgEffect::DesaturatedSource => "Black & white photo",
+            BgEffect::LensBlur { .. } => "Lens blur",
         }
     }
 }

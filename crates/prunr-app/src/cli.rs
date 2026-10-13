@@ -132,7 +132,7 @@ pub struct Cli {
     /// Fill transparent background with a copy of the photo: `blur`
     /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
     /// over `--bg-image` and `--bg-color`, as in the app.
-    #[arg(long, value_name = "blur[:N]|bw", value_parser = parse_bg_effect)]
+    #[arg(long, value_name = "blur[:N]|lens[:N]|bw", value_parser = parse_bg_effect)]
     pub bg_effect: Option<prunr_core::BgEffect>,
 
     /// Sticker outline around the cut-out: width in px, optionally with a
@@ -229,6 +229,20 @@ pub struct Cli {
     /// Color strength: 0 is grey, 1 the predicted color, up to 1.5.
     #[arg(long, requires = "colorize", default_value_t = 1.0)]
     pub color_strength: f32,
+
+    /// Lines fade with distance, 0-100 (needs the depth model, from the
+    /// app's Model Store).
+    #[arg(long, value_name = "PERCENT", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub line_fade: u8,
+
+    /// Also write each input's depth map as {stem}-depth.png (16-bit grey,
+    /// white = near) beside the result. Needs the depth model.
+    #[arg(long)]
+    pub depth_map: bool,
+
+    /// Write only the depth maps, nothing else.
+    #[arg(long, requires = "depth_map")]
+    pub depth_only: bool,
 }
 
 /// Upscale model selection.
@@ -337,7 +351,13 @@ impl CliBackdrop {
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
             CliBackdrop::Effect(effect) => match prunr_core::load_image_from_path(photo_path) {
                 Ok(photo) => {
-                    prunr_core::apply_bg_effect(result, &photo.into_rgba8(), *effect);
+                    let photo = photo.into_rgba8();
+                    let depth = effect.needs_depth()
+                        .then(|| prunr_app::gui::processor::measure_depth_once(&photo)
+                            .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
+                            .ok())
+                        .flatten();
+                    prunr_core::apply_bg_effect(result, &photo, *effect, depth.as_ref());
                 }
                 Err(err) => tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
             },
@@ -345,18 +365,62 @@ impl CliBackdrop {
     }
 }
 
-/// `blur`, `blur:N` (1-64 px) or `bw`.
+/// `blur`, `blur:N` (1-64 px), `lens`, `lens:N` (0-100 %) or `bw`.
 fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     use prunr_core::BgEffect;
     match s.split_once(':') {
         None if s == "blur" => Ok(BgEffect::BlurredSource { radius: 12 }),
+        None if s == "lens" => Ok(BgEffect::LensBlur { amount_pct: 50 }),
         None if s == "bw" => Ok(BgEffect::DesaturatedSource),
         Some(("blur", n)) => match n.parse::<u32>() {
             Ok(radius @ 1..=64) => Ok(BgEffect::BlurredSource { radius }),
             _ => Err(format!("'{n}' is not a blur radius from 1 to 64")),
         },
-        _ => Err(format!("'{s}' is not one of blur, blur:N, bw")),
+        Some(("lens", n)) => match n.parse::<u8>() {
+            Ok(amount_pct @ 0..=100) => Ok(BgEffect::LensBlur { amount_pct }),
+            _ => Err(format!("'{n}' is not a lens blur amount from 0 to 100")),
+        },
+        _ => Err(format!("'{s}' is not one of blur, blur:N, lens, lens:N, bw")),
     }
+}
+
+/// Where an input's depth map goes: `{stem}-depth.png` beside its result.
+fn depth_map_path(args: &Cli, input: &std::path::Path) -> PathBuf {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    args.result_path(input).with_file_name(format!("{stem}-depth.png"))
+}
+
+/// Write each input's depth map (`--depth-map`). Returns how many failed.
+fn write_depth_maps(args: &Cli) -> usize {
+    let mut failed = 0;
+    for input in &args.inputs {
+        let out = depth_map_path(args, input);
+        let written = check_overwrite(&out, args.force)
+            .and_then(|()| prunr_core::load_image_from_path(input).map_err(|e| format!("failed to read {}: {e}", input.display())))
+            .and_then(|img| {
+                let photo = img.into_rgba8();
+                let depth = prunr_app::gui::processor::measure_depth_once(&photo).map_err(|e| format!("depth failed: {e}"))?;
+                prunr_core::depth::encode_depth_png(&depth, photo.width(), photo.height()).map_err(|e| format!("encode failed: {e}"))
+            })
+            .and_then(|bytes| std::fs::write(&out, bytes).map_err(|e| format!("failed to save {}: {e}", out.display())));
+        match written {
+            Ok(()) if !args.quiet => eprintln!("Saved {}", out.display()),
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                failed += 1;
+            }
+        }
+    }
+    failed
+}
+
+/// The depth model is needed (a depth map, fading lines, a lens blur)
+/// but not installed: the line to print.
+fn missing_depth_model(args: &Cli) -> Option<String> {
+    let id = prunr_models::ModelId::DepthAnythingV2Small;
+    let needed = args.depth_map || args.line_fade > 0 || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth);
+    (needed && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
 }
 
 fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
@@ -467,18 +531,26 @@ pub fn run_remove(args: &Cli) -> i32 {
             return 1;
         }
     }
-    if args.inpaint {
-        return run_inpaint(args);
+    if let Some(err) = missing_depth_model(args) {
+        eprintln!("error: {err}");
+        return 1;
     }
-    if let Some(upscaler) = args.upscale {
-        return run_upscale(args, upscaler);
+    let code = if args.depth_only {
+        0
+    } else if args.inpaint {
+        run_inpaint(args)
+    } else if let Some(upscaler) = args.upscale {
+        run_upscale(args, upscaler)
+    } else if args.colorize {
+        run_colorize(args)
+    } else {
+        // All processing uses subprocess isolation for OOM protection
+        run_batch(args)
+    };
+    if args.depth_map && write_depth_maps(args) > 0 {
+        return 1;
     }
-    if args.colorize {
-        return run_colorize(args);
-    }
-
-    // All processing uses subprocess isolation for OOM protection
-    run_batch(args)
+    code
 }
 
 /// One upscale as the app runs it: denoise, the model, Refine, faces.
@@ -533,6 +605,7 @@ fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
         (args.bg_effect.is_some(), "--bg-effect"),
         (args.effect.is_some(), "--effect"),
         (args.contrast > 0.0, "--contrast"),
+        (args.line_fade > 0, "--line-fade"),
     ]
     .into_iter()
     .filter_map(|(set, flag)| set.then_some(flag))
@@ -974,9 +1047,10 @@ fn run_batch(args: &Cli) -> i32 {
         line_style: prunr_core::LineStyle::default(),
         input_transform: prunr_core::InputTransform::default(),
     };
+    let lines = prunr_app::subprocess::manager::WorkerLines { mode: line_mode, edge, fade_pct: args.line_fade };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, edge, &backdrop,
+        lines, &backdrop,
         &spinners_arc, &inputs_arc, quiet,
     );
 
@@ -1083,8 +1157,7 @@ fn run_batch_subprocess(
     initial_jobs: usize,
     mask: MaskSettings,
     force_cpu: bool,
-    line_mode: LineMode,
-    edge: prunr_core::EdgeSettings,
+    lines: prunr_app::subprocess::manager::WorkerLines,
     backdrop: &CliBackdrop,
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
@@ -1112,8 +1185,8 @@ fn run_batch_subprocess(
 
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
-        let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
+        let (mut sub, _provider) = match SubprocessManager::spawn_with_lines(
+            model, effective_jobs, mask, force_cpu, lines,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1430,9 +1503,22 @@ mod tests {
         assert_eq!(parse_bg_effect("blur"), Ok(BgEffect::BlurredSource { radius: 12 }));
         assert_eq!(parse_bg_effect("blur:30"), Ok(BgEffect::BlurredSource { radius: 30 }));
         assert_eq!(parse_bg_effect("bw"), Ok(BgEffect::DesaturatedSource));
+        assert_eq!(parse_bg_effect("lens"), Ok(BgEffect::LensBlur { amount_pct: 50 }));
+        assert_eq!(parse_bg_effect("lens:80"), Ok(BgEffect::LensBlur { amount_pct: 80 }));
+        assert!(parse_bg_effect("lens:120").is_err());
         for bad in ["blur:0", "blur:65", "blur:x", "invert", ""] {
             assert!(parse_bg_effect(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_depth_map_goes_beside_the_result() {
+        use clap::Parser;
+        let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "-o", "/out/x.png", "--depth-map"]);
+        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/out/cat-depth.png"));
+        let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "--depth-map", "--depth-only"]);
+        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/p/cat-depth.png"));
+        assert!(super::Cli::try_parse_from(["prunr", "/p/cat.jpg", "--depth-only"]).is_err(), "--depth-only needs --depth-map");
     }
 
     /// The effect is made from the input photo and fills what the result

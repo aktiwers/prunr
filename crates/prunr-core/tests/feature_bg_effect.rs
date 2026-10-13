@@ -26,8 +26,10 @@ fn the_cutout_stays_transparent_and_each_effect_fills_it() {
     let (min_a, max_a) = cutout.pixels().fold((255u8, 0u8), |(lo, hi), p| (lo.min(p.0[3]), hi.max(p.0[3])));
     assert!(max_a > 200 && min_a < 50, "subject and transparent background: α {min_a}..{max_a}");
 
+    // A flat map: enough for the lens blur to make its picture.
+    let depth = prunr_core::depth::DepthMap::from_raw(2, 2, vec![0.0, 0.2, 0.8, 1.0]);
     for effect in BgEffect::ALL.iter().filter(|e| **e != BgEffect::None) {
-        let picture = effect_backdrop(&photo.to_rgba8(), *effect).expect("an effect makes a picture");
+        let picture = effect_backdrop(&photo.to_rgba8(), *effect, Some(&depth), Some(&cutout)).expect("an effect makes a picture");
         let mut composed = cutout.clone();
         apply_background_image(&mut composed, &image::DynamicImage::ImageRgba8(picture), BgImageFit::Cover);
         let min = composed.pixels().map(|p| p.0[3]).min().unwrap_or(0);

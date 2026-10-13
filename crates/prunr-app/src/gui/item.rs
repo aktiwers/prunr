@@ -63,6 +63,42 @@ pub(crate) struct ExportBg {
     fit: prunr_core::BgImageFit,
     photo: Option<BackdropPhoto>,
     source: ImageSource,
+    /// The original photo's depth map when the item has one; a lens blur
+    /// without it measures the photo in the save thread.
+    depth: Option<Arc<prunr_core::depth::DepthMap>>,
+}
+
+/// An image's depth map to save beside its result as `<stem>-depth.png`
+/// (16-bit grey, white = near) at the photo's size: the item's map, or
+/// measured in the save thread.
+#[derive(Clone)]
+pub(crate) struct DepthExport {
+    name: String,
+    dims: (u32, u32),
+    depth: Option<Arc<prunr_core::depth::DepthMap>>,
+    source: ImageSource,
+}
+
+impl DepthExport {
+    /// Write the map into `folder`.
+    pub(crate) fn write(&self, folder: &std::path::Path) -> Result<(), String> {
+        let depth = match &self.depth {
+            Some(depth) => Arc::clone(depth),
+            None => {
+                let photo = self.source.decode_rgba()?;
+                Arc::new(super::processor::measure_depth_once(&photo).map_err(|e| e.to_string())?)
+            }
+        };
+        let (w, h) = self.dims;
+        let bytes = prunr_core::depth::encode_depth_png(&depth, w, h).map_err(|e| e.to_string())?;
+        std::fs::write(folder.join(&self.name), bytes).map_err(|e| e.to_string())
+    }
+}
+
+/// `<stem>-depth.png` for an image named `filename`.
+pub(crate) fn depth_map_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename).file_stem().map_or_else(|| filename.into(), |s| s.to_string_lossy());
+    format!("{stem}-depth.png")
 }
 
 /// The photo an effect background is made from: the image the shown
@@ -102,10 +138,24 @@ impl ExportBg {
             Backdrop::Color(c) => Some(composite(&|img| prunr_core::apply_background_color(img, c))),
             Backdrop::Image(_) => self.image.as_ref()
                 .map(|bg| composite(&|img| prunr_core::apply_background_image(img, &bg.image, self.fit))),
-            Backdrop::Effect(effect) => self.photo()
-                .map(|photo| composite(&|img| { prunr_core::apply_bg_effect(img, &photo, effect); })),
+            Backdrop::Effect(effect) => self.photo().map(|photo| {
+                let depth = if effect.needs_depth() { self.depth_map() } else { None };
+                composite(&|img| { prunr_core::apply_bg_effect(img, &photo, effect, depth.as_deref()); })
+            }),
         };
         baked.unwrap_or_else(|| Arc::clone(rgba))
+    }
+
+    /// The original photo's depth map: the item's, or measured now.
+    pub(crate) fn depth_map(&self) -> Option<Arc<prunr_core::depth::DepthMap>> {
+        if let Some(depth) = &self.depth {
+            return Some(Arc::clone(depth));
+        }
+        let photo = self.source.decode_rgba().map_err(|err| tracing::warn!(%err, "depth for export: source")).ok()?;
+        super::processor::measure_depth_once(&photo)
+            .map(Arc::new)
+            .map_err(|err| tracing::warn!(%err, "depth for export"))
+            .ok()
     }
 
     fn photo(&self) -> Option<Arc<image::RgbaImage>> {
@@ -500,6 +550,39 @@ pub(crate) struct BatchItem {
     /// A background pre-encode was refused (RAM gate or encoder error);
     /// not retried every frame. Cleared with the embedding.
     pub(crate) magic_preencode_refused: bool,
+    /// How near each part of the original photo is (~1 MB), measured when
+    /// a depth knob first needs it and kept until the source changes.
+    pub(crate) depth: Option<Arc<prunr_core::depth::DepthMap>>,
+    /// Where the depth map's run stands; see `DepthRun`.
+    pub(crate) depth_run: DepthRun,
+    /// The previewed photo with the Depth chip's look on it, and what it
+    /// was made from, so a line or effect tweak does not blur again. One
+    /// image of RAM while the look is on; dropped off screen.
+    pub(crate) depth_photo: Option<(Arc<image::DynamicImage>, DepthPhotoKey)>,
+}
+
+/// The depth map's run for one photo: `epoch` counts the photos the item
+/// has had, so a map measured from a replaced one is dropped on landing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DepthRun {
+    pub(crate) epoch: u64,
+    pub(crate) pending: bool,
+    /// The run failed; not retried until the photo changes.
+    pub(crate) failed: bool,
+}
+
+/// What a depth-looked photo was made from.
+#[derive(Clone)]
+pub(crate) struct DepthPhotoKey {
+    pub(crate) base: Arc<image::DynamicImage>,
+    pub(crate) depth: Arc<prunr_core::depth::DepthMap>,
+    pub(crate) look: prunr_core::depth::DepthLook,
+}
+
+impl DepthPhotoKey {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.base, &other.base) && Arc::ptr_eq(&self.depth, &other.depth) && self.look == other.look
+    }
 }
 
 /// The logits of a Magic Brush stroke and how they were applied.
@@ -649,6 +732,38 @@ impl BatchItem {
         self.magic_brush_embedding = None;
         self.magic_preencode_refused = false;
         self.last_decode = None;
+    }
+
+    /// The photo changed: its depth map, any run measuring the old one and
+    /// the photo looked from it are out of date.
+    pub(crate) fn invalidate_depth(&mut self) {
+        self.depth = None;
+        self.depth_photo = None;
+        self.depth_run = DepthRun { epoch: self.depth_run.epoch.wrapping_add(1), pending: false, failed: false };
+    }
+
+    /// A depth map is wanted and none is kept, under way or failed.
+    pub(crate) fn needs_depth_run(&self) -> bool {
+        self.depth.is_none() && !self.depth_run.pending && !self.depth_run.failed
+    }
+
+    /// Keep a depth map measured at `epoch`, unless the photo changed
+    /// since. True when it was kept.
+    pub(crate) fn land_depth(&mut self, epoch: u64, result: Result<Arc<prunr_core::depth::DepthMap>, String>) -> bool {
+        if epoch != self.depth_run.epoch {
+            return false;
+        }
+        self.depth_run.pending = false;
+        match result {
+            Ok(map) => {
+                self.depth = Some(map);
+                true
+            }
+            Err(_) => {
+                self.depth_run.failed = true;
+                false
+            }
+        }
     }
 
     /// The last decode while its stroke still owns the selection; any
@@ -1449,6 +1564,9 @@ impl BatchItem {
             magic_brush_embedding: None,
             last_decode: None,
             magic_preencode_refused: false,
+            depth: None,
+            depth_run: DepthRun::default(),
+            depth_photo: None,
         }
     }
 
@@ -1496,6 +1614,11 @@ impl BatchItem {
             .or_else(|| self.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())))
     }
 
+    /// The depth map to save beside this item's result.
+    pub(crate) fn depth_export(&self) -> DepthExport {
+        DepthExport { name: depth_map_name(&self.filename), dims: self.dimensions, depth: self.depth.clone(), source: self.source.clone() }
+    }
+
     /// What export puts behind this item's result: only shared handles,
     /// so it can travel to a save thread and bake there.
     pub(crate) fn export_bg(&self) -> ExportBg {
@@ -1505,6 +1628,7 @@ impl BatchItem {
             fit: self.settings.bg_image_fit,
             photo: self.backdrop_photo(),
             source: self.source.clone(),
+            depth: self.depth.clone(),
         }
     }
 
@@ -1523,8 +1647,17 @@ impl BatchItem {
         use super::item_settings::Backdrop;
         let backdrop = self.settings.backdrop();
         let key = backdrop.picture_key()?;
-        Some(match (backdrop, self.backdrop_photo()) {
+        let key = match (backdrop, self.backdrop_photo()) {
             (Backdrop::Effect(_), Some(BackdropPhoto::Edited(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
+            _ => key,
+        };
+        // A lens blur is made with the depth map, focused on the result's subject.
+        Some(match backdrop {
+            Backdrop::Effect(effect) if effect.needs_depth() => {
+                let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
+                let result = self.result_rgba.as_ref().map_or(0, |r| Arc::as_ptr(r) as u64);
+                key ^ depth.rotate_left(29) ^ result.rotate_left(43)
+            }
             _ => key,
         })
     }

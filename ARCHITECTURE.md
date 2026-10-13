@@ -38,7 +38,7 @@ assets/                    # Icon, Info.plist, .desktop
 | Coordinator        | Owns                                                                                                   |
 |--------------------|--------------------------------------------------------------------------------------------------------|
 | `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
-| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, SAM 2 sessions, the shared progress slot |
+| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, the depth queue, SAM 2 sessions, the shared progress slot |
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
@@ -87,6 +87,7 @@ ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold 
 | SD erases | inpaint-only worker subprocess (no seg engines) | spawned on first SD erase; killed after 5 min idle, on model switch, or on Cancel |
 | LaMa / MI-GAN erases, SAM, live preview | in-process, rayon | sessions cached; LaMa released after 5 min idle |
 | Upscale, colorize | in-process, one thread per run | engine kept warm until model or hardware change |
+| Depth maps | in-process, one queue thread, photos one at a time | engine kept warm until model or hardware change; the ~1 MB map stays on the item until its photo changes |
 | Filters only (no model) | background thread per item | — |
 
 SD has its own process because its multi-GB bundle is the likeliest OOM and a UNet step can't be interrupted: Cancel kills the process so RAM frees at once, and a watchdog kills it if free system RAM drops below 1 GB mid-erase.
@@ -138,8 +139,8 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 |------|------|------|
 | `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes TEED's input | Full inference |
 | `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | TEED only |
-| `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
-| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached TEED tensor |
+| `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), the Depth chip's look, or lines turned off | Postprocess the cached seg tensor (the look re-renders the photo from the kept depth map) |
+| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style, fade with distance) | Re-threshold the cached TEED tensor |
 | `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
 | `ColorizeTier2` | Colorize Strength (a colorizer change is a model change) | Re-render the kept colour plane at the new strength |
 | `CompositeOnly` | Background colour or image | Render-time only |
@@ -465,7 +466,7 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 |--------|--------|
 | `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
 
 `resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
