@@ -48,7 +48,7 @@ const BLUR_MODES: [chip::Choice<LensBlurMode>; 3] = [
 /// `picking` is true while the next click on the image sets the focus.
 pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking: bool) -> DepthChange {
     let mut change = DepthChange::default();
-    let summary = if installed { summary(look) } else { get_model::BADGE.to_string() };
+    let summary: std::borrow::Cow<'static, str> = if installed { summary(look).into() } else { get_model::BADGE.into() };
     let group = chip::GroupChip {
         id_salt: "depth",
         icon: ICON_LANDSCAPE.codepoint,
@@ -67,8 +67,8 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 return;
             }
             change.picked(chip::choice_buttons(ui, &BLUR_MODES, &mut look.blur));
-            change.merge(percent_row(ui, "Amount", &mut look.blur_pct));
-            change.merge(percent_row(ui, "Fog", &mut look.fog_pct));
+            change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
+            change.merge(chip::slider_row_pct(ui, "Fog", &mut look.fog_pct, fmt::percent));
         }
         chip::Part::Full { reset } => {
             if reset {
@@ -79,7 +79,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 change.open_store |= get_model::button(ui, DEPTH_MODEL);
             }
             change.picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur));
-            change.merge(percent_row(ui, "Amount", &mut look.blur_pct));
+            change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
             hint(ui, "Lens blur. Blurs what is far from the focus.");
             ui.horizontal(|ui| {
                 let text = if picking { "Click the image\u{2026}" } else { "Set focus" };
@@ -91,23 +91,15 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 }
             });
             hint(ui, focus_text(look));
-            change.merge(percent_row(ui, "Fog", &mut look.fog_pct));
+            change.merge(chip::slider_row_pct(ui, "Fog", &mut look.fog_pct, fmt::percent));
             hint(ui, "Haze that thickens with distance.");
-            change.merge(percent_row(ui, "Aerial perspective", &mut look.aerial_pct));
+            change.merge(chip::slider_row_pct(ui, "Aerial perspective", &mut look.aerial_pct, fmt::percent));
             hint(ui, "Far things turn cooler and paler, like distant hills.");
         }
     });
     change
 }
 
-fn percent_row(ui: &mut Ui, label: &str, pct: &mut u8) -> chip::ChipChange {
-    let mut v = f32::from(*pct) / 100.0;
-    let c = chip::slider_row_f32(ui, label, &mut v, 0.0..=1.0, false, fmt::percent);
-    if c.changed {
-        *pct = (v * 100.0).round() as u8;
-    }
-    c
-}
 
 /// The chip face: what the look does, or Off.
 fn summary(look: &DepthLook) -> String {
