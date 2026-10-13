@@ -342,10 +342,10 @@ mod tests {
     #[test]
     fn cache_populated_does_not_create_directory() {
         let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else { return };
+        let Some(path) = cache_path_for(ModelId::Teed, "CPU") else { return };
         let _ = std::fs::remove_dir_all(&path);
         let exists_before = path.exists();
-        let populated = cache_populated_for(ModelId::DexiNed, "CPU");
+        let populated = cache_populated_for(ModelId::Teed, "CPU");
         let exists_after = path.exists();
         assert!(!populated);
         assert_eq!(exists_before, exists_after,
@@ -368,7 +368,7 @@ mod tests {
         let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::LaMaFp32.stable_name()));
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("dummy"), b"x").unwrap();
-        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::DexiNed.stable_name()));
+        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::Teed.stable_name()));
         std::fs::create_dir_all(&other_dir).unwrap();
         std::fs::write(other_dir.join("dummy"), b"x").unwrap();
 

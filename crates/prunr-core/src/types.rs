@@ -99,10 +99,10 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
 pub enum LineMode {
     /// No line extraction
     Off,
-    /// DexiNed on original image; segmentation skipped.
+    /// Line detection on the original image; segmentation skipped.
     #[serde(alias = "LinesOnly")]
     EdgesOnly,
-    /// Segmentation first, then DexiNed — edges only within subject, body transparent.
+    /// Segmentation first, then line detection — edges only within subject, body transparent.
     #[serde(alias = "AfterBgRemoval")]
     SubjectOutline,
 }
@@ -247,29 +247,31 @@ impl Default for MaskSettings {
     }
 }
 
-/// DexiNed output-scale selector. The model produces 6 side outputs
-/// (`block0`..`block5`, fine → coarse) plus a fused `block_cat`. One inference
-/// pass computes all 7; picking a scale just indexes into the outputs.
+/// Which TEED output the lines come from. Every scale is cheap to keep,
+/// so a switch reads a cached plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[derive(Default)]
 pub enum EdgeScale {
-    /// `block0` — finest, crispest micro-edges.
+    /// The fused output of a run at twice the size: thin, detailed lines.
     Fine,
-    /// `block3` — mid-scale; smoother transitions than Fine.
-    Balanced,
-    /// `block5` — coarsest side output; abstract outlines.
+    /// The deepest side output: bold outlines.
     Bold,
-    /// `block_cat` — learned combination of all blocks; current default.
+    /// The fused output; the default. `Balanced` (a scale of the
+    /// previous detector) loads as this.
     #[default]
+    #[serde(alias = "Balanced")]
     Fused,
 }
 
+impl EdgeScale {
+    /// Every scale, in tensor-slot (`as usize`) and display order.
+    pub const ALL: [Self; 3] = [Self::Fine, Self::Bold, Self::Fused];
+}
 
 impl std::fmt::Display for EdgeScale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Fine => "fine",
-            Self::Balanced => "balanced",
             Self::Bold => "bold",
             Self::Fused => "fused",
         })
@@ -281,10 +283,9 @@ impl std::str::FromStr for EdgeScale {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "fine" => Ok(Self::Fine),
-            "balanced" => Ok(Self::Balanced),
             "bold" => Ok(Self::Bold),
-            "fused" => Ok(Self::Fused),
-            _ => Err(format!("unknown edge scale '{s}' (expected: fine, balanced, bold, fused)")),
+            "fused" | "balanced" => Ok(Self::Fused),
+            _ => Err(format!("unknown edge scale '{s}' (expected: fine, bold, fused)")),
         }
     }
 }
@@ -293,13 +294,13 @@ impl std::str::FromStr for EdgeScale {
 /// `line_mode` is kept separate — it picks whether edges run at all.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeSettings {
-    /// DexiNed sensitivity, 0.0-1.0.
+    /// Line detector sensitivity, 0.0-1.0.
     pub line_strength: f32,
     /// Solid color override for edges. `None` = preserve original RGB.
     pub solid_line_color: Option<[u8; 3]>,
     /// Dilate edge mask by N pixels after threshold — thickens thin lines.
     pub edge_thickness: u32,
-    /// Which DexiNed output scale to read. Default `Fused` = current behaviour.
+    /// Which detector output scale to read.
     pub edge_scale: EdgeScale,
     /// How the subject mask and edge mask combine in `LineMode::SubjectOutline`.
     /// Ignored in Off / EdgesOnly. Pure compose-time setting — changing it
@@ -309,7 +310,7 @@ pub struct EdgeSettings {
     /// How edge pixels are coloured (solid / gradient). Compose-time.
     #[serde(default)]
     pub line_style: LineStyle,
-    /// Transform applied to the image before DexiNed inference. Changing
+    /// Transform applied to the image before line detection. Changing
     /// this invalidates the edge tensor cache.
     #[serde(default)]
     pub input_transform: InputTransform,
@@ -321,6 +322,17 @@ impl EdgeSettings {
     /// still carry Bold there, which would collapse both layers into one).
     pub fn primary_scale(&self) -> EdgeScale {
         if matches!(self.line_style, LineStyle::DualScale { .. }) { EdgeScale::Fine } else { self.edge_scale }
+    }
+
+    /// Every scale a compose with these settings reads: the primary
+    /// scale, plus Bold for Dual scale.
+    pub fn drawn_scales(&self) -> &'static [EdgeScale] {
+        match (self.line_style, self.edge_scale) {
+            (LineStyle::DualScale { .. }, _) => &[EdgeScale::Fine, EdgeScale::Bold],
+            (_, EdgeScale::Fine) => &[EdgeScale::Fine],
+            (_, EdgeScale::Bold) => &[EdgeScale::Bold],
+            (_, EdgeScale::Fused) => &[EdgeScale::Fused],
+        }
     }
 }
 
@@ -338,8 +350,8 @@ impl Default for EdgeSettings {
     }
 }
 
-/// Transform applied to the image BEFORE it reaches DexiNed. Changes what
-/// DexiNed "sees", so switching `InputTransform` invalidates the edge tensor
+/// Transform applied to the image BEFORE it reaches the line detector.
+/// Changes what the detector "sees", so switching `InputTransform` invalidates the edge tensor
 /// cache and reruns the detector.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash,
@@ -358,7 +370,7 @@ pub enum InputTransform {
     /// Scale contrast by `percent / 100` around luma 128. 100 = neutral,
     /// 150 = punchy, 50 = muted. Clamped 50..=300.
     ContrastBoost { percent: u16 },
-    /// Quantise each channel to N levels before edge detection — DexiNed
+    /// Quantise each channel to N levels before edge detection — the detector
     /// sees step transitions instead of gradients, producing cleaner lines.
     Posterize { levels: u8 },
 }
@@ -483,7 +495,7 @@ pub enum LineStyle {
     /// Hue rotates through the colour wheel along pixel index —
     /// `cycles` = how many full rotations across the image.
     Rainbow { cycles: u16 },
-    /// Two DexiNed scales layered — Fine at `fine_color` for micro-details,
+    /// Two detector scales layered — Fine at `fine_color` for micro-details,
     /// Bold at `bold_color` for structural edges. Both sets share
     /// `line_strength` and `edge_thickness` from the chip; colours are
     /// independent.
@@ -802,7 +814,6 @@ mod tests {
 
     #[test]
     fn edge_scale_default_is_fused() {
-        // Default must keep current behaviour (block_cat / fused output).
         assert_eq!(EdgeScale::default(), EdgeScale::Fused);
     }
 
@@ -852,10 +863,27 @@ mod tests {
     fn edge_scale_from_str_accepts_all_variants_case_insensitive() {
         use std::str::FromStr;
         assert_eq!(EdgeScale::from_str("fine").unwrap(), EdgeScale::Fine);
-        assert_eq!(EdgeScale::from_str("Balanced").unwrap(), EdgeScale::Balanced);
+        assert_eq!(EdgeScale::from_str("Balanced").unwrap(), EdgeScale::Fused, "the retired Balanced scale reads as Fused");
         assert_eq!(EdgeScale::from_str("BOLD").unwrap(), EdgeScale::Bold);
         assert_eq!(EdgeScale::from_str("fused").unwrap(), EdgeScale::Fused);
         assert!(EdgeScale::from_str("ultra").is_err());
+    }
+
+    #[test]
+    fn a_saved_balanced_scale_loads_as_fused() {
+        let loaded: EdgeScale = serde_json::from_str("\"Balanced\"").expect("Balanced still loads");
+        assert_eq!(loaded, EdgeScale::Fused);
+    }
+
+    #[test]
+    fn drawn_scales_are_the_primary_plus_bold_for_dual_scale() {
+        let dual = LineStyle::DualScale { fine_color: [0; 3], bold_color: [0; 3] };
+        for scale in EdgeScale::ALL {
+            let single = EdgeSettings { edge_scale: scale, ..EdgeSettings::default() };
+            assert_eq!(single.drawn_scales(), &[scale]);
+            let layered = EdgeSettings { edge_scale: scale, line_style: dual, ..EdgeSettings::default() };
+            assert_eq!(layered.drawn_scales(), &[EdgeScale::Fine, EdgeScale::Bold]);
+        }
     }
 
     #[test]

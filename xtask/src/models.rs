@@ -38,13 +38,13 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
         sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
     },
-    // DexiNed is exported from PyTorch weights via scripts/export_dexined.py
-    // and hosted on prunr's own releases (separate tag from app versions).
+    // TEED (MIT, Xavier Soria Poma) exported from the BIPED checkpoint and
+    // hosted on prunr's own releases (separate tag from app versions).
     ModelSpec {
-        id: prunr_models::ModelId::DexiNed,
-        name: "dexined.onnx",
-        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/dexined.onnx",
-        sha256: "cba9193b1e3fbcb5bd196001a9aae13bafaa309442f6cb074330c426cc61ec5a",
+        id: prunr_models::ModelId::Teed,
+        name: "teed.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/teed.onnx",
+        sha256: "8aab32bf7b9da0a4f03108c7f5dd9b9799e22601f212249659ea3ab1d59a5a1a",
     },
     // LaMa for the Eraser tool. OnDemand: distributed via Model Store at
     // runtime. Dev-mode uses `models/lama_fp32.onnx`; this xtask also

@@ -22,7 +22,6 @@ pub(super) fn mode_description(mode: LineMode) -> &'static str {
 pub(super) fn scale_label(scale: EdgeScale) -> &'static str {
     match scale {
         EdgeScale::Fine => "Fine",
-        EdgeScale::Balanced => "Balanced",
         EdgeScale::Bold => "Bold",
         EdgeScale::Fused => "Fused",
     }
@@ -30,10 +29,9 @@ pub(super) fn scale_label(scale: EdgeScale) -> &'static str {
 
 pub(super) fn scale_description(scale: EdgeScale) -> &'static str {
     match scale {
-        EdgeScale::Fine => "Tiny texture, crispest detail",
-        EdgeScale::Balanced => "Mid-size shapes, smooth transitions",
-        EdgeScale::Bold => "Big silhouettes only",
-        EdgeScale::Fused => "Every scale combined; the most detailed result",
+        EdgeScale::Fine => "Thin, detailed pen lines",
+        EdgeScale::Bold => "Big outlines only",
+        EdgeScale::Fused => "Every scale combined; clean lines",
     }
 }
 
@@ -56,7 +54,7 @@ mod tests {
             assert!(!mode_label(mode).is_empty());
             assert!(!mode_description(mode).is_empty());
         }
-        for scale in [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused] {
+        for scale in EdgeScale::ALL {
             assert!(!scale_label(scale).is_empty());
             assert!(!scale_description(scale).is_empty());
         }

@@ -20,7 +20,7 @@ pub enum ModelId {
     Silueta,
     U2net,
     BiRefNetLite,
-    DexiNed,
+    Teed,
     LaMaFp32,
     BigLaMa,
     Migan,
@@ -107,7 +107,7 @@ impl ModelId {
         ModelId::Silueta,
         ModelId::U2net,
         ModelId::BiRefNetLite,
-        ModelId::DexiNed,
+        ModelId::Teed,
         ModelId::LaMaFp32,
         ModelId::BigLaMa,
         ModelId::Migan,
@@ -138,7 +138,7 @@ impl ModelId {
             ModelId::Silueta => "silueta",
             ModelId::U2net => "u2net",
             ModelId::BiRefNetLite => "birefnet_lite",
-            ModelId::DexiNed => "dexined",
+            ModelId::Teed => "teed",
             ModelId::LaMaFp32 => "lama_fp32",
             ModelId::BigLaMa => "big_lama",
             ModelId::Migan => "migan",
@@ -220,7 +220,9 @@ pub struct OnDemandVariant {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ModelSource {
-    Bundled,
+    /// Embedded in the binary. `license` is `None` where the Credits tab
+    /// shows the project's own licence.
+    Bundled { license: Option<LicenseInfo> },
     OnDemand {
         filename: &'static str,
         url: &'static str,
@@ -264,7 +266,7 @@ impl ModelSource {
     /// fails this match loudly — there's no `_ =>` fall-through.
     pub fn kind_label(&self) -> &'static str {
         match self {
-            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => "Bundled",
+            ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => "Bundled",
             ModelSource::OnDemand { .. } => "OnDemand",
             ModelSource::MultiPartOnDemand { .. } => "MultiPart",
         }
@@ -387,6 +389,16 @@ impl UpscaleModelKnobs {
 }
 
 impl ModelDescriptor {
+    /// Upstream author and licence, where the source carries one.
+    pub fn license(&self) -> Option<LicenseInfo> {
+        match self.source {
+            ModelSource::OnDemand { license, .. }
+            | ModelSource::MultiPartOnDemand { license, .. }
+            | ModelSource::MultiPartBundled { license, .. } => Some(license),
+            ModelSource::Bundled { license } => license,
+        }
+    }
+
     /// Download size in MB for OnDemand entries, `None` for Bundled
     /// (the size is already paid in the binary). Multi-part on-demand
     /// bundles return the sum of all parts.
@@ -397,7 +409,7 @@ impl ModelDescriptor {
                 let total: u64 = parts.iter().map(|p| p.size_bytes).sum();
                 Some((total / (1024 * 1024)) as u32)
             }
-            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
+            ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => None,
         }
     }
 
@@ -429,7 +441,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "Silueta",
         description: "Fast and tiny — pick when speed matters more than edge fidelity.",
         category: ModelCategory::Segmentation,
-        source: ModelSource::Bundled,
+        source: ModelSource::Bundled { license: None },
         version: "1.0.0",
         gpu: GpuRequirement::None,
         // OpenVINO 2025.4.1 rejects Silueta's ONNX with
@@ -475,7 +487,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "BiRefNet-lite",
         description: "Default model. Best detail on hair and leaves at 1024×1024.",
         category: ModelCategory::Segmentation,
-        source: ModelSource::Bundled,
+        source: ModelSource::Bundled { license: None },
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
@@ -486,11 +498,18 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         upscale: None,
     },
     ModelDescriptor {
-        id: ModelId::DexiNed,
-        display_name: "DexiNed",
+        id: ModelId::Teed,
+        display_name: "TEED",
         description: "Edge / line extraction. Used by line-mode toolbar.",
         category: ModelCategory::EdgeDetection,
-        source: ModelSource::Bundled,
+        source: ModelSource::Bundled {
+            license: Some(LicenseInfo {
+                author: "Xavier Soria Poma",
+                license: "MIT",
+                license_url: "https://opensource.org/licenses/MIT",
+                source_url: "https://github.com/xavysp/TEED",
+            }),
+        },
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
@@ -1201,7 +1220,7 @@ pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
 /// the binary: they change only with the app version.
 pub fn content_tag(id: ModelId) -> Option<u64> {
     match descriptor(id)?.source {
-        ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => None,
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => None,
         ModelSource::OnDemand { sha256, fp16, .. } => {
             Some(tag_of_shas(std::iter::once(sha256).chain(fp16.map(|v| v.sha256))))
         }
@@ -1259,7 +1278,7 @@ pub enum ResolveError {
 pub fn resolve_bytes(id: ModelId) -> Option<Cow<'static, [u8]>> {
     let desc = descriptor(id)?;
     match desc.source {
-        ModelSource::Bundled => Some(Cow::Borrowed(bundled_bytes(id))),
+        ModelSource::Bundled { .. } => Some(Cow::Borrowed(bundled_bytes(id))),
         ModelSource::OnDemand { filename, .. } => on_demand_bytes(id, filename).map(Cow::Borrowed),
         // Multi-part models aren't a single byte-blob — callers go
         // through `resolve_part_bytes(id, key)` or `multi_part_paths(id)`
@@ -1365,7 +1384,7 @@ pub fn not_installed_error(id: ModelId) -> String {
 
 pub fn is_available(id: ModelId) -> bool {
     match descriptor(id).map(|d| d.source) {
-        Some(ModelSource::Bundled) | Some(ModelSource::MultiPartBundled { .. }) => true,
+        Some(ModelSource::Bundled { .. }) | Some(ModelSource::MultiPartBundled { .. }) => true,
         Some(ModelSource::OnDemand { filename, .. }) => {
             on_demand_dir().is_some_and(|d| d.join(filename).is_file())
         }
@@ -1450,7 +1469,7 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
     match id {
         ModelId::Silueta => silueta_bytes(),
         ModelId::BiRefNetLite => birefnet_lite_bytes(),
-        ModelId::DexiNed => dexined_bytes(),
+        ModelId::Teed => teed_bytes(),
         ModelId::U2net
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
@@ -1483,7 +1502,7 @@ static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
-static DEXINED_ZST: &[u8] = include_bytes!("../../../models/dexined.onnx.zst");
+static TEED_ZST: &[u8] = include_bytes!("../../../models/teed.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.encoder.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
@@ -1494,7 +1513,7 @@ static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
 static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
-static DEXINED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static TEED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
 static SAM2_ENCODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
@@ -1517,10 +1536,10 @@ pub fn birefnet_lite_bytes() -> &'static [u8] {
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn dexined_bytes() -> &'static [u8] {
-    DEXINED_CACHE.get_or_init(|| {
-        zstd::bulk::decompress(DEXINED_ZST, 150 * 1024 * 1024)
-            .expect("failed to decompress embedded dexined model")
+pub fn teed_bytes() -> &'static [u8] {
+    TEED_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(TEED_ZST, 1024 * 1024)
+            .expect("failed to decompress embedded TEED model")
     })
 }
 
@@ -1545,7 +1564,7 @@ static DEV_SILUETA: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_BIREFNET: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
-static DEV_DEXINED: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_TEED: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_SAM2_ENCODER: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
@@ -1591,8 +1610,8 @@ pub fn birefnet_lite_bytes() -> &'static [u8] {
 }
 
 #[cfg(feature = "dev-models")]
-pub fn dexined_bytes() -> &'static [u8] {
-    DEV_DEXINED.get_or_init(|| dev_model_bytes("dexined.onnx"))
+pub fn teed_bytes() -> &'static [u8] {
+    DEV_TEED.get_or_init(|| dev_model_bytes("teed.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
@@ -1624,7 +1643,7 @@ fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> &'static [u8]
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
 // Generated by: python scripts/convert_models.py
 // Returns None when the variant hasn't been generated yet, or when the model
-// has no optimized variant (DexiNed, LaMa). Caller falls back to FP32.
+// has no optimized variant (TEED, LaMa). Caller falls back to FP32.
 
 pub fn model_fp16_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "fp16")
@@ -1654,7 +1673,7 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         // MultiPartOnDemand with no fp16 sibling.
         ModelId::Nomos8kSchatL
         | ModelId::FourXNomos2RealPlksr
-        | ModelId::DexiNed
+        | ModelId::Teed
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
         | ModelId::Migan
@@ -1726,7 +1745,7 @@ mod tests {
     fn model_api_compiles() {
         let _: fn() -> &'static [u8] = silueta_bytes;
         let _: fn() -> &'static [u8] = birefnet_lite_bytes;
-        let _: fn() -> &'static [u8] = dexined_bytes;
+        let _: fn() -> &'static [u8] = teed_bytes;
     }
 
     #[test]
@@ -1749,7 +1768,7 @@ mod tests {
                 ModelId::Silueta
                 | ModelId::U2net
                 | ModelId::BiRefNetLite
-                | ModelId::DexiNed
+                | ModelId::Teed
                 | ModelId::LaMaFp32
                 | ModelId::BigLaMa
                 | ModelId::Migan
@@ -1778,7 +1797,7 @@ mod tests {
         // Bundled entry with `Required` doesn't silently render as
         // Built-in while ignoring its own gate.
         for desc in REGISTRY {
-            if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
+            if matches!(desc.source, ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. }) {
                 assert!(
                     !matches!(desc.gpu, GpuRequirement::Required),
                     "Bundled descriptor {:?} declares GpuRequirement::Required — \
@@ -1805,14 +1824,14 @@ mod tests {
         assert!(ids.contains(&ModelId::Silueta));
         assert!(ids.contains(&ModelId::U2net));
         assert!(ids.contains(&ModelId::BiRefNetLite));
-        assert!(!ids.contains(&ModelId::DexiNed));
+        assert!(!ids.contains(&ModelId::Teed));
         assert!(!ids.contains(&ModelId::LaMaFp32));
     }
 
     #[test]
     fn bundled_descriptors_are_always_available() {
         for desc in REGISTRY {
-            if matches!(desc.source, ModelSource::Bundled | ModelSource::MultiPartBundled { .. }) {
+            if matches!(desc.source, ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. }) {
                 assert!(is_available(desc.id), "Bundled {:?} reports unavailable", desc.id);
             }
         }
@@ -1869,7 +1888,7 @@ mod tests {
         assert!(!ModelId::Silueta.is_sd_family());
         assert!(!ModelId::U2net.is_sd_family());
         assert!(!ModelId::BiRefNetLite.is_sd_family());
-        assert!(!ModelId::DexiNed.is_sd_family());
+        assert!(!ModelId::Teed.is_sd_family());
         assert!(!ModelId::TaesdFp16.is_sd_family());
     }
 
@@ -1980,7 +1999,7 @@ mod tests {
         for d in REGISTRY {
             let tag = content_tag(d.id);
             match d.source {
-                ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => assert_eq!(tag, None, "{:?}", d.id),
+                ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => assert_eq!(tag, None, "{:?}", d.id),
                 ModelSource::OnDemand { .. } | ModelSource::MultiPartOnDemand { .. } => {
                     let tag = tag.unwrap_or_else(|| panic!("{:?} has no tag", d.id));
                     assert!(seen.insert(tag), "{:?} shares a tag", d.id);
@@ -2038,13 +2057,7 @@ mod tests {
     #[test]
     fn upscale_attribution_required_matches_license_class() {
         for desc in REGISTRY {
-            let license = match desc.source {
-                ModelSource::OnDemand { license, .. } => Some(license),
-                ModelSource::MultiPartOnDemand { license, .. } => Some(license),
-                ModelSource::MultiPartBundled { license, .. } => Some(license),
-                ModelSource::Bundled => None,
-            };
-            let Some(lic) = license else { continue };
+            let Some(lic) = desc.license() else { continue };
             if lic.license.starts_with("CC-BY") {
                 assert!(
                     desc.attribution_required,
@@ -2064,13 +2077,7 @@ mod tests {
     #[test]
     fn every_license_info_has_author() {
         for desc in REGISTRY {
-            let author = match desc.source {
-                ModelSource::OnDemand { license, .. } => Some(license.author),
-                ModelSource::MultiPartOnDemand { license, .. } => Some(license.author),
-                ModelSource::MultiPartBundled { license, .. } => Some(license.author),
-                ModelSource::Bundled => None,
-            };
-            if let Some(author) = author {
+            if let Some(author) = desc.license().map(|l| l.author) {
                 assert!(
                     !author.is_empty(),
                     "{:?} has empty author in LicenseInfo",

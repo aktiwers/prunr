@@ -1689,7 +1689,7 @@ impl PrunrApp {
     fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         self.batch.fit_line_modes_to(self.settings.model);
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
-        // subprocess entirely. (No model + EdgesOnly still needs DexiNed,
+        // subprocess entirely. (No model + EdgesOnly still needs TEED,
         // so falls through to the normal path with a dummy ModelKind — the
         // seg engine won't spawn because needs_segmentation is false.)
         let is_pure_filter = self.settings.model.to_model_kind().is_none()
@@ -1854,7 +1854,7 @@ impl PrunrApp {
                 }
                 RequiredTier::MaskRerun => {
                     if item.cached_tensor.is_some() {
-                        // SubjectOutline mask rerun needs DexiNed re-composite
+                        // SubjectOutline mask rerun needs TEED re-composite
                         // on the new masked base; Tier 2 RePostProcess only
                         // runs the mask side, which would drop the outline.
                         if current_recipe.inference.uses_edge_detection {
@@ -2838,15 +2838,13 @@ impl PrunrApp {
             .filter(|(s, _)| *s == scale)
             .map(|(_, arc)| arc.clone());
         if let Some(arc) = hot_hit {
-            let (height, width) = item.cached_edge_tensors.as_ref()
-                .map(|c| (c.height, c.width))?;
+            let (height, width) = item.cached_edge_tensors.as_ref()?.dims(scale);
             return Some(super::live_preview::EdgeTensor { data: arc, height, width });
         }
 
-        let (data, height, width) = {
+        let (data, (height, width)) = {
             let cache = item.cached_edge_tensors.as_ref()?;
-            let d = Arc::new(cache.decompress(scale)?);
-            (d, cache.height, cache.width)
+            (Arc::new(cache.decompress(scale)?), cache.dims(scale))
         };
         if scale == item.settings.edge_settings().primary_scale() {
             item.volatile_edge_tensor = Some((scale, data.clone()));
@@ -3219,7 +3217,7 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Include which models are loading so a DexiNed-only reload is
+    /// Include which models are loading so a TEED-only reload is
     /// distinguishable from a segmentation model load.
     fn loading_model_status_text(&self, item_id: u64) -> String {
         let line_mode = self.batch.find_by_id(item_id)
@@ -3228,8 +3226,8 @@ impl PrunrApp {
         let seg_name = super::views::model_name(self.settings.model);
         let models = match line_mode {
             prunr_core::LineMode::Off => seg_name.to_string(),
-            prunr_core::LineMode::EdgesOnly => "DexiNed".to_string(),
-            prunr_core::LineMode::SubjectOutline => format!("{seg_name} + DexiNed"),
+            prunr_core::LineMode::EdgesOnly => "TEED".to_string(),
+            prunr_core::LineMode::SubjectOutline => format!("{seg_name} + TEED"),
         };
         if cfg!(target_os = "macos") {
             format!("Loading {models} (first run may take a few minutes)...")
@@ -4613,7 +4611,7 @@ enum NavDir {
 struct ClassifiedTiers {
     tier1: HashSet<u64>,
     tier2: HashSet<u64>,
-    /// AddEdgeInference items: seg tensor cached, run DexiNed only.
+    /// AddEdgeInference items: seg tensor cached, run TEED only.
     tier_add_edge: HashSet<u64>,
     skip_count: usize,
 }

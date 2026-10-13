@@ -49,14 +49,14 @@ pub struct ItemSettings {
 
     /// Line extraction mode.
     pub line_mode: LineMode,
-    /// DexiNed edge sensitivity (0.0-1.0).
+    /// TEED edge sensitivity (0.0-1.0).
     pub line_strength: f32,
     /// Solid color override for edges. `None` = preserve original RGB.
     pub solid_line_color: Option<[u8; 3]>,
     /// Line width: the edge mask grown by N pixels. Range 0-20 in the UI;
     /// stored as u8 to fit the ItemSettings byte budget.
     pub edge_thickness: u8,
-    /// Which DexiNed output scale to read from the cached tensor set.
+    /// Which TEED output scale to read from the cached tensor set.
     pub edge_scale: EdgeScale,
 
     /// Fill transparent areas with a solid color. `None` = transparent.
@@ -80,7 +80,7 @@ pub struct ItemSettings {
     /// A picture made from the photo, shown behind the result.
     #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
-    /// Transform applied to the image before DexiNed inference. A change
+    /// Transform applied to the image before TEED inference. A change
     /// drops the edge tensor cache and reruns the detector at once (on the
     /// cached cut-out when there is one).
     #[serde(default)]
@@ -567,7 +567,7 @@ mod tests {
     fn serde_loads_old_preset_missing_edge_scale_as_fused() {
         // Backwards-compat: preset files written before Task 5 lack
         // edge_scale. `#[serde(default)]` on ItemSettings must fall back
-        // to `EdgeScale::Fused` (the previous hardcoded block_cat output).
+        // to `EdgeScale::Fused`.
         let old_json = r#"{
             "gamma": 1.2,
             "contrast": 0.0,
@@ -585,6 +585,15 @@ mod tests {
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.edge_scale, EdgeScale::Fused);
         assert_eq!(loaded.line_mode, LineMode::EdgesOnly); // sanity: others still parse
+    }
+
+    /// Presets saved with the retired Balanced scale still load.
+    #[test]
+    fn serde_loads_a_balanced_scale_preset_as_fused() {
+        let mut json = serde_json::to_value(ItemSettings { edge_scale: EdgeScale::Bold, ..ItemSettings::default() }).unwrap();
+        json["edge_scale"] = serde_json::json!("Balanced");
+        let loaded: ItemSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.edge_scale, EdgeScale::Fused);
     }
 
     #[test]

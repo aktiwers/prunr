@@ -35,6 +35,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **Lines now come from TEED** instead of DexiNed: cleaner lines, faster (a Sketch on a 20 MP photo takes 1.8 s instead of 2.7 s), and the app is about 130 MB smaller. The Balanced scale is folded into Fused; saved settings, presets and `--line-scale balanced` read it as Fused.
 - An upscaled result keeps its place on screen: a fitted image stays fitted, a zoomed-in view keeps its spot.
 - **A new look.** Panels float as dark glass with round pill corners. Mask, Sketch, Effect, Outline & Shadow, Background and Refine open as a quick strip of their everyday knobs; its dots open the full panel under it. Effects and backgrounds are picture tiles, colors are swatch dots, choices are segmented pills. The model picker groups models by what they do. Settings has a sidebar of pages (Performance, Hardware, Images, Editing, Hotkeys, Credits) and the Model Store is a grid of cards that open in place. The brush panels hold only what their strip lacks, and on a cut-out Erase is drawn in warm red.
 - Refine's Brightness lift and Saturation are gone (Brightness lift clipped highlights and banded shadows; no upscaler offers either), and so is the 4× two-pass Scale.

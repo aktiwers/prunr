@@ -299,7 +299,7 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// Send an AddEdgeInference command (seg cached, run DexiNed on masked).
+    /// Send an AddEdgeInference command (seg cached, run TEED on masked).
     /// Writes the seg tensor + original image bytes to temp files. The worker
     /// reads the seg tensor without deleting it and hands the path back as
     /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes

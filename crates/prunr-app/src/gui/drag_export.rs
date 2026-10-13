@@ -608,8 +608,11 @@ mod tests {
         use std::sync::Arc;
 
         let (h, w) = (8u32, 8u32);
-        let tensor = |on: bool| vec![if on { 10.0_f32 } else { -10.0 }; (h * w) as usize];
-        let raw = EdgeTensorCache { tensors: [tensor(true), tensor(false), tensor(false), tensor(false)], height: h, width: w };
+        let tensor = |scale: EdgeScale| {
+            let (sh, sw) = prunr_core::edge_scale_dims(scale, h, w);
+            vec![if scale == EdgeScale::Fine { 1.0_f32 } else { 0.0 }; (sh * sw) as usize]
+        };
+        let raw = EdgeTensorCache { tensors: EdgeScale::ALL.map(tensor), height: h, width: w };
         let all_scales = prunr_core::EdgeInferenceResult { tensors: raw.tensors.clone(), height: h, width: w };
         let settings = ItemSettings {
             line_mode: LineMode::EdgesOnly,

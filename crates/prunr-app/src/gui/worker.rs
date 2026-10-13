@@ -72,17 +72,18 @@ impl CompressedTensor {
     }
 }
 
-/// Raw multi-scale DexiNed output for IPC transfer. `tensors` is indexed by
-/// [`EdgeScale`] as `usize` — Fine=0, Balanced=1, Bold=2, Fused=3.
+/// Raw multi-scale TEED output for IPC transfer. `tensors` is indexed by
+/// [`EdgeScale`] as `usize`; `height` × `width` is the base size, a
+/// scale's own size is `prunr_core::edge_scale_dims`.
 pub struct EdgeTensorCache {
     pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
 }
 
-/// Zstd-compressed multi-scale DexiNed cache. All 4 scales are extracted from
-/// one inference pass and compressed in parallel here, so scale switching in
-/// live preview is a tensor lookup (one decompress, no re-inference).
+/// Zstd-compressed multi-scale TEED cache. Every scale is kept and
+/// compressed in parallel here, so scale switching in live preview is a
+/// tensor lookup (one decompress, no re-inference).
 /// Cloning shares the bytes.
 #[derive(Clone)]
 pub struct CompressedEdgeTensors {
@@ -92,7 +93,7 @@ pub struct CompressedEdgeTensors {
 }
 
 impl CompressedEdgeTensors {
-    /// Compress all 4 tensors with zstd level 1, in parallel via rayon.
+    /// Compress every scale's tensor with zstd level 1, in parallel via rayon.
     /// Runs off the UI thread (called from the BG-IO / subprocess-event path).
     /// Returns None if any compression fails.
     pub fn from_raw(raw: EdgeTensorCache) -> Option<Self> {
@@ -102,8 +103,8 @@ impl CompressedEdgeTensors {
                 .ok().unwrap_or_default()
         }).collect();
         if parts.iter().any(|p| p.is_empty()) { return None; }
-        let [a, b, c, d] = parts.try_into().ok()?;
-        Some(Self { tensors: [a.into(), b.into(), c.into(), d.into()], height: raw.height, width: raw.width })
+        let [a, b, c] = parts.try_into().ok()?;
+        Some(Self { tensors: [a.into(), b.into(), c.into()], height: raw.height, width: raw.width })
     }
 
     /// Decompress one scale's tensor. Called per-dispatch in the hot path,
@@ -114,19 +115,22 @@ impl CompressedEdgeTensors {
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
-    /// The scales `edge` draws, decompressed for a compose: its primary
-    /// scale, plus Bold for Dual scale. The other slots stay empty.
+    /// `scale`'s tensor size, height first.
+    pub fn dims(&self, scale: EdgeScale) -> (u32, u32) {
+        prunr_core::edge_scale_dims(scale, self.height, self.width)
+    }
+
+    /// The scales `edge` draws, decompressed for a compose. The other
+    /// slots stay empty.
     pub fn for_compose(&self, edge: &EdgeSettings) -> Option<prunr_core::EdgeInferenceResult> {
         let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
-        let primary = edge.primary_scale();
-        tensors[primary as usize] = self.decompress(primary)?;
-        if matches!(edge.line_style, prunr_core::LineStyle::DualScale { .. }) {
-            tensors[EdgeScale::Bold as usize] = self.decompress(EdgeScale::Bold)?;
+        for &scale in edge.drawn_scales() {
+            tensors[scale as usize] = self.decompress(scale)?;
         }
         Some(prunr_core::EdgeInferenceResult { tensors, height: self.height, width: self.width })
     }
 
-    /// Total compressed bytes across all 4 scales (for budget tracking).
+    /// Total compressed bytes across every scale (for budget tracking).
     pub fn compressed_size(&self) -> usize {
         self.tensors.iter().map(|t| t.len()).sum()
     }
@@ -196,7 +200,7 @@ pub enum WorkerMessage {
         items: Vec<WorkItem>,
         /// Tier 2 items: re-postprocess from cached tensor (skip inference).
         tier2_items: Vec<Tier2WorkItem>,
-        /// AddEdgeInference items: cached seg tensor + DexiNed on masked image.
+        /// AddEdgeInference items: cached seg tensor + TEED on masked image.
         /// Used for Off → SubjectOutline transitions so enabling the outline
         /// doesn't force a full seg re-inference.
         add_edge_items: Vec<AddEdgeWorkItem>,
@@ -223,7 +227,7 @@ pub enum WorkerResult {
         result: Result<ProcessResult, String>,
         /// Cached segmentation tensor from Tier 1 (for future mask-tier reruns).
         tensor_cache: Option<TensorCache>,
-        /// Multi-scale DexiNed cache — all 4 scales produced in one inference.
+        /// Multi-scale TEED cache — every scale, kept so a switch needs no run.
         /// Only populated when the run used edge detection.
         edge_cache: Option<EdgeTensorCache>,
     },
@@ -805,8 +809,9 @@ fn read_tensor_cache(
     Some(TensorCache { data, height: h, width: w, model })
 }
 
-/// Read the DexiNed multi-scale cache. Child concatenates 4 tensors into
-/// one file (each h*w*4 bytes); parent splits into equal chunks.
+/// Read the TEED multi-scale cache. Child concatenates every scale's
+/// tensor into one file in `EdgeScale` order; parent splits it by each
+/// scale's size.
 fn read_edge_tensor_cache(
     path: Option<&std::path::PathBuf>,
     height: Option<u32>,
@@ -816,8 +821,11 @@ fn read_edge_tensor_cache(
     let w = width?;
     let raw_bytes = read_and_delete(path?)?;
 
-    let per_tensor_bytes = (h as usize) * (w as usize) * std::mem::size_of::<f32>();
-    let expected = per_tensor_bytes * EDGE_SCALE_COUNT;
+    let scale_bytes = |scale: EdgeScale| {
+        let (sh, sw) = prunr_core::edge_scale_dims(scale, h, w);
+        (sh as usize) * (sw as usize) * std::mem::size_of::<f32>()
+    };
+    let expected: usize = EdgeScale::ALL.iter().map(|&s| scale_bytes(s)).sum();
     if raw_bytes.len() != expected {
         tracing::error!(
             got = raw_bytes.len(),
@@ -827,15 +835,13 @@ fn read_edge_tensor_cache(
         return None;
     }
 
-    let mut chunks = raw_bytes.chunks_exact(per_tensor_bytes);
-    let mut next = || -> Option<Vec<f32>> {
-        Some(crate::subprocess::ipc::le_bytes_to_f32s(chunks.next()?))
-    };
-    let a = next()?;
-    let b = next()?;
-    let c = next()?;
-    let d = next()?;
-    Some(EdgeTensorCache { tensors: [a, b, c, d], height: h, width: w })
+    let mut rest = raw_bytes.as_slice();
+    let tensors = EdgeScale::ALL.map(|scale| {
+        let (chunk, tail) = rest.split_at(scale_bytes(scale));
+        rest = tail;
+        crate::subprocess::ipc::le_bytes_to_f32s(chunk)
+    });
+    Some(EdgeTensorCache { tensors, height: h, width: w })
 }
 
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.

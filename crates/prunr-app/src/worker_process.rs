@@ -631,8 +631,8 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
-                            // Write DexiNed multi-scale cache (4 tensors concatenated
-                            // into a single temp file; parent splits by EDGE_SCALE_COUNT).
+                            // Write TEED multi-scale cache (every scale concatenated
+                            // into a single temp file; parent splits by scale size).
                             let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
                                 let ep = IpcKind::Edge.path_for(&ipc, item_id);
                                 match write_edge_tensors(&ep, res) {

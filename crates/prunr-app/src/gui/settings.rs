@@ -550,7 +550,7 @@ pub enum SettingsModel {
     BiRefNetLite,
     /// "Filter-only" mode — no segmentation inference. The pipeline bypasses
     /// the seg stage entirely and just applies fill_style / bg_effect to the
-    /// source. DexiNed still runs if `line_mode == EdgesOnly` (edges don't
+    /// source. TEED still runs if `line_mode == EdgesOnly` (edges don't
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
     None,

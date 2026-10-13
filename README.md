@@ -45,10 +45,10 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), DexiNed (lines), SAM 2.1 (Magic Brush)
+- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), TEED (lines), SAM 2.1 (Magic Brush)
 - **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
 - **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
-- **Line extraction** — edges/outlines via DexiNed at four scales, standalone or combined with background removal, with colour styles and compositions
+- **Line extraction** — edges/outlines via TEED at three scales, standalone or combined with background removal, with colour styles and compositions
 - **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN or Stable Diffusion 1.5 (with prompts) fill it in
 - **Upscale** — Real-ESRGAN, NMKD and HAT models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
 - **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / tile) or a blurred or black-and-white version of the photo
@@ -93,7 +93,7 @@ Common flags:
 | `--line-detail <N>` | How much detail becomes lines, 0.0–1.0 (default 0.5); `--line-strength` still works |
 | `--line-width <N>` | Line width in pixels, 0–20 |
 | `--line-composition <M>` | With `--lines-after-bg`: `lines-only`, `subject-filled`, `engraving`, `ghost` |
-| `--line-scale <S>` | `fine`, `balanced`, `bold`, `fused` (default) |
+| `--line-scale <S>` | `fine`, `bold`, `fused` (default) |
 | `--line-color <HEX>` | Paint all lines one colour |
 | `--large-image <P>` | Images above 8000 px: `downscale` (default, to 4096 px) or `process` (keep the original size) |
 | `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
@@ -118,7 +118,7 @@ Common flags:
 |-------|------|---------|-----------|----------|
 | BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) — **default** |
 | Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects |
-| DexiNed | ~140 MB | yes | full-res | Line / edge extraction |
+| TEED | ~0.25 MB | yes | 640×480 and 1280×960 | Line / edge extraction |
 | SAM 2.1 Hiera Small | encoder + decoder | yes | 1024 input | Magic Brush selections |
 | U2Net | ~170 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |
@@ -131,7 +131,7 @@ Common flags:
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
 | 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
 
-The default install bundles Silueta + BiRefNet-lite + DexiNed + SAM 2 for the common cases. Heavier models download on first use from prunr's GitHub releases. Open the model dropdown and pick **More models…** for the Model Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
+The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2 for the common cases. Heavier models download on first use from prunr's GitHub releases. Open the model dropdown and pick **More models…** for the Model Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 
 ## Hardware Acceleration
 

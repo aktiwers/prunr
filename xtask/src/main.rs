@@ -20,7 +20,7 @@ fn ondemand_target(id: prunr_models::ModelId) -> Option<&'static str> {
         // Multi-part bundles aren't single-file targets — xtask doesn't
         // mirror them today; the production DownloadManager handles
         // on-demand bundles, and bundled variants live in the binary.
-        prunr_models::ModelSource::Bundled
+        prunr_models::ModelSource::Bundled { .. }
         | prunr_models::ModelSource::MultiPartOnDemand { .. }
         | prunr_models::ModelSource::MultiPartBundled { .. } => None,
     }
