@@ -231,7 +231,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None, false, &Progress::none())
+    process_inpaint_with(image, mask, id, None, false, &Progress::none()).map(|f| f.rgba)
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
@@ -247,7 +247,7 @@ pub fn process_inpaint_with(
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
     cpu_only: bool,
     progress: &Progress,
-) -> Result<RgbaImage, CoreError> {
+) -> Result<Filled, CoreError> {
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -258,7 +258,7 @@ pub fn process_inpaint_with(
     // Short-circuit before the 200 MB session load — empty masks are
     // common during live preview when the user hasn't started painting.
     if mask_is_empty(mask) {
-        return Ok(image.clone());
+        return Ok(Filled { rgba: image.clone(), scale: 1.0 });
     }
     if id.is_sd_family() {
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
@@ -271,6 +271,13 @@ pub fn process_inpaint_with(
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
     process_lama(image, mask, id, cpu_only, FillScale::Auto, progress)
+}
+
+/// A fill, and the scale its region was filled at: 1 is full size; with
+/// several regions, the smallest of their scales.
+pub struct Filled {
+    pub rgba: RgbaImage,
+    pub scale: f32,
 }
 
 /// How large an eraser fills a hole. LaMa works in 512 px tiles and SD
@@ -346,9 +353,9 @@ pub fn process_lama(
     cpu_only: bool,
     scale: FillScale,
     progress: &Progress,
-) -> Result<RgbaImage, CoreError> {
+) -> Result<Filled, CoreError> {
     if mask_is_empty(mask) {
-        return Ok(image.clone());
+        return Ok(Filled { rgba: image.clone(), scale: 1.0 });
     }
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
@@ -370,9 +377,9 @@ pub(crate) fn fill_at_scale(
     scale: FillScale,
     fit: Fit,
     mut fill: impl FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
-) -> Result<RgbaImage, CoreError> {
+) -> Result<Filled, CoreError> {
     if scale == FillScale::Full {
-        return fill(image, mask);
+        return Ok(Filled { rgba: fill(image, mask)?, scale: 1.0 });
     }
     let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
         .map(|r| {
@@ -382,8 +389,9 @@ pub(crate) fn fill_at_scale(
         .filter(|&(_, f)| f < 1.0)
         .collect();
     if shrunk.is_empty() {
-        return fill(image, mask);
+        return Ok(Filled { rgba: fill(image, mask)?, scale: 1.0 });
     }
+    let smallest = shrunk.iter().map(|&(_, f)| f).fold(1.0f32, f32::min);
     let mut out = image.clone();
     let mut rest = mask.clone();
     let width = mask.width() as usize;
@@ -397,7 +405,7 @@ pub(crate) fn fill_at_scale(
     if !mask_is_empty(&rest) {
         out = fill(&out, &rest)?;
     }
-    Ok(out)
+    Ok(Filled { rgba: out, scale: smallest })
 }
 
 /// Fill the part of `mask` inside `hole` through `fill` at `factor` < 1,
@@ -1573,7 +1581,7 @@ mod tests {
             }
         }
         let mut calls = Vec::new();
-        let out = fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, |rgba, m| {
+        let Filled { rgba: out, scale } = fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, |rgba, m| {
             calls.push((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
             let mut filled = rgba.clone();
             for (x, y, p) in m.enumerate_pixels() {
@@ -1583,6 +1591,9 @@ mod tests {
             }
             Ok(filled)
         }).unwrap();
+        assert!(scale > 0.0 && scale < 1.0, "reports the large region's scale: {scale}");
+        let full = fill_at_scale(&image, &mask, FillScale::Full, Fit { long: 300, short: 300 }, |rgba, _| Ok(rgba.clone())).unwrap();
+        assert_eq!(full.scale, 1.0, "Full fills at full size");
         assert_eq!(calls.len(), 2, "the large region scaled down, then the rest");
         assert!(calls[0].0.0 < 1200, "the large region's crop is scaled down");
         assert_eq!(calls[1], ((1200, 400), 20 * 20), "the small mark alone, at full size");

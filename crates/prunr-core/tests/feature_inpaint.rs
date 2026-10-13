@@ -119,6 +119,6 @@ fn inpaint_rorem_runs_end_to_end() {
     use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
     run_inpaint_test_with(ModelId::RoremFp16, "rorem", |image, mask| {
         let req = SdInpaintRequest { num_inference_steps: 4, scheduler: SchedulerKind::Lcm, seed: Some(7), ..Default::default() };
-        prunr_core::inpaint_sd::process_inpaint_with(image, mask, ModelId::RoremFp16, req, &prunr_core::Progress::none())
+        prunr_core::inpaint_sd::process_inpaint_with(image, mask, ModelId::RoremFp16, req, &prunr_core::Progress::none()).map(|f| f.rgba)
     });
 }

@@ -652,6 +652,7 @@ mod tests {
                 rgba_path: PathBuf::from("/tmp/y"),
                 width: 100,
                 height: 100,
+                fill_scale: 1.0,
             },
             SubprocessEvent::InpaintError {
                 item_id: 4,

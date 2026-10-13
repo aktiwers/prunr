@@ -46,7 +46,7 @@ fn sd_inpaint_modifies_painted_region() {
     };
     let progress = prunr_core::Progress::none();
     let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress) {
-        Ok(r) => r,
+        Ok(r) => r.rgba,
         // The pre-flight RAM gate is an environmental refusal (SD wants
         // ~12 GB free), not a pipeline failure — skip like a missing bundle.
         Err(e) if e.to_string().contains("RAM free") => {
@@ -145,7 +145,7 @@ fn sd_bench() {
     let progress = prunr_core::Progress::none();
     let started = std::time::Instant::now();
     let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress) {
-        Ok(r) => r,
+        Ok(r) => r.rgba,
         Err(e) if e.to_string().contains("RAM free") => {
             eprintln!("[sd_bench] SKIP: {e}");
             return;

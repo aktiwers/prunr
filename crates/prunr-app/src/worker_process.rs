@@ -987,7 +987,7 @@ pub fn run_worker() -> ! {
                             map: inpaint_cancels.clone(),
                         },
                     };
-                    let result = (|| -> Result<image::RgbaImage, String> {
+                    let result = (|| -> Result<(image::RgbaImage, f32), String> {
                         // Inner scope drops encoded bytes + DynamicImage as
                         // soon as `to_rgba8`/`to_luma8` produces the final
                         // buffer — encoded source (~5–20 MB at 4 K) and
@@ -1009,18 +1009,18 @@ pub fn run_worker() -> ! {
                                 .map_err(|e| format!("decode mask: {e}"))?
                                 .to_luma8()
                         };
-                        let raw = prunr_core::inpaint::process_inpaint_with(
+                        let filled = prunr_core::inpaint::process_inpaint_with(
                             &image, &mask, model_id, sd_req.clone(),
                             sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
                         ).map_err(|e| format!("inpaint: {e:?}"))?;
                         progress.step(prunr_core::Step::Blending);
-                        Ok(prunr_core::inpaint_blend::finalize_inpaint(
-                            &raw, &image, &mask, feather_px, sharpen,
-                        ))
+                        Ok((prunr_core::inpaint_blend::finalize_inpaint(
+                            &filled.rgba, &image, &mask, feather_px, sharpen,
+                        ), filled.scale))
                     })();
                     drop(_cleanup);
                     match result {
-                        Ok(rgba) => {
+                        Ok((rgba, fill_scale)) => {
                             let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
                             match prunr_core::encode_rgba_png(&rgba) {
                                 Ok(bytes) => {
@@ -1036,6 +1036,7 @@ pub fn run_worker() -> ! {
                                         rgba_path: path,
                                         width: rgba.width(),
                                         height: rgba.height(),
+                                        fill_scale,
                                     });
                                 }
                                 Err(e) => {

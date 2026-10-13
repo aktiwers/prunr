@@ -1216,6 +1216,9 @@ impl PrunrApp {
                 // its brush marks; undoing it brings both back.
                 item.invalidate_selection();
                 item.finish_job();
+                if let Some(scale) = r.fill_scale {
+                    item.note_fill_scale(scale);
+                }
             }
         }
     }
@@ -5431,6 +5434,25 @@ mod timeline_contract_tests {
         app.handle_undo(&ctx);
         assert_eq!(shown(&app), Some(1));
         assert!(app.batch.items[0].selection_mask.is_some(), "undo brings the marks back with the image");
+    }
+
+    /// An erase records how large it filled its region on its step, so
+    /// the footer can show what Auto picked; undo and redo keep it with
+    /// the step.
+    #[test]
+    fn an_erase_records_how_large_it_filled() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
+        app.processor.land_inpaint_scaled_for_test(1, (*px(7)).clone(), 0.5);
+        app.pump_inpaint_results(&ctx);
+        let fill_scale = |app: &PrunrApp| app.batch.items[0].timeline.current().origin.as_ref().and_then(|o| o.fill_scale);
+        assert_eq!(fill_scale(&app), Some(0.5));
+        app.handle_undo(&ctx);
+        assert_eq!(fill_scale(&app), None, "the stroke step has no fill");
+        app.handle_redo(&ctx);
+        assert_eq!(fill_scale(&app), Some(0.5));
     }
 
     /// The control socket reports the app busy while an erase runs, so a

@@ -198,6 +198,8 @@ pub enum SubprocessEvent {
         rgba_path: std::path::PathBuf,
         width: u32,
         height: u32,
+        /// How large the region was filled: 1 is full size.
+        fill_scale: f32,
     },
     /// Inpaint dispatch failed (model missing, ORT error, IO error).
     InpaintError {
@@ -655,6 +657,7 @@ mod tests {
             rgba_path: std::path::PathBuf::from("/tmp/prunr-inpaint-out-11"),
             width: 1920,
             height: 1080,
+            fill_scale: 0.5,
         });
         roundtrip(&SubprocessEvent::InpaintError {
             item_id: 11,
