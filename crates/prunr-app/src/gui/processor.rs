@@ -931,7 +931,7 @@ impl Processor {
         // a new stroke starts (and avoids the capsule showing the prior
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Inpaint, prunr_core::Step::LoadingModel.label());
+        let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint);
         let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
         self.inpaint_runs.insert(item_id, run.clone());
@@ -1246,6 +1246,11 @@ impl Processor {
     /// reads this to override the "All done" text during LaMa work.
     pub(crate) fn any_inpaint_in_flight(&self) -> bool {
         self.inpaint_pending.values().any(|&c| c > 0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_inpaint_in_flight_for_test(&mut self, item_id: u64, on: bool) {
+        self.inpaint_pending.insert(item_id, u32::from(on));
     }
 
     /// Register a batch's recipe + the IDs that should deliver against it.
@@ -1638,7 +1643,7 @@ impl Processor {
     /// The next queued image, to dispatch now; none while a run is in
     /// flight or the queue is empty.
     pub(crate) fn next_queued_run(&self) -> Option<u64> {
-        if self.is_run_in_flight() {
+        if self.is_run_in_flight() || self.any_inpaint_in_flight() {
             return None;
         }
         let mut q = self.run_queue();
