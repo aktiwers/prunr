@@ -165,6 +165,8 @@ pub enum Surface {
     Colorize,
     /// The Stable Diffusion eraser's Quality, Prompt and Advanced chips.
     SdChips,
+    /// The RORem eraser's Advanced chip: steps and seed.
+    RoremChips,
     /// Paint and Magic Brush, the selection on the image and its actions.
     Brushes,
     /// The Paint Brush's mode (Restore/Erase or Add/Subtract), Hardness
@@ -191,6 +193,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Upscale => role == Upscale,
         Surface::Colorize => role == Colorize,
         Surface::SdChips => model == SettingsModel::SdInpaint,
+        Surface::RoremChips => model == SettingsModel::RoremInpaint,
         Surface::Brushes => !matches!(role, Upscale | Colorize),
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,

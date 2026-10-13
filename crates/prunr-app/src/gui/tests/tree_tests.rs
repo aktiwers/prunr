@@ -92,19 +92,22 @@ fn loaded_item_names_every_control() {
 fn each_model_toolbar_shows_only_its_chips() {
     use crate::gui::knob_catalog::{shows, Surface};
     use crate::gui::settings::SettingsModel;
-    let chips: &[(&str, Surface)] = &[
-        ("Mask", Surface::Mask),
-        ("Sketch", Surface::Lines),
-        ("Effect", Surface::Effect),
-        ("Faces", Surface::Faces),
-        ("Depth", Surface::Depth),
-        ("Background", Surface::Background),
-        ("Scale", Surface::Upscale),
-        ("Refine", Surface::Upscale),
-        ("Strength", Surface::Colorize),
-        ("Prompt", Surface::SdChips),
-        ("Paint Brush", Surface::Brushes),
-        ("Magic Brush", Surface::Brushes),
+    // A chip shows when any of its surfaces does: both generative
+    // erasers have an Advanced chip.
+    let chips: &[(&str, &[Surface])] = &[
+        ("Mask", &[Surface::Mask]),
+        ("Sketch", &[Surface::Lines]),
+        ("Effect", &[Surface::Effect]),
+        ("Faces", &[Surface::Faces]),
+        ("Depth", &[Surface::Depth]),
+        ("Background", &[Surface::Background]),
+        ("Scale", &[Surface::Upscale]),
+        ("Refine", &[Surface::Upscale]),
+        ("Strength", &[Surface::Colorize]),
+        ("Prompt", &[Surface::SdChips]),
+        ("Advanced", &[Surface::SdChips, Surface::RoremChips]),
+        ("Paint Brush", &[Surface::Brushes]),
+        ("Magic Brush", &[Surface::Brushes]),
     ];
     for model in SettingsModel::ALL {
         let mut harness = harness();
@@ -117,8 +120,9 @@ fn each_model_toolbar_shows_only_its_chips() {
         }
         settle(&mut harness);
         let names = names(&harness);
-        for &(chip, surface) in chips {
-            assert_eq!(names.iter().any(|n| n == chip), shows(model, surface), "{model:?}: {chip}");
+        for &(chip, surfaces) in chips {
+            let expected = surfaces.iter().any(|&surface| shows(model, surface));
+            assert_eq!(names.iter().any(|n| n == chip), expected, "{model:?}: {chip}");
         }
     }
 }

@@ -227,6 +227,9 @@ pub(crate) fn render(
                 change.brush_settings_committed = true;
             }
         }
+        if shows(model, Surface::RoremChips) && super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed) {
+            change.brush_settings_committed = true;
+        }
         if shows(model, Surface::Mask) {
             let mask_reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out.");
             chip::gated(ui, mask_reason, |ui| {

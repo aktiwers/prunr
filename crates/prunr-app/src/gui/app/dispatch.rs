@@ -133,6 +133,7 @@ impl PrunrApp {
             sd_guidance_scale: bs.sd_guidance_scale,
             sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
+            rorem_steps: bs.rorem_steps,
             sd_seed: seed,
             use_taesd: bs.sd_use_taesd_effective(),
             sd_tuning: crate::gui::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
