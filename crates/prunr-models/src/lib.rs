@@ -95,10 +95,10 @@ impl ModelId {
     /// What the SD pipeline needs to know about an SD-family bundle;
     /// `None` for every other model.
     pub fn sd_spec(&self) -> Option<SdSpec> {
-        const SD15: SdSpec = SdSpec { vae_scale: 0.18215, cpu_output_correct: false, takes_taesd: true };
+        const SD15: SdSpec = SdSpec { vae_scale: 0.18215, cpu_output_correct: false, takes_taesd: true, lean_sessions: false };
         match self {
             ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 => Some(SD15),
-            ModelId::RoremFp16 => Some(SdSpec { vae_scale: 0.13025, cpu_output_correct: true, takes_taesd: false }),
+            ModelId::RoremFp16 => Some(SdSpec { vae_scale: 0.13025, cpu_output_correct: true, takes_taesd: false, lean_sessions: true }),
             _ => None,
         }
     }
@@ -1477,6 +1477,10 @@ pub struct SdSpec {
     pub cpu_output_correct: bool,
     /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
     pub takes_taesd: bool,
+    /// Sessions run without ORT's memory-pattern planning. Measured on
+    /// RORem (prunr-export/rorem_mem): 15 GB peak instead of 21.7 at the
+    /// same speed. SD 1.5 is unmeasured, so it keeps ORT's default.
+    pub lean_sessions: bool,
 }
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:

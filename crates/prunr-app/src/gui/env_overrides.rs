@@ -48,17 +48,7 @@ fn read_f32(var: &str) -> Option<f32> {
 /// the session memory knobs `PRUNR_SD_MEM_PATTERN`, `PRUNR_SD_DEV_INIT`
 /// and `PRUNR_SD_THREADS`.
 pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpaint_sd::SdTuning {
-    prunr_core::inpaint_sd::SdTuning {
-        keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
-        tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
-        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(planned.ov_device),
-        mem: prunr_core::inpaint_sd::SdMemPlan {
-            no_memory_pattern: read_bool("PRUNR_SD_MEM_PATTERN").map_or(planned.mem.no_memory_pattern, |on| !on),
-            device_initializers: read_bool("PRUNR_SD_DEV_INIT").unwrap_or(planned.mem.device_initializers),
-            intra_threads: std::env::var("PRUNR_SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(planned.mem.intra_threads),
-        },
-        ..planned
-    }
+    planned.with_env_overrides()
 }
 
 fn read_bool(var: &str) -> Option<bool> {
