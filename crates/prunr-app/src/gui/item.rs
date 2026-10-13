@@ -958,6 +958,153 @@ impl BatchItem {
         }
     }
 
+    /// `rgba` is the result from now on; its texture and thumbnail are
+    /// rebuilt from it.
+    fn take_result(&mut self, rgba: Arc<image::RgbaImage>) {
+        self.result_rgba = Some(rgba);
+        self.result_tex_pending = true;
+        self.thumb_pending = true;
+    }
+
+    /// Show `rgba` as the result: what is on screen is held to reveal it
+    /// over, and a waiting image is done.
+    pub(crate) fn show_result(&mut self, rgba: Arc<image::RgbaImage>) {
+        self.hold_for_reveal();
+        self.unpark_result();
+        self.take_result(rgba);
+        if self.status == BatchStatus::Pending {
+            self.status = BatchStatus::Done;
+        }
+    }
+
+    /// Show a finished upscale or colorize with the recipe it ran: over
+    /// its tile preview when there is one.
+    pub(crate) fn show_run_result(&mut self, shown: Arc<image::RgbaImage>, recipe: prunr_core::ProcessingRecipe) {
+        self.applied_recipe = Some(recipe);
+        self.status = BatchStatus::Done;
+        self.hold_tile_preview_for_reveal();
+        self.take_result(shown);
+    }
+
+    /// A prepared texture lands on the side it was made for; a result's
+    /// reveals over what was held.
+    pub(crate) fn land_texture(&mut self, tex: egui::TextureHandle, target: super::background_io::TexTarget) {
+        use super::background_io::TexTarget;
+        if target == TexTarget::Source {
+            self.source_texture = Some(tex);
+            self.source_tex_pending = false;
+            tracing::info!(item_id = self.id, kind = "source", "texture uploaded");
+        } else {
+            self.result_texture = Some(tex);
+            self.result_tex_pending = false;
+            if target == TexTarget::Result {
+                self.start_reveal();
+            }
+            tracing::info!(item_id = self.id, kind = "result", "texture uploaded");
+        }
+    }
+
+    /// The decoded source lands: the item holds its pixels (`true`), or
+    /// shows why decoding failed.
+    pub(crate) fn land_decode(&mut self, result: Result<Arc<image::RgbaImage>, String>) -> bool {
+        self.decode_pending = false;
+        match result {
+            Ok(rgba) => {
+                self.source_rgba = Some(rgba);
+                // Live-preview DynamicImage cache is built from source_rgba;
+                // invalidate so the next dispatch rebuilds against the new one.
+                self.source_dyn = None;
+                true
+            }
+            Err(msg) => {
+                self.status = BatchStatus::Error(msg);
+                false
+            }
+        }
+    }
+
+    /// A selection overlay built off-thread lands when it is still for
+    /// the mask shown; `load` uploads a whole one. Returns whether a
+    /// feathered plane the cut-out has not had yet came with it.
+    pub(crate) fn land_selection_texture(
+        &mut self,
+        result: super::background_io::SelectionTextureResult,
+        load: impl FnOnce(egui::ColorImage) -> egui::TextureHandle,
+    ) -> bool {
+        use super::background_io::SelectionImage;
+        if self.selection_tex_pending == Some(result.key) {
+            self.selection_tex_pending = None;
+        }
+        if self.selection_hash != Some(result.key.0) {
+            return false;
+        }
+        let Some(shown) = self.selection_mask.clone() else { return false };
+        match result.image {
+            SelectionImage::Full { image, feathered } => {
+                // Re-cut only for a feathered plane the cut-out has not
+                // had yet; a rebuild for zoom keeps the same one.
+                let had_it = self.selection_texture.as_ref().is_some_and(|t| {
+                    t.feathered.is_some() && t.key.0 == result.key.0 && t.key.1.edge_feather_px == result.key.1.edge_feather_px
+                });
+                let new_plane = feathered.is_some() && !had_it;
+                self.selection_texture = Some(SelectionTexture { key: result.key, handle: load(image), shown, feathered });
+                new_plane
+            }
+            // A patch whose base texture has moved on is dropped; the
+            // per-frame check asks again against the new base.
+            SelectionImage::Patch { base_hash, pos, image } => {
+                if let Some(tex) = self.selection_texture.as_mut().filter(|t| t.key == (base_hash, result.key.1)) {
+                    tex.handle.set_partial(pos, image, egui::TextureOptions::LINEAR);
+                    tex.key = result.key;
+                    tex.shown = shown;
+                }
+                false
+            }
+        }
+    }
+
+    /// A picture built for the backdrop lands when it is still the
+    /// item's backdrop (`true`); a stale or empty build frees the slot
+    /// for the next frame to build the current one.
+    pub(crate) fn land_backdrop(&mut self, key: u64, ci: Option<egui::ColorImage>, ctx: &egui::Context) -> bool {
+        if self.backdrop_tex_pending == Some(key) {
+            self.backdrop_tex_pending = None;
+        }
+        let Some(ci) = ci.filter(|_| self.backdrop_key() == Some(key)) else { return false };
+        // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0 wraps);
+        // other fits keep UVs in [0, 1] so the wrap is a no-op.
+        let opts = egui::TextureOptions {
+            magnification: egui::TextureFilter::Linear,
+            minification: egui::TextureFilter::Linear,
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            mipmap_mode: None,
+        };
+        self.backdrop_texture = Some((key, ctx.load_texture(format!("backdrop_{key:x}"), ci, opts)));
+        true
+    }
+
+    /// Faces found for this image are kept for the blend when they are
+    /// for the photo and model it still wants: how many, or why the
+    /// search failed. `None`: a search for something else, dropped.
+    pub(crate) fn keep_faces(&mut self, landed: super::processor::FacesResult, stage: FaceStage) -> Option<Result<usize, String>> {
+        if self.pending_for(&landed.photo, landed.model) {
+            self.faces_pending = None;
+        }
+        if !self.wants_faces(&landed.photo, landed.model, stage) {
+            return None;
+        }
+        let (faces, outcome) = match landed.result {
+            Ok(faces) => {
+                let found = faces.len();
+                (faces, Ok(found))
+            }
+            Err(err) => (Vec::new(), Err(err)),
+        };
+        self.found_faces = Some(FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces), failed: outcome.is_err() });
+        self.faces_changed();
+        Some(outcome)
+    }
+
     /// The size of the frame the image is shown in: the result's, once
     /// there is one, else the source's. Every texture shown for this item
     /// (source, preview, held image, result) is drawn into it, so a
@@ -2061,6 +2208,66 @@ mod tests {
         assert_eq!(item.run_tier(Silueta), RunTier::UpToDate, "a backdrop change renders at display time");
         let composite = item.settings.current_recipe(Silueta).composite;
         assert_eq!(item.applied_recipe.as_ref().map(|r| &r.composite), Some(&composite), "and the applied recipe follows it");
+    }
+
+    /// A result keeps the texture on screen until its own is uploaded,
+    /// then reveals over it; a waiting image is done with it.
+    #[test]
+    fn a_result_keeps_the_old_texture_until_its_own_lands() {
+        use crate::gui::background_io::TexTarget;
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        let mut item = fixture_item(1);
+        let old = tex("old");
+        item.result_texture = Some(old.clone());
+        item.status = BatchStatus::Pending;
+        item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
+        assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays");
+        assert!(item.result_tex_pending && item.thumb_pending, "and a new one and thumbnail are on their way");
+        assert_eq!(item.status, BatchStatus::Done);
+        let new = tex("new");
+        item.land_texture(new.clone(), TexTarget::Result);
+        assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(new.id()));
+        assert!(!item.result_tex_pending);
+        assert!(matches!(item.reveal, Some(Reveal::Running(..))), "the new result reveals over the old");
+    }
+
+    /// The decoded source lands on the image with what was derived from
+    /// the old bytes dropped; a failed decode marks the image.
+    #[test]
+    fn a_decoded_source_replaces_what_was_derived_from_the_old_one() {
+        let mut item = fixture_item(1);
+        item.decode_pending = true;
+        item.source_dyn = Some(Arc::new(image::DynamicImage::new_rgba8(1, 1)));
+        assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(2, 2)))));
+        assert!(item.source_rgba.is_some() && item.source_dyn.is_none() && !item.decode_pending);
+        assert!(!item.land_decode(Err("bad file".into())));
+        assert_eq!(item.status, BatchStatus::Error("bad file".into()));
+    }
+
+    /// A selection overlay built for a mask the image has since replaced
+    /// is dropped; the one for the shown mask is kept, and a feathered
+    /// plane that comes with it is reported once.
+    #[test]
+    fn a_selection_overlay_lands_only_for_the_mask_shown() {
+        use crate::gui::background_io::{SelectionImage, SelectionStyle, SelectionTextureResult};
+        let ctx = egui::Context::default();
+        let load = |image| ctx.load_texture("selection", image, egui::TextureOptions::LINEAR);
+        let image = || egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]);
+        let style = SelectionStyle { fill_opacity: 0.5, erase: false, outline_thickness: 1.0, edge_feather_px: 2, fill: None };
+        let full = |hash: u64, feathered: bool| SelectionTextureResult {
+            item_id: 1,
+            image: SelectionImage::Full { image: image(), feathered: feathered.then(|| make_mask(hash, 2, 2)) },
+            key: (hash, style),
+        };
+        let mut item = fixture_item(1);
+        item.selection_mask = Some(make_mask(7, 2, 2));
+        item.selection_hash = Some(7);
+        item.selection_tex_pending = Some((3, style));
+        assert!(!item.land_selection_texture(full(3, true), load));
+        assert!(item.selection_texture.is_none() && item.selection_tex_pending.is_none(), "a stale build is dropped and frees the slot");
+        assert!(item.land_selection_texture(full(7, true), load), "the shown mask's overlay lands with a new feathered plane");
+        assert!(!item.land_selection_texture(full(7, true), load), "a rebuild keeps the plane it had");
     }
 
     /// An image whose file is gone when its run would start fails there,
