@@ -697,23 +697,48 @@ impl PrunrApp {
         if !self.can_process_intent() {
             return;
         }
-        if self.settings.model.is_upscale() {
-            self.dispatch_upscale_intent();
-            return;
-        }
-        if self.settings.model.is_colorize() {
-            self.dispatch_colorize_intent();
+        if self.settings.model.is_upscale() || self.settings.model.is_colorize() {
+            // One image at a time: the rest wait for the slot.
+            self.processor.queue_runs(self.batch.items_to_process());
+            self.dispatch_next_queued_run();
             return;
         }
         if self.settings.model.is_inpaint() {
-            let Some(idx) = self.batch.selected_idx_clamped() else { return };
-            let has_selection = self.batch.items.get(idx).is_some_and(
-                |i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()),
-            );
-            if !has_selection { return; }
-            self.dispatch_inpaint_for_item(idx);
+            let (with_region, without) = self.erase_targets();
+            for idx in with_region {
+                self.dispatch_inpaint_for_item(idx);
+            }
+            if without > 0 {
+                self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
+            }
         } else {
             self.handle_remove_bg();
+        }
+    }
+
+    /// The target images an erase runs on (those with a painted region),
+    /// and how many targets have none.
+    fn erase_targets(&self) -> (Vec<usize>, usize) {
+        let mut without = 0;
+        let with_region = self.batch.targeted_indices().into_iter().filter(|&idx| {
+            let has = self.batch.items[idx].selection_mask.as_ref().is_some_and(|m| m.has_selected_region());
+            if !has { without += 1; }
+            has
+        }).collect();
+        (with_region, without)
+    }
+
+    /// Start the next queued upscale or colorize when the slot is free,
+    /// with the shown image's settings, as a batch of cut-outs runs.
+    fn dispatch_next_queued_run(&mut self) {
+        let Some(item_id) = self.processor.next_queued_run() else { return };
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &HashSet::from([item_id]));
+        }
+        if self.settings.model.is_colorize() {
+            self.dispatch_colorize_for(item_id);
+        } else {
+            self.dispatch_upscale_for(item_id);
         }
     }
 
@@ -721,12 +746,8 @@ impl PrunrApp {
     /// from the timeline (`BatchItem::run_input_or_source`), then hands off
     /// to `Processor::dispatch_upscale`. Must only be called after
     /// `can_process_intent()` confirms the model is installed and idle.
-    fn dispatch_upscale_intent(&mut self) {
-        let item = match self.batch.selected_item() {
-            Some(i) => i,
-            None => return,
-        };
-        let item_id = item.id;
+    fn dispatch_upscale_for(&mut self, item_id: u64) {
+        let Some(item) = self.batch.find_by_id(item_id) else { return };
         let model_id = match self.settings.model.to_model_id() {
             Some(id) => id,
             None => return,
@@ -754,9 +775,8 @@ impl PrunrApp {
 
     /// Colorize branch of `handle_process_intent`: the selected image, from
     /// where its timeline says a run starts, to `Processor::dispatch_colorize`.
-    fn dispatch_colorize_intent(&mut self) {
-        let Some(item) = self.batch.selected_item() else { return };
-        let item_id = item.id;
+    fn dispatch_colorize_for(&mut self, item_id: u64) {
+        let Some(item) = self.batch.find_by_id(item_id) else { return };
         let input = item.run_input_or_source(Engine::Colorize);
         let recipe = item.settings.current_recipe(super::settings::COLORIZER);
         tracing::info!(item_id, "colorize dispatched");
@@ -776,15 +796,13 @@ impl PrunrApp {
             // an `is_file()` syscall per frame would add 60 stats/sec
             // while the toolbar is visible. Deletion-after-select is
             // surfaced at dispatch time by the error toast.
-            return can_start_run(self.processor.is_upscale_in_flight(), self.batch.selected_item().is_some());
+            return can_start_run(self.processor.is_upscale_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_colorize() {
-            return can_start_run(self.processor.is_colorize_in_flight(), self.batch.selected_item().is_some());
+            return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_inpaint() {
-            self.batch.selected_item().is_some_and(
-                |i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()),
-            )
+            self.batch.any_target_can(|i| i.selection_mask.as_ref().is_some_and(|m| m.has_selected_region()))
         } else {
             self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
         }
@@ -1308,6 +1326,7 @@ impl PrunrApp {
                 Err(err) => self.end_unlanded_run(item_id, "Upscale", err),
             }
         }
+        self.dispatch_next_queued_run();
         ctx.request_repaint();
     }
 
@@ -1329,6 +1348,7 @@ impl PrunrApp {
                 Err(err) => self.end_unlanded_run(item_id, "Colorize", err),
             }
         }
+        self.dispatch_next_queued_run();
         ctx.request_repaint();
     }
 
@@ -5910,6 +5930,61 @@ mod busy_pill_tests {
             crate::gui::dispatch_progress::ProgressKind::Seg, "Starting",
         ));
         assert_eq!(app.busy_pill(t0 + Duration::from_secs(3)), None);
+    }
+}
+
+/// Process runs any model on the ticked images, the way the cut-out
+/// models always did.
+#[cfg(test)]
+mod process_targets_tests {
+    use super::PrunrApp;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::timeline::StepKind;
+
+    fn mask() -> std::sync::Arc<prunr_core::selection::MaskArtifact> {
+        let mut cells = vec![0i8; 16];
+        cells[5] = prunr_core::selection::FULL;
+        std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, cells))
+    }
+
+    fn two_images(model: SettingsModel) -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = model;
+        for id in [1, 2] {
+            let item = push_test_item(&mut app, id);
+            item.dimensions = (4, 4);
+        }
+        app.batch.select_item(0);
+        app
+    }
+
+    #[test]
+    fn an_eraser_runs_on_every_ticked_image_with_a_region() {
+        let mut app = two_images(SettingsModel::Inpaint);
+        assert!(!app.can_process_intent(), "nothing painted yet");
+        app.batch.items[1].commit_selection_mask(mask(), StepKind::Stroke);
+        assert!(!app.can_process_intent(), "the viewed image has no region");
+        app.batch.items[1].selected = true;
+        assert!(app.can_process_intent(), "a ticked image has one");
+        assert_eq!(app.erase_targets(), (vec![1], 0));
+        app.batch.items[0].selected = true;
+        assert_eq!(app.erase_targets(), (vec![1], 1), "the ticked one without a region is counted");
+    }
+
+    #[test]
+    fn an_upscale_can_start_for_ticked_images_and_waits_for_the_slot() {
+        let mut app = two_images(SettingsModel::RealEsrganUpscale);
+        assert!(app.can_process_intent(), "the viewed image");
+        app.batch.items[0].selected = true;
+        app.batch.items[1].selected = true;
+        assert!(app.can_process_intent());
+        app.processor.set_upscale_in_flight_for_test(true);
+        assert!(!app.can_process_intent(), "one at a time");
+        app.processor.queue_runs(app.batch.items_to_process());
+        app.dispatch_next_queued_run();
+        app.processor.set_upscale_in_flight_for_test(false);
+        assert_eq!(app.processor.next_queued_run(), Some(1), "the queue waited for the slot");
     }
 }
 
