@@ -271,6 +271,19 @@ pub(crate) enum Engine {
     Colorize,
 }
 
+/// How much of the pipeline a Process run needs on an image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunTier {
+    /// Nothing: its result is what the settings ask for.
+    UpToDate,
+    /// Everything again.
+    Full,
+    /// The mask side again, from the cached tensor.
+    Mask,
+    /// Edge detection onto the cut-out from the cached tensor.
+    AddEdge,
+}
+
 /// `selection` applied over `edits`: restored (made positive) or erased
 /// (kept negative, as a selection is stored); where it lands it wins.
 pub(crate) fn apply_selection(
@@ -1331,6 +1344,57 @@ impl BatchItem {
         }
     }
 
+    /// How much of the pipeline a Process run needs here, from what last
+    /// ran to what the settings ask for now. Caches the run can't reuse
+    /// are dropped, and a change the run doesn't touch is noted on the
+    /// applied recipe so the image reads as up to date.
+    pub(crate) fn run_tier(&mut self, model: prunr_core::ModelKind) -> RunTier {
+        use prunr_core::RequiredTier;
+        let Some(ref old_recipe) = self.applied_recipe else {
+            return RunTier::Full;
+        };
+        // A run that starts from an earlier result works on pixels the
+        // cached tensor never saw, unless it redoes the shown cut-out
+        // from that cut-out's own starting image.
+        if self.starts_from_result(Engine::Segment) {
+            if !self.redoes_shown_step(Engine::Segment) {
+                self.set_cached_tensor(None);
+            }
+            return RunTier::Full;
+        }
+        let current = self.settings.current_recipe(model);
+        let tier = prunr_core::resolve_tier(old_recipe, &current);
+        let impact = crate::gui::knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current);
+        self.apply_cache_impact(impact);
+        let has_tensor = self.cached_tensor.is_some();
+        match tier {
+            // A backdrop, Refine or Strength change re-renders at display
+            // and export time, not through the dispatcher; the stored
+            // composite follows so status reads stay accurate.
+            RequiredTier::Skip
+            | RequiredTier::CompositeOnly
+            | RequiredTier::UpscaleRerun
+            | RequiredTier::UpscaleTier2
+            | RequiredTier::ColorizeTier2 => {
+                if let Some(recipe) = &mut self.applied_recipe {
+                    recipe.composite = current.composite.clone();
+                }
+                RunTier::UpToDate
+            }
+            // Lines on the subject compose onto the new masked base, which
+            // a mask-only rerun would drop.
+            RequiredTier::MaskRerun if has_tensor && current.inference.uses_edge_detection => RunTier::AddEdge,
+            RequiredTier::MaskRerun if has_tensor => RunTier::Mask,
+            RequiredTier::AddEdgeInference if has_tensor => RunTier::AddEdge,
+            // An edge rerun through the subprocess isn't wired for batches;
+            // the live preview handles it in-process.
+            RequiredTier::MaskRerun
+            | RequiredTier::AddEdgeInference
+            | RequiredTier::EdgeRerun
+            | RequiredTier::FullPipeline => RunTier::Full,
+        }
+    }
+
     /// Reset all caches tied to the current result. Call after the result
     /// has changed (history walk, fresh process, etc.) so the next paint
     /// rebuilds textures and the next reprocess re-runs from scratch.
@@ -1937,6 +2001,48 @@ mod tests {
         assert!(!item.source_tex_pending);
         assert!(!item.result_tex_pending);
         assert!(!item.decode_pending);
+    }
+
+    /// Each kind of settings change asks for the run it needs: none for a
+    /// backdrop or Refine change, the mask side from the cached tensor,
+    /// the lines onto it, or everything — and everything when there is no
+    /// tensor to start from.
+    #[test]
+    fn a_process_run_is_as_small_as_the_change_allows() {
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use prunr_core::{LineMode, ModelKind::Silueta};
+        fn processed(with_tensor: bool, before: fn(&mut ItemSettings)) -> BatchItem {
+            let mut item = fixture_item(1);
+            before(&mut item.settings);
+            item.applied_recipe = Some(item.settings.current_recipe(Silueta));
+            if with_tensor {
+                item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: Silueta }));
+            }
+            item
+        }
+        let tier = |with_tensor: bool, before: fn(&mut ItemSettings), change: fn(&mut ItemSettings)| {
+            let mut item = processed(with_tensor, before);
+            change(&mut item.settings);
+            item.run_tier(Silueta)
+        };
+        let lines_on = |s: &mut ItemSettings| s.line_mode = LineMode::SubjectOutline;
+
+        assert_eq!(fixture_item(1).run_tier(Silueta), RunTier::Full, "never processed");
+        assert_eq!(tier(true, |_| {}, |_| {}), RunTier::UpToDate);
+        assert_eq!(tier(true, |_| {}, |s| s.sharpen = 0.5), RunTier::UpToDate, "Refine re-finishes the kept run");
+        assert_eq!(tier(true, |_| {}, |s| s.feather = 3.0), RunTier::Mask, "a mask knob reruns from the tensor");
+        assert_eq!(tier(false, |_| {}, |s| s.feather = 3.0), RunTier::Full, "without a tensor, everything");
+        assert_eq!(tier(true, |_| {}, lines_on), RunTier::AddEdge, "lines onto the cut-out");
+        assert_eq!(tier(false, |_| {}, lines_on), RunTier::Full);
+        assert_eq!(tier(true, lines_on, |s| s.feather = 3.0), RunTier::AddEdge, "a mask change under lines composes them again");
+        assert_eq!(tier(true, lines_on, |s| s.edge_thickness = 3), RunTier::Full, "an edge change runs whole in a batch");
+        assert_eq!(tier(true, |_| {}, |s| s.line_mode = LineMode::EdgesOnly), RunTier::Full, "lines over the whole photo");
+
+        let mut item = processed(true, |_| {});
+        item.settings.bg = Some([1, 2, 3, 255]);
+        assert_eq!(item.run_tier(Silueta), RunTier::UpToDate, "a backdrop change renders at display time");
+        let composite = item.settings.current_recipe(Silueta).composite;
+        assert_eq!(item.applied_recipe.as_ref().map(|r| &r.composite), Some(&composite), "and the applied recipe follows it");
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {

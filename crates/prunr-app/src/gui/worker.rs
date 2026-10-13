@@ -181,6 +181,20 @@ pub struct AddEdgeWorkItem {
     pub mask: MaskSettings,
 }
 
+impl From<Tier2WorkItem> for AddEdgeWorkItem {
+    fn from(w: Tier2WorkItem) -> Self {
+        Self {
+            item_id: w.item_id,
+            tensor_data: w.tensor_data,
+            tensor_height: w.tensor_height,
+            tensor_width: w.tensor_width,
+            model: w.model,
+            original_bytes: w.original_bytes,
+            mask: w.mask,
+        }
+    }
+}
+
 /// Bundled processing settings — avoids passing 6+ individual fields.
 /// Clone/PartialEq enable the pre-warm path to check whether the warm
 /// subprocess was booted with the same Init-affecting config as the

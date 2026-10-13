@@ -464,7 +464,7 @@ pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
 }
 
 /// Aggregate `CacheImpact` implied by a recipe diff — union of per-knob
-/// impacts for every field that actually changed. Used by `classify_candidates`
+/// impacts for every field that actually changed. Used by `BatchItem::run_tier`
 /// to invalidate only the caches whose INPUT changed (seg stays valid on an
 /// input_transform change, edge stays valid on a model swap).
 pub fn cache_impact_for_recipe_diff(old: &ProcessingRecipe, new: &ProcessingRecipe) -> CacheImpact {

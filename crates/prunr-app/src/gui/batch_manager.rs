@@ -13,11 +13,13 @@
 //! - Undo — each item's own `timeline`
 //! - Drag-out lifecycle — `DragExportState`
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::background_io::BackgroundIO;
-use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::item::{BatchItem, BatchStatus, ImageSource, RunTier};
 use super::state::AppState;
+use super::worker::Tier2WorkItem;
 
 /// Per-status counts across the batch. Produced by `status_counts` for
 /// callers that need to render progress strings, decide "all done" vs
@@ -693,6 +695,78 @@ impl BatchManager {
         for item in self.items.iter_mut().filter(|i| i.settings.line_mode == prunr_core::LineMode::SubjectOutline) {
             item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
         }
+    }
+}
+
+/// The images a Process run sends, by how much of the pipeline each
+/// needs, and how many were already up to date (for the toast).
+#[derive(Default)]
+pub(crate) struct ClassifiedTiers {
+    pub(crate) tier1: HashSet<u64>,
+    pub(crate) tier2: HashSet<u64>,
+    pub(crate) tier_add_edge: HashSet<u64>,
+    pub(crate) skip_count: usize,
+}
+
+impl ClassifiedTiers {
+    pub(crate) fn process_count(&self) -> usize {
+        self.tier1.len() + self.tier2.len() + self.tier_add_edge.len()
+    }
+
+    /// Every image the run sends.
+    pub(crate) fn all_process_ids(&self) -> HashSet<u64> {
+        self.tier1.iter()
+            .chain(self.tier2.iter())
+            .chain(self.tier_add_edge.iter())
+            .copied().collect()
+    }
+}
+
+impl BatchManager {
+    /// Sort the images in `ids` by the run each needs (`BatchItem::run_tier`).
+    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind) -> ClassifiedTiers {
+        let mut tiers = ClassifiedTiers::default();
+        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+            match item.run_tier(model) {
+                RunTier::UpToDate => tiers.skip_count += 1,
+                RunTier::Full => { tiers.tier1.insert(item.id); }
+                RunTier::Mask => { tiers.tier2.insert(item.id); }
+                RunTier::AddEdge => { tiers.tier_add_edge.insert(item.id); }
+            }
+        }
+        tiers
+    }
+
+    /// The work for the images in `ids` that run again from their cached
+    /// tensor. One whose cache or file can't be read fails, and starts
+    /// over next time.
+    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<Tier2WorkItem> {
+        fn start_over(item: &mut BatchItem, why: String) {
+            item.status = BatchStatus::Error(why);
+            item.set_cached_tensor(None);
+            item.applied_recipe = None;
+        }
+        let mut out = Vec::new();
+        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+            let Some(ct) = &item.cached_tensor else { continue };
+            match (ct.decompress(), item.source.load_bytes()) {
+                (Some(data), Ok(bytes)) => {
+                    out.push(Tier2WorkItem {
+                        item_id: item.id,
+                        tensor_data: data,
+                        tensor_height: ct.height,
+                        tensor_width: ct.width,
+                        model: ct.model,
+                        original_bytes: bytes,
+                        mask: item.settings.mask_settings(),
+                    });
+                    item.status = BatchStatus::Processing;
+                }
+                (None, _) => start_over(item, "Tensor cache corrupt".into()),
+                (_, Err(e)) => start_over(item, format!("Failed to load: {e}")),
+            }
+        }
+        out
     }
 }
 

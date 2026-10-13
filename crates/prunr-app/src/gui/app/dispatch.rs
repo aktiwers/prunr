@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Engine, ImageSource};
 use crate::gui::timeline::StepKind;
-use crate::gui::worker::WorkerMessage;
+use crate::gui::worker::{AddEdgeWorkItem, WorkerMessage};
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -191,10 +191,9 @@ impl PrunrApp {
             item.unpark_result();
         }
 
-        let tiers = self.classify_candidates(&candidate_ids, model);
-        let process_count = tiers.tier1.len() + tiers.tier2.len() + tiers.tier_add_edge.len();
-        self.notify_skip(tiers.skip_count, process_count);
-        if process_count == 0 { return; }
+        let tiers = self.batch.classify(&candidate_ids, model);
+        self.notify_skip(tiers.skip_count, tiers.process_count());
+        if tiers.process_count() == 0 { return; }
 
         for id in tiers.all_process_ids() {
             if let Some(item) = self.batch.find_by_id_mut(id) {
@@ -202,8 +201,8 @@ impl PrunrApp {
             }
         }
 
-        let tier2_work = self.build_tier2_work(&tiers.tier2);
-        let add_edge_work = self.build_add_edge_work(&tiers.tier_add_edge);
+        let tier2_work = self.batch.cached_tensor_work(&tiers.tier2);
+        let add_edge_work: Vec<AddEdgeWorkItem> = self.batch.cached_tensor_work(&tiers.tier_add_edge).into_iter().map(Into::into).collect();
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
         if tiers.tier1.len() > 1 {
@@ -235,134 +234,6 @@ impl PrunrApp {
         }
     }
 
-    fn build_add_edge_work(&mut self, ids: &HashSet<u64>) -> Vec<crate::gui::worker::AddEdgeWorkItem> {
-        let mut out = Vec::new();
-        for item in &mut self.batch.items {
-            if !ids.contains(&item.id) { continue; }
-            let Some(ref ct) = item.cached_tensor else { continue };
-            let tensor_data = ct.decompress();
-            let mask = item.settings.mask_settings();
-            match (tensor_data, item.source.load_bytes()) {
-                (Some(data), Ok(bytes)) => {
-                    out.push(crate::gui::worker::AddEdgeWorkItem {
-                        item_id: item.id,
-                        tensor_data: data,
-                        tensor_height: ct.height,
-                        tensor_width: ct.width,
-                        model: ct.model,
-                        original_bytes: bytes,
-                        mask,
-                    });
-                    item.status = BatchStatus::Processing;
-                }
-                (None, _) => {
-                    item.status = BatchStatus::Error("Seg tensor cache corrupt".into());
-                    item.set_cached_tensor(None);
-                    item.applied_recipe = None;
-                }
-                (_, Err(e)) => {
-                    item.status = BatchStatus::Error(format!("Failed to load: {e}"));
-                }
-            }
-        }
-        out
-    }
-
-    /// Classify each candidate into Tier 1 (full pipeline), Tier 2 (mask
-    /// rerun from cached tensor), or Skip (already up to date).
-    /// Mutates items in-place: invalidates stale caches via the catalog,
-    /// syncs composite-only recipe changes, and never downgrades Tier 2
-    /// items without a tensor.
-    pub(super) fn classify_candidates(
-        &mut self,
-        candidate_ids: &HashSet<u64>,
-        model: prunr_core::ModelKind,
-    ) -> ClassifiedTiers {
-        use crate::gui::knob_catalog;
-        use prunr_core::RequiredTier;
-        let mut tiers = ClassifiedTiers::default();
-
-        for item in &mut self.batch.items {
-            if !candidate_ids.contains(&item.id) { continue; }
-
-            // Never-processed items always need the full pipeline.
-            let Some(ref old_recipe) = item.applied_recipe else {
-                tiers.tier1.insert(item.id);
-                continue;
-            };
-
-            // A run that starts from an earlier result works on pixels the
-            // cached tensor never saw, unless it redoes the shown cut-out
-            // from that cut-out's own starting image.
-            if item.starts_from_result(Engine::Segment) {
-                if !item.redoes_shown_step(Engine::Segment) {
-                    item.set_cached_tensor(None);
-                }
-                tiers.tier1.insert(item.id);
-                continue;
-            }
-
-            let current_recipe = item.settings.current_recipe(model);
-            let tier = prunr_core::resolve_tier(old_recipe, &current_recipe);
-            let impact = knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current_recipe);
-            item.apply_cache_impact(impact);
-
-            match tier {
-                RequiredTier::Skip
-                | RequiredTier::CompositeOnly
-                | RequiredTier::UpscaleRerun => {
-                    // CompositeOnly (bg_color) and UpscaleRerun re-render at
-                    // display/export time, not via the seg/edge dispatcher;
-                    // sync the stored composite so status reads stay accurate.
-                    if let Some(ref mut recipe) = item.applied_recipe {
-                        recipe.composite = current_recipe.composite.clone();
-                    }
-                    tiers.skip_count += 1;
-                }
-                RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => {
-                    // Tier-2 upscale (sharpen/ai_blend/color_match)
-                    // dispatches the cached-buffer postprocess via live preview
-                    // — no subprocess admission, no re-inference.
-                    if let Some(ref mut recipe) = item.applied_recipe {
-                        recipe.composite = current_recipe.composite.clone();
-                    }
-                    tiers.skip_count += 1;
-                }
-                RequiredTier::MaskRerun => {
-                    if item.cached_tensor.is_some() {
-                        // SubjectOutline mask rerun needs TEED re-composite
-                        // on the new masked base; Tier 2 RePostProcess only
-                        // runs the mask side, which would drop the outline.
-                        if current_recipe.inference.uses_edge_detection {
-                            tiers.tier_add_edge.insert(item.id);
-                        } else {
-                            tiers.tier2.insert(item.id);
-                        }
-                    } else {
-                        tiers.tier1.insert(item.id);
-                    }
-                }
-                RequiredTier::EdgeRerun => {
-                    // Edge rerun via the subprocess isn't wired for batch
-                    // dispatch — fall through to a full pipeline run (live
-                    // preview handles the in-process path).
-                    tiers.tier1.insert(item.id);
-                }
-                RequiredTier::AddEdgeInference => {
-                    if item.cached_tensor.is_some() {
-                        tiers.tier_add_edge.insert(item.id);
-                    } else {
-                        tiers.tier1.insert(item.id);
-                    }
-                }
-                RequiredTier::FullPipeline => {
-                    tiers.tier1.insert(item.id);
-                }
-            }
-        }
-        tiers
-    }
-
     /// Tell the user when some items were skipped. Three shapes:
     /// nothing-skipped (silent), all-skipped, partially-skipped.
     fn notify_skip(&mut self, skipped: usize, processing: usize) {
@@ -377,41 +248,6 @@ impl PrunrApp {
             format!("{skipped} up to date, processing {processing}")
         };
         self.toasts.info(msg);
-    }
-
-    fn build_tier2_work(&mut self, tier2_ids: &HashSet<u64>) -> Vec<crate::gui::worker::Tier2WorkItem> {
-        let mut out = Vec::new();
-        for item in &mut self.batch.items {
-            if !tier2_ids.contains(&item.id) { continue; }
-            let Some(ref ct) = item.cached_tensor else { continue };
-            let tensor_data = ct.decompress();
-            let mask = item.settings.mask_settings();
-            match (tensor_data, item.source.load_bytes()) {
-                (Some(data), Ok(bytes)) => {
-                    out.push(crate::gui::worker::Tier2WorkItem {
-                        item_id: item.id,
-                        tensor_data: data,
-                        tensor_height: ct.height,
-                        tensor_width: ct.width,
-                        model: ct.model,
-                        original_bytes: bytes,
-                        mask,
-                    });
-                    item.status = BatchStatus::Processing;
-                }
-                (None, _) => {
-                    item.status = BatchStatus::Error("Tensor cache corrupt".into());
-                    item.set_cached_tensor(None);
-                    item.applied_recipe = None;
-                }
-                (_, Err(e)) => {
-                    item.status = BatchStatus::Error(format!("Failed to load: {e}"));
-                    item.set_cached_tensor(None);
-                    item.applied_recipe = None;
-                }
-            }
-        }
-        out
     }
 
     /// Dispatch with streaming admission — used when >1 Tier 1 items so the
@@ -572,30 +408,6 @@ impl PrunrApp {
         if admission_complete {
             self.processor.clear_admission();
         }
-    }
-}
-
-/// Classification output from `classify_candidates`: which items go to the
-/// full subprocess pipeline (tier1), which can do an in-subprocess mask
-/// rerun from their cached tensor (tier2), and how many were already
-/// up-to-date (skip_count, used only for the user-facing toast).
-#[derive(Default)]
-pub(super) struct ClassifiedTiers {
-    pub(super) tier1: HashSet<u64>,
-    tier2: HashSet<u64>,
-    /// AddEdgeInference items: seg tensor cached, run TEED only.
-    pub(super) tier_add_edge: HashSet<u64>,
-    skip_count: usize,
-}
-
-impl ClassifiedTiers {
-    /// Union of tier1 + tier2 + add-edge — the set of items that will actually
-    /// be reprocessed this batch (history seeding, progress counting).
-    fn all_process_ids(&self) -> HashSet<u64> {
-        self.tier1.iter()
-            .chain(self.tier2.iter())
-            .chain(self.tier_add_edge.iter())
-            .copied().collect()
     }
 }
 
