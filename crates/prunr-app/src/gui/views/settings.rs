@@ -508,6 +508,7 @@ fn render_page_images(ui: &mut egui::Ui, settings: &mut Settings) {
             super::chip::switch(ui, "Auto-process on import", &mut settings.auto_process_on_import);
         });
         rows.row("Default preset", "New images inherit this preset. The toolbar's reset restores its values.", |ui| {
+            ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
             let combo = egui::ComboBox::from_id_salt("default_preset")
                 .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
                 .show_ui(ui, |ui| {
@@ -581,7 +582,7 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     let color = if waiting { theme::ACCENT } else if rebindable { theme::TEXT_PRIMARY } else { theme::TEXT_HINT };
                     let label = RichText::new(text).monospace().size(theme::FONT_SIZE_MONO).color(color);
                     if rebindable {
-                        let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, 0.0));
+                        let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, theme::CHIP_HEIGHT));
                         if ui.add(slot_button).clicked() {
                             app.hotkey_capture = Some((action, slot));
                         }
