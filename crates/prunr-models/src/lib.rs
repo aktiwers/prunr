@@ -67,6 +67,10 @@ pub enum ModelId {
     /// RestoreFormer++ face restorer with the YuNet face detector. Same
     /// input and output as `FaceGfpgan`; Apache-2.0 + MIT.
     FaceRestoreFormerPp,
+    /// RORem: SDXL inpainting fine-tuned for object removal, with its
+    /// 4-step LCM LoRA fused in and the fixed removal prompt baked into
+    /// the UNet (no text encoder). Runs through the SD pipeline.
+    RoremFp16,
 }
 
 impl ModelId {
@@ -76,7 +80,7 @@ impl ModelId {
     /// previously duplicated in `prunr-core::inpaint` and
     /// `prunr-app::gui::processor`.
     pub fn is_sd_family(&self) -> bool {
-        matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16)
+        matches!(self, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 | ModelId::RoremFp16)
     }
 
     /// Canonical iteration of every variant. Drift catcher: a test below
@@ -101,6 +105,7 @@ impl ModelId {
         ModelId::Sam2HieraSmall,
         ModelId::FaceGfpgan,
         ModelId::FaceRestoreFormerPp,
+        ModelId::RoremFp16,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -129,6 +134,7 @@ impl ModelId {
             ModelId::Sam2HieraSmall => "sam2_hiera_small",
             ModelId::FaceGfpgan => "face_gfpgan",
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
+            ModelId::RoremFp16 => "rorem_fp16",
         }
     }
 
@@ -674,6 +680,83 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // LCM is a training-schedule variant; bundle footprint matches
         // standard SD 1.5 inpaint.
         working_set_mb: 10000,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
+    // RORem-4S: exported by scripts/export_rorem.py, weights split into
+    // files under GitHub's 2 GiB asset limit by scripts/split_onnx_data.py.
+    // The graph names its data files; they sit next to it in the subdir.
+    ModelDescriptor {
+        id: ModelId::RoremFp16,
+        display_name: "Eraser (RORem)",
+        description: "Removes large objects cleanly: trained to fill with background, not to draw something new. Stable Diffusion XL, about 5.5 GB.",
+        category: ModelCategory::Inpaint,
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "rorem-4s-fp16-1.0.0",
+            parts: &[
+                ModelPart {
+                    key: "unet",
+                    filename: "unet.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_unet.onnx",
+                    sha256: "52680ae80bee80db3ab2eaf85c8dde342b2b8b5f0a8c4d48f86ed676a31bdd12",
+                    size_bytes: 3_770_384,
+                },
+                ModelPart {
+                    key: "unet_data_0",
+                    filename: "unet_0.data",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_unet_0.data",
+                    sha256: "2b10d139a31477c68f401a617bd1d402d4056dcf3e1009f39bad714346cea928",
+                    size_bytes: 1_980_548_992,
+                },
+                ModelPart {
+                    key: "unet_data_1",
+                    filename: "unet_1.data",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_unet_1.data",
+                    sha256: "beb25f4924f71019d6c4496e7ae0f036c4357d733cef97ff2fb2aa4db0739b93",
+                    size_bytes: 1_991_050_240,
+                },
+                ModelPart {
+                    key: "unet_data_2",
+                    filename: "unet_2.data",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_unet_2.data",
+                    sha256: "94fd838901653d7858922f2a5c2242201bad6369a7614cf875ad354559753781",
+                    size_bytes: 1_163_650_560,
+                },
+                ModelPart {
+                    key: "vae_encoder",
+                    filename: "vae_encoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_vae_encoder.onnx",
+                    sha256: "7d711a558fbde2186aa900c74ab65649b3fe88dee58bf98ceed4fcbfe59f0cf2",
+                    size_bytes: 136_757_971,
+                },
+                ModelPart {
+                    key: "vae_decoder",
+                    filename: "vae_decoder.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/rorem_vae_decoder.onnx",
+                    sha256: "4ff36b2a02436e7caa5581d59e2c629a08ae5943398899c8db0c0dc4d1245803",
+                    size_bytes: 198_078_716,
+                },
+            ],
+            license: LicenseInfo {
+                author: "Li et al. (RORem); Stability AI (SDXL base)",
+                license: "Apache 2.0 (RORem) + CreativeML Open RAIL++-M (SDXL)",
+                license_url: "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md",
+                source_url: "https://github.com/leeruibin/RORem",
+            },
+            license_acceptance_required: true,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        // OpenVINO's CPU plugin widens the 5 GB fp16 UNet to fp32 and
+        // compiles it: the process was OOM-killed with 19 GB free on a
+        // 32 GB i7-6700. ORT's own CPU EP runs it correctly.
+        incompatible_eps: &["OpenVINO"],
+        // Measured on ORT's CPU EP: 16.5 GB anonymous peak (the fp16
+        // weights widened for the CPU kernels, the VAE, activations);
+        // the 5 GB of mapped weight files on top are reclaimable.
+        working_set_mb: 17000,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1229,6 +1312,16 @@ pub fn multi_part_paths(id: ModelId) -> Option<Vec<(&'static str, std::path::Pat
     Some(out)
 }
 
+/// The bundle keeps weights in `.data` files beside its graphs (a graph
+/// over the 2 GiB protobuf limit). The graph names them relative to its
+/// own directory, so it only loads from there.
+pub fn keeps_weights_apart(id: ModelId) -> bool {
+    descriptor(id).is_some_and(|d| match d.source {
+        ModelSource::MultiPartOnDemand { parts, .. } => parts.iter().any(|p| p.filename.ends_with(".data")),
+        _ => false,
+    })
+}
+
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:
 /// `~/Library/Application Support/prunr/`, Windows: `%APPDATA%\prunr\`.
 /// Returns `None` when the platform's data dir can't be resolved (rare —
@@ -1277,7 +1370,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::FourXNmkdSuperscale
         | ModelId::Sam2HieraSmall
         | ModelId::FaceGfpgan
-        | ModelId::FaceRestoreFormerPp => {
+        | ModelId::FaceRestoreFormerPp
+        | ModelId::RoremFp16 => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1471,7 +1565,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::TaesdFp16
         | ModelId::Sam2HieraSmall
         | ModelId::FaceGfpgan
-        | ModelId::FaceRestoreFormerPp => return None,
+        | ModelId::FaceRestoreFormerPp
+        | ModelId::RoremFp16 => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1569,7 +1664,8 @@ mod tests {
                 | ModelId::FourXNmkdSuperscale
                 | ModelId::Sam2HieraSmall
                 | ModelId::FaceGfpgan
-                | ModelId::FaceRestoreFormerPp => {}
+                | ModelId::FaceRestoreFormerPp
+                | ModelId::RoremFp16 => {}
             }
         }
     }
@@ -1645,12 +1741,23 @@ mod tests {
         }
     }
 
+    /// A graph whose weights live in separate `.data` files resolves
+    /// them next to the graph: a copy of the graph elsewhere (an
+    /// optimized-model cache) cannot load.
+    #[test]
+    fn only_rorem_keeps_its_weights_apart_from_its_graph() {
+        for &id in ModelId::ALL {
+            assert_eq!(keeps_weights_apart(id), id == ModelId::RoremFp16, "{id:?}");
+        }
+    }
+
     #[test]
     fn is_sd_family_routes_only_sd_models_to_subprocess() {
         // SD-family routes to the dedicated subprocess (5-10 GB bundle
         // — process isolation prevents an OOM from killing the GUI).
         assert!(ModelId::SdV15InpaintFp16.is_sd_family());
         assert!(ModelId::SdV15LcmInpaintFp16.is_sd_family());
+        assert!(ModelId::RoremFp16.is_sd_family());
         // Smaller inpaint models stay in-process (no isolation pressure,
         // lower latency, no subprocess spin-up cost).
         assert!(!ModelId::LaMaFp32.is_sd_family());

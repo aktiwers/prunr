@@ -1122,7 +1122,7 @@ impl PrunrApp {
     /// "Try another" is possible: the SD eraser is chosen and the shown
     /// step is a generated fill, with nothing running on the image.
     pub fn can_reroll_intent(&self) -> bool {
-        self.settings.model == super::settings::SettingsModel::SdInpaint
+        self.settings.model.generates()
             && self.batch.selected_item().is_some_and(|i| !i.is_busy() && i.reroll().is_some())
     }
 
