@@ -90,13 +90,17 @@ fn render_empty_state(ui: &mut egui::Ui) {
     );
 }
 
+/// The tick boxes on the thumbnails and on Select All: one size, big
+/// enough to hit on a thumbnail.
+const TICK_SIZE: f32 = 22.0;
+
 /// Select-all checkbox + "N/M" selected counter.
 fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let count = app.batch.items.len();
     let all_selected = app.batch.all_selected();
     let mut select_all = all_selected;
     ui.horizontal(|ui| {
-        ui.spacing_mut().icon_width = 20.0;
+        ui.spacing_mut().icon_width = TICK_SIZE;
         ui.spacing_mut().icon_spacing = 8.0;
         if ui
             .checkbox(
@@ -348,12 +352,11 @@ fn paint_thumbnail(
 /// also switch the main canvas to this item. Mirrors the `close_clicked`
 /// contract used for the delete/save hover buttons.
 fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect) -> bool {
-    let cb_size = 16.0;
     let cb_center = Pos2::new(
-        item_rect.min.x + 4.0 + cb_size * 0.5,
-        item_rect.min.y + 4.0 + cb_size * 0.5,
+        item_rect.min.x + 4.0 + TICK_SIZE * 0.5,
+        item_rect.min.y + 4.0 + TICK_SIZE * 0.5,
     );
-    let cb_rect = Rect::from_center_size(cb_center, Vec2::splat(cb_size));
+    let cb_rect = Rect::from_center_size(cb_center, Vec2::splat(TICK_SIZE));
 
     let resp = row_control(
         ui, cb_rect, egui::Id::new(("sidebar_tick", item.id)),
@@ -383,7 +386,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
             cb_center,
             egui::Align2::CENTER_CENTER,
             ICON_CHECK.codepoint,
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(TICK_SIZE * 0.75),
             Color32::WHITE,
         );
     }
