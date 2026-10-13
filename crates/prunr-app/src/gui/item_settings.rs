@@ -177,7 +177,7 @@ impl Default for FaceSettings {
 impl FaceSettings {
     pub fn blend(&self) -> prunr_core::face::FaceBlend {
         prunr_core::face::FaceBlend {
-            strength: f32::from(self.strength_pct.min(100)) / 100.0,
+            strength: prunr_core::math::pct(self.strength_pct),
             largest_only: self.largest_only,
             hair: self.hair,
         }
@@ -268,10 +268,9 @@ impl ItemSettings {
     pub const HARD_EDGE: f32 = 1.0;
     pub const COLOR_STRENGTH_MAX_PCT: u8 = (prunr_core::colorize::STRENGTH_MAX * 100.0) as u8;
 
-    /// Fade with distance as `fade_lines_by_depth` takes it, while lines
-    /// are drawn.
+    /// Fade with distance as `LineFade` takes it, while lines are drawn.
     pub fn line_fade(&self) -> f32 {
-        if self.line_mode == LineMode::Off { 0.0 } else { f32::from(self.line_fade_pct.min(100)) / 100.0 }
+        if self.line_mode == LineMode::Off { 0.0 } else { prunr_core::math::pct(self.line_fade_pct) }
     }
 
     /// Whether what this image shows under `role` reads its depth map:

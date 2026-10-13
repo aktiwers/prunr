@@ -403,6 +403,16 @@ pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     Ok(buf)
 }
 
+/// Encode a 16-bit grey image as PNG bytes with fast compression.
+pub fn encode_gray16_png(img: &image::ImageBuffer<image::Luma<u16>, Vec<u16>>) -> Result<Vec<u8>, CoreError> {
+    use image::EncodableLayout;
+    let mut buf = Vec::with_capacity(img.as_raw().len());
+    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
+    encoder.write_image(img.as_raw().as_bytes(), img.width(), img.height(), image::ExtendedColorType::L16)
+        .map_err(CoreError::from)?;
+    Ok(buf)
+}
+
 /// `img` as RGBA, borrowed when it already is and converted otherwise.
 pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
     img.as_rgba8().map_or_else(|| std::borrow::Cow::Owned(img.to_rgba8()), std::borrow::Cow::Borrowed)
@@ -410,6 +420,21 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_16_bit_grey_png_keeps_every_value() {
+        let img = image::ImageBuffer::from_fn(7, 3, |x, y| image::Luma([(x * 9000 + y * 300) as u16]));
+        let back = image::load_from_memory(&super::encode_gray16_png(&img).expect("encode")).expect("decode");
+        assert_eq!(back.as_luma16(), Some(&img));
+    }
+
+    #[test]
+    fn an_opaque_rgb_photo_shrinks_to_the_pixels_of_its_rgba_copy() {
+        let rgb = image::RgbImage::from_fn(97, 61, |x, y| image::Rgb([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) % 256) as u8]));
+        let rgba = image::DynamicImage::ImageRgb8(rgb.clone()).to_rgba8();
+        let filter = super::ResizeFilter::Lanczos3;
+        assert_eq!(super::resize_to_rgba(&image::DynamicImage::ImageRgb8(rgb), 23, 14, filter), super::resize_rgba(&rgba, 23, 14, filter));
+    }
+
     #[test]
     fn an_rgb_resize_keeps_a_flat_colour() {
         let src = image::RgbImage::from_pixel(64, 32, image::Rgb([20, 140, 230]));

@@ -62,33 +62,68 @@ pub(crate) struct ExportBg {
     image: Option<Arc<BgImage>>,
     fit: prunr_core::BgImageFit,
     photo: Option<BackdropPhoto>,
-    source: ImageSource,
-    /// The original photo's depth map when the item has one; a lens blur
-    /// without it measures the photo in the save thread.
+    /// A lens blur's depth map, and the original an effect is made from
+    /// when `photo` has none.
+    depth: DepthSource,
+}
+
+/// An image's depth map for export: the item's, or measured from its
+/// original photo in the export's thread.
+#[derive(Clone)]
+pub(crate) struct DepthSource {
     depth: Option<Arc<prunr_core::depth::DepthMap>>,
+    source: ImageSource,
+}
+
+impl DepthSource {
+    /// The map; without one, measured from `original` (the photo already
+    /// decoded) or from the source decoded now.
+    pub(crate) fn get(&self, export: &ExportDepth, original: Option<&image::RgbaImage>) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
+        match &self.depth {
+            Some(depth) => Ok(Arc::clone(depth)),
+            None => export.measure(&self.source, original),
+        }
+    }
+}
+
+/// The depth one export (a save, a copy, a drag) measures: one engine
+/// for all its images, and the last map kept, so an image's backdrop,
+/// faded lines and Depth map file measure it once between them.
+#[derive(Default)]
+pub(crate) struct ExportDepth {
+    measurer: prunr_core::depth::Measurer,
+    last: std::sync::Mutex<Option<(ImageSource, Arc<prunr_core::depth::DepthMap>)>>,
+}
+
+impl ExportDepth {
+    fn measure(&self, source: &ImageSource, original: Option<&image::RgbaImage>) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
+        let last = || self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, map)) = last().as_ref().filter(|(seen, _)| seen.same_as(source)) {
+            return Ok(Arc::clone(map));
+        }
+        let measured = match original {
+            Some(photo) => self.measurer.measure(photo),
+            None => self.measurer.measure_decoded(&source.decode()?),
+        };
+        let map = Arc::new(measured.map_err(|e| e.to_string())?);
+        *last() = Some((source.clone(), Arc::clone(&map)));
+        Ok(map)
+    }
 }
 
 /// An image's depth map to save beside its result as `<stem>-depth.png`
-/// (16-bit grey, white = near) at the photo's size: the item's map, or
-/// measured in the save thread.
+/// (16-bit grey, white = near) at the photo's size.
 #[derive(Clone)]
 pub(crate) struct DepthExport {
     name: String,
     dims: (u32, u32),
-    depth: Option<Arc<prunr_core::depth::DepthMap>>,
-    source: ImageSource,
+    depth: DepthSource,
 }
 
 impl DepthExport {
     /// Write the map into `folder`.
-    pub(crate) fn write(&self, folder: &std::path::Path) -> Result<(), String> {
-        let depth = match &self.depth {
-            Some(depth) => Arc::clone(depth),
-            None => {
-                let photo = self.source.decode_rgba()?;
-                Arc::new(super::processor::measure_depth_once(&photo).map_err(|e| e.to_string())?)
-            }
-        };
+    pub(crate) fn write(&self, folder: &std::path::Path, export: &ExportDepth) -> Result<(), String> {
+        let depth = self.depth.get(export, None)?;
         let (w, h) = self.dims;
         let bytes = prunr_core::depth::encode_depth_png(&depth, w, h).map_err(|e| e.to_string())?;
         std::fs::write(folder.join(&self.name), bytes).map_err(|e| e.to_string())
@@ -98,7 +133,7 @@ impl DepthExport {
 /// `<stem>-depth.png` for an image named `filename`.
 pub(crate) fn depth_map_name(filename: &str) -> String {
     let stem = std::path::Path::new(filename).file_stem().map_or_else(|| filename.into(), |s| s.to_string_lossy());
-    format!("{stem}-depth.png")
+    prunr_core::depth::map_file_name(&stem)
 }
 
 /// The photo an effect background is made from: the image the shown
@@ -126,7 +161,7 @@ impl ExportBg {
         matches!(self.backdrop, super::item_settings::Backdrop::Transparent)
     }
 
-    pub(crate) fn bake(&self, rgba: &Arc<image::RgbaImage>) -> Arc<image::RgbaImage> {
+    pub(crate) fn bake(&self, rgba: &Arc<image::RgbaImage>, export: &ExportDepth) -> Arc<image::RgbaImage> {
         use super::item_settings::Backdrop;
         let composite = |under: &dyn Fn(&mut image::RgbaImage)| {
             let mut copy = (**rgba).clone();
@@ -138,28 +173,28 @@ impl ExportBg {
             Backdrop::Color(c) => Some(composite(&|img| prunr_core::apply_background_color(img, c))),
             Backdrop::Image(_) => self.image.as_ref()
                 .map(|bg| composite(&|img| prunr_core::apply_background_image(img, &bg.image, self.fit))),
-            Backdrop::Effect(effect) => self.photo().map(|photo| {
-                let depth = if effect.needs_depth() { self.depth_map() } else { None };
+            Backdrop::Effect(effect) => self.photo().map(|(photo, original)| {
+                let depth = if effect.needs_depth() {
+                    self.depth.get(export, original.then_some(&*photo))
+                        .map_err(|err| tracing::warn!(%err, "depth for export"))
+                        .ok()
+                } else {
+                    None
+                };
                 composite(&|img| { prunr_core::apply_bg_effect(img, &photo, effect, depth.as_deref()); })
             }),
         };
         baked.unwrap_or_else(|| Arc::clone(rgba))
     }
 
-    /// The original photo's depth map: the item's, or measured now.
-    pub(crate) fn depth_map(&self) -> Option<Arc<prunr_core::depth::DepthMap>> {
-        if let Some(depth) = &self.depth {
-            return Some(Arc::clone(depth));
-        }
-        let photo = self.source.decode_rgba().map_err(|err| tracing::warn!(%err, "depth for export: source")).ok()?;
-        super::processor::measure_depth_once(&photo)
-            .map(Arc::new)
-            .map_err(|err| tracing::warn!(%err, "depth for export"))
-            .ok()
-    }
-
-    fn photo(&self) -> Option<Arc<image::RgbaImage>> {
-        self.photo.as_ref().and_then(BackdropPhoto::load).or_else(|| self.source.decode_rgba().ok())
+    /// The photo the effect is made from, and whether it is the original.
+    fn photo(&self) -> Option<(Arc<image::RgbaImage>, bool)> {
+        let chosen = match &self.photo {
+            Some(BackdropPhoto::Edited(stored)) => stored.load().map(|photo| (photo, false)),
+            Some(BackdropPhoto::Original(photo)) => Some((Arc::clone(photo), true)),
+            None => None,
+        };
+        chosen.or_else(|| self.depth.source.decode_rgba().ok().map(|photo| (photo, true)))
     }
 }
 
@@ -201,6 +236,15 @@ impl ImageSource {
     pub(crate) fn decode(&self) -> Result<image::DynamicImage, String> {
         let bytes = self.load_bytes().map_err(|e| e.to_string())?;
         prunr_core::load_image_from_bytes(&bytes).map_err(|e| e.to_string())
+    }
+
+    /// Whether both name the same image: one path, or one shared buffer.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Path(a), Self::Path(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
     pub(crate) fn load_bytes(&self) -> std::io::Result<Arc<Vec<u8>>> {
@@ -1442,8 +1486,13 @@ impl BatchItem {
     /// source for the run's thread to decode. Shared via `Arc`: the full
     /// RGBA would otherwise be deep-cloned (tens of MB at 4K) per run.
     pub(crate) fn run_input_or_source(&self, engine: Engine) -> super::processor::RunInput {
-        self.run_input(engine)
-            .or_else(|| self.source_rgba.clone())
+        self.run_input(engine).map_or_else(|| self.original_run_input(), super::processor::RunInput::Decoded)
+    }
+
+    /// The decoded original, else the source for the run's thread to
+    /// decode.
+    pub(crate) fn original_run_input(&self) -> super::processor::RunInput {
+        self.source_rgba.clone()
             .map_or_else(|| super::processor::RunInput::Source(self.source.clone()), super::processor::RunInput::Decoded)
     }
 
@@ -1853,7 +1902,12 @@ impl BatchItem {
 
     /// The depth map to save beside this item's result.
     pub(crate) fn depth_export(&self) -> DepthExport {
-        DepthExport { name: depth_map_name(&self.filename), dims: self.dimensions, depth: self.depth.clone(), source: self.source.clone() }
+        DepthExport { name: depth_map_name(&self.filename), dims: self.dimensions, depth: self.depth_source() }
+    }
+
+    /// See `DepthSource`.
+    pub(crate) fn depth_source(&self) -> DepthSource {
+        DepthSource { depth: self.depth.clone(), source: self.source.clone() }
     }
 
     /// What export puts behind this item's result: only shared handles,
@@ -1864,8 +1918,7 @@ impl BatchItem {
             image: self.bg_image.clone(),
             fit: self.settings.bg_image_fit,
             photo: self.backdrop_photo(),
-            source: self.source.clone(),
-            depth: self.depth.clone(),
+            depth: self.depth_source(),
         }
     }
 
@@ -2008,7 +2061,7 @@ mod tests {
         item.timeline.current_mut().origin = Some(Origin::new(Engine::Segment, Some(RunStart { image: erased, dims: (4, 2) })));
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
         let cut_out = Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 0, 0])));
-        assert_eq!(item.export_bg().bake(&cut_out).get_pixel(0, 0).0, [10, 10, 10, 255], "export: the edited photo behind");
+        assert_eq!(item.export_bg().bake(&cut_out, &ExportDepth::default()).get_pixel(0, 0).0, [10, 10, 10, 255], "export: the edited photo behind");
         assert_eq!(item.backdrop_photo().and_then(|p| p.load()).map(|p| p.get_pixel(0, 0).0), Some([10, 10, 10, 255]), "screen: the same photo");
         let before = item.backdrop_key();
         item.commit(StepKind::Stroke);
@@ -2029,14 +2082,29 @@ mod tests {
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
         let line = image::Rgba([255, 0, 0, 255]);
         let result = Arc::new(image::RgbaImage::from_fn(4, 2, |x, _| if x == 0 { line } else { image::Rgba([0, 0, 0, 0]) }));
-        let out = item.export_bg().bake(&result);
+        let out = item.export_bg().bake(&result, &ExportDepth::default());
         assert_eq!(*out.get_pixel(0, 0), line, "the result's own pixels stay");
         let behind = out.get_pixel(3, 1).0;
         assert_eq!(behind[3], 255, "the transparent part gets the picture");
         assert!(behind[0] == behind[1] && behind[1] == behind[2], "a black-and-white photo: {behind:?}");
 
         item.settings.bg_effect = prunr_core::BgEffect::None;
-        assert!(Arc::ptr_eq(&item.export_bg().bake(&result), &result), "nothing behind, nothing baked");
+        assert!(Arc::ptr_eq(&item.export_bg().bake(&result, &ExportDepth::default()), &result), "nothing behind, nothing baked");
+    }
+
+    /// An export measures an image's depth once: a later fetch for the
+    /// same source gets the kept map, another source does not.
+    #[test]
+    fn an_export_reuses_the_map_it_measured_for_the_same_image() {
+        let source = ImageSource::Bytes(Arc::new(b"not an image".to_vec()));
+        let map = Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
+        let export = ExportDepth { last: std::sync::Mutex::new(Some((source.clone(), Arc::clone(&map)))), ..ExportDepth::default() };
+        let same = DepthSource { depth: None, source };
+        assert!(Arc::ptr_eq(&same.get(&export, None).expect("kept"), &map));
+        let other = DepthSource { depth: None, source: ImageSource::Bytes(Arc::new(b"not an image".to_vec())) };
+        assert!(other.get(&export, None).is_err(), "another image is decoded, not handed the kept map");
+        let own = Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5]));
+        assert!(Arc::ptr_eq(&DepthSource { depth: Some(Arc::clone(&own)), ..other }.get(&export, None).expect("own"), &own));
     }
 
     /// The upscale run survives a display reset (Refine re-finishes from

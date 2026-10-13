@@ -10,8 +10,7 @@ use super::{chip, get_model};
 use super::{fmt, hint};
 
 const PANEL_WIDTH: f32 = 380.0;
-/// The one model every depth effect reads.
-pub(crate) const DEPTH_MODEL: prunr_models::ModelId = prunr_models::ModelId::DepthAnythingV2Small;
+pub(crate) const DEPTH_MODEL: prunr_models::ModelId = prunr_core::depth::MODEL.model_id();
 
 /// "Depth needs Depth Anything V2 Small · 94 MB.", built once.
 fn needs_text() -> &'static str {

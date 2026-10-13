@@ -190,7 +190,7 @@ impl DragExportState {
         if self.is_writing(id) {
             return;
         }
-        let handle = std::thread::spawn(move || files.write());
+        let handle = std::thread::spawn(move || files.write(&super::item::ExportDepth::default()));
         self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Writing(handle) });
     }
 

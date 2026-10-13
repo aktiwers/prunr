@@ -334,14 +334,15 @@ use prunr_core::inpaint_blend::{fill_region, finalize_inpaint, DEFAULT_EDGE_BLEN
 
 /// What goes behind each result, from `--bg-effect`, `--bg-image` and
 /// `--bg-color`.
-enum CliBackdrop {
+enum CliBackdrop<'a> {
     Transparent,
     Color([u8; 3]),
     Image(std::sync::Arc<image::DynamicImage>, prunr_core::BgImageFit),
-    Effect(prunr_core::BgEffect),
+    /// An effect, and where a lens blur gets its depth.
+    Effect(prunr_core::BgEffect, &'a CliDepth),
 }
 
-impl CliBackdrop {
+impl CliBackdrop<'_> {
     /// Put the backdrop under `result`; an effect is made from the photo
     /// at `photo_path`.
     fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path) {
@@ -349,15 +350,15 @@ impl CliBackdrop {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
-            CliBackdrop::Effect(effect) => match prunr_core::load_image_from_path(photo_path) {
+            CliBackdrop::Effect(effect, depth) => match prunr_core::load_image_from_path(photo_path) {
                 Ok(photo) => {
                     let photo = photo.into_rgba8();
                     let depth = effect.needs_depth()
-                        .then(|| prunr_app::gui::processor::measure_depth_once(&photo)
+                        .then(|| depth.for_backdrop(photo_path, &photo)
                             .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
                             .ok())
                         .flatten();
-                    prunr_core::apply_bg_effect(result, &photo, *effect, depth.as_ref());
+                    prunr_core::apply_bg_effect(result, &photo, *effect, depth.as_deref());
                 }
                 Err(err) => tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
             },
@@ -384,24 +385,58 @@ fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     }
 }
 
-/// Where an input's depth map goes: `{stem}-depth.png` beside its result.
+/// Depth in the CLI: one engine for the run, and each input measured
+/// once when a lens backdrop and `--depth-map` both want it.
+#[derive(Default)]
+struct CliDepth {
+    measurer: prunr_core::depth::Measurer,
+    /// With `--depth-map`: the maps backdrops measured and their photo's
+    /// size (~0.7 MB each), until written.
+    kept: Option<std::cell::RefCell<std::collections::HashMap<PathBuf, KeptDepth>>>,
+}
+
+type KeptDepth = (std::sync::Arc<prunr_core::depth::DepthMap>, (u32, u32));
+
+impl CliDepth {
+    fn new(args: &Cli) -> Self {
+        Self { kept: args.depth_map.then(Default::default), ..Self::default() }
+    }
+
+    /// The map of `photo`, read from `path`, for its backdrop.
+    fn for_backdrop(&self, path: &std::path::Path, photo: &image::RgbaImage) -> Result<std::sync::Arc<prunr_core::depth::DepthMap>, CoreError> {
+        let map = std::sync::Arc::new(self.measurer.measure(photo)?);
+        if let Some(kept) = &self.kept {
+            kept.borrow_mut().insert(path.to_path_buf(), (std::sync::Arc::clone(&map), photo.dimensions()));
+        }
+        Ok(map)
+    }
+
+    /// `input`'s map and its photo's size: the one its backdrop kept, else
+    /// measured now.
+    fn for_file(&self, input: &std::path::Path) -> Result<KeptDepth, String> {
+        if let Some(kept) = self.kept.as_ref().and_then(|kept| kept.borrow_mut().remove(input)) {
+            return Ok(kept);
+        }
+        let photo = prunr_core::load_image_from_path(input).map_err(|e| format!("failed to read {}: {e}", input.display()))?;
+        let map = self.measurer.measure_decoded(&photo).map_err(|e| format!("depth failed: {e}"))?;
+        Ok((std::sync::Arc::new(map), (photo.width(), photo.height())))
+    }
+}
+
+/// Where an input's depth map goes, beside its result.
 fn depth_map_path(args: &Cli, input: &std::path::Path) -> PathBuf {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    args.result_path(input).with_file_name(format!("{stem}-depth.png"))
+    args.result_path(input).with_file_name(prunr_core::depth::map_file_name(&stem))
 }
 
 /// Write each input's depth map (`--depth-map`). Returns how many failed.
-fn write_depth_maps(args: &Cli) -> usize {
+fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
     let mut failed = 0;
     for input in &args.inputs {
         let out = depth_map_path(args, input);
         let written = check_overwrite(&out, args.force)
-            .and_then(|()| prunr_core::load_image_from_path(input).map_err(|e| format!("failed to read {}: {e}", input.display())))
-            .and_then(|img| {
-                let photo = img.into_rgba8();
-                let depth = prunr_app::gui::processor::measure_depth_once(&photo).map_err(|e| format!("depth failed: {e}"))?;
-                prunr_core::depth::encode_depth_png(&depth, photo.width(), photo.height()).map_err(|e| format!("encode failed: {e}"))
-            })
+            .and_then(|()| depth.for_file(input))
+            .and_then(|(map, (w, h))| prunr_core::depth::encode_depth_png(&map, w, h).map_err(|e| format!("encode failed: {e}")))
             .and_then(|bytes| std::fs::write(&out, bytes).map_err(|e| format!("failed to save {}: {e}", out.display())));
         match written {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out.display()),
@@ -418,7 +453,7 @@ fn write_depth_maps(args: &Cli) -> usize {
 /// The depth model is needed (a depth map, fading lines, a lens blur)
 /// but not installed: the line to print.
 fn missing_depth_model(args: &Cli) -> Option<String> {
-    let id = prunr_models::ModelId::DepthAnythingV2Small;
+    let id = prunr_core::depth::MODEL.into();
     let needed = args.depth_map || args.line_fade > 0 || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth);
     (needed && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
 }
@@ -535,6 +570,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         eprintln!("error: {err}");
         return 1;
     }
+    let depth = CliDepth::new(args);
     let code = if args.depth_only {
         0
     } else if args.inpaint {
@@ -545,9 +581,9 @@ pub fn run_remove(args: &Cli) -> i32 {
         run_colorize(args)
     } else {
         // All processing uses subprocess isolation for OOM protection
-        run_batch(args)
+        run_batch(args, &depth)
     };
-    if args.depth_map && write_depth_maps(args) > 0 {
+    if args.depth_map && write_depth_maps(args, &depth) > 0 {
         return 1;
     }
     code
@@ -881,7 +917,7 @@ fn load_with_policy(
 
 // ── Batch execution path ─────────────────────────────────────────────────────
 
-fn run_batch(args: &Cli) -> i32 {
+fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     // Validate and decode --bg-image before setting up progress bars.
     // Placing the decode inside the MultiProgress draw region causes
     // eprintln! on decode failure to get overwritten by the next redraw.
@@ -1032,7 +1068,7 @@ fn run_batch(args: &Cli) -> i32 {
     };
     // The app's rule: an effect wins over an image, an image over a colour.
     let backdrop = match (args.bg_effect, bg_image, bg_color) {
-        (Some(effect), _, _) => CliBackdrop::Effect(effect),
+        (Some(effect), _, _) => CliBackdrop::Effect(effect, depth),
         (None, Some(image), _) => CliBackdrop::Image(image, args.bg_image_fit),
         (None, None, Some(color)) => CliBackdrop::Color(color),
         (None, None, None) => CliBackdrop::Transparent,
@@ -1521,6 +1557,22 @@ mod tests {
         assert!(super::Cli::try_parse_from(["prunr", "/p/cat.jpg", "--depth-only"]).is_err(), "--depth-only needs --depth-map");
     }
 
+    /// `--depth-map` writes the map a backdrop measured instead of
+    /// measuring the input again, and keeps it no longer.
+    #[test]
+    fn a_depth_map_a_backdrop_measured_is_written_without_measuring_again() {
+        use clap::Parser;
+        let args = super::Cli::parse_from(["prunr", "/missing/cat.jpg", "--depth-map"]);
+        let depth = super::CliDepth::new(&args);
+        let map = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
+        let input = std::path::Path::new("/missing/cat.jpg");
+        depth.kept.as_ref().expect("kept with --depth-map").borrow_mut().insert(input.into(), (std::sync::Arc::clone(&map), (4, 8)));
+        let (got, dims) = depth.for_file(input).expect("the kept map");
+        assert!(std::sync::Arc::ptr_eq(&got, &map) && dims == (4, 8));
+        assert!(depth.for_file(input).is_err(), "taken once; the missing file is read the next time");
+        assert!(super::CliDepth::new(&super::Cli::parse_from(["prunr", "/p/cat.jpg"])).kept.is_none(), "nothing kept without --depth-map");
+    }
+
     /// The effect is made from the input photo and fills what the result
     /// leaves transparent; the result's own pixels stay.
     #[test]
@@ -1529,7 +1581,7 @@ mod tests {
         let photo = dir.path().join("photo.png");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
         let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
-        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource).apply(&mut result, &photo);
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default()).apply(&mut result, &photo);
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");

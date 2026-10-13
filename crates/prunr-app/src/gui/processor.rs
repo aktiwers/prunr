@@ -429,7 +429,7 @@ fn measure_depth(
     input: RunInput,
     cpu_only: bool,
 ) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
-    let kind = prunr_core::ModelKind::DepthAnythingV2Small;
+    let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     if !admitted(descriptor) {
         return Err(format!("needs about {} MB of free memory", descriptor.working_set_mb));
@@ -454,17 +454,6 @@ fn measure_depth(
         run.end();
     }
     result
-}
-
-/// Measure `photo`'s depth on a fresh engine, for a save or the CLI,
-/// which run once and keep no engine.
-/// The CPU EP: the model takes about half a second there, less than a
-/// GPU session takes to build.
-pub fn measure_depth_once(photo: &image::RgbaImage) -> Result<prunr_core::depth::DepthMap, prunr_core::CoreError> {
-    let kind = prunr_core::ModelKind::DepthAnythingV2Small;
-    let threads = prunr_core::batch::ort_intra_threads(1);
-    let engine = prunr_core::OrtEngine::new_cpu_only(kind, threads)?;
-    prunr_core::depth::estimate_depth(&engine, photo, &prunr_core::Progress::none())
 }
 
 /// The longer side of the preview an upscale shows while it runs: about a

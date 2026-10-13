@@ -11,7 +11,7 @@ const TRANSPOSE_BLOCK: usize = 16;
 
 /// Box radii whose three passes approximate a Gaussian of `sigma`
 /// (Kutskir's method, as in `image`'s `fast_blur`).
-fn box_radii(sigma: f32) -> Vec<usize> {
+fn box_radii(sigma: f32) -> [usize; PASSES] {
     let w_ideal = (12.0 * sigma * sigma / PASSES as f32 + 1.0).sqrt();
     let mut w_l = w_ideal.floor();
     if w_l % 2.0 == 0.0 {
@@ -21,10 +21,10 @@ fn box_radii(sigma: f32) -> Vec<usize> {
     let m_ideal = 0.25 * PASSES as f32 * (w_l + 3.0) - 3.0 * sigma * sigma / (w_l + 1.0);
     let m = m_ideal.round().max(0.0) as usize;
     let ceil_to_odd = |x: usize| if x.is_multiple_of(2) { x + 1 } else { x };
-    (0..PASSES)
-        .map(|i| if i < m { w_l as usize } else { w_u as usize })
-        .map(|size| ceil_to_odd(size.saturating_sub(1) / 2))
-        .collect()
+    std::array::from_fn(|i| {
+        let size = if i < m { w_l as usize } else { w_u as usize };
+        ceil_to_odd(size.saturating_sub(1) / 2)
+    })
 }
 
 /// One box pass along each row of `src` (rows of `width` RGBA pixels),
@@ -35,26 +35,37 @@ fn box_rows(src: &[u8], dst: &mut [u8], width: usize, radius: usize) {
     let kernel = (2 * radius + 1) as u32;
     let half = kernel / 2;
     let last = width - 1;
+    // Between `head_end` and `tail_start` the window lies inside the row.
+    let head_end = radius.min(width);
+    let tail_start = width.saturating_sub(radius + 1).max(head_end);
     dst.par_chunks_exact_mut(row_len).zip(src.par_chunks_exact(row_len)).for_each(|(out, row)| {
         let px = |x: usize| {
-            let i = x.min(last) * 4;
+            let i = x * 4;
             [u32::from(row[i]), u32::from(row[i + 1]), u32::from(row[i + 2]), u32::from(row[i + 3])]
         };
+        let clamped = |x: usize| px(x.min(last));
         let mut sum = px(0).map(|v| v * (radius as u32 + 1));
         for x in 1..=radius {
-            let p = px(x);
+            let p = clamped(x);
             for c in 0..4 {
                 sum[c] += p[c];
             }
         }
-        for (x, o) in out.chunks_exact_mut(4).enumerate() {
+        let mut slide = |x: usize, add: [u32; 4], sub: [u32; 4]| {
+            let o = &mut out[x * 4..x * 4 + 4];
             for c in 0..4 {
                 o[c] = ((sum[c] + half) / kernel) as u8;
-            }
-            let (add, sub) = (px(x + radius + 1), px(x.saturating_sub(radius)));
-            for c in 0..4 {
                 sum[c] = sum[c] + add[c] - sub[c];
             }
+        };
+        for x in 0..head_end {
+            slide(x, clamped(x + radius + 1), px(0));
+        }
+        for x in head_end..tail_start {
+            slide(x, px(x + radius + 1), px(x - radius));
+        }
+        for x in tail_start..width {
+            slide(x, px(last), px(x - radius));
         }
     });
 }
@@ -85,10 +96,12 @@ pub fn blur_rgba(src: &RgbaImage, sigma: f32) -> RgbaImage {
         return src.clone();
     }
     let radii = box_radii(sigma);
+    let [first, rest @ ..] = radii;
     let (w, h) = (w as usize, h as usize);
-    let mut a = src.as_raw().clone();
+    let mut a = vec![0u8; src.as_raw().len()];
     let mut b = vec![0u8; a.len()];
-    for &r in &radii {
+    box_rows(src.as_raw(), &mut a, w, first);
+    for &r in &rest {
         box_rows(&a, &mut b, w, r);
         std::mem::swap(&mut a, &mut b);
     }
