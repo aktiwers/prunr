@@ -103,6 +103,13 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
         sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
     },
+    // Own dynamic-shape export: Phhofm's published ONNX is fixed at 256×256.
+    ModelSpec {
+        id: prunr_models::ModelId::FourXNomos2RealPlksr,
+        name: "4xNomos2_realplksr_dysample.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos2_realplksr_dysample.onnx",
+        sha256: "ec435c52cfc68bdf9b3e4b757bdd8078ce5daea70ff439a7e68de1a17262e24d",
+    },
     // Phhofm's official Nomos8k release IS fp16 (single file, no fp32
     // sibling) — `UpscaleModelKnobs::is_fp16: true` drives runtime
     // dispatch. Filename is `4xNomos8kSCHAT-L.onnx` with no `_fp16`

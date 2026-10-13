@@ -232,6 +232,8 @@ pub enum CliUpscaler {
     Siax,
     /// 4x NMKD Superscale: noisy or compressed photos.
     Superscale,
+    /// 4xNomos2 RealPLKSR: fast, natural skin and hair texture.
+    Nomos2,
 }
 
 impl CliUpscaler {
@@ -242,6 +244,7 @@ impl CliUpscaler {
             Self::Nomos => ModelId::Nomos8kSchatL,
             Self::Siax => ModelId::FourXNmkdSiaxCx,
             Self::Superscale => ModelId::FourXNmkdSuperscale,
+            Self::Nomos2 => ModelId::FourXNomos2RealPlksr,
         }
     }
 }
