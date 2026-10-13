@@ -55,13 +55,22 @@ enum ReaderEvent {
     Disconnected,
 }
 
-/// The lines a worker draws: the mode, their settings, and how much
-/// they fade with distance (0-100).
+/// The lines a worker draws: the mode, their settings, how much they
+/// fade with distance (0-100), and the scales it runs the detector at.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerLines {
     pub mode: LineMode,
     pub edge: EdgeSettings,
     pub fade_pct: u8,
+    pub scales: InferredScales,
+}
+
+impl WorkerLines {
+    /// The app's lines: it fades the lines it shows from its own depth
+    /// map, and keeps every scale so a scale switch needs no new run.
+    pub fn app(mode: LineMode, edge: EdgeSettings) -> Self {
+        Self { mode, edge, fade_pct: 0, scales: InferredScales::All }
+    }
 }
 
 impl SubprocessManager {
@@ -69,21 +78,9 @@ impl SubprocessManager {
     /// Blocks until the child sends `Ready` or `InitError`.
     #[tracing::instrument(
         skip_all,
-        fields(model = ?model, jobs, force_cpu, line_mode = ?line_mode),
+        fields(model = ?model, jobs, force_cpu, line_mode = ?lines.mode),
     )]
     pub fn spawn(
-        model: ModelKind,
-        jobs: usize,
-        mask: MaskSettings,
-        force_cpu: bool,
-        line_mode: LineMode,
-        edge: EdgeSettings,
-    ) -> Result<(Self, String), String> {
-        Self::spawn_inner(model, jobs, mask, force_cpu, WorkerLines { mode: line_mode, edge, fade_pct: 0 }, false)
-    }
-
-    /// `spawn` whose worker fades the lines with distance itself (the CLI).
-    pub fn spawn_with_lines(
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
@@ -102,7 +99,7 @@ impl SubprocessManager {
         Self::spawn_inner(
             ModelKind::Silueta, 1,
             MaskSettings::default(), false,
-            WorkerLines { mode: LineMode::Off, edge: EdgeSettings::default(), fade_pct: 0 },
+            WorkerLines::app(LineMode::Off, EdgeSettings::default()),
             true,
         )
     }
@@ -115,7 +112,7 @@ impl SubprocessManager {
         lines: WorkerLines,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
-        let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct } = lines;
+        let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct, scales: edge_scales } = lines;
         // Stale-file cleanup is owned by `ipc_temp_dir()`'s init-time
         // sweep. Spawning a subprocess must NOT touch the temp dir —
         // callers like the CLI downscale path and the inpaint bridge's
@@ -146,6 +143,7 @@ impl SubprocessManager {
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
             line_fade_pct,
+            edge_scales,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
         flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
 
