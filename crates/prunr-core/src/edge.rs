@@ -105,48 +105,49 @@ impl EdgeEngine {
     /// | 640×480   | 3.7 MB | 4.9 MB             | 2.5 MB      |
     /// | 1280×960  | 15 MB  | 20 MB              | 4.9 MB      |
     ///
-    /// The runs go one after the other, each run's outputs dropped before
-    /// the next, so the peak is the 1280×960 run plus the 2.5 MB already
-    /// kept, plus one full-size RGBA copy (W×H×4 bytes) while an input
-    /// with alpha is flattened onto white. A whole Sketch on a 20 MP photo
-    /// peaks at about 0.9 GB resident in the CLI (DexiNed: 1.4 GB).
+    /// Both runs' inputs are built before the session lock is taken, so
+    /// with several images in flight one image's resize never holds up
+    /// another's run. The runs go one after the other, each run's input
+    /// and outputs dropped before the next, so the peak is the 1280×960
+    /// run plus the 2.5 MB already kept and the 3.7 MB base input waiting
+    /// for it. While the inputs are built, an input that is not 8-bit RGB
+    /// costs one full-size RGB copy (W×H×3 bytes), flattened onto white
+    /// when it has alpha. A whole Sketch on a 20 MP photo peaks at about
+    /// 0.9 GB resident in the CLI (DexiNed: 1.4 GB).
     pub fn infer_scales(&self, original: &DynamicImage, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
+        let wants = |s: EdgeScale| scales.contains(&s);
+        let (fine_h, fine_w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
+        let (base_input, fine_input) = {
+            let rgb = opaque_rgb(original);
+            (
+                (wants(EdgeScale::Bold) || wants(EdgeScale::Fused)).then(|| preprocess(&rgb, BASE_W, BASE_H)),
+                wants(EdgeScale::Fine).then(|| preprocess(&rgb, fine_w, fine_h)),
+            )
+        };
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
-        let flattened;
-        let original = if original.color().has_alpha() {
-            flattened = flatten_on_white(original);
-            &flattened
-        } else {
-            original
-        };
-        let wants = |s: EdgeScale| scales.contains(&s);
-        if wants(EdgeScale::Bold) || wants(EdgeScale::Fused) {
-            let outputs = run_inference(&mut session, original, BASE_W, BASE_H)?;
+        if let Some(input) = base_input {
+            let outputs = run_inference(&mut session, input)?;
             for (scale, name) in [(EdgeScale::Bold, BOLD_OUTPUT), (EdgeScale::Fused, FUSED_OUTPUT)] {
                 if wants(scale) {
                     tensors[scale as usize] = extract_probabilities(&outputs, name, BASE_H, BASE_W)?;
                 }
             }
         }
-        if wants(EdgeScale::Fine) {
-            let (h, w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
-            let outputs = run_inference(&mut session, original, w, h)?;
-            tensors[EdgeScale::Fine as usize] = extract_probabilities(&outputs, FUSED_OUTPUT, h, w)?;
+        if let Some(input) = fine_input {
+            let outputs = run_inference(&mut session, input)?;
+            tensors[EdgeScale::Fine as usize] = extract_probabilities(&outputs, FUSED_OUTPUT, fine_h, fine_w)?;
         }
         Ok(EdgeInferenceResult { tensors, height: BASE_H, width: BASE_W })
     }
 }
 
-/// Run the ONNX session once on `original` (opaque) resized to `w` × `h`.
-fn run_inference<'s>(
-    session: &'s mut Session,
-    original: &DynamicImage,
-    w: u32,
-    h: u32,
-) -> Result<ort::session::SessionOutputs<'s>, CoreError> {
-    let input_array = preprocess(original, w, h);
+/// Run the ONNX session once on a `preprocess`ed input.
+fn run_inference(
+    session: &mut Session,
+    input_array: Array4<f32>,
+) -> Result<ort::session::SessionOutputs<'_>, CoreError> {
     let input_name = session.inputs()[0].name().to_string();
     let input_tensor = Tensor::from_array(input_array)
         .map_err(|e| CoreError::Inference(format!("Failed to create edge tensor: {e}")))?;
@@ -450,20 +451,19 @@ pub fn compose_subject_outline(
 ) -> RgbaImage {
     use crate::{EdgeScale, LineStyle};
     let primary_scale = edge.primary_scale();
-    let active = &edge_res.tensors[primary_scale as usize];
-    let (ph, pw) = edge_res.dims(primary_scale);
-    let plane = |tensor: &[f32], th: u32, tw: u32| {
-        let mut p = edge_plane(tensor, th, tw, masked_rgba.width(), masked_rgba.height(), edge.line_strength, edge.edge_thickness);
+    let plane = |scale: EdgeScale| {
+        let (th, tw) = edge_res.dims(scale);
+        let mut p = edge_plane(&edge_res.tensors[scale as usize], th, tw, masked_rgba.width(), masked_rgba.height(), edge.line_strength, edge.edge_thickness);
         if let Some(fade) = fade {
             fade.apply(&mut p);
         }
         p
     };
-    let primary_mask = plane(active, ph, pw);
+    let primary_mask = plane(primary_scale);
     if let LineStyle::DualScale { fine_color, bold_color } = edge.line_style {
+        let active = &edge_res.tensors[primary_scale as usize];
         let bold = &edge_res.tensors[EdgeScale::Bold as usize];
-        let (bh, bw) = edge_res.dims(EdgeScale::Bold);
-        let bold_mask = plane(bold, bh, bw);
+        let bold_mask = plane(EdgeScale::Bold);
         // Fine and Bold must come from distinct tensor slots — equal raw
         // pointers mean the caller collapsed to single-scale output.
         debug_assert_ne!(
@@ -534,8 +534,7 @@ pub fn apply_input_transform<'a>(
         // At the detector's size: blurred at full size, the softening
         // would shrink away with the photo before the detector sees it.
         InputTransform::Smooth => {
-            let flat = if img.color().has_alpha() { Cow::Owned(flatten_on_white(img)) } else { Cow::Borrowed(img) };
-            let seen = crate::formats::resize_rgb_lanczos3(&flat, BASE_W, BASE_H);
+            let seen = crate::formats::resize_rgb_image_lanczos3(&opaque_rgb(img), BASE_W, BASE_H);
             return Cow::Owned(DynamicImage::ImageRgb8(image::imageops::blur(&seen, SMOOTH_SIGMA)));
         }
         _ => {}
@@ -573,38 +572,42 @@ pub fn apply_input_transform<'a>(
     Cow::Owned(DynamicImage::ImageRgba8(rgba))
 }
 
-/// Flatten RGBA onto white: transparent pixels become white so edge detection
-/// doesn't see ghost content behind removed backgrounds.
-///
-/// Operates in-place on the `to_rgba8` clone — saves one full-image
-/// allocation vs. allocating a separate output buffer (~50 MB at 4 K).
-/// Rows are independent → parallel via `par_chunks_mut`. Equivalent
-/// to the previous `result = src * alpha + 255 * (1-alpha)` formula.
-fn flatten_on_white(img: &DynamicImage) -> DynamicImage {
-    use rayon::prelude::*;
-    let mut rgba = img.to_rgba8();
-    let row_stride = (rgba.width() * 4) as usize;
-    rgba.as_mut().par_chunks_mut(row_stride).for_each(|row| {
-        let n = row.len() / 4;
-        for i in 0..n {
-            let p = i * 4;
-            let a = row[p + 3] as f32 / 255.0;
+/// The photo as opaque 8-bit RGB, borrowed when it already is. Alpha is
+/// flattened onto white so edge detection doesn't see ghost content
+/// behind removed backgrounds: `src * alpha + 255 * (1 - alpha)`.
+fn opaque_rgb(img: &DynamicImage) -> std::borrow::Cow<'_, image::RgbImage> {
+    use std::borrow::Cow;
+    match img {
+        DynamicImage::ImageRgb8(rgb) => Cow::Borrowed(rgb),
+        DynamicImage::ImageRgba8(rgba) => Cow::Owned(flatten_on_white(rgba)),
+        other if other.color().has_alpha() => Cow::Owned(flatten_on_white(&other.to_rgba8())),
+        other => Cow::Owned(other.to_rgb8()),
+    }
+}
+
+fn flatten_on_white(rgba: &RgbaImage) -> image::RgbImage {
+    let (w, h) = rgba.dimensions();
+    let mut rgb = image::RgbImage::new(w, h);
+    let (dst_stride, src_stride) = (w as usize * 3, w as usize * 4);
+    rgb.par_chunks_mut(dst_stride.max(1)).zip(rgba.par_chunks(src_stride.max(1))).for_each(|(dst, src)| {
+        for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
+            let a = s[3] as f32 / 255.0;
             if a < 1.0 {
                 let inv_a = 1.0 - a;
-                row[p]     = (row[p]     as f32 * a + 255.0 * inv_a) as u8;
-                row[p + 1] = (row[p + 1] as f32 * a + 255.0 * inv_a) as u8;
-                row[p + 2] = (row[p + 2] as f32 * a + 255.0 * inv_a) as u8;
+                for (dc, &sc) in d.iter_mut().zip(&s[..3]) {
+                    *dc = (sc as f32 * a + 255.0 * inv_a) as u8;
+                }
+            } else {
+                d.copy_from_slice(&s[..3]);
             }
-            row[p + 3] = 255;
         }
     });
-    DynamicImage::ImageRgba8(rgba)
+    rgb
 }
 
 /// Resize to `w` × `h`, BGR float32, subtract mean (no /255).
-/// `source` is already flattened onto white.
-fn preprocess(source: &DynamicImage, w: u32, h: u32) -> Array4<f32> {
-    let resized = crate::formats::resize_rgb_lanczos3(source, w, h);
+fn preprocess(source: &image::RgbImage, w: u32, h: u32) -> Array4<f32> {
+    let resized = crate::formats::resize_rgb_image_lanczos3(source, w, h);
     let raw = resized.as_raw();
     let h = h as usize;
     let w = w as usize;

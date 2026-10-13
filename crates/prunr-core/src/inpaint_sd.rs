@@ -388,7 +388,7 @@ pub fn process_inpaint_with(
     }
 
     if mask_regions(mask).is_empty() {
-        return Ok(crate::inpaint::Filled { rgba: image.clone(), scale: 1.0 });
+        return Ok(crate::inpaint::Filled::full(image.clone()));
     }
     progress.step(Step::LoadingModel);
 
@@ -1546,20 +1546,16 @@ fn build_part_with_ep_ladder(
 /// `lean`: the model's sessions skip ORT's memory-pattern planning unless
 /// the plan says otherwise.
 fn sd_base_builder(mem: SdMemPlan, lean: bool) -> Result<ort::session::builder::SessionBuilder, String> {
-    let builder = crate::ort_runtime::session_builder()
+    let mut builder = crate::ort_runtime::session_builder()
         .map_err(|e| format!("SD: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("SD: optimization level: {e}"))?;
-    let builder = if mem.memory_pattern.unwrap_or(!lean) {
-        builder
-    } else {
-        builder.with_memory_pattern(false).map_err(|e| format!("SD: memory pattern: {e}"))?
-    };
-    let builder = if mem.device_initializers {
-        builder.with_device_allocated_initializers().map_err(|e| format!("SD: initializers: {e}"))?
-    } else {
-        builder
-    };
+    if !mem.memory_pattern.unwrap_or(!lean) {
+        builder = builder.with_memory_pattern(false).map_err(|e| format!("SD: memory pattern: {e}"))?;
+    }
+    if mem.device_initializers {
+        builder = builder.with_device_allocated_initializers().map_err(|e| format!("SD: initializers: {e}"))?;
+    }
     let threads = if mem.intra_threads > 0 { mem.intra_threads as usize } else { num_cpus::get().max(1) };
     builder
         // Both settings act on ORT's own CPU EP, the only one RORem runs
