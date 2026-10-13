@@ -454,8 +454,14 @@ fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
 /// but not installed: the line to print.
 fn missing_depth_model(args: &Cli) -> Option<String> {
     let id = prunr_core::depth::MODEL.into();
-    let needed = args.depth_map || args.line_fade > 0 || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth);
-    (needed && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
+    (wants_depth(args) && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
+}
+
+/// Whether the run reads a depth map: a depth-map file, faded lines (only
+/// when lines are drawn), or a lens-blur backdrop.
+fn wants_depth(args: &Cli) -> bool {
+    let draws_lines = args.lines || args.lines_after_bg;
+    args.depth_map || (draws_lines && args.line_fade > 0) || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth)
 }
 
 fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
@@ -1490,6 +1496,18 @@ mod tests {
 
     /// The upscale flags parse into a mode; its knobs need it, and faces
     /// need a face model named.
+    /// `--line-fade` reads the depth model only when lines are drawn;
+    /// on its own it does nothing and must not refuse the run.
+    #[test]
+    fn line_fade_needs_depth_only_with_lines() {
+        let wants = |args: &[&str]| super::wants_depth(&super::Cli::parse_from(["prunr", "a.png"].iter().chain(args).copied()));
+        assert!(!wants(&["--line-fade", "40"]));
+        assert!(wants(&["--lines", "--line-fade", "40"]));
+        assert!(wants(&["--lines-after-bg", "--line-fade", "40"]));
+        assert!(wants(&["--depth-map"]));
+        assert!(!wants(&["--lines"]));
+    }
+
     #[test]
     fn the_upscale_flags_need_upscale_mode() {
         let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);
