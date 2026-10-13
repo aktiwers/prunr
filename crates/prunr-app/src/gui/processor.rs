@@ -1710,6 +1710,27 @@ mod sd_request_tests {
 mod sam_dispatch_tests {
     use super::*;
 
+    /// Magic Brush end to end on the installed SAM 2 bundle: encode a
+    /// photo, decode a click on its subject. Prints the timings and a
+    /// digest of the candidates so two runtimes can be compared.
+    #[test]
+    #[ignore = "needs the SAM 2 bundle; seconds on a CPU"]
+    fn sam_encodes_and_decodes_a_click() {
+        let Some(path) = std::env::var_os("PRUNR_SAM_PHOTO") else { return };
+        let photo = image::open(path).expect("photo").to_rgba8();
+        let (w, h) = photo.dimensions();
+        let sessions = ensure_sam_sessions(&SamSessionSlot::default()).expect("SAM 2 installed");
+        let started = std::time::Instant::now();
+        let embedding = run_sam_encoder_inline(&sessions, &photo).expect("encode");
+        let encoded = started.elapsed();
+        let prompt = prunr_core::sam::prompt::build_click_prompt(w as f32 / 2.0, h as f32 / 3.0, w, h);
+        let decoded = run_sam_decoder_inline(&sessions, &embedding, &prompt).expect("decode");
+        let positive = decoded.masks.iter().filter(|&&v| v > 0.0).count();
+        eprintln!("sam encode {:.2}s decode {:.3}s iou {:?} positive {positive}",
+            encoded.as_secs_f32(), (started.elapsed() - encoded).as_secs_f32(), decoded.iou_predictions);
+        assert!(positive > 0, "the click selects something");
+    }
+
     #[test]
     fn sam_admission_gate_refuses_below_800mb() {
         assert!(!admission_check(800, 799));
