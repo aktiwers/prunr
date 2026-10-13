@@ -479,6 +479,9 @@ impl PrunrApp {
             }
         }
         app.refresh_install_cache();
+        // The saved model's tools, as a switch to it would set them: an
+        // eraser starts with its brush on.
+        app.fit_brush_models_to_model();
         app
     }
 
