@@ -531,11 +531,16 @@ pub fn apply_input_transform<'a>(
     const SMOOTH_SIGMA: f32 = 1.2;
     match transform {
         InputTransform::None => return Cow::Borrowed(img),
-        // At the detector's size: blurred at full size, the softening
-        // would shrink away with the photo before the detector sees it.
+        // At the detector's largest size: blurred at full size, the
+        // softening would shrink away with the photo before the detector
+        // sees it; at the base size the Fine scale would get an upscaled
+        // photo and lose the detail it exists for. The sigma scales with
+        // the size, so the base run sees the same softening as before.
         InputTransform::Smooth => {
-            let seen = crate::formats::resize_rgb_image_lanczos3(&opaque_rgb(img), BASE_W, BASE_H);
-            return Cow::Owned(DynamicImage::ImageRgb8(image::imageops::blur(&seen, SMOOTH_SIGMA)));
+            let (h, w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
+            let k = w as f32 / BASE_W as f32;
+            let seen = crate::formats::resize_rgb_image_lanczos3(&opaque_rgb(img), w, h);
+            return Cow::Owned(DynamicImage::ImageRgb8(image::imageops::blur(&seen, SMOOTH_SIGMA * k)));
         }
         _ => {}
     }
@@ -633,6 +638,16 @@ mod tests {
 
     /// The detector sees a 640×480 copy, so Smooth must soften that copy
     /// alike on a large photo and a small one.
+    /// Smooth is made at the Fine scale's size, so Fine still sees twice
+    /// the base detail rather than an upscaled base-size photo.
+    #[test]
+    fn smooth_keeps_the_fine_scales_resolution() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(3000, 2000, Rgb([90, 90, 90])));
+        let (h, w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
+        let smooth = apply_input_transform(&img, crate::types::InputTransform::Smooth);
+        assert_eq!((smooth.width(), smooth.height()), (w, h));
+    }
+
     #[test]
     fn smooth_softens_what_the_detector_sees_at_any_photo_size() {
         for (w, h) in [(3200u32, 2400u32), (320, 240)] {
