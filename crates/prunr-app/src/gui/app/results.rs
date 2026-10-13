@@ -387,10 +387,7 @@ impl PrunrApp {
         if !item.needs_depth_run() {
             return;
         }
-        let input = match &item.source_rgba {
-            Some(rgba) => crate::gui::processor::RunInput::Decoded(Arc::clone(rgba)),
-            None => crate::gui::processor::RunInput::Source(item.source.clone()),
-        };
+        let input = item.original_run_input();
         item.depth_run.pending = true;
         self.processor.dispatch_depth(item.id, item.depth_run.epoch, input, cpu_only);
     }
@@ -439,9 +436,10 @@ impl PrunrApp {
         if self.hardware_install_cache.depth {
             return;
         }
-        use crate::gui::views::{depth_chip::DEPTH_MODEL, get_model};
-        self.toasts.info(get_model::needs("Depth", DEPTH_MODEL));
-        self.open_model_store(get_model::store_request(DEPTH_MODEL), ctx);
+        use crate::gui::views::get_model;
+        let model = prunr_core::depth::MODEL.into();
+        self.toasts.info(get_model::needs("Depth", model));
+        self.open_model_store(get_model::store_request(model), ctx);
     }
 
     /// The next click on the image picks the Depth chip's focus.

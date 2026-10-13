@@ -30,6 +30,21 @@ pub(crate) fn bilinear_taps(src_len: u32, out_len: u32) -> Vec<Tap> {
         .collect()
 }
 
+/// `plane` (rows `stride` long) sampled bilinearly between the taps.
+#[inline]
+pub(crate) fn bilinear_sample(plane: &[f32], stride: usize, tx: &Tap, ty: &Tap) -> f32 {
+    let (r0, r1) = (ty.lo * stride, ty.hi * stride);
+    let top = plane[r0 + tx.lo] + (plane[r0 + tx.hi] - plane[r0 + tx.lo]) * tx.t;
+    let bot = plane[r1 + tx.lo] + (plane[r1 + tx.hi] - plane[r1 + tx.lo]) * tx.t;
+    top + (bot - top) * ty.t
+}
+
+/// A whole percent (capped at 100) as a fraction, 0..=1.
+#[inline]
+pub fn pct(v: u8) -> f32 {
+    f32::from(v.min(100)) / 100.0
+}
+
 /// Single-pass min / max / mean over a slice.
 ///
 /// Returns `(f32::INFINITY, f32::NEG_INFINITY, 0.0)` for an empty slice —
@@ -144,6 +159,19 @@ mod tests {
         assert_eq!(lo, -5.0);
         assert_eq!(hi, 10.0);
         assert_eq!(mean, (n as f32 + 3.0) / n as f32);
+    }
+
+    #[test]
+    fn a_percent_is_a_capped_fraction() {
+        assert_eq!((pct(0), pct(50), pct(100), pct(255)), (0.0, 0.5, 1.0, 1.0));
+    }
+
+    #[test]
+    fn a_bilinear_sample_weighs_the_four_neighbours() {
+        let plane = [0.0, 1.0, 2.0, 3.0];
+        let tap = |lo, hi, t| Tap { lo, hi, t };
+        assert_eq!(bilinear_sample(&plane, 2, &tap(0, 1, 0.5), &tap(0, 1, 0.5)), 1.5);
+        assert_eq!(bilinear_sample(&plane, 2, &tap(1, 1, 0.0), &tap(0, 0, 0.0)), 1.0);
     }
 
     #[test]

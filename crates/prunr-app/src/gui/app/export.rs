@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
-use crate::gui::item::{BatchItem, BatchStatus};
+use crate::gui::item::{BatchItem, BatchStatus, ExportDepth};
 use crate::gui::state::AppState;
 use super::PrunrApp;
 
@@ -306,7 +306,7 @@ impl PrunrApp {
         let tx = self.batch.bg_io.copy_ready_tx.clone();
         std::thread::spawn(move || {
             if let Some(rgba) = result.load() {
-                let _ = tx.send((bg.bake(&rgba), multi_hint));
+                let _ = tx.send((bg.bake(&rgba, &ExportDepth::default()), multi_hint));
             }
         });
     }
@@ -343,7 +343,8 @@ fn spawn_save_single(
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
-        let mut msg = match format.encode(&one.bg.bake(&one.rgba)) {
+        let depth = ExportDepth::default();
+        let mut msg = match format.encode(&one.bg.bake(&one.rgba, &depth)) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(()) => "Saved".into(),
                 Err(e) => format!("Save failed: {e}"),
@@ -351,7 +352,7 @@ fn spawn_save_single(
             Err(e) => format!("Save failed: {e}"),
         };
         let folder = path.parent().unwrap_or(Path::new("."));
-        if let Some(Err(e)) = one.depth.map(|d| d.write(folder)) {
+        if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             msg = format!("{msg}; depth map failed: {e}");
         }
@@ -360,8 +361,8 @@ fn spawn_save_single(
 }
 
 /// Write `depth` into `folder` when asked for; counts it as saved or failed.
-fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Path, saved: &mut usize, failed: &mut usize) {
-    match depth.map(|d| d.write(folder)) {
+fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Path, measure: &ExportDepth, saved: &mut usize, failed: &mut usize) {
+    match depth.map(|d| d.write(folder, measure)) {
         Some(Ok(())) => *saved += 1,
         Some(Err(e)) => {
             tracing::warn!(%e, "depth map save failed");
@@ -385,11 +386,12 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
+        let depth = ExportDepth::default();
         for job in jobs {
-            let mut files = job.layers.render_bytes();
+            let mut files = job.layers.render_bytes(&depth);
             if files.is_empty() {
                 if let Some((rgba, bg)) = job.composite.as_ref().and_then(|(r, bg)| Some((r.load()?, bg))) {
-                    if let Ok(bytes) = format.encode(&bg.bake(&rgba)) {
+                    if let Ok(bytes) = format.encode(&bg.bake(&rgba, &depth)) {
                         files.push((crate::gui::drag_export::export_name(job.layers.filename(), format), bytes));
                     }
                 }
@@ -400,7 +402,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
                     Err(_) => failed += 1,
                 }
             }
-            save_depth_beside(job.depth.as_ref(), &folder, &mut saved, &mut failed);
+            save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut saved, &mut failed);
         }
         let msg = if failed > 0 {
             format!("Saved {saved}, failed {failed}")
@@ -430,14 +432,15 @@ fn spawn_save_batch(
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
+        let measure = ExportDepth::default();
         for BatchSave { filename, result, bg, depth } in items {
-            save_depth_beside(depth.as_ref(), &folder, &mut saved, &mut failed);
+            save_depth_beside(depth.as_ref(), &folder, &measure, &mut saved, &mut failed);
             let out_path = folder.join(crate::gui::drag_export::export_name(&filename, format));
             let Some(rgba) = result.load() else {
                 failed += 1;
                 continue;
             };
-            match format.encode(&bg.bake(&rgba)) {
+            match format.encode(&bg.bake(&rgba, &measure)) {
                 Ok(bytes) => match std::fs::write(&out_path, &bytes) {
                     Ok(()) => saved += 1,
                     Err(_) => failed += 1,
