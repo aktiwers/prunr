@@ -303,7 +303,7 @@ pub fn process_inpaint(
         image, mask, id,
         SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
         &crate::progress::Progress::none(),
-    )
+    ).map(|f| f.rgba)
 }
 
 /// Full-knob entry. The `inpaint::process_inpaint` shim calls this with
@@ -315,7 +315,7 @@ pub fn process_inpaint_with(
     id: prunr_models::ModelId,
     mut req: SdInpaintRequest,
     progress: &crate::progress::Progress,
-) -> Result<RgbaImage, CoreError> {
+) -> Result<crate::inpaint::Filled, CoreError> {
     use crate::progress::Step;
     // The other quality's bundle goes before the RAM gate counts it: it
     // would be dropped on load anyway, and kept-loaded it filled RAM.
@@ -339,7 +339,7 @@ pub fn process_inpaint_with(
     }
 
     if mask_regions(mask).is_empty() {
-        return Ok(image.clone());
+        return Ok(crate::inpaint::Filled { rgba: image.clone(), scale: 1.0 });
     }
     progress.step(Step::LoadingModel);
 

@@ -1129,6 +1129,14 @@ impl BatchItem {
         }
     }
 
+    /// The erase that made the shown step filled its region at `scale` of
+    /// full size (the smallest, when regions differed).
+    pub(crate) fn note_fill_scale(&mut self, scale: f32) {
+        if let Some(origin) = self.timeline.current_mut().origin.as_mut() {
+            origin.fill_scale = Some(scale);
+        }
+    }
+
     /// The kept run the shown step claims, if any.
     fn shown_kept_run(&self) -> Option<u64> {
         self.timeline.current().origin.as_ref().and_then(|o| o.kept_run)

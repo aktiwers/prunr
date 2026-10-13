@@ -293,13 +293,15 @@ pub(crate) struct Origin {
     /// The region an erase filled, so "Try another" can fill it again
     /// (shared with the stroke step that painted it).
     pub(crate) region: Option<StoredSelection>,
+    /// How large an erase filled its region: 1 is full size.
+    pub(crate) fill_scale: Option<f32>,
 }
 
 impl Origin {
     /// A run of `engine` from `start` (`None`: the original), with no seed,
     /// kept run or region.
     pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
-        Self { engine, start, kept_run: None, seed: None, region: None }
+        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None }
     }
 }
 

@@ -154,6 +154,17 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                         .size(theme::FONT_SIZE_BODY)
                         .color(theme::TEXT_SECONDARY),
                 );
+                let erase_scale = item.timeline.current().origin.as_ref()
+                    .filter(|o| o.engine == crate::gui::item::Engine::Erase)
+                    .and_then(|o| o.fill_scale);
+                if let Some(scale) = erase_scale {
+                    ui.add_space(theme::SPACE_SM);
+                    ui.label(
+                        RichText::new(format!("Fill {}", super::fmt::percent(scale)))
+                            .size(theme::FONT_SIZE_BODY)
+                            .color(theme::TEXT_SECONDARY),
+                    ).on_hover_text("How large the eraser filled its region. 100% is full size; Auto shrinks a large region to fit the model.");
+                }
             }
         });
     });
