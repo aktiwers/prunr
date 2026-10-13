@@ -35,7 +35,7 @@ pub(crate) fn dismissable_popup_open(ctx: &egui::Context) -> bool {
 use egui::{Color32, Stroke};
 
 /// The dimming over the app behind a modal.
-const MODAL_SCRIM: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 100);
+const MODAL_SCRIM: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 56);
 
 /// Check if the user clicked the backdrop (outside the modal window).
 /// Must be called AFTER the window is rendered so we know the window rect.
@@ -61,8 +61,9 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 // a soft deep shadow. Panels round at 18 px, strips and buttons are pills,
 // inputs round at 10 px.
 
-/// The glass fill: Surface at 94 %.
-pub const GLASS: Color32 = Color32::from_rgba_premultiplied(23, 23, 27, 240);
+/// The glass fill: a raised surface (#2A2A2E) at 94 %, lighter than the
+/// toolbar it floats under so it reads as raised.
+pub const GLASS: Color32 = Color32::from_rgba_premultiplied(40, 40, 43, 240);
 /// The hairline border around glass: white at 8 %.
 pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 /// A slider's rail and an off switch.
@@ -428,7 +429,7 @@ pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 // === Phase 5: Settings Dialog ===
 pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
 /// The glass panel's colour at full cover, for a modal page of text.
-pub const MODAL_FILL: Color32 = Color32::from_rgb(23, 23, 27);
+pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);
 /// Settings: its sidebar and the page beside it.
 pub const SETTINGS_MODAL_SIZE: [f32; 2] = [860.0, 600.0];
 
