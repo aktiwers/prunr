@@ -71,6 +71,13 @@ impl AdmissionController {
         ImageMemCost { item_id, total }
     }
 
+    /// A controller with a fixed budget, for tests that must not read
+    /// the machine's RAM or the active provider.
+    #[cfg(test)]
+    pub(crate) fn with_budget(budget_bytes: usize) -> Self {
+        Self { budget_bytes, committed_bytes: 0, admitted: HashMap::new(), pending: Vec::new() }
+    }
+
     /// Add pending items. Sorts them for best-fit (largest first).
     pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
         costs.sort_by(|a, b| b.total.cmp(&a.total));
@@ -180,18 +187,9 @@ pub fn safe_max_jobs(model: ModelKind) -> usize {
 mod tests {
     use super::*;
 
-    fn make_ctrl(budget: usize) -> AdmissionController {
-        AdmissionController {
-            budget_bytes: budget,
-            committed_bytes: 0,
-            admitted: HashMap::new(),
-            pending: Vec::new(),
-        }
-    }
-
     #[test]
     fn admits_items_within_budget() {
-        let mut ctrl = make_ctrl(100_000_000);
+        let mut ctrl = AdmissionController::with_budget(100_000_000);
         ctrl.enqueue(vec![
             AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000, 0),
             AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000, 0),
@@ -205,7 +203,7 @@ mod tests {
 
     #[test]
     fn force_admits_when_deadlocked() {
-        let mut ctrl = make_ctrl(10_000); // tiny budget
+        let mut ctrl = AdmissionController::with_budget(10_000); // tiny budget
         ctrl.enqueue(vec![
             AdmissionController::estimate_cost(1, (1000, 1000), 100, 0), // ~8 MB
         ]);
@@ -215,7 +213,7 @@ mod tests {
 
     #[test]
     fn release_frees_budget() {
-        let mut ctrl = make_ctrl(100_000_000);
+        let mut ctrl = AdmissionController::with_budget(100_000_000);
         ctrl.enqueue(vec![
             AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000, 0),
             AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000, 0),
@@ -230,7 +228,7 @@ mod tests {
 
     #[test]
     fn is_complete_after_all_released() {
-        let mut ctrl = make_ctrl(100_000_000);
+        let mut ctrl = AdmissionController::with_budget(100_000_000);
         ctrl.enqueue(vec![
             AdmissionController::estimate_cost(1, (100, 100), 100, 0),
         ]);
@@ -246,7 +244,7 @@ mod tests {
         //   - big:  ~38 MB (oversized — won't fit)
         //   - mid:  ~23 MB (fits — and is the best-fit largest)
         //   - smol: ~8 MB  (also fits but smaller)
-        let mut ctrl = make_ctrl(35_000_000);
+        let mut ctrl = AdmissionController::with_budget(35_000_000);
         let big = AdmissionController::estimate_cost(1, (2200, 2200), 0, 0);
         let mid = AdmissionController::estimate_cost(2, (1700, 1700), 0, 0);
         let smol = AdmissionController::estimate_cost(3, (1000, 1000), 0, 0);
@@ -258,14 +256,14 @@ mod tests {
     #[test]
     fn release_of_unadmitted_is_noop() {
         // Defensive: releasing an id that was never admitted must not underflow.
-        let mut ctrl = make_ctrl(100_000_000);
+        let mut ctrl = AdmissionController::with_budget(100_000_000);
         ctrl.release(42);
         assert_eq!(ctrl.committed_bytes, 0);
     }
 
     #[test]
     fn double_release_does_not_underflow() {
-        let mut ctrl = make_ctrl(100_000_000);
+        let mut ctrl = AdmissionController::with_budget(100_000_000);
         ctrl.enqueue(vec![AdmissionController::estimate_cost(1, (100, 100), 100, 0)]);
         let id = ctrl.try_admit_next().unwrap();
         ctrl.release(id);
@@ -277,7 +275,7 @@ mod tests {
     fn drains_all_items_even_when_every_one_exceeds_budget() {
         // Every item is bigger than the budget. Force-admit must kick in each
         // time the window is empty, so the queue still drains completely.
-        let mut ctrl = make_ctrl(5_000_000);
+        let mut ctrl = AdmissionController::with_budget(5_000_000);
         let items: Vec<ImageMemCost> = (1..=10)
             .map(|i| AdmissionController::estimate_cost(i, (2000, 2000), 100, 0))
             .collect();
