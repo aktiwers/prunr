@@ -2207,9 +2207,18 @@ impl PrunrApp {
         for (slot, result) in slots.into_iter().zip(super::drag_export::write_all(jobs)) {
             written[slot] = Some(result);
         }
+        // A write ahead that failed or went stale meanwhile is written now,
+        // with the rest of the misses.
+        let mut missed: Vec<(usize, DragFiles)> = Vec::new();
         for (slot, id, key) in ahead {
-            written[slot] = self.drag_export.take_written(id, &key).map(Ok)
-                .or_else(|| self.batch.find_by_id(id).map(|item| DragFiles::of(item, spec).write()));
+            match self.drag_export.take_written(id, &key) {
+                Some(paths) => written[slot] = Some(Ok(paths)),
+                None => missed.extend(self.batch.find_by_id(id).map(|item| (slot, DragFiles::of(item, spec)))),
+            }
+        }
+        let (slots, jobs): (Vec<usize>, Vec<DragFiles>) = missed.into_iter().unzip();
+        for (slot, result) in slots.into_iter().zip(super::drag_export::write_all(jobs)) {
+            written[slot] = Some(result);
         }
         let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
         for result in written.into_iter().flatten() {

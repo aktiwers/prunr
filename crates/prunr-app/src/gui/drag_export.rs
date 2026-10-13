@@ -393,25 +393,17 @@ impl DragFiles {
     }
 }
 
-/// Write each item's files, `writers()` at a time; the results come back
-/// in the order given.
+/// Write each item's files, `writers()` at a time (each write holds a
+/// baked copy of its image); the results come back in the order given.
 pub(crate) fn write_all(jobs: Vec<DragFiles>) -> Vec<std::io::Result<Vec<PathBuf>>> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let next = AtomicUsize::new(0);
-    let results: Vec<std::sync::Mutex<Option<std::io::Result<Vec<PathBuf>>>>> = jobs.iter().map(|_| Default::default()).collect();
-    std::thread::scope(|s| {
-        for _ in 0..super::drag_export_state::writers().min(jobs.len()) {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                let Some(job) = jobs.get(i) else { break };
-                *results[i].lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job.write());
-            });
+    use rayon::prelude::*;
+    match rayon::ThreadPoolBuilder::new().num_threads(super::drag_export_state::writers()).build() {
+        Ok(pool) => pool.install(|| jobs.par_iter().map(DragFiles::write).collect()),
+        Err(err) => {
+            tracing::warn!(%err, "drag writer pool failed to start; writing one at a time");
+            jobs.iter().map(DragFiles::write).collect()
         }
-    });
-    results.into_iter()
-        .map(|r| r.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .unwrap_or_else(|| Err(std::io::Error::other("drag file writer stopped"))))
-        .collect()
+    }
 }
 
 /// What a drag's files were made from, to tell whether files written
@@ -805,9 +797,11 @@ mod tests {
         let key_of = |id: u64| items.iter().find(|i| i.id == id).map(|i| DragKey::of(i, spec));
         let files_of = |id: u64| items.iter().find(|i| i.id == id).map(|i| DragFiles::of(i, spec));
         let mut state = DragExportState::new();
+        let now = std::time::Instant::now();
+        state.note_hover(Some((107, true)), now);
         let more = state.queue_writes(107, &targets, key_of, files_of);
         assert!(more, "the rest wait their turn");
-        assert_eq!(state.started(), writers(), "only a few at once");
+        assert_eq!(state.prewrite_count(), writers(), "only a few at once");
         assert!(state.has_current(107, &DragKey::of(&items[7], spec)), "the hovered image first");
         let mut rounds = 0;
         while state.queue_writes(107, &targets, key_of, files_of) {
@@ -815,7 +809,10 @@ mod tests {
             rounds += 1;
             assert!(rounds < 1_000_000, "the queue drains");
         }
-        assert_eq!(state.started(), targets.len());
+        assert_eq!(state.prewrite_count(), targets.len());
+        assert_eq!(state.due(now), None, "all written: nothing is checked again every frame");
+        state.note_hover(Some((108, true)), now);
+        assert_eq!(state.due(now), Some(108), "another thumbnail is checked");
         for (id, item) in targets.iter().zip(&items) {
             for path in state.take_written(*id, &DragKey::of(item, spec)).expect("written") {
                 let _ = std::fs::remove_file(path);
