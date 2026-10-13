@@ -173,10 +173,6 @@ impl Progress {
         self.sink.as_ref().and(self.preview_edge)
     }
 
-    pub fn cancel_flag(&self) -> Option<&Arc<AtomicBool>> {
-        self.cancel.as_ref()
-    }
-
     pub fn is_cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(|f| f.load(Ordering::Acquire))
     }

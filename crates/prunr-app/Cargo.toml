@@ -39,7 +39,6 @@ num_cpus = { workspace = true }
 rayon = { workspace = true }
 egui-notify = { workspace = true }
 egui_material_icons = { workspace = true }
-egui_animation = { workspace = true }
 accesskit = { workspace = true }
 accesskit_consumer = { workspace = true }
 dirs = { workspace = true }

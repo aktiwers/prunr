@@ -408,12 +408,6 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to send CancelItem: {e}"))
     }
 
-    /// Send shutdown signal to the child.
-    pub fn send_shutdown(&mut self) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::Shutdown)
-            .map_err(|e| format!("Failed to send Shutdown: {e}"))
-    }
-
     /// Send Shutdown and wait up to `timeout` for the child to exit.
     /// Force-kills if unresponsive. Returns true iff graceful exit succeeded.
     ///
@@ -619,12 +613,10 @@ mod tests {
         apply_event_state(state.0, state.1, 1_000_000_000, 800_000_000, evt);
     }
 
-    /// Phase 21-01 / B1 fix: every terminal Done/Error variant must
-    /// decrement `in_flight`. Caught the regression where adding
-    /// `InpaintDone`/`InpaintError` IPC variants in the SD subprocess
-    /// refactor left them falling through `_ => {}` — the SD bundle
-    /// stayed resident forever after the first stroke because the idle
-    /// eviction gate keyed off `in_flight_items().is_empty()`.
+    /// Every terminal Done/Error variant must decrement `in_flight`. A
+    /// variant that falls through `_ => {}` leaves the SD bundle resident
+    /// forever, because the idle eviction gate keys off
+    /// `in_flight_items().is_empty()`.
     #[test]
     fn apply_event_state_decrements_on_every_terminal_variant() {
         let (mut in_flight, mut rss_paused) = fresh_state();
@@ -666,8 +658,8 @@ mod tests {
 
         assert!(!in_flight.contains(&1), "ImageDone must decrement in_flight");
         assert!(!in_flight.contains(&2), "ImageError must decrement in_flight");
-        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight (B1 regression)");
-        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight (B1 regression)");
+        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight");
+        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight");
         // Items not referenced by any event are still in flight
         for id in 5..10 {
             assert!(in_flight.contains(&id));
