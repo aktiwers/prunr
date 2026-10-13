@@ -753,10 +753,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // compiles it: the process was OOM-killed with 19 GB free on a
         // 32 GB i7-6700. ORT's own CPU EP runs it correctly.
         incompatible_eps: &["OpenVINO"],
-        // Measured on ORT's CPU EP: 16.5 GB anonymous peak (the fp16
+        // Measured on ORT's CPU EP: 15.6 GiB anonymous peak (the fp16
         // weights widened for the CPU kernels, the VAE, activations);
-        // the 5 GB of mapped weight files on top are reclaimable.
-        working_set_mb: 17000,
+        // the 4.8 GiB of mapped weight files on top are reclaimable.
+        working_set_mb: 16000,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
