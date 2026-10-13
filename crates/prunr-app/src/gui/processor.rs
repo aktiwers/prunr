@@ -1542,6 +1542,22 @@ impl Processor {
 
     /// Deliver an upscale or colorize for `item_id` that ended with `err`.
     #[cfg(test)]
+    pub(crate) fn land_run_for_test(&self, engine: super::item::Engine, item_id: u64, shown: Arc<image::RgbaImage>, recipe: ProcessingRecipe) {
+        match engine {
+            super::item::Engine::Upscale => {
+                let run = super::item::UpscaleCache::new(Arc::clone(&shown), Arc::clone(&shown), None);
+                let _ = self.upscale.tx.send(UpscaleResult { item_id, result: Ok(UpscaleOutput { run, shown }), recipe });
+            }
+            super::item::Engine::Colorize => {
+                let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
+                let run = super::item::ColorizeCache::new(Arc::new(vec![0.0; 2 * n]), Arc::clone(&shown));
+                let _ = self.colorize.tx.send(ColorizeResult { item_id, result: Ok(ColorizeOutput { run, shown }), recipe });
+            }
+            other => unreachable!("{other:?} is not an upscale or colorize"),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
         match engine {
             super::item::Engine::Upscale => { let _ = self.upscale.tx.send(UpscaleResult { item_id, result: Err(err), recipe }); }
