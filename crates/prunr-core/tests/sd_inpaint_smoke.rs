@@ -138,6 +138,13 @@ fn sd_bench() {
             keep_loaded: flag("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
             tall_crop: flag("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
             ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()),
+            // `PRUNR_SD_MEM_PATTERN=0`, `PRUNR_SD_DEV_INIT=1`, `PRUNR_SD_THREADS=n`
+            // try the session memory knobs.
+            mem: inpaint_sd::SdMemPlan {
+                no_memory_pattern: flag("PRUNR_SD_MEM_PATTERN").is_some_and(|on| !on),
+                device_initializers: flag("PRUNR_SD_DEV_INIT").unwrap_or(false),
+                intra_threads: std::env::var("PRUNR_SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            },
             ..planned
         },
         ..Default::default()
