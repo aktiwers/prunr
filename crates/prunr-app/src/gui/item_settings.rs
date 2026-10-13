@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn the_recipe_names_every_upscale_model() {
         use prunr_core::ModelKind;
-        for kind in [ModelKind::RealEsrganX4Plus, ModelKind::Nomos8kSchatL, ModelKind::FourXNmkdSiaxCx, ModelKind::FourXNmkdSuperscale] {
+        for kind in [ModelKind::RealEsrganX4Plus, ModelKind::Nomos8kSchatL, ModelKind::FourXNmkdSiaxCx, ModelKind::FourXNmkdSuperscale, ModelKind::FourXNomos2RealPlksr] {
             assert_eq!(ItemSettings::default().current_recipe(kind).upscale.model, Some(kind.into()), "{kind:?}");
         }
         assert_eq!(ItemSettings::default().current_recipe(ModelKind::Silueta).upscale.model, None);

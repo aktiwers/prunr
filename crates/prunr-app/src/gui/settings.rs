@@ -584,11 +584,13 @@ pub enum SettingsModel {
     /// 4x NMKD Superscale (RRDB-23, fp32). Community-trained restoration
     /// upscaler — handles noise and JPEG artifacts on real photos.
     FourXNmkdSuperscaleUpscale,
+    /// 4xNomos2 RealPLKSR. Fast, natural texture on skin and hair.
+    Nomos2Upscale,
 }
 
 impl SettingsModel {
     /// All variants in display order — source of truth for the model dropdown.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Silueta,
         Self::U2net,
         Self::BiRefNetLite,
@@ -602,6 +604,7 @@ impl SettingsModel {
         Self::Nomos8kUpscale,
         Self::FourXNmkdSiaxCxUpscale,
         Self::FourXNmkdSuperscaleUpscale,
+        Self::Nomos2Upscale,
     ];
 
     /// This model's position in `ALL`.
@@ -645,6 +648,7 @@ impl SettingsModel {
                 | Self::Nomos8kUpscale
                 | Self::FourXNmkdSiaxCxUpscale
                 | Self::FourXNmkdSuperscaleUpscale
+                | Self::Nomos2Upscale
         )
     }
 
@@ -688,7 +692,8 @@ impl SettingsModel {
             | Self::RealEsrganUpscale
             | Self::Nomos8kUpscale
             | Self::FourXNmkdSiaxCxUpscale
-            | Self::FourXNmkdSuperscaleUpscale => None,
+            | Self::FourXNmkdSuperscaleUpscale
+            | Self::Nomos2Upscale => None,
         }
     }
 
@@ -716,6 +721,7 @@ impl SettingsModel {
             Self::Nomos8kUpscale => Some(prunr_models::ModelId::Nomos8kSchatL),
             Self::FourXNmkdSiaxCxUpscale => Some(prunr_models::ModelId::FourXNmkdSiaxCx),
             Self::FourXNmkdSuperscaleUpscale => Some(prunr_models::ModelId::FourXNmkdSuperscale),
+            Self::Nomos2Upscale => Some(prunr_models::ModelId::FourXNomos2RealPlksr),
             Self::None => None,
         }
     }
@@ -731,6 +737,7 @@ impl From<ModelKind> for SettingsModel {
             ModelKind::Nomos8kSchatL => SettingsModel::Nomos8kUpscale,
             ModelKind::FourXNmkdSiaxCx => SettingsModel::FourXNmkdSiaxCxUpscale,
             ModelKind::FourXNmkdSuperscale => SettingsModel::FourXNmkdSuperscaleUpscale,
+            ModelKind::FourXNomos2RealPlksr => SettingsModel::Nomos2Upscale,
             ModelKind::RealEsrganX2Plus => {
                 // RealEsrganX2Plus is never the user-selected active model — it
                 // runs for a 2x Real-ESRGAN upscale. This conversion is
@@ -1303,7 +1310,8 @@ mod tests {
                 SettingsModel::RealEsrganUpscale
                     | SettingsModel::Nomos8kUpscale
                     | SettingsModel::FourXNmkdSiaxCxUpscale
-                    | SettingsModel::FourXNmkdSuperscaleUpscale,
+                    | SettingsModel::FourXNmkdSuperscaleUpscale
+                    | SettingsModel::Nomos2Upscale,
             );
             assert_eq!(m.is_upscale(), expected, "{m:?}");
         }
