@@ -1074,11 +1074,12 @@ impl eframe::App for PrunrApp {
         self.reconcile_selected(ctx);
         let now = std::time::Instant::now();
         self.note_quiet_work(now);
-        if let Some(since) = self.busy_since {
-            // A frame at the one-second mark, so the pill appears without
-            // waiting for input.
-            let wait = BUSY_PILL_AFTER.saturating_sub(now.duration_since(since));
-            ctx.request_repaint_after(wait.max(std::time::Duration::from_millis(16)));
+        // A frame at the one-second mark, so the pill appears without
+        // waiting for input; once it shows, the poll below and the pill's
+        // own repaint are enough.
+        let until_pill = self.busy_since.map(|since| BUSY_PILL_AFTER.saturating_sub(now.duration_since(since)));
+        if let Some(wait) = until_pill.filter(|wait| !wait.is_zero()) {
+            ctx.request_repaint_after(wait);
         }
         // Keep the event loop awake while any async texture / decode work is
         // pending. `ctx.request_repaint()` from the tex_prep / decode threads
@@ -1087,7 +1088,7 @@ impl eframe::App for PrunrApp {
         // canvas stuck on the old image until a mouse event fires. Polling
         // from the UI thread is reliable; it costs one frame per 50ms while
         // async work is in flight, then self-extinguishes.
-        if self.batch.items.iter().any(|it| it.has_pending_work()) {
+        if self.batch.has_pending_work() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }

@@ -316,8 +316,8 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     }
     match hover.filter(|p| img_rect.contains(*p)) {
         Some(p) => {
-            let fx = ((p.x - img_rect.left()) / img_rect.width()).clamp(0.0, 1.0);
-            let fy = ((p.y - img_rect.top()) / img_rect.height()).clamp(0.0, 1.0);
+            let f = super::brush_overlay::screen_to_model(p, img_rect, 1, 1);
+            let (fx, fy) = (f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0));
             app.set_depth_focus(fx, fy);
         }
         None if hover.is_some_and(|p| canvas_rect.contains(p)) => app.picking_depth_focus = false,
@@ -381,13 +381,15 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         (clicked, drag_started, dragging, released, hover)
     });
 
-    // No embedding yet? Render cursor + trail above but skip dispatch —
-    // the encoder must finish before a SAM prompt can run. Selecting by
-    // depth reads the depth map instead.
-    let by_depth = app.settings.brush.magic_depth;
-    if !by_depth && embedding.is_none() {
-        return;
-    }
+    // What a click or stroke selects with: the depth map, or SAM once the
+    // encoder has finished. Until then the cursor and trail above still
+    // draw, so the tool reads as active, and nothing is dispatched.
+    enum Pick { Depth, Sam(std::sync::Arc<prunr_core::sam::SamEmbedding>) }
+    let pick = if app.settings.brush.magic_depth {
+        Pick::Depth
+    } else {
+        match embedding { Some(embedding) => Pick::Sam(embedding), None => return }
+    };
 
     let screen_radius = look.radius;
 
@@ -414,34 +416,29 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
-        // With Depth on a stroke selects like a click where it began.
-        if by_depth {
-            depth_click(app, item_id, stroke_pts[0], (source_w, source_h), mode);
-            return;
-        }
-        let Some(embedding) = embedding else { return };
-        match prunr_core::sam::prompt::build_stroke_prompt(
-            &stroke_pts,
-            source_w,
-            source_h,
-        ) {
-            Ok(prompt) => {
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
-            }
-            Err(e) => {
-                tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
-            }
+        match &pick {
+            // With Depth on a stroke selects like a click where it began.
+            Pick::Depth => depth_click(app, item_id, stroke_pts[0], (source_w, source_h), mode),
+            Pick::Sam(embedding) => match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
+                Ok(prompt) => {
+                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
+                }
+                Err(e) => {
+                    tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
+                }
+            },
         }
     } else if clicked {
         if let Some((px, py)) = hover_pos.and_then(screen_to_src) {
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
-            if by_depth {
-                depth_click(app, item_id, (px, py), (source_w, source_h), mode);
-            } else if let Some(embedding) = embedding {
-                let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
+            match &pick {
+                Pick::Depth => depth_click(app, item_id, (px, py), (source_w, source_h), mode),
+                Pick::Sam(embedding) => {
+                    let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
+                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
+                }
             }
         }
         app.magic_brush_state.clear_stroke();

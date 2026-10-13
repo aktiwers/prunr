@@ -48,12 +48,12 @@ const WHICH: [chip::Choice<bool>; 2] = [
 pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
     let mut change = FacesChange::default();
     let any_installed = FaceModel::ALL.iter().any(|&m| installed.has_face_model(m));
-    let summary = if !any_installed {
-        get_model::BADGE.to_string()
+    let summary: std::borrow::Cow<'static, str> = if !any_installed {
+        get_model::BADGE.into()
     } else if s.on {
-        fmt::percent(f32::from(s.strength_pct) / 100.0)
+        fmt::percent(f32::from(s.strength_pct) / 100.0).into()
     } else {
-        "Off".to_string()
+        "Off".into()
     };
     let group = chip::GroupChip {
         id_salt: "faces",
@@ -111,12 +111,7 @@ fn needs_text() -> &'static str {
 }
 
 fn strength_row(ui: &mut Ui, s: &mut FaceSettings) -> bool {
-    let mut v = f32::from(s.strength_pct) / 100.0;
-    let changed = chip::slider_row_f32(ui, "Strength", &mut v, 0.0..=1.0, false, fmt::percent).changed;
-    if changed {
-        s.strength_pct = (v * 100.0).round() as u8;
-    }
-    changed
+    chip::slider_row_pct(ui, "Strength", &mut s.strength_pct, fmt::percent).changed
 }
 
 fn model_name(m: FaceModel) -> &'static str {
