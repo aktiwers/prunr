@@ -355,15 +355,24 @@ impl PrunrApp {
                 self.magic_brush_state.deactivate();
             }
             Some(Tool::Paint) => {
+                self.picking_depth_focus = false;
                 self.magic_brush_state.deactivate();
                 self.brush_state.enable();
             }
             Some(Tool::Magic) => {
+                self.picking_depth_focus = false;
                 self.brush_state.disable();
                 self.magic_brush_state.activate();
             }
         }
         true
+    }
+
+    /// The Depth chip's "Set focus": the next click on the image focuses
+    /// there, so a brush that would take that click goes off.
+    pub(crate) fn begin_focus_pick(&mut self) {
+        self.set_tool(None);
+        self.picking_depth_focus = true;
     }
 
     /// Keep the selected image's embedding current, then drain SAM encoder
@@ -566,6 +575,19 @@ mod tool_mutual_exclusion_tests {
 
     fn on(app: &PrunrApp) -> (bool, bool) {
         (app.brush_state.is_enabled(), app.magic_brush_state.is_active())
+    }
+
+    /// Set focus takes the next click like a tool does: starting it turns
+    /// a brush off, and a brush coming on ends the pick.
+    #[test]
+    fn set_focus_and_the_brushes_take_turns() {
+        let mut app = app();
+        app.set_tool(Some(Tool::Paint));
+        app.begin_focus_pick();
+        assert_eq!(on(&app), (false, false));
+        assert!(app.picking_depth_focus);
+        app.set_tool(Some(Tool::Magic));
+        assert!(!app.picking_depth_focus && on(&app) == (false, true));
     }
 
     /// Whichever way a tool comes on, the other goes off, and the on
