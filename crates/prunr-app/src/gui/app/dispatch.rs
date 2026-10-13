@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Engine, ImageSource};
 use crate::gui::timeline::StepKind;
-use crate::gui::worker::{CachedTensorWork, WorkItem, WorkerMessage};
+use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -20,14 +20,20 @@ impl PrunrApp {
     /// Start the next queued upscale or colorize when the slot is free,
     /// with the shown image's settings, as a batch of cut-outs runs.
     pub(super) fn dispatch_next_queued_run(&mut self) {
-        let Some(item_id) = self.processor.next_queued_run() else { return };
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &HashSet::from([item_id]));
-        }
-        if self.settings.model.is_colorize() {
-            self.dispatch_colorize_for(item_id);
-        } else {
-            self.dispatch_upscale_for(item_id);
+        // An image gone from the batch, or one without a run, passes its
+        // turn on: nothing else would call this again for the rest.
+        while let Some(item_id) = self.processor.next_queued_run() {
+            if let Some(shown) = self.batch.selected_idx_clamped() {
+                self.batch.share_settings(shown, &HashSet::from([item_id]));
+            }
+            let started = if self.settings.model.is_colorize() {
+                self.dispatch_colorize_for(item_id)
+            } else {
+                self.dispatch_upscale_for(item_id)
+            };
+            if started {
+                return;
+            }
         }
     }
 
@@ -35,11 +41,11 @@ impl PrunrApp {
     /// from the timeline (`BatchItem::run_input_or_source`), then hands off
     /// to `Processor::dispatch_upscale`. Must only be called after
     /// `can_process_intent()` confirms the model is installed and idle.
-    fn dispatch_upscale_for(&mut self, item_id: u64) {
-        let Some(item) = self.batch.find_by_id(item_id) else { return };
+    fn dispatch_upscale_for(&mut self, item_id: u64) -> bool {
+        let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let model_id = match self.settings.model.to_model_id() {
             Some(id) => id,
-            None => return,
+            None => return false,
         };
         let input = item.run_input_or_source(Engine::Upscale);
         let output_scale = item.settings.output_scale;
@@ -50,7 +56,7 @@ impl PrunrApp {
             Ok(k) => k,
             Err(id) => {
                 tracing::error!(?id, "upscale dispatch skipped: ModelId has no ModelKind mapping");
-                return;
+                return false;
             }
         };
         let recipe = item.settings.current_recipe(model_kind);
@@ -60,12 +66,13 @@ impl PrunrApp {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         }
         self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe);
+        true
     }
 
     /// Colorize branch of `handle_process_intent`: the selected image, from
     /// where its timeline says a run starts, to `Processor::dispatch_colorize`.
-    fn dispatch_colorize_for(&mut self, item_id: u64) {
-        let Some(item) = self.batch.find_by_id(item_id) else { return };
+    fn dispatch_colorize_for(&mut self, item_id: u64) -> bool {
+        let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let input = item.run_input_or_source(Engine::Colorize);
         let recipe = item.settings.current_recipe(crate::gui::settings::COLORIZER);
         tracing::info!(item_id, "colorize dispatched");
@@ -73,6 +80,7 @@ impl PrunrApp {
             item.start_job(Some(StepKind::Colorize), Engine::Colorize);
         }
         self.processor.dispatch_colorize(item_id, input, self.settings.cpu_only(), recipe);
+        true
     }
 
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) {
@@ -267,10 +275,9 @@ impl PrunrApp {
     ) {
         let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs);
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
-        let (admitted, additional_items_rx) = self.processor.open_admission(ctrl);
-        let initial_items: Vec<WorkItem> = admitted.into_iter()
-            .filter_map(|id| self.batch.find_by_id_mut(id).and_then(BatchItem::full_run_work))
-            .collect();
+        let batch = &mut self.batch;
+        let (initial_items, additional_items_rx) =
+            self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).and_then(BatchItem::full_run_work));
         self.batch.mark_waiting(tier1_ids);
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
@@ -421,6 +428,20 @@ mod process_targets_tests {
         assert!(app.can_process_intent());
         app.hardware_install_cache = Default::default();
         assert!(!app.can_process_intent());
+    }
+
+    /// An image gone from the batch by the time its turn comes passes it
+    /// on, so the rest of the queue still runs.
+    #[test]
+    fn a_queued_image_that_is_gone_passes_its_turn_on() {
+        let mut app = two_images(SettingsModel::RealEsrganUpscale);
+        app.processor.queue_runs(vec![99, 98, 97]);
+        app.processor.set_upscale_in_flight_for_test(true);
+        app.dispatch_next_queued_run();
+        assert_eq!(app.processor.next_queued_run(), None, "the slot is taken: nothing moved");
+        app.processor.set_upscale_in_flight_for_test(false);
+        app.dispatch_next_queued_run();
+        assert_eq!(app.processor.next_queued_run(), None, "every image that could not start passed its turn on; none is left waiting");
     }
 
     #[test]

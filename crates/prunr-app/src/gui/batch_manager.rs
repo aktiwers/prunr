@@ -781,9 +781,10 @@ impl BatchManager {
         self.in_set(ids).filter_map(BatchItem::full_run_work).collect()
     }
 
-    /// The images in `ids` not under way wait their turn.
+    /// The images in `ids` not under way wait their turn; one that has
+    /// just failed keeps its error.
     pub(crate) fn mark_waiting(&mut self, ids: &HashSet<u64>) {
-        for item in self.in_set(ids).filter(|i| i.status != BatchStatus::Processing) {
+        for item in self.in_set(ids).filter(|i| matches!(i.status, BatchStatus::Done | BatchStatus::Pending)) {
             item.status = BatchStatus::Pending;
         }
     }
