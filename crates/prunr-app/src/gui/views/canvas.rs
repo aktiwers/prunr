@@ -180,14 +180,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint();
     }
 
-    let tool = if app.magic_brush_state.is_active() {
-        Some(super::tool_strip::Tool::Magic)
-    } else if app.brush_state.is_enabled() {
-        Some(super::tool_strip::Tool::Paint)
-    } else {
-        None
-    };
-    if let Some(tool) = tool {
+    if let Some(tool) = app.active_tool() {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),

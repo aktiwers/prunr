@@ -16,6 +16,7 @@ use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{adjustments_toolbar, canvas, cli_help, model_store, pipeline_flow, settings, sidebar, statusbar, toolbar};
 use super::views::selection_action_bar::SelectionAction;
+use super::brush_state::Tool;
 
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt. 14 picked to balance "don't nag" with "remind on a
@@ -1437,10 +1438,14 @@ impl PrunrApp {
     fn fit_brush_models_to_model(&mut self) {
         if self.magic_brush_wanted() {
             self.processor.warm_sam_sessions();
+            // An eraser's only input is a painted region: the brush comes
+            // on by itself, unless a tool is in use already.
+            if self.settings.model.is_inpaint() && self.active_tool().is_none() {
+                self.set_tool(Some(Tool::Paint));
+            }
             return;
         }
-        self.brush_state.disable();
-        self.deactivate_magic_brush();
+        self.set_tool(None);
         self.processor.release_sam_sessions();
         self.batch.clear_magic_embeddings();
     }
@@ -1493,6 +1498,41 @@ impl PrunrApp {
     /// background images drop theirs on the next eviction pass.
     pub(crate) fn deactivate_magic_brush(&mut self) {
         self.magic_brush_state.deactivate();
+    }
+
+    /// The tool the canvas's left button belongs to.
+    pub(crate) fn active_tool(&self) -> Option<Tool> {
+        if self.magic_brush_state.is_active() {
+            Some(Tool::Magic)
+        } else if self.brush_state.is_enabled() {
+            Some(Tool::Paint)
+        } else {
+            None
+        }
+    }
+
+    /// The one way a tool comes on or goes off, from any surface: the
+    /// Paint and Magic brushes never share the canvas, so turning one on
+    /// turns the other off. Returns whether anything changed.
+    pub(crate) fn set_tool(&mut self, tool: Option<Tool>) -> bool {
+        if self.active_tool() == tool {
+            return false;
+        }
+        match tool {
+            None => {
+                self.brush_state.disable();
+                self.magic_brush_state.deactivate();
+            }
+            Some(Tool::Paint) => {
+                self.magic_brush_state.deactivate();
+                self.brush_state.enable();
+            }
+            Some(Tool::Magic) => {
+                self.brush_state.disable();
+                self.magic_brush_state.activate();
+            }
+        }
+        true
     }
 
     /// Keep the selected image's embedding current, then drain SAM encoder
@@ -4386,16 +4426,12 @@ impl PrunrApp {
             self.show_original = !self.show_original;
         }
         if toolbar_change.toggle_paint {
-            self.brush_state.toggle();
-            if self.brush_state.is_enabled() {
-                self.deactivate_magic_brush();
-            }
+            let next = (self.active_tool() != Some(Tool::Paint)).then_some(Tool::Paint);
+            self.set_tool(next);
         }
         if toolbar_change.toggle_magic {
-            if self.magic_brush_state.is_active() {
-                self.deactivate_magic_brush();
-            } else if self.magic_brush_state.activate() {
-                self.brush_state.disable();
+            let next = (self.active_tool() != Some(Tool::Magic)).then_some(Tool::Magic);
+            if self.set_tool(next) && next.is_some() {
                 self.ensure_magic_embedding_for_selected(ctx);
             }
         }
@@ -5752,44 +5788,66 @@ mod selection_action_tests {
 
 #[cfg(test)]
 mod tool_mutual_exclusion_tests {
-    use crate::gui::brush_state::BrushState;
-    use crate::gui::magic_brush_state::MagicBrushState;
+    use super::PrunrApp;
+    use crate::gui::brush_state::Tool;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::views::adjustments_toolbar::ToolbarChange;
 
-    #[test]
-    fn magic_activation_deactivates_paint_brush() {
-        let mut brush = BrushState::default();
-        let mut magic = MagicBrushState::default();
-
-        brush.toggle();
-        assert!(brush.is_enabled(), "paint brush must start enabled");
-
-        // Activating magic must deactivate paint brush — mutual exclusion contract.
-        let activated = magic.activate();
-        assert!(activated, "first activate() must return true");
-        if magic.is_active() {
-            brush.disable();
-        }
-
-        assert!(magic.is_active(), "magic brush must be active");
-        assert!(!brush.is_enabled(), "paint brush must be disabled when magic activates");
+    fn app() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        push_test_item(&mut app, 1);
+        app.batch.select_item(0);
+        app
     }
 
+    fn on(app: &PrunrApp) -> (bool, bool) {
+        (app.brush_state.is_enabled(), app.magic_brush_state.is_active())
+    }
+
+    /// Whichever way a tool comes on, the other goes off, and the on
+    /// tool's own button turns it off.
     #[test]
-    fn paint_activation_deactivates_magic_brush() {
-        let mut brush = BrushState::default();
-        let mut magic = MagicBrushState::default();
+    fn one_tool_at_a_time_whichever_way_it_comes_on() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let settings = app.batch.items[0].settings;
+        app.set_tool(Some(Tool::Magic));
+        assert_eq!((on(&app), app.active_tool()), ((false, true), Some(Tool::Magic)));
 
-        magic.activate();
-        assert!(magic.is_active(), "magic brush must start active");
+        app.apply_toolbar_change(&ctx, ToolbarChange { toggle_paint: true, ..Default::default() }, settings);
+        assert_eq!((on(&app), app.active_tool()), ((true, false), Some(Tool::Paint)), "Paint over Magic");
+        app.apply_toolbar_change(&ctx, ToolbarChange { toggle_magic: true, ..Default::default() }, settings);
+        assert_eq!((on(&app), app.active_tool()), ((false, true), Some(Tool::Magic)), "Magic over Paint");
+        app.apply_toolbar_change(&ctx, ToolbarChange { toggle_magic: true, ..Default::default() }, settings);
+        assert_eq!((on(&app), app.active_tool()), ((false, false), None), "its own button turns it off");
+        app.apply_toolbar_change(&ctx, ToolbarChange { toggle_paint: true, ..Default::default() }, settings);
+        app.apply_toolbar_change(&ctx, ToolbarChange { toggle_paint: true, ..Default::default() }, settings);
+        assert_eq!(app.active_tool(), None);
+    }
 
-        // Enabling paint brush must deactivate magic — mutual exclusion contract.
-        brush.toggle();
-        if brush.is_enabled() {
-            magic.deactivate();
-        }
+    /// Switching to an eraser brings the brush on by itself, but never
+    /// over a tool in use: that left both brushes on at once.
+    #[test]
+    fn an_eraser_brings_the_brush_on_unless_a_tool_is_in_use() {
+        let mut app = app();
+        app.settings.model = SettingsModel::Inpaint;
+        app.fit_brush_models_to_model();
+        assert_eq!(on(&app), (true, false));
 
-        assert!(brush.is_enabled(), "paint brush must be enabled");
-        assert!(!magic.is_active(), "magic brush must be deactivated when paint activates");
+        app.set_tool(Some(Tool::Magic));
+        app.fit_brush_models_to_model();
+        assert_eq!(on(&app), (false, true), "Magic Brush stays the tool");
+    }
+
+    /// A model without brushes turns both off.
+    #[test]
+    fn a_model_without_brushes_turns_the_tools_off() {
+        let mut app = app();
+        app.set_tool(Some(Tool::Paint));
+        app.settings.model = SettingsModel::RealEsrganUpscale;
+        app.fit_brush_models_to_model();
+        assert_eq!((on(&app), app.active_tool()), ((false, false), None));
     }
 }
 
