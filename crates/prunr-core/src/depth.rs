@@ -58,10 +58,14 @@ impl DepthMap {
     fn fill_rows<T: Send>(&self, w: u32, h: u32, out: &mut [T], per_px: usize, f: impl Fn(usize, &[f32], &mut [T]) + Sync) {
         let (xs, ys) = (bilinear_taps(self.width, w), bilinear_taps(self.height, h));
         let stride = self.width as usize;
-        out.par_chunks_exact_mut(w as usize * per_px).zip(ys.par_iter()).enumerate().for_each(|(y, (row, ty))| {
-            let near: Vec<f32> = xs.iter().map(|tx| bilinear_sample(&self.near, stride, tx, ty)).collect();
-            f(y, &near, row);
-        });
+        out.par_chunks_exact_mut(w as usize * per_px).zip(ys.par_iter()).enumerate().for_each_init(
+            || Vec::with_capacity(w as usize),
+            |near, (y, (row, ty))| {
+                near.clear();
+                near.extend(xs.iter().map(|tx| bilinear_sample(&self.near, stride, tx, ty)));
+                f(y, near, row);
+            },
+        );
     }
 
     /// The map at `w × h` as a 16-bit grey image, white = near, for
@@ -202,8 +206,10 @@ const LEVELS: usize = 4;
 /// |----------------------------|-------------|
 /// | result                     | 96 MB       |
 /// | previous and current level | 2 × 96 MB   |
+/// | the blur's two scratch planes | 2 × 96 MB |
 /// | per-pixel level positions  | 96 MB       |
-/// Total ~384 MB beside `src`; levels are made one at a time, not kept.
+/// Total ~576 MB beside `src` while a level is built; levels are made one
+/// at a time, not kept.
 pub fn lens_blur(src: &RgbaImage, depth: &DepthMap, focus: Focus, amount: f32) -> RgbaImage {
     let (w, h) = src.dimensions();
     let sigma_max = amount.clamp(0.0, 1.0) * w.max(h) as f32 / 100.0;
