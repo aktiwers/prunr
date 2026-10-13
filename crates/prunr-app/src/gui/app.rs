@@ -441,9 +441,10 @@ impl PrunrApp {
             result_switch_id: 0,
             pending_batch_sync: false,
             pending_open_dialog: false,
+            // Above the brush's modifier hint, which sits in the same corner.
             toasts: super::toasts::Toasts::new(
                 egui_notify::Anchor::BottomLeft,
-                egui::vec2(theme::SPACE_SM, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM),
+                egui::vec2(theme::SPACE_MD, theme::STATUS_BAR_HEIGHT + theme::SPACE_SM + theme::SPACE_LG),
             ),
             drag_export: super::drag_export_state::DragExportState::new(),
             automation: None,

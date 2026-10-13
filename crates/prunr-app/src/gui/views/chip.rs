@@ -288,15 +288,10 @@ pub(super) fn named_with(resp: Response, name: impl FnOnce() -> String) -> Respo
     resp
 }
 
-/// Render the standard reset-to-default button at the bottom of a popover.
-pub(super) fn reset_button(ui: &mut Ui, tooltip: &str) -> bool {
-    ui.small_button(
-        RichText::new(format!("{}  Reset", ICON_RESTART_ALT.codepoint))
-            .color(theme::TEXT_SECONDARY)
-            .size(theme::FONT_SIZE_MONO),
-    )
-    .on_hover_text(tooltip)
-    .clicked()
+/// The one Reset control, in popovers and panels alike: a ghost pill
+/// with the restart icon, greyed while there is nothing to reset.
+pub(super) fn reset_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    ui.add_enabled_ui(enabled, |ui| button(ui, ButtonKind::Ghost, &format!("{}  {label}", ICON_RESTART_ALT.codepoint))).inner
 }
 
 /// Wire a popup to a chip button. Handles toggle-on-click.
@@ -631,20 +626,27 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
 /// Horizontal tab strip: the active tab is filled, the rest are flat.
 /// Used by Settings, the CLI reference and the Model Store filters.
 pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
-    ui.horizontal(|ui| {
-        for (i, label) in labels.iter().enumerate() {
-            let active = *selected == i;
-            let text = RichText::new(*label)
-                .size(theme::FONT_SIZE_BODY)
-                .color(if active { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY });
-            let btn = egui::Button::new(text)
-                .corner_radius(theme::BUTTON_ROUNDING)
-                .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-            let fill = if active { theme::BG_SECONDARY } else { Color32::TRANSPARENT };
-            if with_fill(ui, fill, |ui| ui.add(btn)).clicked() {
-                *selected = i;
+    // The same segmented look as `choice_buttons` (the Model Store
+    // filters): the active tab on its old BG_SECONDARY fill was 1.16:1.
+    egui::Frame::NONE.fill(theme::FIELD_FILL).corner_radius(theme::BUTTON_ROUNDING).inner_margin(3).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 2.0);
+            for (i, label) in labels.iter().enumerate() {
+                let active = *selected == i;
+                let text = RichText::new(*label)
+                    .size(theme::FONT_SIZE_BODY)
+                    .color(if active { Color32::WHITE } else { theme::TEXT_SECONDARY });
+                let btn = egui::Button::new(text)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(theme::BUTTON_ROUNDING)
+                    .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT - 6.0));
+                let fill = if active { theme::ACCENT_BRIGHT } else { Color32::TRANSPARENT };
+                if with_fill(ui, fill, |ui| ui.add(btn)).clicked() {
+                    *selected = i;
+                }
             }
-        }
+        });
     });
 }
 
@@ -670,6 +672,8 @@ pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
         ButtonKind::Ghost => (Color32::TRANSPARENT, theme::TEXT_SECONDARY),
     };
     with_fill(ui, fill, |ui| {
+        // egui's 4 px left a pill's label against its rounded ends.
+        ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
         ui.add(
             egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
                 .stroke(egui::Stroke::NONE)
@@ -807,8 +811,7 @@ fn panel_header(ui: &mut Ui, title: &str, header: PanelHeader<'_>, at_default: b
         .horizontal(|ui| {
             ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let text = RichText::new(header.reset).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO);
-                let clicked = ui.add_enabled(!at_default, egui::Button::new(text).frame(false)).clicked();
+                let clicked = reset_button(ui, header.reset, !at_default).clicked();
                 if !header.note.is_empty() {
                     ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(12.0));
                 }
@@ -923,7 +926,7 @@ pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool
             ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 reset.is_some_and(|(tip, at_default)| {
-                    ui.add_enabled_ui(!at_default, |ui| reset_button(ui, tip)).inner
+                    reset_button(ui, "Reset", !at_default).on_hover_text(tip).clicked()
                 })
             })
             .inner
