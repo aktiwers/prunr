@@ -1414,13 +1414,17 @@ impl Processor {
 
     /// `completed` frees its share of the budget, and the images that
     /// now fit are sent to the worker, each prepared by `work` (`None`:
-    /// it can't be sent). Admission ends once every image is through.
+    /// it can't be sent, and frees its share too). Admission ends once
+    /// every image is through.
     pub(crate) fn release_and_admit(&mut self, completed: u64, mut work: impl FnMut(u64) -> Option<WorkItem>) {
         let Some(ctrl) = self.admission.as_mut() else { return };
         ctrl.release(completed);
         let mut streamed = Vec::new();
         while let Some(next) = ctrl.try_admit_next() {
-            let Some(item) = work(next) else { continue };
+            let Some(item) = work(next) else {
+                ctrl.release(next);
+                continue;
+            };
             match self.admission_tx.as_ref() {
                 Some(tx) if tx.send(item).is_ok() => streamed.push(next),
                 _ => break, // worker gone
@@ -2427,8 +2431,8 @@ mod tests {
 
     /// Streamed admission: images beyond the RAM budget go one at a time,
     /// the next sent as one completes and counted into the batch; one
-    /// that can't be prepared is passed over; admission ends with the
-    /// last one through.
+    /// that can't be prepared gives its turn back; admission ends with
+    /// the last one through.
     #[test]
     fn admission_streams_the_next_image_as_one_completes() {
         use crate::gui::memory::ImageMemCost;
@@ -2443,13 +2447,11 @@ mod tests {
         p.release_and_admit(3, work);
         assert_eq!(rx.try_recv().map(|w| w.0), Ok(2), "the next smallest is sent");
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)), "and counted");
+        assert!(p.admission.is_some(), "the batch is still open");
 
         p.release_and_admit(2, |_| None);
         assert!(rx.try_recv().is_err(), "an image that can't be prepared is not sent");
-        assert!(p.admission.is_some(), "the batch is still open");
-
-        p.release_and_admit(1, work);
-        assert!(p.admission.is_none() && p.admission_tx.is_none(), "every image is through");
+        assert!(p.admission.is_none() && p.admission_tx.is_none(), "and holds no budget: every image is through");
     }
 
     #[test]

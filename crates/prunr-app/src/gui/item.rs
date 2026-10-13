@@ -1319,9 +1319,17 @@ impl BatchItem {
 
     /// What a full run on this image sends: its file and the pixels the
     /// run starts from; the image shows as processing. `None` when the
-    /// file can't be read.
+    /// file can't be read: the image fails now rather than wait on a
+    /// run that never starts.
     pub(crate) fn full_run_work(&mut self) -> Option<super::worker::WorkItem> {
-        let bytes = self.source.load_bytes().ok()?;
+        let bytes = match self.source.load_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.job = None;
+                self.status = BatchStatus::Error(format!("Failed to load: {e}"));
+                return None;
+            }
+        };
         let input = self.job_input();
         self.status = BatchStatus::Processing;
         Some((self.id, bytes, input))
@@ -2053,6 +2061,18 @@ mod tests {
         assert_eq!(item.run_tier(Silueta), RunTier::UpToDate, "a backdrop change renders at display time");
         let composite = item.settings.current_recipe(Silueta).composite;
         assert_eq!(item.applied_recipe.as_ref().map(|r| &r.composite), Some(&composite), "and the applied recipe follows it");
+    }
+
+    /// An image whose file is gone when its run would start fails there,
+    /// with nothing left waiting on the run.
+    #[test]
+    fn a_run_on_a_missing_file_fails_instead_of_waiting() {
+        let mut item = fixture_item(1);
+        item.source = ImageSource::Path(PathBuf::from("/nonexistent/photo.png"));
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(item.full_run_work().is_none());
+        assert!(matches!(&item.status, BatchStatus::Error(why) if why.starts_with("Failed to load")), "{:?}", item.status);
+        assert!(item.job.is_none(), "nothing is awaited");
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
