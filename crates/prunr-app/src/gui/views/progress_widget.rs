@@ -159,12 +159,24 @@ pub(crate) fn render(
 /// A small pill beside the cursor (or mid-canvas when the cursor is
 /// elsewhere) for a wait the user started by picking a tool.
 pub(crate) fn render_loading_pill(ui: &egui::Ui, canvas_rect: Rect, cursor: Option<Pos2>, label: &str) {
+    paint_pill(ui, canvas_rect, label, |size| cursor.map_or(canvas_rect.center() - size / 2.0, |c| c + Vec2::new(18.0, 4.0)));
+}
+
+/// The same pill at the bottom of the canvas, clear of the strips and
+/// popovers along its top, for work that goes on with nothing to show.
+pub(crate) fn render_working_pill(ui: &egui::Ui, canvas_rect: Rect, label: &str) {
+    paint_pill(ui, canvas_rect, label, |size| Pos2::new(canvas_rect.center().x - size.x / 2.0, canvas_rect.max.y - size.y - WORKING_PILL_INSET));
+}
+
+/// Room between the working pill and the canvas's bottom edge.
+const WORKING_PILL_INSET: f32 = 24.0;
+
+fn paint_pill(ui: &egui::Ui, canvas_rect: Rect, label: &str, place: impl FnOnce(Vec2) -> Pos2) {
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     let text = single_line(&painter, label.to_string(), SUBTITLE_SIZE, theme::TEXT_PRIMARY, f32::INFINITY);
     let size = Vec2::new(9.0 + 16.0 + 8.0 + text.size().x + 12.0, 30.0);
-    let anchor = cursor.map_or(canvas_rect.center() - size / 2.0, |c| c + Vec2::new(18.0, 4.0));
-    let min = anchor.clamp(canvas_rect.min, (canvas_rect.max - size).max(canvas_rect.min));
+    let min = place(size).clamp(canvas_rect.min, (canvas_rect.max - size).max(canvas_rect.min));
     let pill = Rect::from_min_size(min, size);
     let shadow = Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(115) };
     painter.add(shadow.as_shape(pill, 15));
