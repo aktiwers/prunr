@@ -4427,9 +4427,12 @@ fn is_supported_image_ext(path: &Path) -> bool {
 
 /// The second toolbar row's panel, with or without an image loaded.
 fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
+    // The row is a chip plus SPACE_SM above and below: with no vertical
+    // margin the chips sat on the top rule.
+    let margin = egui::Margin::symmetric(theme::SPACE_SM as i8, theme::SPACE_SM as i8);
     egui::Panel::top("adjustments_toolbar")
         .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)
-        .frame(frame)
+        .frame(egui::Frame { inner_margin: margin, ..frame })
 }
 
 /// Encode + write one image on a background thread, then send the result

@@ -760,6 +760,10 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
             let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));
             theme::pill_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    // The row's centre line is set by its first height: the
+                    // title and knobs centred on 18 px while the '...' grew
+                    // it to 28.
+                    ui.set_min_height(theme::CHIP_HEIGHT);
                     ui.spacing_mut().item_spacing.x = 16.0;
                     ui.spacing_mut().slider_width = STRIP_SLIDER_WIDTH;
                     ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
