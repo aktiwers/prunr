@@ -6,6 +6,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- Eraser (RORem) has an Advanced chip: Steps (2–8, the model was trained for 4) and Pin seed, next to Try another.
 - **Process works on the ticked images for every model.** Upscalers and Colorize take them one at a time (the capsule counts "Image 2 of 5"); an eraser fills every ticked image that has a painted region and says how many had none. Tick boxes are bigger. The footer shows how large an erase filled its region ("Fill 24%"), and a pill at the bottom of the canvas says "Rendering…" or "Preparing…" when work goes on for more than a second with nothing else to show for it.
 - `--feather` and `--edge-width` on the command line, so every Mask setting has a flag.
 - **Magic Brush.** Click or drag over anything and SAM 2.1 (Hiera Small, bundled) finds it and adds it to the selection; Alt (or Ctrl) takes it away. A Confidence knob filters weak candidates. The encoder runs once per image in the background, so switching images keeps the tool ready.

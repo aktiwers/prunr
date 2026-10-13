@@ -600,6 +600,8 @@ pub(crate) struct InpaintTuning {
     pub sd_scheduler: super::brush_state::SdScheduler,
     /// SD-only: number of denoise steps.
     pub sd_steps: u32,
+    /// RORem only: its denoise steps.
+    pub rorem_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = random.
     pub sd_seed: Option<u64>,
     /// SD-only: post-gate TAESD selection — already resolved by the
@@ -634,6 +636,7 @@ impl Default for InpaintTuning {
             sd_guidance_scale: 1.0,
             sd_scheduler: super::brush_state::SdScheduler::Lcm,
             sd_steps: 8,
+            rorem_steps: prunr_core::inpaint_sd::ROREM_STEPS,
             sd_seed: None,
             use_taesd: false,
             sd_tuning: Default::default(),
@@ -2066,7 +2069,7 @@ fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpain
         // The prompt is baked in: the user's prompt, guidance and TAESD
         // do not apply.
         prunr_models::ModelId::RoremFp16 => Some(SdInpaintRequest {
-            num_inference_steps: prunr_core::inpaint_sd::ROREM_STEPS,
+            num_inference_steps: tuning.rorem_steps,
             scheduler: SchedulerKind::Lcm,
             ..base
         }),
@@ -2078,8 +2081,8 @@ fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpain
 mod sd_request_tests {
     use super::*;
 
-    /// RORem runs its own 4 LCM steps whatever the SD chips say; the SD
-    /// 1.5 settings never reach it, the seed does (for Try another).
+    /// RORem runs the steps its own chip sets, whatever the SD chips say;
+    /// the SD 1.5 settings never reach it, the seed does (for Try another).
     #[test]
     fn rorem_runs_its_own_steps_and_keeps_the_seed() {
         let tuning = InpaintTuning {
@@ -2088,12 +2091,13 @@ mod sd_request_tests {
             sd_guidance_scale: 7.5,
             sd_scheduler: super::super::brush_state::SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 25,
+            rorem_steps: 6,
             sd_seed: Some(42),
             use_taesd: true,
             ..Default::default()
         };
         let req = sd_request(&tuning).expect("RORem runs through the SD pipeline");
-        assert_eq!(req.num_inference_steps, prunr_core::inpaint_sd::ROREM_STEPS);
+        assert_eq!(req.num_inference_steps, 6, "its own steps, not SD's");
         assert_eq!(req.scheduler, prunr_core::inpaint_sd::SchedulerKind::Lcm);
         assert!(req.prompt.is_empty() && req.guidance_scale <= 1.0 && !req.use_taesd);
         assert_eq!(req.seed, Some(42));
