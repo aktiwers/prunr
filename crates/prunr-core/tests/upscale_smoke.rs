@@ -31,11 +31,11 @@ fn skip_if_unavailable(id: ModelId) -> bool {
 }
 
 #[test]
-fn real_esrgan_and_nomos8k_upscale_128x128_to_512x512() {
+fn every_4x_upscaler_turns_128x128_into_512x512() {
     if skip_if_no_ort("upscale_128x128") {
         return;
     }
-    for id in [ModelId::RealEsrganX4Plus, ModelId::Nomos8kSchatL] {
+    for id in [ModelId::RealEsrganX4Plus, ModelId::Nomos8kSchatL, ModelId::FourXNomos2RealPlksr] {
         if skip_if_unavailable(id) {
             continue;
         }

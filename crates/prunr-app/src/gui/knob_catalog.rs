@@ -539,6 +539,7 @@ mod tests {
             (SettingsModel::Nomos8kUpscale, upscale),
             (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),
             (SettingsModel::FourXNmkdSuperscaleUpscale, upscale),
+            (SettingsModel::Nomos2Upscale, upscale),
         ];
         assert_eq!(rows.len(), SettingsModel::ALL.len(), "every model has a row");
         for &(model, shown) in rows {

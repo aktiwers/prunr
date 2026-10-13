@@ -56,6 +56,9 @@ pub enum ModelId {
     /// restoration upscaler — handles noise and JPEG artifacts on real
     /// photos. WTFPL — no attribution required.
     FourXNmkdSuperscale,
+    /// 4xNomos2 RealPLKSR with DySample (fp32). OnDemand. Fast photo
+    /// upscaler trained on JPEG-degraded photos. CC-BY-4.0.
+    FourXNomos2RealPlksr,
     /// SAM 2.1 Hiera Small. Two-part bundled pair (encoder + decoder
     /// ONNX). Apache 2.0 from Meta. Used by Magic Brush for selection
     /// authoring. Encoder cached on BatchItem; decoder runs per
@@ -113,6 +116,7 @@ impl ModelId {
         ModelId::RealEsrganX2Plus,
         ModelId::FourXNmkdSiaxCx,
         ModelId::FourXNmkdSuperscale,
+        ModelId::FourXNomos2RealPlksr,
         ModelId::Sam21HieraSmall,
         ModelId::FaceGfpgan,
         ModelId::FaceRestoreFormerPp,
@@ -142,6 +146,7 @@ impl ModelId {
             ModelId::RealEsrganX2Plus => "real_esrgan_x2plus",
             ModelId::FourXNmkdSiaxCx => "four_x_nmkd_siax_cx",
             ModelId::FourXNmkdSuperscale => "four_x_nmkd_superscale",
+            ModelId::FourXNomos2RealPlksr => "four_x_nomos2_realplksr",
             ModelId::Sam21HieraSmall => "sam2_1_hiera_small",
             ModelId::FaceGfpgan => "face_gfpgan",
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
@@ -964,6 +969,38 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         }),
     },
     ModelDescriptor {
+        id: ModelId::FourXNomos2RealPlksr,
+        display_name: "4xNomos2 RealPLKSR",
+        description: "Fast photo upscaler trained on compressed photos. Natural skin and hair texture; can invent texture on flat areas like snow.",
+        category: ModelCategory::Upscale,
+        source: ModelSource::OnDemand {
+            filename: "4xNomos2_realplksr_dysample.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos2_realplksr_dysample.onnx",
+            sha256: "ec435c52cfc68bdf9b3e4b757bdd8078ce5daea70ff439a7e68de1a17262e24d",
+            size_mb: 30,
+            license: LicenseInfo {
+                author: "Philip Hofmann (Phhofm)",
+                license: "CC-BY-4.0",
+                license_url: "https://creativecommons.org/licenses/by/4.0/",
+                source_url: "https://github.com/Phhofm/models/releases/tag/4xNomos2_realplksr_dysample",
+            },
+            fp16: None,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::Recommended,
+        incompatible_eps: &[],
+        working_set_mb: 800,
+        tile_size_multiple: None,
+        recommended_tile: Some(512),
+        attribution_required: true,
+        upscale: Some(UpscaleModelKnobs {
+            input_name: "input",
+            is_fp16: false,
+            native_scale: 4,
+            uses_window_attention: false,
+        }),
+    },
+    ModelDescriptor {
         id: ModelId::FourXNmkdSuperscale,
         display_name: "4x NMKD Superscale",
         description: "Community-trained restoration upscaler. Handles noise and JPEG artifacts on real photos.",
@@ -1391,6 +1428,7 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
         | ModelId::FourXNmkdSuperscale
+        | ModelId::FourXNomos2RealPlksr
         | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
@@ -1579,6 +1617,7 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         // Nomos8k's published .onnx is already fp16; SAM 2 is
         // MultiPartOnDemand with no fp16 sibling.
         ModelId::Nomos8kSchatL
+        | ModelId::FourXNomos2RealPlksr
         | ModelId::DexiNed
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
@@ -1685,6 +1724,7 @@ mod tests {
                 | ModelId::RealEsrganX2Plus
                 | ModelId::FourXNmkdSiaxCx
                 | ModelId::FourXNmkdSuperscale
+                | ModelId::FourXNomos2RealPlksr
                 | ModelId::Sam21HieraSmall
                 | ModelId::FaceGfpgan
                 | ModelId::FaceRestoreFormerPp

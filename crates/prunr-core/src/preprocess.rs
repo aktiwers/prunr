@@ -24,7 +24,8 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
         | ModelKind::Nomos8kSchatL
         | ModelKind::RealEsrganX2Plus
         | ModelKind::FourXNmkdSiaxCx
-        | ModelKind::FourXNmkdSuperscale => {
+        | ModelKind::FourXNmkdSuperscale
+        | ModelKind::FourXNomos2RealPlksr => {
             unreachable!("upscale models are dispatched via upscale_rgba, not the seg pipeline")
         }
     }
