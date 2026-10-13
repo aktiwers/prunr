@@ -315,6 +315,24 @@ pub(crate) enum Engine {
     Colorize,
 }
 
+/// A lens-blur focus and what it was measured from.
+struct LensFocus {
+    depth: std::sync::Weak<prunr_core::depth::DepthMap>,
+    result: Option<std::sync::Weak<image::RgbaImage>>,
+    value: f32,
+}
+
+impl LensFocus {
+    fn is_for(&self, depth: &Arc<prunr_core::depth::DepthMap>, result: Option<&Arc<image::RgbaImage>>) -> bool {
+        let same_result = match (&self.result, result) {
+            (None, None) => true,
+            (Some(w), Some(r)) => std::sync::Weak::ptr_eq(w, &Arc::downgrade(r)),
+            _ => false,
+        };
+        same_result && std::sync::Weak::ptr_eq(&self.depth, &Arc::downgrade(depth))
+    }
+}
+
 /// How much of the pipeline a Process run needs on an image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunTier {
@@ -573,9 +591,10 @@ pub(crate) struct BatchItem {
     /// next frame doesn't start the same one again.
     pub(crate) backdrop_tex_pending: Option<u64>,
     /// Where a lens-blur backdrop focuses, measured once per depth map
-    /// and result (their pointers): a preview tick that leaves the
-    /// subject where it was keeps the backdrop it has.
-    lens_focus: Option<(usize, usize, f32)>,
+    /// and result: a preview tick that leaves the subject where it was
+    /// keeps the backdrop it has. Weak handles pin the allocations, so a
+    /// new result can never pass for the old one by address.
+    lens_focus: Option<LensFocus>,
 
     /// Shared selection mask. Both Paint Brush and Magic Brush write
     /// here. Signed i8 plane at source image resolution.
@@ -1970,7 +1989,7 @@ impl BatchItem {
         Some(match backdrop {
             Backdrop::Effect(effect) if effect.needs_depth() => {
                 let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
-                let focus = self.lens_focus.map_or(0, |(_, _, f)| u64::from(f.to_bits()));
+                let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
                 key ^ depth.rotate_left(29) ^ focus.rotate_left(43)
             }
             _ => key,
@@ -1985,12 +2004,14 @@ impl BatchItem {
             self.lens_focus = None;
             return;
         };
-        let ids = (Arc::as_ptr(depth) as usize, self.result_rgba.as_ref().map_or(0, |r| Arc::as_ptr(r) as usize));
-        if self.lens_focus.is_some_and(|(d, r, _)| (d, r) == ids) {
+        if self.lens_focus.as_ref().is_some_and(|f| f.is_for(depth, self.result_rgba.as_ref())) {
             return;
         }
-        let value = prunr_core::depth::backdrop_focus(depth, self.result_rgba.as_deref());
-        self.lens_focus = Some((ids.0, ids.1, value));
+        self.lens_focus = Some(LensFocus {
+            depth: Arc::downgrade(depth),
+            result: self.result_rgba.as_ref().map(Arc::downgrade),
+            value: prunr_core::depth::backdrop_focus(depth, self.result_rgba.as_deref()),
+        });
     }
 
 
@@ -2378,6 +2399,35 @@ mod tests {
         assert!(item.selection_texture.is_none() && item.selection_tex_pending.is_none(), "a stale build is dropped and frees the slot");
         assert!(item.land_selection_texture(full(7, true), load), "the shown mask's overlay lands with a new feathered plane");
         assert!(!item.land_selection_texture(full(7, true), load), "a rebuild keeps the plane it had");
+    }
+
+    /// A lens-blur backdrop keys on where it focuses: a new result with
+    /// the subject where it was keeps the key, one with the subject at
+    /// another depth changes it, and the cache holds no result alive.
+    #[test]
+    fn a_lens_backdrop_keys_on_its_focus_not_the_result_handle() {
+        use prunr_core::depth::DepthMap;
+        let mut item = fixture_item(1);
+        item.settings.bg_effect = prunr_core::BgEffect::LensBlur { amount_pct: 50 };
+        item.depth = Some(Arc::new(DepthMap::from_raw(2, 2, vec![0.1, 0.1, 0.9, 0.9])));
+        let cutout = |rows: [u8; 2]| {
+            let mut img = image::RgbaImage::new(2, 2);
+            for (y, a) in rows.into_iter().enumerate() {
+                for x in 0..2 { img.put_pixel(x, y as u32, image::Rgba([0, 0, 0, a])); }
+            }
+            Arc::new(img)
+        };
+        item.result_rgba = Some(cutout([255, 0]));
+        item.refresh_lens_focus();
+        let near = item.backdrop_key();
+        item.result_rgba = Some(cutout([255, 0]));
+        item.refresh_lens_focus();
+        assert_eq!(item.backdrop_key(), near, "a new result with the subject where it was keeps the key");
+        let weak = item.result_rgba.as_ref().map(Arc::downgrade).expect("a result");
+        item.result_rgba = Some(cutout([0, 255]));
+        assert!(weak.upgrade().is_none(), "the cache does not keep the old result alive");
+        item.refresh_lens_focus();
+        assert_ne!(item.backdrop_key(), near, "the subject at another depth is another focus");
     }
 
     /// An image whose file is gone when its run would start fails there,
