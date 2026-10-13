@@ -83,7 +83,7 @@ fn render_empty_state(ui: &mut egui::Ui) {
         |ui| {
             ui.label(
                 RichText::new("Drop images here\nto queue them")
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
             );
         },
@@ -117,7 +117,7 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
             let selected = app.batch.selected_count();
             ui.label(
                 RichText::new(format!("{selected}/{count}"))
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
         });
@@ -301,8 +301,9 @@ fn paint_item_background(ui: &egui::Ui, item_rect: Rect, is_selected: bool) {
 }
 
 fn draw_loading_spinner(ui: &mut egui::Ui, item_rect: Rect) {
-    let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
-    ui.put(spinner_rect, egui::Spinner::new().size(theme::FONT_SIZE_MODAL_TITLE).color(theme::ACCENT));
+    const SPINNER: f32 = 20.0;
+    let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(SPINNER));
+    ui.put(spinner_rect, egui::Spinner::new().size(SPINNER).color(theme::ACCENT));
 }
 
 fn paint_thumbnail(

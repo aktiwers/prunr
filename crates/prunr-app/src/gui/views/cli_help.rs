@@ -9,10 +9,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
     theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",
         [theme::SETTINGS_DIALOG_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
-        |ui| egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
+        |ui| super::chip::modal_page(ui, "Command-line reference", "", |ui| {
             theme::apply_modal_visuals(ui);
-            let close = super::chip::modal_header(ui, "Command-line reference", "");
-            ui.add_space(theme::SPACE_MD);
 
             // Tab state
             let tab_id = egui::Id::new("cli_help_tab");
@@ -257,12 +255,11 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.label(
                     RichText::new("Press F2 to close")
-                        .size(theme::FONT_SIZE_MONO)
+                        .size(theme::FONT_SIZE_SECONDARY)
                         .color(theme::TEXT_HINT),
                 );
             });
-            close
-        }).inner,
+        }),
     )
 }
 
@@ -273,7 +270,7 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
         ui.label(
             RichText::new(cmd)
                 .monospace()
-                .size(theme::FONT_SIZE_MONO)
+                .size(theme::FONT_SIZE_SECONDARY)
                 .color(theme::TEXT_PRIMARY),
         );
         let flash_id = egui::Id::new(("copy_flash", cmd));

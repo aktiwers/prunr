@@ -62,7 +62,7 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 // inputs round at 10 px.
 
 /// The glass fill: a raised surface (#2A2A2E) at 94 %, lighter than the
-/// toolbar it floats under so it reads as raised.
+/// toolbar it floats under.
 pub const GLASS: Color32 = Color32::from_rgba_premultiplied(40, 40, 43, 240);
 /// The hairline border around glass: white at 8 %.
 pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
@@ -121,7 +121,6 @@ pub fn mark_color(erase: bool) -> Color32 {
 pub const ERASE_PICKED: Color32 = Color32::from_rgb(0xc9, 0x57, 0x3a);
 /// A hint under its row: smaller and greyer than a label.
 pub const HINT: Color32 = Color32::from_rgb(0x9c, 0x9c, 0x9c);
-pub const FONT_SIZE_HINT: f32 = FONT_SIZE_CAPTION;
 pub const PANEL_RADIUS: u8 = 18;
 pub const PILL_RADIUS: u8 = 255;
 pub const INPUT_RADIUS: u8 = 10;
@@ -159,8 +158,9 @@ pub fn apply_building_blocks(visuals: &mut egui::Visuals, spacing: &mut egui::st
     visuals.window_stroke = Stroke::new(STROKE_DEFAULT, HAIRLINE);
     visuals.window_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
     visuals.menu_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
-    // egui's 6 px left popover content hugging the 18 px corner.
     spacing.menu_margin = egui::Margin::same(12);
+    // Every button is a pill: its label needs room from the rounded ends.
+    spacing.button_padding = egui::vec2(12.0, 4.0);
     visuals.window_shadow = glass_shadow();
     visuals.popup_shadow = glass_shadow();
     visuals.selection.bg_fill = ACCENT_BRIGHT;
@@ -346,7 +346,7 @@ pub const PROCESSING_SWEEP: Color32 = Color32::from_rgba_premultiplied(24, 9, 28
 pub const DROP_HOVER_BORDER: Color32 = ACCENT;
 
 /// Drop zone border default
-pub const DROP_BORDER: Color32 = Color32::from_rgba_premultiplied(0x40, 0x40, 0x40, 0x40);
+pub const DROP_BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 64);
 
 // === Spacing (from UI-SPEC, multiples of 4) ===
 
@@ -410,15 +410,19 @@ pub const FONT_SIZE_CAPTION: f32 = 11.0;
 pub const FONT_SIZE_SECONDARY: f32 = 12.0;
 pub const FONT_SIZE_BODY: f32 = 14.0;
 pub const FONT_SIZE_MODAL_TITLE: f32 = 20.0;
+
+/// A list row's corners (pickers, menus, choice lists).
+pub const ROW_ROUNDING: f32 = 12.0;
+/// A bare modal page's margin on every side.
+pub const MODAL_PAGE_MARGIN: egui::Margin = egui::Margin::same(24);
 pub const FONT_SIZE_HEADING: f32 = 16.0;
-pub const FONT_SIZE_MONO: f32 = 12.0;
 
 // === Overlay ===
 
 /// Overlay background: #1a1a1a at 95% alpha
 pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x3a, 0x3a, 0x3a, 0xf8);
 /// Overlay border: #ffffff20 (white 12.5%)
-pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_premultiplied(0x20, 0x20, 0x20, 0x20);
+pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 32);
 
 // === Checkerboard ===
 
@@ -490,8 +494,7 @@ mod motion_tests {
 mod modal_tests {
     use super::*;
 
-    /// The dimming goes under the modal, not over it: drawn over, it
-    /// darkened the modal's own text by 39%.
+    /// The dimming goes under the modal, not over it.
     #[test]
     fn the_backdrop_is_painted_under_the_modal() {
         let ctx = egui::Context::default();

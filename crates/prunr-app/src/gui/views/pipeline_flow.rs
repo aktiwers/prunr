@@ -82,9 +82,7 @@ pub fn render(ctx: &egui::Context) -> bool {
     theme::bare_modal_window(
         ctx, "pipeline_flow", "Pipelines",
         [MODAL_WIDTH, MODAL_HEIGHT],
-        |ui| egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
-            let close = chip::modal_header(ui, "Pipelines", "");
-            ui.add_space(theme::SPACE_MD);
+        |ui| chip::modal_page(ui, "Pipelines", "", |ui| {
             let tab_id = egui::Id::new("pipeline_flow_tab");
             let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
             let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
@@ -111,12 +109,11 @@ pub fn render(ctx: &egui::Context) -> bool {
                         "The order is fixed. Each step works on the result of the one above it, \
                          so a knob changes what every later step has to work with.",
                     )
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
                 );
             });
-            close
-        }).inner,
+        }),
     )
 }
 
@@ -132,7 +129,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(format!("Step {number} of {total}"))
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
             ui.label(
@@ -143,7 +140,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
             );
             ui.label(
                 RichText::new(stage.tagline)
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
             );
         });
@@ -166,7 +163,7 @@ fn endpoint_label(ui: &mut egui::Ui, text: &str) {
         ui.add_space(theme::SPACE_SM);
         ui.label(
             RichText::new(text)
-                .size(theme::FONT_SIZE_MONO)
+                .size(theme::FONT_SIZE_SECONDARY)
                 .color(theme::TEXT_SECONDARY),
         );
     });
