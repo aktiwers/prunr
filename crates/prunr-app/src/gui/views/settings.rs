@@ -19,7 +19,7 @@ use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{button, ButtonKind};
-use super::{hint, kv_row, section_heading};
+use super::{hint, kv_row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -564,6 +564,8 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     hint(ui, "Click a key to change it, then press the new keys. Escape cancels, Backspace clears.");
     ui.add_space(theme::SPACE_SM);
+    group(ui, |rows| {
+    let ui = rows.ui();
     egui::Grid::new("hotkeys_grid")
         .num_columns(2 + SLOTS)
         .spacing([theme::SPACE_MD, theme::SPACE_XS])
@@ -603,16 +605,19 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 ui.end_row();
             }
         });
-    ui.add_space(theme::SPACE_MD);
-    section_heading(ui, "Mouse");
-    egui::Grid::new("gestures_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_SM])
-        .show(ui, |ui| {
-            for (gesture, what) in shortcuts::gestures() {
-                kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
-            }
-        });
+    });
+    group_heading(ui, "Mouse");
+    group(ui, |rows| {
+        let ui = rows.ui();
+        egui::Grid::new("gestures_grid")
+            .num_columns(2)
+            .spacing([theme::SPACE_LG, theme::SPACE_SM])
+            .show(ui, |ui| {
+                for (gesture, what) in shortcuts::gestures() {
+                    kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
+                }
+            });
+    });
     ui.add_space(theme::SPACE_MD);
     if app.settings.hotkeys.is_empty() {
         ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
@@ -664,10 +669,16 @@ fn render_tab_model_credits(ui: &mut egui::Ui) {
     }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for descriptor in installed {
-            render_model_credit_row(ui, descriptor);
-            ui.separator();
-        }
+        group(ui, |rows| {
+            let ui = rows.ui();
+            for (i, descriptor) in installed.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                render_model_credit_row(ui, descriptor);
+            }
+            ui.add_space(theme::SPACE_SM);
+        });
     });
 }
 
