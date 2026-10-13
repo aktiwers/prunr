@@ -586,30 +586,46 @@ pub(super) const LIST_ACTION_FILL: Color32 = Color32::from_rgba_premultiplied(39
 /// A selectable option with a title and a one-line description, for
 /// every picker popover. Returns the row's response.
 pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: &str) -> Response {
-    use egui::text::{LayoutJob, TextFormat};
-    let mut job = LayoutJob::default();
-    job.append(
-        title,
-        0.0,
-        TextFormat {
-            color: theme::TEXT_PRIMARY,
-            font_id: egui::FontId::proportional(theme::FONT_SIZE_BODY),
-            ..Default::default()
-        },
+    const PAD: egui::Vec2 = egui::vec2(12.0, 6.0);
+    const CHECK_ROOM: f32 = 28.0;
+    let dim = if ui.is_enabled() { 1.0 } else { 0.5 };
+    let title_galley = ui.painter().layout_no_wrap(title.to_owned(),
+        egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY.gamma_multiply(dim));
+    let desc_galley = (!description.is_empty()).then(|| ui.painter().layout_no_wrap(description.to_owned(),
+        egui::FontId::proportional(theme::FONT_SIZE_MONO), theme::TEXT_SECONDARY.gamma_multiply(dim)));
+    let text_h = title_galley.size().y + desc_galley.as_ref().map_or(0.0, |g| g.size().y + 2.0);
+    let text_w = title_galley.size().x.max(desc_galley.as_ref().map_or(0.0, |g| g.size().x));
+    let size = egui::vec2(
+        ui.available_width().max(text_w + 2.0 * PAD.x + CHECK_ROOM),
+        (text_h + 2.0 * PAD.y).max(theme::CHIP_HEIGHT),
     );
-    if !description.is_empty() {
-        job.append("\n", 0.0, TextFormat::default());
-        job.append(
-            description,
-            0.0,
-            TextFormat {
-                color: theme::TEXT_SECONDARY,
-                font_id: egui::FontId::proportional(theme::FONT_SIZE_MONO),
-                ..Default::default()
-            },
-        );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let name = if description.is_empty() { title.to_owned() } else { format!("{title}\n{description}") };
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, &name));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        // A wash, not a solid accent: grey description text on the solid
+        // accent fell to 2:1.
+        let fill = if selected {
+            theme::ROW_PICKED
+        } else if resp.hovered() {
+            theme::ROW_HOVER
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, 10.0, fill);
+        let top = rect.center().y - text_h / 2.0;
+        let desc_top = top + title_galley.size().y + 2.0;
+        painter.galley(egui::pos2(rect.left() + PAD.x, top), title_galley, theme::TEXT_PRIMARY);
+        if let Some(g) = desc_galley {
+            painter.galley(egui::pos2(rect.left() + PAD.x, desc_top), g, theme::TEXT_SECONDARY);
+        }
+        if selected {
+            painter.text(egui::pos2(rect.right() - PAD.x, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
+                egui::FontId::proportional(16.0), theme::ACCENT_RING);
+        }
     }
-    ui.selectable_label(selected, job)
+    resp
 }
 
 /// Horizontal tab strip: the active tab is filled, the rest are flat.
