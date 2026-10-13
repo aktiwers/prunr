@@ -122,6 +122,11 @@ pub struct ItemSettings {
     /// Restore faces: on or off, with which model and how strongly.
     #[serde(default)]
     pub faces: FaceSettings,
+    /// How much of the colorizer's predicted colour shows, in whole
+    /// percent to fit the byte budget: 0 = grey, 100 = as predicted, up
+    /// to `COLOR_STRENGTH_MAX_PCT`.
+    #[serde(default = "default_color_strength_pct")]
+    pub color_strength_pct: u8,
 }
 
 /// The face restorer a run uses.
@@ -179,6 +184,7 @@ impl FaceSettings {
 
 fn default_sharpen() -> f32 { prunr_core::DEFAULT_SHARPEN }
 fn default_ai_blend() -> f32 { 1.0 }
+fn default_color_strength_pct() -> u8 { 100 }
 
 impl Default for ItemSettings {
     fn default() -> Self {
@@ -210,6 +216,7 @@ impl Default for ItemSettings {
             ai_blend: 1.0,
             color_match: false,
             faces: FaceSettings::default(),
+            color_strength_pct: default_color_strength_pct(),
         }
     }
 }
@@ -250,6 +257,12 @@ impl Backdrop {
 impl ItemSettings {
     /// Contrast for a hard edge, what the old hard threshold was.
     pub const HARD_EDGE: f32 = 1.0;
+    pub const COLOR_STRENGTH_MAX_PCT: u8 = 150;
+
+    /// Strength as the colorizer takes it: 1 = as predicted.
+    pub fn color_strength(&self) -> f32 {
+        f32::from(self.color_strength_pct.min(Self::COLOR_STRENGTH_MAX_PCT)) / 100.0
+    }
 
     /// What sits behind the result. One choice; settings saved while the
     /// fields could hold several read an effect first, then an image,
@@ -347,6 +360,11 @@ impl ItemSettings {
                 sharpen_bits: self.sharpen.to_bits(),
                 ai_blend_bits: self.ai_blend.to_bits(),
                 color_match: self.color_match,
+            },
+            colorize: if model == prunr_core::ModelKind::DdcolorTiny {
+                prunr_core::ColorizeRecipe { model: Some(model.into()), strength_bits: self.color_strength().to_bits() }
+            } else {
+                prunr_core::ColorizeRecipe::default()
             },
         }
     }
@@ -597,6 +615,7 @@ mod tests {
             ai_blend: 0.6,
             color_match: true,
             faces: FaceSettings { on: true, model: FaceModel::RestoreFormerPp, strength_pct: 70, largest_only: true, hair: true },
+            color_strength_pct: 70,
         };
         let json = serde_json::to_string(&s).unwrap();
         let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
@@ -774,6 +793,23 @@ mod tests {
             assert_eq!(ItemSettings::default().current_recipe(kind).upscale.model, Some(kind.into()), "{kind:?}");
         }
         assert_eq!(ItemSettings::default().current_recipe(ModelKind::Silueta).upscale.model, None);
+    }
+
+    /// Strength is the colorizer's live knob: a change re-renders the kept
+    /// colour (ColorizeTier2), and it leaves every other model's recipe alone.
+    #[test]
+    fn color_strength_is_live_for_the_colorizer_only() {
+        use prunr_core::{ModelKind, RequiredTier};
+        let base = ItemSettings::default();
+        let weaker = ItemSettings { color_strength_pct: 30, ..base };
+        let colorize = |s: &ItemSettings| s.current_recipe(ModelKind::DdcolorTiny);
+        assert_eq!(colorize(&base).colorize.model, Some(prunr_models::ModelId::DdcolorTiny));
+        assert_eq!(prunr_core::resolve_tier(&colorize(&base), &colorize(&weaker)), RequiredTier::ColorizeTier2);
+        for kind in [ModelKind::Silueta, ModelKind::RealEsrganX4Plus] {
+            assert_eq!(prunr_core::resolve_tier(&base.current_recipe(kind), &weaker.current_recipe(kind)), RequiredTier::Skip, "{kind:?}");
+        }
+        let loaded: ItemSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.color_strength(), 1.0, "presets saved before Strength load at full colour");
     }
 
     /// Brightness lift and Saturation are gone; presets that saved them

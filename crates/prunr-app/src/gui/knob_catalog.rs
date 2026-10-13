@@ -123,6 +123,8 @@ pub enum ModelRole {
     Erase,
     /// Enlarges the image.
     Upscale,
+    /// Colours a black-and-white photo.
+    Colorize,
 }
 
 impl ModelRole {
@@ -144,6 +146,8 @@ pub enum Surface {
     Background,
     /// The upscaler's Scale and Refine chips.
     Upscale,
+    /// The colorizer's Strength chip.
+    Colorize,
     /// The Stable Diffusion eraser's Quality, Prompt and Advanced chips.
     SdChips,
     /// Paint and Magic Brush, the selection on the image and its actions.
@@ -168,8 +172,9 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Mask | Surface::Decoration => role == Cutout,
         Surface::Lines | Surface::Effect | Surface::Background => matches!(role, Cutout | Filters),
         Surface::Upscale => role == Upscale,
+        Surface::Colorize => role == Colorize,
         Surface::SdChips => model == SettingsModel::SdInpaint,
-        Surface::Brushes => role != Upscale,
+        Surface::Brushes => !matches!(role, Upscale | Colorize),
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
         Surface::Faces => matches!(role, Cutout | Filters | Upscale),
@@ -519,12 +524,13 @@ mod tests {
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces];
+        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, Colorize, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces];
         let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
         let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
         let upscale: &[Surface] = &[Upscale, Faces];
+        let colorize: &[Surface] = &[Colorize];
         let rows: &[(SettingsModel, &[Surface])] = &[
             (SettingsModel::Silueta, cutout),
             (SettingsModel::U2net, cutout),
@@ -540,6 +546,7 @@ mod tests {
             (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),
             (SettingsModel::FourXNmkdSuperscaleUpscale, upscale),
             (SettingsModel::Nomos2Upscale, upscale),
+            (SettingsModel::ColorizeDdcolor, colorize),
         ];
         assert_eq!(rows.len(), SettingsModel::ALL.len(), "every model has a row");
         for &(model, shown) in rows {
@@ -811,11 +818,13 @@ mod tests {
                 Skip => 0,
                 CompositeOnly => 1,
                 UpscaleTier2 => 2,
-                UpscaleRerun => 3,
-                EdgeRerun => 4,
-                MaskRerun => 5,
-                AddEdgeInference => 6,
-                FullPipeline => 7,
+                ColorizeTier2 => 3,
+                UpscaleRerun => 4,
+                ColorizeRerun => 5,
+                EdgeRerun => 6,
+                MaskRerun => 7,
+                AddEdgeInference => 8,
+                FullPipeline => 9,
             }
         };
         for knob in StaticKnob::ALL {
@@ -977,6 +986,7 @@ mod tests {
             }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
+            colorize: Default::default(),
         };
 
         assert_eq!(

@@ -127,6 +127,7 @@ pub fn model_info(model: SettingsModel) -> ModelInfo {
         SettingsModel::FourXNmkdSiaxCxUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Siax-CX)", "4\u{00d7} clean photos \u{00b7} ~64 MB"),
         SettingsModel::FourXNmkdSuperscaleUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (NMKD Superscale)", "4\u{00d7} restoration \u{00b7} ~64 MB"),
         SettingsModel::Nomos2Upscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos2)", "4\u{00d7} fast, natural texture \u{00b7} ~30 MB"),
+        SettingsModel::ColorizeDdcolor => (ICON_PALETTE.codepoint, "Colorize (DDColor)", "Black & white to colour \u{00b7} ~270 MB"),
     };
     ModelInfo { icon, name, blurb }
 }

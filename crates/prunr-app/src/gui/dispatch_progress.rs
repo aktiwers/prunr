@@ -27,6 +27,8 @@ pub enum ProgressKind {
     Inpaint,
     /// Super-resolution upscale (Real-ESRGAN, HAT-L).
     Upscale,
+    /// Colorize: one model run.
+    Colorize,
     /// Restore faces: a few seconds, not cancellable.
     Faces,
 }
@@ -37,6 +39,7 @@ pub enum ProgressKind {
 pub enum CancelTarget {
     InpaintForItem(u64),
     Upscale,
+    Colorize,
     SegBatchAndReset,
 }
 
@@ -44,6 +47,7 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
     match kind {
         ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
+        ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
         ProgressKind::Faces => None,
     }
@@ -552,6 +556,12 @@ mod tests {
             cancel_target_for(ProgressKind::Upscale, Some(99)),
             Some(CancelTarget::Upscale),
         );
+    }
+
+    #[test]
+    fn cancel_target_colorize_ignores_item() {
+        assert_eq!(cancel_target_for(ProgressKind::Colorize, None), Some(CancelTarget::Colorize));
+        assert_eq!(cancel_target_for(ProgressKind::Colorize, Some(99)), Some(CancelTarget::Colorize));
     }
 
     #[test]
