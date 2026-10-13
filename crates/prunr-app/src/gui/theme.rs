@@ -159,6 +159,8 @@ pub fn apply_building_blocks(visuals: &mut egui::Visuals, spacing: &mut egui::st
     visuals.window_stroke = Stroke::new(STROKE_DEFAULT, HAIRLINE);
     visuals.window_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
     visuals.menu_corner_radius = egui::CornerRadius::same(PANEL_RADIUS);
+    // egui's 6 px left popover content hugging the 18 px corner.
+    spacing.menu_margin = egui::Margin::same(12);
     visuals.window_shadow = glass_shadow();
     visuals.popup_shadow = glass_shadow();
     visuals.selection.bg_fill = ACCENT_BRIGHT;
