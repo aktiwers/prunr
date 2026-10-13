@@ -5,11 +5,8 @@
 //! via `LivePreview::is_pending_for`, which returns true when
 //! `dispatch_brush_rerun` called `mark_tweak` for the item.
 //!
-//! Limitation: `SettingsModel` has no Sam21HieraSmall variant (the Selection-
-//! category model is not user-selectable as a top-level mode). The
-//! ModelCategory::Selection arm is therefore verified via code inspection.
-//! `SettingsModel::None` covers the no-model path, which is the closest
-//! testable proxy for "no active model".
+//! The Magic Brush's model (Sam21HieraSmall) is not a `SettingsModel`: it
+//! is never the active model, so it has no row here.
 
 
 use crate::gui::app::PrunrApp;
@@ -250,41 +247,6 @@ fn no_model_loaded_does_not_dispatch() {
     assert!(
         !app.processor.live_preview.is_pending_for(item_id),
         "No-model mode must not dispatch on stroke commit"
-    );
-}
-
-// ── Selection category → no auto-dispatch ────────────────────────────────────
-//
-// Sam21HieraSmall (ModelCategory::Selection) is not user-selectable via
-// SettingsModel — it's an internal Magic Brush model dispatched by the canvas,
-// not a top-level user-facing mode. There is no SettingsModel::Sam2 variant, so
-// this category is not reachable through the settings path.
-//
-// The match arm `Some(ModelCategory::Selection) => {}` exists in
-// `apply_selection_to_active_model` and is verified here by confirming that
-// when the model maps to None (the closest reachable proxy), no dispatch fires.
-// Identical no-dispatch behaviour is what the Selection arm enforces; this test
-// pins the contract so a future SettingsModel::Sam2 variant cannot drift it.
-#[test]
-fn selection_category_arm_exists_no_dispatch() {
-    // Verify apply_selection_to_active_model with SettingsModel::None (which
-    // produces category=None, handled by the last match arm alongside Upscale
-    // and EdgeDetection) does not dispatch. This is the same behavior the
-    // Selection arm enforces. The arm itself prevents future regressions if a
-    // SettingsModel::Sam2 variant is added later.
-    let mut app = app_with_model(SettingsModel::None);
-
-    let item = push_test_item(&mut app, 6);
-    item.dimensions = (64, 64);
-    let item_id = 6u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Selection-category (or no-model) must not auto-dispatch on stroke commit"
     );
 }
 

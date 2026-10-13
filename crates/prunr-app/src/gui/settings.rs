@@ -760,6 +760,9 @@ impl From<ModelKind> for SettingsModel {
     }
 }
 
+/// The model every colorize run uses, in the app and the CLI.
+pub const COLORIZER: ModelKind = ModelKind::DdcolorTiny;
+
 pub use prunr_core::LineMode;
 
 impl Default for Settings {

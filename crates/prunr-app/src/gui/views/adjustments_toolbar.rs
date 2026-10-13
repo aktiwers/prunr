@@ -1210,9 +1210,8 @@ fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
             s.color_strength_pct = default_pct;
         }
         let mut v = s.color_strength();
-        let max = f32::from(ItemSettings::COLOR_STRENGTH_MAX_PCT) / 100.0;
-        if chip::slider_row_f32(ui, "Color", &mut v, 0.0..=max, false, fmt::percent).changed {
-            s.color_strength_pct = (v * 100.0).round() as u8;
+        if chip::slider_row_f32(ui, "Color", &mut v, 0.0..=prunr_core::colorize::STRENGTH_MAX, false, fmt::percent).changed {
+            s.set_color_strength(v);
         }
     });
 }

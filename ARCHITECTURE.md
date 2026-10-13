@@ -141,7 +141,7 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 | `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
 | `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
 | `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
-| `ColorizeRerun` / `ColorizeTier2` | Colorize model / Strength | Run DDColor / re-render its kept colour plane at the new strength |
+| `ColorizeTier2` | Colorize Strength (a colorizer change is a model change) | Re-render the kept colour plane at the new strength |
 | `CompositeOnly` | Background colour or image | Render-time only |
 | `Skip` | Nothing output-relevant | None |
 

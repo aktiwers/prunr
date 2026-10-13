@@ -130,8 +130,6 @@ pub(crate) struct FacesResult {
     pub(crate) result: Result<Vec<prunr_core::face::RestoredFace>, String>,
 }
 
-/// Which selection operation the Magic Brush click/stroke was performing.
-/// Mirrors the Shift/Alt modifier semantics from 33-UI-SPEC.
 /// Single-slot warm engine for an in-process model run (upscale,
 /// colorize). Shared with the dispatch thread so session construction
 /// (seconds on a cold EP) never runs on the GUI thread; single-slot
@@ -190,6 +188,77 @@ fn ensure_warm_engine(
     let fresh = Arc::new(engine);
     *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
+}
+
+/// An in-process model run, one at a time (upscale, colorize): its
+/// in-flight and cancel flags, the channel its result comes back on, and
+/// its warm engine.
+struct RunSlot<R> {
+    active: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<R>,
+    rx: mpsc::Receiver<R>,
+    warm: WarmEngine,
+}
+
+impl<R> RunSlot<R> {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            tx,
+            rx,
+            warm: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn in_flight(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// Raise the cancel flag of the run in flight; `false` when none is.
+    fn cancel(&self) -> bool {
+        if !self.in_flight() {
+            return false;
+        }
+        self.cancel.store(true, Ordering::Release);
+        true
+    }
+
+    fn drain(&self) -> Vec<R> {
+        self.rx.try_iter().collect()
+    }
+
+    /// A run starts: it is in flight, not cancelled, and reports to
+    /// `progress`. The run's thread ends it through the returned handle.
+    fn begin(&self, progress: super::dispatch_progress::RunSink) -> RunDone<R> {
+        self.active.store(true, Ordering::Release);
+        self.cancel.store(false, Ordering::Release);
+        RunDone { active: Arc::clone(&self.active), tx: self.tx.clone(), progress }
+    }
+
+    fn release_engine(&self) {
+        *lock_warm_engine(&self.warm) = None;
+    }
+}
+
+/// The run thread's end of a `RunSlot`.
+struct RunDone<R> {
+    active: Arc<AtomicBool>,
+    tx: mpsc::Sender<R>,
+    progress: super::dispatch_progress::RunSink,
+}
+
+impl<R> RunDone<R> {
+    fn deliver(self, result: R) {
+        // Send the result BEFORE clearing the active flag. Reversed
+        // ordering would let the UI thread see the run idle and enable
+        // Process before the result has landed in the channel.
+        let _ = self.tx.send(result);
+        self.active.store(false, Ordering::Release);
+        self.progress.end();
+    }
 }
 
 /// SAM 2 encoder + decoder sessions, built on first use and reused for
@@ -327,7 +396,7 @@ pub(crate) struct UpscaleOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
-/// A finished colorize, keyed and stamped like `UpscaleResult`.
+/// A finished colorize, stamped with the recipe it ran.
 pub(crate) struct ColorizeResult {
     pub item_id: u64,
     pub result: Result<ColorizeOutput, prunr_core::CoreError>,
@@ -346,6 +415,23 @@ pub(crate) struct ColorizeOutput {
 /// constructing a `Processor`.
 pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
+}
+
+/// Whether free RAM covers the model's working set; a refusal is logged.
+/// The toolbar's `can_process_intent` gate should have stopped the run
+/// already; this is the last guard at the dispatch layer.
+fn admitted(descriptor: &prunr_models::ModelDescriptor) -> bool {
+    let free_mb = crate::hardware::available_ram_mb_throttled();
+    let ok = admission_check(descriptor.working_set_mb, free_mb);
+    if !ok {
+        tracing::warn!(
+            model = ?descriptor.id,
+            working_set_mb = descriptor.working_set_mb,
+            free_mb,
+            "admission refused: insufficient RAM"
+        );
+    }
+    ok
 }
 
 /// What an upscale or colorize starts from: the image, or its source when
@@ -521,14 +607,14 @@ pub(crate) struct Processor {
     /// subprocess lazily and drops it on a 5-min idle timer.
     inpaint_bridge_tx: mpsc::Sender<InpaintBridgeMsg>,
     inpaint_bridge_rx: mpsc::Receiver<InpaintBridgeResult>,
-    /// In-process upscale dispatch state. A single image is upscaled on a
-    /// background thread; live tile progress is published to
-    /// `dispatch_progress` (the canvas overlay reads it). `upscale_active`
-    /// is the in-flight predicate read by `is_upscale_in_flight`. Cancel
-    /// is a per-dispatch atomic set by `cancel_upscale()`; the thread
-    /// checks it between tiles.
-    upscale_active: Arc<AtomicBool>,
-    upscale_cancel: Arc<AtomicBool>,
+    /// The upscale run: a single image is upscaled on a background
+    /// thread; live tile progress is published to `dispatch_progress`
+    /// (the canvas overlay reads it); the thread checks the cancel flag
+    /// between tiles. Its warm engine is kept across consecutive upscales
+    /// so the second click skips the 1-3s graph-optimization stall
+    /// (Level3 for ESRGAN, Level2 for HAT); evicted on a switch away from
+    /// the cached ModelKind and on full release.
+    upscale: RunSlot<UpscaleResult>,
     /// Shared ORT `RunOptions` for the in-flight upscale session. The GUI
     /// thread calls `.terminate()` on this from `cancel_upscale()` to
     /// abort the running `Session::run` within ~50ms instead of waiting
@@ -542,29 +628,16 @@ pub(crate) struct Processor {
     /// pass). First dispatch (which already requires ORT) initializes
     /// the slot; cancel before any dispatch is a no-op.
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
-    upscale_result_tx: mpsc::Sender<UpscaleResult>,
-    upscale_result_rx: mpsc::Receiver<UpscaleResult>,
     /// Each finished upscale tile, small, for the canvas to show in place.
     upscale_preview_tx: mpsc::Sender<(u64, prunr_core::TilePreview)>,
     upscale_preview_rx: mpsc::Receiver<(u64, prunr_core::TilePreview)>,
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
-    /// Warm-cached upscale engine: kept alive across consecutive upscale
-    /// dispatches so the second click skips the 1-3s graph-optimization
-    /// stall (Level3 for ESRGAN, Level2 for HAT). Single-slot — caching
-    /// multiple upscale engines simultaneously is YAGNI. Evicted on
-    /// model swap (any switch away from the cached ModelKind) and on
-    /// full release.
-    warm_upscale_engine: WarmEngine,
-    /// The colorize run in flight (one at a time), its cancel flag (read
-    /// before and after the model's one run), its results and its warm
-    /// engine, released with every other session on a model switch.
-    colorize_active: Arc<AtomicBool>,
-    colorize_cancel: Arc<AtomicBool>,
-    colorize_result_tx: mpsc::Sender<ColorizeResult>,
-    colorize_result_rx: mpsc::Receiver<ColorizeResult>,
-    warm_colorize_engine: WarmEngine,
+    /// The colorize run. Its cancel flag is read before and after the
+    /// model's one run; its engine is released with every other session
+    /// on a model switch.
+    colorize: RunSlot<ColorizeResult>,
     /// SAM 2 encoder results channel. The rayon job sends here when
     /// the embedding is ready (or an error). Drained each frame from
     /// pump_sam_encoder_results (called via drain_background_channels).
@@ -585,9 +658,7 @@ impl Processor {
     ) -> Self {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
-        let (upscale_result_tx, upscale_result_rx) = mpsc::channel();
         let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
-        let (colorize_result_tx, colorize_result_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         let (faces_tx, faces_rx) = mpsc::channel();
@@ -608,20 +679,12 @@ impl Processor {
             inpaint_runs: HashMap::new(),
             inpaint_bridge_tx,
             inpaint_bridge_rx,
-            upscale_active: Arc::new(AtomicBool::new(false)),
-            upscale_cancel: Arc::new(AtomicBool::new(false)),
+            upscale: RunSlot::new(),
             upscale_run_options: std::sync::OnceLock::new(),
-            upscale_result_tx,
-            upscale_result_rx,
             upscale_preview_tx,
             upscale_preview_rx,
             dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
-            warm_upscale_engine: Arc::new(Mutex::new(None)),
-            colorize_active: Arc::new(AtomicBool::new(false)),
-            colorize_cancel: Arc::new(AtomicBool::new(false)),
-            colorize_result_tx,
-            colorize_result_rx,
-            warm_colorize_engine: Arc::new(Mutex::new(None)),
+            colorize: RunSlot::new(),
             sam_encoder_tx,
             sam_encoder_rx,
             sam_decoder_tx,
@@ -684,13 +747,18 @@ impl Processor {
 
     #[cfg(test)]
     pub(crate) fn set_upscale_in_flight_for_test(&self, active: bool) {
-        self.upscale_active.store(active, Ordering::Release);
+        self.upscale.active.store(active, Ordering::Release);
     }
 
     /// `true` while an upscale dispatch is in flight. The intent
     /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this.
     pub fn is_upscale_in_flight(&self) -> bool {
-        self.upscale_active.load(Ordering::Acquire)
+        self.upscale.in_flight()
+    }
+
+    /// `true` while an upscale or a colorize is in flight.
+    pub fn is_run_in_flight(&self) -> bool {
+        self.upscale.in_flight() || self.colorize.in_flight()
     }
 
     /// Per-item generation counter ensures a fresh stroke supersedes the
@@ -836,7 +904,7 @@ impl Processor {
     pub(crate) fn release_all_sessions(&mut self) {
         prunr_core::inpaint::release_all_lama_sessions();
         self.release_upscale_engine();
-        *lock_warm_engine(&self.warm_colorize_engine) = None;
+        self.colorize.release_engine();
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -847,7 +915,7 @@ impl Processor {
         model_kind: prunr_core::ModelKind,
         cpu_only: bool,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
-        cached_warm_engine(&self.warm_upscale_engine, WarmEngineKey { kind: model_kind, cpu_only })
+        cached_warm_engine(&self.upscale.warm, WarmEngineKey { kind: model_kind, cpu_only })
     }
 
     /// Drops the cached upscale engine. Call on:
@@ -856,7 +924,7 @@ impl Processor {
     ///   mismatch, so this is the switch-away-from-upscale case).
     /// - Hardware settings change.
     pub(crate) fn release_upscale_engine(&mut self) {
-        *lock_warm_engine(&self.warm_upscale_engine) = None;
+        self.upscale.release_engine();
     }
 
     /// Test-only accessor for injecting or inspecting the warm-engine slot.
@@ -864,7 +932,7 @@ impl Processor {
     pub(crate) fn warm_upscale_engine_for_test(
         &mut self,
     ) -> std::sync::MutexGuard<'_, Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)>> {
-        lock_warm_engine(&self.warm_upscale_engine)
+        lock_warm_engine(&self.upscale.warm)
     }
 
     /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
@@ -1167,17 +1235,15 @@ impl Processor {
     }
 
     /// Spawn a background thread that upscales the input and posts the
-    /// result back via `upscale_result_rx`. The caller is responsible for
-    /// having verified that the model is installed before dispatching.
+    /// result back through `pump_upscale_results`. The caller is
+    /// responsible for having verified that the model is installed before
+    /// dispatching.
     ///
     /// `model_id` is the model to run (`upscale::model_for_scale`), which
     /// may be Real-ESRGAN's 2x model for a 2x Real-ESRGAN upscale.
     ///
-    /// Pre-flight admission check refuses the dispatch when free RAM is
-    /// below `descriptor.working_set_mb`; a warning is logged and the
-    /// function returns without spawning. The toolbar's `can_process_intent`
-    /// gate should have prevented reaching this path, but the check here
-    /// is the last-resort guard at the dispatch layer.
+    /// Refused (logged, nothing spawned) when free RAM is below the
+    /// model's working set.
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
@@ -1190,23 +1256,16 @@ impl Processor {
         // One upscale runs at a time, so it gets every core; "Parallel
         // jobs" splits cores between images of a batch, not this run.
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
-        let free_mb = crate::hardware::available_ram_mb_throttled();
-        if let Some(d) = prunr_models::descriptor(model_id) {
-            if !admission_check(d.working_set_mb, free_mb) {
-                tracing::warn!(
-                    model = ?model_id,
-                    working_set_mb = d.working_set_mb,
-                    free_mb,
-                    "upscale admission refused: insufficient RAM"
-                );
-                return;
-            }
+        let Some(descriptor) = prunr_models::descriptor(model_id) else {
+            tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
+            return;
+        };
+        if !admitted(descriptor) {
+            return;
         }
 
         let scale_factor = output_scale.factor();
 
-        // Resolve ModelKind + optimization level so we can look up the
-        // warm-engine cache.
         let cache_model_kind = match prunr_core::ModelKind::try_from(model_id) {
             Ok(k) => k,
             Err(id) => {
@@ -1217,21 +1276,8 @@ impl Processor {
                 return;
             }
         };
-        let cache_descriptor = match prunr_models::descriptor(model_id) {
-            Some(d) => d,
-            None => {
-                tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
-                return;
-            }
-        };
-        let level = prunr_core::upscale::pick_optimization_level(cache_descriptor);
+        let level = prunr_core::upscale::pick_optimization_level(descriptor);
 
-        // Release stores pair with the Acquire load in
-        // `upscale::tiling::upscale_tiled` (cancel flag) and the Acquire
-        // load in `is_upscale_in_flight` (active flag). Without the
-        // pairing, weakly-ordered architectures can delay propagation.
-        self.upscale_active.store(true, Ordering::Release);
-        self.upscale_cancel.store(false, Ordering::Release);
         // First dispatch initializes the shared RunOptions; subsequent
         // dispatches reuse it. ORT itself is initialised at app start.
         let run_options = self.upscale_run_options.get_or_init(|| {
@@ -1246,14 +1292,16 @@ impl Processor {
         let run = self.dispatch_progress.begin(
             super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Upscale, prunr_core::Step::LoadingModel.label()),
         );
-        let sink = UpscaleSink { run: run.clone(), item_id, previews: self.upscale_preview_tx.clone() };
+        // Release stores in `begin` pair with the Acquire load in
+        // `upscale::tiling::upscale_tiled` (cancel flag) and in
+        // `is_upscale_in_flight` (active flag).
+        let done = self.upscale.begin(run.clone());
+        let sink = UpscaleSink { run, item_id, previews: self.upscale_preview_tx.clone() };
         let progress = prunr_core::Progress::new(Arc::new(sink))
-            .with_cancel(Arc::clone(&self.upscale_cancel))
+            .with_cancel(Arc::clone(&self.upscale.cancel))
             .with_tile_previews(UPSCALE_PREVIEW_EDGE);
 
-        let active_flag = Arc::clone(&self.upscale_active);
-        let result_tx = self.upscale_result_tx.clone();
-        let engine_slot = Arc::clone(&self.warm_upscale_engine);
+        let engine_slot = Arc::clone(&self.upscale.warm);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
         // this RunOptions aborts the running `Session::run` mid-tile.
         let run_options_for_thread = Arc::clone(run_options);
@@ -1266,9 +1314,7 @@ impl Processor {
                 Ok(input) => build_inference_input(&input, recipe.upscale.pre_denoise()),
                 Err(err) => {
                     tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
-                    let _ = result_tx.send(UpscaleResult { item_id, result: Err(err), recipe });
-                    active_flag.store(false, Ordering::Release);
-                    run.end();
+                    done.deliver(UpscaleResult { item_id, result: Err(err), recipe });
                     return;
                 }
             };
@@ -1283,9 +1329,7 @@ impl Processor {
                 Ok(engine) => engine,
                 Err(err) => {
                     tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
-                    let _ = result_tx.send(UpscaleResult { item_id, result: Err(err), recipe });
-                    active_flag.store(false, Ordering::Release);
-                    run.end();
+                    done.deliver(UpscaleResult { item_id, result: Err(err), recipe });
                     return;
                 }
             };
@@ -1303,13 +1347,7 @@ impl Processor {
                 let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs, None);
                 UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
             });
-            // Send the result BEFORE clearing the active flag. Reversed
-            // ordering would let the UI thread observe `is_in_flight=false`
-            // and enable Process before the previous result has landed in
-            // the channel.
-            let _ = result_tx.send(UpscaleResult { item_id, result, recipe });
-            active_flag.store(false, Ordering::Release);
-            run.end();
+            done.deliver(UpscaleResult { item_id, result, recipe });
         });
     }
 
@@ -1328,11 +1366,10 @@ impl Processor {
     /// Idempotent.
     pub(crate) fn cancel_upscale(&self) {
         // Esc and the model-change hook call this unconditionally.
-        if !self.is_upscale_in_flight() {
+        // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
+        if !self.upscale.cancel() {
             return;
         }
-        // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
-        self.upscale_cancel.store(true, Ordering::Release);
         // The terminate call returns immediately; ORT aborts the running
         // session as soon as it checks between kernel launches.
         let terminate_ok = self
@@ -1355,48 +1392,48 @@ impl Processor {
     /// Non-blocking; returns an empty `Vec` when nothing is ready. Caller
     /// applies each result to the matching `BatchItem`.
     pub(crate) fn pump_upscale_results(&mut self) -> Vec<UpscaleResult> {
-        let mut out = Vec::new();
-        while let Ok(r) = self.upscale_result_rx.try_recv() {
-            out.push(r);
-        }
-        out
+        self.upscale.drain()
     }
 
     /// `true` while a colorize run is in flight.
     pub fn is_colorize_in_flight(&self) -> bool {
-        self.colorize_active.load(Ordering::Acquire)
+        self.colorize.in_flight()
     }
 
     #[cfg(test)]
     pub(crate) fn set_colorize_in_flight_for_test(&self, active: bool) {
-        self.colorize_active.store(active, Ordering::Release);
+        self.colorize.active.store(active, Ordering::Release);
+    }
+
+    /// Deliver an upscale or colorize for `item_id` that ended with `err`.
+    #[cfg(test)]
+    pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
+        match engine {
+            super::item::Engine::Upscale => { let _ = self.upscale.tx.send(UpscaleResult { item_id, result: Err(err), recipe }); }
+            super::item::Engine::Colorize => { let _ = self.colorize.tx.send(ColorizeResult { item_id, result: Err(err), recipe }); }
+            other => unreachable!("{other:?} is not an upscale or colorize"),
+        }
     }
 
     /// Colorize `input` on a background thread; the result comes back
     /// through `pump_colorize_results`. Refused (logged) when free RAM is
-    /// below the model's working set, like `dispatch_upscale`.
+    /// below the model's working set.
     pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: RunInput, cpu_only: bool, recipe: ProcessingRecipe) {
-        let model_id = prunr_models::ModelId::DdcolorTiny;
-        let free_mb = crate::hardware::available_ram_mb_throttled();
-        if let Some(d) = prunr_models::descriptor(model_id) {
-            if !admission_check(d.working_set_mb, free_mb) {
-                tracing::warn!(model = ?model_id, working_set_mb = d.working_set_mb, free_mb, "colorize admission refused: insufficient RAM");
-                return;
-            }
+        let kind = super::settings::COLORIZER;
+        let Some(descriptor) = prunr_models::descriptor(kind.into()) else { return };
+        if !admitted(descriptor) {
+            return;
         }
+        let level = prunr_core::upscale::pick_optimization_level(descriptor);
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
-        self.colorize_active.store(true, Ordering::Release);
-        self.colorize_cancel.store(false, Ordering::Release);
         let run = self.dispatch_progress.begin(
             super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Colorize, prunr_core::Step::LoadingModel.label()),
         );
-        let progress = prunr_core::Progress::new(Arc::new(run.clone())).with_cancel(Arc::clone(&self.colorize_cancel));
-        let active_flag = Arc::clone(&self.colorize_active);
-        let result_tx = self.colorize_result_tx.clone();
-        let engine_slot = Arc::clone(&self.warm_colorize_engine);
+        let done = self.colorize.begin(run.clone());
+        let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(Arc::clone(&self.colorize.cancel));
+        let engine_slot = Arc::clone(&self.colorize.warm);
         std::thread::spawn(move || {
-            let key = WarmEngineKey { kind: prunr_core::ModelKind::DdcolorTiny, cpu_only };
-            let level = prunr_core::engine::GraphOptimizationLevel::Level3;
+            let key = WarmEngineKey { kind, cpu_only };
             let result = input.load().and_then(|input| {
                 let engine = ensure_warm_engine(&engine_slot, key, intra_threads, level)?;
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
@@ -1407,27 +1444,27 @@ impl Processor {
             if let Err(err) = &result {
                 tracing::warn!(item_id, %err, "colorize run did not finish");
             }
-            // Sent before the active flag clears, so Process never enables
-            // ahead of the result landing.
-            let _ = result_tx.send(ColorizeResult { item_id, result, recipe });
-            active_flag.store(false, Ordering::Release);
-            run.end();
+            done.deliver(ColorizeResult { item_id, result, recipe });
         });
     }
 
     /// Cancel the colorize run in flight. The model's one run is not
     /// interrupted; its result is dropped when it returns. Idempotent.
     pub(crate) fn cancel_colorize(&self) {
-        if !self.is_colorize_in_flight() {
-            return;
+        if self.colorize.cancel() {
+            self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
         }
-        self.colorize_cancel.store(true, Ordering::Release);
-        self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
+    }
+
+    /// Cancel the upscale or colorize in flight, whichever it is.
+    pub(crate) fn cancel_runs(&self) {
+        self.cancel_upscale();
+        self.cancel_colorize();
     }
 
     /// Drain finished colorize runs. Non-blocking.
     pub(crate) fn pump_colorize_results(&mut self) -> Vec<ColorizeResult> {
-        self.colorize_result_rx.try_iter().collect()
+        self.colorize.drain()
     }
 
     /// Dispatch the SAM 2 encoder for `item_id`. Runs once per source image;
@@ -1898,7 +1935,7 @@ mod tests {
     #[test]
     fn is_upscale_in_flight_true_when_active_flag_set() {
         let p = fixture();
-        p.upscale_active.store(true, Ordering::Release);
+        p.upscale.active.store(true, Ordering::Release);
         assert!(p.is_upscale_in_flight());
     }
 
@@ -2383,7 +2420,7 @@ mod upscale_dispatch_tests {
 // ── Warm-engine cache boundary contract ──────────────────────────────────────
 //
 // The four tests below pin the cache-hit / cache-eviction / release semantics
-// on `Processor::warm_upscale_engine` without exercising real upscale inference.
+// on the upscale run's warm engine without exercising real upscale inference.
 // Tests 1-3 inject a sentinel Arc<OrtEngine> via the test-only accessor and
 // assert pointer-identity or slot emptiness. Test 4 needs no engine at all.
 //
