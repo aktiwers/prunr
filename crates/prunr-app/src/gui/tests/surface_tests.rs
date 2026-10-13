@@ -206,7 +206,7 @@ fn a_depth_knob_without_the_model_offers_the_store() {
     }
     settle(&mut h);
     click(&mut h, "Depth");
-    click(&mut h, crate::gui::views::get_model::label(crate::gui::views::depth_chip::DEPTH_MODEL));
+    click(&mut h, crate::gui::views::get_model::label(prunr_core::depth::MODEL.into()));
     settle(&mut h);
     assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
     assert!(!egui::Popup::is_any_open(&h.ctx), "the Depth strip closed");

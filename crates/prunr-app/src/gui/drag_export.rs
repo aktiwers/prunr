@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 use image::DynamicImage;
 use prunr_core::{FillStyle, MaskSettings};
 
-use super::item::{BatchItem, ImageSource};
+use super::item::{BatchItem, ExportDepth, ImageSource};
 use super::item_settings::ItemSettings;
 use super::settings::LineMode;
 use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
@@ -158,7 +158,7 @@ pub(crate) struct LayerJob {
     /// The faces Restore faces blends into the photo, as on the canvas.
     faces: Option<super::live_preview::FacesInput>,
     /// The photo's depth map, for lines that fade with distance.
-    depth: Option<Arc<prunr_core::depth::DepthMap>>,
+    depth: super::item::DepthSource,
 }
 
 impl LayerJob {
@@ -174,25 +174,12 @@ impl LayerJob {
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
             faces: item.faces_input(super::item::FaceStage::Photo),
-            depth: item.depth.clone(),
+            depth: item.depth_source(),
         }
     }
 
     pub(crate) fn filename(&self) -> &str {
         &self.filename
-    }
-
-    /// The original photo's depth map: the item's, or measured here (a
-    /// save thread) when it has none yet.
-    fn depth_map(&self) -> Option<Arc<prunr_core::depth::DepthMap>> {
-        if let Some(depth) = &self.depth {
-            return Some(Arc::clone(depth));
-        }
-        let photo = self.source_rgba.clone().or_else(|| self.source.decode_rgba().ok())?;
-        super::processor::measure_depth_once(&photo)
-            .map(Arc::new)
-            .map_err(|err| tracing::warn!(item_id = self.item_id, %err, "layer export: depth"))
-            .ok()
     }
 
     /// The item kept what layers are made from (they were dropped under
@@ -202,13 +189,13 @@ impl LayerJob {
     }
 
     /// Every layer it has as `(filename, PNG bytes)`; empty without any.
-    pub(crate) fn render_bytes(&self) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn render_bytes(&self, depth: &ExportDepth) -> Vec<(String, Vec<u8>)> {
         let Some(src) = LayerSource::of(self) else { return Vec::new() };
         let seg = self.seg.as_ref().and_then(CompressedTensor::bundle);
         LayerKind::ALL.iter()
             .copied()
             .filter_map(|kind| {
-                let bytes = match render_layer(self, kind, &src, seg.as_ref())? {
+                let bytes = match render_layer(self, kind, &src, seg.as_ref(), depth)? {
                     LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png(&rgba).ok()?,
                     LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).ok()?,
                 };
@@ -246,6 +233,7 @@ fn render_layer(
     kind: LayerKind,
     src: &LayerSource,
     seg: Option<&SegBundle>,
+    depth: &ExportDepth,
 ) -> Option<LayerOutput> {
     let original = &src.original;
     let correction = src.correction.as_deref();
@@ -273,7 +261,11 @@ fn render_layer(
             let edge = job.settings.edge_settings();
             let tensors = job.edges.as_ref()?.for_compose(&edge)?;
             let amount = job.settings.line_fade();
-            let depth = (amount > 0.0).then(|| job.depth_map()).flatten();
+            let depth = (amount > 0.0)
+                .then(|| job.depth.get(depth, job.source_rgba.as_deref())
+                    .map_err(|err| tracing::warn!(item_id, %err, "layer export: depth"))
+                    .ok())
+                .flatten();
             let fade = depth.as_deref().map(|depth| prunr_core::depth::LineFade { depth, amount });
             let rgba = prunr_core::compose_whole_photo(&tensors, original, &edge, fade);
             Some(LayerOutput::Rgba(rgba))
@@ -303,8 +295,9 @@ fn write_layer(
     kind: LayerKind,
     src: &LayerSource,
     seg: Option<&SegBundle>,
+    depth: &ExportDepth,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(layer) = render_layer(job, kind, src, seg) else { return Ok(None) };
+    let Some(layer) = render_layer(job, kind, src, seg, depth) else { return Ok(None) };
     let path = item_dir(job.item_id).join(make_layer_filename(&job.filename, kind));
     write_atomically(&path, |w| match layer {
         LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, w),
@@ -352,12 +345,12 @@ impl Composite {
         }
     }
 
-    fn write(&self) -> std::io::Result<PathBuf> {
+    fn write(&self, depth: &ExportDepth) -> std::io::Result<PathBuf> {
         let path = item_dir(self.item_id).join(&self.filename);
         match &self.result {
             Some((result, bg)) => {
                 let rgba = result.load().ok_or_else(|| std::io::Error::other("the result is no longer there"))?;
-                let baked = bg.bake(&rgba);
+                let baked = bg.bake(&rgba, depth);
                 write_atomically(&path, |w| prunr_core::encode_rgba_png_into(&baked, w))?;
             }
             None => {
@@ -395,20 +388,20 @@ impl DragFiles {
 
     /// Render and write the files; slow on a big image, so off the UI
     /// thread where it can be.
-    pub(crate) fn write(&self) -> std::io::Result<Vec<PathBuf>> {
+    pub(crate) fn write(&self, depth: &ExportDepth) -> std::io::Result<Vec<PathBuf>> {
         if let Some(job) = &self.layers {
             if let Some(src) = LayerSource::of(job) {
                 // One seg decompress shared by Subject and Mask.
                 let seg = job.seg.as_ref().and_then(CompressedTensor::bundle);
                 let paths = LayerKind::ALL.iter()
-                    .filter_map(|&k| write_layer(job, k, &src, seg.as_ref()).transpose())
+                    .filter_map(|&k| write_layer(job, k, &src, seg.as_ref(), depth).transpose())
                     .collect::<std::io::Result<Vec<_>>>()?;
                 if !paths.is_empty() {
                     return Ok(paths);
                 }
             }
         }
-        Ok(vec![self.composite.write()?])
+        Ok(vec![self.composite.write(depth)?])
     }
 }
 
@@ -416,11 +409,12 @@ impl DragFiles {
 /// baked copy of its image); the results come back in the order given.
 pub(crate) fn write_all(jobs: Vec<DragFiles>) -> Vec<std::io::Result<Vec<PathBuf>>> {
     use rayon::prelude::*;
+    let depth = ExportDepth::default();
     match rayon::ThreadPoolBuilder::new().num_threads(super::drag_export_state::writers()).build() {
-        Ok(pool) => pool.install(|| jobs.par_iter().map(DragFiles::write).collect()),
+        Ok(pool) => pool.install(|| jobs.par_iter().map(|job| job.write(&depth)).collect()),
         Err(err) => {
             tracing::warn!(%err, "drag writer pool failed to start; writing one at a time");
-            jobs.iter().map(DragFiles::write).collect()
+            jobs.iter().map(|job| job.write(&depth)).collect()
         }
     }
 }
@@ -540,7 +534,7 @@ mod tests {
         item.commit(crate::gui::timeline::StepKind::Process);
         assert!(item.park_result());
         assert!(item.result_rgba.is_none());
-        let paths = DragFiles::of(&item, spec).write().unwrap();
+        let paths = DragFiles::of(&item, spec).write(&Default::default()).unwrap();
         assert!(paths[0].ends_with("parked.prunr.png"), "{:?}", paths[0]);
         assert_eq!(image::open(&paths[0]).unwrap().to_rgba8().get_pixel(0, 0).0, [0, 200, 0, 255]);
         let _ = std::fs::remove_file(&paths[0]);
@@ -555,7 +549,7 @@ mod tests {
         a.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))));
         let mut b = processed_item(32, "same-name.jpg");
         b.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]))));
-        let (pa, pb) = (DragFiles::of(&a, spec).write().unwrap(), DragFiles::of(&b, spec).write().unwrap());
+        let (pa, pb) = (DragFiles::of(&a, spec).write(&Default::default()).unwrap(), DragFiles::of(&b, spec).write(&Default::default()).unwrap());
         assert_ne!(pa[0], pb[0]);
         assert_eq!(pa[0].file_name(), pb[0].file_name(), "the dropped files keep the plain name");
         let red = image::open(&pa[0]).unwrap().to_rgba8();
@@ -612,7 +606,7 @@ mod tests {
         let blank = LayerSource { original: DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10)), correction: None };
         let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
         for kind in LayerKind::ALL {
-            assert!(render_layer(&job, kind, &blank, None).is_none());
+            assert!(render_layer(&job, kind, &blank, None, &Default::default()).is_none());
         }
     }
 
@@ -645,7 +639,7 @@ mod tests {
 
         let src = LayerSource { original: photo.clone(), correction: None };
         let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
-        let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None) else {
+        let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None, &Default::default()) else {
             panic!("the Lines layer renders from the cached lines");
         };
         let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings(), None);
@@ -675,10 +669,10 @@ mod tests {
         let seg = item.cached_tensor.as_ref().and_then(|t| t.bundle());
 
         let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
-        let Some(LayerOutput::Gray(mask)) = render_layer(&job, LayerKind::Mask, &src, seg.as_ref()) else { panic!("mask layer") };
+        let Some(LayerOutput::Gray(mask)) = render_layer(&job, LayerKind::Mask, &src, seg.as_ref(), &Default::default()) else { panic!("mask layer") };
         assert_eq!(mask.get_pixel(5, 5)[0], 255, "the restored pixel is in the mask");
         assert_eq!(mask.get_pixel(9, 9)[0], 0, "the rest stays out");
-        let Some(LayerOutput::Rgba(subject)) = render_layer(&job, LayerKind::Subject, &src, seg.as_ref()) else { panic!("subject layer") };
+        let Some(LayerOutput::Rgba(subject)) = render_layer(&job, LayerKind::Subject, &src, seg.as_ref(), &Default::default()) else { panic!("subject layer") };
         assert_eq!(subject.get_pixel(5, 5).0, [7, 8, 9, 255], "the subject is cut from the image the cut-out ran on");
     }
 
@@ -699,7 +693,7 @@ mod tests {
         item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let job = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
-        let files = std::thread::spawn(move || job.render_bytes()).join().expect("render thread");
+        let files = std::thread::spawn(move || job.render_bytes(&Default::default())).join().expect("render thread");
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["photo-subject.png", "photo-mask.png"]);
         assert!(files.iter().all(|(_, bytes)| bytes.starts_with(b"\x89PNG")));
@@ -720,7 +714,7 @@ mod tests {
         item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
 
-        let files = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Select).render_bytes();
+        let files = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Select).render_bytes(&Default::default());
         let (_, mask) = files.iter().find(|(n, _)| n == "photo-mask.png").expect("a mask layer");
         let mask = image::load_from_memory(mask).expect("png").to_luma8();
         assert_eq!(mask.get_pixel(0, 4)[0], 0, "the erased half is gone");

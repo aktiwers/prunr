@@ -7,7 +7,7 @@ use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
 use crate::color::{lab_to_srgb, srgb_lightness};
-use crate::math::{bilinear_taps, Tap};
+use crate::math::{bilinear_sample, bilinear_taps, Tap};
 use crate::progress::{Progress, Step};
 use crate::{CoreError, OrtEngine};
 
@@ -98,12 +98,7 @@ pub fn colorized(src: &RgbaImage, plane: &[f32], strength: f32) -> RgbaImage {
         .zip(src.as_raw().par_chunks_exact(row_len))
         .zip(ys.par_iter())
         .for_each(|((row, src_row), ty)| {
-            let (r0, r1) = (ty.lo * stride, ty.hi * stride);
-            let sample = |p: &[f32], tx: &Tap| {
-                let top = p[r0 + tx.lo] + (p[r0 + tx.hi] - p[r0 + tx.lo]) * tx.t;
-                let bot = p[r1 + tx.lo] + (p[r1 + tx.hi] - p[r1 + tx.lo]) * tx.t;
-                top + (bot - top) * ty.t
-            };
+            let sample = |p: &[f32], tx: &Tap| bilinear_sample(p, stride, tx, ty);
             for ((px, s), tx) in row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).zip(&xs) {
                 let (r, g, b) = lab_to_srgb(
                     srgb_lightness(s[0], s[1], s[2]),

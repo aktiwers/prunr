@@ -49,11 +49,10 @@ impl ModelKind {
             | ModelKind::FourXNomos2RealPlksr => true,
         }
     }
-}
 
-impl From<ModelKind> for prunr_models::ModelId {
-    fn from(kind: ModelKind) -> Self {
-        match kind {
+    /// The registry id; `const` so a `ModelId` constant can name a kind.
+    pub const fn model_id(self) -> prunr_models::ModelId {
+        match self {
             ModelKind::Silueta => prunr_models::ModelId::Silueta,
             ModelKind::U2net => prunr_models::ModelId::U2net,
             ModelKind::BiRefNetLite => prunr_models::ModelId::BiRefNetLite,
@@ -66,6 +65,12 @@ impl From<ModelKind> for prunr_models::ModelId {
             ModelKind::DdcolorTiny => prunr_models::ModelId::DdcolorTiny,
             ModelKind::DepthAnythingV2Small => prunr_models::ModelId::DepthAnythingV2Small,
         }
+    }
+}
+
+impl From<ModelKind> for prunr_models::ModelId {
+    fn from(kind: ModelKind) -> Self {
+        kind.model_id()
     }
 }
 

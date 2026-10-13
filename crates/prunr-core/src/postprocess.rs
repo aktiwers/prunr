@@ -510,7 +510,7 @@ pub fn effect_backdrop(
         BgEffect::LensBlur { amount_pct } => {
             let depth = depth?;
             let focus = crate::depth::Focus::Depth(crate::depth::backdrop_focus(depth, cutout));
-            crate::depth::lens_blur(source, depth, focus, f32::from(amount_pct.min(100)) / 100.0)
+            crate::depth::lens_blur(source, depth, focus, crate::math::pct(amount_pct))
         }
     };
     for p in img.pixels_mut() {

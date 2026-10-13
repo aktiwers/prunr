@@ -28,7 +28,7 @@ impl HardwareInstallCache {
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
             faces: crate::gui::item_settings::FaceModel::ALL.map(|m| prunr_models::is_available(m.id())),
-            depth: prunr_models::is_available(ModelId::DepthAnythingV2Small),
+            depth: prunr_models::is_available(prunr_core::depth::MODEL.into()),
             models: crate::gui::settings::SettingsModel::ALL.iter()
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))
                 .fold(0, |bits, m| bits | 1 << m.index()),
