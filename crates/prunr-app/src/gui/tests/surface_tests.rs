@@ -206,7 +206,7 @@ fn a_depth_knob_without_the_model_offers_the_store() {
     }
     settle(&mut h);
     click(&mut h, "Depth");
-    click(&mut h, "Get the depth model");
+    click(&mut h, crate::gui::views::get_model::label(crate::gui::views::depth_chip::DEPTH_MODEL));
     settle(&mut h);
     assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
     assert!(!egui::Popup::is_any_open(&h.ctx), "the Depth strip closed");
@@ -490,6 +490,27 @@ fn the_sd_eraser_strip_offers_try_another() {
     let node = tree.iter().find(|n| n.name.as_deref() == Some("Try another")).expect("Try another on the strip");
     assert!(node.disabled, "greyed before any fill");
     super::tree_tests::assert_all_controls_named(&h, "SD eraser strip");
+}
+
+/// The Model picker lists a model that is not downloaded with "Get" and
+/// its size; picking it opens the Model Store on its section instead of
+/// switching to a model that cannot run.
+#[test]
+fn the_picker_offers_a_model_that_is_not_downloaded() {
+    use crate::gui::views::get_model;
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.hardware_install_cache = Default::default();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+    }
+    settle(&mut h);
+    click(&mut h, "Model");
+    let row = format!("BiRefNet\n{}", get_model::badge_and_size(prunr_models::ModelId::BiRefNetLite));
+    click(&mut h, &row);
+    settle(&mut h);
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Segmentation)));
+    assert_eq!(h.state().settings.model, crate::gui::settings::SettingsModel::None, "the model did not switch");
 }
 
 /// Without a face model the Faces strip offers the Model Store on its

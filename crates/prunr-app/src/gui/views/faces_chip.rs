@@ -8,7 +8,7 @@ use egui_material_icons::icons::ICON_FACE;
 use crate::gui::hardware_cache::HardwareInstallCache;
 use crate::gui::item_settings::{FaceModel, FaceSettings};
 
-use super::chip;
+use super::{chip, get_model};
 use super::{fmt, hint};
 
 const PANEL_WIDTH: f32 = 360.0;
@@ -48,7 +48,13 @@ const WHICH: [chip::Choice<bool>; 2] = [
 pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
     let mut change = FacesChange::default();
     let any_installed = FaceModel::ALL.iter().any(|&m| installed.has_face_model(m));
-    let summary = if s.on { fmt::percent(f32::from(s.strength_pct) / 100.0) } else { "Off".to_string() };
+    let summary = if !any_installed {
+        get_model::BADGE.to_string()
+    } else if s.on {
+        fmt::percent(f32::from(s.strength_pct) / 100.0)
+    } else {
+        "Off".to_string()
+    };
     let group = chip::GroupChip {
         id_salt: "faces",
         icon: ICON_FACE.codepoint,
@@ -63,7 +69,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
     chip::strip_chip(ui, group, "More face settings", header, |ui, part| match part {
         chip::Part::Quick => {
             if !any_installed {
-                ui.label(egui::RichText::new("Needs a face model (about 300 MB).").color(crate::gui::theme::TEXT_SECONDARY));
+                ui.label(egui::RichText::new(needs_text()).color(crate::gui::theme::TEXT_SECONDARY));
                 change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get a face model").clicked();
                 return;
             }
@@ -83,8 +89,10 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
                 enabled: installed.has_face_model(m),
             });
             change.search |= chip::choice_row(ui, "Model", &models, &mut s.model);
-            if FaceModel::ALL.iter().any(|&m| !installed.has_face_model(m)) {
-                change.open_store |= chip::button(ui, chip::ButtonKind::Secondary, "Get face models").clicked();
+            for m in FaceModel::ALL {
+                if !installed.has_face_model(m) {
+                    change.open_store |= get_model::button(ui, m.id());
+                }
             }
             change.blend |= strength_row(ui, s);
             hint(ui, "Up to 50% adds detail and keeps the photo's own shading; above, the redrawn shading too.");
@@ -94,6 +102,12 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
         }
     });
     change
+}
+
+/// "Faces needs a face model, 295 to 340 MB.", built once.
+fn needs_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| get_model::needs_one_of("Faces", "a face model", &FaceModel::ALL.map(FaceModel::id)))
 }
 
 fn strength_row(ui: &mut Ui, s: &mut FaceSettings) -> bool {

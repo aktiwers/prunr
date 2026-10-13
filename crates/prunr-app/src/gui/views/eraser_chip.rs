@@ -13,12 +13,8 @@ use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 use super::chip::{self, GroupChip};
-use super::{differs, fmt, hint};
+use super::{differs, fmt, get_model, hint};
 
-const LCM_DOWNLOAD_HINT: &str =
-    "Download Eraser (SD 1.5 LCM, fast) in the Model Store to enable.";
-const TAESD_DOWNLOAD_HINT: &str =
-    "Download the fast decoder in the Model Store to enable.";
 
 #[derive(Default)]
 pub struct EraserRowChange {
@@ -82,8 +78,8 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         ui.add_space(theme::SPACE_XS);
 
         let mut fast = brush.sd_use_taesd_effective_with_avail(taesd_installed);
-        let reason = (!taesd_installed).then_some(TAESD_DOWNLOAD_HINT);
-        if chip::gated(ui, reason, |ui| chip::toggle_row(ui, "Fast decoder", &mut fast)).changed {
+        let reason = (!taesd_installed).then(|| get_model::needs("The fast decoder", prunr_models::ModelId::TaesdFp16));
+        if chip::gated(ui, reason.as_deref(), |ui| chip::toggle_row(ui, "Fast decoder", &mut fast)).changed {
             brush.sd_use_taesd = Some(fast);
             committed = true;
         }
@@ -156,7 +152,8 @@ fn render_quality_chip(
         for quality in SdScheduler::ALL {
             let (label, desc) = (quality.label(), quality.description());
             if quality == SdScheduler::Lcm && !lcm_bundle_installed {
-                chip::gated(ui, Some(LCM_DOWNLOAD_HINT), |ui| chip::picker_row(ui, false, label, desc));
+                let reason = get_model::needs(label, prunr_models::ModelId::SdV15LcmInpaintFp16);
+                chip::gated(ui, Some(&reason), |ui| chip::picker_row(ui, false, label, desc));
                 continue;
             }
             let selected = active == quality;
