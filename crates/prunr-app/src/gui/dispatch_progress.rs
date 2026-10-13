@@ -31,6 +31,8 @@ pub enum ProgressKind {
     Colorize,
     /// Restore faces: a few seconds, not cancellable.
     Faces,
+    /// Measuring a photo's depth: under a second, not cancellable.
+    Depth,
 }
 
 /// What Cancel stops. An eraser run needs the item it runs on; without
@@ -49,7 +51,7 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
-        ProgressKind::Faces => None,
+        ProgressKind::Faces | ProgressKind::Depth => None,
     }
 }
 
@@ -556,6 +558,11 @@ mod tests {
             cancel_target_for(ProgressKind::Upscale, Some(99)),
             Some(CancelTarget::Upscale),
         );
+    }
+
+    #[test]
+    fn a_depth_run_has_no_cancel() {
+        assert_eq!(cancel_target_for(ProgressKind::Depth, Some(3)), None);
     }
 
     #[test]

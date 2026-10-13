@@ -56,7 +56,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         && app.magic_brush_state.is_active()
         && !app.magic_brush_preparing()
         && matches!(app_state, AppState::Loaded | AppState::Done);
-    let any_brush_tool_active = brush_active || magic_brush_active;
+    // Picking the Depth chip's focus takes the next left click too.
+    let picking_focus = app.picking_depth_focus && matches!(app_state, AppState::Loaded | AppState::Done);
+    let any_brush_tool_active = brush_active || magic_brush_active || picking_focus;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
     let canvas_gets_zoom = !pointer_blocked;
@@ -191,21 +193,29 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             encoder_pending: app.magic_brush_preparing(),
             can_reroll: app.can_reroll_intent(),
         };
+        let depth_before = app.settings.brush.magic_depth;
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
         app.apply_brush_change(change.brush);
+        if app.settings.brush.magic_depth && !depth_before {
+            app.offer_depth_model(ui.ctx());
+        }
         if change.try_another {
             app.handle_reroll_intent();
         }
     }
 
-    if brush_active && !pointer_blocked {
-        handle_brush_input(ui, app, canvas_rect);
-    }
+    if picking_focus && !pointer_blocked {
+        handle_focus_pick(ui, app, canvas_rect);
+    } else {
+        if brush_active && !pointer_blocked {
+            handle_brush_input(ui, app, canvas_rect);
+        }
 
-    // Magic Brush click/stroke input. Suppressed during encoder run (silently —
-    // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
-    if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
-        handle_magic_brush_input(ui, app, canvas_rect);
+        // Magic Brush click/stroke input. Suppressed during encoder run (silently —
+        // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
+        if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
+            handle_magic_brush_input(ui, app, canvas_rect);
+        }
     }
 
     if app.magic_brush_state.is_active() && app.magic_brush_preparing() {
@@ -296,6 +306,29 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     }
 }
 
+/// The Depth chip's "Set focus": a crosshair over the image, and the
+/// next click on it focuses there; a click beside it gives up.
+fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
+    let Some(item) = app.batch.selected_item() else { return };
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    let (clicked, hover) = ui.ctx().input(|i| (i.pointer.primary_clicked(), i.pointer.hover_pos()));
+    if hover.is_some_and(|p| canvas_rect.contains(p)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    if !clicked {
+        return;
+    }
+    match hover.filter(|p| img_rect.contains(*p)) {
+        Some(p) => {
+            let fx = ((p.x - img_rect.left()) / img_rect.width()).clamp(0.0, 1.0);
+            let fy = ((p.y - img_rect.top()) / img_rect.height()).clamp(0.0, 1.0);
+            app.set_depth_focus(fx, fy);
+        }
+        None if hover.is_some_and(|p| canvas_rect.contains(p)) => app.picking_depth_focus = false,
+        None => {}
+    }
+}
+
 /// Handle Magic Brush pointer events (click + drag-stroke) on the canvas.
 /// Suppressed when encoder is pending — clicks during "Preparing..." are
 /// silently ignored (per 33-UI-SPEC). Dispatches a SAM decoder job on
@@ -353,8 +386,12 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     });
 
     // No embedding yet? Render cursor + trail above but skip dispatch —
-    // the encoder must finish before a SAM prompt can run.
-    let Some(embedding) = embedding else { return };
+    // the encoder must finish before a SAM prompt can run. Selecting by
+    // depth reads the depth map instead.
+    let by_depth = app.settings.brush.magic_depth;
+    if !by_depth && embedding.is_none() {
+        return;
+    }
 
     let screen_radius = look.radius;
 
@@ -381,6 +418,12 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
+        // With Depth on a stroke selects like a click where it began.
+        if by_depth {
+            depth_click(app, item_id, stroke_pts[0], (source_w, source_h), mode);
+            return;
+        }
+        let Some(embedding) = embedding else { return };
         match prunr_core::sam::prompt::build_stroke_prompt(
             &stroke_pts,
             source_w,
@@ -398,11 +441,33 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
-            let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-            app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
+            if by_depth {
+                depth_click(app, item_id, (px, py), (source_w, source_h), mode);
+            } else if let Some(embedding) = embedding {
+                let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
+                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
+            }
         }
         app.magic_brush_state.clear_stroke();
     }
+}
+
+/// A Magic Brush click with Depth on: select everything near the clicked
+/// depth, or say the map is still being measured.
+fn depth_click(app: &mut PrunrApp, item_id: u64, (px, py): (f32, f32), (w, h): (u32, u32), mode: prunr_core::selection::BrushMode) {
+    let Some(depth) = app.batch.find_by_id(item_id).and_then(|i| i.depth.clone()) else {
+        app.toasts.info("The depth map is not ready yet.");
+        return;
+    };
+    app.processor.dispatch_depth_select(crate::gui::processor::DepthSelectRequest {
+        item_id,
+        depth,
+        at: ((px + 0.5) / w as f32, (py + 0.5) / h as f32),
+        range: app.settings.brush.magic_depth_range,
+        mode,
+        source_dims: (w, h),
+        reading: app.settings.brush.magic_reading(),
+    });
 }
 
 /// A screen position as a source pixel, or `None` off the image: only

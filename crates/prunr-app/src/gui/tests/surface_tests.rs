@@ -156,6 +156,66 @@ fn the_tool_strip_follows_the_magic_brush() {
     assert_all_controls_named(&h, "magic brush panel");
 }
 
+/// Magic Brush's Depth switch trades Confidence for Range on the strip.
+#[test]
+fn the_magic_brush_strip_selects_by_depth() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache.depth = true;
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    click(&mut h, "By depth");
+    assert!(h.state().settings.brush.magic_depth);
+    let present = names(&h);
+    assert!(present.iter().any(|n| n == "Range") && !present.iter().any(|n| n == "Confidence"), "{present:?}");
+    assert_all_controls_named(&h, "magic brush strip with depth");
+    assert!(h.state().model_store.is_none(), "the model is installed: no store");
+}
+
+/// Turning on a depth knob without the depth model opens the Model Store
+/// on Depth, from the Depth strip's own button too.
+#[test]
+fn a_depth_knob_without_the_model_offers_the_store() {
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache = Default::default();
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    click(&mut h, "By depth");
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
+
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.hardware_install_cache = Default::default();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+    }
+    settle(&mut h);
+    click(&mut h, "Depth");
+    click(&mut h, "Get the depth model");
+    settle(&mut h);
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the Depth strip closed");
+}
+
+/// While Set focus waits, a click on the canvas belongs to it: no pan,
+/// and the wait ends whether or not the click hit the image.
+#[test]
+fn picking_the_focus_takes_the_canvas_click() {
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+        app.picking_depth_focus = true;
+    }
+    settle(&mut h);
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    assert!(!h.state().zoom_state.is_panning, "the press does not pan");
+    press(&mut h, CANVAS_POINT, false);
+    settle(&mut h);
+    assert!(!h.state().picking_depth_focus, "the click ended the wait");
+}
+
 #[test]
 fn bracket_keys_step_the_brush_size() {
     let mut h = loaded();

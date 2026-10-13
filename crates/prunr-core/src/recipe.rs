@@ -40,6 +40,11 @@ pub struct EdgeRecipe {
     pub edge_scale: EdgeScale,
     pub compose_mode: ComposeMode,
     pub line_style: LineStyle,
+    /// Fade with distance, 0-100: lines lighten with depth. Not part of
+    /// `EdgeSettings` because the worker never draws it; the app fades
+    /// the lines it shows and saves.
+    #[serde(default)]
+    pub line_fade_pct: u8,
 }
 
 impl From<&crate::EdgeSettings> for EdgeRecipe {
@@ -51,6 +56,7 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
             edge_scale: e.edge_scale,
             compose_mode: e.compose_mode,
             line_style: e.line_style,
+            line_fade_pct: 0,
         }
     }
 }
@@ -281,6 +287,9 @@ pub struct ProcessingRecipe {
     pub upscale: UpscaleRecipe,
     #[serde(default)]
     pub colorize: ColorizeRecipe,
+    /// The Depth chip's blur and haze, applied to the photo first.
+    #[serde(default)]
+    pub depth: crate::depth::DepthLook,
 }
 
 /// What processing tier is needed to go from old settings to new settings.
@@ -363,7 +372,9 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
             (false, false) => {}
         }
     }
-    if old.mask != new.mask {
+    // The depth look changes the photo the mask and lines are drawn
+    // from, so it re-renders like a mask change; the map is kept.
+    if old.mask != new.mask || old.depth != new.depth {
         return RequiredTier::MaskRerun;
     }
     if old.edge != new.edge {
@@ -418,6 +429,7 @@ mod tests {
                 edge_scale: EdgeScale::Fused,
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
+                line_fade_pct: 0,
             },
             mask: mask(gamma, 0.0, 0.0, false),
             composite: CompositeRecipe {
@@ -428,6 +440,7 @@ mod tests {
             },
             upscale: UpscaleRecipe::default(),
             colorize: ColorizeRecipe::default(),
+            depth: Default::default(),
         }
     }
 
@@ -666,6 +679,17 @@ mod tests {
             r.composite.bg_color = Some(rgb);
             r
         };
+        let with_depth = || {
+            let mut r = base.clone();
+            r.depth.blur = crate::depth::LensBlurMode::Point;
+            r.depth.blur_pct = 60;
+            r
+        };
+        let with_fade = |pct: u8| {
+            let mut r = base.clone();
+            r.edge.line_fade_pct = pct;
+            r
+        };
         // Edges-on baseline for input_transform cases (the transform only
         // affects the edge leg; with edges off the transform is dead state).
         let edges_on = || {
@@ -738,6 +762,19 @@ mod tests {
                 r.composite.bg_color = Some([9, 9, 9]);
                 r
             }, RequiredTier::AddEdgeInference),
+            ("depth look only → mask", base.clone(), with_depth(), RequiredTier::MaskRerun),
+            ("line fade only → edge", base.clone(), with_fade(40), RequiredTier::EdgeRerun),
+            ("bg lens blur only → composite", base.clone(), {
+                let mut r = base.clone();
+                r.composite.bg_effect = BgEffect::LensBlur { amount_pct: 50 };
+                r
+            }, RequiredTier::CompositeOnly),
+            // The depth look re-renders the photo, so it outranks lines.
+            ("depth look+line fade → mask", base.clone(), {
+                let mut r = with_depth();
+                r.edge.line_fade_pct = 40;
+                r
+            }, RequiredTier::MaskRerun),
             // Priority: model change dominates everything.
             ("model+gamma+line+bg → full", base.clone(), {
                 let mut r = make_recipe(ModelKind::U2net, 1.5, Some([9, 9, 9]));
@@ -988,6 +1025,16 @@ mod tests {
         json.as_object_mut().unwrap().remove("colorize");
         let back: ProcessingRecipe = serde_json::from_value(json).unwrap();
         assert_eq!(back, r, "a recipe saved before colorize loads unchanged");
+    }
+
+    #[test]
+    fn a_recipe_saved_before_depth_loads_unchanged() {
+        let r = make_recipe(ModelKind::Silueta, 1.0, None);
+        let mut json = serde_json::to_value(&r).unwrap();
+        json.as_object_mut().unwrap().remove("depth");
+        json["edge"].as_object_mut().unwrap().remove("line_fade_pct");
+        let back: ProcessingRecipe = serde_json::from_value(json).unwrap();
+        assert_eq!(back, r);
     }
 
     #[test]

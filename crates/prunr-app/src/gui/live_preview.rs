@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, RgbaImage};
 
+use prunr_core::depth::LineFade;
 use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
 
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
@@ -82,6 +83,16 @@ pub enum PreviewKind {
     UpscaleTier2,
     /// Strength → re-render the kept colorize run. No model run.
     ColorizeTier2,
+}
+
+impl PreviewKind {
+    /// The kind that re-renders the photo and all drawn on it under
+    /// `line_mode`: lines over the whole photo are an Edge render (a Mask
+    /// render there would draw the photo without them); otherwise a Mask
+    /// render, which also redraws Subject lines.
+    pub fn photo_rerun(line_mode: LineMode) -> Self {
+        if line_mode == LineMode::EdgesOnly { Self::Edge } else { Self::Mask }
+    }
 }
 
 /// The upscale result to show: Refine over the model's output
@@ -145,11 +156,15 @@ pub struct PreviewResult {
     pub new_reference: Option<Arc<image::RgbaImage>>,
     /// The faced photo this dispatch built, for the item to reuse.
     pub new_faced: Option<(Arc<DynamicImage>, FacedKey)>,
+    /// The depth-looked photo this dispatch built, for the item to reuse.
+    pub(crate) new_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
     /// applied.
     pub applied_mask: prunr_core::MaskRecipe,
+    /// The Depth chip's look this dispatch rendered, for `applied_recipe`.
+    pub applied_depth: prunr_core::depth::DepthLook,
     /// Tier-2 knob values captured at dispatch time. `apply_completed_previews`
     /// patches `applied_recipe.upscale`'s four Tier-2 fields to match so
     /// resolve_tier sees Skip (not UpscaleTier2) on the next frame and
@@ -323,11 +338,8 @@ impl LivePreview {
 
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
-                let plane_key = |scale: prunr_core::EdgeScale| EdgePlaneKey {
-                    strength_bits: inputs.settings.line_strength.to_bits(),
-                    scale,
-                    thickness: u32::from(inputs.settings.edge_thickness),
-                };
+                let has_depth = inputs.depth.is_some();
+                let plane_key = |scale: prunr_core::EdgeScale| EdgePlaneKey::new(&inputs.settings, scale, has_depth);
                 let primary_key = plane_key(inputs.settings.edge_settings().primary_scale());
                 let bold_key = plane_key(prunr_core::EdgeScale::Bold);
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
@@ -342,6 +354,7 @@ impl LivePreview {
                 // after the user stops dragging.
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let applied_color_strength = matches!(inputs.kind, PreviewKind::ColorizeTier2).then_some(inputs.settings.color_strength());
+                let applied_depth = inputs.settings.depth;
                 let version = inputs.version;
                 let start = inputs.start.clone();
                 let faced_key = inputs.faces.as_ref().map(|f| f.key.clone());
@@ -365,7 +378,9 @@ impl LivePreview {
                         new_edge, new_bold, new_masked_base,
                         new_reference: output.built_reference,
                         new_faced: output.built_faced.zip(faced_key),
+                        new_depth_photo: output.built_depth_photo,
                         applied_mask: mask_recipe,
+                        applied_depth,
                         applied_tier2_knobs,
                         applied_color_strength,
                         is_final: false,
@@ -475,6 +490,18 @@ pub struct DispatchInputs {
     pub(crate) colorize: Option<crate::gui::item::ColorizeCache>,
     /// Restored faces to blend into `original` before anything else.
     pub faces: Option<FacesInput>,
+    /// The photo's depth map, for the Depth chip's look and fading lines.
+    pub(crate) depth: Option<DepthInput>,
+}
+
+/// What a preview reads from the depth map: the look to put on the photo
+/// after the faces (No model only), and the photo it made last time when
+/// that still matches.
+#[derive(Clone)]
+pub(crate) struct DepthInput {
+    pub(crate) map: Arc<prunr_core::depth::DepthMap>,
+    pub(crate) look: Option<prunr_core::depth::DepthLook>,
+    pub(crate) photo: Option<Arc<DynamicImage>>,
 }
 
 impl DispatchInputs {
@@ -498,6 +525,7 @@ impl DispatchInputs {
             upscale_tier2_knobs: None,
             colorize: None,
             faces: None,
+            depth: None,
         }
     }
 }
@@ -524,12 +552,27 @@ impl FacedKey {
     }
 }
 
-/// What an edge plane was built from; a plane is reused only on an exact match.
+/// What an edge plane was built from; a plane is reused only on an exact
+/// match. Fade with distance applies to the dilated plane only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgePlaneKey {
     pub strength_bits: u32,
     pub scale: prunr_core::EdgeScale,
     pub thickness: u32,
+    pub fade_pct: u8,
+}
+
+impl EdgePlaneKey {
+    /// The key of `scale`'s planes under `settings`; lines fade only where
+    /// the depth map is there to fade them by.
+    pub fn new(settings: &ItemSettings, scale: prunr_core::EdgeScale, has_depth: bool) -> Self {
+        Self {
+            strength_bits: settings.line_strength.to_bits(),
+            scale,
+            thickness: u32::from(settings.edge_thickness),
+            fade_pct: if has_depth && settings.line_fade() > 0.0 { settings.line_fade_pct } else { 0 },
+        }
+    }
 }
 
 /// What the undilated plane depends on: strength and scale, not thickness.
@@ -609,7 +652,7 @@ impl EdgePlaneCache {
     /// One built dilated plane, for tests that check the cache is dropped.
     #[cfg(test)]
     pub(crate) fn store_placeholder(&mut self) {
-        let key = EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0 };
+        let key = EdgePlaneKey { strength_bits: 0, scale: prunr_core::EdgeScale::Fused, thickness: 0, fade_pct: 0 };
         self.store(EdgePlanes { base: None, dilated: Some(Arc::new(GrayImage::new(1, 1))) }, key);
     }
 }
@@ -656,11 +699,12 @@ struct RunOutput {
     built_masked_base: Option<Arc<image::RgbaImage>>,
     built_reference: Option<Arc<image::RgbaImage>>,
     built_faced: Option<Arc<DynamicImage>>,
+    built_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
 }
 
 impl RunOutput {
     fn empty() -> Self {
-        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None }
+        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None, built_depth_photo: None }
     }
 }
 
@@ -709,8 +753,28 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         None => None,
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    // The Depth chip's look goes on the faced photo, before the lines.
+    let built_depth_photo = apply_depth_look(&mut inputs);
+    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
     let output = run_photo_preview(inputs);
-    RunOutput { built_faced, ..output }
+    RunOutput { built_faced, built_depth_photo, ..output }
+}
+
+/// Swap `inputs.original` for the photo with the Depth chip's look on it:
+/// the one made last time when it still matches, or a fresh one, which
+/// is returned with its key for the item to keep.
+fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)> {
+    let depth = inputs.depth.as_ref()?;
+    let look = depth.look.filter(prunr_core::depth::DepthLook::is_active)?;
+    if let Some(photo) = &depth.photo {
+        inputs.original = Arc::clone(photo);
+        return None;
+    }
+    let looked = look.apply(&prunr_core::rgba_view(&inputs.original), &depth.map)?;
+    let photo = Arc::new(DynamicImage::ImageRgba8(looked));
+    let key = crate::gui::item::DepthPhotoKey { base: Arc::clone(&inputs.original), depth: Arc::clone(&depth.map), look };
+    inputs.original = Arc::clone(&photo);
+    Some((photo, key))
 }
 
 /// `run_preview` for the kinds made from the photo (not an upscale).
@@ -784,11 +848,12 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
             let out_dims = (base_arc.width(), base_arc.height());
-            let (mask, _) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings);
+            let fade = line_fade(&inputs);
+            let (mask, _) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings, fade);
             let (rgba, _) = dispatch_compose(
                 &mask, &base_arc, &edge_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
-                out_dims,
+                out_dims, fade,
             );
             RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, ..RunOutput::empty() }
         }
@@ -803,7 +868,8 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 Some(arc) => (arc.width(), arc.height()),
                 None => (inputs.original.width(), inputs.original.height()),
             };
-            let (mask, built_edge) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings);
+            let fade = line_fade(&inputs);
+            let (mask, built_edge) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings, fade);
             // SubjectOutline: the chosen composition over the subject.
             // EdgesOnly: the same compose over the photo, lines only.
             let (base, compose_settings) = match masked_base.as_deref() {
@@ -815,7 +881,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             };
             let (rgba, built_bold) = dispatch_compose(
                 &mask, &base, &compose_settings,
-                inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims,
+                inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims, fade,
             );
             RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::empty() }
         }
@@ -844,11 +910,12 @@ fn dispatch_compose(
     secondary_tensor: Option<&EdgeTensor>,
     cached_bold: &EdgePlanes,
     base_dims: (u32, u32),
+    fade: Option<LineFade<'_>>,
 ) -> (image::RgbaImage, EdgePlanes) {
     use prunr_core::LineStyle;
     match (edge_settings.line_style, secondary_tensor) {
         (LineStyle::DualScale { fine_color, bold_color }, Some(secondary)) => {
-            let (bold_mask, built) = resolve_edge_mask(cached_bold, secondary, base_dims, edge_settings);
+            let (bold_mask, built) = resolve_edge_mask(cached_bold, secondary, base_dims, edge_settings, fade);
             let rgba = compose_edges_dual_styled(
                 primary_mask, &bold_mask, base,
                 edge_settings.compose_mode,
@@ -878,6 +945,7 @@ fn resolve_edge_mask(
     edge: &EdgeTensor,
     out_dims: (u32, u32),
     edge_settings: &prunr_core::EdgeSettings,
+    fade: Option<LineFade<'_>>,
 ) -> (Arc<GrayImage>, EdgePlanes) {
     if let Some(d) = &cached.dilated {
         return (Arc::clone(d), EdgePlanes::default());
@@ -888,8 +956,24 @@ fn resolve_edge_mask(
     });
     // one of the two is Some: built_base is None only when cached.base is Some
     let base = built_base.as_ref().or(cached.base.as_ref()).unwrap();
-    let dilated = thickened_edges(base, edge_settings.edge_thickness).map_or_else(|| Arc::clone(base), Arc::new);
+    let dilated = match (thickened_edges(base, edge_settings.edge_thickness), fade) {
+        (thick, Some(fade)) => {
+            let mut plane = thick.unwrap_or_else(|| (**base).clone());
+            fade.apply(&mut plane);
+            Arc::new(plane)
+        }
+        (Some(thick), None) => Arc::new(thick),
+        (None, None) => Arc::clone(base),
+    };
     (Arc::clone(&dilated), EdgePlanes { base: built_base, dilated: Some(dilated) })
+}
+
+/// Fade with distance for a render of `inputs`, when it fades and the
+/// map is there.
+fn line_fade(inputs: &DispatchInputs) -> Option<LineFade<'_>> {
+    let amount = inputs.settings.line_fade();
+    let depth = inputs.depth.as_ref()?;
+    (amount > 0.0).then_some(LineFade { depth: &depth.map, amount })
 }
 
 #[cfg(test)]
@@ -901,7 +985,7 @@ mod tests {
     #[test]
     fn edge_planes_keep_bold_and_the_newest_other_scale() {
         use prunr_core::EdgeScale::{Bold, Fine, Fused};
-        let key = |scale, thickness| EdgePlaneKey { strength_bits: 1, scale, thickness };
+        let key = |scale, thickness| EdgePlaneKey { strength_bits: 1, scale, thickness, fade_pct: 0 };
         let plane = || Some(Arc::new(GrayImage::new(1, 1)));
         let built = || EdgePlanes { base: plane(), dilated: plane() };
         let mut cache = EdgePlaneCache::default();
@@ -1105,6 +1189,8 @@ mod tests {
             new_masked_base: None,
             new_reference: None,
             new_faced: None,
+            new_depth_photo: None,
+            applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             applied_color_strength: None,
@@ -1136,6 +1222,8 @@ mod tests {
             new_masked_base: None,
             new_reference: None,
             new_faced: None,
+            new_depth_photo: None,
+            applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             applied_color_strength: None,
@@ -1166,6 +1254,8 @@ mod tests {
             new_masked_base: None,
             new_reference: None,
             new_faced: None,
+            new_depth_photo: None,
+            applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             applied_color_strength: None,
@@ -1193,6 +1283,8 @@ mod tests {
             new_masked_base: None,
             new_reference: None,
             new_faced: None,
+            new_depth_photo: None,
+            applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             applied_color_strength: None,
@@ -1227,6 +1319,8 @@ mod tests {
             new_masked_base: None,
             new_reference: None,
             new_faced: None,
+            new_depth_photo: None,
+            applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
             applied_color_strength: None,
@@ -1317,6 +1411,61 @@ mod tests {
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
     }
 
+    /// No model's photo preview puts the Depth chip's look on the photo,
+    /// hands the looked photo back for the item, and reuses it next time.
+    #[test]
+    fn a_photo_preview_wears_the_depth_look_and_reuses_it() {
+        use crate::gui::item_settings::ItemSettings;
+        use prunr_core::depth::{DepthLook, DepthMap};
+        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))));
+        let map = Arc::new(DepthMap::from_raw(1, 8, (0..8).map(|y| y as f32).collect()));
+        let look = DepthLook { fog_pct: 100, ..DepthLook::default() };
+        let settings = ItemSettings { depth: look, ..ItemSettings::default() };
+        let inputs = |cached: Option<Arc<image::DynamicImage>>| DispatchInputs {
+            depth: Some(DepthInput { map: Arc::clone(&map), look: Some(look), photo: cached }),
+            ..DispatchInputs::new(PreviewKind::Mask, 0, Arc::clone(&photo), settings)
+        };
+        let cancel = AtomicBool::new(false);
+        let first = run_preview(inputs(None), &cancel);
+        let rgba = first.rgba.expect("rendered");
+        assert!(rgba.get_pixel(4, 0).0[0] > 150, "the far top is fogged: {:?}", rgba.get_pixel(4, 0));
+        assert!(rgba.get_pixel(4, 7).0[0] < 20, "the near bottom is not");
+        let (looked, key) = first.built_depth_photo.expect("the looked photo comes back");
+        assert!(Arc::ptr_eq(&key.base, &photo) && key.look == look);
+        let again = run_preview(inputs(Some(Arc::clone(&looked))), &cancel);
+        assert!(again.built_depth_photo.is_none(), "a kept looked photo is reused, not built again");
+        assert_eq!(again.rgba.expect("rendered").as_raw(), rgba.as_raw());
+        let plain = DispatchInputs { depth: Some(DepthInput { map, look: None, photo: None }), ..DispatchInputs::new(PreviewKind::Mask, 0, Arc::clone(&photo), settings) };
+        assert_eq!(run_preview(plain, &cancel).rgba.expect("rendered").get_pixel(4, 0).0[0], 0, "no look outside No model");
+    }
+
+    /// Whole-photo lines fade with distance in the preview, and the plane
+    /// key holds the fade so a cached unfaded plane is not reused.
+    #[test]
+    fn whole_photo_lines_fade_with_distance_in_the_preview() {
+        use crate::gui::item_settings::ItemSettings;
+        use prunr_core::LineMode;
+        let (th, tw) = (8u32, 8u32);
+        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([90, 90, 90, 255]))));
+        let edge = EdgeTensor { data: Arc::new(vec![1.0; (th * tw) as usize]), height: th, width: tw };
+        let map = Arc::new(prunr_core::depth::DepthMap::from_raw(1, 8, (0..8).map(|y| y as f32).collect()));
+        let settings = ItemSettings { line_mode: LineMode::EdgesOnly, line_fade_pct: 100, ..ItemSettings::default() };
+        let render = |depth: Option<DepthInput>| {
+            let inputs = DispatchInputs {
+                edge_tensor: Some(EdgeTensor { data: Arc::clone(&edge.data), height: th, width: tw }),
+                depth,
+                ..DispatchInputs::new(PreviewKind::Edge, 0, Arc::clone(&photo), settings)
+            };
+            run_preview(inputs, &AtomicBool::new(false)).rgba.expect("rendered")
+        };
+        let faded = render(Some(DepthInput { map: Arc::clone(&map), look: None, photo: None }));
+        let plain = render(None);
+        assert!(faded.get_pixel(4, 0).0[3] < plain.get_pixel(4, 0).0[3] / 4, "far lines fade");
+        let key = |has| EdgePlaneKey::new(&settings, prunr_core::EdgeScale::Fused, has);
+        assert_ne!(key(true), key(false), "a faded plane is cached apart from an unfaded one");
+        assert_eq!(key(true).base_key(), key(false).base_key(), "the undilated plane is shared");
+    }
+
     /// A Strength preview re-renders the kept colorize run at the
     /// snapshot's strength, with no model run.
     #[test]
@@ -1396,9 +1545,9 @@ mod tests {
             .rgba
             .unwrap_or_else(|| panic!("{mode:?} {style:?} {compose:?}: the preview renders"));
             let process = if subject_mode {
-                prunr_core::compose_subject_outline(&res, &subject, &edge)
+                prunr_core::compose_subject_outline(&res, &subject, &edge, None)
             } else {
-                prunr_core::compose_whole_photo(&res, &photo, &edge)
+                prunr_core::compose_whole_photo(&res, &photo, &edge, None)
             };
             assert!(preview.as_raw() == process.as_raw(), "{mode:?} {style:?} {compose:?}: preview differs from Process");
         }

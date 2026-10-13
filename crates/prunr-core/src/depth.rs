@@ -2,7 +2,7 @@
 //! The map is small (the model's resolution) and kept per photo; the
 //! effects sample it at the photo's own size.
 
-use image::{imageops, GrayImage, ImageBuffer, Luma, RgbaImage};
+use image::{GrayImage, ImageBuffer, Luma, RgbaImage};
 use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
@@ -50,15 +50,15 @@ impl DepthMap {
         self.near[(y * self.width + x) as usize]
     }
 
-    /// Calls `f(row, nearness per column)` for each row of a `w × h`
-    /// photo, sampling the map bilinearly. Rows run in parallel; the
-    /// row buffer is per call, so nothing photo-sized is allocated.
-    fn for_each_row(&self, w: u32, h: u32, f: impl Fn(usize, &[f32]) + Sync) {
+    /// Fills `out`, a `w × h` image with `per_px` values per pixel, row
+    /// by row in parallel: `f` gets the row index, the map's nearness
+    /// along that row (sampled bilinearly) and the row to write.
+    fn fill_rows<T: Send>(&self, w: u32, h: u32, out: &mut [T], per_px: usize, f: impl Fn(usize, &[f32], &mut [T]) + Sync) {
         let (xs, ys) = (bilinear_taps(self.width, w), bilinear_taps(self.height, h));
         let stride = self.width as usize;
-        ys.par_iter().enumerate().for_each(|(y, ty)| {
-            let row: Vec<f32> = xs.iter().map(|tx| self.sample(stride, tx, ty)).collect();
-            f(y, &row);
+        out.par_chunks_exact_mut(w as usize * per_px).zip(ys.par_iter()).enumerate().for_each(|(y, (row, ty))| {
+            let near: Vec<f32> = xs.iter().map(|tx| self.sample(stride, tx, ty)).collect();
+            f(y, &near, row);
         });
     }
 
@@ -74,17 +74,11 @@ impl DepthMap {
     /// export to other tools.
     pub fn to_gray16(&self, w: u32, h: u32) -> ImageBuffer<Luma<u16>, Vec<u16>> {
         let mut out = vec![0u16; (w * h) as usize];
-        let rows: Vec<(usize, Vec<u16>)> = {
-            let collected = std::sync::Mutex::new(Vec::with_capacity(h as usize));
-            self.for_each_row(w, h, |y, near| {
-                let row = near.iter().map(|v| (v * 65535.0).round() as u16).collect();
-                collected.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((y, row));
-            });
-            collected.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)
-        };
-        for (y, row) in rows {
-            out[y * w as usize..(y + 1) * w as usize].copy_from_slice(&row);
-        }
+        self.fill_rows(w, h, &mut out, 1, |_, near, row| {
+            for (v, d) in row.iter_mut().zip(near) {
+                *v = (d * 65535.0).round() as u16;
+            }
+        });
         // sized w × h above
         ImageBuffer::from_raw(w, h, out).expect("buffer sized w × h")
     }
@@ -172,24 +166,19 @@ pub fn lens_blur(src: &RgbaImage, depth: &DepthMap, focus: Focus, amount: f32) -
     }
     // Where each pixel falls between the levels: 0 = sharp, LEVELS = full.
     let mut pos = vec![0.0f32; (w * h) as usize];
-    {
-        let rows = std::sync::Mutex::new(&mut pos);
-        depth.for_each_row(w, h, |y, near| {
-            let row: Vec<f32> = near.iter().map(|&d| {
-                let off = match focus {
-                    Focus::Depth(f) => (d - f).abs(),
-                    Focus::Band { center, half_height } => ((y as f32 + 0.5) / h as f32 - center).abs() - half_height,
-                };
-                smoothstep((off / FULL_BLUR_AT).clamp(0.0, 1.0)) * LEVELS as f32
-            }).collect();
-            let mut guard = rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard[y * w as usize..(y + 1) * w as usize].copy_from_slice(&row);
-        });
-    }
+    depth.fill_rows(w, h, &mut pos, 1, |y, near, row| {
+        for (p, &d) in row.iter_mut().zip(near) {
+            let off = match focus {
+                Focus::Depth(f) => (d - f).abs(),
+                Focus::Band { center, half_height } => ((y as f32 + 0.5) / h as f32 - center).abs() - half_height,
+            };
+            *p = smoothstep((off / FULL_BLUR_AT).clamp(0.0, 1.0)) * LEVELS as f32;
+        }
+    });
     let mut out = src.clone();
     let mut prev = src.clone();
     for k in 1..=LEVELS {
-        let cur = imageops::fast_blur(src, sigma_max * k as f32 / LEVELS as f32);
+        let cur = crate::blur::blur_rgba(src, sigma_max * k as f32 / LEVELS as f32);
         let lo = (k - 1) as f32;
         out.as_mut()
             .par_chunks_exact_mut(4)
@@ -217,17 +206,55 @@ pub fn depth_fog(src: &RgbaImage, depth: &DepthMap, amount: f32, color: [u8; 3])
     let (w, h) = src.dimensions();
     let amount = amount.clamp(0.0, 1.0);
     let row_len = w as usize * 4;
-    let out = std::sync::Mutex::new(vec![0u8; src.as_raw().len()]);
-    depth.for_each_row(w, h, |y, near| {
+    let mut out = vec![0u8; src.as_raw().len()];
+    depth.fill_rows(w, h, &mut out, 4, |y, near, row| {
         let src_row = &src.as_raw()[y * row_len..(y + 1) * row_len];
-        let row: Vec<u8> = src_row.chunks_exact(4).zip(near).flat_map(|(px, &d)| {
+        for ((o, px), &d) in row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).zip(near) {
             let f = amount * smoothstep(1.0 - d);
             let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f).round().clamp(0.0, 255.0) as u8;
-            [mix(px[0], color[0]), mix(px[1], color[1]), mix(px[2], color[2]), px[3]]
-        }).collect();
-        out.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[y * row_len..(y + 1) * row_len].copy_from_slice(&row);
+            o.copy_from_slice(&[mix(px[0], color[0]), mix(px[1], color[1]), mix(px[2], color[2]), px[3]]);
+        }
     });
-    let out = out.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // sized from src
+    RgbaImage::from_raw(w, h, out).expect("buffer sized from src")
+}
+
+/// How far `aerial_perspective` moves the farthest pixel at full amount:
+/// b* toward blue, the share of chroma removed, the share of the way to
+/// white L is lifted. The nearest pixel warms by a quarter of the shift.
+const AERIAL_BLUE: f32 = 12.0;
+const AERIAL_DESATURATE: f32 = 0.6;
+const AERIAL_LIFT: f32 = 0.15;
+const AERIAL_WARM_SHARE: f32 = 0.25;
+
+/// Colour that recedes: far pixels turn cooler and paler, the way
+/// distant hills do, and near ones a touch warmer. Works in Lab; L is
+/// lifted by an affine map with a positive slope at each depth, so no
+/// two pixels of one depth swap lightness order. Alpha is unchanged.
+///
+/// Peak working set: the result (w·h·4 bytes) and one row of nearness.
+pub fn aerial_perspective(src: &RgbaImage, depth: &DepthMap, amount: f32) -> RgbaImage {
+    let (w, h) = src.dimensions();
+    let amount = amount.clamp(0.0, 1.0);
+    if amount == 0.0 {
+        return src.clone();
+    }
+    let row_len = w as usize * 4;
+    let mut out = vec![0u8; src.as_raw().len()];
+    depth.fill_rows(w, h, &mut out, 4, |y, near, row| {
+        let src_row = &src.as_raw()[y * row_len..(y + 1) * row_len];
+        for ((o, px), &d) in row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)).zip(near) {
+            let far = amount * smoothstep(1.0 - d);
+            let warm = amount * AERIAL_WARM_SHARE * smoothstep(d);
+            let (l, a, b) = crate::color::srgb_to_lab(px[0], px[1], px[2]);
+            let keep = 1.0 - AERIAL_DESATURATE * far;
+            let l = l + AERIAL_LIFT * far * (100.0 - l);
+            let a = a * keep + 0.5 * AERIAL_BLUE * warm;
+            let b = b * keep - AERIAL_BLUE * far + AERIAL_BLUE * warm;
+            let (r, g, bl) = crate::color::lab_to_srgb(l, a, b);
+            o.copy_from_slice(&[r, g, bl, px[3]]);
+        }
+    });
     // sized from src
     RgbaImage::from_raw(w, h, out).expect("buffer sized from src")
 }
@@ -237,14 +264,28 @@ pub fn depth_fog(src: &RgbaImage, depth: &DepthMap, amount: f32, color: [u8; 3])
 ///
 /// Peak working set: the w·h cells (1 byte each).
 pub fn select_by_depth(depth: &DepthMap, w: u32, h: u32, around: f32, range: f32, mode: BrushMode) -> MaskArtifact {
-    let row_len = w as usize;
-    let cells = std::sync::Mutex::new(vec![0i8; (w * h) as usize]);
+    let mut cells = vec![0i8; (w * h) as usize];
     let value = mode.sign() * FULL;
-    depth.for_each_row(w, h, |y, near| {
-        let row: Vec<i8> = near.iter().map(|&d| if (d - around).abs() <= range { value } else { 0 }).collect();
-        cells.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[y * row_len..(y + 1) * row_len].copy_from_slice(&row);
+    depth.fill_rows(w, h, &mut cells, 1, |_, near, row| {
+        for (c, &d) in row.iter_mut().zip(near) {
+            *c = if (d - around).abs() <= range { value } else { 0 };
+        }
     });
-    MaskArtifact::from_cells(w, h, cells.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner))
+    MaskArtifact::from_cells(w, h, cells)
+}
+
+/// Fade with distance for one render: the map and how much (0..=1).
+#[derive(Clone, Copy, Debug)]
+pub struct LineFade<'a> {
+    pub depth: &'a DepthMap,
+    pub amount: f32,
+}
+
+impl LineFade<'_> {
+    /// Fade `plane` (see `fade_lines_by_depth`).
+    pub fn apply(&self, plane: &mut GrayImage) {
+        fade_lines_by_depth(plane, self.depth, self.amount);
+    }
 }
 
 /// Lines lighter with distance: each line pixel keeps `1 - fade × far`
@@ -256,14 +297,152 @@ pub fn fade_lines_by_depth(plane: &mut GrayImage, depth: &DepthMap, fade: f32) {
         return;
     }
     let (w, h) = plane.dimensions();
-    let rows = std::sync::Mutex::new(plane.as_mut());
-    depth.for_each_row(w, h, |y, near| {
-        let mut guard = rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let row = &mut guard[y * w as usize..(y + 1) * w as usize];
+    depth.fill_rows(w, h, plane.as_mut(), 1, |_, near, row| {
         for (v, &d) in row.iter_mut().zip(near) {
             *v = (*v as f32 * (1.0 - fade * (1.0 - d))).round() as u8;
         }
     });
+}
+
+/// The haze `depth_fog` draws toward in the app and the CLI: a light
+/// grey-blue, like air over distance.
+pub const FOG_COLOR: [u8; 3] = [214, 220, 228];
+
+/// A tilt-shift band's half height, as a fraction of the photo's height.
+pub const BAND_HALF_HEIGHT: f32 = 0.12;
+
+/// `DepthLook::focus` units per photo side.
+const FOCUS_SCALE: f32 = 10_000.0;
+
+/// The longest side of the grid `subject_nearness` samples.
+const SUBJECT_SAMPLES: u32 = 512;
+
+/// How the Depth chip blurs a photo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LensBlurMode {
+    #[default]
+    Off,
+    /// Sharp at one depth, blurring with the depth difference.
+    Point,
+    /// Sharp in a horizontal band, blurring above and below it.
+    TiltShift,
+}
+
+/// What the Depth chip does to a photo before anything else draws on it:
+/// a lens blur and a haze, both read from its depth map. Whole percent
+/// and ten-thousandths keep it `Eq` and `Hash` for the recipe.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DepthLook {
+    pub blur: LensBlurMode,
+    /// Blur strength, 0-100.
+    pub blur_pct: u8,
+    /// The focus point as ten-thousandths of the photo's width and
+    /// height; `None` focuses automatically.
+    pub focus: Option<[u16; 2]>,
+    /// Haze strength, 0-100.
+    pub fog_pct: u8,
+    /// Aerial perspective strength, 0-100.
+    pub aerial_pct: u8,
+}
+
+impl DepthLook {
+    /// Whether it changes the photo at all.
+    pub fn is_active(&self) -> bool {
+        self.blurs() || self.fog_pct > 0 || self.aerial_pct > 0
+    }
+
+    fn blurs(&self) -> bool {
+        self.blur != LensBlurMode::Off && self.blur_pct > 0
+    }
+
+    pub fn focus_point(&self) -> Option<(f32, f32)> {
+        self.focus.map(|[x, y]| (f32::from(x) / FOCUS_SCALE, f32::from(y) / FOCUS_SCALE))
+    }
+
+    /// Focus on a point given as fractions of the photo's width and height.
+    pub fn set_focus(&mut self, fx: f32, fy: f32) {
+        let unit = |v: f32| (v.clamp(0.0, 1.0) * FOCUS_SCALE).round() as u16;
+        self.focus = Some([unit(fx), unit(fy)]);
+    }
+
+    /// What stays sharp: the depth at the focus point (the nearest tenth
+    /// of the photo when none is set), or a band through it (the middle
+    /// when none is set).
+    pub fn lens_focus(&self, depth: &DepthMap) -> Focus {
+        let point = self.focus_point();
+        match self.blur {
+            LensBlurMode::TiltShift => Focus::Band { center: point.map_or(0.5, |(_, y)| y), half_height: BAND_HALF_HEIGHT },
+            LensBlurMode::Off | LensBlurMode::Point => Focus::Depth(point.map_or_else(|| auto_focus(depth), |(x, y)| depth.at(x, y))),
+        }
+    }
+
+    /// `photo` blurred, then hazed, then graded for aerial perspective;
+    /// `None` when it has none of them. The blur goes first so the haze
+    /// and the grade stay smooth over what it softened.
+    ///
+    /// Peak working set: `lens_blur`'s (~4 photos); each later stage holds
+    /// its input and its output (2 photos).
+    pub fn apply(&self, photo: &RgbaImage, depth: &DepthMap) -> Option<RgbaImage> {
+        if !self.is_active() {
+            return None;
+        }
+        let pct = |v: u8| f32::from(v.min(100)) / 100.0;
+        let mut out: Option<RgbaImage> = None;
+        if self.blurs() {
+            out = Some(lens_blur(photo, depth, self.lens_focus(depth), pct(self.blur_pct)));
+        }
+        if self.fog_pct > 0 {
+            out = Some(depth_fog(out.as_ref().unwrap_or(photo), depth, pct(self.fog_pct), FOG_COLOR));
+        }
+        if self.aerial_pct > 0 {
+            out = Some(aerial_perspective(out.as_ref().unwrap_or(photo), depth, pct(self.aerial_pct)));
+        }
+        out
+    }
+}
+
+/// The nearness that is nearer than 90% of the photo: where a camera
+/// with nothing else to go on would focus.
+pub fn auto_focus(depth: &DepthMap) -> f32 {
+    let mut near = depth.near.clone();
+    percentile(&mut near, 0.9).unwrap_or(1.0)
+}
+
+/// The median nearness under the opaque part of `cutout` (its subject),
+/// sampled on a grid; `None` when nothing is opaque.
+pub fn subject_nearness(depth: &DepthMap, cutout: &RgbaImage) -> Option<f32> {
+    let (w, h) = cutout.dimensions();
+    let step = (w.max(h) / SUBJECT_SAMPLES).max(1);
+    let mut under: Vec<f32> = (0..h).step_by(step as usize)
+        .flat_map(|y| (0..w).step_by(step as usize).map(move |x| (x, y)))
+        .filter(|&(x, y)| cutout.get_pixel(x, y).0[3] >= 128)
+        .map(|(x, y)| depth.at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32))
+        .collect();
+    percentile(&mut under, 0.5)
+}
+
+/// What a lens-blur background focuses on: the cut-out's subject, or
+/// `auto_focus` without one.
+pub fn backdrop_focus(depth: &DepthMap, cutout: Option<&RgbaImage>) -> f32 {
+    cutout.and_then(|c| subject_nearness(depth, c)).unwrap_or_else(|| auto_focus(depth))
+}
+
+fn percentile(values: &mut [f32], q: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let k = ((values.len() - 1) as f32 * q).round() as usize;
+    let (_, v, _) = values.select_nth_unstable_by(k, f32::total_cmp);
+    Some(*v)
+}
+
+/// The map at `w × h` as a 16-bit grey PNG (white = near).
+pub fn encode_depth_png(depth: &DepthMap, w: u32, h: u32) -> Result<Vec<u8>, CoreError> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma16(depth.to_gray16(w, h)).write_to(&mut out, image::ImageFormat::Png)?;
+    Ok(out.into_inner())
 }
 
 #[cfg(test)]
@@ -354,5 +533,84 @@ mod tests {
         let img = ramp(4, 50).to_gray16(4, 50);
         assert_eq!(img.get_pixel(1, 0).0[0], 0);
         assert_eq!(img.get_pixel(1, 49).0[0], 65535);
+    }
+
+    #[test]
+    fn auto_focus_is_the_nearest_tenth() {
+        let f = auto_focus(&ramp(1, 101));
+        assert!((f - 0.9).abs() < 0.02, "{f}");
+    }
+
+    #[test]
+    fn the_subject_is_focused_at_its_median_depth() {
+        let depth = ramp(10, 100);
+        let mut cut = RgbaImage::new(10, 100);
+        for y in 70..80 {
+            for x in 0..10 {
+                cut.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        let n = subject_nearness(&depth, &cut).expect("opaque pixels");
+        assert!((n - 0.75).abs() < 0.03, "{n}");
+        assert_eq!(subject_nearness(&depth, &RgbaImage::new(10, 100)), None);
+        assert_eq!(backdrop_focus(&depth, Some(&RgbaImage::new(10, 100))), auto_focus(&depth));
+    }
+
+    #[test]
+    fn a_look_focuses_where_it_is_told_or_automatically() {
+        let depth = ramp(10, 100);
+        let mut look = DepthLook { blur: LensBlurMode::Point, blur_pct: 50, ..DepthLook::default() };
+        assert_eq!(look.lens_focus(&depth), Focus::Depth(auto_focus(&depth)));
+        look.set_focus(0.5, 0.25);
+        assert_eq!(look.focus_point(), Some((0.5, 0.25)));
+        assert_eq!(look.lens_focus(&depth), Focus::Depth(depth.at(0.5, 0.25)));
+        look.blur = LensBlurMode::TiltShift;
+        assert_eq!(look.lens_focus(&depth), Focus::Band { center: 0.25, half_height: BAND_HALF_HEIGHT });
+    }
+
+    #[test]
+    fn an_idle_look_leaves_the_photo_alone() {
+        let src = checker(20, 20);
+        let depth = ramp(4, 4);
+        assert!(DepthLook::default().apply(&src, &depth).is_none());
+        let no_amount = DepthLook { blur: LensBlurMode::Point, ..DepthLook::default() };
+        assert!(no_amount.apply(&src, &depth).is_none());
+        let fog = DepthLook { fog_pct: 100, ..DepthLook::default() };
+        assert_eq!(fog.apply(&src, &depth), Some(depth_fog(&src, &depth, 1.0, FOG_COLOR)));
+        let aerial = DepthLook { aerial_pct: 100, ..DepthLook::default() };
+        assert_eq!(aerial.apply(&src, &depth), Some(aerial_perspective(&src, &depth, 1.0)));
+    }
+
+    #[test]
+    fn aerial_perspective_cools_and_pales_the_far_and_warms_the_near() {
+        let src = RgbaImage::from_pixel(10, 100, image::Rgba([150, 110, 80, 99]));
+        assert_eq!(aerial_perspective(&src, &ramp(10, 100), 0.0), src);
+        let out = aerial_perspective(&src, &ramp(10, 100), 1.0);
+        let lab = |p: image::Rgba<u8>| crate::color::srgb_to_lab(p.0[0], p.0[1], p.0[2]);
+        let (_, a0, b0) = lab(*src.get_pixel(0, 0));
+        let (_, af, bf) = lab(*out.get_pixel(5, 0));
+        let (_, an, bn) = lab(*out.get_pixel(5, 99));
+        assert!(bf < b0 && af.hypot(bf) < a0.hypot(b0), "far is cooler and paler: {af} {bf}");
+        assert!(bn > b0 && an >= a0, "near is warmer: {an} {bn}");
+        assert_eq!(out.get_pixel(5, 0).0[3], 99);
+        let grey = RgbaImage::from_pixel(10, 100, image::Rgba([128, 128, 128, 255]));
+        let (_, _, b) = lab(*aerial_perspective(&grey, &ramp(10, 100), 1.0).get_pixel(5, 0));
+        assert!(b < 0.0, "a far grey turns blue: {b}");
+    }
+
+    #[test]
+    fn aerial_perspective_keeps_lightness_order_at_one_depth() {
+        let src = RgbaImage::from_fn(256, 4, |x, _| image::Rgba([x as u8, x as u8, x as u8, 255]));
+        let out = aerial_perspective(&src, &DepthMap::from_raw(2, 2, vec![0.0, 0.0, 0.0, 1.0]), 1.0);
+        let l = |x: u32| crate::color::srgb_lightness(out.get_pixel(x, 0).0[0], out.get_pixel(x, 0).0[1], out.get_pixel(x, 0).0[2]);
+        assert!((1..256).all(|x| l(x) >= l(x - 1) - 0.5));
+    }
+
+    #[test]
+    fn the_depth_png_is_16_bit_at_the_asked_size() {
+        let bytes = encode_depth_png(&ramp(4, 50), 8, 20).expect("encode");
+        let img = image::load_from_memory(&bytes).expect("decode");
+        assert_eq!((img.width(), img.height()), (8, 20));
+        assert_eq!(img.color(), image::ColorType::L16);
     }
 }

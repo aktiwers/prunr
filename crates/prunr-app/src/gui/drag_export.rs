@@ -157,6 +157,8 @@ pub(crate) struct LayerJob {
     edges: Option<CompressedEdgeTensors>,
     /// The faces Restore faces blends into the photo, as on the canvas.
     faces: Option<super::live_preview::FacesInput>,
+    /// The photo's depth map, for lines that fade with distance.
+    depth: Option<Arc<prunr_core::depth::DepthMap>>,
 }
 
 impl LayerJob {
@@ -172,11 +174,25 @@ impl LayerJob {
             seg: item.cached_tensor.clone(),
             edges: item.cached_edge_tensors.clone(),
             faces: item.faces_input(super::item::FaceStage::Photo),
+            depth: item.depth.clone(),
         }
     }
 
     pub(crate) fn filename(&self) -> &str {
         &self.filename
+    }
+
+    /// The original photo's depth map: the item's, or measured here (a
+    /// save thread) when it has none yet.
+    fn depth_map(&self) -> Option<Arc<prunr_core::depth::DepthMap>> {
+        if let Some(depth) = &self.depth {
+            return Some(Arc::clone(depth));
+        }
+        let photo = self.source_rgba.clone().or_else(|| self.source.decode_rgba().ok())?;
+        super::processor::measure_depth_once(&photo)
+            .map(Arc::new)
+            .map_err(|err| tracing::warn!(item_id = self.item_id, %err, "layer export: depth"))
+            .ok()
     }
 
     /// The item kept what layers are made from (they were dropped under
@@ -256,7 +272,10 @@ fn render_layer(
         LayerKind::Lines => {
             let edge = job.settings.edge_settings();
             let tensors = job.edges.as_ref()?.for_compose(&edge)?;
-            let rgba = prunr_core::compose_whole_photo(&tensors, original, &edge);
+            let amount = job.settings.line_fade();
+            let depth = (amount > 0.0).then(|| job.depth_map()).flatten();
+            let fade = depth.as_deref().map(|depth| prunr_core::depth::LineFade { depth, amount });
+            let rgba = prunr_core::compose_whole_photo(&tensors, original, &edge, fade);
             Some(LayerOutput::Rgba(rgba))
         }
         LayerKind::Mask => {
@@ -629,7 +648,7 @@ mod tests {
         let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None) else {
             panic!("the Lines layer renders from the cached lines");
         };
-        let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings());
+        let canvas = prunr_core::compose_whole_photo(&all_scales, &photo, &item.settings.edge_settings(), None);
         assert_eq!(layer.as_raw(), canvas.as_raw());
         assert_eq!(layer.get_pixel(8, 8).0[..3], [255, 0, 0], "Fine lines draw in the fine color");
     }

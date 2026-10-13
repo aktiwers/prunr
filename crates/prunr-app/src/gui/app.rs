@@ -61,6 +61,9 @@ pub struct PrunrApp {
 
     // Before/After toggle
     pub(crate) show_original: bool,
+    /// "Set focus" was clicked on the Depth chip: the next click on the
+    /// image sets the focus point instead of panning or painting.
+    pub(crate) picking_depth_focus: bool,
     /// Which item the view was last brought up to date for; a change
     /// runs the selection-change work in `reconcile_selected`.
     synced_selected: Option<u64>,
@@ -417,6 +420,7 @@ impl PrunrApp {
             magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
+            picking_depth_focus: false,
             synced_selected: None,
             title_state: TitleState::default(),
             last_drift_check: None,
@@ -1511,6 +1515,16 @@ impl PrunrApp {
                         });
                     }
                 }
+                Ok(DecodedSelection::ByDepth(mask)) => {
+                    let existing = self.batch
+                        .find_by_id(result.item_id)
+                        .and_then(|i| i.selection_mask.clone());
+                    let final_mask = merge_stroke(existing, mask);
+                    self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
+                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
+                        item.last_decode = None;
+                    }
+                }
                 Ok(DecodedSelection::Retuned { merged, hash }) => {
                     self.magic_brush_state.rethreshold_in_flight = false;
                     self.apply_rethreshold(result.item_id, merged, hash, result.reading);
@@ -2124,6 +2138,7 @@ impl PrunrApp {
             .map(|item| LayerSave {
                 layers: super::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
                 composite: item.result_ref().map(|r| (r, item.export_bg())),
+                depth: self.settings.export_depth_map.then(|| item.depth_export()),
             })
             .collect();
         let without_layers: Vec<&str> = targets.iter()
@@ -2154,7 +2169,8 @@ impl PrunrApp {
         let Some(rgba) = item.result_rgba.clone() else { return };
         let default_name = super::drag_export::export_name(&item.filename, self.settings.export_format);
         let bg = item.export_bg();
-        self.save_rgba_with_dialog(rgba, bg, &default_name);
+        let depth = self.settings.export_depth_map.then(|| item.depth_export());
+        self.save_rgba_with_dialog(SaveOne { rgba, bg, depth }, &default_name);
     }
 
     /// Save one specific batch item (by index) via a save-as dialog. Used by
@@ -2162,23 +2178,19 @@ impl PrunrApp {
     /// entry point into the same encode-on-background pipeline as
     /// `save_current_to_file`.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let (rgba, bg, default_name) = {
+        let (one, default_name) = {
             let Some(item) = self.batch.items.get(idx) else { return };
             let Some(rgba) = item.result_rgba.clone() else { return };
-            (rgba, item.export_bg(), super::drag_export::export_name(&item.filename, self.settings.export_format))
+            let depth = self.settings.export_depth_map.then(|| item.depth_export());
+            (SaveOne { rgba, bg: item.export_bg(), depth }, super::drag_export::export_name(&item.filename, self.settings.export_format))
         };
-        self.save_rgba_with_dialog(rgba, bg, &default_name);
+        self.save_rgba_with_dialog(one, &default_name);
     }
 
     /// Shared tail for the two single-item save paths: open the save-as
     /// dialog, then bake the background, encode in the format the chosen
     /// name asks for and write on a background thread.
-    fn save_rgba_with_dialog(
-        &mut self,
-        rgba: Arc<image::RgbaImage>,
-        bg: super::item::ExportBg,
-        default_name: &str,
-    ) {
+    fn save_rgba_with_dialog(&mut self, one: SaveOne, default_name: &str) {
         let preferred = self.settings.export_format;
         let Some(path) = self.system.save_image_dialog(
             self.last_open_dir.as_deref(),
@@ -2191,15 +2203,21 @@ impl PrunrApp {
         };
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving...");
-        spawn_save_single(path, rgba, bg, format, tx);
+        spawn_save_single(path, one, format, tx);
     }
 
     /// One or more sidebar checkboxes selected — pick a folder, write each
     /// as `<source-stem>.prunr.png`. Encode + write run on a background thread.
     fn save_selected_to_folder(&mut self) {
-        let items: Vec<(String, super::item::ResultRef, super::item::ExportBg)> = self.batch.items.iter()
+        let with_depth = self.settings.export_depth_map;
+        let items: Vec<BatchSave> = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done)
-            .filter_map(|item| Some((item.filename.clone(), item.result_ref()?, item.export_bg())))
+            .filter_map(|item| Some(BatchSave {
+                filename: item.filename.clone(),
+                result: item.result_ref()?,
+                bg: item.export_bg(),
+                depth: with_depth.then(|| item.depth_export()),
+            }))
             .collect();
         let Some(folder) = self.system.pick_folder_dialog(
             self.last_open_dir.as_deref(),
@@ -2626,6 +2644,103 @@ impl PrunrApp {
         if self.batch.items[idx].faces_input(self.face_stage()).is_some() {
             self.redo_faces_blend(idx);
         }
+        // The run drew the lines unfaded and the photo without its look:
+        // re-render them over its depth map, measured first when needed.
+        if self.batch.items[idx].settings.wants_depth(self.settings.model.role()) {
+            if self.batch.items[idx].depth.is_some() {
+                self.after_depth_landed(idx);
+            } else {
+                self.request_depth(idx);
+            }
+        }
+    }
+
+    /// Whether the image at `idx` needs its depth map now: a depth knob on
+    /// its settings, or Magic Brush selecting by depth on the shown image.
+    fn wants_depth_now(&self, idx: usize) -> bool {
+        let item = &self.batch.items[idx];
+        let magic = self.magic_brush_state.is_active() && self.settings.brush.magic_depth && self.batch.is_selected(item.id);
+        item.settings.wants_depth(self.settings.model.role()) || magic
+    }
+
+    /// Queue a depth run for the image at `idx` when it has no map, none
+    /// is under way and the model is installed. Off the UI thread: the
+    /// depth thread decodes the source itself when it is not decoded.
+    fn request_depth(&mut self, idx: usize) {
+        if !self.hardware_install_cache.depth {
+            return;
+        }
+        let cpu_only = self.settings.cpu_only();
+        let item = &mut self.batch.items[idx];
+        if !item.needs_depth_run() {
+            return;
+        }
+        let input = match &item.source_rgba {
+            Some(rgba) => super::processor::RunInput::Decoded(Arc::clone(rgba)),
+            None => super::processor::RunInput::Source(item.source.clone()),
+        };
+        item.depth_run.pending = true;
+        self.processor.dispatch_depth(item.id, item.depth_run.epoch, input, cpu_only);
+    }
+
+    /// Depth maps: keep what lands and re-render what reads it; measure
+    /// the shown image's photo when something wants its map.
+    fn pump_depth(&mut self, ctx: &egui::Context) {
+        for landed in self.processor.pump_depth_results() {
+            let Some(idx) = self.batch.index_of(landed.item_id) else { continue };
+            let error = landed.result.as_ref().err().cloned();
+            let item = &mut self.batch.items[idx];
+            let current = landed.epoch == item.depth_run.epoch;
+            if item.land_depth(landed.epoch, landed.result) {
+                tracing::info!(item_id = landed.item_id, "depth map landed");
+                self.after_depth_landed(idx);
+                ctx.request_repaint();
+            } else if let Some(err) = error.filter(|_| current) {
+                self.toasts.error(format!("Depth failed: {err}"));
+            }
+        }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        if self.wants_depth_now(idx) {
+            self.request_depth(idx);
+        }
+    }
+
+    /// The image's depth map is there: re-render the photo look and the
+    /// faded lines that read it. A lens-blur background rebuilds itself,
+    /// its texture key holding the map.
+    fn after_depth_landed(&mut self, idx: usize) {
+        use super::knob_catalog::ModelRole;
+        let role = self.settings.model.role();
+        let item = &self.batch.items[idx];
+        let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
+        let has_result = item.status == BatchStatus::Done || role == ModelRole::Filters;
+        if reads && has_result && shows(self.settings.model, Surface::Effect) {
+            let (id, kind) = (item.id, super::live_preview::PreviewKind::photo_rerun(item.settings.line_mode));
+            self.processor.live_preview.mark_tweak(id, kind);
+            self.processor.live_preview.flush(id);
+        }
+    }
+
+    /// A depth feature was turned on without the depth model: say so and
+    /// open the Model Store on Depth, as other on-demand features do.
+    pub(crate) fn offer_depth_model(&mut self, ctx: &egui::Context) {
+        if self.hardware_install_cache.depth {
+            return;
+        }
+        self.toasts.info("Depth effects need the Depth Anything model (95 MB).");
+        self.open_model_store(adjustments_toolbar::ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Depth) }, ctx);
+    }
+
+    /// The next click on the image picks the Depth chip's focus.
+    pub(crate) fn set_depth_focus(&mut self, fx: f32, fy: f32) {
+        self.picking_depth_focus = false;
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item = &mut self.batch.items[idx];
+        item.settings.depth.set_focus(fx, fy);
+        item.commit(StepKind::Adjust);
+        let (id, kind) = (item.id, super::live_preview::PreviewKind::photo_rerun(item.settings.line_mode));
+        self.processor.live_preview.mark_tweak(id, kind);
+        self.processor.live_preview.flush(id);
     }
 
     /// Restore faces: keep the shown image's faces found for its photo,
@@ -2661,6 +2776,7 @@ impl PrunrApp {
         self.pump_colorize_results(ctx);
         self.pump_sam_results(ctx);
         self.pump_faces();
+        self.pump_depth(ctx);
         self.pump_download_manager(ctx);
         self.pump_runtime_install(ctx);
         self.recipe_drift_tripwire();
@@ -2789,11 +2905,8 @@ impl PrunrApp {
             PreviewKind::Edge if edge_tensor.is_none() => return None,
             _ => {}
         }
-        let plane_key = |scale: prunr_core::EdgeScale| super::live_preview::EdgePlaneKey {
-            strength_bits: item.settings.line_strength.to_bits(),
-            scale,
-            thickness: u32::from(item.settings.edge_thickness),
-        };
+        let has_depth = item.depth.is_some();
+        let plane_key = |scale: prunr_core::EdgeScale| super::live_preview::EdgePlaneKey::new(&item.settings, scale, has_depth);
         let cached_edge = item.edge_planes.lookup(plane_key(item.settings.edge_settings().primary_scale()));
         let cached_bold = item.edge_planes.lookup(plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
@@ -2805,14 +2918,38 @@ impl PrunrApp {
         // (filter-only path).
         let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
         let faces = item.faces_input(super::item::FaceStage::Photo);
+        let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Some(DispatchInputs {
             start,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
             correction,
             faces,
+            depth,
             ..DispatchInputs::new(kind, version, original, item.settings)
         })
+    }
+
+    /// The depth map a photo preview reads, with the Depth chip's look on
+    /// No model and the looked photo kept from last time when it was made
+    /// from the same photo (the faced one, when faces go in first).
+    fn depth_input(
+        item: &BatchItem,
+        original: &Arc<image::DynamicImage>,
+        faces: Option<&super::live_preview::FacesInput>,
+        is_filter_only: bool,
+    ) -> Option<super::live_preview::DepthInput> {
+        let map = item.depth.clone()?;
+        let look = is_filter_only.then_some(item.settings.depth).filter(prunr_core::depth::DepthLook::is_active);
+        let base = match faces {
+            None => Some(Arc::clone(original)),
+            Some(f) => f.faced.clone(),
+        };
+        let photo = look.zip(base).and_then(|(look, base)| {
+            let want = super::item::DepthPhotoKey { base, depth: Arc::clone(&map), look };
+            item.depth_photo.as_ref().filter(|(_, k)| k.matches(&want)).map(|(p, _)| Arc::clone(p))
+        });
+        Some(super::live_preview::DepthInput { map, look, photo })
     }
 
     /// Decompress the edge tensor for the item's currently-selected scale,
@@ -2893,6 +3030,9 @@ impl PrunrApp {
                 if let Some(faced) = r.new_faced {
                     item.faced_photo = Some(faced);
                 }
+                if let Some(looked) = r.new_depth_photo {
+                    item.depth_photo = Some(looked);
+                }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
                 }
@@ -2904,6 +3044,7 @@ impl PrunrApp {
                 // a result it has already consumed.
                 if let Some(applied) = item.applied_recipe.as_mut() {
                     applied.mask = r.applied_mask;
+                    applied.depth = r.applied_depth;
                     if let Some(knobs) = r.applied_tier2_knobs {
                         applied.upscale.sharpen_bits = knobs.sharpen.to_bits();
                         applied.upscale.ai_blend_bits = knobs.ai_blend.to_bits();
@@ -3019,6 +3160,8 @@ impl PrunrApp {
             // The photo with faces blended in, one image of RAM; the faces
             // themselves (a few MB) stay, so it is rebuilt without a search.
             item.faced_photo = None;
+            // Likewise the photo with the Depth chip's look; the map stays.
+            item.depth_photo = None;
             // Up to two images; warmed again when the image is shown.
             item.set_on_screen(false);
             // A full-size picture made from the photo; rebuilt when shown.
@@ -3060,7 +3203,14 @@ impl PrunrApp {
             }
             Backdrop::Effect(effect) => {
                 let Some(photo) = item.backdrop_photo() else { return };
-                Box::new(move || photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect)))
+                let depth = item.depth.clone();
+                if effect.needs_depth() && depth.is_none() {
+                    // Built when the depth map lands.
+                    item.backdrop_texture = None;
+                    return;
+                }
+                let cutout = item.result_rgba.clone().filter(|_| effect.needs_depth());
+                Box::new(move || photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref())))
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,
         };
@@ -4085,6 +4235,7 @@ impl PrunrApp {
                     can_compare,
                     shown_seed: item.shown_seed(),
                     faces_found: Self::face_search(item, super::item::FaceStage::of(settings_ref.model.role())),
+                    picking_depth_focus: self.picking_depth_focus,
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
@@ -4218,6 +4369,13 @@ impl PrunrApp {
             self.batch.items[idx].commit(StepKind::Adjust);
         }
         self.on_faces_change(idx, toolbar_change.faces);
+        let role = self.settings.model.role();
+        if self.batch.items[idx].settings.wants_depth(role) && !settings_before.wants_depth(role) {
+            self.offer_depth_model(ctx);
+        }
+        if toolbar_change.pick_depth_focus {
+            self.picking_depth_focus = true;
+        }
 
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
         let item_id = self.batch.items[idx].id;
@@ -4231,7 +4389,8 @@ impl PrunrApp {
             DispatchKind::Render => {}
             DispatchKind::LivePreviewMask => {
                 if seg_preview_active {
-                    self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
+                    let kind = PreviewKind::photo_rerun(self.batch.items[idx].settings.line_mode);
+                    self.processor.live_preview.mark_tweak(item_id, kind);
                     if toolbar_change.commit {
                         self.processor.live_preview.flush(item_id);
                         ctx.request_repaint();
@@ -4506,23 +4665,47 @@ fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
 /// Encode + write one image on a background thread, then send the result
 /// toast text on `tx`. Stays at module scope so neither save method needs
 /// `&mut self` once they've kicked off the work.
-fn spawn_save_single(
-    path: PathBuf,
+/// One image to save: its result, what goes behind it, and its depth map
+/// when Save options asks for it.
+struct SaveOne {
     rgba: Arc<image::RgbaImage>,
     bg: super::item::ExportBg,
+    depth: Option<super::item::DepthExport>,
+}
+
+fn spawn_save_single(
+    path: PathBuf,
+    one: SaveOne,
     format: prunr_core::ExportFormat,
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
-        let msg = match format.encode(&bg.bake(&rgba)) {
+        let mut msg = match format.encode(&one.bg.bake(&one.rgba)) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
                 Ok(()) => "Saved".into(),
                 Err(e) => format!("Save failed: {e}"),
             },
             Err(e) => format!("Save failed: {e}"),
         };
+        let folder = path.parent().unwrap_or(Path::new("."));
+        if let Some(Err(e)) = one.depth.map(|d| d.write(folder)) {
+            tracing::warn!(%e, "depth map save failed");
+            msg = format!("{msg}; depth map failed: {e}");
+        }
         let _ = tx.send(msg);
     });
+}
+
+/// Write `depth` into `folder` when asked for; counts it as saved or failed.
+fn save_depth_beside(depth: Option<&super::item::DepthExport>, folder: &Path, saved: &mut usize, failed: &mut usize) {
+    match depth.map(|d| d.write(folder)) {
+        Some(Ok(())) => *saved += 1,
+        Some(Err(e)) => {
+            tracing::warn!(%e, "depth map save failed");
+            *failed += 1;
+        }
+        None => {}
+    }
 }
 
 /// One image of a layers save: its layers, and the composite to save
@@ -4530,6 +4713,7 @@ fn spawn_save_single(
 struct LayerSave {
     layers: super::drag_export::LayerJob,
     composite: Option<(super::item::ResultRef, super::item::ExportBg)>,
+    depth: Option<super::item::DepthExport>,
 }
 
 /// Render and write each image's layers into `folder` on a background
@@ -4553,6 +4737,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
                     Err(_) => failed += 1,
                 }
             }
+            save_depth_beside(job.depth.as_ref(), &folder, &mut saved, &mut failed);
         }
         let msg = if failed > 0 {
             format!("Saved {saved}, failed {failed}")
@@ -4565,16 +4750,25 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
 
 /// Encode + write N images into `folder` (named by `drag_export::export_name`) on a
 /// background thread; report aggregate counts when done.
+/// One image of a batch save.
+struct BatchSave {
+    filename: String,
+    result: super::item::ResultRef,
+    bg: super::item::ExportBg,
+    depth: Option<super::item::DepthExport>,
+}
+
 fn spawn_save_batch(
     folder: PathBuf,
-    items: Vec<(String, super::item::ResultRef, super::item::ExportBg)>,
+    items: Vec<BatchSave>,
     format: prunr_core::ExportFormat,
     tx: mpsc::Sender<String>,
 ) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
-        for (filename, result, bg) in items {
+        for BatchSave { filename, result, bg, depth } in items {
+            save_depth_beside(depth.as_ref(), &folder, &mut saved, &mut failed);
             let out_path = folder.join(super::drag_export::export_name(&filename, format));
             let Some(rgba) = result.load() else {
                 failed += 1;
@@ -5521,5 +5715,81 @@ mod hotkey_capture_tests {
         assert!(captured);
         assert!(app.hotkey_capture.is_none());
         assert!(app.show_settings, "Escape went to the capture field, not to the modal");
+    }
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use std::sync::Arc;
+    use super::PrunrApp;
+    use crate::gui::item::BatchStatus;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    fn map() -> Arc<prunr_core::depth::DepthMap> {
+        Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]))
+    }
+
+    /// A landing depth map re-renders what reads it, and only that: the
+    /// Depth chip's look on No model, faded lines on a finished cut-out;
+    /// nothing for an image that reads no depth or has no result yet.
+    #[test]
+    fn a_landed_depth_map_re_renders_only_what_reads_it() {
+        use prunr_core::depth::DepthLook;
+        type Case = (&'static str, SettingsModel, BatchStatus, fn(&mut crate::gui::item_settings::ItemSettings), bool);
+        let cases: [Case; 5] = [
+            ("look on No model", SettingsModel::None, BatchStatus::Pending, |s| s.depth = DepthLook { fog_pct: 40, ..DepthLook::default() }, true),
+            ("look on a cut-out model", SettingsModel::BiRefNetLite, BatchStatus::Done, |s| s.depth = DepthLook { fog_pct: 40, ..DepthLook::default() }, false),
+            ("faded lines, done", SettingsModel::BiRefNetLite, BatchStatus::Done, |s| { s.line_mode = prunr_core::LineMode::EdgesOnly; s.line_fade_pct = 50; }, true),
+            ("faded lines, not processed", SettingsModel::BiRefNetLite, BatchStatus::Pending, |s| { s.line_mode = prunr_core::LineMode::EdgesOnly; s.line_fade_pct = 50; }, false),
+            ("nothing reads depth", SettingsModel::None, BatchStatus::Done, |_| {}, false),
+        ];
+        for (name, model, status, set, reruns) in cases {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = model;
+            let item = push_test_item(&mut app, 1);
+            item.status = status;
+            set(&mut item.settings);
+            let epoch = item.depth_run.epoch;
+            assert!(item.land_depth(epoch, Ok(map())));
+            app.after_depth_landed(0);
+            assert_eq!(app.processor.live_preview.is_pending_for(1), reruns, "{name}");
+        }
+    }
+
+    /// A lens-blur background waits for the depth map: no texture build
+    /// starts without it, and the texture key changes when it lands.
+    #[test]
+    fn a_lens_blur_background_waits_for_the_depth_map() {
+        let mut app = PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        let item = push_test_item(&mut app, 1);
+        item.settings.bg_effect = prunr_core::BgEffect::LensBlur { amount_pct: 50 };
+        item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+        let before = item.backdrop_key();
+        app.kick_backdrop_tex_prep(1, &ctx);
+        assert!(app.batch.items[0].backdrop_tex_pending.is_none(), "no build without the map");
+        app.batch.items[0].depth = Some(map());
+        assert_ne!(app.batch.items[0].backdrop_key(), before, "the map is part of the key");
+        app.kick_backdrop_tex_prep(1, &ctx);
+        assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the map is there");
+    }
+
+    /// Set focus stores the click as fractions, makes it an undo step and
+    /// re-renders the photo.
+    #[test]
+    fn a_focus_click_is_a_step_that_re_renders() {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::None;
+        push_test_item(&mut app, 1);
+        app.batch.select_item(0);
+        app.picking_depth_focus = true;
+        let version = app.batch.items[0].timeline.version();
+        app.set_depth_focus(0.25, 0.75);
+        let item = &app.batch.items[0];
+        assert_eq!(item.settings.depth.focus_point(), Some((0.25, 0.75)));
+        assert!(item.timeline.version() != version, "an undo step");
+        assert!(!app.picking_depth_focus);
+        assert!(app.processor.live_preview.is_pending_for(1));
     }
 }

@@ -41,6 +41,11 @@ pub enum SubprocessCommand {
         ipc_dir: std::path::PathBuf,
         #[serde(default)]
         inpaint_only: bool,
+        /// Fade with distance, 0-100: the worker measures each photo's
+        /// depth and fades its lines. The app sends 0 and fades the
+        /// lines it shows from its own depth map.
+        #[serde(default)]
+        line_fade_pct: u8,
     },
     /// Process a single image. `image_path` points to a temp file with
     /// the raw image bytes (avoids piping large payloads through stdin).
@@ -476,6 +481,7 @@ mod tests {
             edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: prunr_core::EdgeScale::Bold, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: false,
+            line_fade_pct: 40,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -486,6 +492,7 @@ mod tests {
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: true,
+            line_fade_pct: 0,
         });
     }
 
@@ -938,6 +945,7 @@ mod tests {
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: false,
+            line_fade_pct: 40,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -948,6 +956,7 @@ mod tests {
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: true,
+            line_fade_pct: 0,
         });
     }
 

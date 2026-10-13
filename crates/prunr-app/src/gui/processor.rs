@@ -311,6 +311,22 @@ pub(crate) enum DecodedSelection {
     /// A re-threshold: already merged onto the pre-stroke selection and
     /// hashed on the pool, ready to replace the stroke's selection.
     Retuned { merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64 },
+    /// A click with Depth on: the depth band's mask, still to be merged,
+    /// with no logits to re-threshold.
+    ByDepth(prunr_core::selection::MaskArtifact),
+}
+
+/// A Magic Brush click with Depth on, captured at click time like
+/// `SamDecodeRequest`.
+pub(crate) struct DepthSelectRequest {
+    pub(crate) item_id: u64,
+    pub(crate) depth: Arc<prunr_core::depth::DepthMap>,
+    /// The click as fractions of the photo's width and height.
+    pub(crate) at: (f32, f32),
+    pub(crate) range: f32,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+    pub(crate) source_dims: (u32, u32),
+    pub(crate) reading: prunr_core::MaskReading,
 }
 
 /// Re-threshold the logits of the last stroke at a new confidence.
@@ -350,6 +366,95 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) reading: prunr_core::MaskReading,
+}
+
+/// A depth map landing for `item_id`, measured from the photo the item
+/// had at `epoch`.
+pub(crate) struct DepthResult {
+    pub(crate) item_id: u64,
+    pub(crate) epoch: u64,
+    pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
+}
+
+/// One photo to measure, queued for the depth thread.
+struct DepthJob {
+    item_id: u64,
+    epoch: u64,
+    input: RunInput,
+    cpu_only: bool,
+}
+
+/// The depth thread's queue and its warm engine. One thread measures the
+/// photos one after another, so a batch never decodes them all at once.
+struct DepthQueue {
+    jobs: mpsc::Sender<DepthJob>,
+    done: mpsc::Receiver<DepthResult>,
+    warm: WarmEngine,
+}
+
+impl DepthQueue {
+    fn spawn(progress: super::dispatch_progress::DispatchProgressSlot) -> Self {
+        let (jobs, job_rx) = mpsc::channel::<DepthJob>();
+        let (done_tx, done) = mpsc::channel();
+        let warm: WarmEngine = Arc::new(Mutex::new(None));
+        let engine_slot = Arc::clone(&warm);
+        std::thread::spawn(move || {
+            for job in job_rx {
+                let result = measure_depth(&engine_slot, &progress, job.input, job.cpu_only);
+                if let Err(err) = &result {
+                    tracing::warn!(item_id = job.item_id, %err, "depth run failed");
+                }
+                let _ = done_tx.send(DepthResult { item_id: job.item_id, epoch: job.epoch, result });
+            }
+        });
+        Self { jobs, done, warm }
+    }
+}
+
+/// Measure one photo on the warm engine. The capsule shows it only when
+/// nothing else is showing, since it cannot be cancelled.
+fn measure_depth(
+    engine_slot: &WarmEngine,
+    slot: &super::dispatch_progress::DispatchProgressSlot,
+    input: RunInput,
+    cpu_only: bool,
+) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
+    let kind = prunr_core::ModelKind::DepthAnythingV2Small;
+    let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
+    if !admitted(descriptor) {
+        return Err(format!("needs about {} MB of free memory", descriptor.working_set_mb));
+    }
+    let (progress, run) = if slot.read().is_none() {
+        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label());
+        let (progress, run) = slot.progress_for(initial, Arc::new(AtomicBool::new(false)));
+        (progress, Some(run))
+    } else {
+        (prunr_core::Progress::none(), None)
+    };
+    let level = prunr_core::upscale::pick_optimization_level(descriptor);
+    let threads = prunr_core::batch::ort_intra_threads(1);
+    let result = input.load()
+        .and_then(|photo| {
+            let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads, level)?;
+            prunr_core::depth::estimate_depth(&engine, &photo, &progress)
+        })
+        .map(Arc::new)
+        .map_err(|e| e.to_string());
+    if let Some(run) = run {
+        run.end();
+    }
+    result
+}
+
+/// Measure `photo`'s depth on a fresh engine, for a save or the CLI,
+/// which run once and keep no engine.
+/// The CPU EP: the model takes about half a second there, less than a
+/// GPU session takes to build.
+pub fn measure_depth_once(photo: &image::RgbaImage) -> Result<prunr_core::depth::DepthMap, prunr_core::CoreError> {
+    let kind = prunr_core::ModelKind::DepthAnythingV2Small;
+    let threads = prunr_core::batch::ort_intra_threads(1);
+    let engine = prunr_core::OrtEngine::new_cpu_only(kind, threads)?;
+    prunr_core::depth::estimate_depth(&engine, photo, &prunr_core::Progress::none())
 }
 
 /// The longer side of the preview an upscale shows while it runs: about a
@@ -649,6 +754,7 @@ pub(crate) struct Processor {
     sam_sessions: SamSessionSlot,
     faces_tx: mpsc::Sender<FacesResult>,
     faces_rx: mpsc::Receiver<FacesResult>,
+    depth: DepthQueue,
 }
 
 impl Processor {
@@ -662,6 +768,8 @@ impl Processor {
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         let (faces_tx, faces_rx) = mpsc::channel();
+        let dispatch_progress = super::dispatch_progress::DispatchProgressSlot::new();
+        let depth = DepthQueue::spawn(dispatch_progress.clone());
         Self {
             worker_tx,
             worker_rx,
@@ -683,7 +791,7 @@ impl Processor {
             upscale_run_options: std::sync::OnceLock::new(),
             upscale_preview_tx,
             upscale_preview_rx,
-            dispatch_progress: super::dispatch_progress::DispatchProgressSlot::new(),
+            dispatch_progress,
             colorize: RunSlot::new(),
             sam_encoder_tx,
             sam_encoder_rx,
@@ -692,7 +800,33 @@ impl Processor {
             sam_sessions: Arc::new(Mutex::new(None)),
             faces_tx,
             faces_rx,
+            depth,
         }
+    }
+
+    /// Queue `item_id`'s photo for a depth map; it lands through
+    /// `pump_depth_results`, tagged with `epoch`.
+    pub(crate) fn dispatch_depth(&self, item_id: u64, epoch: u64, input: RunInput, cpu_only: bool) {
+        let _ = self.depth.jobs.send(DepthJob { item_id, epoch, input, cpu_only });
+    }
+
+    pub(crate) fn pump_depth_results(&mut self) -> Vec<DepthResult> {
+        self.depth.done.try_iter().collect()
+    }
+
+    /// A Magic Brush click with Depth on: everything near the clicked
+    /// depth, made on the pool and landing like a decoded stroke.
+    pub(crate) fn dispatch_depth_select(&self, req: DepthSelectRequest) {
+        let tx = self.sam_decoder_tx.clone();
+        rayon::spawn(move || {
+            let (w, h) = req.source_dims;
+            let around = req.depth.at(req.at.0, req.at.1);
+            let mask = prunr_core::depth::select_by_depth(&req.depth, w, h, around, req.range, req.mode);
+            let _ = tx.send(SamDecoderResult {
+                item_id: req.item_id, mode: req.mode, reading: req.reading,
+                result: Ok(DecodedSelection::ByDepth(mask)),
+            });
+        });
     }
 
     pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
@@ -905,6 +1039,7 @@ impl Processor {
         prunr_core::inpaint::release_all_lama_sessions();
         self.release_upscale_engine();
         self.colorize.release_engine();
+        *lock_warm_engine(&self.depth.warm) = None;
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -2198,11 +2333,13 @@ mod tests {
                 edge_scale: EdgeScale::Fused,
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
+                line_fade_pct: 0,
             },
             mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
             colorize: Default::default(),
+            depth: Default::default(),
         }
     }
 

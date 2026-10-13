@@ -29,6 +29,7 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
             unreachable!("upscale models are dispatched via upscale_rgba, not the seg pipeline")
         }
         ModelKind::DdcolorTiny => unreachable!("the colorizer runs through colorize_plane, not the seg pipeline"),
+        ModelKind::DepthAnythingV2Small => unreachable!("depth runs through depth::estimate_depth, not the seg pipeline"),
     }
 }
 

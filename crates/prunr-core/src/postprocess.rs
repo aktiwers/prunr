@@ -484,12 +484,18 @@ fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
 }
 
 /// The picture `effect` makes from `source`, opaque, at the source's
-/// size; `None` for no effect. It goes behind a result like a background
-/// image does.
+/// size; `None` for no effect, and for a lens blur without `depth`. A
+/// lens blur focuses on the subject of `cutout` (`depth::backdrop_focus`).
+/// It goes behind a result like a background image does.
 ///
 /// Peak working set: the source as RGBA plus the output (2 × w·h·4 bytes;
-/// 96 MB at 12 MP).
-pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Option<RgbaImage> {
+/// 96 MB at 12 MP); a lens blur, `depth::lens_blur`'s (~4 × w·h·4).
+pub fn effect_backdrop(
+    source: &RgbaImage,
+    effect: crate::types::BgEffect,
+    depth: Option<&crate::depth::DepthMap>,
+    cutout: Option<&RgbaImage>,
+) -> Option<RgbaImage> {
     use crate::types::BgEffect;
     let mut img = match effect {
         BgEffect::None => return None,
@@ -501,6 +507,11 @@ pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Op
             apply_fill_style(&mut img, crate::types::FillStyle::Desaturate);
             img
         }
+        BgEffect::LensBlur { amount_pct } => {
+            let depth = depth?;
+            let focus = crate::depth::Focus::Depth(crate::depth::backdrop_focus(depth, cutout));
+            crate::depth::lens_blur(source, depth, focus, f32::from(amount_pct.min(100)) / 100.0)
+        }
     };
     for p in img.pixels_mut() {
         p.0[3] = 255;
@@ -509,10 +520,10 @@ pub fn effect_backdrop(source: &RgbaImage, effect: crate::types::BgEffect) -> Op
 }
 
 /// Put `effect`'s picture of `photo` under what `rgba` leaves transparent,
-/// covering it at any result size (an upscale included). False when there
-/// is no effect.
-pub fn apply_bg_effect(rgba: &mut RgbaImage, photo: &RgbaImage, effect: crate::types::BgEffect) -> bool {
-    let Some(picture) = effect_backdrop(photo, effect) else { return false };
+/// covering it at any result size (an upscale included); a lens blur
+/// focuses on `rgba`'s own subject. False when there is no picture.
+pub fn apply_bg_effect(rgba: &mut RgbaImage, photo: &RgbaImage, effect: crate::types::BgEffect, depth: Option<&crate::depth::DepthMap>) -> bool {
+    let Some(picture) = effect_backdrop(photo, effect, depth, Some(rgba)) else { return false };
     crate::formats::apply_background_image(rgba, &DynamicImage::ImageRgba8(picture), crate::types::BgImageFit::Cover);
     true
 }
@@ -1103,16 +1114,18 @@ mod tests {
         let photo = RgbaImage::from_fn(8, 4, |x, _| {
             if x < 4 { image::Rgba([200, 40, 40, 0]) } else { image::Rgba([20, 20, 220, 255]) }
         });
-        assert!(effect_backdrop(&photo, BgEffect::None).is_none());
+        let depth = crate::depth::DepthMap::from_raw(2, 2, vec![0.0, 0.0, 1.0, 1.0]);
+        assert!(effect_backdrop(&photo, BgEffect::None, Some(&depth), None).is_none());
+        assert!(effect_backdrop(&photo, BgEffect::LensBlur { amount_pct: 50 }, None, None).is_none(), "a lens blur waits for depth");
         for effect in BgEffect::ALL.iter().filter(|e| **e != BgEffect::None) {
-            let b = effect_backdrop(&photo, *effect).expect("an effect makes a picture");
+            let b = effect_backdrop(&photo, *effect, Some(&depth), None).expect("an effect makes a picture");
             assert_eq!(b.dimensions(), (8, 4));
             assert!(b.pixels().all(|p| p.0[3] == 255), "{effect:?} is opaque");
         }
-        let grey = effect_backdrop(&photo, BgEffect::DesaturatedSource).unwrap();
+        let grey = effect_backdrop(&photo, BgEffect::DesaturatedSource, None, None).unwrap();
         let p = grey.get_pixel(6, 1).0;
         assert!(p[0] == p[1] && p[1] == p[2], "black and white");
-        let blur = effect_backdrop(&photo, BgEffect::BlurredSource { radius: 2 }).unwrap();
+        let blur = effect_backdrop(&photo, BgEffect::BlurredSource { radius: 2 }, None, None).unwrap();
         let (left, right) = (blur.get_pixel(3, 2).0[2], blur.get_pixel(4, 2).0[2]);
         assert!(left > 40 && right < 220, "the two halves bleed into each other: {left} {right}");
     }

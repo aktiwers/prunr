@@ -236,7 +236,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only,
+        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -271,6 +271,7 @@ pub fn run_worker() -> ! {
     let needs_edge = !inpaint_only && line_mode != LineMode::Off;
     let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
 
+    let line_depth = (needs_edge && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
     let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
             Ok(e) => Some(Arc::new(e)),
@@ -367,6 +368,7 @@ pub fn run_worker() -> ! {
                 let cancelled_items = cancelled_items.clone();
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
+                let line_depth = line_depth.clone();
                 let provider = active_provider.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
@@ -456,7 +458,8 @@ pub fn run_worker() -> ! {
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
                                 eng_ref.infer_all_tensors(&transformed).map(|res| {
-                                    let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge);
+                                    let depth = line_depth.as_ref().and_then(|d| d.measure(img));
+                                    let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge, LineDepth::fade(&line_depth, &depth));
                                     edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,
@@ -473,7 +476,8 @@ pub fn run_worker() -> ! {
                                 progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, |i| eng_ref.infer_all_tensors(i))
+                                let depth = line_depth.as_ref().and_then(|d| d.measure(img));
+                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, LineDepth::fade(&line_depth, &depth), |i| eng_ref.infer_all_tensors(i))
                                     .map(|(rgba_image, res)| {
                                         edge_tensor_for_cache = Some(res);
                                         ProcessResult { rgba_image, active_provider: provider.clone() }
@@ -522,8 +526,9 @@ pub fn run_worker() -> ! {
                                         progress.step(prunr_core::Step::DrawingLines);
                                         // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
                                         let eng_ref = edge_eng.as_ref().unwrap();
+                                        let depth = line_depth.as_ref().and_then(|d| d.measure(original));
                                         let (rgba_image, edge_res) = prunr_core::outline_subject(
-                                            subject, mask.fill_style, &edge, |img| eng_ref.infer_all_tensors(img),
+                                            subject, mask.fill_style, &edge, LineDepth::fade(&line_depth, &depth), |img| eng_ref.infer_all_tensors(img),
                                         )?;
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -796,6 +801,7 @@ pub fn run_worker() -> ! {
                 let mask_settings = cmd_mask;
                 let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
+                let line_depth = line_depth.clone();
                 let cancelled_items = cancelled_items.clone();
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
@@ -834,7 +840,8 @@ pub fn run_worker() -> ! {
                         progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, |img| eng_ref.infer_all_tensors(img))
+                        let depth = line_depth.as_ref().and_then(|d| d.measure(&original));
+                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, LineDepth::fade(&line_depth, &depth), |img| eng_ref.infer_all_tensors(img))
                             .map_err(|e| e.to_string())
                     })();
 
@@ -1089,6 +1096,37 @@ pub fn run_worker() -> ! {
     drop(evt_tx);
     let _ = writer_handle.join();
     std::process::exit(0);
+}
+
+/// Fade with distance in the worker (the CLI's runs): the depth model,
+/// built on first use and shared by the pool, and how much to fade.
+struct LineDepth {
+    engine: std::sync::OnceLock<Option<OrtEngine>>,
+    amount: f32,
+}
+
+impl LineDepth {
+    fn new(fade_pct: u8) -> Self {
+        Self { engine: std::sync::OnceLock::new(), amount: f32::from(fade_pct.min(100)) / 100.0 }
+    }
+
+    /// `photo`'s depth map; `None` (lines drawn unfaded) when the model
+    /// is missing or the run fails, which is logged.
+    fn measure(&self, photo: &image::DynamicImage) -> Option<prunr_core::depth::DepthMap> {
+        let engine = self.engine.get_or_init(|| {
+            OrtEngine::new_cpu_only(prunr_core::ModelKind::DepthAnythingV2Small, 1)
+                .map_err(|err| tracing::warn!(%err, "worker: depth model unavailable; lines drawn without fading"))
+                .ok()
+        }).as_ref()?;
+        prunr_core::depth::estimate_depth(engine, &prunr_core::rgba_view(photo), &prunr_core::Progress::none())
+            .map_err(|err| tracing::warn!(%err, "worker: depth run failed; lines drawn without fading"))
+            .ok()
+    }
+
+    fn fade<'a>(this: &Option<Arc<Self>>, depth: &'a Option<prunr_core::depth::DepthMap>) -> Option<prunr_core::depth::LineFade<'a>> {
+        let amount = this.as_ref()?.amount;
+        depth.as_ref().map(|depth| prunr_core::depth::LineFade { depth, amount })
+    }
 }
 
 #[cfg(test)]

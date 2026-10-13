@@ -27,6 +27,12 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
 - **Colorize** (DDColor, in the Model Store): colours a black-and-white photo. Pick "Colorize (DDColor)" and Process; Strength then sets how much of the colour shows, from grey to more saturated than predicted, without running the model again. `--colorize` with `--color-strength` on the command line.
 - **Upscale on the command line**: `--upscale realesrgan|nomos|siax|superscale|nomos2` with `--scale`, `--denoise`, `--sharpen`, `--ai-blend`, `--color-match`, and `--restore-faces gfpgan|restoreformer` with `--face-strength`. A batch loads the model once.
+- **Depth** (Depth Anything V2 Small, 95 MB in the Model Store, about half a second per photo on the CPU): the app measures how near each part of the photo is once, then every depth effect updates live without running the model again.
+  - **Lens blur background** for cut-outs: the photo behind the subject blurs more the farther it is from the subject's depth, like a wide-open lens. `--bg-effect lens[:N]` on the command line.
+  - **Depth chip** on No model: Lens blur (Point or Tilt-shift, with Amount and Set focus: click the image where it should be sharp), Fog that thickens with distance, and Aerial perspective, which turns far things cooler and paler like distant hills. Sketch lines draw over the result.
+  - **Fade with distance** in Sketch's settings: lines lighten the farther away they are. `--line-fade <0-100>` on the command line.
+  - **Select by depth** with Magic Brush: turn on By depth on its strip and a click selects everything at about that depth; Range sets how far it reaches. Shift adds and Alt subtracts as usual.
+  - **Depth map export**: Save options › Depth map also writes `<name>-depth.png` (16-bit grey, white = near) beside each saved image, layers included. `--depth-map` on the command line, `--depth-only` for the maps alone.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.

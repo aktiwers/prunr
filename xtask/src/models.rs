@@ -116,6 +116,12 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/ddcolor_paper_tiny.onnx",
         sha256: "5b4396ff19dbc9729a39fbebd6d7857dee6ff58a35d8820467efa168ecf7b17b",
     },
+    ModelSpec {
+        id: prunr_models::ModelId::DepthAnythingV2Small,
+        name: "depth_anything_v2_small.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/depth_anything_v2_small.onnx",
+        sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    },
     // Phhofm's official Nomos8k release IS fp16 (single file, no fp32
     // sibling) — `UpscaleModelKnobs::is_fp16: true` drives runtime
     // dispatch. Filename is `4xNomos8kSCHAT-L.onnx` with no `_fp16`

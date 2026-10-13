@@ -77,6 +77,9 @@ pub enum ModelId {
     /// DDColor paper-tiny colorizer (fp32). OnDemand; predicts the
     /// colour of a black-and-white photo. Apache-2.0.
     DdcolorTiny,
+    /// Depth Anything V2 Small (fp32). OnDemand; predicts how near each
+    /// part of a photo is. Apache-2.0.
+    DepthAnythingV2Small,
 }
 
 impl ModelId {
@@ -125,6 +128,7 @@ impl ModelId {
         ModelId::FaceRestoreFormerPp,
         ModelId::RoremFp16,
         ModelId::DdcolorTiny,
+        ModelId::DepthAnythingV2Small,
     ];
 
     /// Stable string identifier used as a persistent key (cache
@@ -156,6 +160,7 @@ impl ModelId {
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
             ModelId::RoremFp16 => "rorem_fp16",
             ModelId::DdcolorTiny => "ddcolor_tiny",
+            ModelId::DepthAnythingV2Small => "depth_anything_v2_small",
         }
     }
 
@@ -177,6 +182,8 @@ pub enum ModelCategory {
     Face,
     /// Colorize: predicts colour for a black-and-white photo.
     Colorize,
+    /// Depth: how near each part of a photo is, for depth effects.
+    Depth,
 }
 
 /// Hardware requirement for a model. Drives Model Store + dropdown
@@ -1091,6 +1098,35 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
+    ModelDescriptor {
+        id: ModelId::DepthAnythingV2Small,
+        display_name: "Depth Anything V2 Small",
+        description: "Finds how near each part of a photo is, for lens blur, fog, fading lines and selecting by depth.",
+        category: ModelCategory::Depth,
+        source: ModelSource::OnDemand {
+            filename: "depth_anything_v2_small.onnx",
+            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/depth_anything_v2_small.onnx",
+            sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+            size_mb: 95,
+            license: LicenseInfo {
+                author: "Depth Anything (Yang et al., 2024)",
+                license: "Apache-2.0",
+                license_url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/blob/main/LICENSE",
+                source_url: "https://github.com/DepthAnything/Depth-Anything-V2",
+            },
+            fp16: None,
+        },
+        version: "1.0.0",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+        // Measured: 366 MB peak RSS on the CPU EP, session load included
+        // (518×392 input); headroom for a square photo's 518×518.
+        working_set_mb: 500,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
     // SAM 2.1 Hiera Small: Magic Brush. Apache 2.0 from Meta.
     // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
     // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
@@ -1487,7 +1523,8 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
         | ModelId::RoremFp16
-        | ModelId::DdcolorTiny => {
+        | ModelId::DdcolorTiny
+        | ModelId::DepthAnythingV2Small => {
             // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
             // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
@@ -1684,7 +1721,8 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
         | ModelId::RoremFp16
-        | ModelId::DdcolorTiny => return None,
+        | ModelId::DdcolorTiny
+        | ModelId::DepthAnythingV2Small => return None,
     };
     let filename = format!("{name}_{suffix}.onnx");
 
@@ -1785,7 +1823,8 @@ mod tests {
                 | ModelId::FaceGfpgan
                 | ModelId::FaceRestoreFormerPp
                 | ModelId::RoremFp16
-                | ModelId::DdcolorTiny => {}
+                | ModelId::DdcolorTiny
+                | ModelId::DepthAnythingV2Small => {}
             }
         }
     }
@@ -2348,6 +2387,14 @@ mod tests {
             // returns None cleanly.
             let _ = model_fp16_bytes(id);
         }
+    }
+
+    #[test]
+    fn depth_anything_is_on_demand_depth() {
+        let desc = descriptor(ModelId::DepthAnythingV2Small).expect("DepthAnythingV2Small in REGISTRY");
+        assert_eq!(desc.category, ModelCategory::Depth);
+        assert!(matches!(desc.source, ModelSource::OnDemand { filename: "depth_anything_v2_small.onnx", .. }));
+        assert_eq!(descriptors_for(ModelCategory::Depth).map(|d| d.id).collect::<Vec<_>>(), [ModelId::DepthAnythingV2Small]);
     }
 
     #[test]

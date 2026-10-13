@@ -75,7 +75,7 @@ fn line_mode_subject_outline_combines_seg_and_edge() {
     // Step 2: edge inference + compose_subject_outline overlays lines.
     let edge_res = edge_engine.infer_all_tensors(&img).expect("infer_all_tensors");
     let edge = default_edge_settings(EdgeScale::Fused, ComposeMode::SubjectFilled, LineStyle::Solid);
-    let out = compose_subject_outline(&edge_res, &masked, &edge);
+    let out = compose_subject_outline(&edge_res, &masked, &edge, None);
 
     assert_eq!(out.dimensions(), (256, 256));
     // SubjectFilled keeps the subject fill — at least one near-opaque
@@ -118,7 +118,7 @@ fn line_style_solid_and_dual_scale_compose() {
         LineStyle::DualScale { fine_color: [255, 0, 0], bold_color: [0, 0, 255] },
     ] {
         let edge = default_edge_settings(EdgeScale::Fused, ComposeMode::SubjectFilled, style);
-        let out = compose_subject_outline(&edge_res, &masked, &edge);
+        let out = compose_subject_outline(&edge_res, &masked, &edge, None);
         assert_eq!(out.dimensions(), (256, 256), "{style:?}: dimension mismatch");
     }
 }
