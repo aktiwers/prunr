@@ -448,7 +448,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "Silueta",
         description: "Fast and tiny — pick when speed matters more than edge fidelity.",
         category: ModelCategory::Segmentation,
-        source: ModelSource::Bundled { license: None },
+        source: ModelSource::Bundled {
+            license: Some(LicenseInfo {
+                author: "Daniel Gatis (rembg), after U\u{b2}-Net by Xuebin Qin",
+                license: "MIT",
+                license_url: "https://github.com/danielgatis/rembg/blob/main/LICENSE.txt",
+                source_url: "https://github.com/danielgatis/rembg",
+            }),
+        },
         version: "1.0.0",
         gpu: GpuRequirement::None,
         // OpenVINO 2025.4.1 rejects Silueta's ONNX with
