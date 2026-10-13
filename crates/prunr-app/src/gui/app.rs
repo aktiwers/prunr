@@ -1206,7 +1206,7 @@ impl PrunrApp {
         for r in results {
             let Some(item) = self.batch.find_by_id_mut(r.item_id) else { continue };
             if !item.job_is_current() {
-                // Undone, redone or edited since the run started.
+                self.end_stale_run(r.item_id, "erase");
                 continue;
             }
             self.publish_result(r.item_id, Arc::new(r.rgba), "inpaint", ctx);
@@ -1335,6 +1335,7 @@ impl PrunrApp {
     ) -> bool {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
         if !item.job_is_current() {
+            self.end_stale_run(item_id, tex_kind);
             return false;
         }
         item.result_rgba = Some(Arc::clone(&shown));
@@ -1352,6 +1353,24 @@ impl PrunrApp {
         );
         self.batch.request_thumbnail(item_id, &source, Some(&shown));
         true
+    }
+
+    /// A result arrived for a state the image has since left (a knob
+    /// change, a stroke or an undo while the run was under way), so it
+    /// cannot land: the image shows its current state again instead of
+    /// waiting on, and the user hears why. Silent when nothing was awaited
+    /// any more (an undo already showed the earlier state).
+    fn end_stale_run(&mut self, item_id: u64, run: &str) {
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        if item.status != BatchStatus::Processing && item.job.is_none() {
+            return;
+        }
+        tracing::warn!(item_id, run, "result dropped: the image changed while the run was under way");
+        let name = item.filename.clone();
+        item.abandon_job();
+        self.toasts.warning(format!("{name} changed while it was processing, so that result was dropped. Run it again."));
+        self.refresh_batch_progress_status();
+        self.admission_release_and_admit(item_id);
     }
 
     /// An upscale or colorize ended without a result: its item stops
@@ -3410,9 +3429,12 @@ impl PrunrApp {
         }
 
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        // Skip results the item no longer waits for: cancelled, or undone,
-        // redone or edited since the run started.
-        if item.status != BatchStatus::Processing || !item.job_is_current() {
+        // A cancelled run's item already shows its state again.
+        if item.status != BatchStatus::Processing {
+            return;
+        }
+        if !item.job_is_current() {
+            self.end_stale_run(item_id, "processing");
             return;
         }
         let succeeded = result.is_ok();
@@ -3479,6 +3501,17 @@ impl PrunrApp {
 
     fn on_batch_complete(&mut self) {
         self.processor.drain_recipes();
+        // The worker has answered for everything it was given; an image
+        // still marked as processing was never answered and must not wait
+        // on, with nothing under way.
+        let unanswered: Vec<u64> = self.batch.items.iter()
+            .filter(|i| i.status == BatchStatus::Processing && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
+            .map(|i| i.id)
+            .collect();
+        for item_id in unanswered {
+            tracing::warn!(item_id, "the batch ended with this image still processing");
+            self.end_stale_run(item_id, "processing");
+        }
         let counts = self.batch.status_counts();
         let still_processing = counts.processing > 0;
         if counts.errored > 0 {
@@ -3852,8 +3885,11 @@ impl PrunrApp {
         while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
             filtered.push(item_id);
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if !item.job_is_current() {
+                self.end_stale_run(item_id, "filters");
+                continue;
+            }
             match result {
-                _ if !item.job_is_current() => continue,
                 Ok(rgba) => {
                     item.hold_for_reveal();
                     item.unpark_result();
@@ -5499,6 +5535,78 @@ mod timeline_contract_tests {
         app.on_batch_item_done(&ctx, 1, Ok(late), None, None);
         assert_eq!(shown(&app), None, "undo went back to the original and stays there");
         assert_eq!(app.batch.items[0].status, BatchStatus::Pending);
+    }
+
+    /// A result for a state the image has since left (a knob change while
+    /// it ran) cannot land; the image shows its current state again
+    /// instead of staying "Processing" with nothing under way.
+    #[test]
+    fn a_result_for_a_state_the_image_has_left_ends_the_run() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        item.status = BatchStatus::Processing;
+        item.settings.gamma = 1.8;
+        item.commit(StepKind::Adjust);
+
+        let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, 1, Ok(late), None, None);
+        let item = &app.batch.items[0];
+        assert_eq!(item.status, BatchStatus::Done, "shows its current state again");
+        assert!(item.job.is_none(), "nothing is awaited any more");
+        assert_eq!(shown(&app), Some(1), "the late result did not land");
+        assert!(!super::super::automation::state::dump(&app).busy);
+    }
+
+    /// The same for an erase, an upscale and a colorize: a result for a
+    /// state the image has left ends the run instead of hanging it.
+    #[test]
+    fn a_stale_erase_upscale_or_colorize_result_ends_its_run() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
+        app.batch.items[0].settings.gamma = 1.8;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert!(app.batch.items[0].job.is_none(), "erase: the run is over");
+        assert_eq!(shown(&app), Some(1), "erase: the late result did not land");
+
+        let runs = [
+            (SettingsModel::RealEsrganUpscale, Engine::Upscale, StepKind::Upscale),
+            (SettingsModel::ColorizeDdcolor, Engine::Colorize, StepKind::Colorize),
+        ];
+        for (model, engine, step) in runs {
+            let mut app = app_with_processed_item(model);
+            app.batch.items[0].start_job(Some(step), engine);
+            app.batch.items[0].status = BatchStatus::Processing;
+            app.batch.items[0].settings.gamma = 1.8;
+            app.batch.items[0].commit(StepKind::Adjust);
+            let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+            app.processor.land_run_for_test(engine, 1, px(7), recipe);
+            app.pump_upscale_results(&ctx);
+            app.pump_colorize_results(&ctx);
+            let item = &app.batch.items[0];
+            assert_eq!(item.status, BatchStatus::Done, "{engine:?}: shows its current state again");
+            assert!(item.job.is_none(), "{engine:?}: the run is over");
+            assert_eq!(shown(&app), Some(1), "{engine:?}: the late result did not land");
+        }
+    }
+
+    /// A batch that ends with an image still marked as processing (its
+    /// result never came) frees that image.
+    #[test]
+    fn a_batch_ending_with_an_image_still_processing_frees_it() {
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        item.status = BatchStatus::Processing;
+        app.on_batch_complete();
+        assert_eq!(app.batch.items[0].status, BatchStatus::Done);
+        assert!(app.batch.items[0].job.is_none());
+        assert!(!super::super::automation::state::dump(&app).busy);
     }
 
     /// A Process result that lands on the state it started from is a step.
