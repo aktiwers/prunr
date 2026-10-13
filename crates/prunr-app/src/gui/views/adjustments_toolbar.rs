@@ -1021,7 +1021,7 @@ fn render_background_chip(
                             set_color(rgb, bg, bg_effect, change);
                         }
                         if let Some([r, g, b]) = solid {
-                            ui.label(RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                            ui.label(RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
                         }
                     });
                     if let Some(rgba) = bg.as_mut() {

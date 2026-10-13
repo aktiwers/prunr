@@ -245,7 +245,7 @@ fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) 
             x += 26.0;
         }
         let color = if selected { Color32::WHITE } else if icon.is_some() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
-        painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), color);
+        painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(theme::FONT_SIZE_BODY), color);
     }
     resp
 }
@@ -256,7 +256,7 @@ fn render_reset_confirm(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.separator();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Reset settings? Presets, licences, background pictures and the model stay.")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_MONO));
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_SECONDARY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                 app.pending_reset_confirm = false;
@@ -360,7 +360,7 @@ fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::Ra
                 *value -= 1;
             }
             let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, value.to_string(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, value.to_string(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY);
             if step(ui, *value < *range.end(), "+", "More") {
                 *value += 1;
             }
@@ -581,7 +581,7 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         texts.get(slot).map_or("\u{2014}", |t| t)
                     };
                     let color = if waiting { theme::ACCENT } else if rebindable { theme::TEXT_PRIMARY } else { theme::TEXT_HINT };
-                    let label = RichText::new(text).monospace().size(theme::FONT_SIZE_MONO).color(color);
+                    let label = RichText::new(text).monospace().size(theme::FONT_SIZE_SECONDARY).color(color);
                     if rebindable {
                         let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, theme::CHIP_HEIGHT));
                         if ui.add(slot_button).clicked() {
@@ -615,7 +615,7 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
         });
     ui.add_space(theme::SPACE_MD);
     if app.settings.hotkeys.is_empty() {
-        ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
+        ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
     } else if button(ui, ButtonKind::Secondary, "Reset all hotkeys").clicked() {
         reset = Some(Bindings::shipped());
     }
@@ -694,19 +694,19 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
         if descriptor.attribution_required {
             ui.label(
                 RichText::new(" CC-BY")
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::ACCENT_RING),
             );
         }
     });
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Author:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
-        ui.label(RichText::new(author).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new("Author:").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(author).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
     });
     ui.horizontal(|ui| {
-        ui.label(RichText::new("License:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
-        ui.label(RichText::new(license_name).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new("License:").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(license_name).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
         if !source_url.is_empty() {
             ui.hyperlink_to("↗ source", source_url);
         }

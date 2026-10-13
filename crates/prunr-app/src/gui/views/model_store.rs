@@ -94,14 +94,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
     let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", theme::fit_to_window(ctx, STORE_SIZE), |ui| {
-        let mut close = false;
-        egui::Frame::NONE.inner_margin(egui::Margin::same(24)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            close = super::chip::modal_header(ui, "Model Store", &format!(
-                "Everything runs on this computer. Download what you need. {} on disk.",
-                format_byte_size(disk_usage_bytes()),
-            ));
-            ui.add_space(14.0);
+        let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(disk_usage_bytes()));
+        super::chip::modal_page(ui, "Model Store", &subtitle, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
 
@@ -135,8 +129,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 ui.data_mut(|d| d.insert_temp(heights_id, heights));
                 ui.ctx().request_repaint();
             }
-        });
-        close
+        })
     });
 
     for (id, action) in pending_actions {

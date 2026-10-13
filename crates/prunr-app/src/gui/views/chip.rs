@@ -240,7 +240,7 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
             ui.label(
                 RichText::new(body)
                     .color(theme::TEXT_PRIMARY)
-                    .size(theme::FONT_SIZE_MONO),
+                    .size(theme::FONT_SIZE_SECONDARY),
             );
         }
         if let Some(action) = shortcut {
@@ -248,7 +248,7 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
             ui.label(
                 RichText::new(&*shortcuts::keys(ui.ctx(), action))
                     .color(theme::TEXT_SECONDARY)
-                    .size(theme::FONT_SIZE_MONO),
+                    .size(theme::FONT_SIZE_SECONDARY),
             );
         }
     })
@@ -454,7 +454,7 @@ fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipC
     if in_panel_rows(ui) {
         return panel_slider(ui, label, slider);
     }
-    let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
     let resp = ui.add(slider.show_value(true)).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
 }
@@ -486,7 +486,7 @@ fn in_panel_rows(ui: &Ui) -> bool {
 /// A panel row's name, in its fixed column.
 pub(super) fn panel_name(ui: &mut Ui, label: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(PANEL_NAME_WIDTH, PANEL_ROW_HEIGHT), egui::Sense::hover());
-    let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(13.0), theme::TEXT_PRIMARY);
+    let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY);
     ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
 }
 
@@ -540,23 +540,38 @@ fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
     ui.painter().circle_filled(center, radius, fill);
 }
 
+/// A list row's fill: the purple wash when picked, a faint one on hover.
+fn row_wash(resp: &Response, selected: bool) -> Color32 {
+    if selected {
+        theme::ROW_PICKED
+    } else if resp.hovered() {
+        theme::ROW_HOVER
+    } else {
+        Color32::TRANSPARENT
+    }
+}
+
+/// The picked row's check, `inset` from its right edge.
+fn paint_row_check(painter: &egui::Painter, rect: egui::Rect, inset: f32) {
+    painter.text(egui::pos2(rect.right() - inset, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
+        egui::FontId::proportional(16.0), theme::ACCENT_RING);
+}
+
+/// A row's accessible name: its title, and its description on a line under.
+fn row_name(title: &str, description: &str) -> String {
+    if description.is_empty() { title.to_owned() } else { format!("{title}\n{description}") }
+}
+
 /// A choice-list row: an icon in a dim circle, the title over
 /// a one-line description, and when picked a purple wash and a check.
 /// Reads as a button named title, newline, description.
 pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description: &str, selected: bool, icon_fill: Color32) -> Response {
     const HEIGHT: f32 = 46.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), egui::Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, format!("{title}\n{description}")));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, row_name(title, description)));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let fill = if selected {
-            theme::ROW_PICKED
-        } else if resp.hovered() {
-            theme::ROW_HOVER
-        } else {
-            Color32::TRANSPARENT
-        };
-        painter.rect_filled(rect, 12.0, fill);
+        painter.rect_filled(rect, theme::ROW_ROUNDING, row_wash(&resp, selected));
         let icon_center = egui::pos2(rect.left() + 12.0 + 15.0, rect.center().y);
         painter.circle_filled(icon_center, 15.0, icon_fill);
         painter.text(icon_center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), theme::GLOW);
@@ -567,8 +582,7 @@ pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description:
         painter.text(egui::pos2(text_x, rect.center().y + 2.0), egui::Align2::LEFT_TOP, description,
             egui::FontId::proportional(theme::FONT_SIZE_SECONDARY), theme::TEXT_SECONDARY.gamma_multiply(dim));
         if selected {
-            painter.text(egui::pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
-                egui::FontId::proportional(16.0), theme::ACCENT_RING);
+            paint_row_check(painter, rect, 14.0);
         }
     }
     resp
@@ -587,7 +601,7 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
     let title_galley = ui.painter().layout_no_wrap(title.to_owned(),
         egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY.gamma_multiply(dim));
     let desc_galley = (!description.is_empty()).then(|| ui.painter().layout_no_wrap(description.to_owned(),
-        egui::FontId::proportional(theme::FONT_SIZE_MONO), theme::TEXT_SECONDARY.gamma_multiply(dim)));
+        egui::FontId::proportional(theme::FONT_SIZE_SECONDARY), theme::TEXT_SECONDARY.gamma_multiply(dim)));
     let text_h = title_galley.size().y + desc_galley.as_ref().map_or(0.0, |g| g.size().y + 2.0);
     let text_w = title_galley.size().x.max(desc_galley.as_ref().map_or(0.0, |g| g.size().x));
     let size = egui::vec2(
@@ -595,20 +609,10 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
         (text_h + 2.0 * PAD.y).max(theme::CHIP_HEIGHT),
     );
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let name = if description.is_empty() { title.to_owned() } else { format!("{title}\n{description}") };
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, &name));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, row_name(title, description)));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        // A wash, not a solid accent: grey description text on the solid
-        // accent fell to 2:1.
-        let fill = if selected {
-            theme::ROW_PICKED
-        } else if resp.hovered() {
-            theme::ROW_HOVER
-        } else {
-            Color32::TRANSPARENT
-        };
-        painter.rect_filled(rect, 10.0, fill);
+        painter.rect_filled(rect, theme::ROW_ROUNDING, row_wash(&resp, selected));
         let top = rect.center().y - text_h / 2.0;
         let desc_top = top + title_galley.size().y + 2.0;
         painter.galley(egui::pos2(rect.left() + PAD.x, top), title_galley, theme::TEXT_PRIMARY);
@@ -616,11 +620,22 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
             painter.galley(egui::pos2(rect.left() + PAD.x, desc_top), g, theme::TEXT_SECONDARY);
         }
         if selected {
-            painter.text(egui::pos2(rect.right() - PAD.x, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
-                egui::FontId::proportional(16.0), theme::ACCENT_RING);
+            paint_row_check(painter, rect, PAD.x);
         }
     }
     resp
+}
+
+/// A bare modal's page: the margin, the header row, then `body`. True on
+/// the frame its close was clicked.
+pub(super) fn modal_page(ui: &mut Ui, title: &str, subtitle: &str, body: impl FnOnce(&mut Ui)) -> bool {
+    egui::Frame::NONE.inner_margin(theme::MODAL_PAGE_MARGIN).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let close = modal_header(ui, title, subtitle);
+        ui.add_space(theme::SPACE_MD);
+        body(ui);
+        close
+    }).inner
 }
 
 /// A modal's header row: its title, a line under it, and the round close
@@ -652,9 +667,7 @@ pub(super) fn menu_row(ui: &mut Ui, title: &str, shortcut: &str) -> Response {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        if resp.hovered() {
-            painter.rect_filled(rect, 10.0, theme::ROW_HOVER);
-        }
+        painter.rect_filled(rect, theme::ROW_ROUNDING, row_wash(&resp, false));
         let y = rect.center().y;
         painter.galley(egui::pos2(rect.left() + PAD, y - title_galley.size().y / 2.0), title_galley, theme::TEXT_PRIMARY);
         painter.galley(egui::pos2(rect.right() - PAD - key_galley.size().x, y - key_galley.size().y / 2.0), key_galley, theme::TEXT_SECONDARY);
@@ -662,14 +675,19 @@ pub(super) fn menu_row(ui: &mut Ui, title: &str, shortcut: &str) -> Response {
     resp
 }
 
+/// The track of a segmented control: a dim pill, its segments 2 px apart.
+fn segmented<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE.fill(theme::FIELD_FILL).corner_radius(theme::PILL_RADIUS).inner_margin(3).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        body(ui)
+    }).inner
+}
+
 /// Horizontal tab strip: the active tab is filled, the rest are flat.
 /// Used by Settings, the CLI reference and the Model Store filters.
 pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
-    // The same segmented look as `choice_buttons` (the Model Store
-    // filters): the active tab on its old BG_SECONDARY fill was 1.16:1.
-    egui::Frame::NONE.fill(theme::FIELD_FILL).corner_radius(theme::BUTTON_ROUNDING).inner_margin(3).show(ui, |ui| {
+    segmented(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
             ui.spacing_mut().button_padding = egui::vec2(12.0, 2.0);
             for (i, label) in labels.iter().enumerate() {
                 let active = *selected == i;
@@ -711,8 +729,6 @@ pub(super) fn button(ui: &mut Ui, kind: ButtonKind, text: &str) -> Response {
         ButtonKind::Ghost => (Color32::TRANSPARENT, theme::TEXT_SECONDARY),
     };
     with_fill(ui, fill, |ui| {
-        // egui's 4 px left a pill's label against its rounded ends.
-        ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
         ui.add(
             egui::Button::new(RichText::new(text).color(color).size(theme::FONT_SIZE_BODY))
                 .stroke(egui::Stroke::NONE)
@@ -874,7 +890,7 @@ pub(super) fn color_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
             if in_panel_rows(ui) {
                 panel_name(ui, label);
             } else {
-                ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+                ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
             }
             color_dot(ui, label, Color32::from_rgb(r, g, b), open)
         })
@@ -1018,14 +1034,14 @@ pub(super) fn panel_section(ui: &mut Ui, caption: &str, note: Option<&str>) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(caption).size(theme::FONT_SIZE_CAPTION).color(theme::TEXT_SECONDARY));
         if let Some(note) = note {
-            ui.label(RichText::new(note).size(theme::FONT_SIZE_HINT).color(theme::HINT));
+            ui.label(RichText::new(note).size(theme::FONT_SIZE_CAPTION).color(theme::HINT));
         }
     });
 }
 
 /// Secondary caption above a row or a list inside a popover.
 pub(super) fn section_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
 }
 
 /// One option of a `choice_row`.
@@ -1069,13 +1085,8 @@ pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice
 
 /// `choice_buttons` with the picked option in `picked` (Erase's warm red).
 pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T, picked: Color32) -> bool {
-    egui::Frame::NONE
-        .fill(theme::FIELD_FILL)
-        .corner_radius(theme::PILL_RADIUS)
-        .inner_margin(3.0)
-        .show(ui, |ui| {
+    segmented(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
                 ui.spacing_mut().button_padding = egui::vec2(11.0, 5.0);
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 let v = ui.visuals_mut();
@@ -1101,7 +1112,6 @@ pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &
             })
             .inner
         })
-        .inner
 }
 
 /// A dropdown (a rounded field with a chevron) for a choice too
@@ -1122,7 +1132,7 @@ pub(super) fn dropdown<T: Copy + PartialEq>(ui: &mut Ui, label: &str, options: &
         let painter = ui.painter();
         painter.rect_filled(rect, theme::INPUT_RADIUS, fill);
         let text = if ui.is_enabled() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
-        painter.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, current, egui::FontId::proportional(13.0), text);
+        painter.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, current, egui::FontId::proportional(theme::FONT_SIZE_BODY), text);
         let chevron = if open { ICON_EXPAND_LESS.codepoint } else { ICON_EXPAND_MORE.codepoint };
         painter.text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, chevron, egui::FontId::proportional(16.0), theme::TEXT_SECONDARY);
         resp
@@ -1244,7 +1254,7 @@ pub(super) fn toggle_row(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChan
 
 /// A switch with its label beside it, for a quick strip.
 pub(super) fn inline_switch(ui: &mut Ui, label: &str, value: &mut bool) -> ChipChange {
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
+    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
     let changed = switch(ui, label, value).changed();
     ChipChange { changed, commit: changed }
 }

@@ -226,9 +226,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let active_color = theme::ACCENT;
         let pos = egui::pos2(
             canvas_rect.min.x + theme::SPACE_SM,
-            canvas_rect.max.y - theme::SPACE_SM - theme::FONT_SIZE_MONO,
+            canvas_rect.max.y - theme::SPACE_SM - theme::FONT_SIZE_SECONDARY,
         );
-        let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
+        let font = egui::FontId::monospace(theme::FONT_SIZE_SECONDARY);
         let painter = ui.painter();
         let (shift_hint, alt_hint) = super::shortcuts::MODIFIER_HINTS;
         let shift_color = if shift { active_color } else { base_color };
@@ -774,7 +774,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
             egui::Align2::LEFT_TOP,
             "Original",
-            egui::FontId::monospace(theme::FONT_SIZE_MONO),
+            egui::FontId::monospace(theme::FONT_SIZE_SECONDARY),
             theme::TEXT_SECONDARY,
         );
     }
