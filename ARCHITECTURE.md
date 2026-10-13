@@ -38,7 +38,7 @@ assets/                    # Icon, Info.plist, .desktop
 | Coordinator        | Owns                                                                                                   |
 |--------------------|--------------------------------------------------------------------------------------------------------|
 | `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
-| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, SAM 2 sessions, the shared progress slot |
+| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, SAM 2 sessions, the shared progress slot |
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
@@ -86,7 +86,7 @@ ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold 
 | Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup and used by the first batch if its config matches; later batches spawn their own child; shut down when the batch ends or on model switch |
 | SD erases | inpaint-only worker subprocess (no seg engines) | spawned on first SD erase; killed after 5 min idle, on model switch, or on Cancel |
 | LaMa / MI-GAN erases, SAM, live preview | in-process, rayon | sessions cached; LaMa released after 5 min idle |
-| Upscale | in-process, one thread per run | engine kept warm until model or hardware change |
+| Upscale, colorize | in-process, one thread per run | engine kept warm until model or hardware change |
 | Filters only (no model) | background thread per item | — |
 
 SD has its own process because its multi-GB bundle is the likeliest OOM and a UNet step can't be interrupted: Cancel kills the process so RAM frees at once, and a watchdog kills it if free system RAM drops below 1 GB mid-erase.
@@ -141,6 +141,7 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 | `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
 | `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
 | `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
+| `ColorizeRerun` / `ColorizeTier2` | Colorize model / Strength | Run DDColor / re-render its kept colour plane at the new strength |
 | `CompositeOnly` | Background colour or image | Render-time only |
 | `Skip` | Nothing output-relevant | None |
 
@@ -150,7 +151,7 @@ The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on 
 
 **Batch vs interactive Tier 2.** Batch reruns go through the subprocess (a mask rerun with lines on takes the AddEdge path so the outline is recomposed; edge reruns run the full pipeline). Interactive reruns of the selected item run in-process; see [Live Preview](#live-preview).
 
-**What each model shows.** A model has a role (cut-out, filters, erase, upscale), and `knob_catalog::shows(model, Surface)` is the one table of which chips and brush controls appear for it: only those that act on that model's image. Dispatch routing stays on the role and model predicates. The toolbar, the brush strip and panels, the selection overlay and the selection actions all read it; a test renders the toolbar for every model against the table. A control that is shown but idle under another setting (Mask while Sketch is Full) is greyed with its reason instead.
+**What each model shows.** A model has a role (cut-out, filters, erase, upscale, colorize), and `knob_catalog::shows(model, Surface)` is the one table of which chips and brush controls appear for it: only those that act on that model's image. Dispatch routing stays on the role and model predicates. The toolbar, the brush strip and panels, the selection overlay and the selection actions all read it; a test renders the toolbar for every model against the table. A control that is shown but idle under another setting (Mask while Sketch is Full) is greyed with its reason instead.
 
 **Two sources of tier truth, one test.** `resolve_tier` compares whole recipes; `gui/knob_catalog.rs` maps each toolbar knob to `(tier, cache impact, dispatch)`, with context-aware specs for knobs whose cost depends on what is cached (Off → Subject outline is a live recompose with the edge tensor warm, an AddEdge run otherwise). A test mutates every knob and asserts the two agree.
 
@@ -182,7 +183,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 |---|---|---|
 | Background removal | Restore or Erase on the cut-out | At once, by an in-process mask rerun from the cached seg tensor, but only while a cut-out is on screen (`BatchItem::shows_cutout`); otherwise the selection waits for the next result |
 | Eraser | Add to / subtract from the region to fill | On Process, since a run costs seconds to minutes |
-| Upscale | Not offered: the brushes and selection actions are hidden, since an upscale covers the whole image | — |
+| Upscale, Colorize | Not offered: the brushes and selection actions are hidden, since both cover the whole image | — |
 
 **Correction.** `MaskArtifact::apply_to_alpha` runs last, on the full-resolution mask after edge refinement and feather (Erase scales toward 0, Restore lifts toward 1, by magnitude): a stroke is exact intent, and refining it would pull it onto nearby image edges. The plane it gets is the selection at the photo's own size (`BatchItem::correction_plane`), feathered by the selection Feather once the overlay has built that plane off the UI thread; its landing re-cuts once more. The overlay draws the same plane by coverage, so what it shows is what the cut-out gets.
 
@@ -464,7 +465,7 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 |--------|--------|
 | `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, DexiNed |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (with an fp16 sibling for GPU EPs) |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
 
 `resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).

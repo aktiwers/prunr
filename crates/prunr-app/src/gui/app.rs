@@ -689,6 +689,10 @@ impl PrunrApp {
             self.dispatch_upscale_intent();
             return;
         }
+        if self.settings.model.is_colorize() {
+            self.dispatch_colorize_intent();
+            return;
+        }
         if self.settings.model.is_inpaint() {
             let Some(idx) = self.batch.selected_idx_clamped() else { return };
             let has_selection = self.batch.items.get(idx).is_some_and(
@@ -718,7 +722,7 @@ impl PrunrApp {
         // Share the input via Arc — full RGBA payload would otherwise
         // be deep-cloned (tens of MB at 4K) for every Process click.
         let input = item.run_input(Engine::Upscale).or_else(|| item.source_rgba.clone())
-            .map_or_else(|| super::processor::UpscaleInput::Source(item.source.clone()), super::processor::UpscaleInput::Decoded);
+            .map_or_else(|| super::processor::RunInput::Source(item.source.clone()), super::processor::RunInput::Decoded);
         let output_scale = item.settings.output_scale;
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
@@ -739,6 +743,21 @@ impl PrunrApp {
         self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe);
     }
 
+    /// Colorize branch of `handle_process_intent`: the selected image, from
+    /// where its timeline says a run starts, to `Processor::dispatch_colorize`.
+    fn dispatch_colorize_intent(&mut self) {
+        let Some(item) = self.batch.selected_item() else { return };
+        let item_id = item.id;
+        let input = item.run_input(Engine::Colorize).or_else(|| item.source_rgba.clone())
+            .map_or_else(|| super::processor::RunInput::Source(item.source.clone()), super::processor::RunInput::Decoded);
+        let recipe = item.settings.current_recipe(prunr_core::ModelKind::DdcolorTiny);
+        tracing::info!(item_id, "colorize dispatched");
+        if let Some(item) = self.batch.find_by_id_mut(item_id) {
+            item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+        }
+        self.processor.dispatch_colorize(item_id, input, self.settings.cpu_only(), recipe);
+    }
+
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
     /// this so the button's disabled state and the dispatch's gating can't
     /// drift independently.
@@ -752,6 +771,9 @@ impl PrunrApp {
             let is_in_flight = self.processor.is_upscale_in_flight();
             let item_loaded = self.batch.selected_item().is_some();
             return can_process_upscale(is_in_flight, item_loaded);
+        }
+        if self.settings.model.is_colorize() {
+            return can_process_upscale(self.processor.is_colorize_in_flight(), self.batch.selected_item().is_some());
         }
         if self.settings.model.is_inpaint() {
             self.batch.selected_item().is_some_and(
@@ -848,6 +870,7 @@ impl PrunrApp {
         match item.job.as_ref().map(|j| j.engine) {
             Some(Engine::Erase) => self.cancel_inpaint_for(item_id),
             Some(Engine::Upscale) => self.processor.cancel_upscale(),
+            Some(Engine::Colorize) => self.processor.cancel_colorize(),
             Some(Engine::Segment) | None => self.processor.cancels.request_item_cancel(item_id),
         }
     }
@@ -1318,6 +1341,59 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
+    /// Drain finished colorize runs and land each on its item, as
+    /// `pump_upscale_results` does. Nothing goes on top: a colorize has no
+    /// selection re-cut and no Restore faces.
+    fn pump_colorize_results(&mut self, ctx: &egui::Context) {
+        let results = self.processor.pump_colorize_results();
+        if results.is_empty() {
+            return;
+        }
+        let handles = self.batch.bg_io.tex_prep_handles();
+        let switch = self.result_switch_id;
+        for r in results {
+            let item_id = r.item_id;
+            match r.result {
+                Ok(output) => {
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    if !item.job_is_current() {
+                        continue;
+                    }
+                    let new_rgba = output.shown;
+                    item.result_rgba = Some(Arc::clone(&new_rgba));
+                    item.applied_recipe = Some(r.recipe);
+                    item.status = BatchStatus::Done;
+                    item.hold_for_reveal();
+                    item.result_tex_pending = true;
+                    item.thumb_pending = true;
+                    item.land_colorize(output.run);
+                    let source = item.source.clone();
+                    Self::spawn_tex_prep(
+                        Arc::clone(&new_rgba), item_id,
+                        Self::tex_name("colorize", item_id, Some(switch)),
+                        TexTarget::Result, handles.clone(), ctx.clone(),
+                    );
+                    self.batch.request_thumbnail(item_id, &source, Some(&new_rgba));
+                    tracing::info!(item_id, "colorize result applied");
+                }
+                Err(prunr_core::CoreError::Cancelled) => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.job = None;
+                    }
+                    self.toasts.info("Colorize cancelled");
+                }
+                Err(e) => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.job = None;
+                    }
+                    tracing::error!(item_id, %e, "colorize dispatch failed");
+                    self.toasts.error(format!("Colorize failed: {e}"));
+                }
+            }
+        }
+        ctx.request_repaint();
+    }
+
     /// Eager encoder: the selected image gets an embedding as soon as it
     /// has a decoded source, so Magic Brush is ready the moment it is
     /// turned on. Runs from `reconcile_selected` every frame. With the tool
@@ -1625,7 +1701,7 @@ impl PrunrApp {
     /// never start on import.
     fn auto_process_imported(&mut self, id_floor: u64) {
         let model = self.settings.model;
-        if !self.settings.auto_process_on_import || model.is_inpaint() || model.is_upscale() {
+        if !self.settings.auto_process_on_import || model.is_inpaint() || model.is_upscale() || model.is_colorize() {
             return;
         }
         if self.batch.items.iter().any(|i| i.id >= id_floor) {
@@ -1786,7 +1862,8 @@ impl PrunrApp {
             match tier {
                 RequiredTier::Skip
                 | RequiredTier::CompositeOnly
-                | RequiredTier::UpscaleRerun => {
+                | RequiredTier::UpscaleRerun
+                | RequiredTier::ColorizeRerun => {
                     // CompositeOnly (bg_color) and UpscaleRerun re-render at
                     // display/export time, not via the seg/edge dispatcher;
                     // sync the stored composite so status reads stay accurate.
@@ -1795,7 +1872,7 @@ impl PrunrApp {
                     }
                     tiers.skip_count += 1;
                 }
-                RequiredTier::UpscaleTier2 => {
+                RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => {
                     // Tier-2 upscale (sharpen/ai_blend/color_match)
                     // dispatches the cached-buffer postprocess via live preview
                     // — no subprocess admission, no re-inference.
@@ -2347,6 +2424,7 @@ impl PrunrApp {
         // gating on `model.is_upscale()` would drop the signal if the
         // user switched model mid-flight.
         self.processor.cancel_upscale();
+        self.processor.cancel_colorize();
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
@@ -2610,6 +2688,7 @@ impl PrunrApp {
         self.pump_inpaint_results(ctx);
         self.pump_upscale_previews(ctx);
         self.pump_upscale_results(ctx);
+        self.pump_colorize_results(ctx);
         self.pump_sam_results(ctx);
         self.pump_faces();
         self.pump_download_manager(ctx);
@@ -2687,7 +2766,29 @@ impl PrunrApp {
                 correction: None,
                 upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
+                colorize: None,
                 faces: item.faces_input(super::item::FaceStage::Upscale),
+            });
+        }
+        if matches!(kind, PreviewKind::ColorizeTier2) {
+            let colorize = item.kept_colorize()?.clone();
+            return Some(DispatchInputs {
+                version,
+                kind,
+                original: Arc::new(image::DynamicImage::new_rgba8(0, 0)),
+                start: None,
+                settings: item.settings,
+                seg_tensor: None,
+                edge_tensor: None,
+                secondary_edge_tensor: None,
+                cached_edge: Default::default(),
+                cached_bold: Default::default(),
+                cached_masked_base: None,
+                correction: None,
+                upscale: None,
+                upscale_tier2_knobs: None,
+                colorize: Some(colorize),
+                faces: None,
             });
         }
         let seg_tensor = item.hot_seg_tensor();
@@ -2767,6 +2868,7 @@ impl PrunrApp {
             correction,
             upscale: None,
             upscale_tier2_knobs: None,
+            colorize: None,
             faces,
         })
     }
@@ -2867,14 +2969,21 @@ impl PrunrApp {
                         applied.upscale.ai_blend_bits = knobs.ai_blend.to_bits();
                         applied.upscale.color_match = knobs.color_match;
                     }
+                    if let Some(strength) = r.applied_color_strength {
+                        applied.colorize.strength_bits = strength.to_bits();
+                    }
                 }
                 item.amend();
-                if !is_upscale_tier2 {
-                    item.record_origin(Engine::Segment, r.start);
+                // A Strength re-render keeps its colorize step's origin and
+                // has no faces.
+                if r.kind != PreviewKind::ColorizeTier2 {
+                    if !is_upscale_tier2 {
+                        item.record_origin(Engine::Segment, r.start);
+                    }
+                    let stage = if is_upscale_tier2 { super::item::FaceStage::Upscale } else { super::item::FaceStage::Photo };
+                    let blended = item.faces_input(stage).is_some_and(|f| !f.key.faces.is_empty());
+                    item.settle_faced(stage.engine(), blended);
                 }
-                let stage = if is_upscale_tier2 { super::item::FaceStage::Upscale } else { super::item::FaceStage::Photo };
-                let blended = item.faces_input(stage).is_some_and(|f| !f.key.faces.is_empty());
-                item.settle_faced(stage.engine(), blended);
                 tracing::debug!(
                     event = "upscale_tier2_apply",
                     item_id = item.id,
@@ -3468,6 +3577,8 @@ impl PrunrApp {
         }
         if self.processor.is_upscale_in_flight() {
             self.processor.cancel_upscale();
+        } else if self.processor.is_colorize_in_flight() {
+            self.processor.cancel_colorize();
         } else if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {
@@ -3992,7 +4103,7 @@ impl PrunrApp {
     fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-        let is_processing = self.batch.app_state() == AppState::Processing || self.processor.is_upscale_in_flight();
+        let is_processing = self.batch.app_state() == AppState::Processing || self.processor.is_upscale_in_flight() || self.processor.is_colorize_in_flight();
         // Compared after the toolbar ran: a changed knob or preset is a step.
         let settings_before = self.batch.items[idx].settings;
         adjustments_panel(panel_frame)
@@ -4052,6 +4163,13 @@ impl PrunrApp {
         self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| item.refine_only_changed(model))
     }
 
+    /// Whether the image at `idx` changed only in Strength since its
+    /// colorize, so its kept run can be re-rendered.
+    fn wants_colorize_tier2(&self, idx: usize) -> bool {
+        self.settings.model.is_colorize()
+            && self.batch.items.get(idx).is_some_and(|item| item.strength_only_changed(prunr_core::ModelKind::DdcolorTiny))
+    }
+
     /// What a model switch does whatever images are loaded: fit lines and
     /// brushes to the model, drop runs and cached sessions of the old one.
     fn on_model_changed(&mut self) {
@@ -4062,12 +4180,14 @@ impl PrunrApp {
         // changes model mid-run — the result would land on the
         // wrong selection otherwise.
         self.processor.cancel_upscale();
+        self.processor.cancel_colorize();
         // Drop every item's kept upscale run — the buffers
         // were produced by the previous model. A subsequent Tier-2
         // preview tick would otherwise display the old model's output
         // under the new model's knobs.
         for item in &mut self.batch.items {
             item.invalidate_upscale_cache();
+            item.invalidate_colorize_cache();
         }
         self.settings.save();
         self.toasts.info(format!(
@@ -4201,8 +4321,15 @@ impl PrunrApp {
         // whatever the Live preview setting. Checked only on a change (or
         // a slider's release), not every frame.
         let changed = self.batch.items[idx].settings != settings_before;
-        if (changed || toolbar_change.commit) && self.wants_upscale_tier2(idx) {
-            self.processor.live_preview.mark_tweak(item_id, PreviewKind::UpscaleTier2);
+        let kept_run_kind = if self.wants_upscale_tier2(idx) {
+            Some(PreviewKind::UpscaleTier2)
+        } else if self.wants_colorize_tier2(idx) {
+            Some(PreviewKind::ColorizeTier2)
+        } else {
+            None
+        };
+        if let Some(kind) = kept_run_kind.filter(|_| changed || toolbar_change.commit) {
+            self.processor.live_preview.mark_tweak(item_id, kind);
             if toolbar_change.commit {
                 self.processor.live_preview.flush(item_id);
                 ctx.request_repaint();
@@ -4265,12 +4392,13 @@ impl PrunrApp {
                         // UpscaleRerun (Tier-1): user must re-click Process.
                         RequiredTier::Skip
                         | RequiredTier::CompositeOnly
-                        | RequiredTier::UpscaleRerun => knob_catalog::DispatchKind::None,
+                        | RequiredTier::UpscaleRerun
+                        | RequiredTier::ColorizeRerun => knob_catalog::DispatchKind::None,
                         // UpscaleTier2: route to live preview via the upscale
                         // dispatch path. DispatchKind doesn't have an UpscaleTier2
                         // variant — the caller handles it specially after this
                         // function returns when the model is in upscale mode.
-                        RequiredTier::UpscaleTier2 => knob_catalog::DispatchKind::None,
+                        RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => knob_catalog::DispatchKind::None,
                         RequiredTier::EdgeRerun => knob_catalog::DispatchKind::LivePreviewEdge,
                         RequiredTier::MaskRerun => knob_catalog::DispatchKind::LivePreviewMask,
                         RequiredTier::AddEdgeInference => {
@@ -4955,14 +5083,14 @@ mod timeline_contract_tests {
     /// upscale runs on the image you pick, so those wait for Process.
     #[test]
     fn auto_process_on_import_runs_only_for_cut_out_and_filter_models() {
-        for model in [SettingsModel::SdInpaint, SettingsModel::Inpaint, SettingsModel::RealEsrganUpscale, SettingsModel::BiRefNetLite, SettingsModel::None] {
+        for model in [SettingsModel::SdInpaint, SettingsModel::Inpaint, SettingsModel::RealEsrganUpscale, SettingsModel::ColorizeDdcolor, SettingsModel::BiRefNetLite, SettingsModel::None] {
             let mut app = PrunrApp::new_for_test();
             app.settings.model = model;
             app.settings.auto_process_on_import = true;
             push_test_item(&mut app, 5);
             app.auto_process_imported(5);
             let ran = matches!(app.batch.items[0].status, BatchStatus::Processing);
-            assert_eq!(ran, !(model.is_inpaint() || model.is_upscale()), "{model:?}");
+            assert_eq!(ran, !(model.is_inpaint() || model.is_upscale() || model.is_colorize()), "{model:?}");
         }
     }
 

@@ -25,6 +25,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - **Outline & Shadow** for cut-outs: a sticker outline (width, color, round corners that follow soft hair edges) and a Soft or Drop shadow (opacity, blur, distance), under the subject, in the preview, Save and drag-out. `--outline PX[:HEX]` and `--shadow soft|drop` on the command line.
 - **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
+- **Colorize** (DDColor, in the Model Store): colours a black-and-white photo. Pick "Colorize (DDColor)" and Process; Strength then sets how much of the colour shows, from grey to more saturated than predicted, without running the model again. `--colorize` with `--color-strength` on the command line.
 - **Upscale on the command line**: `--upscale realesrgan|nomos|siax|superscale|nomos2` with `--scale`, `--denoise`, `--sharpen`, `--ai-blend`, `--color-match`, and `--restore-faces gfpgan|restoreformer` with `--face-strength`. A batch loads the model once.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.

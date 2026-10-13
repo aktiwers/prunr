@@ -223,6 +223,16 @@ fn upscale_does_not_auto_dispatch_on_selection_commit() {
     );
 }
 
+#[test]
+fn colorize_does_not_auto_dispatch_on_selection_commit() {
+    let mut app = app_with_model(SettingsModel::ColorizeDdcolor);
+    let item = push_test_item(&mut app, 4);
+    item.dimensions = (64, 64);
+    app.batch.commit_selection(4, make_mask(64, 64), StepKind::Stroke);
+    app.apply_selection_to_active_model(4);
+    assert!(!app.processor.live_preview.is_pending_for(4), "Colorize must not auto-dispatch on stroke commit");
+}
+
 // ── No model → no auto-dispatch ──────────────────────────────────────────────
 
 #[test]
@@ -516,6 +526,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
         new_faced: None,
         applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
         applied_tier2_knobs: None,
+        applied_color_strength: None,
         is_final: true,
     };
     app.apply_completed_previews(&ctx, vec![landed]);
@@ -593,6 +604,7 @@ fn the_drift_check_never_recuts_a_result_that_used_no_mask() {
     for (model, line_mode) in [
         (SettingsModel::Silueta, prunr_core::LineMode::EdgesOnly),
         (SettingsModel::RealEsrganUpscale, prunr_core::LineMode::Off),
+        (SettingsModel::ColorizeDdcolor, prunr_core::LineMode::Off),
     ] {
         let mut app = app_with_model(model);
         let item = push_test_item(&mut app, 7);
@@ -689,6 +701,7 @@ fn a_recut_landing_off_screen_keeps_the_image_parked() {
         new_faced: None,
         applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
         applied_tier2_knobs: None,
+        applied_color_strength: None,
         is_final: true,
     };
     app.apply_completed_previews(&ctx, vec![landed]);

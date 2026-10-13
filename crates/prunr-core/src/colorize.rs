@@ -3,9 +3,12 @@
 //! lightness and takes the predicted colour, scaled by a strength.
 
 use image::RgbaImage;
+use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
 use crate::color::{lab_to_srgb, srgb_to_lab};
+use crate::progress::{Progress, Step};
+use crate::{CoreError, OrtEngine};
 
 /// Edge length of the model's square input and of its colour output.
 pub const COLORIZE_INPUT: u32 = 512;
@@ -36,6 +39,36 @@ pub fn colorize_input(src: &RgbaImage) -> Vec<f32> {
         out[2 * n + i] = b as f32 / 255.0;
     }
     out
+}
+
+/// Run the colorizer on `src`: the predicted colour at
+/// `COLORIZE_INPUT²`, to hand to `colorized` at any strength.
+///
+/// Peak working set: the 3 MB input tensor, the 2 MB plane and the
+/// session's own scratch (`ModelDescriptor.working_set_mb`).
+pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) -> Result<ColorPlane, CoreError> {
+    progress.step(Step::Colorizing);
+    let side = COLORIZE_INPUT as usize;
+    let input = ndarray::Array4::from_shape_vec((1, 3, side, side), colorize_input(src))
+        .map_err(|e| CoreError::Inference(format!("colorize: input shape: {e}")))?;
+    let tensor = Tensor::from_array(input).map_err(|e| CoreError::Inference(format!("colorize: input tensor: {e}")))?;
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    let plane = engine.with_session(|session| {
+        let outputs = session.run(inputs!["input" => &tensor])
+            .map_err(|e| CoreError::Inference(format!("colorize: inference failed: {e}")))?;
+        let (_, data) = outputs[0].try_extract_tensor::<f32>()
+            .map_err(|e| CoreError::Inference(format!("colorize: output: {e}")))?;
+        Ok(data.to_vec())
+    })?;
+    if plane.len() != 2 * side * side {
+        return Err(CoreError::Inference(format!("colorize: output has {} values, expected {}", plane.len(), 2 * side * side)));
+    }
+    if progress.is_cancelled() {
+        return Err(CoreError::Cancelled);
+    }
+    Ok(plane)
 }
 
 /// One bilinear tap along an axis: the two source indices and the

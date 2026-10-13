@@ -202,6 +202,10 @@ pub(crate) fn render(
         if shows(model, Surface::Upscale) {
             super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.processing);
         }
+        if shows(model, Surface::Colorize) {
+            let reason = state.processing.then_some("Wait for Colorize to finish, or cancel it.");
+            chip::gated(ui, reason, |ui| render_color_strength_chip(ui, item_settings));
+        }
         if shows(model, Surface::SdChips) {
             let outcome = super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed);
             if outcome.committed {
@@ -1187,12 +1191,39 @@ pub(crate) fn render_model_only(
 
 const MODEL_PICKER_WIDTH: f32 = 360.0;
 
+fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
+    let default_pct = ItemSettings::default().color_strength_pct;
+    let tuned = s.color_strength_pct != default_pct;
+    let summary = fmt::percent(s.color_strength());
+    let group = chip::GroupChip {
+        id_salt: "color_strength",
+        icon: ICON_PALETTE.codepoint,
+        label: "Strength",
+        summary: &summary,
+        tooltip: "Color strength. 0 = grey, 1 = as predicted.",
+        tuned,
+        width: theme::POPOVER_WIDTH,
+        live: true,
+    };
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            s.color_strength_pct = default_pct;
+        }
+        let mut v = s.color_strength();
+        let max = f32::from(ItemSettings::COLOR_STRENGTH_MAX_PCT) / 100.0;
+        if chip::slider_row_f32(ui, "Color", &mut v, 0.0..=max, false, fmt::percent).changed {
+            s.color_strength_pct = (v * 100.0).round() as u8;
+        }
+    });
+}
+
 fn role_caption(role: crate::gui::knob_catalog::ModelRole) -> &'static str {
     use crate::gui::knob_catalog::ModelRole;
     match role {
         ModelRole::Cutout => "BACKGROUND REMOVAL",
         ModelRole::Erase => "ERASER",
         ModelRole::Upscale => "UPSCALE",
+        ModelRole::Colorize => "COLORIZE",
         ModelRole::Filters => "",
     }
 }
@@ -1223,6 +1254,7 @@ pub(super) fn render_model_dropdown(
             ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and download size.",
             ModelRole::Erase => "Removes what you paint over and fills the area in. Paint with the brush, then Process.",
             ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",
+            ModelRole::Colorize => "Colors a black-and-white photo. Process, then set Strength.",
             ModelRole::Filters => "No model runs: only the effect, lines and background apply to the photo.",
         };
         let resp = chip::tooltip(resp, "Model", body, None);

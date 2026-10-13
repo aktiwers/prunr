@@ -170,6 +170,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 match target {
                     CancelTarget::InpaintForItem(id) => app.cancel_inpaint_for(id),
                     CancelTarget::Upscale => app.processor.cancel_upscale(),
+                    CancelTarget::Colorize => app.processor.cancel_colorize(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
                 }
             }

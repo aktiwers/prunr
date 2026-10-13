@@ -80,6 +80,8 @@ pub enum PreviewKind {
     /// on the kept upscale run. No ORT inference — snapshot provides
     /// the cached buffer directly.
     UpscaleTier2,
+    /// Strength → re-render the kept colorize run. No model run.
+    ColorizeTier2,
 }
 
 /// The upscale result to show: Refine over the model's output
@@ -154,6 +156,9 @@ pub struct PreviewResult {
     /// mark_tweak stops firing between settled drags.
     /// `None` for non-UpscaleTier2 kinds.
     pub applied_tier2_knobs: Option<prunr_core::upscale::Refine>,
+    /// The Strength a ColorizeTier2 dispatch rendered, patched into
+    /// `applied_recipe.colorize` for the same reason. `None` otherwise.
+    pub applied_color_strength: Option<f32>,
     /// `true` when no further tweaks are pending for this item at drain
     /// time — the drag has settled and this is the last result of the
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
@@ -336,6 +341,7 @@ impl LivePreview {
                 // instead of UpscaleTier2, stopping the per-frame mark_tweak loop
                 // after the user stops dragging.
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
+                let applied_color_strength = matches!(inputs.kind, PreviewKind::ColorizeTier2).then_some(inputs.settings.color_strength());
                 let version = inputs.version;
                 let start = inputs.start.clone();
                 let faced_key = inputs.faces.as_ref().map(|f| f.key.clone());
@@ -361,6 +367,7 @@ impl LivePreview {
                         new_faced: output.built_faced.zip(faced_key),
                         applied_mask: mask_recipe,
                         applied_tier2_knobs,
+                        applied_color_strength,
                         is_final: false,
                     });
                 }
@@ -463,6 +470,9 @@ pub struct DispatchInputs {
     pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
     /// For `PreviewKind::UpscaleTier2` only — snapshot of the Refine knobs.
     pub upscale_tier2_knobs: Option<prunr_core::upscale::Refine>,
+    /// For `PreviewKind::ColorizeTier2` only — the kept colorize run,
+    /// re-rendered at `settings.color_strength()`.
+    pub(crate) colorize: Option<crate::gui::item::ColorizeCache>,
     /// Restored faces to blend into `original` before anything else.
     pub faces: Option<FacesInput>,
 }
@@ -649,6 +659,13 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         let built_reference = reference.filter(|_| !had_reference);
         return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::empty() };
     }
+    if matches!(inputs.kind, PreviewKind::ColorizeTier2) {
+        let Some(run) = inputs.colorize else {
+            tracing::debug!(event = "colorize_tier2_run_abort", reason = "no colorize run kept");
+            return RunOutput::empty();
+        };
+        return RunOutput { rgba: Some(Arc::new(run.render(inputs.settings.color_strength()))), ..RunOutput::empty() };
+    }
 
     // Faces go into the photo before the mask, the effect and the lines.
     let mut inputs = inputs;
@@ -712,7 +729,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     }
                 }
             }
-            PreviewKind::UpscaleTier2 => unreachable!("run_preview finishes UpscaleTier2 itself"),
+            PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
         }
     } else {
         (None, None)
@@ -777,7 +794,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             );
             RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::empty() }
         }
-        PreviewKind::UpscaleTier2 => unreachable!("run_preview finishes UpscaleTier2 itself"),
+        PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
     }
 }
 
@@ -1065,6 +1082,7 @@ mod tests {
             new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
+            applied_color_strength: None,
             is_final: false,
         }).unwrap();
 
@@ -1095,6 +1113,7 @@ mod tests {
             new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
+            applied_color_strength: None,
             is_final: false,
         }).unwrap();
 
@@ -1124,6 +1143,7 @@ mod tests {
             new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
+            applied_color_strength: None,
             is_final: false,
         }).unwrap();
         let drained = lp.drain_results();
@@ -1150,6 +1170,7 @@ mod tests {
             new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
+            applied_color_strength: None,
             is_final: false,
         }).unwrap();
 
@@ -1183,6 +1204,7 @@ mod tests {
             new_faced: None,
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None,
+            applied_color_strength: None,
             is_final: false,
         }).unwrap();
 
@@ -1270,6 +1292,7 @@ mod tests {
                 correction: None,
                 upscale: Some(crate::gui::item::UpscaleCache::new(raw_arc.clone(), raw_arc.clone(), None)),
                 upscale_tier2_knobs: Some(knobs),
+                colorize: None,
                 faces: None,
             },
             &cancel,
@@ -1277,6 +1300,46 @@ mod tests {
         assert!(output.rgba.is_some(), "UpscaleTier2 dispatch must produce an RGBA result");
         assert!(output.built_edge.dilated.is_none(), "UpscaleTier2 must not build an edge mask");
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
+    }
+
+    /// A Strength preview re-renders the kept colorize run at the
+    /// snapshot's strength, with no model run.
+    #[test]
+    fn colorize_tier2_renders_the_kept_run_at_the_new_strength() {
+        use crate::gui::item_settings::ItemSettings;
+        let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
+        let mut plane = vec![0.0; 2 * n];
+        plane[n..].fill(40.0);
+        let input = Arc::new(RgbaImage::from_pixel(4, 4, image::Rgba([128, 128, 128, 255])));
+        let run = crate::gui::item::ColorizeCache::new(Arc::new(plane), Arc::clone(&input));
+        let render = |color_strength_pct| {
+            let inputs = DispatchInputs {
+                version: 0,
+                kind: PreviewKind::ColorizeTier2,
+                original: Arc::new(image::DynamicImage::new_rgba8(0, 0)),
+                start: None,
+                settings: ItemSettings { color_strength_pct, ..ItemSettings::default() },
+                seg_tensor: None,
+                edge_tensor: None,
+                secondary_edge_tensor: None,
+                cached_edge: EdgePlanes::default(),
+                cached_bold: EdgePlanes::default(),
+                cached_masked_base: None,
+                correction: None,
+                upscale: None,
+                upscale_tier2_knobs: None,
+                colorize: Some(run.clone()),
+                faces: None,
+            };
+            run_preview(inputs, &std::sync::atomic::AtomicBool::new(false)).rgba.expect("rendered")
+        };
+        let spread = |img: &RgbaImage| {
+            let [r, g, b, _] = img.get_pixel(2, 2).0;
+            r.max(g).max(b) - r.min(g).min(b)
+        };
+        assert!(spread(&render(0)) <= 1, "0 = grey");
+        assert!(spread(&render(100)) > 20, "100% = the predicted colour");
+        assert_eq!(*render(100), run.render(1.0));
     }
 
     /// A Sketch tweak previews exactly what Process makes: the same
@@ -1328,6 +1391,7 @@ mod tests {
                     correction: None,
                     upscale: None,
                     upscale_tier2_knobs: None,
+                    colorize: None,
                     faces: None,
                 },
                 &std::sync::atomic::AtomicBool::new(false),
