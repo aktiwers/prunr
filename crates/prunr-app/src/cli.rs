@@ -723,16 +723,8 @@ fn run_colorize(args: &Cli) -> i32 {
 /// optimisation level, the CPU alone with `--cpu`. The error is the line
 /// to print.
 fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Result<prunr_core::OrtEngine, String> {
-    let descriptor = prunr_models::descriptor(model).ok_or_else(|| format!("{model:?} is not a known model"))?;
-    let level = prunr_core::upscale::pick_optimization_level(descriptor);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    prunr_core::ModelKind::try_from(model)
-        .map_err(|id| prunr_core::CoreError::Model(format!("{id:?} has no session kind")))
-        .and_then(|kind| if cpu {
-            prunr_core::OrtEngine::new_cpu_only_with_optimization_level(kind, threads, level)
-        } else {
-            prunr_core::OrtEngine::new_with_optimization_level(kind, threads, level)
-        })
+    prunr_core::OrtEngine::for_model(model, threads, cpu)
         .map_err(|e| format!("cannot load the {what} model: {e}"))
 }
 
