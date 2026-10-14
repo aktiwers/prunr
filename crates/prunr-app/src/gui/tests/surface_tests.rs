@@ -294,6 +294,18 @@ fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
 }
 
+/// The save dialog opens ready for a name: text typed at once goes into
+/// it. (Saving writes the presets folder, so Enter is checked live.)
+#[test]
+fn the_save_preset_dialog_takes_a_name_typed_at_once() {
+    let mut h = loaded();
+    click(&mut h, "Preset");
+    click(&mut h, "Save current as…");
+    h.event(egui::Event::Text("Mine".into()));
+    settle(&mut h);
+    assert_eq!(h.state().save_preset.as_deref(), Some("Mine"), "the typing went into the name");
+}
+
 #[test]
 fn escape_closes_a_modal_before_touching_the_selection() {
     let mut h = loaded();
