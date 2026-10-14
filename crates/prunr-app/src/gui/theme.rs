@@ -203,6 +203,10 @@ pub fn apply_modal_visuals(ui: &mut egui::Ui) {
 /// it on the first frame.
 pub const MODAL_BACKDROP_DEBOUNCE_SECS: f64 = 0.2;
 
+/// What a modal keeps clear of the window's edges when it has to shrink.
+const MODAL_SCREEN_MARGIN: f32 = 16.0;
+const MODAL_MIN_SIZE: f32 = 240.0;
+
 /// Render a centred non-resizable modal: backdrop + window + frame +
 /// close-on-backdrop-click. Returns `true` when the user closed the
 /// modal this frame (X button or backdrop click). The `opened_at`
@@ -264,6 +268,9 @@ fn show_modal(
         .response
         .layer_id;
 
+    // A short window: the modal shrinks to fit it, and its page scrolls.
+    let room = screen.size() - egui::vec2(2.0 * MODAL_SCREEN_MARGIN, 2.0 * MODAL_SCREEN_MARGIN);
+    let size = [size[0].min(room.x).max(MODAL_MIN_SIZE), size[1].min(room.y).max(MODAL_MIN_SIZE)];
     let mut open = true;
     let resp = window
         .id(egui::Id::new(id))

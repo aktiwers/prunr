@@ -91,7 +91,7 @@ pub fn render(ctx: &egui::Context) -> bool {
             ui.separator();
 
             let pipeline = &PIPELINES[tab];
-            ui.vertical(|ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(theme::SPACE_SM);
                 endpoint_label(ui, pipeline.input);
                 arrow(ui);

@@ -105,6 +105,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- The command-line reference and the pipeline diagrams fit a short window and scroll; their bottom and close button used to fall outside it.
 - The Model picker fits its longest model name instead of a fixed width, and in a window too short for the list it runs to the bottom edge and scrolls; "Get more models" used to fall off the bottom of the window.
 - Set focus in the Depth panel closes the panel first, so a click anywhere on the image sets the focus; a click under the panel used to go to the panel and the focus never moved.
 - On the command line `-o name` without an extension saves `name.png` in every mode; upscale, colorize and erase used to stop with "The image format could not be determined".

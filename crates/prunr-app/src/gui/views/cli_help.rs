@@ -5,6 +5,9 @@ use crate::gui::theme;
 use super::{kv_row, section_heading};
 
 /// Returns true if the modal should close.
+/// Room kept under the scrolling page for the "Press F2 to close" line.
+const FOOTER_HEIGHT: f32 = 28.0;
+
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",
@@ -22,6 +25,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
 
             ui.data_mut(|d| d.insert_temp(tab_id, tab));
 
+            // A short window: the page scrolls above its footer line.
+            let page_height = (ui.available_height() - FOOTER_HEIGHT).max(0.0);
+            egui::ScrollArea::vertical().max_height(page_height).auto_shrink([false, false]).show(ui, |ui| {
             match tab {
                 // ── Quick Start ──
                 0 => {
@@ -275,6 +281,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
 
                 _ => {}
             }
+            });
 
             // Footer
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
