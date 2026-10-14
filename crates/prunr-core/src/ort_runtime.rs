@@ -4,7 +4,8 @@
 //!   1. `ORT_DYLIB_PATH` env var (escape hatch + dev override). Set but
 //!      not a file is an error, never a silent fall-through.
 //!   2. User Runtime Store install (`<data>/prunr/runtimes/<ep>/<ver>/`)
-//!   3. Bundled fallback alongside the executable (`<exe parent>/runtime/`)
+//!   3. Bundled fallback alongside the executable (`<exe parent>/runtime/`;
+//!      a macOS `.app` keeps it in `Contents/Frameworks/`)
 //!
 //! Every session in the workspace starts from [`session_builder`], which
 //! runs [`ensure_initialized`] first. Under `load-dynamic`, building a
@@ -160,7 +161,8 @@ pub fn diagnose() -> Diagnostics {
         env_path: env_override(),
         store_root: prunr_models::runtime_store_dir(),
         store_entries: store_entries().into_iter().map(|(name, p)| { let exists = p.is_file(); (name, exists) }).collect(),
-        bundled: bundled_nested_path().map(|p| { let exists = p.is_file(); (p, exists) }),
+        bundled: bundled_dylib().map(|p| (p, true))
+            .or_else(|| bundled_paths().into_iter().next().map(|p| (p, false))),
         resolved: resolve_dylib_path().ok(),
     }
 }
@@ -176,24 +178,46 @@ pub fn has_fallback_excluding(excluding: &Path) -> bool {
         || bundled_dylib().is_some()
 }
 
-/// Release CI's `cargo xtask install-runtime --stage-to <pkg>/runtime/`
-/// puts shared libs in a `runtime/` sibling of the binary.
-fn bundled_nested_path() -> Option<PathBuf> {
-    Some(std::env::current_exe().ok()?.parent()?.join("runtime").join(DYLIB_NAME))
+fn bundled_paths() -> Vec<PathBuf> {
+    let Some(exe) = std::env::current_exe().ok() else { return Vec::new() };
+    // macOS reports the path the binary was launched by; a Homebrew
+    // `bin/prunr` symlink must still find the runtime beside the real
+    // binary, as dyld's `@executable_path` would.
+    let exe = if cfg!(target_os = "macos") { exe.canonicalize().unwrap_or(exe) } else { exe };
+    exe.parent().map_or_else(Vec::new, |dir| bundled_candidates(dir, cfg!(target_os = "macos")))
+}
+
+/// Where a packaged build keeps the runtime: release CI's `runtime/`
+/// beside the binary, the binary's own dir (packagers that flatten
+/// `runtime/`, the macOS tar.gz), and a macOS `.app`'s
+/// `Contents/Frameworks/`.
+fn bundled_candidates(exe_dir: &Path, macos: bool) -> Vec<PathBuf> {
+    let mut paths = vec![exe_dir.join("runtime").join(DYLIB_NAME), exe_dir.join(DYLIB_NAME)];
+    if macos {
+        paths.extend(exe_dir.parent().map(|contents| contents.join("Frameworks").join(DYLIB_NAME)));
+    }
+    paths
 }
 
 fn bundled_dylib() -> Option<PathBuf> {
-    // Some packagers flatten the `runtime/` dir, hence the exe-dir fallback.
-    //
-    // macOS .app skips both: the binary's rpath
-    // (`@executable_path/../Frameworks`, set in `.cargo/config.toml`)
-    // resolves the dylib at link time, so this returns `None` and the
-    // dlopen falls through to rpath. There's no Frameworks/ check here
-    // on purpose.
-    let nested = bundled_nested_path()?;
-    if nested.is_file() {
-        return Some(nested);
+    bundled_paths().into_iter().find(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_candidates_reach_the_app_bundle_frameworks_on_macos() {
+        let exe_dir = Path::new("/Applications/Prunr.app/Contents/MacOS");
+        let frameworks = Path::new("/Applications/Prunr.app/Contents/Frameworks").join(DYLIB_NAME);
+        let expected_common = [exe_dir.join("runtime").join(DYLIB_NAME), exe_dir.join(DYLIB_NAME)];
+
+        let mac = bundled_candidates(exe_dir, true);
+        assert_eq!(mac[..2], expected_common);
+        assert_eq!(mac.get(2), Some(&frameworks));
+        assert_eq!(mac.len(), 3);
+
+        assert_eq!(bundled_candidates(exe_dir, false), expected_common);
     }
-    let flat = nested.parent()?.parent()?.join(DYLIB_NAME);
-    flat.is_file().then_some(flat)
 }
