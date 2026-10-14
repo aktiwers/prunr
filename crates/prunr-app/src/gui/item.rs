@@ -1056,6 +1056,23 @@ impl BatchItem {
         }
     }
 
+    /// Paint a finished tile into its square of the run's preview, made
+    /// on the run's first tile (or anew when the size changes). Only the
+    /// tile is uploaded (`set_partial`).
+    pub(crate) fn paint_tile_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview) {
+        let full = [tile.full_width as usize, tile.full_height as usize];
+        let texture = match &mut self.tile_preview {
+            Some(t) if t.size() == full => t,
+            slot => slot.insert(ctx.load_texture(
+                format!("tile-preview-{}", self.id),
+                egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
+                egui::TextureOptions::LINEAR,
+            )),
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+        texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
+    }
+
     /// An upscale has landed: its finished-tile preview, the whole image
     /// by now, is shown until the result's texture lands and the result
     /// reveals over it. Without one, the shown image is held as usual.
