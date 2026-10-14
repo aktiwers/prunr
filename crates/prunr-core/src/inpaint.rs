@@ -12,7 +12,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::{apply_ort_graph_cache, EpSite};
+use crate::engine::{apply_ort_graph_cache, EpSite, Weights};
 use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
 
@@ -685,7 +685,7 @@ fn build_lama_session(
             tracing::debug!(?id, ep = %ep, "LaMa: EP statically incompatible; skipping");
             continue;
         }
-        if crate::ep_compat::is_known_failure(ep, id) {
+        if crate::ep_compat::is_known_failure(ep, id, Weights::Base) {
             tracing::debug!(?id, ep = %ep, "LaMa: EP cached as incompatible; skipping");
             continue;
         }
@@ -722,7 +722,7 @@ fn build_lama_session(
                 tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
                 crate::engine::handle_commit_failure(
                     matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
+                    ep, id, Weights::Base,
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &format!("{e}"),
                 );
@@ -741,7 +741,7 @@ fn build_lama_session(
                 );
                 crate::engine::handle_commit_failure(
                     matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
+                    ep, id, Weights::Base,
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &e,
                 );

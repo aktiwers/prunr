@@ -1740,7 +1740,16 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "int8")
 }
 
+/// Whether the half-precision copy of `id` is on disk, without reading it.
+pub fn has_fp16_variant(id: ModelId) -> bool {
+    variant_path(id, "fp16").is_some()
+}
+
 fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
+    std::fs::read(variant_path(id, suffix)?).ok()
+}
+
+fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
     // `name` is the filename stem the variant file uses on disk. Seg
     // models use their snake_case stable_name (matches the dev-models
     // workflow that drops `{stable_name}_fp16.onnx` into the models
@@ -1781,23 +1790,25 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../models")
             .join(&filename);
-        if let Ok(bytes) = std::fs::read(&dev_path) {
-            return Some(bytes);
+        if dev_path.is_file() {
+            return Some(dev_path);
         }
     }
 
     // OnDemand-installed sibling: fetcher writes both fp32 and fp16
     // siblings into on_demand_dir() when `OnDemand.fp16` is set.
     if let Some(dir) = on_demand_dir() {
-        if let Ok(bytes) = std::fs::read(dir.join(&filename)) {
-            return Some(bytes);
+        let path = dir.join(&filename);
+        if path.is_file() {
+            return Some(path);
         }
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            if let Ok(bytes) = std::fs::read(dir.join("models").join(&filename)) {
-                return Some(bytes);
+            let path = dir.join("models").join(&filename);
+            if path.is_file() {
+                return Some(path);
             }
         }
     }
