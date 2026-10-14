@@ -39,7 +39,7 @@ pub const PINNED_ORT_VERSION: &str = "1.24.1";
 pub const MACOS_CORE_ML_ORT_VERSION: &str = "1.20.0";
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
-/// for unsupported platforms; `host_pypi_token` rejects those explicitly.
+/// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "linux-x64" }
     else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
@@ -51,23 +51,35 @@ pub fn host_rid() -> &'static str {
     else { "unknown" }
 }
 
-/// PyPI wheel filename token for the host platform.
-pub fn host_pypi_token() -> Option<&'static str> {
-    Some(match host_rid() {
-        "linux-x64" => "manylinux_2_28_x86_64",
-        "linux-arm64" => "manylinux_2_28_aarch64",
-        "windows-x64" => "win_amd64",
-        "windows-arm64" => "win_arm64",
-        "macos-arm64" => "macosx_11_0_arm64",
-        // Intel Mac. PyPI's onnxruntime wheels use the 10.15 deployment
-        // target on x86_64 (the `macosx_10_15_x86_64` filename token);
-        // `host_rid` already returns `"macos-x64"` for this case, so the
-        // arm has to be present here for the GUI install button + xtask
-        // CLI to actually find a wheel instead of bailing with
-        // "unsupported host platform".
-        "macos-x64" => "macosx_10_15_x86_64",
-        _ => return None,
-    })
+/// Whether a wheel's platform tag runs on `rid`. A macOS tag carries
+/// the wheel's minimum OS, which moves between ORT releases
+/// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
+/// only its arch is fixed.
+fn tag_fits(tag: &str, rid: &str) -> bool {
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let macos = |arch: &str| tag.strip_prefix("macosx_")
+        .and_then(|t| t.strip_suffix(arch))
+        .and_then(|t| t.strip_suffix('_'))
+        .and_then(|version| version.split_once('_'))
+        .is_some_and(|(major, minor)| number(major) && number(minor));
+    match rid {
+        "linux-x64" => tag == "manylinux_2_28_x86_64",
+        "linux-arm64" => tag == "manylinux_2_28_aarch64",
+        "windows-x64" => tag == "win_amd64",
+        "windows-arm64" => tag == "win_arm64",
+        "macos-arm64" => macos("arm64"),
+        "macos-x64" => macos("x86_64"),
+        _ => false,
+    }
+}
+
+/// A wheel filename's platform tags: its last `-` field, which may
+/// join several with `.` (`manylinux_2_27_x86_64.manylinux_2_28_x86_64`).
+fn platform_tags(filename: &str) -> impl Iterator<Item = &str> {
+    filename.strip_suffix(".whl")
+        .and_then(|stem| stem.rsplit('-').next())
+        .into_iter()
+        .flat_map(|field| field.split('.'))
 }
 
 /// Install-dir name: `<short>-<version>-<rid>`. Locked — existing
@@ -103,9 +115,10 @@ pub struct WheelInfo {
 /// Pick the right wheel for the host platform. Prefers cp313, falls
 /// back to any cp tag.
 pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, String> {
-    let host_token = host_pypi_token().ok_or_else(||
-        format!("unsupported host platform `{}`", host_rid())
-    )?;
+    pick_wheel(urls, host_rid())
+}
+
+fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String> {
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
         // Reject sdists / non-wheel artifacts up front so a future PyPI
@@ -113,7 +126,7 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
         // filename can't slip through to `extract_wheel` (which would
         // fail at `ZipArchive::new` with a confusing error).
         if !name.ends_with(".whl") { return None; }
-        if !name.contains(host_token) { return None; }
+        if !platform_tags(name).any(|tag| tag_fits(tag, rid)) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
         Some(WheelInfo {
             url: u["url"].as_str()?.to_string(),
@@ -122,7 +135,7 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
         })
     });
     pick(true).or_else(|| pick(false)).ok_or_else(||
-        format!("no wheel for host platform `{}`", host_rid()),
+        format!("no wheel for host platform `{rid}`"),
     )
 }
 
@@ -461,39 +474,90 @@ mod tests {
         ), "unexpected rid: {r}");
     }
 
-    /// Contract: every rid that `host_rid` produces (other than the
-    /// catch-all `"unknown"`) must have a matching arm in
-    /// `host_pypi_token`. Otherwise users on that platform get a
-    /// confusing "unsupported host platform" from `pick_wheel_for_host`
-    /// despite `host_rid` agreeing the platform is supported.
+    /// Every 1.24.1 wheel on PyPI, as its JSON lists them.
+    const ORT_1_24_1_WHEELS: &[&str] = &[
+        "onnxruntime-1.24.1-cp311-cp311-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-win_amd64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-win_amd64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-win_amd64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-win_amd64.whl",
+    ];
+
+    fn urls_for(filenames: &[&str]) -> Vec<serde_json::Value> {
+        filenames.iter().map(|f| json!({
+            "filename": f, "url": format!("https://example.com/{f}"),
+            "digests": {"sha256": "aa".repeat(32)}, "size": 0,
+        })).collect()
+    }
+
     #[test]
-    fn every_supported_rid_has_a_pypi_token() {
-        for rid in [
-            "linux-x64", "linux-arm64",
-            "windows-x64", "windows-arm64",
-            "macos-arm64", "macos-x64",
+    fn picks_each_platforms_cp313_wheel_from_the_pinned_release() {
+        let urls = urls_for(ORT_1_24_1_WHEELS);
+        for (rid, expected) in [
+            ("linux-x64", "cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"),
+            ("linux-arm64", "cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"),
+            ("windows-x64", "cp313-cp313-win_amd64.whl"),
+            ("macos-arm64", "cp313-cp313-macosx_14_0_arm64.whl"),
         ] {
-            let token = match rid {
-                "linux-x64" => "manylinux_2_28_x86_64",
-                "linux-arm64" => "manylinux_2_28_aarch64",
-                "windows-x64" => "win_amd64",
-                "windows-arm64" => "win_arm64",
-                "macos-arm64" => "macosx_11_0_arm64",
-                "macos-x64" => "macosx_10_15_x86_64",
-                _ => unreachable!(),
-            };
-            // Compile-time check the arm exists for current host.
-            if host_rid() == rid {
-                assert_eq!(host_pypi_token(), Some(token), "rid {rid}");
-            }
+            let pick = pick_wheel(&urls, rid).unwrap_or_else(|e| panic!("{rid}: {e}"));
+            assert!(pick.url.ends_with(expected), "{rid} picked {}", pick.url);
         }
-        // Final guard: host's own rid produces Some(token), which is
-        // the actual contract `pick_wheel_for_host` depends on.
-        if host_rid() != "unknown" {
-            assert!(host_pypi_token().is_some(),
-                "host_rid()={} but host_pypi_token() is None — pick_wheel_for_host will reject this host",
-                host_rid());
+        // 1.24 dropped Intel macOS and has no Windows-on-Arm wheel.
+        assert!(pick_wheel(&urls, "macos-x64").is_err());
+        assert!(pick_wheel(&urls, "windows-arm64").is_err());
+    }
+
+    #[test]
+    fn macos_wheels_match_whatever_minimum_os_they_carry() {
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.19.2-cp312-cp312-macosx_11_0_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.31.0-cp313-cp313-macosx_15_0_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-x64", "onnxruntime-1.19.2-cp312-cp312-macosx_10_15_x86_64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_ok(), "{rid} rejected {filename}");
         }
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-win_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_x_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_err(), "{rid} took {filename}");
+        }
+    }
+
+    /// Every rid `host_rid` names has wheels it accepts; without one,
+    /// that platform's install fails with "unsupported host platform".
+    #[test]
+    fn every_supported_rid_accepts_its_own_wheels() {
+        for (rid, tag) in [
+            ("linux-x64", "manylinux_2_28_x86_64"),
+            ("linux-arm64", "manylinux_2_28_aarch64"),
+            ("windows-x64", "win_amd64"),
+            ("windows-arm64", "win_arm64"),
+            ("macos-arm64", "macosx_14_0_arm64"),
+            ("macos-x64", "macosx_13_0_x86_64"),
+        ] {
+            let urls = urls_for(&[&format!("onnxruntime-1.0.0-cp313-cp313-{tag}.whl")]);
+            assert!(pick_wheel(&urls, rid).is_ok(), "{rid} accepts no {tag} wheel");
+        }
+        assert!(pick_wheel(&urls_for(ORT_1_24_1_WHEELS), "unknown").is_err());
     }
 
     #[test]
@@ -522,28 +586,26 @@ mod tests {
 
     #[test]
     fn pick_wheel_prefers_cp313() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![
-            json!({"filename": format!("ort-cp310-cp310-{token}.whl"),
+            json!({"filename": "ort-cp310-cp310-win_amd64.whl",
                    "url": "https://example.com/cp310.whl",
                    "digests": {"sha256": "aa".repeat(32)}, "size": 80_000_000}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
                    "url": "https://example.com/cp313.whl",
                    "digests": {"sha256": "bb".repeat(32)}, "size": 80_000_000}),
         ];
-        let pick = pick_wheel_for_host(&urls).expect("pick");
+        let pick = pick_wheel(&urls, "windows-x64").expect("pick");
         assert_eq!(pick.url, "https://example.com/cp313.whl");
     }
 
     #[test]
     fn pick_wheel_falls_back_to_any_cp_tag() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![json!({
-            "filename": format!("ort-cp311-cp311-{token}.whl"),
+            "filename": "ort-cp311-cp311-win_amd64.whl",
             "url": "https://example.com/cp311.whl",
             "digests": {"sha256": "cc".repeat(32)}, "size": 0,
         })];
-        let pick = pick_wheel_for_host(&urls).expect("fallback");
+        let pick = pick_wheel(&urls, "windows-x64").expect("fallback");
         assert_eq!(pick.url, "https://example.com/cp311.whl");
     }
 
@@ -554,7 +616,7 @@ mod tests {
             "url": "https://example.com/wrong.whl",
             "digests": {"sha256": "dd".repeat(32)}, "size": 0,
         })];
-        assert!(pick_wheel_for_host(&urls).is_err());
+        assert!(pick_wheel(&urls, "windows-x64").is_err());
     }
 
     /// PyPI's URL list also includes the source distribution
@@ -564,16 +626,15 @@ mod tests {
     /// to parse a tarball as a zip and fail with a confusing error.
     #[test]
     fn pick_wheel_skips_sdist_even_with_matching_token() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![
-            json!({"filename": format!("ort-{token}.tar.gz"),
+            json!({"filename": "ort-win_amd64.tar.gz",
                    "url": "https://example.com/sdist.tar.gz",
                    "digests": {"sha256": "ee".repeat(32)}, "size": 0}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
                    "url": "https://example.com/cp313.whl",
                    "digests": {"sha256": "ff".repeat(32)}, "size": 0}),
         ];
-        let pick = pick_wheel_for_host(&urls).expect("wheel pick should succeed");
+        let pick = pick_wheel(&urls, "windows-x64").expect("wheel pick should succeed");
         assert_eq!(pick.url, "https://example.com/cp313.whl",
             "must skip sdist and pick the .whl");
     }
