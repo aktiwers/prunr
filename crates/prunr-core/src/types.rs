@@ -16,6 +16,17 @@ pub enum CoreError {
     Cancelled,
 }
 
+impl CoreError {
+    /// The error for a person to read: the message alone, without the
+    /// kind of failure in front of it ("Inference error: …").
+    pub fn message(&self) -> String {
+        match self {
+            CoreError::Model(m) | CoreError::Inference(m) | CoreError::ImageFormat(m) => m.clone(),
+            other => other.to_string(),
+        }
+    }
+}
+
 impl From<image::ImageError> for CoreError {
     fn from(e: image::ImageError) -> Self {
         CoreError::ImageFormat(e.to_string())
@@ -790,6 +801,13 @@ pub const DOWNSCALE_TARGET: u32 = 4096;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_errors_message_is_the_text_without_its_kind() {
+        assert_eq!(CoreError::Inference("needs 15.6 GB".into()).message(), "needs 15.6 GB");
+        assert_eq!(CoreError::Model("missing".into()).message(), "missing");
+        assert_eq!(CoreError::Cancelled.message(), "Processing cancelled");
+    }
 
     #[test]
     fn test_core_error_model_variant() {

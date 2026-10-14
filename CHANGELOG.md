@@ -106,6 +106,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- A failed erase says what happened in plain words; the message used to carry program text ("inpaint: Inference(…)") and an internal model name.
 - The Stable Diffusion eraser checks for the memory its load really takes (about 14 GB on the CPU, plus the spare it keeps) before it starts. It used to start with 12 GB free and be stopped partway through the load.
 - Process with the Depth look on several ticked images under No model gives each its look; the images off screen used to stay plain while a "Rendering…" pill stayed up for good.
 - The brush strip no longer draws over an open dialog (Settings, the command-line reference, the Model Store).
