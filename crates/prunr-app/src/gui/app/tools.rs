@@ -607,8 +607,10 @@ mod tool_mutual_exclusion_tests {
         app.begin_focus_pick();
         assert_eq!(on(&app), (false, false));
         assert!(app.picking_depth_focus);
+        assert_eq!(crate::gui::automation::state::dump(&app).tool, "set_focus");
         app.set_tool(Some(Tool::Magic));
         assert!(!app.picking_depth_focus && on(&app) == (false, true));
+        assert_eq!(crate::gui::automation::state::dump(&app).tool, "magic_brush");
     }
 
     /// Whichever way a tool comes on, the other goes off, and the on
