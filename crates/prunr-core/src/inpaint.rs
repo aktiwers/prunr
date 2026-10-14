@@ -12,7 +12,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::{apply_ort_graph_cache, EpKind};
+use crate::engine::{apply_ort_graph_cache, EpSite};
 use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
 
@@ -697,49 +697,14 @@ fn build_lama_session(
                 continue;
             }
         };
-        #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
-        let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(bytes);
-        let builder = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => {
-                let (b, owned) = apply_ort_graph_cache(builder, bytes, id, ep.as_str());
-                bytes_owner = owned;
-                b
-            }
-            _ => builder,
+        let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
+            apply_ort_graph_cache(builder, bytes, id, ep.as_str())
+        } else {
+            (builder, Cow::Borrowed(bytes))
         };
-        let registered = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => builder.with_execution_providers([
-                ort::ep::CUDA::default()
-                    .with_device_id(0)
-                    .build(),
-            ]),
-            #[cfg(target_os = "macos")]
-            EpKind::CoreMl => {
-                let mut p = ort::ep::CoreML::default();
-                if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
-                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
-                }
-                builder.with_execution_providers([p.build()])
-            }
-            #[cfg(windows)]
-            EpKind::DirectMl => builder.with_execution_providers([
-                ort::ep::DirectML::default().build(),
-            ]),
-            // Default device "AUTO" lets OpenVINO pick the best target
-            // (iGPU when present + driver works, NPU on newer Intel,
-            // else CPU). Smoke test below catches op-incompat failures.
-            // `with_num_threads` caps the EP-internal TBB pool to match
-            // our outer rayon budget. (No `with_cache_dir` — see
-            // engine.rs for the empirical retest finding.)
-            #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => builder.with_execution_providers([
-                ort::ep::OpenVINO::default()
-                    .with_num_threads(threads.max(1))
-                    .build(),
-            ]),
-        };
+        let registered = builder.with_execution_providers([
+            ep.provider(id, EpSite::Fill { threads }),
+        ]);
         let mut built = match registered {
             Ok(b) => b,
             Err(e) => {

@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::types::{CoreError, ModelKind};
 pub use ort::session::builder::GraphOptimizationLevel;
 use ort::{
-    ep::CPU,
+    ep::{ExecutionProviderDispatch, CPU},
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
     value::Tensor,
@@ -108,6 +108,107 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
     if cpu_only { &[] } else { available_gpu_eps() }
 }
 
+/// The session family a provider is registered for; each keeps its own
+/// tuning of the providers.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // each field tunes a provider that only some platforms compile in
+pub(crate) enum EpSite<'a> {
+    /// Segmentation and upscale engines.
+    Engine { threads: usize },
+    /// LaMa-class fills.
+    Fill { threads: usize },
+    /// One part of a Stable Diffusion bundle. `ov_device` pins OpenVINO's
+    /// device (bench only).
+    SdPart { part: &'a str, ov_device: Option<&'a str> },
+}
+
+impl EpKind {
+    /// This provider tuned for `site`, set to fail its registration
+    /// loudly. ort's default logs a failed registration and commits the
+    /// session on the CPU, which the ladder would then label with this
+    /// provider's name. A failed registration says the machine lacks the
+    /// provider, not that the model breaks on it, so the ladders move on
+    /// without an `ep_compat` record.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] // only CoreML's compiled-model cache is per model
+    pub(crate) fn provider(self, model: prunr_models::ModelId, site: EpSite<'_>) -> ExecutionProviderDispatch {
+        let dispatch = match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => {
+                let p = ort::ep::CUDA::default().with_device_id(0);
+                match site {
+                    EpSite::Engine { .. } => p
+                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
+                        .with_cuda_graph(true)
+                        .with_tf32(true)
+                        .build(),
+                    EpSite::Fill { .. } | EpSite::SdPart { .. } => p.build(),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            EpKind::CoreMl => {
+                let dir = match site {
+                    EpSite::SdPart { part, .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
+                    EpSite::Engine { .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
+                };
+                let mut p = ort::ep::CoreML::default();
+                if let Some(dir) = dir {
+                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
+                }
+                p.build()
+            }
+            // No device id: DXCore's high-performance order picks the
+            // discrete card on a hybrid laptop, where DXGI's index 0 is
+            // usually the integrated one.
+            #[cfg(windows)]
+            EpKind::DirectMl => ort::ep::DirectML::default().build(),
+            // NOT using `with_cache_dir`: retested against SD UNet on
+            // ort=2.0.0-rc.12 + openvino-1.24.1, Intel HD 530. Cold and
+            // warm session-commit elapsed are identical within noise
+            // (cold 23735 ms / warm 23224 ms on UNet), and every blob's
+            // mtime advances on the warm run — OpenVINO computes a
+            // different cache key each launch and rewrites ~3.3 GB on
+            // every cold build. Re-evaluate when ort bumps.
+            #[cfg(not(target_os = "macos"))]
+            EpKind::OpenVino => match site {
+                // Cap the EP-internal TBB pool to our outer rayon budget.
+                // Uncapped, OpenVINO sizes its pool to all logical cores
+                // and oversubscribes against the rayon workers —
+                // `sched_yield` was ~2% of CLI batch wall time.
+                EpSite::Engine { threads } | EpSite::Fill { threads } => ort::ep::OpenVINO::default()
+                    .with_num_threads(threads.max(1))
+                    .build(),
+                // `num_streams=1` disables per-stream buffer duplication
+                // (the bundle sits at ~16 GB RSS on an i7-6700 either
+                // way; measured 2026-10). Dynamic shapes cost nothing per
+                // step, so one bundle serves 512² tiles and the 512×768
+                // crop.
+                EpSite::SdPart { ov_device, .. } => {
+                    let mut p = ort::ep::OpenVINO::default()
+                        .with_num_streams(1)
+                        .with_dynamic_shapes(true);
+                    if let Some(dev) = ov_device {
+                        p = p.with_device_type(dev);
+                    }
+                    p.build()
+                }
+            },
+        };
+        dispatch.error_on_failure()
+    }
+
+    /// Whether sessions on this provider load and write ORT's
+    /// optimized-graph cache. Never DirectML: ORT turns its graph fusion
+    /// off whenever an optimized model path is set.
+    pub(crate) fn keeps_optimized_graph(self) -> bool {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => true,
+            _ => false,
+        }
+    }
+}
+
 /// ORT-backed inference engine. Holds one Session per model selection.
 /// Create once per model; reuse across all images — never instantiate per-image.
 ///
@@ -127,9 +228,8 @@ impl OrtEngine {
     /// - `intra_threads`: ORT intra-op thread count. For batch use: num_cpus / rayon_workers.
     ///   Pass 1 for single-image use; the thread count is set at session creation time.
     ///
-    /// Execution providers are registered in priority order: CUDA → CoreML → DirectML → CPU.
-    /// ORT silently selects the first available EP. Call active_provider() after creation
-    /// to confirm which EP was selected.
+    /// Tries each available GPU provider in turn, then the CPU. Call
+    /// active_provider() after creation to see which one won.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
         Self::new_with_fallback(model, intra_threads, false)
     }
@@ -298,63 +398,14 @@ impl OrtEngine {
             }
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level)?;
-            #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
-            let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(model_bytes);
-            let builder = match ep {
-                #[cfg(not(target_os = "macos"))]
-                EpKind::Cuda => {
-                    let (b, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str());
-                    bytes_owner = bytes;
-                    b
-                }
-                _ => builder,
+            let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
+                apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str())
+            } else {
+                (builder, Cow::Borrowed(model_bytes))
             };
-            let res = match ep {
-                #[cfg(not(target_os = "macos"))]
-                EpKind::Cuda => builder.with_execution_providers([
-                    ort::ep::CUDA::default()
-                        .with_device_id(0)
-                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
-                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
-                        .with_cuda_graph(true)
-                        .with_tf32(true)
-                        .build(),
-                ]),
-                #[cfg(target_os = "macos")]
-                EpKind::CoreMl => {
-                    let mut p = ort::ep::CoreML::default();
-                    if let Some(dir) = crate::cache::cache_dir_for(model_id, ep.as_str()) {
-                        p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
-                    }
-                    builder.with_execution_providers([p.build()])
-                }
-                #[cfg(windows)]
-                EpKind::DirectMl => builder.with_execution_providers([
-                    // No application-level cache; rely on OS DXIL cache.
-                    ort::ep::DirectML::default().build(),
-                ]),
-                #[cfg(not(target_os = "macos"))]
-                EpKind::OpenVino => builder.with_execution_providers([
-                    // Cap the EP-internal TBB pool to match our outer rayon
-                    // budget. Without this OpenVINO spawns its own pool sized
-                    // to all logical cores, which oversubscribes against the
-                    // rayon worker pool — `sched_yield` accounted for ~2% of
-                    // CLI batch wall time in the perf trace.
-                    //
-                    // NOT using `with_cache_dir`: retested against SD UNet
-                    // on ort=2.0.0-rc.12 + openvino-1.24.1, Intel HD 530.
-                    // Cold and warm session-commit elapsed are identical
-                    // within noise (cold 23735 ms / warm 23224 ms on UNet),
-                    // and every blob's mtime advances on the warm run —
-                    // OpenVINO computes a different cache key each launch
-                    // and rewrites ~3.3 GB on every cold build. Net-negative
-                    // until ORT or OpenVINO ships a fix; re-evaluate when
-                    // ort bumps.
-                    ort::ep::OpenVINO::default()
-                        .with_num_threads(intra_threads.max(1))
-                        .build(),
-                ]),
-            };
+            let res = builder.with_execution_providers([
+                ep.provider(model_id, EpSite::Engine { threads: intra_threads }),
+            ]);
 
             let mut built = match res {
                 Ok(b) => b,
@@ -678,6 +729,33 @@ mod tests {
             "record_failure must NOT fire on was_cached=true",
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A provider the loaded runtime lacks must fail its registration,
+    /// not hand back a builder that commits on the CPU while the ladder
+    /// labels the session with the provider's name. Every site counts:
+    /// each ladder registers through `EpKind::provider`.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn missing_provider_fails_registration_instead_of_running_on_cpu() {
+        use ort::ep::ExecutionProvider;
+        if crate::ort_runtime::ensure_initialized().is_err()
+            || ort::ep::CUDA::default().is_available().unwrap_or(true)
+        {
+            return;
+        }
+        let sites = [
+            EpSite::Engine { threads: 1 },
+            EpSite::Fill { threads: 1 },
+            EpSite::SdPart { part: "unet", ov_device: None },
+        ];
+        for site in sites {
+            let builder = crate::ort_runtime::session_builder().expect("runtime loaded above");
+            let registered = builder.with_execution_providers([
+                EpKind::Cuda.provider(prunr_models::ModelId::Silueta, site),
+            ]);
+            assert!(registered.is_err(), "{site:?}: CUDA registered on a runtime without it");
+        }
     }
 
     // Integration tests require dev-models feature and downloaded models.
