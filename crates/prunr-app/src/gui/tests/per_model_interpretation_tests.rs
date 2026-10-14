@@ -792,3 +792,32 @@ fn undo_onto_another_models_step_does_not_recut_it() {
     app.handle_undo(&egui::Context::default());
     assert!(!app.processor.live_preview.is_pending_for(12));
 }
+
+/// Switching model leaves the cut-out on screen, so the brushes still
+/// correct it: Escape folds a live Erase into the edits, and the next
+/// run re-applies them, whichever model makes it.
+#[test]
+fn a_model_switch_keeps_the_shown_cutout_correctable() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::tests::tree_tests::{click, harness, settle};
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.settings.model = SettingsModel::Silueta;
+        app.settings.brush.cutout_action = CutoutAction::Erase;
+        cutout_with_selection(app, 13);
+        app.batch.select_item(0);
+    }
+    settle(&mut h);
+    click(&mut h, "Model");
+    let row = format!("BiRefNet\n{}", crate::gui::views::model_blurb(SettingsModel::BiRefNetLite));
+    click(&mut h, &row);
+    assert_eq!(h.state().settings.model, SettingsModel::BiRefNetLite);
+    let item = &h.state().batch.items[0];
+    assert!(item.corrects_cutout(SettingsModel::BiRefNetLite), "the Silueta cut-out is still on screen");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    let item = &h.state().batch.items[0];
+    assert!(item.selection_mask.is_none(), "Escape folded the selection");
+    assert!(item.edits.is_some(), "into the edits the next run re-applies");
+}
