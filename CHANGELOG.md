@@ -110,6 +110,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Settings › Hardware said "none detected" for the graphics on every Windows machine. It now finds the graphics card and the built-in graphics, and tells a virtual machine's or remote desktop's stand-in from a real one.
 - When a graphics card could not be used (no driver, a remote desktop, a virtual machine), the work quietly ran on the processor while the status bar still named the card. It now falls back to the processor openly and says "CPU".
 - A face search could not be stopped: the capsule's Cancel and Esc did nothing while Faces searched, which on a large group photo can take a minute. Both stop it now, after the face it is on, and the Faces panel says "Stopped. Turn Faces off and on to search again."
 - The Faces panel's status line ("7 faces found.", or "These apply while Faces is on.") heads the panel instead of sitting under Include hair, where it read as part of that switch.
