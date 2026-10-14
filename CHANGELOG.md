@@ -106,6 +106,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Process with the Depth look on several ticked images under No model gives each its look; the images off screen used to stay plain while a "Rendering…" pill stayed up for good.
 - The brush strip no longer draws over an open dialog (Settings, the command-line reference, the Model Store).
 - The command-line reference and the pipeline diagrams fit a short window and scroll; their bottom and close button used to fall outside it.
 - The Model picker fits its longest model name instead of a fixed width, and in a window too short for the list it runs to the bottom edge and scrolls; "Get more models" used to fall off the bottom of the window.

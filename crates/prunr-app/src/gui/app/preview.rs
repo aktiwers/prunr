@@ -122,6 +122,17 @@ impl PrunrApp {
             ctx.request_repaint_after(w);
         }
 
+        // A render queued for an image whose photo is not decoded (a
+        // ticked image off screen, its map just measured) waits for the
+        // decode; nothing else asks for it, and the render would wait for
+        // good with the busy pill up.
+        let waiting: Vec<usize> = self.processor.live_preview.pending_photo_renders()
+            .filter_map(|id| self.batch.index_of(id))
+            .collect();
+        for idx in waiting {
+            self.ensure_source_decoded(idx);
+        }
+
         let results = self.processor.live_preview.drain_results();
         if !results.is_empty() {
             self.apply_completed_previews(ctx, results);
@@ -583,6 +594,19 @@ mod busy_pill_tests {
         push_test_item(&mut app, 1);
         app.batch.select_item(0);
         app
+    }
+
+    /// A render queued for an image off screen whose photo is not decoded
+    /// asks for the decode instead of waiting for good with the pill up.
+    #[test]
+    fn a_queued_render_of_an_undecoded_image_asks_for_its_decode() {
+        let mut app = app();
+        push_test_item(&mut app, 2);
+        assert!(app.batch.items[1].source_rgba.is_none() && !app.batch.items[1].decode_pending);
+        app.processor.live_preview.mark_tweak(2, crate::gui::live_preview::PreviewKind::Mask);
+        app.pump_live_preview(&egui::Context::default());
+        assert!(app.batch.items[1].decode_pending, "the decode the render needs is under way");
+        assert!(!app.batch.items[0].decode_pending, "an image with nothing queued is left alone");
     }
 
     #[test]
