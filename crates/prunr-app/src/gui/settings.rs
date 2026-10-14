@@ -319,11 +319,17 @@ impl Settings {
         if self.cpu_only() { "CPU" } else { &self.active_backend }
     }
 
+    /// Whether models run on the host CPU: "CPU only", no accelerator, or
+    /// OpenVINO, which the app runs on the CPU.
+    pub fn runs_on_host_cpu(&self) -> bool {
+        prunr_core::engine::runs_on_host_cpu(self.effective_backend()) || self.active_backend.is_empty()
+    }
+
     /// Smart default for parallel jobs based on backend and model. In
     /// filter-only mode (`SettingsModel::None`) the pipeline runs pure CPU
     /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
-        let base = if self.is_gpu() { 2 } else { (num_cpus::get() / 2).max(1) };
+        let base = if self.runs_on_host_cpu() { (num_cpus::get() / 2).max(1) } else { 2 };
         match self.model.to_model_kind() {
             Some(model) => base.min(super::memory::safe_max_jobs(model)),
             None => base,
@@ -332,7 +338,7 @@ impl Settings {
 
     /// Max recommended parallel jobs based on backend and model.
     pub fn max_jobs(&self) -> usize {
-        let base = if self.is_gpu() { 4 } else { num_cpus::get() };
+        let base = if self.runs_on_host_cpu() { num_cpus::get() } else { 4 };
         match self.model.to_model_kind() {
             Some(model) => base.min(super::memory::safe_max_jobs(model)),
             None => base,
@@ -781,6 +787,16 @@ mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
     use prunr_core::LineMode;
+
+    #[test]
+    fn openvino_and_cpu_only_count_as_the_host_cpu() {
+        let mut s = Settings::default();
+        for (backend, cpu_only, host) in [("OpenVINO", false, true), ("CPU", false, true), ("", false, true), ("CUDA", false, false), ("CUDA", true, true), ("DirectML", false, false)] {
+            s.active_backend = backend.into();
+            s.processor = if cpu_only { ComputeMode::CpuOnly } else { ComputeMode::Auto };
+            assert_eq!(s.runs_on_host_cpu(), host, "{backend} cpu_only={cpu_only}");
+        }
+    }
 
     #[test]
     fn v1_migration_parses_all_per_image_fields() {

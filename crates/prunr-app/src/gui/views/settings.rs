@@ -375,7 +375,7 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
     use super::chip::Choice;
     group_heading(ui, "Processing");
     let max_jobs = settings.max_jobs();
-    let jobs_hint = if settings.is_gpu() {
+    let jobs_hint = if !settings.runs_on_host_cpu() {
         format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
     } else {
         format!("Images at once. 1\u{2013}{max_jobs}. BiRefNet takes one at a time on the CPU, since one run already uses every core.")
