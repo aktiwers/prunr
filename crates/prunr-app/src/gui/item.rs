@@ -914,6 +914,13 @@ impl BatchItem {
         self.last_decode = None;
     }
 
+    /// True while a model works on this image: a cut-out the worker has
+    /// taken, or an upscale, colorize or erase, which start their job only
+    /// when they run (a queued cut-out holds its job while it waits).
+    pub(crate) fn is_running(&self) -> bool {
+        self.status == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
+    }
+
     /// True while a run, a decode, a texture or a thumbnail is still to land.
     pub(crate) fn is_busy(&self) -> bool {
         self.status == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
@@ -2178,6 +2185,22 @@ mod tests {
     /// A landed upscale reveals over its finished-tile preview, which
     /// stays on screen until the result's texture lands; a new run never
     /// shows the last run's tiles.
+    #[test]
+    fn an_image_is_running_while_a_model_works_on_it() {
+        let mut item = fixture_item(1);
+        assert!(!item.is_running());
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(!item.is_running(), "a queued cut-out waits");
+        item.status = BatchStatus::Processing;
+        assert!(item.is_running(), "the worker has taken it");
+        for engine in [Engine::Upscale, Engine::Colorize, Engine::Erase] {
+            let mut item = fixture_item(2);
+            item.status = BatchStatus::Done;
+            item.start_job(None, engine);
+            assert!(item.is_running(), "{engine:?} runs from its start");
+        }
+    }
+
     #[test]
     fn an_upscale_reveals_over_its_tile_preview() {
         let ctx = egui::Context::default();
