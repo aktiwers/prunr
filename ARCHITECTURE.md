@@ -85,7 +85,7 @@ ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold 
 
 | Work | Runs in | Lifetime |
 |------|---------|----------|
-| Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup; a batch reuses the warm worker when its model, processor and pool size fit and sends it the run's mask and Sketch settings (`Configure`, engines built on first need); the worker stays warm 5 min after a batch; released on model switch, Cancel or a crash, and the newly picked cut-out model loaded once it has stayed picked 1 s |
+| Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup; a batch reuses the warm worker when its model, processor and pool size fit and sends it the run's mask and Sketch settings (`Configure`, engines built on first need); the worker stays warm 5 min after a batch, 1 min after a model whose working memory stays loaded (BiRefNet: 5.5 GB); released on model switch, Cancel or a crash, and the newly picked cut-out model loaded once it has stayed picked 1 s |
 | SD erases | inpaint-only worker subprocess (no seg engines) | spawned on first SD erase; killed after 5 min idle, on model switch, or on Cancel |
 | LaMa / MI-GAN erases, SAM, live preview | in-process, rayon | sessions cached; LaMa released after 5 min idle |
 | Upscale, colorize | in-process, one thread per run | engine kept warm until model or hardware change |

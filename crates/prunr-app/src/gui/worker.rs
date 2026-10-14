@@ -16,10 +16,22 @@ const HANG_TIMEOUT: Duration = Duration::from_secs(60);
 /// to drop its model caches cleanly, short enough that a misbehaving worker
 /// doesn't block the UI thread indefinitely.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the worker that ran the last batch stays warm; the same as
-/// the LaMa session and the SD worker.
+/// How long a loaded worker stays warm unused; the same as the LaMa
+/// session and the SD worker.
 const WARM_IDLE: Duration = Duration::from_secs(300);
-const WARM_POLL: Duration = Duration::from_secs(30);
+/// The same after a run of a model whose working memory stays with it:
+/// BiRefNet keeps 5.5 GB on OpenVINO after its first image, against 1.2 GB
+/// loaded. A minute still covers a tweak and Process again.
+const WARM_IDLE_AFTER_HEAVY_RUN: Duration = Duration::from_secs(60);
+/// A model counts as heavy from this registry working set up.
+const HEAVY_WORKING_SET_MB: u32 = 2000;
+
+/// When the worker that just ran a batch of `model` is released if unused.
+fn idle_after_run(model: ModelKind) -> Duration {
+    let id: prunr_models::ModelId = model.into();
+    let heavy = prunr_models::descriptor(id).is_some_and(|d| d.working_set_mb >= HEAVY_WORKING_SET_MB);
+    if heavy { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
+}
 
 /// True when the subprocess is alive but hasn't produced events for too long.
 /// Pure so it's unit-testable — the event loop calls this each iteration and
@@ -300,7 +312,7 @@ pub enum WorkerResult {
 /// at startup. A batch reuses the warm worker when its model, processor
 /// and pool size fit (`ProcessingConfig::reusable_by`) and sends it the
 /// run's mask and Sketch settings; the worker that ran a batch stays warm
-/// for `WARM_IDLE` after it, so the next Process skips the model load.
+/// after it (`idle_after_run`), so the next Process skips the model load.
 /// A model switch (`ReleaseWarm`), a crash or Cancel drops it.
 pub(crate) fn spawn_worker(
     ctx: egui::Context,
@@ -317,14 +329,16 @@ pub(crate) fn spawn_worker(
             // load duration (UI stays responsive — bridge has its own
             // thread). If a Process click arrives during warm-up, it
             // queues on msg_rx and gets picked up once the sub is live.
+            // The warm worker and when it is released if still unused.
             let mut warm: Option<(SubprocessManager, ProcessingConfig, Instant)> =
                 prewarm.and_then(|cfg| spawn_warm(cfg, &res_tx, &ctx));
 
             loop {
-                let msg = match msg_rx.recv_timeout(WARM_POLL) {
+                let wait = warm.as_ref().map_or(WARM_IDLE, |(_, _, release_at)| release_at.saturating_duration_since(Instant::now()));
+                let msg = match msg_rx.recv_timeout(wait) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if warm.as_ref().is_some_and(|(_, _, since)| since.elapsed() >= WARM_IDLE) {
+                        if warm.as_ref().is_some_and(|(_, _, release_at)| Instant::now() >= *release_at) {
                             if let Some((mut sub, cfg, _)) = warm.take() {
                                 tracing::info!(model = ?cfg.model, "seg subprocess released after idling");
                                 let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
@@ -389,7 +403,10 @@ pub(crate) fn spawn_worker(
                             items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
                         warm = run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx)
-                            .map(|(sub, cfg)| (sub, cfg, Instant::now()));
+                            .map(|(sub, cfg)| {
+                                let release_at = Instant::now() + idle_after_run(cfg.model);
+                                (sub, cfg, release_at)
+                            });
                     }
                 }
             }
@@ -1174,7 +1191,7 @@ fn spawn_warm(
             tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?model, line_mode = ?line_mode, "subprocess cold-start");
             let _ = res_tx.send(WorkerResult::BackendReady(provider));
             ctx.request_repaint();
-            Some((sub, cfg, Instant::now()))
+            Some((sub, cfg, Instant::now() + WARM_IDLE))
         }
         Err(err) => {
             tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
@@ -1257,6 +1274,17 @@ fn try_send_add_edge(
 
 #[cfg(test)]
 mod tests {
+
+    /// A heavy model's worker lets go a minute after its run, a light
+    /// one after five: BiRefNet keeps gigabytes of working memory loaded.
+    #[test]
+    fn a_heavy_models_worker_is_released_sooner_after_a_run() {
+        use super::{idle_after_run, WARM_IDLE, WARM_IDLE_AFTER_HEAVY_RUN};
+        assert_eq!(idle_after_run(ModelKind::BiRefNetLite), WARM_IDLE_AFTER_HEAVY_RUN);
+        assert_eq!(idle_after_run(ModelKind::Silueta), WARM_IDLE);
+        assert_eq!(idle_after_run(ModelKind::U2net), WARM_IDLE);
+    }
+
 
     /// A chained cut starts from its start's colours seen through the
     /// cut-out's transparency; the file is read only when the colours are
