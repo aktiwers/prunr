@@ -29,6 +29,9 @@ pub(crate) struct PendingDepthClick {
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
     active: bool,
+    /// On at least once this session: from then on the shown image is
+    /// encoded ahead, so the tool is ready whenever it comes back on.
+    used: bool,
     pub(crate) pending_depth_click: Option<PendingDepthClick>,
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
@@ -59,6 +62,7 @@ impl MagicBrushState {
     /// Activate Magic Brush. Returns true if the active state changed
     /// (caller may need to dispatch encoder).
     pub fn activate(&mut self) -> bool {
+        self.used = true;
         if !self.active {
             self.active = true;
             true
@@ -72,6 +76,8 @@ impl MagicBrushState {
         self.pending_depth_click = None;
         self.clear_stroke();
     }
+
+    pub(crate) fn used(&self) -> bool { self.used }
 
     pub fn has_pending_encoder(&self) -> bool { self.encoder_pending }
 
