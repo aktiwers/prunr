@@ -256,9 +256,9 @@ impl PrunrApp {
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
         let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
-        if app.magic_brush_wanted() {
-            app.processor.warm_sam_sessions();
-        }
+        // The saved model's tools, as a switch to it would set them: an
+        // eraser starts with its brush on, a cut-out warms Magic Brush.
+        app.fit_brush_models_to_model();
         app.pending_onboarding_toast = onboarding_toast;
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
@@ -389,6 +389,8 @@ impl PrunrApp {
             worker_rx,
         );
         app.hardware_install_cache = super::hardware_cache::HardwareInstallCache::all_installed();
+        app.processor.stub_model_runs();
+        app.fit_brush_models_to_model();
         app
     }
 
@@ -479,9 +481,6 @@ impl PrunrApp {
             }
         }
         app.refresh_install_cache();
-        // The saved model's tools, as a switch to it would set them: an
-        // eraser starts with its brush on.
-        app.fit_brush_models_to_model();
         app
     }
 
@@ -1195,12 +1194,7 @@ impl PrunrApp {
         if !matches!(id, ModelId::LaMaFp32 | ModelId::BigLaMa | ModelId::Migan) {
             return;
         }
-        let cpu_only = self.settings.cpu_only();
-        rayon::spawn(move || {
-            if let Err(e) = prunr_core::inpaint::prewarm(id, cpu_only) {
-                tracing::warn!(?id, %e, "Inpaint prewarm failed");
-            }
-        });
+        self.processor.prewarm_eraser(id, self.settings.cpu_only());
     }
 
     fn render_modal_overlays(&mut self, ctx: &egui::Context) {
