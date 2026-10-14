@@ -188,7 +188,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     // The strip sits on the foreground layer, above the modals' level:
     // under an open modal it would draw over the modal.
-    if let Some(tool) = app.active_tool().filter(|_| !app.any_modal_open()) {
+    if let Some(tool) = app.active_tool().filter(|_| !modal_open) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
@@ -423,7 +423,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         app.magic_brush_state.active_trail.clear();
         match &pick {
             // With Depth on a stroke selects like a click where it began.
-            Pick::Depth => depth_click(app, item_id, stroke_pts[0], (source_w, source_h), mode),
+            Pick::Depth => app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode),
             Pick::Sam(embedding) => match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
                 Ok(prompt) => {
                     app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
@@ -439,7 +439,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
             match &pick {
-                Pick::Depth => depth_click(app, item_id, (px, py), (source_w, source_h), mode),
+                Pick::Depth => app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode),
                 Pick::Sam(embedding) => {
                     let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
                     app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
@@ -448,12 +448,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         }
         app.magic_brush_state.clear_stroke();
     }
-}
-
-/// A Magic Brush click with Depth on: select everything near the clicked
-/// depth, or say the map is still being measured.
-fn depth_click(app: &mut PrunrApp, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
-    app.magic_depth_click(item_id, at, dims, mode);
 }
 
 /// A screen position as a source pixel, or `None` off the image: only
@@ -982,18 +976,15 @@ mod tests {
     #[test]
     fn a_run_shows_the_newest_image_whatever_it_reads() {
         use crate::gui::item::{BatchItem, Cutter};
-        use crate::gui::timeline::StepKind;
         let ctx = egui::Context::default();
         let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
         let mut item = BatchItem::new_for_test();
         item.source_texture = Some(tex("photo"));
         assert_eq!(processing_texture(&item).map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
 
-        item.start_cut(Some(StepKind::Process), Cutter::Model(prunr_core::ModelKind::Silueta), false);
-        item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(1, 1)));
-        item.finish_job();
+        item.land_cut_for_test(Cutter::Model(prunr_core::ModelKind::Silueta), std::sync::Arc::new(image::RgbaImage::new(1, 1)));
         item.result_texture = Some(tex("cut-out"));
-        item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta), false);
+        item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta));
         assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
         assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
     }

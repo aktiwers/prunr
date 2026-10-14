@@ -1333,22 +1333,39 @@ impl BatchItem {
     /// a different model (or No model) made it, and the new one only takes
     /// more away. Undo gets back to before.
     pub(crate) fn cuts_anothers_cutout(&self, cutter: Cutter) -> bool {
-        self.timeline.current().result.is_some()
-            && self.timeline.current().origin.as_ref()
-                .is_some_and(|o| o.engine == Engine::Segment && o.cutter.is_some_and(|c| c != cutter))
+        self.timeline.current().result.is_some() && self.shown_cutter().is_some_and(|c| c != cutter)
     }
 
-    /// Note a cut by `cutter` starting now. `chain`: it builds on the
-    /// cut-out on screen (`cuts_anothers_cutout`), starting from that
-    /// cut-out's own colours, so its look is not applied twice, seen
-    /// through its transparency; otherwise as `start_job`.
-    pub(crate) fn start_cut(&mut self, step: Option<StepKind>, cutter: Cutter, chain: bool) {
-        let keep = chain.then(|| self.timeline.current().result.clone()).flatten();
+    /// Who cut the step on screen, when a cut made it and that is known.
+    pub(crate) fn shown_cutter(&self) -> Option<Cutter> {
+        self.timeline.current().origin.as_ref().filter(|o| o.engine == Engine::Segment).and_then(|o| o.cutter)
+    }
+
+    /// Whether a run by `cutter` recording `step` builds on the cut-out on
+    /// screen: a new step does; a knob's re-run redoes its step.
+    pub(crate) fn chains(&self, step: Option<StepKind>, cutter: Cutter) -> bool {
+        step.is_some() && self.cuts_anothers_cutout(cutter)
+    }
+
+    /// Note a cut by `cutter` starting now. One that `chains` starts from
+    /// the shown cut-out's own colours, so its look is not applied twice,
+    /// seen through its transparency; otherwise as `start_job`.
+    pub(crate) fn start_cut(&mut self, step: Option<StepKind>, cutter: Cutter) {
+        let keep = self.chains(step, cutter).then(|| self.timeline.current().result.clone()).flatten();
         self.start_job(step, Engine::Segment);
         if let Some(job) = &mut self.job {
             job.cutter = Some(cutter);
             job.keep = keep;
         }
+    }
+
+    /// A first cut by `cutter` that landed `result`, recorded as Process.
+    #[cfg(test)]
+    pub(crate) fn land_cut_for_test(&mut self, cutter: Cutter, result: Arc<image::RgbaImage>) {
+        self.start_cut(Some(StepKind::Process), cutter);
+        self.result_rgba = Some(result);
+        self.status = BatchStatus::Done;
+        self.finish_job();
     }
 
     /// The image a chained cut starts from, built where the run reads its
@@ -1366,7 +1383,11 @@ impl BatchItem {
         let job = self.job.as_ref()?;
         let start = self.job_input();
         match &job.keep {
-            Some(cutout) => Some(super::worker::RunImage::Kept { start, cutout: Arc::clone(cutout) }),
+            // The decoded photo spares the bridge decoding the file again.
+            Some(cutout) => Some(super::worker::RunImage::Kept {
+                start: start.or_else(|| self.source_rgba.clone()),
+                cutout: Arc::clone(cutout),
+            }),
             None => start.map(super::worker::RunImage::Start),
         }
     }
@@ -1810,7 +1831,11 @@ impl BatchItem {
     /// to a step another model made (or an upscale), a re-cut from it would
     /// rewrite that step with the wrong model's cut-out.
     pub(crate) fn tensor_made_shown_step(&self) -> bool {
-        matches!((&self.applied_recipe, &self.cached_tensor), (Some(recipe), Some(tensor)) if recipe.inference.model == tensor.model)
+        let Some(tensor) = &self.cached_tensor else { return false };
+        match self.shown_cutter() {
+            Some(cutter) => cutter == Cutter::Model(tensor.model),
+            None => self.applied_recipe.as_ref().is_some_and(|r| r.inference.model == tensor.model),
+        }
     }
 
     /// Whether the selection corrects the cut-out on screen under `model`,
@@ -1869,12 +1894,7 @@ impl BatchItem {
         // Only the step this segmentation cut is re-cut with it: another
         // model's cut is that model's, and No model's pass already carries
         // its cut in its start.
-        let cut_by_another = match self.timeline.current().origin.as_ref().and_then(|o| o.cutter) {
-            Some(Cutter::Model(model)) => model != ct.model,
-            Some(Cutter::NoModel) => true,
-            None => false,
-        };
-        if cut_by_another {
+        if self.shown_cutter().is_some_and(|c| c != Cutter::Model(ct.model)) {
             return None;
         }
         if self.volatile_seg_tensor.is_none() {
@@ -2782,14 +2802,11 @@ mod tests {
         use prunr_core::ModelKind::{BiRefNetLite, Silueta};
         let (silueta, birefnet) = (Cutter::Model(Silueta), Cutter::Model(BiRefNetLite));
         let mut item = fixture_item(1);
-        item.start_cut(Some(StepKind::Process), silueta, false);
-        item.result_rgba = Some(px(1));
-        item.status = BatchStatus::Done;
-        item.finish_job();
+        item.land_cut_for_test(silueta, px(1));
         assert!(!item.cuts_anothers_cutout(silueta));
         assert!(item.cuts_anothers_cutout(birefnet) && item.cuts_anothers_cutout(Cutter::NoModel));
 
-        item.start_cut(Some(StepKind::Process), birefnet, true);
+        item.start_cut(Some(StepKind::Process), birefnet);
         assert!(matches!(item.job_run_image(), Some(crate::gui::worker::RunImage::Kept { start: None, .. })), "colours from the photo");
         item.chain_start_built(px(7));
         item.result_rgba = Some(px(2));

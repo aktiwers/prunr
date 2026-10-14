@@ -293,7 +293,9 @@ impl Settings {
         }
     }
 
-    /// Whether the active backend is a GPU (not CPU).
+    /// Whether an accelerator backend is active (OpenVINO counts, though it
+    /// may run on the host CPU: `runs_on_host_cpu`). Settings offers the
+    /// Processor choice only then.
     pub fn is_gpu(&self) -> bool {
         !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
     }

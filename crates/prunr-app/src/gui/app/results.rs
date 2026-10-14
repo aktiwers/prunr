@@ -434,17 +434,13 @@ impl PrunrApp {
         }
     }
 
-    /// The image's depth map is there: what reads it re-renders, and a
-    /// By depth click that waited for it runs, if the brush is still on.
+    /// The image's depth map landed: what reads it re-renders, and a By
+    /// depth click that waited for it runs (turning the brush off drops one).
     pub(crate) fn on_depth_landed(&mut self, idx: usize) {
         self.after_depth_landed(idx);
         let item_id = self.batch.items[idx].id;
-        let waiting = self.magic_brush_state.pending_depth_click.filter(|c| c.item_id == item_id);
-        if let Some(click) = waiting {
-            self.magic_brush_state.pending_depth_click = None;
-            if self.magic_brush_state.is_active() {
-                self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
-            }
+        if let Some(click) = self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id) {
+            self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
         }
     }
 
@@ -1214,7 +1210,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action, false);
+        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action);
         assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
@@ -1251,7 +1247,7 @@ mod timeline_contract_tests {
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.input_transform = prunr_core::InputTransform::Grayscale;
         let ids = std::collections::HashSet::from([1]);
-        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta, &Default::default());
+        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta, Some(StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
         assert!(tiers.tier_add_edge.is_empty(), "no lines composed onto the cached cut-out");
         assert!(tiers.tier1.contains(&1), "the lines run again on the whole photo");
     }

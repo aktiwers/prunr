@@ -208,14 +208,13 @@ impl PrunrApp {
         }
 
         let cutter = Cutter::of(self.settings.model.to_model_kind());
-        let chained = self.batch.chained_cuts(&candidate_ids, step, cutter);
-        let tiers = self.batch.classify(&candidate_ids, model, &chained);
+        let tiers = self.batch.classify(&candidate_ids, model, step, cutter);
         self.notify_skip(tiers.skip_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
 
         for id in tiers.all_process_ids() {
             if let Some(item) = self.batch.find_by_id_mut(id) {
-                item.start_cut(step, cutter, chained.contains(&id));
+                item.start_cut(step, cutter);
             }
         }
 
@@ -243,11 +242,10 @@ impl PrunrApp {
         if let Some(shown) = self.batch.selected_idx_clamped() {
             self.batch.share_settings(shown, &dispatches.iter().map(|(id, _)| *id).collect());
         }
-        let chained = self.batch.chained_cuts(&dispatches.iter().map(|(id, _)| *id).collect(), step, Cutter::NoModel);
         for (id, source) in dispatches {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             item.status = BatchStatus::Processing;
-            item.start_cut(step, Cutter::NoModel, chained.contains(&id));
+            item.start_cut(step, Cutter::NoModel);
             let input = item.job_run_image();
             self.batch.request_filter_only(id, &source, input, settings.fill_style);
         }
@@ -453,15 +451,12 @@ mod process_targets_tests {
     /// knob's re-run, redoes the step from its own start.
     #[test]
     fn process_by_another_model_builds_on_the_cutout_on_screen() {
-        use crate::gui::item::{BatchStatus, Cutter};
+        use crate::gui::item::Cutter;
         use prunr_core::ModelKind;
         let mut app = two_images(SettingsModel::Silueta);
         for item in &mut app.batch.items {
-            item.start_cut(Some(StepKind::Process), Cutter::Model(ModelKind::Silueta), false);
-            item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
             item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
-            item.status = BatchStatus::Done;
-            item.finish_job();
+            item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), std::sync::Arc::new(image::RgbaImage::new(4, 4)));
         }
         let chained = |app: &PrunrApp, i: usize| app.batch.items[i].job.as_ref().map(|j| j.keep.is_some());
 

@@ -172,6 +172,14 @@ pub fn check_large_image(img: &DynamicImage) -> Option<CoreError> {
     }
 }
 
+/// `(w, h)` scaled so the long side is `max_side`, the aspect kept and
+/// neither side zero.
+pub fn fit_long_side(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    let k = f64::from(max_side) / f64::from(w.max(h).max(1));
+    let side = |v: u32| ((f64::from(v) * k).round() as u32).max(1);
+    (side(w), side(h))
+}
+
 /// Downscale an image so its largest dimension does not exceed max_dim.
 /// Uses Lanczos3 resampling. Preserves aspect ratio.
 /// Default max_dim: DOWNSCALE_TARGET (4096).
@@ -181,9 +189,7 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     if largest <= max_dim {
         return img;
     }
-    let scale = max_dim as f32 / largest as f32;
-    let nw = ((w as f32 * scale).round() as u32).max(1);
-    let nh = ((h as f32 * scale).round() as u32).max(1);
+    let (nw, nh) = fit_long_side(w, h, max_dim);
     let rgba = img.to_rgba8();
     let src = Image::from_vec_u8(rgba.width(), rgba.height(), rgba.into_raw(), PixelType::U8x4)
         .expect("valid RGBA buffer");
@@ -642,6 +648,13 @@ mod tests {
             // Each pixel is either red or blue (not black).
             assert!(p[0] == 255 || p[2] == 255, "Tile sample must come from bg");
         }
+    }
+
+    #[test]
+    fn fit_long_side_keeps_the_aspect_and_never_reaches_zero() {
+        assert_eq!(fit_long_side(8000, 6000, 4096), (4096, 3072));
+        assert_eq!(fit_long_side(6000, 8000, 2048), (1536, 2048));
+        assert_eq!(fit_long_side(10_000, 3, 100), (100, 1), "a sliver keeps a pixel");
     }
 
     #[test]

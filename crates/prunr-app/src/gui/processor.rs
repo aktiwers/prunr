@@ -845,9 +845,8 @@ impl Processor {
         if let Some(wait) = due.checked_duration_since(now).filter(|w| !w.is_zero()) {
             return Some(wait);
         }
-        if let Some((_, cfg)) = self.seg_warm_due.take() {
-            let _ = self.worker_tx.send(WorkerMessage::Warm(Box::new(cfg)));
-        }
+        let (_, cfg) = self.seg_warm_due.take()?;
+        let _ = self.worker_tx.send(WorkerMessage::Warm(Box::new(cfg)));
         None
     }
 
@@ -856,13 +855,18 @@ impl Processor {
         self.runs_models = false;
     }
 
+    /// Run a model job on the rayon pool; a test app (`stub_model_runs`)
+    /// runs none.
+    fn spawn_model(&self, job: impl FnOnce() + Send + 'static) {
+        if self.runs_models {
+            rayon::spawn(job);
+        }
+    }
+
     /// Build the LaMa / Big-LaMa / MI-GAN session in the background, so
     /// the first stroke skips the 5-10 s build.
     pub(crate) fn prewarm_eraser(&self, id: prunr_models::ModelId, cpu_only: bool) {
-        if !self.runs_models {
-            return;
-        }
-        rayon::spawn(move || {
+        self.spawn_model(move || {
             if let Err(e) = prunr_core::inpaint::prewarm(id, cpu_only) {
                 tracing::warn!(?id, %e, "Inpaint prewarm failed");
             }
@@ -994,11 +998,8 @@ impl Processor {
             self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
             return;
         }
-        if !self.runs_models {
-            return;
-        }
         let tx = self.inpaint_tx.clone();
-        rayon::spawn(move || {
+        self.spawn_model(move || {
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN.
             let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.backend, tuning.cpu_only, tuning.fill_scale, &progress);
@@ -1762,12 +1763,9 @@ impl Processor {
                 ENCODER_COST_MB, available_ram_mb,
             ));
         }
-        if !self.runs_models {
-            return Ok(());
-        }
         let tx = self.sam_encoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
-        rayon::spawn(move || {
+        self.spawn_model(move || {
             let result = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_encoder_inline(&s, &source));
             let _ = tx.send(SamEncoderResult { item_id, result });
@@ -1809,11 +1807,11 @@ impl Processor {
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
     /// so the first Magic Brush use never waits for them.
     pub(crate) fn warm_sam_sessions(&self) {
-        if !self.runs_models || self.sam_sessions_ready() {
+        if self.sam_sessions_ready() {
             return;
         }
         let sessions = Arc::clone(&self.sam_sessions);
-        rayon::spawn(move || {
+        self.spawn_model(move || {
             if let Err(err) = ensure_sam_sessions(&sessions) {
                 tracing::warn!(%err, "SAM session warm-up failed");
             }
@@ -1836,12 +1834,9 @@ impl Processor {
     /// worker too, so the UI thread only merges the result; the logits
     /// come back with it for later re-thresholding.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
-        if !self.runs_models {
-            return;
-        }
         let tx = self.sam_decoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
-        rayon::spawn(move || {
+        self.spawn_model(move || {
             let (w, h) = req.source_dims;
             let result = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))

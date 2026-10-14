@@ -471,11 +471,6 @@ pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);
 /// Settings: its sidebar and the page beside it.
 pub const SETTINGS_MODAL_SIZE: [f32; 2] = [860.0, 600.0];
 
-/// `size` shrunk to leave a margin round the window, for a big modal.
-pub fn fit_to_window(ctx: &egui::Context, size: [f32; 2]) -> [f32; 2] {
-    let window = ctx.content_rect().size();
-    [size[0].min(window.x - 40.0), size[1].min(window.y - 40.0)]
-}
 pub const CLI_HELP_DIALOG_HEIGHT: f32 = 700.0;
 /// Vertical space the settings modal reserves at the bottom for its
 /// footer (Reset / Auto-saved row + separator).

@@ -291,7 +291,7 @@ impl LivePreview {
     /// skipped.
     pub fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
-        F: FnMut(u64, PreviewKind, bool) -> Option<DispatchInputs>,
+        F: FnMut(u64, PreviewKind) -> Option<DispatchInputs>,
     {
         let now = self.clock.now();
         let mut ready_ids: Vec<u64> = Vec::new();
@@ -324,7 +324,7 @@ impl LivePreview {
                 in_flight_count = self.in_flight.len(),
                 "tick: item ready for dispatch"
             );
-            let Some(inputs) = snapshot(id, kind, settled) else {
+            let Some(mut inputs) = snapshot(id, kind) else {
                 tracing::debug!(
                     event = "upscale_tier2_tick_no_snapshot",
                     item_id = id,
@@ -341,6 +341,7 @@ impl LivePreview {
                 continue;
             };
             self.pending.remove(&id);
+            inputs.quick = !settled;
             self.generation_counter = self.generation_counter.wrapping_add(1);
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));
@@ -1016,6 +1017,21 @@ fn line_fade(inputs: &DispatchInputs) -> Option<LineFade<'_>> {
 }
 
 #[cfg(test)]
+impl PreviewResult {
+    /// A Mask render of `item_id` that landed as the final one, on version
+    /// 0, having built and changed nothing else.
+    pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
+        Self {
+            item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None,
+            applied_depth: Default::default(),
+            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+            applied_tier2_knobs: None, applied_color_strength: None, is_final: true,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
 
@@ -1156,31 +1172,26 @@ mod tests {
         // tick at the same simulated `now` — DEBOUNCE elapsed since T0,
         // so the dispatch must be ready. `wait` is None because nothing's
         // pending after dispatch.
-        let wait = lp.tick(|_, _, _| None);
+        let wait = lp.tick(|_, _| None);
         assert!(
             wait.is_none(),
             "tick at frame 1 (200ms after T0) must clear the pending entry"
         );
     }
 
-    /// A drag's in-between frames are told apart from the release: the
-    /// snapshot sees `settled` only after a flush, and a new tweak after
-    /// it is a drag again.
+    /// A drag's in-between frames are told apart from the release (the
+    /// render then is quick): a flush settles the render, and a new tweak
+    /// after it is a drag again.
     #[test]
     fn a_release_settles_the_render_and_a_new_tweak_does_not() {
-        let clock = MockClock::new(Instant::now());
-        let mut lp = LivePreview::with_clock(clock.clone());
-        let mut seen = Vec::new();
+        let mut lp = LivePreview::default();
+        let settled = |lp: &LivePreview| lp.pending.get(&1).map(|p| p.settled);
         lp.mark_tweak(1, PreviewKind::Mask);
-        clock.advance(DEBOUNCE + Duration::from_millis(1));
-        lp.tick(|_, _, settled| { seen.push(settled); None });
-        lp.mark_tweak(1, PreviewKind::Mask);
+        assert_eq!(settled(&lp), Some(false));
         lp.flush(1);
-        lp.tick(|_, _, settled| { seen.push(settled); None });
+        assert_eq!(settled(&lp), Some(true));
         lp.mark_tweak(1, PreviewKind::Mask);
-        clock.advance(DEBOUNCE + Duration::from_millis(1));
-        lp.tick(|_, _, settled| { seen.push(settled); None });
-        assert_eq!(seen, vec![false, true, false]);
+        assert_eq!(settled(&lp), Some(false));
     }
 
     /// `tick` returning `None` (no remaining wait) is the readiness
@@ -1195,12 +1206,12 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
 
         // Before DEBOUNCE — wait is Some(>0).
-        let wait = lp.tick(|_, _, _| None);
+        let wait = lp.tick(|_, _| None);
         assert!(wait.is_some(), "before DEBOUNCE tick should report a wait");
 
         // After DEBOUNCE — wait is None (entry is ready).
         clock.advance(DEBOUNCE + Duration::from_millis(1));
-        let wait = lp.tick(|_, _, _| None);
+        let wait = lp.tick(|_, _| None);
         assert!(
             wait.is_none(),
             "after DEBOUNCE tick should report no remaining wait (entry is ready)"
@@ -1211,7 +1222,7 @@ mod tests {
     fn tick_before_debounce_does_not_dispatch() {
         let mut lp = LivePreview::default();
         lp.mark_tweak(1, PreviewKind::Mask);
-        let wait = lp.tick(|_, _, _| None);
+        let wait = lp.tick(|_, _| None);
         assert!(wait.is_some(), "should still be pending");
         assert!(lp.in_flight.is_empty(), "no dispatch before debounce expires");
     }
@@ -1238,23 +1249,7 @@ mod tests {
             42,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
-            item_id: 42,
-            rgba: Arc::new(RgbaImage::new(1, 1)),
-            kind: PreviewKind::Mask,
-            generation: 1,
-            new_edge: None,
-            new_bold: None,
-            new_masked_base: None,
-            new_reference: None,
-            new_faced: None,
-            new_depth_photo: None,
-            applied_depth: Default::default(),
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None,
-            applied_color_strength: None,
-            is_final: false,
-        }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(42, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
 
         let drained = lp.drain_results();
         assert!(drained.is_empty(), "stale generation must not be returned");
@@ -1271,23 +1266,7 @@ mod tests {
             99,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
-            item_id: 99,
-            rgba: Arc::new(RgbaImage::new(2, 2)),
-            kind: PreviewKind::Mask,
-            generation: 7,
-            new_edge: None,
-            new_bold: None,
-            new_masked_base: None,
-            new_reference: None,
-            new_faced: None,
-            new_depth_photo: None,
-            applied_depth: Default::default(),
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None,
-            applied_color_strength: None,
-            is_final: false,
-        }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 7, is_final: false, ..PreviewResult::mask_for_test(99, Arc::new(RgbaImage::new(2, 2))) }).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
@@ -1303,23 +1282,7 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
-            item_id: 777,
-            rgba: Arc::new(RgbaImage::new(1, 1)),
-            kind: PreviewKind::Mask,
-            generation: 1,
-            new_edge: None,
-            new_bold: None,
-            new_masked_base: None,
-            new_reference: None,
-            new_faced: None,
-            new_depth_photo: None,
-            applied_depth: Default::default(),
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None,
-            applied_color_strength: None,
-            is_final: false,
-        }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(777, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
         let drained = lp.drain_results();
         assert!(drained.is_empty());
     }
@@ -1332,23 +1295,7 @@ mod tests {
             11,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
-            item_id: 11,
-            rgba: Arc::new(RgbaImage::new(1, 1)),
-            kind: PreviewKind::Mask,
-            generation: 3,
-            new_edge: None,
-            new_bold: None,
-            new_masked_base: None,
-            new_reference: None,
-            new_faced: None,
-            new_depth_photo: None,
-            applied_depth: Default::default(),
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None,
-            applied_color_strength: None,
-            is_final: false,
-        }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 3, is_final: false, ..PreviewResult::mask_for_test(11, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
@@ -1368,23 +1315,7 @@ mod tests {
             22,
             Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
-            item_id: 22,
-            rgba: Arc::new(RgbaImage::new(1, 1)),
-            kind: PreviewKind::Mask,
-            generation: 2,
-            new_edge: None,
-            new_bold: None,
-            new_masked_base: None,
-            new_reference: None,
-            new_faced: None,
-            new_depth_photo: None,
-            applied_depth: Default::default(),
-            applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None,
-            applied_color_strength: None,
-            is_final: false,
-        }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 2, is_final: false, ..PreviewResult::mask_for_test(22, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);

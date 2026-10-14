@@ -93,7 +93,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut new_filter = initial_filter;
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
-    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", theme::fit_to_window(ctx, STORE_SIZE), |ui| {
+    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
         let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(disk_usage_bytes()));
         super::chip::modal_page(ui, "Model Store", &subtitle, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);

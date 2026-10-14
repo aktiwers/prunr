@@ -5,6 +5,7 @@
 use serde::Serialize;
 
 use crate::gui::app::PrunrApp;
+use crate::gui::brush_state::Tool;
 use crate::gui::item_settings::ItemSettings;
 
 #[derive(Debug, Serialize)]
@@ -49,14 +50,11 @@ pub fn dump(app: &PrunrApp) -> StateDump {
     StateDump {
         app_state: format!("{:?}", app.batch.app_state()),
         model: format!("{:?}", app.settings.model),
-        tool: if app.magic_brush_state.is_active() {
-            "magic_brush"
-        } else if app.brush_state.is_enabled() {
-            "paint_brush"
-        } else if app.picking_depth_focus {
-            "set_focus"
-        } else {
-            "none"
+        tool: match app.active_tool() {
+            Some(Tool::Magic) => "magic_brush",
+            Some(Tool::Paint) => "paint_brush",
+            None if app.picking_depth_focus => "set_focus",
+            None => "none",
         },
         selected: app.batch.selected_item().map(|it| it.id),
         busy: app.quiet_background_work().is_some()

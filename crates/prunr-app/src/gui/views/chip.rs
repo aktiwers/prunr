@@ -578,9 +578,12 @@ fn row_wash(resp: &Response, selected: bool) -> Color32 {
 }
 
 /// The picked row's check, `inset` from its right edge.
+/// The picked row's check mark size.
+const ROW_CHECK_SIZE: f32 = 16.0;
+
 fn paint_row_check(painter: &egui::Painter, rect: egui::Rect, inset: f32) {
     painter.text(egui::pos2(rect.right() - inset, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
-        egui::FontId::proportional(16.0), theme::ACCENT_RING);
+        egui::FontId::proportional(ROW_CHECK_SIZE), theme::ACCENT_RING);
 }
 
 /// A row's accessible name: its title, and its description on a line under.
@@ -594,7 +597,7 @@ const LIST_ICON_INSET: f32 = 12.0;
 const LIST_ICON_RADIUS: f32 = 15.0;
 const LIST_TEXT_GAP: f32 = 12.0;
 const LIST_CHECK_INSET: f32 = 14.0;
-const LIST_CHECK_ROOM: f32 = LIST_CHECK_INSET + 16.0 + LIST_TEXT_GAP;
+const LIST_CHECK_ROOM: f32 = LIST_CHECK_INSET + ROW_CHECK_SIZE + LIST_TEXT_GAP;
 
 /// The width a `choice_list_row` needs to show `title` and `description`
 /// whole, for a list that sizes itself to its longest row.
