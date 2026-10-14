@@ -173,6 +173,22 @@ fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     }
 }
 
+/// Remove an image's IPC inputs: its file and, for a chained run, its start.
+fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, chain: Option<&std::path::Path>) {
+    match chain {
+        Some(c) => cleanup_ipc_temps(ipc, &[image, c]),
+        None => cleanup_ipc_temps(ipc, &[image]),
+    }
+}
+
+/// The edge detector, built on first need.
+fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), String> {
+    if edge_engine.is_none() {
+        *edge_engine = Some(Arc::new(EdgeEngine::new().map_err(|e| format!("Edge engine failed: {e}"))?));
+    }
+    Ok(())
+}
+
 /// The detector's planes as the item's edge cache: path, base height and
 /// width, or all `None` when nothing was written. A run that skipped a
 /// scale writes none — the app splits the file into every scale's plane,
@@ -388,8 +404,8 @@ pub fn run_worker() -> ! {
             }
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
                 let built = (|| -> Result<(), String> {
-                    if line_mode != LineMode::Off && edge_engine.is_none() {
-                        edge_engine = Some(Arc::new(EdgeEngine::new().map_err(|e| format!("Edge engine failed: {e}"))?));
+                    if line_mode != LineMode::Off {
+                        ensure_edge_engine(&mut edge_engine)?;
                     }
                     if line_mode != LineMode::EdgesOnly && engines.is_empty() {
                         let started = std::time::Instant::now();
@@ -400,11 +416,7 @@ pub fn run_worker() -> ! {
                 })();
                 if let Err(error) = built {
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
-                    let mut inputs: Vec<&std::path::Path> = vec![&image_path];
-                    if let Some(ci) = chain_input.as_ref() {
-                        inputs.push(&ci.path);
-                    }
-                    cleanup_ipc_temps(&ipc_dir, &inputs);
+                    cleanup_image_inputs(&ipc_dir, &image_path, chain_input.as_ref().map(|c| c.path.as_path()));
                     continue;
                 }
                 let engine = if !engines.is_empty() {
@@ -446,12 +458,7 @@ pub fn run_worker() -> ! {
                         let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
-                    let cleanup_inputs = || {
-                        match chain_path.as_deref() {
-                            Some(p) => cleanup_ipc_temps(&ipc, &[image_path.as_path(), p]),
-                            None    => cleanup_ipc_temps(&ipc, &[image_path.as_path()]),
-                        }
-                    };
+                    let cleanup_inputs = || cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
 
                     if is_item_cancelled(&cancelled_items, item_id) {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
@@ -836,15 +843,10 @@ pub fn run_worker() -> ! {
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
                 mask: cmd_mask,
             } => {
-                if edge_engine.is_none() {
-                    match EdgeEngine::new() {
-                        Ok(e) => edge_engine = Some(Arc::new(e)),
-                        Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: format!("Edge engine failed: {e}") });
-                            cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
-                            continue;
-                        }
-                    }
+                if let Err(error) = ensure_edge_engine(&mut edge_engine) {
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
+                    continue;
                 }
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
