@@ -425,6 +425,14 @@ impl LivePreview {
     }
 
     /// True while a preview waits for its debounce or runs.
+    /// The images with a render queued that reads the photo (not a Refine
+    /// or Strength re-render of a kept run).
+    pub(crate) fn pending_photo_renders(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter()
+            .filter(|(_, p)| !matches!(p.kind, PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2))
+            .map(|(id, _)| *id)
+    }
+
     pub fn is_busy(&self) -> bool {
         !self.pending.is_empty() || !self.in_flight.is_empty()
     }

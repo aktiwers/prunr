@@ -34,7 +34,7 @@ impl PrunrApp {
         }
         if let (Some(idx), Some(id)) = (idx, selected) {
             self.batch.items[idx].settle_reveal();
-            self.ensure_selected_source_decoded(idx);
+            self.ensure_source_decoded(idx);
             self.request_selected_textures(idx, ctx);
             self.kick_backdrop_tex_prep(id, ctx);
         }
@@ -125,9 +125,10 @@ impl PrunrApp {
         });
     }
 
-    /// Kick off background decode if the selected item has no decoded source
-    /// (lazy decode path — applies after sidebar navigation to a not-yet-decoded item).
-    fn ensure_selected_source_decoded(&mut self, idx: usize) {
+    /// Kick off a background decode when the image has no decoded source:
+    /// the selected one after sidebar navigation, or one a queued render
+    /// reads.
+    pub(super) fn ensure_source_decoded(&mut self, idx: usize) {
         if self.batch.items[idx].source_rgba.is_some() || self.batch.items[idx].decode_pending {
             return;
         }
