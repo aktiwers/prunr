@@ -181,6 +181,17 @@ pub fn apply_building_blocks(visuals: &mut egui::Visuals, spacing: &mut egui::st
     }
     visuals.widgets.inactive.bg_fill = RAIL;
     spacing.slider_rail_height = 4.0;
+    // A slim, translucent thumb with no rail behind it: egui's default
+    // 10 px white bar reads as a second panel edge on the dark glass.
+    spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 6.0,
+        bar_outer_margin: 2.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
+        active_handle_opacity: 0.35,
+        interact_handle_opacity: 0.6,
+        ..egui::style::ScrollStyle::floating()
+    };
 }
 
 /// Tighten egui's default visuals for a modal: subdued borders + the
