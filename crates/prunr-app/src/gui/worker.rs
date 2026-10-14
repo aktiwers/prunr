@@ -254,6 +254,10 @@ pub(crate) enum WorkerMessage {
     /// memory across the user's "I'm done with that model" signal.
     /// Idempotent; no-op when nothing is warm.
     ReleaseWarm,
+    /// Load this config's model now, replacing a warm worker that does
+    /// not fit it: a switch to a cut-out model, so its first Process
+    /// skips the load.
+    Warm(Box<ProcessingConfig>),
 }
 
 pub enum WorkerResult {
@@ -313,29 +317,8 @@ pub(crate) fn spawn_worker(
             // load duration (UI stays responsive — bridge has its own
             // thread). If a Process click arrives during warm-up, it
             // queues on msg_rx and gets picked up once the sub is live.
-            let mut warm: Option<(SubprocessManager, ProcessingConfig, Instant)> = None;
-            if let Some(cfg) = prewarm {
-                let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
-                let started = std::time::Instant::now();
-                match SubprocessManager::spawn(model, jobs, mask, force_cpu, WorkerLines::app(line_mode, edge)) {
-                    Ok((sub, provider)) => {
-                        let elapsed_ms = started.elapsed().as_millis();
-                        tracing::info!(
-                            stage = "prewarm",
-                            elapsed_ms,
-                            model = ?model,
-                            line_mode = ?line_mode,
-                            "subprocess cold-start",
-                        );
-                        let _ = res_tx.send(WorkerResult::BackendReady(provider));
-                        ctx.request_repaint();
-                        warm = Some((sub, cfg, Instant::now()));
-                    }
-                    Err(err) => {
-                        tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
-                    }
-                }
-            }
+            let mut warm: Option<(SubprocessManager, ProcessingConfig, Instant)> =
+                prewarm.and_then(|cfg| spawn_warm(cfg, &res_tx, &ctx));
 
             loop {
                 let msg = match msg_rx.recv_timeout(WARM_POLL) {
@@ -357,6 +340,16 @@ pub(crate) fn spawn_worker(
                             tracing::info!(model = ?cfg.model, "seg subprocess released on model switch");
                             let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
                         }
+                    }
+                    WorkerMessage::Warm(cfg) => {
+                        if warm.as_ref().is_some_and(|(_, have, _)| have.reusable_by(&cfg)) {
+                            continue;
+                        }
+                        if let Some((mut sub, old, _)) = warm.take() {
+                            tracing::info!(model = ?old.model, "seg subprocess released for the new model");
+                            let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                        }
+                        warm = spawn_warm(*cfg, &res_tx, &ctx);
                     }
                     WorkerMessage::BatchProcess {
                         items, tier2_items, add_edge_items, config, cancels,
@@ -1163,6 +1156,31 @@ fn finalize_or_continue(
         }
     }
     true
+}
+
+/// Boot a worker with `cfg`'s model before any Process asks for it: at
+/// start-up and on a switch to a cut-out model. Blocks the bridge thread
+/// for the load; a Process sent meanwhile waits for it, as it would for
+/// its own.
+fn spawn_warm(
+    cfg: ProcessingConfig,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> Option<(SubprocessManager, ProcessingConfig, Instant)> {
+    let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
+    let started = Instant::now();
+    match SubprocessManager::spawn(model, jobs, mask, force_cpu, WorkerLines::app(line_mode, edge)) {
+        Ok((sub, provider)) => {
+            tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?model, line_mode = ?line_mode, "subprocess cold-start");
+            let _ = res_tx.send(WorkerResult::BackendReady(provider));
+            ctx.request_repaint();
+            Some((sub, cfg, Instant::now()))
+        }
+        Err(err) => {
+            tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
+            None
+        }
+    }
 }
 
 /// Send a WorkItem to the subprocess via temp file IPC. A chained cut's

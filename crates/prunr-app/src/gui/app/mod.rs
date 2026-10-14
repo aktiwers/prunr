@@ -1086,6 +1086,9 @@ impl eframe::App for PrunrApp {
         self.status.tick();
         self.reconcile_selected(ctx);
         let now = std::time::Instant::now();
+        if let Some(wait) = self.processor.pump_seg_warm(now) {
+            ctx.request_repaint_after(wait);
+        }
         self.note_quiet_work(now);
         // A frame at the one-second mark, so the pill appears without
         // waiting for input; once it shows, the poll below and the pill's
@@ -1187,6 +1190,10 @@ impl PrunrApp {
         // is no longer using, whatever the direction.
         self.processor.release_all_sessions();
         self.prewarm_in_process_eraser();
+        let installed = self.settings.model.to_model_id().is_some_and(prunr_models::is_available);
+        if let Some(cfg) = Self::initial_processing_config(&self.settings).filter(|_| installed) {
+            self.processor.schedule_seg_warm(cfg, std::time::Instant::now());
+        }
     }
 
     /// Build the LaMa / Big-LaMa / MI-GAN session in the background, so
