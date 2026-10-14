@@ -42,7 +42,7 @@ assets/                    # Icon, Info.plist, .desktop
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
-| `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard)                                     |
+| `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard). One file dialog at a time: a surface asks, `logic()` shows it parented to the window and drains the answer, which carries image ids so it resumes the action that asked; while it is up it counts as a modal |
 | `Automation`       | The control socket; `None` unless `PRUNR_CONTROL_PORT` is set                                          |
 
 **Who decides what.** A decision about one image is a method on `BatchItem` (how much of a run it needs, what a landed decode, texture, overlay or result does to it, whether a run's result still fits the state it started from); a loop over the batch is a method on `BatchManager` (classify a batch, prepare its work, mark what waits); admission and the streams to the workers are on `Processor`. `PrunrApp` routes between them and owns nothing a coordinator could. Process targets the ticked images for every model: cut-outs as one admitted batch, upscales, colorize and erasers one after the other.
@@ -116,6 +116,7 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 | `prunr-inpaint-bridge` | Owns the SD worker; spawns it on a helper thread so Cancel works during Init |
 | `subprocess-reader` | One per child; blocking reads of child stdout |
 | `prunr-control` | Only with `PRUNR_CONTROL_PORT`: local JSON socket; requests are answered on the UI thread |
+| `file-dialog` | One per open file dialog: waits for the user's answer and wakes the frame loop. The dialog itself starts on the UI thread, which macOS needs for its sheet |
 | Upscale | Builds the session off the UI thread (a cold OpenVINO compile takes tens of seconds); Cancel terminates the running ORT call |
 | Background I/O | Short-lived: file listing, decode, thumbnails, texture prep, history spill, save, downloads. Decode-heavy ones share a slot pool capped at the core count so a big batch doesn't stack per-image peaks |
 | rayon global pool | Live preview, LaMa / MI-GAN, SAM |
