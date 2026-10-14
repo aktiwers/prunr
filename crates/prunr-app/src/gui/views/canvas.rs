@@ -738,15 +738,8 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     let t = theme::motion_clock(ui.ctx());
 
-    // A run that builds on an earlier result shows that result while it works.
     let item = app.batch.selected_item();
-    let result_tex = item.and_then(|i| i.result_texture.as_ref());
-    let on_result = item.is_some_and(|i| i.job_builds_on_shown_result());
-    let display_texture = if on_result && result_tex.is_some() {
-        result_tex
-    } else {
-        item.and_then(|i| i.source_texture.as_ref())
-    };
+    let display_texture = item.and_then(processing_texture);
 
     let painted = display_texture.map(|texture| {
         let tex_size = item.map_or(texture.size_vec2(), |i| i.frame_size());
@@ -785,6 +778,12 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
     }
     painted
+}
+
+/// What the canvas shows while a run works: the image being edited, the
+/// newest result, whatever the run reads; the photo before there is one.
+fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&egui::TextureHandle> {
+    item.result_texture.as_ref().or(item.source_texture.as_ref())
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
@@ -975,6 +974,28 @@ mod tests {
         let uv = tile_uv(Vec2::new(800.0, 600.0), Vec2::new(200.0, 300.0));
         assert_eq!(uv.max, Pos2::new(4.0, 2.0));
         assert_eq!(uv.min, Pos2::ZERO);
+    }
+
+    /// A run shows the image being edited, the newest result, even when
+    /// it redoes that step from the photo (a Sketch mode change, a second
+    /// upscale); the photo shows only before there is a result.
+    #[test]
+    fn a_run_shows_the_newest_image_whatever_it_reads() {
+        use crate::gui::item::{BatchItem, Cutter};
+        use crate::gui::timeline::StepKind;
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
+        let mut item = BatchItem::new_for_test();
+        item.source_texture = Some(tex("photo"));
+        assert_eq!(processing_texture(&item).map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
+
+        item.start_cut(Some(StepKind::Process), Cutter::Model(prunr_core::ModelKind::Silueta), false);
+        item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(1, 1)));
+        item.finish_job();
+        item.result_texture = Some(tex("cut-out"));
+        item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta), false);
+        assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
+        assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
     }
 
     #[test]
