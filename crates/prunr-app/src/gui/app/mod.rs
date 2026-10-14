@@ -252,7 +252,7 @@ impl PrunrApp {
         // first Process click skips the 1–5s model-load cost. Filter-only
         // mode (SettingsModel::None) skips pre-warm — no ORT session
         // needed for pure CPU filters.
-        let prewarm = Self::initial_processing_config(&settings);
+        let prewarm = Self::initial_engines(&settings);
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
         let mut app = Self::init_state(settings, super::system_bridge::SystemBridge::new(), worker_tx, worker_rx);
@@ -355,22 +355,14 @@ impl PrunrApp {
         }
     }
 
-    /// Build the pre-warm subprocess config for startup, or `None` when
-    /// pre-warming doesn't make sense (e.g. user has "No model" selected —
-    /// filter-only runs without ORT, so the subprocess would never be used).
-    /// Uses `ItemSettings::default()` for mask/edge because startup has no
-    /// selected item yet; Process clicks that use different settings will
-    /// drop the warm sub and spawn fresh.
-    fn initial_processing_config(settings: &Settings) -> Option<super::worker::ProcessingConfig> {
-        let model = settings.model.to_model_kind()?;
-        let item_defaults = super::item_settings::ItemSettings::default();
-        Some(super::worker::ProcessingConfig {
-            model,
+    /// The engines to load ahead of Process, at start-up or on a switch;
+    /// `None` for a model that is not a cut-out (No model's filters run
+    /// without a worker).
+    fn initial_engines(settings: &Settings) -> Option<super::worker::EngineSpec> {
+        Some(super::worker::EngineSpec {
+            model: settings.model.to_model_kind()?,
             jobs: settings.parallel_jobs,
-            mask: item_defaults.mask_settings(),
             force_cpu: settings.cpu_only(),
-            line_mode: item_defaults.line_mode,
-            edge: item_defaults.edge_settings(),
         })
     }
 
@@ -1189,8 +1181,8 @@ impl PrunrApp {
         self.processor.release_all_sessions();
         self.prewarm_in_process_eraser();
         let installed = self.hardware_install_cache.has_model(self.settings.model);
-        if let Some(cfg) = Self::initial_processing_config(&self.settings).filter(|_| installed) {
-            self.processor.schedule_seg_warm(cfg, std::time::Instant::now());
+        if let Some(spec) = Self::initial_engines(&self.settings).filter(|_| installed) {
+            self.processor.schedule_seg_warm(spec, std::time::Instant::now());
         }
     }
 

@@ -27,13 +27,13 @@ const HEAVY_WORKING_SET_MB: u32 = 2000;
 /// The worker kept loaded between batches, and when it goes if unused.
 struct WarmWorker {
     sub: SubprocessManager,
-    cfg: ProcessingConfig,
+    spec: EngineSpec,
     release_at: Instant,
 }
 
 impl WarmWorker {
     fn release(mut self, reason: &'static str) {
-        tracing::info!(model = ?self.cfg.model, reason, "seg subprocess released");
+        tracing::info!(model = ?self.spec.model, reason, "seg subprocess released");
         let _ = self.sub.shutdown_with_timeout(RELEASE_TIMEOUT);
     }
 }
@@ -258,30 +258,40 @@ pub struct CachedTensorWork {
 }
 
 
-/// Bundled processing settings — avoids passing 6+ individual fields.
-/// Clone/PartialEq enable the pre-warm path to check whether the warm
-/// subprocess was booted with the same Init-affecting config as the
-/// incoming batch (and therefore safely reusable).
-#[derive(Clone, PartialEq)]
-pub struct ProcessingConfig {
+/// What a worker's engines are built for: the model, on which processor,
+/// and the jobs they serve. A warm worker is kept and reused by this alone.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EngineSpec {
     pub model: ModelKind,
     pub jobs: usize,
-    pub mask: MaskSettings,
     pub force_cpu: bool,
+}
+
+impl EngineSpec {
+    /// Whether a worker built for `self` can run `next` on `provider`: the
+    /// same model on the same processor, with a pool at least as large (two
+    /// job counts can make the same pool: BiRefNet on the CPU builds one
+    /// either way).
+    pub fn reusable_by(&self, next: &EngineSpec, provider: &str) -> bool {
+        let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, e.force_cpu, provider);
+        self.model == next.model && self.force_cpu == next.force_cpu && engines(self) >= engines(next)
+    }
+}
+
+/// What a batch runs with besides its engines; the worker takes it with
+/// `Configure`, so any warm worker can run any of these.
+#[derive(Clone, PartialEq)]
+pub struct RunSettings {
+    pub mask: MaskSettings,
     pub line_mode: LineMode,
     pub edge: EdgeSettings,
 }
 
-impl ProcessingConfig {
-    /// Whether a worker built for `self` can run `next` on `provider`: the
-    /// same model on the same processor, with a pool at least as large (two
-    /// job counts can make the same pool: BiRefNet on the CPU builds one
-    /// either way). Mask, Sketch mode and line settings are not part of it;
-    /// a batch sends those with `Configure`.
-    pub fn reusable_by(&self, next: &ProcessingConfig, provider: &str) -> bool {
-        let engines = |c: &ProcessingConfig| prunr_core::batch::engine_pool_size(c.model, c.jobs, c.force_cpu, provider);
-        self.model == next.model && self.force_cpu == next.force_cpu && engines(self) >= engines(next)
-    }
+/// A batch: the engines it needs and the settings it runs with.
+#[derive(Clone)]
+pub struct ProcessingConfig {
+    pub engines: EngineSpec,
+    pub run: RunSettings,
 }
 
 pub(crate) enum WorkerMessage {
@@ -309,7 +319,7 @@ pub(crate) enum WorkerMessage {
     /// Load this config's model now, replacing a warm worker that does
     /// not fit it: a switch to a cut-out model, so its first Process
     /// skips the load.
-    Warm(Box<ProcessingConfig>),
+    Warm(EngineSpec),
 }
 
 pub enum WorkerResult {
@@ -349,13 +359,13 @@ pub enum WorkerResult {
 ///
 /// When `prewarm` is `Some`, the bridge boots a subprocess with that config
 /// at startup. A batch reuses the warm worker when its model, processor
-/// and pool size fit (`ProcessingConfig::reusable_by`) and sends it the
+/// and pool size fit (`EngineSpec::reusable_by`) and sends it the
 /// run's mask and Sketch settings; the worker that ran a batch stays warm
 /// after it (`idle_after_run`), so the next Process skips the model load.
 /// A model switch (`ReleaseWarm`), a crash or Cancel drops it.
 pub(crate) fn spawn_worker(
     ctx: egui::Context,
-    prewarm: Option<ProcessingConfig>,
+    prewarm: Option<EngineSpec>,
 ) -> (mpsc::Sender<WorkerMessage>, mpsc::Receiver<WorkerResult>) {
     let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>();
     let (res_tx, res_rx) = mpsc::channel::<WorkerResult>();
@@ -369,7 +379,7 @@ pub(crate) fn spawn_worker(
             // thread). If a Process click arrives during warm-up, it
             // queues on msg_rx and gets picked up once the sub is live.
             // The warm worker and when it is released if still unused.
-            let mut warm: Option<WarmWorker> = prewarm.and_then(|cfg| spawn_warm(cfg, &res_tx, &ctx));
+            let mut warm: Option<WarmWorker> = prewarm.and_then(|spec| spawn_warm(spec, &res_tx, &ctx));
 
             loop {
                 let wait = warm.as_ref().map_or(WARM_IDLE, |w| w.release_at.saturating_duration_since(Instant::now()));
@@ -389,28 +399,28 @@ pub(crate) fn spawn_worker(
                             w.release("model switch");
                         }
                     }
-                    WorkerMessage::Warm(cfg) => {
-                        if warm.as_ref().is_some_and(|w| w.cfg.reusable_by(&cfg, &prunr_core::OrtEngine::detect_active_provider())) {
+                    WorkerMessage::Warm(spec) => {
+                        if warm.as_ref().is_some_and(|w| w.spec.reusable_by(&spec, &prunr_core::OrtEngine::detect_active_provider())) {
                             continue;
                         }
                         if let Some(w) = warm.take() {
                             w.release("another model picked");
                         }
-                        warm = spawn_warm(*cfg, &res_tx, &ctx);
+                        warm = spawn_warm(spec, &res_tx, &ctx);
                     }
                     WorkerMessage::BatchProcess {
                         batch, items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
-                        let needed = ProcessingConfig { jobs: pool_jobs(config.jobs, items.len()), ..(*config).clone() };
-                        let mut reuse: Option<(SubprocessManager, ProcessingConfig)> = None;
+                        let needed = EngineSpec { jobs: pool_jobs(config.engines.jobs, items.len()), ..config.engines };
+                        let mut reuse: Option<(SubprocessManager, EngineSpec)> = None;
                         let respawn_reason = match warm.take() {
                             None => Some("no_warm_worker"),
                             Some(mut w) => {
                                 if !w.sub.is_alive() {
                                     Some("warm_worker_dead")
-                                } else if w.cfg.reusable_by(&needed, &prunr_core::OrtEngine::detect_active_provider()) {
-                                    reuse = Some((w.sub, w.cfg));
+                                } else if w.spec.reusable_by(&needed, &prunr_core::OrtEngine::detect_active_provider()) {
+                                    reuse = Some((w.sub, w.spec));
                                     None
                                 } else {
                                     w.release("engines differ");
@@ -426,15 +436,15 @@ pub(crate) fn spawn_worker(
                             stage = "batch_dispatch",
                             decision,
                             reason,
-                            model = ?config.model,
-                            line_mode = ?config.line_mode,
+                            model = ?config.engines.model,
+                            line_mode = ?config.run.line_mode,
                             "subprocess cold-start",
                         );
                         let state = BatchRunState::new(
                             batch, items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
                         warm = run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx)
-                            .map(|(sub, cfg)| WarmWorker { release_at: Instant::now() + idle_after_run(cfg.model), sub, cfg });
+                            .map(|(sub, spec)| WarmWorker { release_at: Instant::now() + idle_after_run(spec.model), sub, spec });
                     }
                 }
             }
@@ -469,7 +479,7 @@ impl BatchRunState {
         config: ProcessingConfig,
     ) -> Self {
         Self {
-            max_jobs: config.jobs,
+            max_jobs: config.engines.jobs,
             config,
             pending: items.into(),
             pending_tier2: tier2_items.into(),
@@ -558,12 +568,12 @@ enum WaitAction {
 /// afterwards, with the config it was built for, to stay warm for the
 /// next batch; `None` after a crash, a Cancel or a failed spawn.
 fn run_batch_with_retry(
-    warm: Option<(SubprocessManager, ProcessingConfig)>,
+    warm: Option<(SubprocessManager, EngineSpec)>,
     mut state: BatchRunState,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) -> Option<(SubprocessManager, ProcessingConfig)> {
+) -> Option<(SubprocessManager, EngineSpec)> {
     // The worker in hand: the warm one, then the last spawn's; a crash
     // drops it and the next round spawns fresh.
     let mut live = warm;
@@ -661,7 +671,7 @@ struct InitialBurst {
     sub: SubprocessManager,
     sent: SentWork,
     /// What the worker's engines were built for.
-    engines: ProcessingConfig,
+    engines: EngineSpec,
 }
 
 /// Spawn a subprocess (or accept a warm one), give it the batch's run
@@ -669,7 +679,7 @@ struct InitialBurst {
 /// needed — then Tier 1 up to `max_jobs`). On spawn failure, reports
 /// errors for every pending item and sends `BatchComplete`; returns `None`.
 fn spawn_and_initial_burst(
-    warm: Option<(SubprocessManager, ProcessingConfig)>,
+    warm: Option<(SubprocessManager, EngineSpec)>,
     state: &mut BatchRunState,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -691,13 +701,13 @@ fn spawn_and_initial_burst(
     let (mut sub, engines) = match warm {
         Some(pair) => pair,
         None => match SubprocessManager::spawn(
-            state.config.model, effective_jobs, state.config.mask, state.config.force_cpu,
-            WorkerLines::app(state.config.line_mode, state.config.edge),
+            state.config.engines.model, effective_jobs, state.config.run.mask, state.config.engines.force_cpu,
+            WorkerLines::app(state.config.run.line_mode, state.config.run.edge),
         ) {
             Ok((s, active_provider)) => {
                 let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
                 ctx.request_repaint();
-                (s, ProcessingConfig { jobs: effective_jobs, ..state.config.clone() })
+                (s, EngineSpec { jobs: effective_jobs, ..state.config.engines })
             }
             Err(e) => {
                 emit_pending_errors(state, &e, res_tx);
@@ -708,7 +718,8 @@ fn spawn_and_initial_burst(
         },
     };
     // A dead worker fails here too; the event loop reports it as a crash.
-    if let Err(err) = sub.send_configure(state.config.mask, state.config.line_mode, state.config.edge) {
+    let run = &state.config.run;
+    if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge) {
         tracing::warn!(%err, "worker did not take the batch's run settings");
     }
 
@@ -829,7 +840,7 @@ fn handle_subprocess_event(
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
             let tensor_cache = read_tensor_cache(
-                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.model,
+                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.engines.model,
             );
             let edge_cache = read_edge_tensor_cache(
                 edge_cache_path.as_ref(), edge_cache_height, edge_cache_width,
@@ -1202,18 +1213,19 @@ fn finalize_or_continue(
 /// for the load; a Process sent meanwhile waits for it, as it would for
 /// its own.
 fn spawn_warm(
-    cfg: ProcessingConfig,
+    spec: EngineSpec,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> Option<WarmWorker> {
-    let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
     let started = Instant::now();
-    match SubprocessManager::spawn(model, jobs, mask, force_cpu, WorkerLines::app(line_mode, edge)) {
+    // Neutral run settings: each batch sends its own with `Configure`.
+    let lines = WorkerLines::app(LineMode::Off, EdgeSettings::default());
+    match SubprocessManager::spawn(spec.model, spec.jobs, MaskSettings::default(), spec.force_cpu, lines) {
         Ok((sub, provider)) => {
-            tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?model, line_mode = ?line_mode, "subprocess cold-start");
+            tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?spec.model, "subprocess cold-start");
             let _ = res_tx.send(WorkerResult::BackendReady(provider));
             ctx.request_repaint();
-            Some(WarmWorker { sub, cfg, release_at: Instant::now() + WARM_IDLE })
+            Some(WarmWorker { sub, spec, release_at: Instant::now() + WARM_IDLE })
         }
         Err(err) => {
             tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
@@ -1326,24 +1338,19 @@ mod tests {
 
     use super::*;
 
+    /// A worker is reused by its engines alone (a batch's mask, Sketch and
+    /// line settings travel with it): the same model on the same
+    /// processor, with a pool at least as large.
     #[test]
-    fn a_worker_is_reused_for_the_same_engines_whatever_the_run_settings() {
-        let built = ProcessingConfig {
-            model: ModelKind::BiRefNetLite, jobs: 4, mask: MaskSettings::default(), force_cpu: false,
-            line_mode: LineMode::Off, edge: super::super::item_settings::ItemSettings::default().edge_settings(),
-        };
-        let mut lines = built.clone();
-        lines.line_mode = LineMode::SubjectOutline;
-        lines.mask.gamma = 2.0;
-        lines.edge.edge_scale = prunr_core::EdgeScale::Fine;
-        lines.jobs = 1;
-        let on = |a: &ProcessingConfig, b: &ProcessingConfig| a.reusable_by(b, "CPU");
-        assert!(on(&built, &lines), "mask, Sketch and lines travel with the batch");
-        assert!(on(&built, &ProcessingConfig { jobs: 4, ..built.clone() }));
-        assert!(!on(&built, &ProcessingConfig { model: ModelKind::Silueta, ..built.clone() }));
-        assert!(!on(&built, &ProcessingConfig { force_cpu: true, ..built.clone() }));
+    fn a_worker_is_reused_for_the_same_engines() {
+        let built = EngineSpec { model: ModelKind::BiRefNetLite, jobs: 4, force_cpu: false };
+        let on = |a: &EngineSpec, b: &EngineSpec| a.reusable_by(b, "CPU");
+        assert!(on(&built, &EngineSpec { jobs: 1, ..built }));
+        assert!(on(&built, &built));
+        assert!(!on(&built, &EngineSpec { model: ModelKind::Silueta, ..built }));
+        assert!(!on(&built, &EngineSpec { force_cpu: true, ..built }));
         // On the CPU, Silueta builds an engine per job; BiRefNet one whatever the jobs.
-        let with = |model, jobs| ProcessingConfig { model, jobs, ..built.clone() };
+        let with = |model, jobs| EngineSpec { model, jobs, ..built };
         assert!(!on(&with(ModelKind::Silueta, 4), &with(ModelKind::Silueta, 5)), "a larger pool needs a new worker");
         assert!(on(&with(ModelKind::BiRefNetLite, 1), &with(ModelKind::BiRefNetLite, 3)), "the same pool from other job counts");
         assert!(!with(ModelKind::BiRefNetLite, 1).reusable_by(&with(ModelKind::BiRefNetLite, 3), "CUDA"), "a GPU builds one per job, up to two");
@@ -1352,8 +1359,8 @@ mod tests {
     #[test]
     fn a_batch_completion_names_its_batch() {
         let cfg = ProcessingConfig {
-            model: ModelKind::Silueta, jobs: 2, mask: MaskSettings::default(), force_cpu: false,
-            line_mode: LineMode::Off, edge: super::super::item_settings::ItemSettings::default().edge_settings(),
+            engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, force_cpu: false },
+            run: RunSettings { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default() },
         };
         let bytes = Arc::new(Vec::new());
         let tier2 = CachedTensorWork {
