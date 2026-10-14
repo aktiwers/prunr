@@ -35,6 +35,9 @@ pub struct Settings {
     /// Reveals, glows and moving highlights; off shows each result at once.
     #[serde(default = "default_true")]
     pub animations: bool,
+    /// Outline the faces found while the Faces strip is open.
+    #[serde(default = "default_true")]
+    pub face_outlines: bool,
     /// Auto-hide the adjustments toolbar when the cursor leaves it.
     #[serde(default)]
     pub auto_hide_adjustments: bool,
@@ -764,6 +767,7 @@ impl Default for Settings {
             selection_fill: default_selection_fill(),
             selection_outline: true,
             animations: true,
+            face_outlines: true,
             auto_hide_adjustments: false,
             export_split_layers: false,
             export_depth_map: false,

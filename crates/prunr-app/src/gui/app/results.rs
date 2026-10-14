@@ -928,7 +928,7 @@ mod faces_tests {
         let item = &mut app.batch.items[0];
         let photo = item.face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::Gfpgan.id()));
-        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false });
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false });
         assert!(item.faces_for(&photo).is_some() && item.faces_to_find(&photo).is_none());
         item.settings.faces.model = FaceModel::RestoreFormerPp;
         assert!(item.faces_for(&photo).is_none());
@@ -1036,7 +1036,7 @@ mod faces_tests {
     fn images_not_on_screen_drop_the_faced_photo() {
         let (mut app, source) = app_with_faces_on();
         push_test_item(&mut app, 2);
-        let found = FoundFaces { photo: FacePhoto::Source(source), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false };
+        let found = FoundFaces { photo: FacePhoto::Source(source), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false };
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         let item = &mut app.batch.items[0];
         item.found_faces = Some(found);

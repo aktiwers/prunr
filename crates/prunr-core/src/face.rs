@@ -64,6 +64,8 @@ pub struct Face {
 #[derive(Clone)]
 pub struct RestoredFace {
     to_crop: Similarity,
+    /// The photo it was found in, width and height.
+    photo_size: [u32; 2],
     original: RgbImage,
     restored: RgbImage,
     original_low: RgbImage,
@@ -71,7 +73,7 @@ pub struct RestoredFace {
 }
 
 impl RestoredFace {
-    fn new(to_crop: Similarity, original: RgbImage, restored: RgbImage) -> Self {
+    fn new(to_crop: Similarity, photo_size: [u32; 2], original: RgbImage, restored: RgbImage) -> Self {
         let mask = face_mask(false);
         let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
         let original_planes = planes(&original);
@@ -83,12 +85,39 @@ impl RestoredFace {
         });
         Self {
             to_crop,
+            photo_size,
             original_low: image(&low(&original_planes)),
             restored_low: image(&low(&restored_planes)),
             restored: image(&restored_planes),
             original,
         }
     }
+}
+
+impl RestoredFace {
+    /// The area its redraw covers in the photo: the crop's face ellipse
+    /// (with `hair`, the larger one) taken back through the alignment.
+    pub fn area(&self, hair: bool) -> FaceArea {
+        let (cx, cy, rx, ry) = face_ellipse(hair);
+        let back = self.to_crop.inverse();
+        let scale = back.scale();
+        FaceArea { center: back.apply([cx, cy]), radii: [rx * scale, ry * scale], angle: back.b.atan2(back.a), photo_size: self.photo_size }
+    }
+}
+
+/// An ellipse in photo pixels, turned by `angle` radians, in a photo of
+/// `photo_size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceArea {
+    pub center: [f32; 2],
+    pub radii: [f32; 2],
+    pub angle: f32,
+    pub photo_size: [u32; 2],
+}
+
+/// The face "Largest" redraws: the one its alignment shrinks most.
+pub fn largest_face(faces: &[RestoredFace]) -> Option<usize> {
+    faces.iter().enumerate().min_by(|(_, a), (_, b)| a.to_crop.scale().total_cmp(&b.to_crop.scale())).map(|(i, _)| i)
 }
 
 /// Find every face in `image` and redraw it with `id`'s restorer, loading
@@ -145,7 +174,7 @@ impl FaceRestorer {
             let to_crop = Similarity::fit(&face.landmarks, &TEMPLATE);
             let original = warp_to_crop(image, &to_crop);
             let restored = restore(restorer, &original)?;
-            out.push(RestoredFace::new(to_crop, original, restored));
+            out.push(RestoredFace::new(to_crop, [image.width(), image.height()], original, restored));
         }
         progress.outer(total, total, Unit::Face);
         Ok(out)
@@ -389,9 +418,7 @@ fn compose(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend, retake
         return;
     }
     let mask = face_mask(blend.hair);
-    // The largest face in the photo is the one its alignment shrinks most.
-    let largest = faces.iter().min_by(|a, b| a.to_crop.scale().total_cmp(&b.to_crop.scale()));
-    let chosen: Vec<&RestoredFace> = if blend.largest_only { largest.into_iter().collect() } else { faces.iter().collect() };
+    let chosen: Vec<&RestoredFace> = if blend.largest_only { largest_face(faces).map(|i| &faces[i]).into_iter().collect() } else { faces.iter().collect() };
     use rayon::prelude::*;
     let target: &RgbaImage = out;
     let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| {
@@ -412,9 +439,15 @@ fn face_mask(hair: bool) -> &'static [f32] {
     if hair { WITH_HAIR.get_or_init(|| build_face_mask(true)) } else { FACE.get_or_init(|| build_face_mask(false)) }
 }
 
+/// The face ellipse on the FFHQ crop: centre and radii, brow to chin, or
+/// with `hair` taking in the hair and ears.
+fn face_ellipse(hair: bool) -> (f32, f32, f32, f32) {
+    if hair { (256.0, 250.0, 225.0, 250.0) } else { (256.0, 280.0, 170.0, 215.0) }
+}
+
 fn build_face_mask(hair: bool) -> Vec<f32> {
     let n = FACE_SIZE as usize;
-    let (cx, cy, rx, ry) = if hair { (256.0f32, 250.0f32, 225.0f32, 250.0f32) } else { (256.0, 280.0, 170.0, 215.0) };
+    let (cx, cy, rx, ry) = face_ellipse(hair);
     let hard: Vec<f32> = (0..n * n)
         .map(|i| {
             let (x, y) = ((i % n) as f32, (i / n) as f32);
@@ -618,7 +651,26 @@ mod tests {
 
     fn face_of(original: RgbImage, restored: RgbImage) -> RestoredFace {
         // Crop pixel (u, v) is photo pixel (u, v) + (10, 20).
-        RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, original, restored)
+        RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, [1000, 1000], original, restored)
+    }
+
+    /// A face's area is the crop's ellipse back in the photo: moved,
+    /// scaled and turned with the alignment; "Largest" names the biggest.
+    #[test]
+    fn a_face_area_is_the_crop_ellipse_back_in_the_photo() {
+        let flat = || RgbImage::from_pixel(512, 512, Rgb([120, 100, 90]));
+        // Photo to crop: halve, then move by (-100, -50): the face is twice the crop's size.
+        let face = RestoredFace::new(Similarity { a: 0.5, b: 0.0, tx: -100.0, ty: -50.0 }, [2000, 1500], flat(), flat());
+        let area = face.area(false);
+        let (cx, cy, rx, ry) = face_ellipse(false);
+        assert!((area.center[0] - (cx + 100.0) * 2.0).abs() < 1e-3 && (area.center[1] - (cy + 50.0) * 2.0).abs() < 1e-3, "{area:?}");
+        assert!((area.radii[0] - rx * 2.0).abs() < 1e-3 && (area.radii[1] - ry * 2.0).abs() < 1e-3);
+        assert!(area.angle.abs() < 1e-6 && area.photo_size == [2000, 1500]);
+        assert!(face.area(true).radii[0] > area.radii[0], "with hair, wider");
+        let turned = RestoredFace::new(Similarity { a: 0.0, b: 1.0, tx: 0.0, ty: 0.0 }, [2000, 1500], flat(), flat());
+        assert!((turned.area(false).angle + std::f32::consts::FRAC_PI_2).abs() < 1e-5, "a quarter turn back");
+        assert_eq!(largest_face(&[face.clone(), turned]), Some(0), "the one the crop shrinks");
+        assert_eq!(largest_face(&[]), None);
     }
 
     /// "Largest only" keeps the face the alignment shrinks most.
@@ -627,8 +679,8 @@ mod tests {
         let image = RgbaImage::from_pixel(1400, 700, Rgba([120, 100, 90, 255]));
         let flat = RgbImage::from_pixel(512, 512, Rgb([120, 100, 90]));
         let stripes = RgbImage::from_fn(512, 512, |x, _| if x % 2 == 0 { Rgb([160, 140, 130]) } else { Rgb([80, 60, 50]) });
-        let small = RestoredFace::new(Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, flat.clone(), stripes.clone());
-        let big = RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, flat, stripes);
+        let small = RestoredFace::new(Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, [1400, 700], flat.clone(), stripes.clone());
+        let big = RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, [1400, 700], flat, stripes);
         let out = compose_faces(&image, &[small, big], FaceBlend { strength: 1.0, largest_only: true, hair: false });
         let changed = |x: u32, y: u32| out.get_pixel(x, y) != image.get_pixel(x, y);
         assert!(changed(256, 280), "the big face");
@@ -640,7 +692,7 @@ mod tests {
     #[test]
     fn a_large_face_takes_the_restored_detail_in_proportion() {
         let flat = RgbImage::from_pixel(512, 512, Rgb([100, 100, 100]));
-        let at = |a: f32| detail_reach(&RestoredFace::new(Similarity { a, b: 0.0, tx: 0.0, ty: 0.0 }, flat.clone(), flat.clone()));
+        let at = |a: f32| detail_reach(&RestoredFace::new(Similarity { a, b: 0.0, tx: 0.0, ty: 0.0 }, [1000, 1000], flat.clone(), flat.clone()));
         assert_eq!(at(0.5), 0.5);
         assert_eq!(at(1.6), 1.0);
         assert_eq!(at(0.1), 0.25, "never below a quarter");

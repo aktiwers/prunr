@@ -659,6 +659,51 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
+/// Points round a found face's outline.
+const FACE_SEGMENTS: usize = 72;
+
+/// `area`'s outline on screen, `img_rect` showing the photo it is in.
+fn face_outline(area: prunr_core::face::FaceArea, img_rect: Rect) -> [Pos2; FACE_SEGMENTS] {
+    let scale = img_rect.width() / area.photo_size[0].max(1) as f32;
+    let (sin, cos) = area.angle.sin_cos();
+    std::array::from_fn(|k| {
+        let (s, c) = (k as f32 / FACE_SEGMENTS as f32 * std::f32::consts::TAU).sin_cos();
+        let (x, y) = (area.radii[0] * c, area.radii[1] * s);
+        img_rect.min + Vec2::new(area.center[0] + x * cos - y * sin, area.center[1] + x * sin + y * cos) * scale
+    })
+}
+
+/// While the Faces strip or panel is open, the faces found in the shown
+/// image outlined: what Faces redraws, so a face it missed shows by having
+/// none. They fade in as they are found and glow once; under "Largest" the
+/// faces it leaves alone are faint.
+fn draw_found_faces(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
+    use super::effects::{face_arrival, paint_glow_ring, FACE_ARRIVAL_SECS, FACE_FADE_SECS};
+    let faces = &item.settings.faces;
+    let ctx = ui.ctx();
+    let open = faces.on && app.settings.face_outlines && shows(app.settings.model, Surface::Faces) && super::chip::group_chip_open(ctx, super::faces_chip::ID_SALT);
+    let shown = ctx.animate_bool_with_time(egui::Id::new("found_faces_shown"), open, theme::fade_secs(ctx, FACE_FADE_SECS));
+    if shown <= 0.0 {
+        return;
+    }
+    let stage = crate::gui::item::FaceStage::of(app.settings.model.role());
+    let Some(found) = item.face_photo(stage).zip(faces.wanted()).and_then(|(photo, model)| item.found_for(&photo, model)) else { return };
+    let since = if theme::motion(ctx) { found.found_at.elapsed().as_secs_f32() } else { f32::MAX };
+    if since < FACE_ARRIVAL_SECS {
+        ctx.request_repaint();
+    }
+    let (size, glow) = face_arrival(since);
+    let opacity = shown * prunr_core::math::smoothstep((since / FACE_FADE_SECS).min(1.0));
+    let largest = faces.largest_only.then(|| prunr_core::face::largest_face(&found.faces)).flatten();
+    for (i, face) in found.faces.iter().enumerate() {
+        let redrawn = !faces.largest_only || largest == Some(i);
+        let (opacity, glow) = if redrawn { (opacity, glow) } else { (0.4 * opacity, 0.0) };
+        let area = face.area(faces.hair);
+        let area = prunr_core::face::FaceArea { radii: area.radii.map(|r| r * size), ..area };
+        paint_glow_ring(ui.painter(), &face_outline(area, img_rect), opacity, glow);
+    }
+}
+
 /// The item's selection over the image, on models that use one.
 fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
     if shows(app.settings.model, Surface::Brushes) {
@@ -712,6 +757,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
             draw_selection(ui, app, it, img_rect);
+            draw_found_faces(ui, app, it, img_rect);
         }
         Some(img_rect)
     } else {
@@ -811,6 +857,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         paint_backdrop(ui, img_rect, it, it.frame_size());
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         draw_selection(ui, app, it, img_rect);
+        draw_found_faces(ui, app, it, img_rect);
         painted = Some(img_rect);
     }
 
@@ -960,6 +1007,21 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A found face's outline sits where the face is in the photo, at
+    /// the zoom the image is shown, turned with the face.
+    #[test]
+    fn a_face_outline_follows_the_photo_onto_the_screen() {
+        use prunr_core::face::FaceArea;
+        let shown = Rect::from_min_size(Pos2::new(10.0, 0.0), Vec2::new(400.0, 200.0));
+        let upright = FaceArea { center: [100.0, 50.0], radii: [10.0, 20.0], angle: 0.0, photo_size: [200, 100] };
+        let pts = face_outline(upright, shown);
+        let near = |p: Pos2, x: f32, y: f32| (p.x - x).abs() < 1e-3 && (p.y - y).abs() < 1e-3;
+        assert!(near(pts[0], 10.0 + 220.0, 100.0), "{:?}", pts[0]);
+        assert!(near(pts[FACE_SEGMENTS / 4], 10.0 + 200.0, 140.0), "{:?}", pts[FACE_SEGMENTS / 4]);
+        let turned = FaceArea { angle: std::f32::consts::FRAC_PI_2, ..upright };
+        assert!(near(face_outline(turned, shown)[0], 10.0 + 200.0, 120.0), "a quarter turn");
+    }
 
     /// Tile repeats a picture at its own pixel size over the image, as
     /// export does: the count follows the image, whatever the zoom.
