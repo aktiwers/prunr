@@ -463,12 +463,12 @@ impl DepthLook {
     pub fn apply_quick(&self, photo: &RgbaImage, depth: &DepthMap, max_side: u32) -> Option<RgbaImage> {
         use crate::formats::{resize_rgba, ResizeFilter};
         let (w, h) = photo.dimensions();
-        let long = w.max(h);
-        if long <= max_side {
+        // Fog alone is one pass at full size: cheaper than the round trip,
+        // and as sharp as the settled render.
+        if w.max(h) <= max_side || !(self.blurs() || self.aerial_pct > 0) {
             return self.apply(photo, depth);
         }
-        let k = f64::from(max_side) / f64::from(long);
-        let (qw, qh) = (((f64::from(w) * k).round() as u32).max(1), ((f64::from(h) * k).round() as u32).max(1));
+        let (qw, qh) = crate::formats::fit_long_side(w, h, max_side);
         let small = resize_rgba(photo, qw, qh, ResizeFilter::Bilinear);
         let looked = self.apply(&small, depth)?;
         Some(resize_rgba(&looked, w, h, ResizeFilter::Bilinear))
