@@ -27,7 +27,7 @@ use prunr_core::ProcessingRecipe;
 use super::inpaint_bridge::{InpaintBridgeMsg, InpaintBridgeResult, spawn_inpaint_bridge};
 use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
-use super::worker::{WorkerMessage, WorkerResult, WorkItem};
+use super::worker::{ProcessingConfig, WorkerMessage, WorkerResult, WorkItem};
 
 #[derive(Clone)]
 pub struct CancelRegistry {
@@ -771,7 +771,13 @@ pub(crate) struct Processor {
     faces_tx: mpsc::Sender<FacesResult>,
     faces_rx: mpsc::Receiver<FacesResult>,
     depth: DepthQueue,
+    /// A cut-out model to load once the user stops switching, and when.
+    seg_warm_due: Option<(std::time::Instant, ProcessingConfig)>,
 }
+
+/// How long the picked model must stay picked before it loads: clicking
+/// through the list loads only the one it stops on.
+const SEG_WARM_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Processor {
     pub(crate) fn new(
@@ -819,7 +825,30 @@ impl Processor {
             faces_tx,
             faces_rx,
             depth,
+            seg_warm_due: None,
         }
+    }
+
+    /// Load `cfg`'s model in the worker once it has stayed picked for
+    /// `SEG_WARM_DEBOUNCE`, so the first Process skips the load.
+    pub(crate) fn schedule_seg_warm(&mut self, cfg: ProcessingConfig, now: std::time::Instant) {
+        self.seg_warm_due = Some((now + SEG_WARM_DEBOUNCE, cfg));
+    }
+
+    /// Send the warm-up when it is due; how long until it is, if it waits.
+    /// A run under way drops it: its own worker stays warm after.
+    pub(crate) fn pump_seg_warm(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if self.is_run_in_flight() || self.in_flight.is_some() {
+            self.seg_warm_due = None;
+        }
+        let (due, _) = self.seg_warm_due.as_ref()?;
+        if let Some(wait) = due.checked_duration_since(now).filter(|w| !w.is_zero()) {
+            return Some(wait);
+        }
+        if let Some((_, cfg)) = self.seg_warm_due.take() {
+            let _ = self.worker_tx.send(WorkerMessage::Warm(Box::new(cfg)));
+        }
+        None
     }
 
     #[cfg(test)]
@@ -1050,7 +1079,8 @@ impl Processor {
     /// previous backend's engine pool (BiRefNetLite ~2 GB, U2Net
     /// ~800 MB, …) isn't held across the user's "I'm done with that
     /// model" signal.
-    pub(crate) fn release_seg_warm(&self) {
+    pub(crate) fn release_seg_warm(&mut self) {
+        self.seg_warm_due = None;
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
     }
 
@@ -2173,6 +2203,51 @@ mod sam_dispatch_tests {
 mod tests {
     use super::*;
     use prunr_models::ModelId;
+
+    /// Picking a cut-out model loads it once it has stayed picked a second:
+    /// a quick second pick replaces the first, a run under way drops it
+    /// (its own worker stays warm), and a release clears it.
+    #[test]
+    fn a_picked_cutout_model_loads_once_the_picking_stops() {
+        use prunr_core::ModelKind;
+        use std::time::{Duration, Instant};
+        let (tx, rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        let mut p = Processor::new(tx, result_rx);
+        let cfg = |model| ProcessingConfig {
+            model,
+            jobs: 1,
+            mask: Default::default(),
+            force_cpu: false,
+            line_mode: prunr_core::LineMode::Off,
+            edge: Default::default(),
+        };
+        let warmed = |rx: &mpsc::Receiver<WorkerMessage>| rx.try_iter().filter_map(|m| match m {
+            WorkerMessage::Warm(c) => Some(c.model),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let t0 = Instant::now();
+        p.schedule_seg_warm(cfg(ModelKind::U2net), t0);
+        p.schedule_seg_warm(cfg(ModelKind::BiRefNetLite), t0 + Duration::from_millis(300));
+        let wait = p.pump_seg_warm(t0 + Duration::from_millis(900));
+        assert_eq!(wait, Some(Duration::from_millis(400)), "the repaint lands when it is due");
+        assert!(warmed(&rx).is_empty());
+        assert_eq!(p.pump_seg_warm(t0 + Duration::from_millis(1300)), None);
+        assert_eq!(warmed(&rx), vec![ModelKind::BiRefNetLite], "only the last pick loads, once");
+        assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(5)), None);
+        assert!(warmed(&rx).is_empty());
+
+        p.schedule_seg_warm(cfg(ModelKind::Silueta), t0);
+        p.track_dispatch(crate::gui::item_settings::ItemSettings::default().current_recipe(ModelKind::Silueta), [1]);
+        assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(2)), None);
+        assert!(warmed(&rx).is_empty(), "a run under way drops it");
+
+        p.schedule_seg_warm(cfg(ModelKind::Silueta), t0);
+        p.release_seg_warm();
+        p.in_flight = None;
+        assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(2)), None);
+        assert!(warmed(&rx).is_empty(), "a release clears it");
+    }
 
     // ── is_upscale_in_flight + admission_check ─────────────────────────────
 
