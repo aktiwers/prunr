@@ -32,6 +32,7 @@ eframe = { workspace = true }
 egui_extras = { workspace = true }
 arboard = { workspace = true }
 rfd = { workspace = true }
+pollster = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -4417,6 +4417,7 @@ dependencies = [
  "ndarray",
  "num_cpus",
  "ort",
+ "pollster",
  "proptest",
  "prunr-core",
  "prunr-models",

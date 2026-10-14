@@ -150,6 +150,25 @@ fn the_tool_strip_leaves_while_a_dialog_is_open() {
     assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is back once the dialog closes");
 }
 
+/// A native file dialog is a separate window the app keeps drawing
+/// under; the canvas holds still until the user answers it.
+#[test]
+fn the_canvas_holds_still_while_a_file_dialog_is_up() {
+    let mut h = loaded();
+    click(&mut h, "Open");
+    assert!(h.state().system.dialog_open(), "Open asked for a dialog");
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    assert!(!h.state().zoom_state.is_panning, "no pan under the dialog");
+    press(&mut h, CANVAS_POINT, false);
+    h.state_mut().system.answer_for_test(None);
+    settle(&mut h);
+    assert!(!h.state().system.dialog_open(), "a cancel closes it");
+    press(&mut h, CANVAS_POINT, true);
+    assert!(h.state().zoom_state.is_panning, "the canvas pans again");
+    press(&mut h, CANVAS_POINT, false);
+}
+
 /// Under an eraser both brushes carry the region knobs, since either
 /// paints the region the erase fills.
 #[test]
