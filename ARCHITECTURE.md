@@ -417,7 +417,7 @@ Every session in the workspace starts from `ort_runtime::session_builder()`, whi
 | Linux / Windows | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA / DirectML builds via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
 | macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
 
-Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm`, so it needs no graphics context; Windows detection is a stub, so the prompt never fires there.
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
 
 ### EP ladder
 
