@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::engine::{EpKind, EpSite};
+use crate::engine::{EpKind, EpSite, Weights};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -1407,7 +1407,7 @@ fn build_part_with_ep_ladder(
             tracing::debug!(?id, part = %key, ep = %ep, "SD: EP statically incompatible; skipping");
             continue;
         }
-        if crate::ep_compat::is_known_failure(ep, id) {
+        if crate::ep_compat::is_known_failure(ep, id, Weights::Base) {
             tracing::debug!(?id, part = %key, ep = %ep, "SD: EP cached as incompatible; skipping");
             continue;
         }
@@ -1428,7 +1428,7 @@ fn build_part_with_ep_ladder(
             if session_key.records_ep_failures() {
                 crate::engine::handle_commit_failure(
                     matches!(load_path, Cow::Owned(_)),
-                    ep, id,
+                    ep, id, Weights::Base,
                     || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
                     msg,
                 );

@@ -437,7 +437,7 @@ OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machi
 Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVINO + Silueta):
 
 1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles).
-2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session commit fails. Keyed on the app version, so an upgrade retries everything. `prunr --clear-ep-cache` wipes it.
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session commit fails. An entry names the EP, the model and the copy of its weights that failed, so FP16 failing on an EP still lets the FP32 weights try that EP. Keyed on the app version, so an upgrade retries everything. `prunr --clear-ep-cache` wipes it.
 
 ### Compiled-model cache
 
