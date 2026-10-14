@@ -145,6 +145,22 @@ fn detect_cpu() -> (CpuVendor, String) {
     (classify_cpu_vendor(&vendor_id, &brand), brand)
 }
 
+/// The processor as Settings shows it: the brand string without its
+/// trademark marks, led by the vendor only when the brand does not name it
+/// already ("Intel (Intel(R) Core(TM) i7 …)" said Intel twice).
+pub fn cpu_label(vendor: CpuVendor, brand: &str) -> String {
+    let brand = brand.replace("(R)", "").replace("(TM)", "").replace("(tm)", "");
+    let brand = brand.split_whitespace().collect::<Vec<_>>().join(" ");
+    let vendor = vendor.to_string();
+    if brand.is_empty() {
+        vendor
+    } else if vendor == "Other" || brand.to_ascii_lowercase().contains(&vendor.to_ascii_lowercase()) {
+        brand
+    } else {
+        format!("{vendor} {brand}")
+    }
+}
+
 fn classify_cpu_vendor(vendor_id: &str, brand: &str) -> CpuVendor {
     let vid = vendor_id.to_ascii_lowercase();
     if vid.contains("genuineintel") { return CpuVendor::Intel; }
@@ -250,6 +266,14 @@ fn matches_cpu(gpu: GpuVendor, cpu: CpuVendor) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_cpu_label_names_the_vendor_once() {
+        assert_eq!(cpu_label(CpuVendor::Intel, "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz"), "Intel Core i7-6700 CPU @ 3.40GHz");
+        assert_eq!(cpu_label(CpuVendor::Apple, "Apple M2"), "Apple M2");
+        assert_eq!(cpu_label(CpuVendor::Amd, "Ryzen 7 5800X"), "AMD Ryzen 7 5800X");
+        assert_eq!(cpu_label(CpuVendor::Intel, ""), "Intel");
+    }
+
     use super::*;
 
     #[test]
