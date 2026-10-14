@@ -916,8 +916,9 @@ fn run_one_tile(
             (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
         }
     };
+    let known = progress.preview_edge().map_or_else(Vec::new, |_| known_cells(image, mask, (lw, lh)));
     let show = |x0: &[f32]| progress.tile_preview((0, 0, w, h), (w, h), |width, height| {
-        let estimate = estimate_picture(x0, (lw, lh), bundle.latent);
+        let estimate = estimate_picture(x0, (lw, lh), bundle.latent, &known);
         crop_preview(image, mask, &estimate, width, height)
     });
     let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show)?;
@@ -999,34 +1000,70 @@ fn preview_factors(space: prunr_models::SdLatent) -> ([[f32; 3]; 4], [f32; 3]) {
     }
 }
 
-/// The latent `x0` (planar 4 × `lh` × `lw`) as RGB through `space`'s
-/// preview factors, one pixel per latent cell.
-fn latent_to_rgb(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> RgbaImage {
+/// The latent `x0` (planar 4 × `lh` × `lw`) as RGB in [-1, 1] through
+/// `space`'s preview factors, one value per latent cell, row-major.
+fn latent_to_rgb(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> Vec<[f32; 3]> {
     let (factors, bias) = preview_factors(space);
     let plane = lw * lh;
-    RgbaImage::from_fn(lw as u32, lh as u32, |x, y| {
-        let i = y as usize * lw + x as usize;
-        let c = |ch: usize| unit_to_byte(bias[ch] + (0..4).map(|k| x0[k * plane + i] * factors[k][ch]).sum::<f32>());
-        image::Rgba([c(0), c(1), c(2), 255])
-    })
+    (0..plane)
+        .map(|i| std::array::from_fn(|ch| bias[ch] + (0..4).map(|k| x0[k * plane + i] * factors[k][ch]).sum::<f32>()))
+        .collect()
+}
+
+/// The crop's own colour per latent cell, in [-1, 1]: the mean of the
+/// 8×8 pixels of each cell wholly inside the crop and outside the mask;
+/// `None` for the rest. What a step preview's colours are matched to.
+fn known_cells(image: &RgbaImage, mask: &GrayImage, (lw, lh): (usize, usize)) -> Vec<Option<[f32; 3]>> {
+    let (w, h) = image.dimensions();
+    (0..lh as u32).flat_map(|cy| (0..lw as u32).map(move |cx| (cx * 8, cy * 8))).map(|(x0, y0)| {
+        if x0 + 8 > w || y0 + 8 > h {
+            return None;
+        }
+        let mut sum = [0.0_f32; 3];
+        for (x, y) in (y0..y0 + 8).flat_map(|y| (x0..x0 + 8).map(move |x| (x, y))) {
+            if mask.get_pixel(x, y)[0] > 0 {
+                return None;
+            }
+            let p = image.get_pixel(x, y);
+            sum.iter_mut().zip(p.0).for_each(|(s, v)| *s += f32::from(v));
+        }
+        Some(sum.map(|s| s / 64.0 / 127.5 - 1.0))
+    }).collect()
 }
 
 /// What a step's clean-latent estimate `x0` looks like at the size of
 /// the crop's padded input (`8·lw × 8·lh`): through the latent space's
-/// colour factors, enlarged. Not TAESD even when it is the run's VAE:
-/// its decode of a 512² crop took 1.06 s on an i7-6700, no small part
-/// of a step; this and `crop_preview` took 45-100 ms in a debug build.
+/// colour factors, each channel shifted so the cells the crop's own
+/// pixels fill (`known`, from `known_cells`) average to those pixels,
+/// then enlarged. The factors are a rough fit: against TAESD's encoding
+/// of a photo they put blue ~30 levels high, and the shift brings a flat
+/// colour's hole within 3 levels. Not TAESD even when it is the run's
+/// VAE: its decode of a 512² crop took 1.06 s on an i7-6700, no small
+/// part of a step; this and `crop_preview` took 45-100 ms in a debug
+/// build.
 ///
-/// Peak per step with previews on, all at latent or crop scale (`x0`,
-/// this picture, the crop composited; the preview is at most the crop):
+/// Peak per step with previews on, all at latent or crop scale (`x0`
+/// and the cells, this picture, the crop composited; the preview is at
+/// most the crop):
 ///
-/// | Crop      | x0     | Picture | Composite | Total   |
-/// |-----------|--------|---------|-----------|---------|
-/// | 512 × 512 | 64 KB  | 1 MB    | 1 MB      | ~3.1 MB |
-/// | 768 × 512 | 96 KB  | 1.5 MB  | 1.5 MB    | ~4.6 MB |
-fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> RgbaImage {
+/// | Crop      | x0, cells | Picture | Composite | Total   |
+/// |-----------|-----------|---------|-----------|---------|
+/// | 512 × 512 | 112 KB    | 1 MB    | 1 MB      | ~3.1 MB |
+/// | 768 × 512 | 168 KB    | 1.5 MB  | 1.5 MB    | ~4.7 MB |
+fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent, known: &[Option<[f32; 3]>]) -> RgbaImage {
     let cells = latent_to_rgb(x0, (lw, lh), space);
-    crate::formats::resize_rgba(&cells, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
+    let (mut shift, mut n) = ([0.0_f32; 3], 0.0_f32);
+    for (cell, own) in cells.iter().zip(known) {
+        let Some(own) = own else { continue };
+        (0..3).for_each(|c| shift[c] += own[c] - cell[c]);
+        n += 1.0;
+    }
+    let shift = shift.map(|s| s / n.max(1.0));
+    let small = RgbaImage::from_fn(lw as u32, lh as u32, |x, y| {
+        let cell = cells[y as usize * lw + x as usize];
+        image::Rgba([unit_to_byte(cell[0] + shift[0]), unit_to_byte(cell[1] + shift[1]), unit_to_byte(cell[2] + shift[2]), 255])
+    });
+    crate::formats::resize_rgba(&small, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
 }
 
 /// The crop with `painted` inside its mask, as the final paste puts it,
@@ -3028,21 +3065,46 @@ mod tests {
     #[test]
     fn the_latent_preview_maps_known_latents_through_comfyuis_factors() {
         use prunr_models::SdLatent;
-        let px = |img: &RgbaImage, x: u32| img.get_pixel(x, 0).0;
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
         // Two cells: channel 0 at 1 in the first, channel 3 at 2 in the second.
         let mut x0 = vec![0.0_f32; 8];
         x0[0] = 1.0;
         x0[3 * 2 + 1] = 2.0;
         let sd15 = latent_to_rgb(&x0, (2, 1), SdLatent::Sd15);
-        // (v + 1) · 127.5, truncated: 0.3512 → 172, 0.2297 → 156, 0.3227 → 168.
-        assert_eq!(px(&sd15, 0), [172, 156, 168, 255]);
-        // 2 · (-0.2120, -0.2616, -0.7177) → 73, 60, and below black → 0.
-        assert_eq!(px(&sd15, 1), [73, 60, 0, 255]);
-        // SDXL's bias alone: 0.1084 → 141, -0.0175 → 125, -0.0011 → 127.
-        assert_eq!(px(&latent_to_rgb(&[0.0; 4], (1, 1), SdLatent::Sdxl), 0), [141, 125, 127, 255]);
-        // Its first row plus the bias: 0.4735 → 187, 0.4057 → 179, 0.4330 → 182.
-        assert_eq!(px(&latent_to_rgb(&[1.0, 0.0, 0.0, 0.0], (1, 1), SdLatent::Sdxl), 0), [187, 179, 182, 255]);
-        assert_eq!(estimate_picture(&x0, (2, 1), SdLatent::Sd15).dimensions(), (16, 8), "a latent cell is 8 px");
+        assert!(close(sd15[0], [0.3512, 0.2297, 0.3227]), "{sd15:?}");
+        assert!(close(sd15[1], [-0.424, -0.5232, -1.4354]), "{sd15:?}");
+        assert!(close(latent_to_rgb(&[0.0; 4], (1, 1), SdLatent::Sdxl)[0], [0.1084, -0.0175, -0.0011]), "SDXL's bias alone");
+        assert!(close(latent_to_rgb(&[1.0, 0.0, 0.0, 0.0], (1, 1), SdLatent::Sdxl)[0], [0.4735, 0.4057, 0.4330]), "row 0 plus the bias");
+
+        // With nothing to match, the cells read as the VAE's output does:
+        // (v + 1) · 127.5, truncated, each cell 8 px.
+        let picture = estimate_picture(&x0, (2, 1), SdLatent::Sd15, &[None, None]);
+        assert_eq!(picture.dimensions(), (16, 8));
+        assert_eq!(picture.get_pixel(0, 0).0, [172, 156, 168, 255]);
+        assert_eq!(picture.get_pixel(15, 7).0, [73, 60, 0, 255], "below black clamps to 0");
+    }
+
+    /// The projection is shifted per channel so the cells the crop's own
+    /// pixels fill match them, and the cells being filled move with them.
+    #[test]
+    fn the_preview_matches_its_colours_to_the_crops_own_pixels() {
+        use prunr_models::SdLatent;
+        // Zero latent: SD 1.5's projection is mid-grey in both cells. The
+        // first cell's own pixels are (60, 120, 200).
+        let own = [60.0_f32, 120.0, 200.0].map(|v| v / 127.5 - 1.0);
+        let picture = estimate_picture(&[0.0; 8], (2, 1), SdLatent::Sd15, &[Some(own), None]);
+        // Within one level: the bytes go through f32 and truncate.
+        let near = |p: [u8; 4], want: [u8; 3]| p[..3].iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 1);
+        assert!(near(picture.get_pixel(0, 0).0, [60, 120, 200]), "{:?}", picture.get_pixel(0, 0));
+        assert!(near(picture.get_pixel(12, 4).0, [60, 120, 200]), "the hole's cell moves by the same shift: {:?}", picture.get_pixel(12, 4));
+
+        let image = RgbaImage::from_fn(20, 8, |x, _| Rgba([if x < 8 { 30 } else { 90 }, 60, 90, 255]));
+        let mut mask = GrayImage::new(20, 8);
+        mask.put_pixel(9, 3, Luma([1]));
+        let cells = known_cells(&image, &mask, (3, 1));
+        assert_eq!(cells[0], Some([30.0_f32, 60.0, 90.0].map(|v| v / 127.5 - 1.0)), "the mean of its 8×8 pixels");
+        assert_eq!(cells[1], None, "any mask in the cell");
+        assert_eq!(cells[2], None, "past the crop's edge");
     }
 
     /// A step's preview changes the crop only inside its mask, reading
@@ -3069,6 +3131,7 @@ mod tests {
         use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
         let image = RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 90, 255]));
         let mask = GrayImage::from_fn(64, 64, |x, y| Luma([if (16..48).contains(&x) && (16..48).contains(&y) { 255 } else { 0 }]));
+        let known = known_cells(&image, &mask, (8, 8));
         for (kind, steps) in [(SchedulerKind::Lcm, 4), (SchedulerKind::DpmPp2MKarras, 6)] {
             let run = |progress: &Progress| {
                 let mut scheduler = Scheduler::new_sd15(kind, steps);
@@ -3076,7 +3139,7 @@ mod tests {
                 let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
                 let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
                 let show = |x0: &[f32]| progress.tile_preview((0, 0, 64, 64), (64, 64), |w, h| {
-                    crop_preview(&image, &mask, &estimate_picture(x0, (8, 8), prunr_models::SdLatent::Sd15), w, h)
+                    crop_preview(&image, &mask, &estimate_picture(x0, (8, 8), prunr_models::SdLatent::Sd15, &known), w, h)
                 });
                 denoise(&mut scheduler, noise, &mut rng, progress, predict, show).expect("denoise")
             };
