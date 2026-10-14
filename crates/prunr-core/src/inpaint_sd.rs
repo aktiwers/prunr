@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::engine::EpKind;
+use crate::engine::{EpKind, EpSite};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -287,7 +287,7 @@ pub(crate) struct SdSessionKey {
 
 impl SdSessionKey {
     /// The GPU providers this bundle's parts may try.
-    fn gpu_eps(&self) -> &'static [crate::engine::EpKind] {
+    fn gpu_eps(&self) -> &'static [EpKind] {
         crate::engine::gpu_eps_for(self.cpu_only)
     }
 }
@@ -1419,16 +1419,10 @@ fn build_part_with_ep_ladder(
                 continue;
             }
         };
-        #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
-        let mut load_path: Cow<'_, Path> = Cow::Borrowed(path.as_path());
-        let builder = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => {
-                let (b, p) = sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key);
-                load_path = p;
-                b
-            }
-            _ => builder,
+        let (builder, load_path) = if ep.keeps_optimized_graph() {
+            sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key)
+        } else {
+            (builder, Cow::Borrowed(path.as_path()))
         };
         let record_failure = |msg: &str| {
             if session_key.records_ep_failures() {
@@ -1440,44 +1434,10 @@ fn build_part_with_ep_ladder(
                 );
             }
         };
-        let registered = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => builder.with_execution_providers([
-                ort::ep::CUDA::default()
-                    .with_device_id(0)
-                    .build(),
-            ]),
-            #[cfg(target_os = "macos")]
-            EpKind::CoreMl => {
-                let mut p = ort::ep::CoreML::default();
-                if let Some(dir) = crate::cache::cache_dir_for_part(id, ep.as_str(), key) {
-                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
-                }
-                builder.with_execution_providers([p.build()])
-            }
-            #[cfg(windows)]
-            EpKind::DirectMl => builder.with_execution_providers([
-                ort::ep::DirectML::default().build(),
-            ]),
-            #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => builder.with_execution_providers([
-                // `num_streams=1` disables per-stream buffer duplication
-                // (the bundle sits at ~16 GB RSS on an i7-6700 either
-                // way; measured 2026-10). Dynamic shapes cost nothing
-                // per step, so one bundle serves 512² tiles and the
-                // 512×768 crop. (No `with_cache_dir` — see engine.rs
-                // for the SD UNet empirical retest.)
-                {
-                    let mut p = ort::ep::OpenVINO::default()
-                        .with_num_streams(1)
-                        .with_dynamic_shapes(true);
-                    if let Some(dev) = &session_key.ov_device {
-                        p = p.with_device_type(dev);
-                    }
-                    p.build()
-                },
-            ]),
-        };
+        let registered = builder.with_execution_providers([ep.provider(
+            id,
+            EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() },
+        )]);
         let mut built = match registered {
             Ok(b) => b,
             Err(e) => {
