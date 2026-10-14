@@ -30,12 +30,25 @@ pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", targ
 
 /// Subdirectory name under temp_dir for prunr drag files.
 const DRAG_SUBDIR: &str = "prunr-drag";
+
+/// The drag folder's name. A test process writes to its own: every test
+/// app sweeps stale entries at start, and an image folder an earlier run
+/// left behind is old enough to go while a parallel test writes into it.
+fn drag_subdir() -> &'static str {
+    #[cfg(test)]
+    {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| format!("{DRAG_SUBDIR}-test-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    DRAG_SUBDIR
+}
 /// Files older than this are considered stale and get removed at startup.
 const STALE_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// Return (and create if needed) the drag temp directory.
 fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(DRAG_SUBDIR);
+    let dir = std::env::temp_dir().join(drag_subdir());
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -52,7 +65,7 @@ fn item_dir(item_id: u64) -> PathBuf {
 /// Check whether a path was created by our own drag-out (i.e. lives under prunr-drag/).
 /// Used to reject self-originated drops so our own thumbnails can't be re-ingested.
 pub(crate) fn is_self_drop(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == DRAG_SUBDIR)
+    path.components().any(|c| c.as_os_str() == drag_subdir())
 }
 
 /// Remove ALL temp drag files. Called on graceful app exit, and waited
