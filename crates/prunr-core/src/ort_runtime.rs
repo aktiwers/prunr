@@ -3,7 +3,8 @@
 //! Resolution order, first hit wins:
 //!   1. `ORT_DYLIB_PATH` env var (escape hatch + dev override). Set but
 //!      not a file is an error, never a silent fall-through.
-//!   2. User Runtime Store install (`<data>/prunr/runtimes/<ep>/<ver>/`)
+//!   2. User Runtime Store install (`<data>/prunr/runtimes/<ep>-<ver>-<rid>/`):
+//!      the one named in [`PREFERRED_FILE`], else the first by name
 //!   3. Bundled fallback alongside the executable (`<exe parent>/runtime/`)
 //!
 //! Every session in the workspace starts from [`session_builder`], which
@@ -111,7 +112,7 @@ pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
         }
         return Ok((path, DylibSource::EnvVar));
     }
-    if let Some((_, path)) = store_entries().into_iter().find(|(_, p)| p.is_file()) {
+    if let Some(path) = prunr_models::runtime_store_dir().and_then(|root| store_dylib(&root)) {
         return Ok((path, DylibSource::RuntimeStore));
     }
     if let Some(path) = bundled_dylib() {
@@ -128,11 +129,63 @@ fn env_override() -> Option<PathBuf> {
     std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from)
 }
 
+/// File in the runtime store naming the install every process loads.
+/// One process loads one runtime, and no wheel carries another's
+/// provider, so with two installed the choice is explicit; a file is
+/// what the worker subprocess and the CLI see as well as the GUI.
+pub const PREFERRED_FILE: &str = "preferred";
+
+/// The install subdir every process loads first, when one is set.
+pub fn preferred_runtime() -> Option<String> {
+    read_preferred(&prunr_models::runtime_store_dir()?)
+}
+
+/// Make the install `subdir` the one every process loads from its next
+/// start.
+pub fn set_preferred_runtime(subdir: &str) -> Result<(), String> {
+    let root = prunr_models::runtime_store_dir().ok_or("could not resolve user data dir")?;
+    write_preferred(&root, subdir)
+}
+
+/// Drop the preference when it names `subdir`, which is going away.
+pub fn forget_preferred_runtime(subdir: &str) {
+    let Some(root) = prunr_models::runtime_store_dir() else { return };
+    if read_preferred(&root).as_deref() == Some(subdir) {
+        if let Err(e) = std::fs::remove_file(root.join(PREFERRED_FILE)) {
+            tracing::warn!(%e, subdir, "could not clear the preferred runtime");
+        }
+    }
+}
+
+fn read_preferred(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(PREFERRED_FILE)).ok()?;
+    let name = text.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn write_preferred(root: &Path, subdir: &str) -> Result<(), String> {
+    std::fs::create_dir_all(root).map_err(|e| format!("create {}: {e}", root.display()))?;
+    let path = root.join(PREFERRED_FILE);
+    std::fs::write(&path, subdir).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// The store's dylib: the preferred install's when it has one, else the
+/// first install's by name.
+fn store_dylib(root: &Path) -> Option<PathBuf> {
+    let usable: Vec<(String, PathBuf)> = store_entries_in(root).into_iter().filter(|(_, p)| p.is_file()).collect();
+    let preferred = read_preferred(root).and_then(|want| usable.iter().position(|(name, _)| *name == want));
+    usable.into_iter().nth(preferred.unwrap_or(0)).map(|(_, p)| p)
+}
+
+fn store_entries() -> Vec<(String, PathBuf)> {
+    prunr_models::runtime_store_dir().map(|root| store_entries_in(&root)).unwrap_or_default()
+}
+
 /// Every runtime-store entry as `(dir name, path the dylib would have)`,
 /// sorted by name so logs reproduce; meaningful EP selection happens at
 /// the per-session ladder, not at this layer.
-fn store_entries() -> Vec<(String, PathBuf)> {
-    let Some(read) = prunr_models::runtime_store_dir().and_then(|root| std::fs::read_dir(root).ok()) else {
+fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(read) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut entries: Vec<(String, PathBuf)> = read
@@ -151,6 +204,7 @@ pub struct Diagnostics {
     pub env_path: Option<PathBuf>,
     pub store_root: Option<PathBuf>,
     pub store_entries: Vec<(String, bool)>,
+    pub preferred: Option<String>,
     pub bundled: Option<(PathBuf, bool)>,
     pub resolved: Option<(PathBuf, DylibSource)>,
 }
@@ -160,6 +214,7 @@ pub fn diagnose() -> Diagnostics {
         env_path: env_override(),
         store_root: prunr_models::runtime_store_dir(),
         store_entries: store_entries().into_iter().map(|(name, p)| { let exists = p.is_file(); (name, exists) }).collect(),
+        preferred: preferred_runtime(),
         bundled: bundled_nested_path().map(|p| { let exists = p.is_file(); (p, exists) }),
         resolved: resolve_dylib_path().ok(),
     }
@@ -196,4 +251,54 @@ fn bundled_dylib() -> Option<PathBuf> {
     }
     let flat = nested.parent()?.parent()?.join(DYLIB_NAME);
     flat.is_file().then_some(flat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install(root: &Path, subdir: &str) {
+        let dir = root.join(subdir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(DYLIB_NAME), b"").unwrap();
+    }
+
+    #[test]
+    fn the_first_install_by_name_loads_without_a_preference() {
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "openvino-1.24.1-windows-x64");
+        install(root.path(), "directml-1.24.1-windows-x64");
+        assert_eq!(store_dylib(root.path()), Some(root.path().join("directml-1.24.1-windows-x64").join(DYLIB_NAME)));
+    }
+
+    #[test]
+    fn the_preferred_install_loads_even_when_another_sorts_first() {
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "directml-1.24.1-windows-x64");
+        install(root.path(), "openvino-1.24.1-windows-x64");
+        write_preferred(root.path(), "openvino-1.24.1-windows-x64").unwrap();
+        assert_eq!(store_dylib(root.path()), Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME)));
+    }
+
+    #[test]
+    fn a_preference_for_a_missing_or_broken_install_falls_back_to_name_order() {
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "openvino-1.24.1-windows-x64");
+        write_preferred(root.path(), "directml-1.24.1-windows-x64").unwrap();
+        let fallback = Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME));
+        assert_eq!(store_dylib(root.path()), fallback);
+        std::fs::create_dir_all(root.path().join("directml-1.24.1-windows-x64")).unwrap();
+        assert_eq!(store_dylib(root.path()), fallback, "an install without its library is skipped");
+    }
+
+    #[test]
+    fn the_preference_file_is_not_an_install_and_reads_back_trimmed() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(store_dylib(root.path()), None);
+        std::fs::write(root.path().join(PREFERRED_FILE), "openvino-1.24.1-linux-x64\n").unwrap();
+        assert_eq!(store_entries_in(root.path()), Vec::new());
+        assert_eq!(read_preferred(root.path()).as_deref(), Some("openvino-1.24.1-linux-x64"));
+        std::fs::write(root.path().join(PREFERRED_FILE), "  ").unwrap();
+        assert_eq!(read_preferred(root.path()), None);
+    }
 }

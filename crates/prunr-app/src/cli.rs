@@ -1424,10 +1424,12 @@ pub fn run_doctor() {
             println!("Runtime store:  {}", root.display());
             for (name, has_dylib) in &diag.store_entries {
                 let mark = if *has_dylib { "OK" } else { "MISSING" };
-                println!("  - {name} [{mark}]");
+                let preferred = if diag.preferred.as_ref() == Some(name) { " (preferred)" } else { "" };
+                println!("  - {name} [{mark}]{preferred}");
             }
         }
     }
+    println!("Preferred:      {}", diag.preferred.as_deref().unwrap_or("(none: first by name)"));
     if let Some((path, exists)) = &diag.bundled {
         let mark = if *exists { "OK" } else { "(absent)" };
         println!("Bundled:        {} {mark}", path.display());

@@ -48,15 +48,28 @@ impl InstallEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeId {
     OpenVino,
+    DirectMl,
 }
 
 impl RuntimeId {
+    /// The runtimes this platform offers. DirectML is a Windows API.
+    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) {
+        &[Self::DirectMl, Self::OpenVino]
+    } else {
+        &[Self::OpenVino]
+    };
+
     fn pypi_package(self) -> &'static str {
-        match self { Self::OpenVino => "onnxruntime-openvino" }
+        match self {
+            Self::OpenVino => "onnxruntime-openvino",
+            Self::DirectMl => "onnxruntime-directml",
+        }
     }
 
     fn pypi_version(self) -> &'static str {
-        match self { Self::OpenVino => prunr_runtime_install::PINNED_ORT_VERSION }
+        match self {
+            Self::OpenVino | Self::DirectMl => prunr_runtime_install::PINNED_ORT_VERSION,
+        }
     }
 
     pub fn install_subdir(self) -> String {
@@ -73,16 +86,31 @@ impl RuntimeId {
             .is_some_and(|p| p.is_file())
     }
 
+    /// The installed runtime every process loads first, when one is set.
+    pub fn preferred() -> Option<Self> {
+        let subdir = prunr_core::ort_runtime::preferred_runtime()?;
+        Self::OFFERED.iter().copied().find(|rt| rt.install_subdir() == subdir)
+    }
+
     fn short_name(self) -> &'static str {
-        match self { Self::OpenVino => "openvino" }
+        match self {
+            Self::OpenVino => "openvino",
+            Self::DirectMl => "directml",
+        }
     }
 
     pub fn display_name(self) -> &'static str {
-        match self { Self::OpenVino => "OpenVINO Runtime" }
+        match self {
+            Self::OpenVino => "OpenVINO Runtime",
+            Self::DirectMl => "DirectML Runtime",
+        }
     }
 
     pub fn approx_download_mb(self) -> u32 {
-        match self { Self::OpenVino => 80 }
+        match self {
+            Self::OpenVino => 80,
+            Self::DirectMl => 25,
+        }
     }
 
     /// Pre-baked first-launch prompt body. Static-str instead of a
@@ -93,6 +121,9 @@ impl RuntimeId {
             Self::OpenVino => "We detected hardware that can use OpenVINO Runtime. \
                 Installing it (~80 MB) unlocks 2-3× faster background removal and \
                 makes Stable Diffusion inpaint usable on your machine.",
+            Self::DirectMl => "Your graphics card can run Prunr's models. \
+                Installing DirectML Runtime (~25 MB) moves background removal, \
+                upscaling and the erasers from the processor to the card.",
         }
     }
 
@@ -101,14 +132,27 @@ impl RuntimeId {
     /// to enumerate, and the `display_name` interpolation is the only
     /// reason this needed a per-frame `format!` before.
     pub fn install_button_label(self) -> &'static str {
-        match self { Self::OpenVino => "Install OpenVINO Runtime" }
+        match self {
+            Self::OpenVino => "Install OpenVINO Runtime",
+            Self::DirectMl => "Install DirectML Runtime",
+        }
     }
 
     /// Stable key for persisted settings — decoupled from `Debug` output
     /// so we can rename the variant without breaking user state.
     pub fn settings_key(self) -> &'static str {
-        match self { Self::OpenVino => "OpenVino" }
+        match self {
+            Self::OpenVino => "OpenVino",
+            Self::DirectMl => "DirectMl",
+        }
     }
+}
+
+/// Make `runtime` the one every process loads from its next start.
+pub fn prefer(runtime: RuntimeId) -> Result<(), String> {
+    let subdir = runtime.install_subdir();
+    ri::validate_subdir(&subdir).map_err(|e| format!("install_subdir invariant broken: {e}"))?;
+    prunr_core::ort_runtime::set_preferred_runtime(&subdir)
 }
 
 /// Started install handle: progress receiver + cancel flag. Caller
@@ -153,7 +197,9 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
                 .to_string()
         );
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+    prunr_core::ort_runtime::forget_preferred_runtime(&runtime.install_subdir());
+    Ok(())
 }
 
 fn run_install(
@@ -182,6 +228,10 @@ fn run_install(
 
     let _ = tx.send(InstallEvent::Extracting);
     let install_dir = prepare_and_extract(&bytes, rt)?;
+    // The runtime just installed is the one the user wants next start.
+    if let Err(e) = prefer(rt) {
+        tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
+    }
 
     let _ = tx.send(InstallEvent::Done { install_dir });
     Ok(())
@@ -215,4 +265,24 @@ fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("create install dir: {e}"))?;
     ri::extract_wheel(bytes, &target_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directml_installs_from_its_own_wheel_into_its_own_folder() {
+        let rt = RuntimeId::DirectMl;
+        assert_eq!(rt.pypi_package(), "onnxruntime-directml");
+        assert_eq!(rt.install_subdir(), format!("directml-{}-{}", ri::PINNED_ORT_VERSION, ri::host_rid()));
+        assert_ne!(rt.install_subdir(), RuntimeId::OpenVino.install_subdir());
+        assert_eq!(rt.settings_key(), "DirectMl");
+    }
+
+    #[test]
+    fn directml_is_offered_only_on_windows() {
+        assert_eq!(RuntimeId::OFFERED.contains(&RuntimeId::DirectMl), cfg!(windows));
+        assert!(RuntimeId::OFFERED.contains(&RuntimeId::OpenVino));
+    }
 }

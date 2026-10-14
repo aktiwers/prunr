@@ -600,6 +600,18 @@ mod tests {
         );
     }
 
+    /// The DirectML wheel's `onnxruntime.dll` delay-loads `DirectML.dll`
+    /// from its own folder; without it there the system's older copy loads.
+    #[test]
+    fn repackage_keeps_the_directml_dll_beside_the_runtime() {
+        for name in ["DirectML.dll", "onnxruntime.dll"] {
+            assert_eq!(
+                repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(),
+                Some(name),
+            );
+        }
+    }
+
     #[test]
     fn repackage_drops_python_files_and_pybind() {
         assert!(repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none());
