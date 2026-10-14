@@ -805,7 +805,11 @@ pub(super) fn group_chip<R>(
     let pop_id = egui::Id::new(("group_chip", g.id_salt));
     let mut out = None;
     let contents = |ui: &mut Ui| {
-        ui.set_min_width(g.width);
+        // Exactly its width: the header's right-aligned Reset would
+        // otherwise stretch a flyout to the popup's default width.
+        ui.set_width(g.width);
+        // Each slider spans the panel, its value box at the end.
+        ui.spacing_mut().slider_width = g.width - PANEL_VALUE_WIDTH;
         let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
         out = Some(body(ui, reset));
     };
