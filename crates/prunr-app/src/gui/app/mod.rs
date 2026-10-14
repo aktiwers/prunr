@@ -774,6 +774,7 @@ impl PrunrApp {
         // idempotent and gating on the model would drop the signal if the
         // user switched model mid-flight.
         self.processor.cancel_runs();
+        self.processor.cancel_faces();
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
@@ -893,8 +894,11 @@ impl PrunrApp {
         if self.close_top_modal(ctx) {
             return;
         }
+        let finding_faces = self.processor.dispatch_progress().is_some_and(|p| p.kind == super::dispatch_progress::ProgressKind::Faces);
         if self.processor.is_run_in_flight() {
             self.processor.cancel_runs();
+        } else if finding_faces {
+            self.processor.cancel_faces();
         } else if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
         } else if self.batch.status_counts().processing > 0 {

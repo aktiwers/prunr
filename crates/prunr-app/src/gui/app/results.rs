@@ -339,7 +339,11 @@ impl PrunrApp {
             return Some(FaceSearch::RestoredEarlier);
         }
         let found = item.found_for(&item.face_photo(stage)?, item.settings.faces.wanted()?)?;
-        Some(if found.failed { FaceSearch::Failed } else { FaceSearch::Found(found.faces.len()) })
+        Some(match (found.stopped, found.failed) {
+            (true, _) => FaceSearch::Stopped,
+            (false, true) => FaceSearch::Failed,
+            (false, false) => FaceSearch::Found(found.faces.len()),
+        })
     }
 
     /// Restore faces works on the active model's stage.
@@ -917,7 +921,7 @@ mod faces_tests {
     }
 
     fn landed(photo: &Arc<image::RgbaImage>, model: FaceModel) -> FacesResult {
-        FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::clone(photo)), model: model.id(), result: Ok(Vec::new()) }
+        FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::clone(photo)), model: model.id(), result: Ok(Vec::new()), stopped: false }
     }
 
     /// Faces count only for the photo and model they were found with:
@@ -928,7 +932,7 @@ mod faces_tests {
         let item = &mut app.batch.items[0];
         let photo = item.face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::Gfpgan.id()));
-        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false });
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false });
         assert!(item.faces_for(&photo).is_some() && item.faces_to_find(&photo).is_none());
         item.settings.faces.model = FaceModel::RestoreFormerPp;
         assert!(item.faces_for(&photo).is_none());
@@ -993,6 +997,21 @@ mod faces_tests {
         assert_eq!(app.batch.items[0].faces_to_find(&photo), Some(FaceModel::Gfpgan.id()), "tried again");
     }
 
+    /// A stopped search says so and is not started again on its own;
+    /// turning Faces on again (a search change) searches.
+    #[test]
+    fn a_stopped_search_waits_to_be_asked_again() {
+        use crate::gui::item::FaceStage;
+        use crate::gui::views::faces_chip::{FaceSearch, FacesChange};
+        let (mut app, source) = app_with_faces_on();
+        app.land_faces(FacesResult { result: Err("cancelled".into()), stopped: true, ..landed(&source, FaceModel::Gfpgan) });
+        let photo = app.batch.items[0].face_photo(FaceStage::Photo).expect("the source");
+        assert!(app.batch.items[0].faces_to_find(&photo).is_none(), "not restarted on the next frame");
+        assert!(matches!(super::PrunrApp::face_search(&app.batch.items[0], FaceStage::Photo), Some(FaceSearch::Stopped)));
+        app.on_faces_change(0, FacesChange { search: true, ..Default::default() });
+        assert_eq!(app.batch.items[0].faces_to_find(&photo), Some(FaceModel::Gfpgan.id()), "searched again when asked");
+    }
+
     /// A blend change drops the faced photo built for the old blend and
     /// re-blends.
     #[test]
@@ -1036,7 +1055,7 @@ mod faces_tests {
     fn images_not_on_screen_drop_the_faced_photo() {
         let (mut app, source) = app_with_faces_on();
         push_test_item(&mut app, 2);
-        let found = FoundFaces { photo: FacePhoto::Source(source), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false };
+        let found = FoundFaces { photo: FacePhoto::Source(source), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false };
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         let item = &mut app.batch.items[0];
         item.found_faces = Some(found);
