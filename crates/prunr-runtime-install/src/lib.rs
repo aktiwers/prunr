@@ -386,7 +386,7 @@ mod tests {
     use super::*;
 
     /// Both `release.yml` (the runtime each artifact ships) and `ci.yml`
-    /// (Linux ORT runtime install for the e2e test) hard-code the same
+    /// (Linux install for the e2e test, macOS smoke test) hard-code the same
     /// version this const carries. Cargo doesn't link CI YAML, so drift
     /// would silently ship mismatched bundled-CPU vs runtime-store
     /// runtimes (release) or run e2e tests against a stale runtime
@@ -400,7 +400,7 @@ mod tests {
         // (path, expected occurrence count)
         let cases: &[(&str, usize)] = &[
             ("/../../.github/workflows/release.yml", 2), // Linux + macOS staging, Windows staging
-            ("/../../.github/workflows/ci.yml",      1), // Linux ORT install before tests
+            ("/../../.github/workflows/ci.yml",      2), // Linux install before tests, macOS smoke test
         ];
         let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
         for (rel, expected) in cases {

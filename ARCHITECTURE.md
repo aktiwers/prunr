@@ -523,7 +523,7 @@ Windows release builds use the GUI subsystem so no empty console opens; CLI mode
 
 Release profile: fat LTO, one codegen unit, `panic = "abort"`, stripped. Rust is pinned to 1.92.0 in `rust-toolchain.toml` and the workflows so clippy `-D warnings` does not drift.
 
-CI on pushes to master: clippy, then build and test with `dev-models` on Linux, macOS (x86_64, aarch64) and Windows. Only Linux installs ONNX Runtime and sets `PRUNR_REQUIRE_ORT`, so its inference tests fail instead of soft-skipping.
+CI on pushes to master: clippy, then build and test with `dev-models` on Linux, macOS (x86_64, aarch64) and Windows. Only Linux installs ONNX Runtime and sets `PRUNR_REQUIRE_ORT`, so its inference tests fail instead of soft-skipping. macOS arm64 stages the runtime the release ships and runs `cargo xtask probe-load-dynamic --require-ep CoreMLExecutionProvider` on it: it must load under our `ort`, carry CoreML and run a model.
 
 A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 
