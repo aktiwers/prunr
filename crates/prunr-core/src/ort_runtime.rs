@@ -93,8 +93,19 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     Session::builder().map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
 }
 
+/// Libraries loaded from beside the runtime before the runtime itself.
+/// The DirectML build of `onnxruntime.dll` delay-loads `DirectML.dll`.
+/// ORT's hook looks beside itself first, but when that fails Windows
+/// searches by name and finds System32's older copy, which rejects the
+/// feature level ORT asks for. A copy already loaded is what every later
+/// load by name resolves to.
+const PRELOAD_BESIDE_RUNTIME: &[&str] = if cfg!(windows) { &["DirectML.dll"] } else { &[] };
+
 fn init() -> Result<DylibSource, String> {
     let (path, source) = resolve_dylib_path()?;
+    for name in PRELOAD_BESIDE_RUNTIME {
+        preload_beside(&path, name);
+    }
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let env = ort::init_from(&path)
         .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
@@ -103,6 +114,18 @@ fn init() -> Result<DylibSource, String> {
     tracing::info!(path = %path.display(), %source, "ORT runtime loaded");
     let _ = LOADED.set(path);
     Ok(source)
+}
+
+/// A runtime without `name` beside it (the CPU build) needs none.
+fn preload_beside(runtime: &Path, name: &str) {
+    let lib = runtime.with_file_name(name);
+    if !lib.is_file() {
+        return;
+    }
+    match ort::util::preload_dylib(lib.as_path()) {
+        Ok(()) => tracing::info!(path = %lib.display(), "preloaded beside the runtime"),
+        Err(e) => tracing::warn!(path = %lib.display(), %e, "preload beside the runtime failed"),
+    }
 }
 
 pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
@@ -207,16 +230,26 @@ pub struct Diagnostics {
     pub preferred: Option<String>,
     pub bundled: Option<(PathBuf, bool)>,
     pub resolved: Option<(PathBuf, DylibSource)>,
+    /// Each library preloaded from beside the resolved runtime, and
+    /// whether it is there.
+    pub beside_runtime: Vec<(PathBuf, bool)>,
 }
 
 pub fn diagnose() -> Diagnostics {
+    let resolved = resolve_dylib_path().ok();
+    let beside_runtime = resolved.as_ref().map_or_else(Vec::new, |(runtime, _)| {
+        PRELOAD_BESIDE_RUNTIME.iter()
+            .map(|name| { let lib = runtime.with_file_name(name); let exists = lib.is_file(); (lib, exists) })
+            .collect()
+    });
     Diagnostics {
         env_path: env_override(),
         store_root: prunr_models::runtime_store_dir(),
         store_entries: store_entries().into_iter().map(|(name, p)| { let exists = p.is_file(); (name, exists) }).collect(),
         preferred: preferred_runtime(),
         bundled: bundled_nested_path().map(|p| { let exists = p.is_file(); (p, exists) }),
-        resolved: resolve_dylib_path().ok(),
+        resolved,
+        beside_runtime,
     }
 }
 
