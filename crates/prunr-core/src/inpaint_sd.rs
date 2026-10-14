@@ -2443,8 +2443,7 @@ impl LcmScheduler {
     }
 
     /// `(c_skip, c_out)` — the LCM consistency-function boundary
-    /// coefficients at timestep `t`. Single source so `step` and
-    /// `step_at` can't drift.
+    /// coefficients at timestep `t`.
     #[inline]
     fn consistency_coefficients(&self, t: i64) -> (f32, f32) {
         let scaled_t = (t as f32) * self.timestep_scaling;
@@ -2453,6 +2452,27 @@ impl LcmScheduler {
         let c_skip = sigma2 / denom2;
         let c_out = scaled_t / denom2.sqrt();
         (c_skip, c_out)
+    }
+
+    /// The consistency function at `t`, per latent value: the clean
+    /// latent LCM predicts from a value and its noise prediction. One
+    /// definition for `step`, `step_at` and `denoised`, so a preview
+    /// shows the estimate the step itself uses.
+    fn denoiser(&self, t: i64) -> impl Fn(f32, f32) -> f32 {
+        let alpha_t = self.alpha_cumprod(t);
+        let sqrt_alpha_t = alpha_t.sqrt();
+        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
+        let (c_skip, c_out) = self.consistency_coefficients(t);
+        move |l, eps| {
+            let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
+            c_out * pred_x0 + c_skip * l
+        }
+    }
+
+    /// The clean latent LCM predicts at `t`; the final step's output.
+    pub fn denoised(&self, latent_t: &[f32], noise_pred: &[f32], t: i64) -> Vec<f32> {
+        let denoise = self.denoiser(t);
+        latent_t.iter().zip(noise_pred).map(|(&l, &eps)| denoise(l, eps)).collect()
     }
 
     pub fn timesteps(&self) -> &[i64] {
@@ -2484,18 +2504,7 @@ impl LcmScheduler {
         if !is_final_step {
             unreachable!("non-final LCM step: caller must use step_at with t_prev")
         }
-
-        let alpha_t = self.alpha_cumprod(t);
-        let sqrt_alpha_t = alpha_t.sqrt();
-        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
-        let (c_skip, c_out) = self.consistency_coefficients(t);
-
-        latent_t.iter().zip(noise_pred.iter())
-            .map(|(&l, &eps)| {
-                let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
-                c_out * pred_x0 + c_skip * l
-            })
-            .collect()
+        self.denoised(latent_t, noise_pred, t)
     }
 
     /// Non-final-step variant that takes the previous inference
@@ -2513,10 +2522,7 @@ impl LcmScheduler {
         debug_assert_eq!(noise_for_step.len(), latent_t.len(),
             "LCM step_at: noise_for_step length must match latent");
 
-        let alpha_t = self.alpha_cumprod(t);
-        let sqrt_alpha_t = alpha_t.sqrt();
-        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
-        let (c_skip, c_out) = self.consistency_coefficients(t);
+        let denoise = self.denoiser(t);
 
         // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
         // alphas_cumprod[0] (≈0.99915), not 1.0.
@@ -2527,11 +2533,7 @@ impl LcmScheduler {
         latent_t.iter()
             .zip(noise_pred.iter())
             .zip(noise_for_step.iter())
-            .map(|((&l, &eps), &n)| {
-                let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
-                let denoised = c_out * pred_x0 + c_skip * l;
-                sqrt_alpha_prev * denoised + sqrt_beta_prev * n
-            })
+            .map(|((&l, &eps), &n)| sqrt_alpha_prev * denoise(l, eps) + sqrt_beta_prev * n)
             .collect()
     }
 }
@@ -2584,6 +2586,12 @@ impl DpmPp2MScheduler {
 
     pub fn timesteps(&self) -> &[i64] { &self.timesteps }
 
+    /// The clean latent the noise prediction implies at step `step_idx`
+    /// (the step's `m0`).
+    pub fn x0(&self, latent: &[f32], noise_pred: &[f32], step_idx: usize) -> Vec<f32> {
+        convert_epsilon_to_x0(latent, noise_pred, self.sigmas[step_idx])
+    }
+
     pub fn step(
         &mut self,
         latent: &[f32],
@@ -2601,7 +2609,7 @@ impl DpmPp2MScheduler {
         let (_, sigma_s0_e) = sigma_to_alpha_sigma(sigma_s0);
         let (alpha_t, sigma_t_e) = sigma_to_alpha_sigma(sigma_t);
 
-        let m0 = convert_epsilon_to_x0(latent, noise_pred, sigma_s0);
+        let m0 = self.x0(latent, noise_pred, step_idx);
 
         let lambda_s0 = sigma_to_lambda(sigma_s0);
         let lambda_t = sigma_to_lambda(sigma_t);
@@ -2721,6 +2729,16 @@ impl Scheduler {
         match self {
             Scheduler::Lcm(s) => s.timesteps(),
             Scheduler::DpmPp2M(s) => s.timesteps(),
+        }
+    }
+
+    /// What the picture would be if denoising stopped at step
+    /// `step_idx`: the clean latent this scheduler's step predicts from
+    /// `latent` and the UNet's `noise_pred`.
+    pub fn x0(&self, latent: &[f32], noise_pred: &[f32], step_idx: usize) -> Vec<f32> {
+        match self {
+            Scheduler::Lcm(s) => s.denoised(latent, noise_pred, s.timesteps[step_idx]),
+            Scheduler::DpmPp2M(s) => s.x0(latent, noise_pred, step_idx),
         }
     }
 }
@@ -2845,6 +2863,48 @@ mod tests {
             let expected = alpha_prev.sqrt() * denoised;  // zero-noise → β_prev term vanishes
             assert!((n - expected).abs() < 1e-5,
                 "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
+        }
+    }
+
+    /// A clean latent noised to each step's level with known noise, and
+    /// that noise given as the prediction: every scheduler's x0 is the
+    /// clean latent again, from pure noise down to the last step.
+    #[test]
+    fn every_schedulers_x0_recovers_the_clean_latent_from_the_true_noise() {
+        let clean = [0.8_f32, -1.2, 0.05, 2.0];
+        let eps = [0.3_f32, -0.7, 1.1, -0.2];
+        let noised = |(a, s): (f32, f32)| -> Vec<f32> { clean.iter().zip(eps).map(|(&x, e)| a * x + s * e).collect() };
+        let lcm = LcmScheduler::new_sd15(4);
+        let lcm_levels: Vec<_> = lcm.timesteps().iter().map(|&t| (lcm.alpha_cumprod(t).sqrt(), (1.0 - lcm.alpha_cumprod(t)).sqrt())).collect();
+        let dpm = DpmPp2MScheduler::new_sd15(8);
+        let dpm_levels: Vec<_> = dpm.sigmas[..dpm.num_inference].iter().map(|&s| sigma_to_alpha_sigma(s)).collect();
+        for (scheduler, levels) in [(Scheduler::Lcm(lcm), lcm_levels), (Scheduler::DpmPp2M(dpm), dpm_levels)] {
+            for (i, &level) in levels.iter().enumerate() {
+                let x0 = scheduler.x0(&noised(level), &eps, i);
+                for (got, want) in x0.iter().zip(clean) {
+                    assert!((got - want).abs() < 1e-3, "step {i}: x0 {got}, clean {want}");
+                }
+            }
+        }
+        // By hand at σ = 1: α = σ_eff = 1/√2, so x0 = √2·x − ε.
+        let x0 = convert_epsilon_to_x0(&[1.0], &[0.5], 1.0);
+        assert!((x0[0] - (std::f32::consts::SQRT_2 - 0.5)).abs() < 1e-6, "{x0:?}");
+    }
+
+    /// The estimate a preview shows is the one the step itself uses:
+    /// LCM's final step returns it, DPM++ keeps it as its history.
+    #[test]
+    fn the_x0_estimate_is_the_one_the_step_uses() {
+        let latent = [0.5_f32, -0.25, 1.5, 0.0];
+        let noise_pred = [0.1_f32, 0.4, -0.3, 0.9];
+        let lcm = LcmScheduler::new_sd15(4);
+        let final_step = lcm.step(&latent, &noise_pred, lcm.timesteps()[3], true, &[]);
+        assert_eq!(Scheduler::Lcm(lcm).x0(&latent, &noise_pred, 3), final_step);
+        let mut dpm = DpmPp2MScheduler::new_sd15(8);
+        for i in 0..2 {
+            let x0 = dpm.x0(&latent, &noise_pred, i);
+            dpm.step(&latent, &noise_pred, i);
+            assert_eq!(dpm.prev_model_output.as_deref(), Some(&x0[..]), "step {i}");
         }
     }
 
