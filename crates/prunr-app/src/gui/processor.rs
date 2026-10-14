@@ -136,6 +136,8 @@ pub(crate) struct FacesResult {
     pub(crate) photo: super::item::FacePhoto,
     pub(crate) model: prunr_models::ModelId,
     pub(crate) result: Result<Vec<prunr_core::face::RestoredFace>, String>,
+    /// The search was stopped (Cancel or Esc), not failed.
+    pub(crate) stopped: bool,
 }
 
 /// Single-slot warm engine for an in-process model run (upscale,
@@ -775,6 +777,8 @@ pub(crate) struct Processor {
     runs_models: bool,
     faces_tx: mpsc::Sender<FacesResult>,
     faces_rx: mpsc::Receiver<FacesResult>,
+    /// The latest face search's stop flag, for Cancel and Esc.
+    faces_stop: Mutex<Arc<AtomicBool>>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -830,6 +834,7 @@ impl Processor {
             runs_models: true,
             faces_tx,
             faces_rx,
+            faces_stop: Mutex::default(),
             depth,
             seg_warm_due: None,
         }
@@ -1800,14 +1805,15 @@ impl Processor {
     /// capsule shows it. The photo is unpacked there, never here.
     pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId) {
         let tx = self.faces_tx.clone();
+        let stop = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
         let (progress, run) = if self.dispatch_progress.read().is_none() {
             let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
-            let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::clone(&stop));
             (progress, Some(run))
         } else {
-            (prunr_core::Progress::none(), None)
+            (prunr_core::Progress::none().with_cancel(Arc::clone(&stop)), None)
         };
         std::thread::spawn(move || {
             let search = std::panic::AssertUnwindSafe(|| {
@@ -1819,8 +1825,22 @@ impl Processor {
             if let Some(run) = run {
                 run.end();
             }
-            let _ = tx.send(FacesResult { item_id, photo, model, result });
+            let stopped = stop.load(Ordering::Acquire);
+            let _ = tx.send(FacesResult { item_id, photo, model, result, stopped });
         });
+    }
+
+    /// A stop flag for the face search starting now; Cancel and Esc reach
+    /// the latest one.
+    fn begin_faces_search(&self) -> Arc<AtomicBool> {
+        let stop = Arc::new(AtomicBool::new(false));
+        *self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&stop);
+        stop
+    }
+
+    /// Stop the face search under way; it ends after the face it is on.
+    pub(crate) fn cancel_faces(&self) {
+        self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner).store(true, Ordering::Release);
     }
 
     pub(crate) fn pump_faces_results(&mut self) -> Vec<FacesResult> {
@@ -2261,6 +2281,18 @@ mod tests {
     }
 
     // ── is_upscale_in_flight + admission_check ─────────────────────────────
+
+    /// Cancel reaches the face search under way, and a new search starts
+    /// with a flag of its own.
+    #[test]
+    fn cancel_stops_the_latest_face_search() {
+        let p = fixture();
+        let first = p.begin_faces_search();
+        p.cancel_faces();
+        assert!(first.load(Ordering::Acquire));
+        let next = p.begin_faces_search();
+        assert!(!next.load(Ordering::Acquire), "a new search is not born cancelled");
+    }
 
     #[test]
     fn is_upscale_in_flight_false_when_idle() {

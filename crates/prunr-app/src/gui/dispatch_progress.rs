@@ -43,6 +43,7 @@ pub enum CancelTarget {
     Upscale,
     Colorize,
     SegBatchAndReset,
+    Faces,
 }
 
 pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
@@ -51,7 +52,8 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
-        ProgressKind::Faces | ProgressKind::Depth => None,
+        ProgressKind::Faces => Some(CancelTarget::Faces),
+        ProgressKind::Depth => None,
     }
 }
 
@@ -507,6 +509,13 @@ mod tests {
         assert_eq!(at(1, 5, 5).as_deref(), Some("about 20 s left"));
         assert_eq!(at(1, 10, 20).as_deref(), Some("about 3 min left"));
         assert_eq!(at(0, 10, 20), None, "nothing done, nothing to go on");
+    }
+
+    /// A face search shows Cancel and stops on it; it used to have no
+    /// target, so the button and Esc did nothing while it ran.
+    #[test]
+    fn cancel_target_faces_stops_the_search() {
+        assert_eq!(cancel_target_for(ProgressKind::Faces, None), Some(CancelTarget::Faces));
     }
 
     #[test]
