@@ -45,6 +45,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Copy selection and Cut put only the selected area on the clipboard, cropped to its edges; they put a full-size image with everything else clear.
 - Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.
 - Nomos8k's line in the model picker says it is the slowest upscaler, and its Model Store text says how slow.
 - Scroll bars are slim and translucent, without a rail, to sit on the dark glass panels.
