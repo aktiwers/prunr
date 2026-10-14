@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::EpKind;
+use crate::engine::{EpKind, Weights};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -34,21 +34,36 @@ struct CacheFile {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    prunr_models::data_dir().map(|d| d.join("ep_compat.json"))
+    #[cfg(test)]
+    {
+        Some(std::env::temp_dir().join(format!("prunr-test-ep-compat-{}.json", std::process::id())))
+    }
+    #[cfg(not(test))]
+    {
+        prunr_models::data_dir().map(|d| d.join("ep_compat.json"))
+    }
 }
 
-/// `"{ep}::{model}"`, plus `"@{tag}"` for a downloaded model so a failure
-/// sticks to the files that failed (`prunr_models::content_tag`). The EP
-/// part keeps the historic `Display` strings ("OpenVINO", "CUDA",
-/// "CoreML", "DirectML").
-fn key(ep: EpKind, model: prunr_models::ModelId) -> String {
-    key_with(ep, model, prunr_models::content_tag(model))
+/// `"{ep}::{model}"`, then `"/fp16"` or `"/int8"` for a lighter copy of
+/// the weights, so a failure of one copy leaves the others to try, and
+/// `"@{tag}"` for a downloaded model so a failure sticks to the files that
+/// failed (`prunr_models::content_tag`). The model's own weights keep the
+/// historic key, so entries written before weights were told apart still
+/// read, as failures of those. The EP part keeps the historic `Display`
+/// strings ("OpenVINO", "CUDA", "CoreML", "DirectML").
+fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
+    key_with(ep, model, weights, prunr_models::content_tag(model))
 }
 
-fn key_with(ep: EpKind, model: prunr_models::ModelId, tag: Option<u64>) -> String {
+fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Option<u64>) -> String {
+    let copy = match weights {
+        Weights::Base => "",
+        Weights::Fp16 => "/fp16",
+        Weights::Int8 => "/int8",
+    };
     match tag {
-        Some(tag) => format!("{ep}::{model:?}@{tag:016x}"),
-        None => format!("{ep}::{model:?}"),
+        Some(tag) => format!("{ep}::{model:?}{copy}@{tag:016x}"),
+        None => format!("{ep}::{model:?}{copy}"),
     }
 }
 
@@ -79,21 +94,21 @@ fn save_to_disk(map: &HashMap<String, String>) {
     }
 }
 
-/// True when this (EP, model) combo is on the persistent skip list.
-/// Cheap: in-memory hashmap lookup behind a Mutex.
-pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId) -> bool {
+/// True when these weights of the model are on the EP's persistent skip
+/// list. Cheap: in-memory hashmap lookup behind a Mutex.
+pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
     let map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    map.contains_key(&key(ep, model))
+    map.contains_key(&key(ep, model, weights))
 }
 
 /// Idempotent — re-recording the same combo is a no-op (no extra disk
 /// writes). Best-effort persistence; a failed write is logged but not
 /// fatal — next session will re-discover the failure.
-pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, error: &str) {
-    let k = key(ep, model);
+pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, error: &str) {
+    let k = key(ep, model, weights);
     let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if map.contains_key(&k) { return; }
-    tracing::info!(%ep, ?model, %error, "recording EP failure to skip cache");
+    tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
     map.insert(k, error.to_string());
     save_to_disk(&map);
 }
@@ -120,10 +135,10 @@ mod tests {
     #[test]
     fn key_format_is_stable_openvino() {
         assert_eq!(
-            key(EpKind::OpenVino, prunr_models::ModelId::Silueta),
+            key(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Base),
             "OpenVINO::Silueta",
         );
-        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16)
+        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Base)
             .starts_with("CUDA::SdV15InpaintFp16@"));
     }
 
@@ -131,7 +146,7 @@ mod tests {
     #[test]
     fn key_format_is_stable_coreml() {
         assert_eq!(
-            key(EpKind::CoreMl, prunr_models::ModelId::Silueta),
+            key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Base),
             "CoreML::Silueta",
         );
     }
@@ -139,7 +154,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn key_format_is_stable_directml() {
-        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16)
+        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16, Weights::Base)
             .starts_with("DirectML::SdV15InpaintFp16@"));
     }
 
@@ -150,11 +165,25 @@ mod tests {
     #[test]
     fn a_new_download_of_a_model_is_a_new_key() {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        let old = key_with(EpKind::OpenVino, lcm, Some(1));
-        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Some(2)));
+        let old = key_with(EpKind::OpenVino, lcm, Weights::Base, Some(1));
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Base, Some(2)));
         assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
-        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, None), "OpenVINO::Silueta",
+        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Base, None), "OpenVINO::Silueta",
             "built-in models keep the historic key; the app version scopes them");
+    }
+
+    /// Each copy of the weights fails on its own key; the model's own
+    /// weights keep the key every earlier entry was written under.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn each_copy_of_the_weights_has_its_own_key() {
+        let u2net = prunr_models::ModelId::U2net;
+        let keys = [Weights::Base, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0)));
+        assert_eq!(keys, [
+            "OpenVINO::U2net@0000000000005ca0",
+            "OpenVINO::U2net/fp16@0000000000005ca0",
+            "OpenVINO::U2net/int8@0000000000005ca0",
+        ]);
     }
 
     #[test]
