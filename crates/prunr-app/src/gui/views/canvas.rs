@@ -186,7 +186,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
 
-    if let Some(tool) = app.active_tool() {
+    // The strip sits on the foreground layer, above the modals' level:
+    // under an open modal it would draw over the modal.
+    if let Some(tool) = app.active_tool().filter(|_| !app.any_modal_open()) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
