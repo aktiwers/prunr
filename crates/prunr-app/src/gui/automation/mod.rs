@@ -41,6 +41,9 @@ pub enum Request {
     HoldAt { x: f32, y: f32 },
     Move { dx: f32, dy: f32 },
     Release,
+    /// Turn the wheel over a control, `lines` up (positive) or down: what
+    /// brings a row below a list's fold into view.
+    Scroll { name: String, lines: f32 },
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
     Key { chord: String },
     Type { text: String },
@@ -198,6 +201,17 @@ impl Automation {
                 self.held_at = Some(to);
                 (2, Response::ok([to.x, to.y]))
             }
+            Request::Scroll { name, lines } => {
+                let (target, pos) = self.target(&name)?;
+                let wheel = egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, lines),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
+                (4, Response::ok(target))
+            }
             Request::Release => {
                 let pos = self.held_at.take().ok_or("nothing is held")?;
                 self.frames.push_back(vec![press(pos, false)].into());
@@ -331,6 +345,8 @@ mod tests {
     fn requests_parse_from_tagged_json() {
         let req: Request = serde_json::from_str(r#"{"cmd":"click","name":"Settings"}"#).unwrap();
         assert!(matches!(req, Request::Click { ref name, secondary: false } if name == "Settings"));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll","name":"Silueta","lines":-5}"#).unwrap();
+        assert!(matches!(req, Request::Scroll { ref name, lines } if name == "Silueta" && lines == -5.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"wait"}"#).unwrap();
         assert!(matches!(req, Request::Wait { frames: 1 }));
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"explode"}"#).is_err());
