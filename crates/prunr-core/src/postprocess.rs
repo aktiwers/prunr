@@ -499,9 +499,7 @@ pub fn effect_backdrop(
     use crate::types::BgEffect;
     let mut img = match effect {
         BgEffect::None => return None,
-        // fast_blur is a 3-pass box approximation of a Gaussian, ~3-4x
-        // faster than imageops::blur and alike at these radii.
-        BgEffect::BlurredSource { radius } => image::imageops::fast_blur(source, radius.clamp(1, 64) as f32),
+        BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(source, radius.clamp(1, 64) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
             apply_fill_style(&mut img, crate::types::FillStyle::Desaturate);

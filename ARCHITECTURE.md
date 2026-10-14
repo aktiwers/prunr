@@ -366,7 +366,7 @@ Depth Anything V2 Small measures a photo once (518 px long side, ~0.5 s) into a 
 
 | Feature | Where | How |
 |---|---|---|
-| Lens blur, Point / Tilt-shift | Depth chip (No model); Background → Lens blur (cut-outs) | Blur grows with distance from the focus depth (or the band); the cut-out's own subject sets the focus behind a cut-out. `blur::blur_rgba` is a parallel three-box Gaussian (22 MP in 2.6 s) |
+| Lens blur, Point / Tilt-shift | Depth chip (No model); Background → Lens blur (cut-outs) | Blur grows with distance from the focus depth (or the band); the cut-out's own subject sets the focus behind a cut-out. `blur::blur_rgba` is a parallel three-box Gaussian (24 MP in 0.5 s); the Blurred photo background and Refine's Sharpen use it too |
 | Fog, Aerial perspective | Depth chip | Haze thickening with distance; far parts turn cooler and paler |
 | Fade with distance | Sketch | `line_fade_pct` on the edge recipe: lines lighten by depth (an `EdgeRerun`) |
 | By depth | Magic Brush | The click's depth ± Range selects a band of the scene, ground included |
