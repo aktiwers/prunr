@@ -426,6 +426,12 @@ impl OrtEngine {
 
 }
 
+/// Whether sessions on `provider` run on the host CPU: the CPU provider,
+/// and OpenVINO, which this app configures for no other device.
+pub fn runs_on_host_cpu(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("CPU") || provider.eq_ignore_ascii_case(OPENVINO_NAME)
+}
+
 /// Whether DirectML is the active GPU provider on this platform.
 ///
 /// Used to gate parallel session-build paths: DirectML's

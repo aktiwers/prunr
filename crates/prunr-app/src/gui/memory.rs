@@ -33,9 +33,9 @@ pub(crate) const RESIDENT_HISTORY_STEPS: usize = 10;
 
 impl AdmissionController {
     /// Create a new controller. Queries available system RAM and applies safety margin.
-    pub fn new(model: ModelKind, jobs: usize) -> Self {
+    pub fn new(model: ModelKind, jobs: usize, cpu_only: bool) -> Self {
         let available = available_ram();
-        let overhead = model_overhead(model, jobs);
+        let overhead = model_overhead(model, jobs, cpu_only);
         let budget = ((available as f64) * 0.85) as usize;
         let budget = budget.saturating_sub(overhead);
         Self {
@@ -165,11 +165,10 @@ fn per_engine_cost(model: ModelKind) -> usize {
     mb * 1024 * 1024
 }
 
-/// Fixed overhead for the engine pool at the requested job count.
-fn model_overhead(model: ModelKind, jobs: usize) -> usize {
-    let is_gpu = !prunr_core::OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
-    let num_engines = if is_gpu { jobs.min(2) } else { jobs };
-    per_engine_cost(model) * num_engines
+/// Fixed overhead for the engine pool the worker will build for `jobs`.
+fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
+    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &prunr_core::OrtEngine::detect_active_provider());
+    per_engine_cost(model) * engines
 }
 
 /// Maximum safe parallel jobs for the given model and available RAM.
