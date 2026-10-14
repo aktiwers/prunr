@@ -444,7 +444,7 @@ fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Opti
                 });
             });
         };
-        kv(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand));
+        kv(ui, "CPU", &crate::hardware::cpu_label(p.cpu_vendor, &p.cpu_brand));
         let gpu_label = match (p.dgpu, p.igpu) {
             (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
             (Some(d), None) => format!("{d}"),
