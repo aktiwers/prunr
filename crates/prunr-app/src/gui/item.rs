@@ -365,6 +365,19 @@ pub(crate) enum RunTier {
     AddEdge,
 }
 
+/// What Process needs on an image under a model that keeps its run (an
+/// upscaler, the colorizer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeptRunTier {
+    /// Nothing: the shown step is this model's run, as the settings ask.
+    UpToDate,
+    /// The kept run finished again: only Refine (upscale) or Strength
+    /// (colorize) changed.
+    Refinish,
+    /// A new run.
+    Full,
+}
+
 /// `selection` applied over `edits`: restored (made positive) or erased
 /// (kept negative, as a selection is stored); where it lands it wins.
 pub(crate) fn apply_selection(
@@ -1479,11 +1492,17 @@ impl BatchItem {
         self.upscale = Some(run);
     }
 
-    /// Whether only Refine's after-the-model knobs changed since this
-    /// step's own upscale, so its kept run can be re-finished.
-    pub(crate) fn refine_only_changed(&self, model: prunr_core::ModelKind) -> bool {
-        let (Some(_), Some(old)) = (self.kept_upscale(), &self.applied_recipe) else { return false };
-        model.is_upscale() && prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) == prunr_core::RequiredTier::UpscaleTier2
+    /// What a run of `model` needs here, measured against the shown
+    /// step's own kept run.
+    pub(crate) fn kept_run_tier(&self, model: prunr_core::ModelKind) -> KeptRunTier {
+        use prunr_core::RequiredTier;
+        let kept = if model.is_upscale() { self.kept_upscale().is_some() } else { self.kept_colorize().is_some() };
+        let (true, Some(old)) = (kept, &self.applied_recipe) else { return KeptRunTier::Full };
+        match prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) {
+            RequiredTier::Skip | RequiredTier::CompositeOnly => KeptRunTier::UpToDate,
+            RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => KeptRunTier::Refinish,
+            _ => KeptRunTier::Full,
+        }
     }
 
     /// A colorize lands: its step is recorded, and the run is kept for
@@ -1499,12 +1518,6 @@ impl BatchItem {
         self.colorize.as_ref().filter(|run| shown == Some(run.run))
     }
 
-    /// Whether only Strength changed since this step's own colorize, so
-    /// its kept run can be re-rendered.
-    pub(crate) fn strength_only_changed(&self, model: prunr_core::ModelKind) -> bool {
-        let (Some(_), Some(old)) = (self.kept_colorize(), &self.applied_recipe) else { return false };
-        prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) == prunr_core::RequiredTier::ColorizeTier2
-    }
 
     /// The kept upscale run, when it is the shown step's own.
     pub(crate) fn kept_upscale(&self) -> Option<&UpscaleCache> {
@@ -2281,15 +2294,38 @@ mod tests {
             item.land_colorize(ColorizeCache::new(Arc::clone(&plane), img()));
         }
         assert!(item.kept_colorize().is_some(), "the shown step's own run");
-        assert!(!item.strength_only_changed(model), "nothing changed yet");
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::UpToDate, "nothing changed yet");
         item.settings.color_strength_pct = 50;
-        assert!(item.strength_only_changed(model));
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::Refinish);
         item.undo_step();
         assert!(item.kept_colorize().is_none(), "an earlier colorize step: the kept run is not its own");
         item.redo_step();
         assert!(item.kept_colorize().is_some());
         item.invalidate_colorize_cache();
         assert!(item.kept_colorize().is_none());
+    }
+
+    /// Process under an upscaler: nothing for the step's own upscale as
+    /// asked, a re-finish for a Refine change, a run for anything else.
+    #[test]
+    fn an_upscale_needs_a_run_only_when_more_than_refine_changed() {
+        let mut item = fixture_item(1);
+        let model = prunr_core::ModelKind::RealEsrganX4Plus;
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::Full, "never upscaled");
+        let img = || Arc::new(image::RgbaImage::new(4, 4));
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.applied_recipe = Some(item.settings.current_recipe(model));
+        item.land_upscale(UpscaleCache::new(img(), img(), None));
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::UpToDate);
+        item.settings.sharpen = 0.4;
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::Refinish);
+        item.settings.output_scale = prunr_core::OutputScale::X2;
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::Full, "a new scale");
+        item.settings = Default::default();
+        item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+        item.result_rgba = Some(img());
+        item.finish_job();
+        assert_eq!(item.kept_run_tier(model), KeptRunTier::Full, "another model's step on top: upscale that");
     }
 
     /// The kept upscale run belongs to the step it landed on: undo to an
