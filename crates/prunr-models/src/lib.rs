@@ -537,7 +537,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Teed,
         display_name: "TEED",
-        description: "Edge / line extraction. Used by line-mode toolbar.",
+        description: "Draws the lines for Sketch.",
         category: ModelCategory::EdgeDetection,
         source: ModelSource::Bundled {
             license: LicenseInfo {
