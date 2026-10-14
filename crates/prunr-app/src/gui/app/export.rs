@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc};
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::item::{BatchItem, BatchStatus, ExportDepth};
 use crate::gui::state::AppState;
+use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -41,16 +42,9 @@ impl PrunrApp {
         }
     }
 
-    /// Folder-picker + multi-file save for layers mode: up to 3 PNGs per
-    /// target (subject / lines / mask), rendered and written on a background
-    /// thread from a `LayerJob` snapshot. Per-item fallback to the composite
-    /// when the layers' data is gone, so every target lands at least one file.
+    /// Layers mode: ask for a folder for the ticked images, or the shown
+    /// one; `on_save_layers_picked` writes into it.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
-        let Some(folder) = self.system.pick_folder_dialog(
-            self.last_open_dir.as_deref(),
-            "Save layers \u{2014} Choose folder",
-        ) else { return };
-
         let targets: Vec<u64> = if has_selection {
             self.batch.items.iter()
                 .filter(|i| i.selected && i.status == BatchStatus::Done)
@@ -59,8 +53,16 @@ impl PrunrApp {
         } else {
             self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
         };
-        if targets.is_empty() { return; }
+        if !targets.is_empty() {
+            self.ask_dialog(DialogRequest::SaveLayers { targets });
+        }
+    }
 
+    /// Multi-file save for layers mode: up to 3 PNGs per target (subject /
+    /// lines / mask), rendered and written on a background thread from a
+    /// `LayerJob` snapshot. Per-item fallback to the composite when the
+    /// layers' data is gone, so every target lands at least one file.
+    pub(super) fn on_save_layers_picked(&mut self, targets: &[u64], folder: PathBuf) {
         let style = self.selection_style();
         let format = self.settings.export_format;
         let jobs: Vec<LayerSave> = targets.iter()
@@ -92,41 +94,39 @@ impl PrunrApp {
         spawn_save_layers(folder, jobs, format, tx);
     }
 
-    /// No checkboxes selected — save just the currently-viewed result via a
-    /// save-as dialog. Suggests a `<stem>.prunr.png` name based on the source.
+    /// No checkboxes selected — save just the currently-viewed result.
     fn save_current_to_file(&mut self) {
-        let Some(item) = self.batch.selected_item() else { return };
-        let Some(rgba) = item.result_rgba.clone() else { return };
-        let default_name = crate::gui::drag_export::export_name(&item.filename, self.settings.export_format);
-        let bg = item.export_bg();
-        let depth = self.settings.export_depth_map.then(|| item.depth_export());
-        self.save_rgba_with_dialog(SaveOne { rgba, bg, depth }, &default_name);
+        self.save_item_to_file(self.batch.selected_index);
     }
 
-    /// Save one specific batch item (by index) via a save-as dialog. Used by
-    /// the sidebar's per-row save button, which needs a non-selection-based
-    /// entry point into the same encode-on-background pipeline as
-    /// `save_current_to_file`.
+    /// Ask where to save one image's result, suggesting `<stem>.prunr.<ext>`
+    /// from its source; `on_save_image_picked` writes it. The sidebar's
+    /// per-row save and Save with nothing ticked.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let (one, default_name) = {
-            let Some(item) = self.batch.items.get(idx) else { return };
-            let Some(rgba) = item.result_rgba.clone() else { return };
-            let depth = self.settings.export_depth_map.then(|| item.depth_export());
-            (SaveOne { rgba, bg: item.export_bg(), depth }, crate::gui::drag_export::export_name(&item.filename, self.settings.export_format))
+        let Some(item) = self.batch.items.get(idx).filter(|i| i.result_rgba.is_some()) else { return };
+        let preferred = self.settings.export_format;
+        let request = DialogRequest::SaveImage {
+            item_id: item.id,
+            default_name: crate::gui::drag_export::export_name(&item.filename, preferred),
+            preferred,
         };
-        self.save_rgba_with_dialog(one, &default_name);
+        self.ask_dialog(request);
     }
 
-    /// Shared tail for the two single-item save paths: open the save-as
-    /// dialog, then bake the background, encode in the format the chosen
-    /// name asks for and write on a background thread.
-    fn save_rgba_with_dialog(&mut self, one: SaveOne, default_name: &str) {
-        let preferred = self.settings.export_format;
-        let Some(path) = self.system.save_image_dialog(
-            self.last_open_dir.as_deref(),
-            default_name,
-            preferred,
-        ) else { return };
+    /// Bake the background, encode in the format the chosen name asks for
+    /// and write on a background thread. The image goes by id: one removed
+    /// while the dialog was up is not saved, and no other takes its place.
+    pub(super) fn on_save_image_picked(&mut self, item_id: u64, preferred: prunr_core::ExportFormat, path: PathBuf) {
+        let Some(item) = self.batch.find_by_id(item_id) else {
+            self.toasts.error("Not saved — the image was removed");
+            return;
+        };
+        let Some(rgba) = item.result_rgba.clone() else {
+            self.toasts.error("Nothing to save — process the image first");
+            return;
+        };
+        let depth = self.settings.export_depth_map.then(|| item.depth_export());
+        let one = SaveOne { rgba, bg: item.export_bg(), depth };
         let (path, format) = match prunr_core::ExportFormat::from_path(&path) {
             Some(f) => (path, f),
             None => (path.with_extension(preferred.extension()), preferred),
@@ -136,12 +136,22 @@ impl PrunrApp {
         spawn_save_single(path, one, format, tx);
     }
 
-    /// One or more sidebar checkboxes selected — pick a folder, write each
-    /// as `<source-stem>.prunr.png`. Encode + write run on a background thread.
+    /// One or more sidebar checkboxes selected — ask for a folder;
+    /// `on_save_selected_picked` writes into it.
     fn save_selected_to_folder(&mut self) {
-        let with_depth = self.settings.export_depth_map;
-        let items: Vec<BatchSave> = self.batch.items.iter()
+        let targets = self.batch.items.iter()
             .filter(|i| i.selected && i.status == BatchStatus::Done)
+            .map(|i| i.id)
+            .collect();
+        self.ask_dialog(DialogRequest::SaveSelected { targets });
+    }
+
+    /// Write each image as `<source-stem>.prunr.<ext>` into `folder`.
+    /// Encode + write run on a background thread.
+    pub(super) fn on_save_selected_picked(&mut self, targets: &[u64], folder: PathBuf) {
+        let with_depth = self.settings.export_depth_map;
+        let items: Vec<BatchSave> = targets.iter()
+            .filter_map(|id| self.batch.find_by_id(*id))
             .filter_map(|item| Some(BatchSave {
                 filename: item.filename.clone(),
                 result: item.result_ref()?,
@@ -149,10 +159,10 @@ impl PrunrApp {
                 depth: with_depth.then(|| item.depth_export()),
             }))
             .collect();
-        let Some(folder) = self.system.pick_folder_dialog(
-            self.last_open_dir.as_deref(),
-            "Save Selected \u{2014} Choose Folder",
-        ) else { return };
+        if items.is_empty() {
+            self.toasts.error("Not saved — the images were removed");
+            return;
+        }
         let count = items.len();
         self.toasts.info(format!("Saving {count} image(s)..."));
         let tx = self.batch.bg_io.save_done_tx.clone();

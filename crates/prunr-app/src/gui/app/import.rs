@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::item::{BatchItem, ImageSource};
+use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -90,30 +91,32 @@ impl PrunrApp {
         self.load_image(bytes, filename);
     }
 
+    /// Open: ask for images; `on_open_picked` imports them.
     pub fn handle_open_dialog(&mut self) {
-        let paths = self.system.open_files_dialog(self.last_open_dir.as_deref());
-        if let Some(paths) = paths {
-            if let Some(first) = paths.first() {
-                self.last_open_dir = first.parent().map(|p| p.to_path_buf());
-            }
-            if paths.len() == 1 && self.batch.items.is_empty() {
-                // invariant: paths.len() == 1 checked in the guard above.
-                self.handle_open_path(paths.into_iter().next().unwrap());
-            } else {
-                // Send file paths for lazy loading — bytes read on demand.
-                let tx = self.batch.bg_io.file_load_tx.clone();
-                std::thread::spawn(move || {
-                    for path in paths {
-                        let name = path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("untitled")
-                            .to_string();
-                        if tx.send((path, name)).is_err() {
-                            break;
-                        }
+        self.ask_dialog(DialogRequest::OpenImages);
+    }
+
+    pub(super) fn on_open_picked(&mut self, paths: Vec<PathBuf>) {
+        if let Some(first) = paths.first() {
+            self.last_open_dir = first.parent().map(|p| p.to_path_buf());
+        }
+        if paths.len() == 1 && self.batch.items.is_empty() {
+            // invariant: paths.len() == 1 checked in the guard above.
+            self.handle_open_path(paths.into_iter().next().unwrap());
+        } else {
+            // Send file paths for lazy loading — bytes read on demand.
+            let tx = self.batch.bg_io.file_load_tx.clone();
+            std::thread::spawn(move || {
+                for path in paths {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("untitled")
+                        .to_string();
+                    if tx.send((path, name)).is_err() {
+                        break;
                     }
-                });
-            }
+                }
+            });
         }
     }
 

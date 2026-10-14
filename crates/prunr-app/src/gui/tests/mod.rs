@@ -9,3 +9,4 @@ mod per_model_interpretation_tests;
 mod tree_tests;
 mod surface_tests;
 mod layout_tests;
+mod dialog_tests;

@@ -69,7 +69,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
         if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(open_btn)), "Open", "Open one or more images.", Some(Action::Open)).clicked() {
-            app.pending_open_dialog = true;
+            app.handle_open_dialog();
         }
 
         if tooltip(icon_button(ui, ICON_STOREFRONT.codepoint), "Model Store", "Get more models: erasers, upscalers, faces and more.", None).clicked() {

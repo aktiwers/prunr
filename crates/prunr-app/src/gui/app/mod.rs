@@ -9,6 +9,7 @@ use super::item::{BatchItem, BatchStatus, Engine};
 use super::timeline::StepKind;
 use super::settings::Settings;
 use super::state::AppState;
+use super::system_bridge::{DialogAnswer, DialogRequest};
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
 use super::views::{canvas, cli_help, model_store, pipeline_flow, settings, sidebar, statusbar, toolbar};
@@ -26,6 +27,9 @@ mod tools;
 /// Quiet work shorter than this needs no pill; longer, the user wonders
 /// whether anything is happening.
 const BUSY_PILL_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often the frame loop looks for a file dialog's answer.
+const DIALOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt. 14 picked to balance "don't nag" with "remind on a
@@ -144,8 +148,6 @@ pub struct PrunrApp {
 
     /// Set by add_to_batch — forces the selection-change work in the next logic()
     pending_batch_sync: bool,
-    /// Set by toolbar Open button — processed in logic() where ctx is available
-    pub(crate) pending_open_dialog: bool,
     /// Toast notification system
     pub(crate) toasts: super::toasts::Toasts,
 
@@ -373,10 +375,11 @@ impl PrunrApp {
         let (_result_tx, worker_rx) = mpsc::channel::<WorkerResult>();
         // Test stub: no real platform clipboard available; SystemBridge::new
         // gracefully no-ops copy_image when the clipboard handle failed to
-        // initialize, so this is safe in headless test envs.
+        // initialize, so this is safe in headless test envs. File dialogs
+        // never show; tests answer them.
         let mut app = Self::init_state(
             Settings::default(),
-            super::system_bridge::SystemBridge::new(),
+            super::system_bridge::SystemBridge::new_for_test(),
             worker_tx,
             worker_rx,
         );
@@ -432,7 +435,6 @@ impl PrunrApp {
             canvas_switch_id: 0,
             result_switch_id: 0,
             pending_batch_sync: false,
-            pending_open_dialog: false,
             // Clears the brush's modifier hint in the same corner.
             toasts: super::toasts::Toasts::new(
                 egui_notify::Anchor::BottomLeft,
@@ -490,12 +492,32 @@ impl PrunrApp {
     /// UI thread and becomes the background when it lands
     /// (`land_bg_image`); a cancelled pick changes nothing.
     pub(crate) fn handle_pick_bg_image(&mut self, idx: usize) {
-        let Some(path) = self.system.pick_image_dialog(
-            self.last_open_dir.as_deref(),
-            "Choose background image",
-        ) else { return };
-        if let Some(id) = self.batch.items.get(idx).map(|i| i.id) {
-            self.batch.request_bg_image(id, path, true);
+        if let Some(item_id) = self.batch.items.get(idx).map(|i| i.id) {
+            self.ask_dialog(DialogRequest::Background { item_id });
+        }
+    }
+
+    fn on_background_picked(&mut self, item_id: u64, path: PathBuf) {
+        if self.batch.find_by_id(item_id).is_some() {
+            self.batch.request_bg_image(item_id, path, true);
+        }
+    }
+
+    /// Ask for a file dialog; every one starts in the last opened folder.
+    fn ask_dialog(&mut self, request: DialogRequest) {
+        self.system.ask_dialog(request, self.last_open_dir.clone());
+    }
+
+    /// Resume the action whose file dialog the user answered.
+    pub(crate) fn drain_dialog_answer(&mut self) {
+        let Some(DialogAnswer { request, paths }) = self.system.take_dialog_answer() else { return };
+        let Some(path) = paths.first().cloned() else { return };
+        match request {
+            DialogRequest::OpenImages => self.on_open_picked(paths),
+            DialogRequest::Background { item_id } => self.on_background_picked(item_id, path),
+            DialogRequest::SaveImage { item_id, preferred, .. } => self.on_save_image_picked(item_id, preferred, path),
+            DialogRequest::SaveLayers { targets } => self.on_save_layers_picked(&targets, path),
+            DialogRequest::SaveSelected { targets } => self.on_save_selected_picked(&targets, path),
         }
     }
 
@@ -634,6 +656,7 @@ impl PrunrApp {
             (self.save_preset.is_some(), "save_preset"),
             (self.runtime_prompt.is_some(), "runtime_prompt"),
             (self.pending_reset_confirm, "reset_confirm"),
+            (self.system.dialog_open(), "file_dialog"),
         ]
         .into_iter()
         .filter(|(open, _)| *open)
@@ -864,9 +887,6 @@ impl PrunrApp {
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::{self, Action};
         let pressed = shortcuts::pressed(ctx);
-        if std::mem::take(&mut self.pending_open_dialog) {
-            self.handle_open_dialog();
-        }
         // Ctrl+C arrives as egui's Copy event, intercepted in raw_input_hook.
         if std::mem::take(&mut self.pending_copy) {
             self.perform(Action::Copy, ctx);
@@ -1062,7 +1082,7 @@ impl eframe::App for PrunrApp {
         });
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
         super::theme::apply_motion(ctx, self.settings.animations);
         // Held while the pointer stays down, so the press that dismissed a
@@ -1076,6 +1096,13 @@ impl eframe::App for PrunrApp {
             self.handle_keyboard_shortcuts(ctx);
         }
         super::automation::pump(self, ctx);
+        self.system.show_dialog(ctx, frame);
+        self.drain_dialog_answer();
+        if self.system.dialog_open() {
+            // An idle Wayland window can drop the dialog thread's
+            // wake-up; polling lands the answer regardless.
+            ctx.request_repaint_after(DIALOG_POLL);
+        }
         self.flush_settings_save(ctx);
         drain_screenshot_replies(ctx);
         // Anything landing restarts the quiet clock: a long import keeps
@@ -1162,6 +1189,10 @@ impl eframe::App for PrunrApp {
             // Without this, egui keeps showing the DnD crosshair cursor because it
             // still thinks an internal drag is in progress.
             ui.ctx().stop_dragging();
+        }
+        // A dialog asked for while rendering shows from the next `logic()`.
+        if self.system.dialog_unshown() {
+            ui.ctx().request_repaint();
         }
     }
 }
