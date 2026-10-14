@@ -198,6 +198,8 @@ impl Clock for SystemClock {
 struct Pending {
     last_tweak_at: Instant,
     kind: PreviewKind,
+    /// The edit settled (slider released): the render is the one kept.
+    settled: bool,
 }
 
 /// State for an in-flight dispatch. Used to cancel when a new tweak arrives.
@@ -244,8 +246,11 @@ impl LivePreview {
         let is_new = !self.pending.contains_key(&item_id);
         self.pending
             .entry(item_id)
-            .and_modify(|p| p.kind = kind)
-            .or_insert_with(|| Pending { last_tweak_at: now, kind });
+            .and_modify(|p| {
+                p.kind = kind;
+                p.settled = false;
+            })
+            .or_insert_with(|| Pending { last_tweak_at: now, kind, settled: false });
         tracing::debug!(
             event = "upscale_tier2_mark_tweak",
             item_id,
@@ -264,6 +269,7 @@ impl LivePreview {
     /// Idempotent — no-op if there's no pending tweak for `item_id`.
     pub fn flush(&mut self, item_id: u64) {
         if let Some(p) = self.pending.get_mut(&item_id) {
+            p.settled = true;
             // Anti-date past DEBOUNCE so next tick dispatches immediately.
             // checked_sub guards against early-boot monotonic clock underflow.
             let now = self.clock.now();
@@ -277,11 +283,13 @@ impl LivePreview {
     /// (useful for `ctx.request_repaint_after`), or `None` if nothing pending.
     ///
     /// `snapshot` provides per-item inputs (tensors, settings, original image)
-    /// for any dispatches we fire this frame. Items that aren't in the
-    /// snapshot (e.g. tensor cache evicted) are silently skipped.
+    /// for any dispatches we fire this frame, told whether the edit has
+    /// settled (a release) or is a drag's in-between frame. Items that
+    /// aren't in the snapshot (e.g. tensor cache evicted) are silently
+    /// skipped.
     pub fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
-        F: FnMut(u64, PreviewKind) -> Option<DispatchInputs>,
+        F: FnMut(u64, PreviewKind, bool) -> Option<DispatchInputs>,
     {
         let now = self.clock.now();
         let mut ready_ids: Vec<u64> = Vec::new();
@@ -303,8 +311,8 @@ impl LivePreview {
             // switch), we keep the pending entry so the next tick retries.
             // Dropping it here silently swallowed the tweak and left the
             // user thinking live preview was dead.
-            let kind = match self.pending.get(&id) {
-                Some(p) => p.kind,
+            let (kind, settled) = match self.pending.get(&id) {
+                Some(p) => (p.kind, p.settled),
                 None => continue,
             };
             tracing::debug!(
@@ -314,7 +322,7 @@ impl LivePreview {
                 in_flight_count = self.in_flight.len(),
                 "tick: item ready for dispatch"
             );
-            let Some(inputs) = snapshot(id, kind) else {
+            let Some(inputs) = snapshot(id, kind, settled) else {
                 tracing::debug!(
                     event = "upscale_tier2_tick_no_snapshot",
                     item_id = id,
@@ -452,6 +460,9 @@ pub struct DispatchInputs {
     pub kind: PreviewKind,
     /// The item's timeline version, carried to the result.
     pub version: u64,
+    /// A drag's in-between frame: the depth look may be made at a smaller
+    /// size, and the result is not kept for the next one.
+    pub quick: bool,
     pub original: Arc<DynamicImage>,
     /// Where the preview starts when that is an earlier result (`None`: the
     /// source), recorded as the step's start on landing.
@@ -511,6 +522,7 @@ impl DispatchInputs {
         Self {
             kind,
             version,
+            quick: false,
             original,
             start: None,
             settings,
@@ -760,6 +772,9 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     RunOutput { built_faced, built_depth_photo, ..output }
 }
 
+/// The long side a drag's in-between depth look is made at.
+const QUICK_LOOK_SIDE: u32 = 2048;
+
 /// Swap `inputs.original` for the photo with the Depth chip's look on it:
 /// the one made last time when it still matches, or a fresh one, which
 /// is returned with its key for the item to keep.
@@ -768,6 +783,11 @@ fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, c
     let look = depth.look.filter(prunr_core::depth::DepthLook::is_active)?;
     if let Some(photo) = &depth.photo {
         inputs.original = Arc::clone(photo);
+        return None;
+    }
+    if inputs.quick {
+        let looked = look.apply_quick(&prunr_core::rgba_view(&inputs.original), &depth.map, QUICK_LOOK_SIDE)?;
+        inputs.original = Arc::new(DynamicImage::ImageRgba8(looked));
         return None;
     }
     let looked = look.apply(&prunr_core::rgba_view(&inputs.original), &depth.map)?;
@@ -1125,7 +1145,7 @@ mod tests {
         // tick at the same simulated `now` — DEBOUNCE elapsed since T0,
         // so the dispatch must be ready. `wait` is None because nothing's
         // pending after dispatch.
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _, _| None);
         assert!(
             wait.is_none(),
             "tick at frame 1 (200ms after T0) must clear the pending entry"
@@ -1137,6 +1157,26 @@ mod tests {
     /// that matters here is that the entry is RECOGNISED as ready, not
     /// that the rayon dispatch actually fires (which depends on
     /// whether the snapshot has the source RGBA decoded etc).
+    /// A drag's in-between frames are told apart from the release: the
+    /// snapshot sees `settled` only after a flush, and a new tweak after
+    /// it is a drag again.
+    #[test]
+    fn a_release_settles_the_render_and_a_new_tweak_does_not() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        let mut seen = Vec::new();
+        lp.mark_tweak(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE + Duration::from_millis(1));
+        lp.tick(|_, _, settled| { seen.push(settled); None });
+        lp.mark_tweak(1, PreviewKind::Mask);
+        lp.flush(1);
+        lp.tick(|_, _, settled| { seen.push(settled); None });
+        lp.mark_tweak(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE + Duration::from_millis(1));
+        lp.tick(|_, _, settled| { seen.push(settled); None });
+        assert_eq!(seen, vec![false, true, false]);
+    }
+
     #[test]
     fn tick_recognises_ready_entry_after_synthetic_debounce() {
         let clock = MockClock::new(Instant::now());
@@ -1144,12 +1184,12 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
 
         // Before DEBOUNCE — wait is Some(>0).
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _, _| None);
         assert!(wait.is_some(), "before DEBOUNCE tick should report a wait");
 
         // After DEBOUNCE — wait is None (entry is ready).
         clock.advance(DEBOUNCE + Duration::from_millis(1));
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _, _| None);
         assert!(
             wait.is_none(),
             "after DEBOUNCE tick should report no remaining wait (entry is ready)"
@@ -1160,7 +1200,7 @@ mod tests {
     fn tick_before_debounce_does_not_dispatch() {
         let mut lp = LivePreview::default();
         lp.mark_tweak(1, PreviewKind::Mask);
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _, _| None);
         assert!(wait.is_some(), "should still be pending");
         assert!(lp.in_flight.is_empty(), "no dispatch before debounce expires");
     }
@@ -1315,7 +1355,7 @@ mod tests {
         );
         lp.pending.insert(
             22,
-            Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask },
+            Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
         lp.result_tx.send(PreviewResult { version: 0, start: None,
             item_id: 22,

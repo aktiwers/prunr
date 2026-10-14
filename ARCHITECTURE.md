@@ -372,7 +372,7 @@ Depth Anything V2 Small measures a photo once (518 px long side, ~0.5 s) into a 
 | By depth | Magic Brush | The click's depth ± Range selects a band of the scene, ground included |
 | Depth map | Save options, `--depth-map` | 16-bit PNG, white = near |
 
-The depth look re-renders the photo in the live preview (`MaskRerun` for a cut-out, the photo rerun under No model), never the model, so a drag costs a re-render and no inference.
+The depth look re-renders the photo in the live preview (`MaskRerun` for a cut-out, the photo rerun under No model), never the model, so a drag costs a re-render and no inference. While a slider is held the look is made at 2048 px on the long side and resampled back (`DepthLook::apply_quick`, 0.5 s instead of 2.9 s at 24 MP); the render on release is full size.
 
 ## Edge Detection (TEED)
 
