@@ -17,7 +17,7 @@ impl PrunrApp {
         (with_region, without.len())
     }
 
-    /// Start the next queued upscale or colorize when the slot is free,
+    /// Start the next queued upscale, colorize or erase when the slot is free,
     /// with the shown image's settings, as a batch of cut-outs runs.
     pub(super) fn dispatch_next_queued_run(&mut self) {
         // An image gone from the batch, or one without a run, passes its

@@ -1,13 +1,10 @@
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 
-/// Filter-only Process result: `Ok(rgba)` on success, `Err(msg)` so load /
-/// decode failures take the same channel path as successful results
-/// (drained in `drain_background_channels`, mapped to `BatchStatus::Error`).
-/// An image's No-model result, and the start a chained pass built.
+/// An image's No-model result, and the start a chained pass built. A load
+/// or decode failure is an `Err` on the same channel (mapped to
+/// `BatchStatus::Error` in `drain_background_channels`).
 pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
 
-/// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
-/// image clears `decode_pending` instead of leaving the item stuck.
 /// A background picture loaded off the UI thread: the item, the file,
 /// whether the user picked it (it then becomes the background) or a preset
 /// names it (it fills in the picture the preset's settings refer to), and
@@ -19,6 +16,8 @@ pub struct BgImageLoad {
     pub result: Result<(image::DynamicImage, u64), String>,
 }
 
+/// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
+/// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
 /// What a selection texture was built from: the mask's content hash and
