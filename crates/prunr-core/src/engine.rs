@@ -151,11 +151,7 @@ impl EpKind {
                     EpSite::SdPart { part, .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
                     EpSite::Engine { .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
                 };
-                let mut p = ort::ep::CoreML::default();
-                if let Some(dir) = dir {
-                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
-                }
-                p.build()
+                coreml_provider(dir.as_deref()).build()
             }
             // No device id: DXCore's high-performance order picks the
             // discrete card on a hybrid laptop, where DXGI's index 0 is
@@ -206,6 +202,22 @@ impl EpKind {
             EpKind::Cuda => true,
             _ => false,
         }
+    }
+}
+
+/// CoreML set to compile ML Programs: NeuralNetwork, its default, takes no
+/// fp16 or int64 inputs, ConvTranspose or LayerNorm. A float32 ML
+/// Program runs on the GPU in fp32, never on the Neural Engine.
+///
+/// CoreML reuses what it compiled under `cache_dir` without checking
+/// input shapes: a session that pins its input dims must key the dir on
+/// them, or a model compiled for one tile size is reused for another.
+#[cfg(any(target_os = "macos", test))]
+fn coreml_provider(cache_dir: Option<&std::path::Path>) -> ort::ep::CoreML {
+    let p = ort::ep::CoreML::default().with_model_format(ort::ep::coreml::ModelFormat::MLProgram);
+    match cache_dir {
+        Some(dir) => p.with_model_cache_dir(dir.to_string_lossy()),
+        None => p,
     }
 }
 
@@ -729,6 +741,15 @@ mod tests {
             "record_failure must NOT fire on was_cached=true",
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coreml_compiles_ml_programs_into_the_given_cache() {
+        let dir = std::path::Path::new("/Users/ada/Library/Caches/prunr/ep_cache/coreml/u2net-1-ort1.24.1-v1");
+        let options = format!("{:?}", coreml_provider(Some(dir)));
+        assert!(options.contains(r#""ModelFormat": "MLProgram""#), "{options}");
+        assert!(options.contains(&format!(r#""ModelCacheDirectory": {:?}"#, dir.to_string_lossy())), "{options}");
+        assert!(!format!("{:?}", coreml_provider(None)).contains("ModelCacheDirectory"));
     }
 
     /// A provider the loaded runtime lacks must fail its registration,
