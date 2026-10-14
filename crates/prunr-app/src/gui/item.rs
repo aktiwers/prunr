@@ -541,8 +541,9 @@ pub(crate) struct BatchItem {
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
     pub(crate) subject: Option<SubjectOutline>,
-    /// The upscale under way's finished tiles, small, each in its square
-    /// of a preview of the whole image.
+    /// The run under way's finished tiles, small, each in its square of a
+    /// preview of the whole image: an upscale's, or an erase's over the
+    /// photo it started from.
     pub(crate) tile_preview: Option<egui::TextureHandle>,
     /// The images of the steps an undo and a redo go to (`BACK`, `AHEAD`),
     /// unpacked off the UI thread and held so they stay unpacked: either
@@ -1073,8 +1074,8 @@ impl BatchItem {
         texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
     }
 
-    /// An upscale has landed: its finished-tile preview, the whole image
-    /// by now, is shown until the result's texture lands and the result
+    /// A run has landed: its finished-tile preview, the whole image by
+    /// now, is shown until the result's texture lands and the result
     /// reveals over it. Without one, the shown image is held as usual.
     pub(crate) fn hold_tile_preview_for_reveal(&mut self) {
         match self.tile_preview.take() {
@@ -1104,10 +1105,10 @@ impl BatchItem {
         self.thumb_pending = true;
     }
 
-    /// Show `rgba` as the result: what is on screen is held to reveal it
-    /// over, and a waiting image is done.
+    /// Show `rgba` as the result: what is on screen, or the run's tile
+    /// preview, is held to reveal it over, and a waiting image is done.
     pub(crate) fn show_result(&mut self, rgba: Arc<image::RgbaImage>) {
-        self.hold_for_reveal();
+        self.hold_tile_preview_for_reveal();
         self.unpark_result();
         self.take_result(rgba);
         if self.status == BatchStatus::Pending {
@@ -1456,6 +1457,7 @@ impl BatchItem {
         self.job = None;
         self.reveal = None;
         self.subject = None;
+        self.tile_preview = None;
         let has_result = self.result_rgba.is_some() || self.result_parked();
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }

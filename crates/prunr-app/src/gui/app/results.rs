@@ -1223,6 +1223,55 @@ mod timeline_contract_tests {
         assert_eq!(app.batch.items[0].tile_preview.as_ref().map(|t| t.size()), Some([3, 2]), "the whole image's preview, made on the first tile");
     }
 
+    /// An erase's tiles, reported the way the SD bridge reports them, land
+    /// on its image's preview while its run is the one shown, and the
+    /// fill reveals over them. A run another took the pill from sends
+    /// nothing more; an erase that ends without a fill drops its tiles,
+    /// and a new one starts clear.
+    #[test]
+    fn an_erases_tiles_show_until_its_fill_reveals_over_them() {
+        use prunr_core::{ProgressUpdate, TilePreview};
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        let second = push_test_item(&mut app, 2);
+        second.dimensions = (4, 4);
+        second.source_rgba = Some(px(0));
+        let tile = |full_width| ProgressUpdate::TilePreview(TilePreview { x: 0, y: 0, width: 1, height: 2, full_width, full_height: 2, rgba: vec![200; 8] });
+        let erase = |app: &mut PrunrApp, item_id: u64| {
+            app.commit_selection_and_dispatch(item_id, mask(), StepKind::Stroke);
+            let idx = app.batch.index_of(item_id).unwrap();
+            assert!(app.dispatch_inpaint_for_item(idx));
+        };
+        let preview_size = |app: &PrunrApp, idx: usize| app.batch.items[idx].tile_preview.as_ref().map(|t| t.size());
+
+        erase(&mut app, 1);
+        app.processor.report_inpaint(1, tile(3));
+        app.pump_run_pictures(&ctx);
+        assert_eq!(preview_size(&app, 0), Some([3, 2]), "the tile lands on the image's preview");
+        let preview = app.batch.items[0].tile_preview.as_ref().map(|t| t.id());
+
+        erase(&mut app, 2);
+        app.processor.report_inpaint(1, tile(5));
+        app.processor.report_inpaint(2, tile(4));
+        app.pump_run_pictures(&ctx);
+        assert_eq!(preview_size(&app, 0), Some([3, 2]), "a run another replaced shows nothing more");
+        assert_eq!(preview_size(&app, 1), Some([4, 2]));
+
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.fail_inpaint_for_test(2, "failed");
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(app.batch.items[0].held_texture().map(|t| t.id()), preview, "the fill reveals over its tiles");
+        assert!(app.batch.items[0].tile_preview.is_none());
+        assert!(app.batch.items[1].tile_preview.is_none(), "an erase without a fill drops its tiles");
+
+        erase(&mut app, 2);
+        app.processor.report_inpaint(2, tile(4));
+        app.pump_run_pictures(&ctx);
+        assert!(preview_size(&app, 1).is_some());
+        erase(&mut app, 2);
+        assert!(app.batch.items[1].tile_preview.is_none(), "a new erase starts clear");
+    }
+
     /// Refine's after-the-model knobs re-finish the kept upscale; a Scale
     /// change needs a new run.
     #[test]

@@ -974,7 +974,9 @@ pub fn run_worker() -> ! {
                 let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
                 // Reports go out on this stroke's own thread, ahead of its
                 // InpaintDone on the same channel.
-                let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(inpaint_cancel.clone());
+                let progress = ipc_progress(item_id, evt_tx.clone())
+                    .with_cancel(inpaint_cancel.clone())
+                    .with_tile_previews(TILE_PREVIEW_EDGE);
                 let in_flight_for_thread = in_flight.clone();
                 // Clones reserved for the spawn-failure unwind path
                 // — the closure below moves the originals.
