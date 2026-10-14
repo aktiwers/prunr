@@ -467,27 +467,20 @@ impl BatchManager {
         std::thread::spawn(move || {
             let _slot = slots.acquire();
             let load = || source.load_bytes().map_err(|e| format!("Failed to load: {e}"));
-            let chained = matches!(base, Some(super::worker::RunImage::Kept { .. }));
-            let start = match base.map(|run| run.build(load)).transpose() {
-                Ok(start) => start,
-                Err(err) => {
-                    let _ = tx.send((item_id, Err(err), None));
-                    return;
-                }
-            };
-            let chain_start = start.as_ref().filter(|_| chained).map(Arc::clone);
+            let (start, chain_start) = base.map_or((None, None), |run| run.resolve(item_id, load));
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
                 let mut rgba = match start {
+                    // No effect: the pass is its start, without a copy.
+                    Some(start) if fill_style == prunr_core::FillStyle::None => return Ok(start),
                     Some(start) => Arc::unwrap_or_clone(start),
                     None => {
-                        let bytes = source.load_bytes()
-                            .map_err(|e| format!("Failed to load: {e}"))?;
+                        let bytes = load()?;
                         let original = prunr_core::load_image_from_bytes(&bytes)
                             .map_err(|_| "Decode failed".to_string())?;
                         drop(bytes);
-                        original.to_rgba8()
+                        original.into_rgba8()
                     }
                 };
                 prunr_core::apply_fill_style(&mut rgba, fill_style);
@@ -731,26 +724,13 @@ impl BatchManager {
         self.items.iter().any(BatchItem::has_pending_work)
     }
 
-    /// The images in `ids` a Process by `cutter` builds on: a new step
-    /// (`step` is `Some`) on another model's cut-out. A knob's re-run
-    /// redoes its step instead.
-    pub(crate) fn chained_cuts(&self, ids: &HashSet<u64>, step: Option<super::timeline::StepKind>, cutter: super::item::Cutter) -> HashSet<u64> {
-        if step.is_none() {
-            return HashSet::new();
-        }
-        self.items.iter()
-            .filter(|i| ids.contains(&i.id) && i.cuts_anothers_cutout(cutter))
-            .map(|i| i.id)
-            .collect()
-    }
-
-    /// Sort the images in `ids` by the run each needs (`BatchItem::run_tier`).
-    /// One in `chained` cuts another model's cut-out: a full run, whatever
-    /// its recipe says.
-    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind, chained: &HashSet<u64>) -> ClassifiedTiers {
+    /// Sort the images in `ids` by the run a `step` by `cutter` needs
+    /// (`BatchItem::run_tier`). One that chains onto another model's
+    /// cut-out is a full run, whatever its recipe says.
+    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind, step: Option<super::timeline::StepKind>, cutter: super::item::Cutter) -> ClassifiedTiers {
         let mut tiers = ClassifiedTiers::default();
         for item in self.in_set(ids) {
-            if chained.contains(&item.id) {
+            if item.chains(step, cutter) {
                 tiers.tier1.insert(item.id);
                 continue;
             }

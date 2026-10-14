@@ -94,7 +94,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let keep_sd_before = app.settings.keep_sd_loaded;
     let processor_before = app.settings.processor;
-    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::fit_to_window(ctx, theme::SETTINGS_MODAL_SIZE), |ui| {
+    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::SETTINGS_MODAL_SIZE, |ui| {
         theme::apply_modal_visuals(ui);
         let height = ui.available_height();
         let mut close = false;
@@ -375,10 +375,10 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
     use super::chip::Choice;
     group_heading(ui, "Processing");
     let max_jobs = settings.max_jobs();
-    let jobs_hint = if !settings.runs_on_host_cpu() {
-        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
-    } else {
+    let jobs_hint = if settings.runs_on_host_cpu() {
         format!("Images at once. 1\u{2013}{max_jobs}. BiRefNet takes one at a time on the CPU, since one run already uses every core.")
+    } else {
+        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
     };
     let gpu = settings.is_gpu();
     group(ui, |rows| {

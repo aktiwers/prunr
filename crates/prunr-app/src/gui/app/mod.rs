@@ -575,25 +575,23 @@ impl PrunrApp {
         if !self.can_process_intent() {
             return;
         }
-        if self.settings.model.is_upscale() || self.settings.model.is_colorize() {
-            // One image at a time: the rest wait for the slot.
-            self.processor.queue_runs(self.batch.items_to_process());
-            self.dispatch_next_queued_run();
-            return;
-        }
-        if self.settings.model.is_inpaint() {
+        let model = self.settings.model;
+        let ids = if model.is_upscale() || model.is_colorize() {
+            self.batch.items_to_process()
+        } else if model.is_inpaint() {
             let (with_region, without) = self.erase_targets();
-            // One at a time through the same queue as upscales: a fill's
-            // working set can be most of the machine's RAM.
-            let ids = with_region.iter().map(|&idx| self.batch.items[idx].id).collect();
-            self.processor.queue_runs(ids);
-            self.dispatch_next_queued_run();
             if without > 0 {
                 self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
             }
+            with_region.iter().map(|&idx| self.batch.items[idx].id).collect()
         } else {
             self.handle_remove_bg();
-        }
+            return;
+        };
+        // One image at a time through the run queue: an upscale's or a
+        // fill's working set can be most of the machine's RAM.
+        self.processor.queue_runs(ids);
+        self.dispatch_next_queued_run();
     }
 
     /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
@@ -1190,7 +1188,7 @@ impl PrunrApp {
         // is no longer using, whatever the direction.
         self.processor.release_all_sessions();
         self.prewarm_in_process_eraser();
-        let installed = self.settings.model.to_model_id().is_some_and(prunr_models::is_available);
+        let installed = self.hardware_install_cache.has_model(self.settings.model);
         if let Some(cfg) = Self::initial_processing_config(&self.settings).filter(|_| installed) {
             self.processor.schedule_seg_warm(cfg, std::time::Instant::now());
         }
