@@ -72,6 +72,11 @@ pub fn runtime_tag() -> Option<&'static str> {
 /// The library loaded by `init`.
 static LOADED: OnceLock<PathBuf> = OnceLock::new();
 
+/// The runtime library this process loaded, once it has.
+pub fn loaded_dylib() -> Option<&'static Path> {
+    LOADED.get().map(PathBuf::as_path)
+}
+
 pub(crate) fn tag_for(version: Option<&str>, len: u64, modified: u64) -> String {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in len.to_le_bytes().into_iter().chain(modified.to_le_bytes()) {

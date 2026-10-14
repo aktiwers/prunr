@@ -414,10 +414,11 @@ Every session in the workspace starts from `ort_runtime::session_builder()`, whi
 
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
-| Linux / Windows | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA / DirectML builds via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| Linux | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| Windows | CPU-only ORT 1.24.1 (PyPI wheel) | DirectML or OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads when both are installed; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
 | macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
 
-Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers the runtime the hardware suits: DirectML for a Windows machine with an NVIDIA or AMD GPU or one with 2 GB of dedicated memory, else OpenVINO for an Intel iGPU. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
 
 ### EP ladder
 
