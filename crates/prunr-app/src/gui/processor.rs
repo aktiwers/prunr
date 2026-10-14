@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use prunr_core::ProcessingRecipe;
@@ -528,7 +528,7 @@ impl PictureSink {
 impl prunr_core::ProgressSink for PictureSink {
     fn report(&self, update: prunr_core::ProgressUpdate) {
         match update {
-            update @ prunr_core::ProgressUpdate::TilePreview(_) => {
+            update @ (prunr_core::ProgressUpdate::TilePreview(_) | prunr_core::ProgressUpdate::Faces(_)) => {
                 if (self.current)() {
                     let _ = self.pictures.send((self.item_id, update));
                 }
@@ -832,6 +832,9 @@ pub(crate) struct Processor {
     faces_rx: mpsc::Receiver<FacesResult>,
     /// The latest face search's stop flag, for Cancel and Esc.
     faces_stop: Mutex<Arc<AtomicBool>>,
+    /// The latest face search's number: an earlier search's pictures are
+    /// dropped.
+    faces_latest: Arc<AtomicU64>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -888,6 +891,7 @@ impl Processor {
             faces_tx,
             faces_rx,
             faces_stop: Mutex::default(),
+            faces_latest: Arc::default(),
             depth,
             seg_warm_due: None,
         }
@@ -1869,24 +1873,25 @@ impl Processor {
     }
 
     /// Find and redraw the faces in `photo` with `model` on a thread; the
-    /// capsule shows it. The photo is unpacked there, never here.
-    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId) {
+    /// capsule shows it, and the image the faces as they are found and
+    /// redrawn, each blended in at `blend`. The photo is unpacked there,
+    /// never here.
+    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend) {
         let tx = self.faces_tx.clone();
-        let stop = self.begin_faces_search();
+        let (stop, current) = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
-        let (progress, run) = if self.dispatch_progress.read().is_none() {
-            let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
-            let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::clone(&stop));
-            (progress, Some(run))
-        } else {
-            (prunr_core::Progress::none().with_cancel(Arc::clone(&stop)), None)
-        };
+        let run = self.dispatch_progress.read().is_none().then(|| {
+            self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()))
+        });
+        let progress = PictureSink::new(item_id, run.clone(), current, self.picture_sender())
+            .into_progress()
+            .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
             let search = std::panic::AssertUnwindSafe(|| {
                 photo.load()
                     .ok_or_else(|| "the photo is no longer there".to_string())
-                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, &progress).map_err(|e| e.to_string()))
+                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, blend, &progress).map_err(|e| e.to_string()))
             });
             let result = std::panic::catch_unwind(search).unwrap_or_else(|_| Err("the face model stopped unexpectedly".to_string()));
             if let Some(run) = run {
@@ -1897,12 +1902,15 @@ impl Processor {
         });
     }
 
-    /// A stop flag for the face search starting now; Cancel and Esc reach
-    /// the latest one.
-    fn begin_faces_search(&self) -> Arc<AtomicBool> {
+    /// A stop flag for the face search starting now, which Cancel and Esc
+    /// reach, and whether its pictures may still land: while it is the
+    /// latest search and not stopped.
+    fn begin_faces_search(&self) -> (Arc<AtomicBool>, impl Fn() -> bool + Send + Sync + 'static) {
         let stop = Arc::new(AtomicBool::new(false));
         *self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&stop);
-        stop
+        let search = self.faces_latest.fetch_add(1, Ordering::AcqRel) + 1;
+        let (latest, stopped) = (Arc::clone(&self.faces_latest), Arc::clone(&stop));
+        (stop, move || latest.load(Ordering::Acquire) == search && !stopped.load(Ordering::Acquire))
     }
 
     /// Stop the face search under way; it ends after the face it is on.
@@ -2408,15 +2416,37 @@ mod tests {
     // ── is_upscale_in_flight + admission_check ─────────────────────────────
 
     /// Cancel reaches the face search under way, and a new search starts
-    /// with a flag of its own.
+    /// with a flag of its own. A search's pictures land while it is the
+    /// latest and not stopped.
     #[test]
     fn cancel_stops_the_latest_face_search() {
         let p = fixture();
-        let first = p.begin_faces_search();
+        let (first, first_current) = p.begin_faces_search();
+        assert!(first_current());
         p.cancel_faces();
         assert!(first.load(Ordering::Acquire));
-        let next = p.begin_faces_search();
+        assert!(!first_current(), "a stopped search's pictures are dropped");
+        let (next, next_current) = p.begin_faces_search();
         assert!(!next.load(Ordering::Acquire), "a new search is not born cancelled");
+        assert!(next_current());
+        let (_, newest_current) = p.begin_faces_search();
+        assert!(!next_current() && newest_current(), "an earlier search's pictures are dropped");
+    }
+
+    /// A face search's pictures (the faces found, each one redrawn) reach
+    /// the canvas's channel while it is the latest search, with no pill
+    /// of its own when another run has it.
+    #[test]
+    fn a_face_searchs_pictures_flow_while_it_is_the_latest() {
+        use prunr_core::{ProgressSink, ProgressUpdate};
+        let p = fixture();
+        let (_, current) = p.begin_faces_search();
+        let sink = PictureSink::new(3, None, current, p.picture_sender());
+        sink.report(ProgressUpdate::Faces(Vec::new()));
+        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![(3, ProgressUpdate::Faces(Vec::new()))]);
+        let _next = p.begin_faces_search();
+        sink.report(ProgressUpdate::Faces(Vec::new()));
+        assert!(p.picture_rx.try_recv().is_err(), "a newer search took over");
     }
 
     #[test]
@@ -2443,7 +2473,7 @@ mod tests {
         let mut p = fixture();
         let _batch = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject"));
         // Not a face model: the search fails at once, without loading anything.
-        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta);
+        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let landed = loop {
             if let Some(r) = p.pump_faces_results().pop() { break r; }
