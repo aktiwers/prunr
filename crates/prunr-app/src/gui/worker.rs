@@ -6,31 +6,47 @@ use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
+use prunr_core::IDLE_RELEASE as WARM_IDLE;
 
 /// Maximum time the subprocess may stay silent with in-flight work before we
 /// treat it as a hung crash. Real batches emit Progress events every few
 /// hundred ms; 60s of silence means something is wrong.
 const HANG_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Graceful-shutdown budget at the end of a batch. Long enough for the child
-/// to drop its model caches cleanly, short enough that a misbehaving worker
-/// doesn't block the UI thread indefinitely.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a loaded worker stays warm unused; the same as the LaMa
-/// session and the SD worker.
-const WARM_IDLE: Duration = Duration::from_secs(300);
-/// The same after a run of a model whose working memory stays with it:
-/// BiRefNet keeps 5.5 GB on OpenVINO after its first image, against 1.2 GB
-/// loaded. A minute still covers a tweak and Process again.
+/// Graceful-shutdown budget when a warm worker is released. The bridge
+/// waits it out, so a Process sent meanwhile waits too; a well-behaved
+/// child exits well inside it.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a worker stays warm after a run of a model whose working memory
+/// stays with it: BiRefNet keeps 5.5 GB on OpenVINO after its first image,
+/// against 1.2 GB loaded. A minute still covers a tweak and Process again.
 const WARM_IDLE_AFTER_HEAVY_RUN: Duration = Duration::from_secs(60);
 /// A model counts as heavy from this registry working set up.
 const HEAVY_WORKING_SET_MB: u32 = 2000;
 
+/// The worker kept loaded between batches, and when it goes if unused.
+struct WarmWorker {
+    sub: SubprocessManager,
+    cfg: ProcessingConfig,
+    release_at: Instant,
+}
+
+impl WarmWorker {
+    fn release(mut self, reason: &'static str) {
+        tracing::info!(model = ?self.cfg.model, reason, "seg subprocess released");
+        let _ = self.sub.shutdown_with_timeout(RELEASE_TIMEOUT);
+    }
+}
+
+/// The engines a batch builds: one per image of its first burst, up to
+/// the jobs it may run at once.
+fn pool_jobs(jobs: usize, first_burst: usize) -> usize {
+    jobs.min(first_burst.max(1))
+}
+
 /// When the worker that just ran a batch of `model` is released if unused.
 fn idle_after_run(model: ModelKind) -> Duration {
-    let id: prunr_models::ModelId = model.into();
-    let heavy = prunr_models::descriptor(id).is_some_and(|d| d.working_set_mb >= HEAVY_WORKING_SET_MB);
-    if heavy { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
+    if super::memory::working_set_mb(model) >= HEAVY_WORKING_SET_MB { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
 }
 
 /// True when the subprocess is alive but hasn't produced events for too long.
@@ -237,12 +253,14 @@ pub struct ProcessingConfig {
 }
 
 impl ProcessingConfig {
-    /// Whether a worker built for `self` can run `next`: the same model
-    /// on the same processor, with a pool at least as large. Mask, Sketch
-    /// mode and line settings are not part of it; a batch sends those with
-    /// `Configure`.
-    pub fn reusable_by(&self, next: &ProcessingConfig) -> bool {
-        self.model == next.model && self.force_cpu == next.force_cpu && self.jobs >= next.jobs
+    /// Whether a worker built for `self` can run `next` on `provider`: the
+    /// same model on the same processor, with a pool at least as large (two
+    /// job counts can make the same pool: BiRefNet on the CPU builds one
+    /// either way). Mask, Sketch mode and line settings are not part of it;
+    /// a batch sends those with `Configure`.
+    pub fn reusable_by(&self, next: &ProcessingConfig, provider: &str) -> bool {
+        let engines = |c: &ProcessingConfig| prunr_core::batch::engine_pool_size(c.model, c.jobs, c.force_cpu, provider);
+        self.model == next.model && self.force_cpu == next.force_cpu && engines(self) >= engines(next)
     }
 }
 
@@ -330,19 +348,15 @@ pub(crate) fn spawn_worker(
             // thread). If a Process click arrives during warm-up, it
             // queues on msg_rx and gets picked up once the sub is live.
             // The warm worker and when it is released if still unused.
-            let mut warm: Option<(SubprocessManager, ProcessingConfig, Instant)> =
-                prewarm.and_then(|cfg| spawn_warm(cfg, &res_tx, &ctx));
+            let mut warm: Option<WarmWorker> = prewarm.and_then(|cfg| spawn_warm(cfg, &res_tx, &ctx));
 
             loop {
-                let wait = warm.as_ref().map_or(WARM_IDLE, |(_, _, release_at)| release_at.saturating_duration_since(Instant::now()));
+                let wait = warm.as_ref().map_or(WARM_IDLE, |w| w.release_at.saturating_duration_since(Instant::now()));
                 let msg = match msg_rx.recv_timeout(wait) {
                     Ok(msg) => msg,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if warm.as_ref().is_some_and(|(_, _, release_at)| Instant::now() >= *release_at) {
-                            if let Some((mut sub, cfg, _)) = warm.take() {
-                                tracing::info!(model = ?cfg.model, "seg subprocess released after idling");
-                                let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
-                            }
+                        if let Some(w) = warm.take_if(|w| Instant::now() >= w.release_at) {
+                            w.release("idle");
                         }
                         continue;
                     }
@@ -350,18 +364,16 @@ pub(crate) fn spawn_worker(
                 };
                 match msg {
                     WorkerMessage::ReleaseWarm => {
-                        if let Some((mut sub, cfg, _)) = warm.take() {
-                            tracing::info!(model = ?cfg.model, "seg subprocess released on model switch");
-                            let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                        if let Some(w) = warm.take() {
+                            w.release("model switch");
                         }
                     }
                     WorkerMessage::Warm(cfg) => {
-                        if warm.as_ref().is_some_and(|(_, have, _)| have.reusable_by(&cfg)) {
+                        if warm.as_ref().is_some_and(|w| w.cfg.reusable_by(&cfg, &prunr_core::OrtEngine::detect_active_provider())) {
                             continue;
                         }
-                        if let Some((mut sub, old, _)) = warm.take() {
-                            tracing::info!(model = ?old.model, "seg subprocess released for the new model");
-                            let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                        if let Some(w) = warm.take() {
+                            w.release("another model picked");
                         }
                         warm = spawn_warm(*cfg, &res_tx, &ctx);
                     }
@@ -369,20 +381,18 @@ pub(crate) fn spawn_worker(
                         items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
-                        // The pool this batch needs: one engine per image
-                        // of its first burst, up to the jobs setting.
-                        let needed = ProcessingConfig { jobs: config.jobs.min(items.len().max(1)), ..(*config).clone() };
+                        let needed = ProcessingConfig { jobs: pool_jobs(config.jobs, items.len()), ..(*config).clone() };
                         let mut reuse: Option<(SubprocessManager, ProcessingConfig)> = None;
                         let respawn_reason = match warm.take() {
                             None => Some("no_warm_worker"),
-                            Some((mut sub, cfg, _)) => {
-                                if !sub.is_alive() {
+                            Some(mut w) => {
+                                if !w.sub.is_alive() {
                                     Some("warm_worker_dead")
-                                } else if cfg.reusable_by(&needed) {
-                                    reuse = Some((sub, cfg));
+                                } else if w.cfg.reusable_by(&needed, &prunr_core::OrtEngine::detect_active_provider()) {
+                                    reuse = Some((w.sub, w.cfg));
                                     None
                                 } else {
-                                    let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                                    w.release("engines differ");
                                     Some("engines_differ")
                                 }
                             }
@@ -403,10 +413,7 @@ pub(crate) fn spawn_worker(
                             items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
                         warm = run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx)
-                            .map(|(sub, cfg)| {
-                                let release_at = Instant::now() + idle_after_run(cfg.model);
-                                (sub, cfg, release_at)
-                            });
+                            .map(|(sub, cfg)| WarmWorker { release_at: Instant::now() + idle_after_run(cfg.model), sub, cfg });
                     }
                 }
             }
@@ -664,7 +671,7 @@ fn spawn_and_initial_burst(
     }
     // Cap engines at the number of Tier 1 items — Tier 2 + AddEdge don't
     // use the seg engine pool.
-    let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
+    let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
     let (mut sub, engines) = match warm {
         Some(pair) => pair,
@@ -1183,7 +1190,7 @@ fn spawn_warm(
     cfg: ProcessingConfig,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) -> Option<(SubprocessManager, ProcessingConfig, Instant)> {
+) -> Option<WarmWorker> {
     let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
     let started = Instant::now();
     match SubprocessManager::spawn(model, jobs, mask, force_cpu, WorkerLines::app(line_mode, edge)) {
@@ -1191,7 +1198,7 @@ fn spawn_warm(
             tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?model, line_mode = ?line_mode, "subprocess cold-start");
             let _ = res_tx.send(WorkerResult::BackendReady(provider));
             ctx.request_repaint();
-            Some((sub, cfg, Instant::now() + WARM_IDLE))
+            Some(WarmWorker { sub, cfg, release_at: Instant::now() + WARM_IDLE })
         }
         Err(err) => {
             tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
@@ -1321,11 +1328,16 @@ mod tests {
         lines.mask.gamma = 2.0;
         lines.edge.edge_scale = prunr_core::EdgeScale::Fine;
         lines.jobs = 1;
-        assert!(built.reusable_by(&lines), "mask, Sketch and lines travel with the batch");
-        assert!(built.reusable_by(&ProcessingConfig { jobs: 4, ..built.clone() }));
-        assert!(!built.reusable_by(&ProcessingConfig { jobs: 5, ..built.clone() }), "a larger pool needs a new worker");
-        assert!(!built.reusable_by(&ProcessingConfig { model: ModelKind::Silueta, ..built.clone() }));
-        assert!(!built.reusable_by(&ProcessingConfig { force_cpu: true, ..built.clone() }));
+        let on = |a: &ProcessingConfig, b: &ProcessingConfig| a.reusable_by(b, "CPU");
+        assert!(on(&built, &lines), "mask, Sketch and lines travel with the batch");
+        assert!(on(&built, &ProcessingConfig { jobs: 4, ..built.clone() }));
+        assert!(!on(&built, &ProcessingConfig { model: ModelKind::Silueta, ..built.clone() }));
+        assert!(!on(&built, &ProcessingConfig { force_cpu: true, ..built.clone() }));
+        // On the CPU, Silueta builds an engine per job; BiRefNet one whatever the jobs.
+        let with = |model, jobs| ProcessingConfig { model, jobs, ..built.clone() };
+        assert!(!on(&with(ModelKind::Silueta, 4), &with(ModelKind::Silueta, 5)), "a larger pool needs a new worker");
+        assert!(on(&with(ModelKind::BiRefNetLite, 1), &with(ModelKind::BiRefNetLite, 3)), "the same pool from other job counts");
+        assert!(!with(ModelKind::BiRefNetLite, 1).reusable_by(&with(ModelKind::BiRefNetLite, 3), "CUDA"), "a GPU builds one per job, up to two");
     }
 
     #[test]

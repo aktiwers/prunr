@@ -18,7 +18,7 @@
 //! - Bundle load refuses below the model's `working_set_mb` free RAM.
 //!   ORT graph optimization + UNet activations together push 6-10 GB
 //!   transient on this codepath; the floor protects against swap thrash.
-//! - Idle bundle release (`SD_IDLE_RELEASE_SECS`) drops the cached 4
+//! - Idle bundle release (`crate::IDLE_RELEASE`) drops the cached 4
 //!   ORT sessions after no use — reclaims ~4-6 GB so users who erased
 //!   ten minutes ago aren't carrying SD weights for the rest of the
 //!   session.
@@ -85,12 +85,6 @@ fn sd_spec(id: prunr_models::ModelId) -> prunr_models::SdSpec {
 /// pre-allocates its own iGPU-shared buffer (which on integrated GPUs
 /// IS RAM). Threshold lives in `ModelDescriptor.working_set_mb` so the
 /// gate scales when a new SD variant ships with a different footprint.
-/// Idle window after which a cached SD session bundle is dropped to
-/// release its ~4-6 GB resident set back to the OS. Trade-off: rebuilding
-/// pays the 10-30s session-build cost on the next stroke; in exchange a
-/// user who finished erasing 5 minutes ago doesn't carry the weights for
-/// the rest of the session.
-const SD_IDLE_RELEASE_SECS: u64 = 300;
 /// CLIP-ViT-L/14 token sequence length used by SD 1.5.
 const CLIP_SEQ_LEN: usize = 77;
 /// CLIP-ViT-L/14 BOS / EOS / pad ids — same value for EOS and pad in
@@ -1238,7 +1232,7 @@ fn ensure_sweeper_running() {
             .name("sd-idle-sweeper".to_string())
             .spawn(|| {
                 let interval = Duration::from_secs(SD_SWEEP_INTERVAL_SECS);
-                let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
+                let idle = crate::IDLE_RELEASE;
                 loop {
                     std::thread::sleep(interval);
                     let cache = sd_cache();
@@ -1248,7 +1242,7 @@ fn ensure_sweeper_running() {
                     if dropped > 0 {
                         tracing::info!(
                             dropped,
-                            idle_secs = SD_IDLE_RELEASE_SECS,
+                            idle_secs = crate::IDLE_RELEASE.as_secs(),
                             rss_mb = process_rss_mb(),
                             "SD: background sweeper released idle session(s)",
                         );
@@ -1264,7 +1258,7 @@ impl SdSession {
         ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
-        let idle = Duration::from_secs(SD_IDLE_RELEASE_SECS);
+        let idle = crate::IDLE_RELEASE;
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the bundle build.
@@ -1274,7 +1268,7 @@ impl SdSession {
             if dropped > 0 {
                 tracing::info!(
                     dropped,
-                    idle_secs = SD_IDLE_RELEASE_SECS,
+                    idle_secs = crate::IDLE_RELEASE.as_secs(),
                     rss_mb = process_rss_mb(),
                     "SD: released idle session bundle(s)",
                 );
