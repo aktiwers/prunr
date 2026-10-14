@@ -722,6 +722,10 @@ mod tests {
             ProgressUpdate::Tiles(vec![TileRect { x: 0.0, y: 0.5, w: 0.25, h: 0.5 }]),
             ProgressUpdate::Tile { index: 0, done: true },
             ProgressUpdate::Subject(prunr_core::SubjectHint { width: 2, height: 1, coverage: vec![0, 255] }),
+            ProgressUpdate::Faces(vec![prunr_core::face::FacePlace::of(
+                &prunr_core::face::Face { score: 0.9, bbox: [0.0; 4], landmarks: [[30.0, 40.0], [60.0, 40.0], [45.0, 55.0], [33.0, 70.0], [57.0, 70.0]] },
+                [96, 128],
+            )]),
             ProgressUpdate::TilePreview(prunr_core::TilePreview { x: 1, y: 0, width: 1, height: 1, full_width: 2, full_height: 1, rgba: vec![1, 2, 3, 4] }),
         ] {
             roundtrip(&SubprocessEvent::Report { item_id: 9, update });

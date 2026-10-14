@@ -115,6 +115,9 @@ pub enum ProgressUpdate {
     Tile { index: u32, done: bool },
     /// Where the subject is, as soon as segmentation has found it.
     Subject(crate::subject::SubjectHint),
+    /// The faces a face search found, as soon as it has, before any is
+    /// redrawn.
+    Faces(Vec<crate::face::FacePlace>),
     /// A finished tile's result, small, for the listener to show in place.
     TilePreview(TilePreview),
 }
@@ -376,7 +379,7 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
                     return Err(format!("preview tile {}×{} at {},{} outside its {}×{} image", t.width, t.height, t.x, t.y, t.full_width, t.full_height));
                 }
             }
-            ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) => {}
+            ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) => {}
         }
     }
     for (done, total, unit) in last.into_iter().flatten() {

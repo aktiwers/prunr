@@ -143,7 +143,7 @@ impl DispatchProgress {
                 self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
             // Pictures for the image, not counted.
-            ProgressUpdate::Subject(_) | ProgressUpdate::TilePreview(_) => {}
+            ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) | ProgressUpdate::TilePreview(_) => {}
             &ProgressUpdate::Tile { index, done } => {
                 if let Some(state) = Arc::make_mut(&mut self.tile_states).get_mut(index as usize) {
                     *state = if done { TileState::Done } else { TileState::Running };
