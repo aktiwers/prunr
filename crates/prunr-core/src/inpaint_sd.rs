@@ -1434,6 +1434,7 @@ fn build_part_with_ep_ladder(
                 );
             }
         };
+        let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
         let registered = builder.with_execution_providers([ep.provider(
             id,
             EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() },
@@ -1449,6 +1450,7 @@ fn build_part_with_ep_ladder(
         let mut session = match built.commit_from_file(&load_path) {
             Ok(s) => {
                 tracing::info!(?id, part = %key, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
+                coverage.report(id, Some(key));
                 s
             }
             Err(e) => {
