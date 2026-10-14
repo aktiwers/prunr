@@ -5,9 +5,23 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Cutter, Engine, ImageSource, KeptRunTier};
 use crate::gui::live_preview::PreviewKind;
+use crate::gui::processor::RunInput;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
+
+/// Why an upscale to `out` cannot run in `free` bytes, with the model's
+/// own `working_set_mb` beside it; `None` when it fits.
+fn too_large_to_upscale(out: (u32, u32), working_set_mb: u32, free: u64) -> Option<String> {
+    let needed = prunr_core::upscale::peak_bytes(out.0, out.1) + u64::from(working_set_mb) * 1024 * 1024;
+    (needed > free).then(|| {
+        use crate::gui::views::format_byte_size;
+        format!(
+            "Too large to upscale: {}\u{00d7}{} needs about {} of free memory, {} is free. Undo to a smaller image or pick a lower Scale.",
+            out.0, out.1, format_byte_size(needed), format_byte_size(free),
+        )
+    })
+}
 
 impl PrunrApp {
     /// The target images an erase runs on (those with a painted region),
@@ -41,10 +55,11 @@ impl PrunrApp {
     }
 
     /// Process on an upscaler or the colorizer. Every target takes the
-    /// shown image's settings first, as a cut-out run does; one already
-    /// showing this model's run as asked is left alone, one that took
-    /// only a Refine or Strength change finishes its kept run again, and
-    /// the rest queue for a run.
+    /// shown image's settings first, as a cut-out run does. One that took
+    /// only a Refine or Strength change finishes its kept run again; one
+    /// already showing this model's run as asked is enlarged again by an
+    /// upscaler and left alone by the colorizer (its run would give the
+    /// same picture); the rest queue for a run.
     pub(super) fn process_kept_run_items(&mut self) {
         let model = if self.settings.model.is_colorize() { crate::gui::settings::COLORIZER } else {
             let Some(kind) = self.settings.model.dispatch_model_kind() else { return };
@@ -64,6 +79,7 @@ impl PrunrApp {
         for id in ids {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             match item.kept_run_tier(model) {
+                KeptRunTier::UpToDate if model.is_upscale() => runs.push(id),
                 KeptRunTier::UpToDate => up_to_date += 1,
                 KeptRunTier::Refinish => {
                     // The shown image's own knob change is a step already.
@@ -94,7 +110,6 @@ impl PrunrApp {
             Some(id) => id,
             None => return false,
         };
-        let input = item.run_input_or_source(Engine::Upscale);
         let output_scale = item.settings.output_scale;
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
@@ -107,10 +122,20 @@ impl PrunrApp {
             }
         };
         let recipe = item.settings.current_recipe(model_kind);
+        let start = item.next_upscale_start(model_kind);
+        let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims);
+        let out = (w.saturating_mul(output_scale.factor()), h.saturating_mul(output_scale.factor()));
+        let free = crate::hardware::available_ram_bytes_throttled();
+        if let Some(why) = too_large_to_upscale(out, crate::gui::memory::working_set_mb(model_kind), free) {
+            tracing::warn!(item_id, out_w = out.0, out_h = out.1, free, "upscale refused: too large for free memory");
+            self.toasts.error(why);
+            return false;
+        }
+        let input = start.as_ref().and_then(|s| s.image.load()).map_or_else(|| item.original_run_input(), RunInput::Decoded);
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
         tracing::info!(item_id, ?model_id, ?run_model, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
-            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+            item.start_job_at(Some(StepKind::Upscale), Engine::Upscale, start);
         }
         self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe);
         true
@@ -420,6 +445,7 @@ mod process_targets_tests {
     use crate::gui::settings::SettingsModel;
     use crate::gui::tests::fixtures::push_test_item;
     use crate::gui::timeline::StepKind;
+    use crate::gui::item::Engine;
 
     fn mask() -> std::sync::Arc<prunr_core::selection::MaskArtifact> {
         let mut cells = vec![0i8; 16];
@@ -546,32 +572,70 @@ mod process_targets_tests {
         assert_eq!(app.processor.next_queued_run(), None, "every image that could not start passed its turn on; none is left waiting");
     }
 
-    /// Process on an upscaler leaves an image whose upscale is what the
-    /// settings ask alone, and re-finishes the kept upscale of one that
-    /// took only a Refine change from the shown image.
+    /// Process on an upscaler enlarges an image whose upscale is what
+    /// the settings ask again, and re-finishes the kept upscale of one
+    /// that took only a Refine change from the shown image.
     #[test]
-    fn process_on_an_upscaler_runs_only_what_changed() {
-        use crate::gui::item::{BatchStatus, Engine, UpscaleCache};
+    fn process_on_an_upscaler_stacks_or_refinishes() {
+        use crate::gui::item::{BatchStatus, UpscaleCache};
         let mut app = two_images(SettingsModel::RealEsrganUpscale);
         let model = app.settings.model.dispatch_model_kind().expect("an upscaler");
         let img = std::sync::Arc::new(image::RgbaImage::new(4, 4));
         for item in &mut app.batch.items {
             item.start_job(Some(StepKind::Upscale), Engine::Upscale);
             item.applied_recipe = Some(item.settings.current_recipe(model));
+            item.result_rgba = Some(img.clone());
             item.land_upscale(UpscaleCache::new(img.clone(), img.clone(), None));
             item.status = BatchStatus::Done;
             item.selected = true;
         }
-        app.handle_process_intent();
-        assert!(!app.processor.is_upscale_in_flight() && app.batch.items.iter().all(|i| i.job.is_none()), "both up to date: nothing runs");
+        // The slot is taken while Process runs, so the queue holds what it
+        // sent; freed to read the queue back.
+        let queued = |app: &PrunrApp| {
+            app.processor.set_upscale_in_flight_for_test(false);
+            let ids = std::iter::from_fn(|| app.processor.next_queued_run()).collect::<Vec<_>>();
+            app.processor.set_upscale_in_flight_for_test(true);
+            ids
+        };
+        app.processor.set_upscale_in_flight_for_test(true);
+        app.process_kept_run_items();
+        assert_eq!(queued(&app), vec![1, 2], "both up to date: Process enlarges each again");
 
         app.batch.items[0].settings.sharpen = 0.4;
         let steps = app.batch.items[1].timeline.undo_steps();
-        app.handle_process_intent();
-        assert!(!app.processor.is_upscale_in_flight(), "a Sharpen change needs no new upscale");
+        app.process_kept_run_items();
+        assert!(queued(&app).is_empty(), "a Sharpen change needs no new upscale");
         assert!(app.processor.live_preview.is_pending_for(2), "the ticked image re-finishes its kept upscale");
         assert_eq!(app.batch.items[1].settings.sharpen, 0.4, "with the shown image's Sharpen");
         assert_eq!(app.batch.items[1].timeline.undo_steps(), steps + 1, "as a step of its own");
+    }
+
+    /// Process on Colorize leaves an image already colorized as asked
+    /// alone: its run would give the same picture.
+    #[test]
+    fn process_on_colorize_skips_what_is_up_to_date() {
+        use crate::gui::item::{BatchStatus, ColorizeCache};
+        let mut app = two_images(SettingsModel::ColorizeDdcolor);
+        let model = crate::gui::settings::COLORIZER;
+        let img = std::sync::Arc::new(image::RgbaImage::new(4, 4));
+        let plane = std::sync::Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+        item.applied_recipe = Some(item.settings.current_recipe(model));
+        item.result_rgba = Some(img.clone());
+        item.land_colorize(ColorizeCache::new(plane, img));
+        item.status = BatchStatus::Done;
+        app.process_kept_run_items();
+        assert!(app.batch.items[0].job.is_none() && !app.processor.is_colorize_in_flight(), "nothing runs");
+    }
+
+    /// An upscale that would not fit in free memory is refused, saying so.
+    #[test]
+    fn an_upscale_too_large_for_free_memory_is_refused() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(super::too_large_to_upscale((4000, 3000), 500, 8 * gb), None, "12 MP: about 0.7 GB");
+        let why = super::too_large_to_upscale((16000, 12000), 500, 2 * gb).expect("192 MP: about 4 GB");
+        assert!(why.contains("16000\u{00d7}12000") && why.contains("free"), "{why}");
     }
 
     #[test]

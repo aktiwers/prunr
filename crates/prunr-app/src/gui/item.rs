@@ -1309,6 +1309,12 @@ impl BatchItem {
         self.begin_job(step, engine, self.run_start(engine), None, None);
     }
 
+    /// Note a run of `engine` starting now from `start` (`None`: the
+    /// original), for a caller that chose where it starts.
+    pub(crate) fn start_job_at(&mut self, step: Option<StepKind>, engine: Engine, start: Option<RunStart>) {
+        self.begin_job(step, engine, start, None, None);
+    }
+
     /// Note an erase of the shown selection starting now; `seed` is the
     /// one a generated fill runs with.
     pub(crate) fn start_erase(&mut self, seed: Option<u64>) {
@@ -1492,17 +1498,39 @@ impl BatchItem {
         self.upscale = Some(run);
     }
 
-    /// What a run of `model` needs here, measured against the shown
-    /// step's own kept run.
+    /// What a run of `model` needs here, measured against the shown step
+    /// when this model's run made it. A re-finish needs that step's run
+    /// still kept; undo to an earlier one runs it again instead.
     pub(crate) fn kept_run_tier(&self, model: prunr_core::ModelKind) -> KeptRunTier {
         use prunr_core::RequiredTier;
-        let kept = if model.is_upscale() { self.kept_upscale().is_some() } else { self.kept_colorize().is_some() };
-        let (true, Some(old)) = (kept, &self.applied_recipe) else { return KeptRunTier::Full };
+        let (engine, kept) = if model.is_upscale() {
+            (Engine::Upscale, self.kept_upscale().is_some())
+        } else {
+            (Engine::Colorize, self.kept_colorize().is_some())
+        };
+        let (Some(_), Some(old)) = (self.redo_origin(engine), &self.applied_recipe) else { return KeptRunTier::Full };
         match prunr_core::resolve_tier(old, &self.settings.current_recipe(model)) {
             RequiredTier::Skip | RequiredTier::CompositeOnly => KeptRunTier::UpToDate,
-            RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => KeptRunTier::Refinish,
+            RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 if kept => KeptRunTier::Refinish,
             _ => KeptRunTier::Full,
         }
+    }
+
+    /// Where the next upscale by `model` starts (`None`: the original):
+    /// on the shown upscale when it is what the settings ask, so Process
+    /// again enlarges it again; else where a run of the upscaler starts,
+    /// which redoes a shown upscale under its changed settings.
+    pub(crate) fn next_upscale_start(&self, model: prunr_core::ModelKind) -> Option<RunStart> {
+        if self.kept_run_tier(model) == KeptRunTier::UpToDate {
+            self.shown_start()
+        } else {
+            self.run_start(Engine::Upscale)
+        }
+    }
+
+    /// The size of the image the next upscale by `model` starts from.
+    pub(crate) fn next_upscale_dims(&self, model: prunr_core::ModelKind) -> (u32, u32) {
+        self.next_upscale_start(model).map_or(self.dimensions, |s| s.dims)
     }
 
     /// A colorize lands: its step is recorded, and the run is kept for
@@ -1550,11 +1578,16 @@ impl BatchItem {
     pub(crate) fn run_start(&self, engine: Engine) -> Option<RunStart> {
         match self.redo_origin(engine) {
             Some(o) => o.start.clone(),
-            None => self.timeline.current().result.clone().map(|image| RunStart {
-                image,
-                dims: self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions()),
-            }),
+            None => self.shown_start(),
         }
+    }
+
+    /// The shown result as a run's start (`None`: the original shows).
+    fn shown_start(&self) -> Option<RunStart> {
+        self.timeline.current().result.clone().map(|image| RunStart {
+            image,
+            dims: self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions()),
+        })
     }
 
     /// The photo Restore faces works on at `stage`: the shown upscale's
@@ -2326,6 +2359,32 @@ mod tests {
         item.result_rgba = Some(img());
         item.finish_job();
         assert_eq!(item.kept_run_tier(model), KeptRunTier::Full, "another model's step on top: upscale that");
+    }
+
+    /// Process again on an upscale enlarges what is shown, also after an
+    /// undo back to an earlier upscale; a Scale change redoes the shown
+    /// upscale from where it started.
+    #[test]
+    fn the_next_upscale_starts_on_the_upscale_shown_unless_settings_changed() {
+        let mut item = fixture_item(1);
+        let model = prunr_core::ModelKind::RealEsrganX4Plus;
+        let upscale = |item: &mut BatchItem, side: u32| {
+            let start = item.next_upscale_start(model);
+            item.start_job_at(Some(StepKind::Upscale), Engine::Upscale, start);
+            item.applied_recipe = Some(item.settings.current_recipe(model));
+            let out = Arc::new(image::RgbaImage::new(side, side));
+            item.result_rgba = Some(Arc::clone(&out));
+            item.land_upscale(UpscaleCache::new(Arc::clone(&out), out, None));
+        };
+        assert!(item.next_upscale_start(model).is_none(), "the first from the photo");
+        upscale(&mut item, 8);
+        assert_eq!(item.next_upscale_dims(model), (8, 8), "Process again enlarges the upscale");
+        upscale(&mut item, 16);
+        assert_eq!(item.next_upscale_dims(model), (16, 16));
+        item.undo_step();
+        assert_eq!(item.next_upscale_dims(model), (8, 8), "after undo: what is shown, with its run no longer kept");
+        item.settings.output_scale = prunr_core::OutputScale::X2;
+        assert!(item.next_upscale_start(model).is_none(), "a new Scale redoes the shown upscale from the photo");
     }
 
     /// The kept upscale run belongs to the step it landed on: undo to an
