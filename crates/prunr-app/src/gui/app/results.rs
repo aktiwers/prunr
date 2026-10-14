@@ -516,6 +516,11 @@ impl PrunrApp {
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
+                WorkerResult::ChainStart { item_id, image } => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.chain_start_built(image);
+                    }
+                }
                 WorkerResult::BatchComplete { items } => self.on_batch_complete(&items),
                 WorkerResult::Cancelled => self.on_cancelled(),
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
@@ -773,9 +778,12 @@ impl PrunrApp {
         // Drain filter-only Process results (model=None path).
         let mut filter_only_arrived = false;
         let mut filtered = Vec::new();
-        while let Ok((item_id, result)) = self.batch.bg_io.filter_only_rx.try_recv() {
+        while let Ok((item_id, result, chain_start)) = self.batch.bg_io.filter_only_rx.try_recv() {
             filtered.push(item_id);
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if let Some(start) = chain_start {
+                item.chain_start_built(start);
+            }
             if !item.job_is_current() {
                 self.end_stale_run(item_id, "filters");
                 continue;
@@ -947,7 +955,7 @@ mod faces_tests {
         item.status = crate::gui::item::BatchStatus::Done;
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
         item.commit(StepKind::Process);
-        item.record_origin(Engine::Segment, None);
+        item.record_origin(Engine::Segment, None, None);
         item.settle_faced(Engine::Segment, true);
         assert!(item.face_photo(FaceStage::Photo).is_some(), "redoing the faced step starts from the photo");
         assert!(!item.faces_already_restored(FaceStage::Photo));
@@ -1231,13 +1239,13 @@ mod timeline_contract_tests {
         use crate::gui::worker::{CompressedTensor, TensorCache};
         let mut app = app_with_processed_item(SettingsModel::Silueta);
         let item = &mut app.batch.items[0];
-        item.record_origin(Engine::Segment, None);
+        item.record_origin(Engine::Segment, None, None);
         item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
         item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.input_transform = prunr_core::InputTransform::Grayscale;
         let ids = std::collections::HashSet::from([1]);
-        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta);
+        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta, &Default::default());
         assert!(tiers.tier_add_edge.is_empty(), "no lines composed onto the cached cut-out");
         assert!(tiers.tier1.contains(&1), "the lines run again on the whole photo");
     }
@@ -1253,7 +1261,7 @@ mod timeline_contract_tests {
         item.result_texture = Some(old.clone());
         item.status = BatchStatus::Processing;
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)))).unwrap();
+        app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
         let item = &app.batch.items[0];
         assert_eq!(shown(&app), Some(5));

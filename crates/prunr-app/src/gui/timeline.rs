@@ -295,13 +295,16 @@ pub(crate) struct Origin {
     pub(crate) region: Option<StoredSelection>,
     /// How large an erase filled its region: 1 is full size.
     pub(crate) fill_scale: Option<f32>,
+    /// Who cut this step out (`None`: another engine, or not known), so a
+    /// Process by a different one builds on it.
+    pub(crate) cutter: Option<super::item::Cutter>,
 }
 
 impl Origin {
     /// A run of `engine` from `start` (`None`: the original), with no seed,
     /// kept run or region.
     pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
-        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None }
+        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None, cutter: None }
     }
 }
 

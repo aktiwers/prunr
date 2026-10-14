@@ -32,8 +32,44 @@ fn is_stalled(
     in_flight_count > 0 && last_event_age > hang_timeout
 }
 
-/// A single image item to be processed (Tier 1: full pipeline).
-pub type WorkItem = (u64, Arc<Vec<u8>>, Option<Arc<image::RgbaImage>>);
+/// A single image item to be processed (Tier 1: full pipeline): its id,
+/// its file, and what it reads instead of or with the file.
+pub(crate) type WorkItem = (u64, Arc<Vec<u8>>, Option<RunImage>);
+
+/// What a full run reads besides its file.
+#[derive(Clone)]
+pub(crate) enum RunImage {
+    /// An earlier image the run starts from instead of the file.
+    Start(Arc<image::RgbaImage>),
+    /// A cut of another model's cut-out: `start`'s colours (`None`: the
+    /// file's) seen through `cutout`'s transparency. Built on the bridge
+    /// thread, which decodes the file anyway.
+    Kept { start: Option<Arc<image::RgbaImage>>, cutout: super::timeline::StoredImage },
+}
+
+impl RunImage {
+    /// The image the run starts from, `Kept` built here; `file` is read
+    /// only when its colours are the file's.
+    pub(crate) fn build(&self, file: impl FnOnce() -> Result<Arc<Vec<u8>>, String>) -> Result<Arc<image::RgbaImage>, String> {
+        match self {
+            RunImage::Start(image) => Ok(Arc::clone(image)),
+            RunImage::Kept { start, cutout } => {
+                let mut image = match start {
+                    Some(start) => image::RgbaImage::clone(start),
+                    None => prunr_core::load_image_from_bytes(&file()?).map_err(|e| e.message())?.to_rgba8(),
+                };
+                let cutout = cutout.load().ok_or("the cut-out could not be read")?;
+                if cutout.dimensions() != image.dimensions() {
+                    return Err(format!("the cut-out is {:?}, its start {:?}", cutout.dimensions(), image.dimensions()));
+                }
+                for (px, kept) in image.pixels_mut().zip(cutout.pixels()) {
+                    px.0[3] = kept.0[3];
+                }
+                Ok(Arc::new(image))
+            }
+        }
+    }
+}
 
 /// Raw tensor data from subprocess → parent (IPC transfer format).
 pub struct TensorCache {
@@ -198,7 +234,7 @@ impl ProcessingConfig {
     }
 }
 
-pub enum WorkerMessage {
+pub(crate) enum WorkerMessage {
     BatchProcess {
         items: Vec<WorkItem>,
         /// Tier 2 items: re-postprocess from cached tensor (skip inference).
@@ -234,6 +270,8 @@ pub enum WorkerResult {
         /// Only populated when the run used edge detection.
         edge_cache: Option<EdgeTensorCache>,
     },
+    /// The image a chained cut starts from, built as it was sent.
+    ChainStart { item_id: u64, image: Arc<image::RgbaImage> },
     /// The batch is over; `items` are the images it owned (given at the
     /// start or admitted while it ran).
     BatchComplete { items: Vec<u64> },
@@ -260,7 +298,7 @@ pub enum WorkerResult {
 /// run's mask and Sketch settings; the worker that ran a batch stays warm
 /// for `WARM_IDLE` after it, so the next Process skips the model load.
 /// A model switch (`ReleaseWarm`), a crash or Cancel drops it.
-pub fn spawn_worker(
+pub(crate) fn spawn_worker(
     ctx: egui::Context,
     prewarm: Option<ProcessingConfig>,
 ) -> (mpsc::Sender<WorkerMessage>, mpsc::Receiver<WorkerResult>) {
@@ -651,7 +689,7 @@ fn spawn_and_initial_burst(
         {
             sent_count += 1;
         } else if let Some(item) = state.pending.pop_front() {
-            if send_item_to_sub(&mut sub, &item).is_err() {
+            if send_item_to_sub(&mut sub, &item, res_tx).is_err() {
                 state.pending.push_front(item);
                 break;
             }
@@ -906,7 +944,7 @@ fn admit_next_item(
         return;
     }
     if let Some(item) = state.pending.pop_front() {
-        if send_item_to_sub(sub, &item).is_ok() {
+        if send_item_to_sub(sub, &item, res_tx).is_ok() {
             sent.items.push(item);
         } else {
             state.pending.push_front(item);
@@ -917,7 +955,7 @@ fn admit_next_item(
         if let Ok(item) = rx.try_recv() {
             if cancels.is_cancelled(item.0) {
                 report_cancelled(item.0, state, res_tx, ctx);
-            } else if send_item_to_sub(sub, &item).is_ok() {
+            } else if send_item_to_sub(sub, &item, res_tx).is_ok() {
                 sent.items.push(item);
             } else {
                 state.admit(item);
@@ -1127,12 +1165,25 @@ fn finalize_or_continue(
     true
 }
 
-/// Send a WorkItem to the subprocess via temp file IPC.
-fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem) -> Result<(), String> {
-    let (item_id, bytes, chain) = item;
-    let chain_input = chain.as_ref().map(|rgba| {
-        (rgba.as_ref(), rgba.width(), rgba.height())
+/// Send a WorkItem to the subprocess via temp file IPC. A chained cut's
+/// start is built here and reported back; one that can't be built runs
+/// from its plain start rather than not at all.
+fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc::Sender<WorkerResult>) -> Result<(), String> {
+    let (item_id, bytes, run_image) = item;
+    let chain = run_image.as_ref().and_then(|run| match run.build(|| Ok(Arc::clone(bytes))) {
+        Ok(image) => Some(image),
+        Err(err) => {
+            tracing::warn!(item_id, %err, "chained cut runs from its plain start");
+            match run {
+                RunImage::Kept { start, .. } => start.clone(),
+                RunImage::Start(image) => Some(Arc::clone(image)),
+            }
+        }
     });
+    if let (Some(RunImage::Kept { .. }), Some(image)) = (run_image, &chain) {
+        let _ = res_tx.send(WorkerResult::ChainStart { item_id: *item_id, image: Arc::clone(image) });
+    }
+    let chain_input = chain.as_deref().map(|rgba| (rgba, rgba.width(), rgba.height()));
     sub.send_image(*item_id, bytes, chain_input)
 }
 
@@ -1188,6 +1239,29 @@ fn try_send_add_edge(
 
 #[cfg(test)]
 mod tests {
+
+    /// A chained cut starts from its start's colours seen through the
+    /// cut-out's transparency; the file is read only when the colours are
+    /// the file's, and a cut-out of another size is refused.
+    #[test]
+    fn a_kept_run_image_takes_colours_from_its_start_and_alpha_from_the_cutout() {
+        use super::RunImage;
+        let cutout = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba([9, 9, 9, if x == 0 { 0 } else { 200 }]))));
+        let start = Arc::new(image::RgbaImage::from_pixel(2, 1, image::Rgba([50, 60, 70, 255])));
+        let kept = RunImage::Kept { start: Some(start), cutout: Arc::clone(&cutout) };
+        let built = kept.build(|| panic!("the colours are the start's")).unwrap();
+        assert_eq!(built.get_pixel(0, 0).0, [50, 60, 70, 0]);
+        assert_eq!(built.get_pixel(1, 0).0, [50, 60, 70, 200]);
+
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let from_file = RunImage::Kept { start: None, cutout: Arc::clone(&cutout) }.build(|| Ok(Arc::new(png))).unwrap();
+        assert_eq!(from_file.get_pixel(1, 0).0, [1, 2, 3, 200]);
+
+        let wide = Arc::new(image::RgbaImage::new(3, 1));
+        assert!(RunImage::Kept { start: Some(wide), cutout }.build(|| unreachable!()).is_err());
+    }
+
     use super::*;
 
     #[test]
