@@ -756,13 +756,23 @@ impl PrunrApp {
     pub(crate) fn maybe_evaluate_runtime_prompt(&mut self) {
         if self.runtime_prompt_evaluated { return; }
         self.runtime_prompt_evaluated = true;
-        use crate::runtime_install::RuntimeId;
-        let rt = RuntimeId::OpenVino;
-        let profile = crate::hardware::profile();
-        if !profile.recommends_openvino() { return; }
+        let Some(rt) = crate::hardware::profile().recommended_runtime() else { return };
         if rt.is_installed() { return; }
         if self.settings.is_runtime_prompt_snoozed(rt) { return; }
         self.runtime_prompt = Some(rt);
+    }
+
+    /// Install `runtime` in the background; Settings › Hardware and the
+    /// first-launch prompt both start it here. One install at a time.
+    pub(crate) fn start_runtime_install(&mut self, runtime: crate::runtime_install::RuntimeId) {
+        if self.runtime_install.is_some() { return; }
+        let h = crate::runtime_install::start_install(runtime);
+        self.runtime_install = Some(RuntimeInstallProgress {
+            runtime,
+            rx: h.events,
+            cancel: h.cancel,
+            last_event: crate::runtime_install::InstallEvent::Preparing,
+        });
     }
 
     pub fn handle_cancel(&mut self) {
@@ -1231,15 +1241,7 @@ impl PrunrApp {
             if let Some(action) = render_runtime_prompt(ctx, rt) {
                 self.runtime_prompt = None;
                 match action {
-                    RuntimePromptAction::Install => {
-                        let h = crate::runtime_install::start_install(rt);
-                        self.runtime_install = Some(RuntimeInstallProgress {
-                            runtime: rt,
-                            rx: h.events,
-                            cancel: h.cancel,
-                            last_event: crate::runtime_install::InstallEvent::Preparing,
-                        });
-                    }
+                    RuntimePromptAction::Install => self.start_runtime_install(rt),
                     RuntimePromptAction::NotNow => {
                         self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
                     }

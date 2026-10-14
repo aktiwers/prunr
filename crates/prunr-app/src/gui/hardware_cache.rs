@@ -6,6 +6,11 @@ use crate::runtime_install::RuntimeId;
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
+    pub directml: bool,
+    /// The runtime the store names to load, `RuntimeId::preferred`.
+    pub preferred_runtime: Option<RuntimeId>,
+    /// The runtime this process loaded, `RuntimeId::loaded`.
+    pub loaded_runtime: Option<RuntimeId>,
     /// The TAESD fast decoder bundle.
     pub taesd: bool,
     /// The LCM eraser bundle, as `Settings::can_select_lcm_scheduler` sees it.
@@ -24,6 +29,9 @@ impl HardwareInstallCache {
         use prunr_models::ModelId;
         Self {
             openvino: RuntimeId::OpenVino.is_installed(),
+            directml: RuntimeId::DirectMl.is_installed(),
+            preferred_runtime: RuntimeId::preferred(),
+            loaded_runtime: RuntimeId::loaded(),
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
@@ -41,12 +49,22 @@ impl HardwareInstallCache {
     pub(crate) fn all_installed() -> Self {
         Self {
             openvino: true,
+            directml: true,
+            preferred_runtime: None,
+            loaded_runtime: None,
             taesd: true,
             lcm_bundle: true,
             x2plus: true,
             faces: [true; 2],
             depth: true,
             models: crate::gui::settings::SettingsModel::ALL.iter().fold(0, |bits, m| bits | 1 << m.index()),
+        }
+    }
+
+    pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
+        match runtime {
+            RuntimeId::OpenVino => self.openvino,
+            RuntimeId::DirectMl => self.directml,
         }
     }
 

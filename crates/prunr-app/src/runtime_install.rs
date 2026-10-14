@@ -52,12 +52,10 @@ pub enum RuntimeId {
 }
 
 impl RuntimeId {
+    pub const ALL: [RuntimeId; 2] = [Self::DirectMl, Self::OpenVino];
+
     /// The runtimes this platform offers. DirectML is a Windows API.
-    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) {
-        &[Self::DirectMl, Self::OpenVino]
-    } else {
-        &[Self::OpenVino]
-    };
+    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) { &Self::ALL } else { &[Self::OpenVino] };
 
     fn pypi_package(self) -> &'static str {
         match self {
@@ -92,6 +90,12 @@ impl RuntimeId {
         Self::OFFERED.iter().copied().find(|rt| rt.install_subdir() == subdir)
     }
 
+    /// The runtime this process loaded, when it came from the store.
+    pub fn loaded() -> Option<Self> {
+        let dir = prunr_core::ort_runtime::loaded_dylib()?.parent()?;
+        Self::OFFERED.iter().copied().find(|rt| dir.ends_with(rt.install_subdir()))
+    }
+
     fn short_name(self) -> &'static str {
         match self {
             Self::OpenVino => "openvino",
@@ -103,6 +107,36 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "OpenVINO Runtime",
             Self::DirectMl => "DirectML Runtime",
+        }
+    }
+
+    /// Settings › Hardware's note when the hardware suits this runtime.
+    pub fn recommendation(self) -> &'static str {
+        match self {
+            Self::OpenVino => "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
+            Self::DirectMl => "Recommended for your graphics card: the models run on it instead of the processor.",
+        }
+    }
+
+    /// What the runtime choice in Settings › Hardware says about it.
+    pub fn choice_description(self) -> &'static str {
+        match self {
+            Self::OpenVino => "Tuned for Intel processors and graphics",
+            Self::DirectMl => "Any DirectX 12 graphics card",
+        }
+    }
+
+    pub fn choice_name(self) -> &'static str {
+        match self {
+            Self::OpenVino => "OpenVINO",
+            Self::DirectMl => "DirectML",
+        }
+    }
+
+    pub fn uninstall_label(self) -> &'static str {
+        match self {
+            Self::OpenVino => "Uninstall OpenVINO Runtime",
+            Self::DirectMl => "Uninstall DirectML Runtime",
         }
     }
 

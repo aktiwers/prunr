@@ -23,7 +23,7 @@ pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
         })
 }
 
-pub(super) fn tree(harness: &Harness<'_, PrunrApp>) -> ControlNode {
+pub(super) fn tree<S>(harness: &Harness<'_, S>) -> ControlNode {
     ControlNode::from_node(&harness.kittest_state().root())
 }
 
@@ -42,13 +42,13 @@ pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
     settle(harness);
 }
 
-pub(super) fn names(harness: &Harness<'_, PrunrApp>) -> Vec<String> {
+pub(super) fn names<S>(harness: &Harness<'_, S>) -> Vec<String> {
     tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
 }
 
 /// Every control in the tree has a readable name. Fails with the list of
 /// nameless controls: an icon-only button, an unlabelled slider.
-pub(super) fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
+pub(super) fn assert_all_controls_named<S>(harness: &Harness<'_, S>, surface: &str) {
     let root = tree(harness);
     let nameless: Vec<String> = root
         .iter()
@@ -160,6 +160,42 @@ fn settings_tabs_name_every_control() {
         harness.state_mut().settings_tab = tab;
         settle(&mut harness);
         assert_all_controls_named(&harness, &format!("settings › {tab:?}"));
+    }
+}
+
+/// Settings › Hardware as Windows shows it, which offers both runtimes:
+/// every runtime row and the runtime choice are named. The page is drawn
+/// on its own because the app reads this machine's platform and store.
+#[test]
+fn the_hardware_page_names_every_runtime_control() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    let mut both = HardwareInstallCache::all_installed();
+    both.preferred_runtime = Some(RuntimeId::OpenVino);
+    let installing = Some((RuntimeId::DirectMl, "Downloading 40% (10/25 MB)".to_string()));
+    let shapes = [
+        ("both installed", both, None, vec!["Uninstall DirectML Runtime", "Uninstall OpenVINO Runtime", "DirectML", "OpenVINO"]),
+        ("DirectML installing", HardwareInstallCache::default(), installing, vec!["Cancel", "Install OpenVINO Runtime"]),
+        ("none installed", HardwareInstallCache::default(), None, vec!["Install DirectML Runtime", "Install OpenVINO Runtime"]),
+    ];
+    for (shape, installs, installing, expected) in shapes {
+        let ctx = HardwareSectionContext {
+            offered: &RuntimeId::ALL,
+            installs,
+            installing,
+            active_provider: "DirectML".into(),
+            sd_margin_mb: 2048,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in expected {
+            assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
+        }
+        let choice_shown = present.iter().any(|n| n == "DirectML");
+        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two installed");
     }
 }
 
