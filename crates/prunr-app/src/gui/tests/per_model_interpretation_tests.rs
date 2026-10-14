@@ -42,9 +42,9 @@ fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_cutout(item);
-    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
+    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action, false) }
         .expect("inputs").seg_tensor.expect("tensor");
-    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
+    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action, false) }
         .expect("inputs").seg_tensor.expect("tensor");
     assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
     let item = app.batch.find_by_id_mut(3).unwrap();
@@ -470,7 +470,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     item.commit(StepKind::Process);
     give_tensor(item);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
-    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
+    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style, app.settings.brush.cutout_action, false) }
         .expect("the stroke's re-cut starts");
 
     app.handle_undo(&ctx);
@@ -647,7 +647,7 @@ fn a_recut_landing_off_screen_keeps_the_image_parked() {
     cutout_with_selection(&mut app, 3);
     let style = app.selection_style();
     let action = app.settings.brush.cutout_action;
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, action)
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, action, false)
         .expect("the re-cut starts");
     assert!(app.batch.items[0].volatile_seg_tensor.is_some());
     app.batch.items[0].set_on_screen(false);

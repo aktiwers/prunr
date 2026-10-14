@@ -1185,7 +1185,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action);
+        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action, false);
         assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
