@@ -348,12 +348,12 @@ impl PrunrApp {
             tier2_items,
             add_edge_items,
             config: Box::new(crate::gui::worker::ProcessingConfig {
-                model,
-                jobs,
-                mask: current_settings.mask_settings(),
-                force_cpu: self.settings.cpu_only(),
-                line_mode: current_settings.line_mode,
-                edge: current_settings.edge_settings(),
+                engines: crate::gui::worker::EngineSpec { model, jobs, force_cpu: self.settings.cpu_only() },
+                run: crate::gui::worker::RunSettings {
+                    mask: current_settings.mask_settings(),
+                    line_mode: current_settings.line_mode,
+                    edge: current_settings.edge_settings(),
+                },
             }),
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
