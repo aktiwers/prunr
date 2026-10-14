@@ -3,7 +3,7 @@ use crate::runtime_install::RuntimeId;
 /// What is installed on disk, read once at launch and after every
 /// install, download or delete, so the toolbar never stats the
 /// filesystem per frame.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
     /// The TAESD fast decoder bundle.
