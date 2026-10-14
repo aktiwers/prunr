@@ -296,6 +296,11 @@ pub(crate) struct Job {
     pub(crate) seed: Option<u64>,
     /// The region an erase fills.
     pub(crate) region: Option<super::timeline::StoredSelection>,
+    /// Who cuts (`None`: another engine).
+    pub(crate) cutter: Option<Cutter>,
+    /// A cut of another model's cut-out: that cut-out, whose transparency
+    /// the run starts from, with `start`'s colours under it.
+    pub(crate) keep: Option<super::timeline::StoredImage>,
 }
 
 /// What "Try another" reruns: the shown fill's start (`None`: the
@@ -313,6 +318,20 @@ pub(crate) enum Engine {
     Erase,
     Upscale,
     Colorize,
+}
+
+/// Who cut a step out: a background-removal model, or No model's pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cutter {
+    Model(prunr_core::ModelKind),
+    NoModel,
+}
+
+impl Cutter {
+    /// The active model's: No model when it has no segmentation model.
+    pub(crate) fn of(model: Option<prunr_core::ModelKind>) -> Self {
+        model.map_or(Cutter::NoModel, Cutter::Model)
+    }
 }
 
 /// A lens-blur focus and what it was measured from.
@@ -1306,8 +1325,50 @@ impl BatchItem {
         seed: Option<u64>,
         region: Option<super::timeline::StoredSelection>,
     ) {
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region });
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None });
         self.tile_preview = None;
+    }
+
+    /// Whether a new step cut by `cutter` builds on the cut-out on screen:
+    /// a different model (or No model) made it, and the new one only takes
+    /// more away. Undo gets back to before.
+    pub(crate) fn cuts_anothers_cutout(&self, cutter: Cutter) -> bool {
+        self.timeline.current().result.is_some()
+            && self.timeline.current().origin.as_ref()
+                .is_some_and(|o| o.engine == Engine::Segment && o.cutter.is_some_and(|c| c != cutter))
+    }
+
+    /// Note a cut by `cutter` starting now. `chain`: it builds on the
+    /// cut-out on screen (`cuts_anothers_cutout`), starting from that
+    /// cut-out's own colours, so its look is not applied twice, seen
+    /// through its transparency; otherwise as `start_job`.
+    pub(crate) fn start_cut(&mut self, step: Option<StepKind>, cutter: Cutter, chain: bool) {
+        let keep = chain.then(|| self.timeline.current().result.clone()).flatten();
+        self.start_job(step, Engine::Segment);
+        if let Some(job) = &mut self.job {
+            job.cutter = Some(cutter);
+            job.keep = keep;
+        }
+    }
+
+    /// The image a chained cut starts from, built where the run reads its
+    /// file: it becomes the step's start, as an earlier image would be.
+    pub(crate) fn chain_start_built(&mut self, image: Arc<image::RgbaImage>) {
+        if let Some(job) = self.job.as_mut().filter(|j| j.keep.is_some()) {
+            let dims = image.dimensions();
+            job.start = Some(RunStart { image: super::timeline::Stored::new(image), dims });
+        }
+    }
+
+    /// What a run reads besides its file: where it starts and, for a
+    /// chained cut, the cut-out it keeps.
+    pub(crate) fn job_run_image(&self) -> Option<super::worker::RunImage> {
+        let job = self.job.as_ref()?;
+        let start = self.job_input();
+        match &job.keep {
+            Some(cutout) => Some(super::worker::RunImage::Kept { start, cutout: Arc::clone(cutout) }),
+            None => start.map(super::worker::RunImage::Start),
+        }
     }
 
     /// The seed of the generated fill on screen.
@@ -1343,6 +1404,7 @@ impl BatchItem {
             self.timeline.current_mut().origin = Some(Origin {
                 seed: job.seed,
                 region: job.region,
+                cutter: job.cutter,
                 ..Origin::new(job.engine, job.start)
             });
             // Faces blend in later, when their re-cut lands.
@@ -1432,8 +1494,8 @@ impl BatchItem {
     /// Record that `engine` made the shown step's image, starting from
     /// `start` (`None`: the original). The start is a stored timeline
     /// image, so the history sweep keeps compressing it.
-    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>) {
-        self.timeline.current_mut().origin = Some(Origin::new(engine, start));
+    pub(crate) fn record_origin(&mut self, engine: Engine, start: Option<RunStart>, cutter: Option<Cutter>) {
+        self.timeline.current_mut().origin = Some(Origin { cutter, ..Origin::new(engine, start) });
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.
@@ -1569,7 +1631,7 @@ impl BatchItem {
                 return None;
             }
         };
-        let input = self.job_input();
+        let input = self.job_run_image();
         self.status = BatchStatus::Processing;
         Some((self.id, bytes, input))
     }
@@ -1578,9 +1640,9 @@ impl BatchItem {
     /// canvas shows that result while it runs.
     pub(crate) fn job_builds_on_shown_result(&self) -> bool {
         let shown = self.timeline.current().result.as_ref();
-        self.job.as_ref().and_then(|j| j.start.as_ref())
-            .zip(shown)
-            .is_some_and(|(start, shown)| Arc::ptr_eq(&start.image, shown))
+        let Some(job) = &self.job else { return false };
+        job.keep.is_some()
+            || job.start.as_ref().zip(shown).is_some_and(|(start, shown)| Arc::ptr_eq(&start.image, shown))
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -1813,6 +1875,17 @@ impl BatchItem {
     /// first call of a drag and shared by the following ticks.
     pub(crate) fn hot_seg_tensor(&mut self) -> Option<Arc<super::live_preview::SegTensor>> {
         let ct = self.cached_tensor.as_ref()?;
+        // Only the step this segmentation cut is re-cut with it: another
+        // model's cut is that model's, and No model's pass already carries
+        // its cut in its start.
+        let cut_by_another = match self.timeline.current().origin.as_ref().and_then(|o| o.cutter) {
+            Some(Cutter::Model(model)) => model != ct.model,
+            Some(Cutter::NoModel) => true,
+            None => false,
+        };
+        if cut_by_another {
+            return None;
+        }
         if self.volatile_seg_tensor.is_none() {
             self.volatile_seg_tensor = super::live_preview::decompress_seg(ct).map(Arc::new);
         }
@@ -2710,6 +2783,33 @@ mod tests {
         assert_eq!(item.run_input_dims(Engine::Upscale), (2, 2));
     }
 
+    /// A chained cut's start, built where the run reads its file, becomes
+    /// the step's start: a knob's re-cut of that step redoes it from there,
+    /// and the next model's Process builds on its cut-out in turn.
+    #[test]
+    fn a_chained_cut_starts_from_the_cutout_it_was_built_from() {
+        use prunr_core::ModelKind::{BiRefNetLite, Silueta};
+        let (silueta, birefnet) = (Cutter::Model(Silueta), Cutter::Model(BiRefNetLite));
+        let mut item = fixture_item(1);
+        item.start_cut(Some(StepKind::Process), silueta, false);
+        item.result_rgba = Some(px(1));
+        item.status = BatchStatus::Done;
+        item.finish_job();
+        assert!(!item.cuts_anothers_cutout(silueta));
+        assert!(item.cuts_anothers_cutout(birefnet) && item.cuts_anothers_cutout(Cutter::NoModel));
+
+        item.start_cut(Some(StepKind::Process), birefnet, true);
+        assert!(matches!(item.job_run_image(), Some(crate::gui::worker::RunImage::Kept { start: None, .. })), "colours from the photo");
+        item.chain_start_built(px(7));
+        item.result_rgba = Some(px(2));
+        item.finish_job();
+        assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(7), "a re-cut redoes it from the built start");
+        assert!(!item.cuts_anothers_cutout(birefnet));
+        assert!(item.cuts_anothers_cutout(silueta), "and Silueta's Process would build on BiRefNet's");
+        item.undo_step();
+        assert_eq!(item.run_input(Engine::Segment), None, "undo is back on Silueta's cut from the photo");
+    }
+
     /// A live tweak after another engine's step records where it started,
     /// so the next tweak redoes it instead of stacking on its own output.
     #[test]
@@ -2721,7 +2821,7 @@ mod tests {
 
         item.result_rgba = Some(px(4)); // the first tweak's preview landed
         item.amend();
-        item.record_origin(Engine::Segment, start);
+        item.record_origin(Engine::Segment, start, None);
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "the next tweak starts there too");
         assert_eq!(item.run_input(Engine::Upscale).map(|b| b.get_pixel(0, 0).0[0]), Some(4), "a new upscale builds on the effect");
     }

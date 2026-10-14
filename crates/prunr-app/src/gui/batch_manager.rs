@@ -458,7 +458,7 @@ impl BatchManager {
         &self,
         item_id: u64,
         source: &ImageSource,
-        base: Option<Arc<image::RgbaImage>>,
+        base: Option<super::worker::RunImage>,
         fill_style: prunr_core::FillStyle,
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
@@ -466,11 +466,21 @@ impl BatchManager {
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
+            let load = || source.load_bytes().map_err(|e| format!("Failed to load: {e}"));
+            let chained = matches!(base, Some(super::worker::RunImage::Kept { .. }));
+            let start = match base.map(|run| run.build(load)).transpose() {
+                Ok(start) => start,
+                Err(err) => {
+                    let _ = tx.send((item_id, Err(err), None));
+                    return;
+                }
+            };
+            let chain_start = start.as_ref().filter(|_| chained).map(Arc::clone);
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
-                let mut rgba = match base {
-                    Some(base) => Arc::unwrap_or_clone(base),
+                let mut rgba = match start {
+                    Some(start) => Arc::unwrap_or_clone(start),
                     None => {
                         let bytes = source.load_bytes()
                             .map_err(|e| format!("Failed to load: {e}"))?;
@@ -483,7 +493,7 @@ impl BatchManager {
                 prunr_core::apply_fill_style(&mut rgba, fill_style);
                 Ok(Arc::new(rgba))
             })();
-            let _ = tx.send((item_id, result));
+            let _ = tx.send((item_id, result, chain_start));
         });
     }
 
@@ -721,10 +731,29 @@ impl BatchManager {
         self.items.iter().any(BatchItem::has_pending_work)
     }
 
+    /// The images in `ids` a Process by `cutter` builds on: a new step
+    /// (`step` is `Some`) on another model's cut-out. A knob's re-run
+    /// redoes its step instead.
+    pub(crate) fn chained_cuts(&self, ids: &HashSet<u64>, step: Option<super::timeline::StepKind>, cutter: super::item::Cutter) -> HashSet<u64> {
+        if step.is_none() {
+            return HashSet::new();
+        }
+        self.items.iter()
+            .filter(|i| ids.contains(&i.id) && i.cuts_anothers_cutout(cutter))
+            .map(|i| i.id)
+            .collect()
+    }
+
     /// Sort the images in `ids` by the run each needs (`BatchItem::run_tier`).
-    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind) -> ClassifiedTiers {
+    /// One in `chained` cuts another model's cut-out: a full run, whatever
+    /// its recipe says.
+    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind, chained: &HashSet<u64>) -> ClassifiedTiers {
         let mut tiers = ClassifiedTiers::default();
         for item in self.in_set(ids) {
+            if chained.contains(&item.id) {
+                tiers.tier1.insert(item.id);
+                continue;
+            }
             match item.run_tier(model) {
                 RunTier::UpToDate => tiers.skip_count += 1,
                 RunTier::Full => { tiers.tier1.insert(item.id); }
@@ -1358,7 +1387,7 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_filter_only(7, &source, None, prunr_core::FillStyle::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 7);
         let rgba = result.expect("default FillStyle on a 1x1 source must succeed");
@@ -1376,7 +1405,7 @@ mod tests {
         ));
         bm.request_filter_only(11, &source, None, prunr_core::FillStyle::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 11);
         assert!(result.is_err(), "missing file must surface as Err, not stall");

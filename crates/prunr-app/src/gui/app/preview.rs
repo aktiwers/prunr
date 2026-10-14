@@ -403,7 +403,9 @@ impl PrunrApp {
                     PreviewKind::ColorizeTier2 => None,
                     PreviewKind::UpscaleTier2 => Some(crate::gui::item::FaceStage::Upscale),
                     _ => {
-                        item.record_origin(Engine::Segment, r.start);
+                        // A pass that cut nothing keeps who cut the step.
+                        let cutter = r.cutter.or_else(|| item.timeline.current().origin.as_ref().and_then(|o| o.cutter));
+                        item.record_origin(Engine::Segment, r.start, cutter);
                         Some(crate::gui::item::FaceStage::Photo)
                     }
                 };
