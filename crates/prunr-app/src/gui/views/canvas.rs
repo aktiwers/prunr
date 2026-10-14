@@ -181,10 +181,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
         }
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
     } else if let Some(label) = app.busy_pill(std::time::Instant::now()) {
         super::progress_widget::render_working_pill(ui, canvas_rect, label);
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
     }
 
     // The strip sits on the foreground layer, above the modals' level:
@@ -226,7 +226,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Wait);
         }
         super::progress_widget::render_loading_pill(ui, canvas_rect, hover, prunr_core::Step::LoadingMagicBrush.label());
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
     }
 
     // Bottom-left modifier hint — shown whenever Magic Brush is the active
@@ -810,7 +810,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             let shown = (subject.shown_at.elapsed().as_secs_f32() / super::effects::SUBJECT_FADE_SECS).min(1.0);
             let breath = 0.75 + 0.25 * super::effects::breath(t);
             ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(shown * breath));
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(theme::WORK_FRAME);
         }
         img_rect
     });
