@@ -148,8 +148,8 @@ impl Default for ToolbarChange {
 }
 
 /// The Faces chip; a missing face model opens the Model Store on Faces.
-pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
-    let faces = super::faces_chip::render(ui, &mut item_settings.faces, state.installed, state.faces_found);
+pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, outlines: &mut bool, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let faces = super::faces_chip::render(ui, &mut item_settings.faces, outlines, state.installed, state.faces_found);
     if faces.open_store {
         change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Face) });
     }
@@ -249,7 +249,7 @@ pub(crate) fn render(
             });
         }
         if shows(model, Surface::Faces) {
-            render_faces_chip(ui, item_settings, &state, &mut change);
+            render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
         }
         if shows(model, Surface::Depth) {
             render_depth_chip(ui, item_settings, &state, &mut change);

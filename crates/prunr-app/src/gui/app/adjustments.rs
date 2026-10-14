@@ -133,7 +133,7 @@ impl PrunrApp {
         if toolbar_change.model_changed {
             self.on_model_changed();
         }
-        if toolbar_change.brush_settings_committed {
+        if toolbar_change.brush_settings_committed || toolbar_change.faces.outline {
             self.settings.save();
         }
         if let Some(req) = toolbar_change.open_model_store {

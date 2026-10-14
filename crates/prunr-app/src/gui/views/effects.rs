@@ -29,6 +29,68 @@ pub(crate) const SUBJECT_FADE_SECS: f32 = 0.35;
 const OUTLINE_LINE_PX: f32 = 1.5;
 const OUTLINE_GLOW_PX: f32 = 6.0;
 
+/// Seconds a found face's outline takes to come in.
+pub(crate) const FACE_FADE_SECS: f32 = 0.25;
+/// Seconds its arrival lasts: the pop, the bounce and the glow settling.
+pub(crate) const FACE_ARRIVAL_SECS: f32 = 2.0;
+/// The glow a found face keeps once it has arrived, and its brightest.
+const FACE_GLOW_REST: f32 = 0.3;
+const FACE_GLOW_PEAK: f32 = 1.8;
+/// Width of a glow ring's line, and how far its glow reaches either side,
+/// in screen points.
+const RING_LINE_PX: f32 = 1.5;
+const RING_GLOW_PX: f32 = 7.0;
+
+/// A found face's outline `since` seconds after the faces were found, as
+/// (size, glow): it pops in at 80 %, bounces past full size once and
+/// settles, while its glow swells bright and eases back to the rest level.
+pub(crate) fn face_arrival(since: f32) -> (f32, f32) {
+    if !(0.0..FACE_ARRIVAL_SECS).contains(&since) {
+        return (1.0, FACE_GLOW_REST);
+    }
+    // A damped spring from 80 %: past 100 % once, back, settled.
+    let size = 1.0 - 0.2 * (-since / 0.18).exp() * (std::f32::consts::TAU * since / 0.45).cos();
+    // t·e^(1−t): 0 at the start, 1 at a quarter second, gone by the end.
+    let t = since / 0.25;
+    let swell = t * (1.0 - t).exp();
+    (size, FACE_GLOW_REST + (FACE_GLOW_PEAK - FACE_GLOW_REST) * swell)
+}
+
+/// A closed outline through `points` (the first not repeated) in the
+/// accent purple, as the subject outline is drawn: a crisp line and a
+/// glow either side that falls off with the square of the distance.
+/// `opacity` fades the whole; `glow` (0-1) is how strongly, and how far,
+/// the halo shows.
+pub(crate) fn paint_glow_ring(painter: &Painter, points: &[Pos2], opacity: f32, glow: f32) {
+    // Across the ring, outer edge to outer edge: (offset in reaches,
+    // strength). The middle pair samples (1 - d)² so the falloff is smooth.
+    const PROFILE: [(f32, f32); 5] = [(-1.0, 0.0), (-0.4, 0.36), (0.0, 1.0), (0.4, 0.36), (1.0, 0.0)];
+    let n = points.len();
+    if n < 3 || opacity <= 0.0 {
+        return;
+    }
+    let reach = RING_GLOW_PX * (0.7 + 0.6 * glow);
+    let halo = (0.5 * glow).min(1.0) * opacity;
+    let mut mesh = Mesh::default();
+    for i in 0..n {
+        let along = (points[(i + 1) % n] - points[(i + n - 1) % n]).normalized();
+        let out = egui::vec2(-along.y, along.x) * reach;
+        for (d, k) in PROFILE {
+            mesh.colored_vertex(points[i] + out * d, theme::ACCENT_BRIGHT.gamma_multiply(halo * k));
+        }
+    }
+    let (n, across) = (n as u32, PROFILE.len() as u32);
+    for i in 0..n {
+        let (a, b) = (across * i, across * ((i + 1) % n));
+        for band in 0..across - 1 {
+            mesh.add_triangle(a + band, a + band + 1, b + band + 1);
+            mesh.add_triangle(a + band, b + band, b + band + 1);
+        }
+    }
+    painter.add(mesh);
+    painter.add(egui::Shape::closed_line(points.to_vec(), egui::Stroke::new(RING_LINE_PX, theme::ACCENT_BRIGHT.gamma_multiply(0.95 * opacity))));
+}
+
 /// The whole texture, for `Painter::image`.
 pub(crate) const UNIT_UV: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
 
@@ -185,6 +247,20 @@ pub(crate) fn paint_working_frame(painter: &Painter, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A found face pops in small, bounces past full size once and
+    /// settles; its glow swells past the rest level and eases back.
+    #[test]
+    fn a_found_face_pops_in_bounces_and_rests() {
+        let (start, glow0) = face_arrival(0.0);
+        assert!((start - 0.8).abs() < 1e-4 && (glow0 - FACE_GLOW_REST).abs() < 1e-4);
+        let (over, peak) = face_arrival(0.25);
+        assert!(over > 1.02, "past full size: {over}");
+        assert!((peak - FACE_GLOW_PEAK).abs() < 1e-4, "brightest a quarter second in");
+        let (late, glow) = face_arrival(FACE_ARRIVAL_SECS - 0.01);
+        assert!((late - 1.0).abs() < 1e-3 && (glow - FACE_GLOW_REST).abs() < 0.02, "settled");
+        assert_eq!(face_arrival(f32::MAX), (1.0, FACE_GLOW_REST), "animations off: at rest from the start");
+    }
 
     #[test]
     fn a_rounded_mesh_pulls_only_its_corners_in() {

@@ -815,13 +815,23 @@ impl GroupChip<'_> {
 /// Render a group chip. `body` receives `reset == true` on the frame the
 /// group's Reset was clicked, before any of its rows render. Returns the
 /// body's value while the popover is open.
+/// The popup a group chip opens.
+fn group_chip_id(id_salt: &str) -> egui::Id {
+    egui::Id::new(("group_chip", id_salt))
+}
+
+/// Whether the group chip `id_salt` has its strip or panel open.
+pub(super) fn group_chip_open(ctx: &egui::Context, id_salt: &str) -> bool {
+    egui::Popup::is_id_open(ctx, group_chip_id(id_salt))
+}
+
 pub(super) fn group_chip<R>(
     ui: &mut Ui,
     g: GroupChip<'_>,
     body: impl FnOnce(&mut Ui, bool) -> R,
 ) -> Option<R> {
     let resp = tooltip(chip_button(ui, g.icon, &g.face(), g.tuned), g.label, g.tooltip, None);
-    let pop_id = egui::Id::new(("group_chip", g.id_salt));
+    let pop_id = group_chip_id(g.id_salt);
     let mut out = None;
     let contents = |ui: &mut Ui| {
         // Exactly its width: the header's right-aligned Reset would
@@ -862,7 +872,7 @@ pub(super) fn strip_chip(ui: &mut Ui, g: GroupChip<'_>, more: &str, header: Pane
 /// chip whose name is too long to sit in the toolbar.
 pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: &str, header: PanelHeader<'_>, mut body: impl FnMut(&mut Ui, Part)) {
     let resp = tooltip(chip_button(ui, g.icon, face, g.tuned), g.label, g.tooltip, None);
-    let pop_id = egui::Id::new(("group_chip", g.id_salt));
+    let pop_id = group_chip_id(g.id_salt);
     let expanded_id = pop_id.with("expanded");
     show_flyout(pop_id, &resp, below_chip(&resp, pop_id), |ui| {
             let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));

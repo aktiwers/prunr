@@ -22,6 +22,8 @@ pub(crate) struct FacesChange {
     pub blend: bool,
     /// "Get a face model" was clicked.
     pub open_store: bool,
+    /// The Outline switch moved (an app setting, saved).
+    pub outline: bool,
 }
 
 /// What the search of the shown photo came to, when one ran.
@@ -45,7 +47,11 @@ const WHICH: [chip::Choice<bool>; 2] = [
     chip::Choice { value: true, name: "Largest", description: "Only the biggest face: a portrait with people behind", enabled: true },
 ];
 
-pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
+/// The Faces chip's strip and panel, which the canvas outlines the
+/// found faces under.
+pub(super) const ID_SALT: &str = "faces";
+
+pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
     let mut change = FacesChange::default();
     let any_installed = FaceModel::ALL.iter().any(|&m| installed.has_face_model(m));
     let summary: std::borrow::Cow<'static, str> = if !any_installed {
@@ -56,7 +62,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
         "Off".into()
     };
     let group = chip::GroupChip {
-        id_salt: "faces",
+        id_salt: ID_SALT,
         icon: ICON_FACE.codepoint,
         label: "Faces",
         summary: &summary,
@@ -75,6 +81,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
             }
             change.search |= chip::choice_buttons(ui, &ON_OFF, &mut s.on);
             change.blend |= strength_row(ui, s);
+            change.outline |= chip::inline_switch(ui, "Outline", outlines).commit;
         }
         chip::Part::Full { reset } => {
             if reset {
