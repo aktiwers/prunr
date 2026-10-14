@@ -19,6 +19,15 @@ pub(crate) fn register_flyout(ctx: &egui::Context, id: egui::Id) {
     flyouts(ctx).0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id);
 }
 
+/// Close every open flyout: for a click the whole image must take.
+pub(crate) fn close_flyouts(ctx: &egui::Context) {
+    let flyouts = flyouts(ctx);
+    let ids = flyouts.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for id in ids.iter() {
+        egui::Popup::close_id(ctx, *id);
+    }
+}
+
 /// Whether the open popup is a flyout the canvas stays live under.
 pub(crate) fn pinned_popup_open(ctx: &egui::Context) -> bool {
     let flyouts = flyouts(ctx);
@@ -469,6 +478,26 @@ pub const INSERTION_LINE: Color32 = ACCENT;
 pub const ZOOM_MIN: f32 = 0.10;
 pub const ZOOM_MAX: f32 = 20.0;
 pub const ZOOM_STEP: f32 = 1.1;
+
+#[cfg(test)]
+mod flyout_tests {
+    use super::*;
+
+    #[test]
+    fn close_flyouts_closes_every_registered_flyout_and_nothing_else() {
+        let ctx = egui::Context::default();
+        let (strip, popover) = (egui::Id::new("strip"), egui::Id::new("popover"));
+        register_flyout(&ctx, strip);
+        // egui holds one open popup at a time, so each case opens its own.
+        egui::Popup::open_id(&ctx, strip);
+        assert!(pinned_popup_open(&ctx));
+        close_flyouts(&ctx);
+        assert!(!egui::Popup::is_id_open(&ctx, strip), "the flyout is closed");
+        egui::Popup::open_id(&ctx, popover);
+        close_flyouts(&ctx);
+        assert!(egui::Popup::is_id_open(&ctx, popover), "a popover is left alone");
+    }
+}
 
 #[cfg(test)]
 mod motion_tests {
