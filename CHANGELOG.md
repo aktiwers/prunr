@@ -106,6 +106,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Slider handles are clean white discs on the rail again; a light ring had appeared around them, with the value box sitting a little low.
 - Colorize's Strength panel is as wide as its slider needs instead of half the window, and the sliders in it and in the eraser's Advanced panels span the panel.
 - Hint text under a knob wraps ragged-right; inside popups egui justified it and spread the words apart.
 - A failed erase says what happened in plain words; the message used to carry program text ("inpaint: Inference(…)") and an internal model name.
