@@ -57,6 +57,7 @@ zip = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]
+prunr-core = { path = "../prunr-core", features = ["test-utils"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 egui_kittest = { workspace = true }

@@ -13,6 +13,9 @@ dev-models = ["prunr-models/dev-models"]
 # CUDA execution provider (requires CUDA toolkit at link time)
 cuda = []
 
+# Constructors other crates' tests use to stand in for a model's output.
+test-utils = []
+
 [dependencies]
 prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }

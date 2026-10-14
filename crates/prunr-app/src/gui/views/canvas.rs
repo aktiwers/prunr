@@ -676,8 +676,9 @@ fn face_outline(area: prunr_core::face::FaceArea, img_rect: Rect) -> [Pos2; FACE
 
 /// While the Faces strip or panel is open, the faces found in the shown
 /// image outlined: what Faces redraws, so a face it missed shows by having
-/// none. They fade in as they are found and glow once; under "Largest" the
-/// faces it leaves alone are faint.
+/// none. They fade in as soon as the search finds them, before they are
+/// redrawn, and glow once; under "Largest" the faces it leaves alone are
+/// faint.
 fn draw_found_faces(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
     use super::effects::{face_arrival, paint_glow_ring, FACE_ARRIVAL_SECS, FACE_FADE_SECS};
     let faces = &item.settings.faces;
@@ -687,21 +688,27 @@ fn draw_found_faces(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::Batc
     if shown <= 0.0 {
         return;
     }
-    let stage = crate::gui::item::FaceStage::of(app.settings.model.role());
-    let Some(found) = item.face_photo(stage).zip(faces.wanted()).and_then(|(photo, model)| item.found_for(&photo, model)) else { return };
+    let Some(found) = item.outlined_faces(crate::gui::item::FaceStage::of(app.settings.model.role())) else { return };
     let since = if theme::motion(ctx) { found.found_at.elapsed().as_secs_f32() } else { f32::MAX };
     if since < FACE_ARRIVAL_SECS {
         ctx.request_repaint();
     }
     let (size, glow) = face_arrival(since);
     let opacity = shown * prunr_core::math::smoothstep((since / FACE_FADE_SECS).min(1.0));
-    let largest = faces.largest_only.then(|| prunr_core::face::largest_face(&found.faces)).flatten();
-    for (i, face) in found.faces.iter().enumerate() {
-        let redrawn = !faces.largest_only || largest == Some(i);
-        let (opacity, glow) = if redrawn { (opacity, glow) } else { (0.4 * opacity, 0.0) };
+    let redrawn = faces.blend().redrawn(found.places());
+    for (i, face) in found.places().enumerate() {
+        let (opacity, glow) = if redrawn(i) { (opacity, glow) } else { (0.4 * opacity, 0.0) };
         let area = face.area(faces.hair);
         let area = prunr_core::face::FaceArea { radii: area.radii.map(|r| r * size), ..area };
         paint_glow_ring(ui.painter(), &face_outline(area, img_rect), opacity, glow);
+    }
+}
+
+/// The faces a search has redrawn so far, each over the image in its
+/// place, until the image with them blended in is shown.
+fn draw_face_preview(ui: &egui::Ui, item: &crate::gui::item::BatchItem, img_rect: Rect) {
+    if let Some(texture) = item.face_preview_texture() {
+        ui.painter().image(texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE);
     }
 }
 
@@ -757,6 +764,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
         // Visualization — Render gating".
         if let Some(it) = app.batch.selected_item() {
+            draw_face_preview(ui, it, img_rect);
             draw_selection(ui, app, it, img_rect);
             draw_found_faces(ui, app, it, img_rect);
         }
@@ -858,6 +866,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
         paint_backdrop(ui, img_rect, it, it.frame_size());
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
+        draw_face_preview(ui, it, img_rect);
         draw_selection(ui, app, it, img_rect);
         draw_found_faces(ui, app, it, img_rect);
         painted = Some(img_rect);

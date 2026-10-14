@@ -662,7 +662,7 @@ impl UpscaleJob<'_> {
         let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
         let mut out = std::sync::Arc::unwrap_or_clone(shown);
         if let Some((restorer, blend)) = self.faces.as_mut() {
-            let faces = restorer.find_and_restore(&out, &progress)
+            let faces = restorer.find_and_restore(&out, *blend, &progress)
                 .map_err(|e| format!("restore faces failed: {e}"))?;
             prunr_core::face::compose_faces_into(&mut out, &faces, *blend);
         }
