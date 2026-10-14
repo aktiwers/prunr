@@ -88,6 +88,8 @@ impl CancelRegistry {
 /// cleans when the last pending item completes — so a late ImageDone after
 /// a settings edit can't pick up the wrong recipe.
 struct InFlightBatch {
+    /// The id the worker's completion names it by.
+    id: u64,
     recipe: ProcessingRecipe,
     pending: HashSet<u64>,
     /// Total items registered for this dispatch — frozen at
@@ -692,7 +694,10 @@ pub(crate) struct Processor {
     /// Sender for streaming additional items to the worker.
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
     /// In-flight batch: recipe + pending IDs. `None` between batches.
-    in_flight: Option<InFlightBatch>,
+    /// The batches sent and not finished, oldest first: one queued behind
+    /// a running one keeps its own images and recipe.
+    in_flight: Vec<InFlightBatch>,
+    next_batch: u64,
     /// The progress run the in-flight batch shows through.
     seg_run: Option<super::dispatch_progress::RunSink>,
     /// Inpaint dispatch state. Per-item generation counter discards
@@ -799,7 +804,8 @@ impl Processor {
             live_preview: LivePreview::default(),
             admission: None,
             admission_tx: None,
-            in_flight: None,
+            in_flight: Vec::new(),
+            next_batch: 0,
             seg_run: None,
             inpaint_tx,
             inpaint_rx,
@@ -838,7 +844,7 @@ impl Processor {
     /// Send the warm-up when it is due; how long until it is, if it waits.
     /// A run under way drops it: its own worker stays warm after.
     pub(crate) fn pump_seg_warm(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
-        if self.is_run_in_flight() || self.in_flight.is_some() {
+        if self.is_run_in_flight() || !self.in_flight.is_empty() {
             self.seg_warm_due = None;
         }
         let (due, _) = self.seg_warm_due.as_ref()?;
@@ -1313,42 +1319,44 @@ impl Processor {
         self.inpaint_pending.insert(item_id, u32::from(on));
     }
 
-    /// Register a batch's recipe + the IDs that should deliver against it.
-    /// Replaces any prior in-flight state — callers ensure prior batches
-    /// have completed before firing a new dispatch.
+    /// Register a batch sent to the worker: `ids` land with `recipe`.
+    /// Returns the batch's id, which its completion names.
     pub(crate) fn track_dispatch(
         &mut self,
         recipe: ProcessingRecipe,
         ids: impl IntoIterator<Item = u64>,
-    ) {
+    ) -> u64 {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
-        self.in_flight = Some(InFlightBatch { recipe, pending, total });
-        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Seg, "Starting");
-        self.seg_run = Some(self.dispatch_progress.begin(initial));
+        let id = self.next_batch;
+        self.next_batch += 1;
+        self.in_flight.push(InFlightBatch { id, recipe, pending, total });
+        if self.seg_run.is_none() {
+            let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Seg, "Starting");
+            self.seg_run = Some(self.dispatch_progress.begin(initial));
+        }
         self.report_seg_count();
+        id
     }
 
-    /// `(done, total)` for the currently in-flight dispatch, or `None`
-    /// when idle. `total` is the count registered at `track_dispatch`,
-    /// `done = total - pending.len()`. Streamed-admission items bump
-    /// `total` via `track_streamed`.
-    ///
-    /// Scopes the seg progress counter to the *current* dispatch so a
-    /// previously-Done item from an earlier reprocess doesn't inflate
-    /// the displayed total ("1 of 2" when only one item was dispatched).
+    /// `(done, total)` over the batches in flight, or `None` when idle.
+    /// Scoped to them, so an image Done by an earlier run doesn't inflate
+    /// the total ("1 of 2" when only one image was sent).
     pub(crate) fn current_dispatch_progress(&self) -> Option<(u32, u32)> {
-        let b = self.in_flight.as_ref()?;
-        let done = b.total.saturating_sub(b.pending.len());
-        Some((done as u32, b.total as u32))
+        if self.in_flight.is_empty() {
+            return None;
+        }
+        let (done, total) = self.in_flight.iter()
+            .fold((0, 0), |(d, t), b| (d + b.total - b.pending.len(), t + b.total));
+        Some((done as u32, total as u32))
     }
 
-    /// Add a streamed (admission-pool) item to the current batch. The
-    /// `debug_assert` catches the "admission ran without a tracked batch"
-    /// invariant breach in tests; release builds silently no-op so a
-    /// single late delivery can't take down a real batch.
+    /// Add a streamed (admission-pool) item to the newest batch, the one
+    /// that opened admission. The `debug_assert` catches "admission ran
+    /// without a tracked batch" in tests; release builds no-op so a late
+    /// delivery can't take down a real batch.
     pub(crate) fn track_streamed(&mut self, id: u64) {
-        match self.in_flight.as_mut() {
+        match self.in_flight.last_mut() {
             Some(b) => {
                 if b.pending.insert(id) {
                     b.total += 1;
@@ -1359,28 +1367,43 @@ impl Processor {
         }
     }
 
-    /// Take the recipe for a finished item. Returns `None` when the item
-    /// wasn't in flight (late delivery after cancel/drain) — caller falls
-    /// back. Self-cleans the in-flight slot when the last item completes.
+    /// Take the recipe for a finished item from the batch that sent it.
+    /// `None` when no batch holds it (late delivery after cancel) and the
+    /// caller falls back. A batch whose last item lands is done.
     pub(crate) fn take_recipe(&mut self, id: u64) -> Option<ProcessingRecipe> {
-        let batch = self.in_flight.as_mut()?;
-        if !batch.pending.remove(&id) {
-            return None;
-        }
+        let at = self.in_flight.iter().position(|b| b.pending.contains(&id))?;
+        let batch = &mut self.in_flight[at];
+        batch.pending.remove(&id);
         let recipe = batch.recipe.clone();
-        self.report_seg_count();
-        if self.in_flight.as_ref().is_some_and(|b| b.pending.is_empty()) {
-            self.in_flight = None;
-            self.end_seg_run();
+        if batch.pending.is_empty() {
+            self.in_flight.remove(at);
         }
+        self.after_batch_change();
         Some(recipe)
     }
 
-    /// Drop the in-flight slot regardless of pending. Called on user cancel
-    /// or batch-complete signals so a late delivery can't reattribute.
+    /// The worker finished batch `id`: drop it and return the images it
+    /// never answered.
+    pub(crate) fn finish_batch(&mut self, id: u64) -> Vec<u64> {
+        let Some(at) = self.in_flight.iter().position(|b| b.id == id) else { return Vec::new() };
+        let batch = self.in_flight.remove(at);
+        self.after_batch_change();
+        batch.pending.into_iter().collect()
+    }
+
+    /// Drop every batch regardless of pending. Called on user cancel so a
+    /// late delivery can't reattribute.
     pub(crate) fn drain_recipes(&mut self) {
-        self.in_flight = None;
+        self.in_flight.clear();
         self.end_seg_run();
+    }
+
+    fn after_batch_change(&mut self) {
+        if self.in_flight.is_empty() {
+            self.end_seg_run();
+        } else {
+            self.report_seg_count();
+        }
     }
 
     /// Whether the running batch still has images waiting for room in
@@ -2239,7 +2262,7 @@ mod tests {
 
         p.schedule_seg_warm(cfg(ModelKind::Silueta), t0);
         p.release_seg_warm();
-        p.in_flight = None;
+        p.in_flight.clear();
         assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(2)), None);
         assert!(warmed(&rx).is_empty(), "a release clears it");
     }
@@ -2607,10 +2630,37 @@ mod tests {
         assert!(p.take_recipe(10).is_some());
         assert!(p.take_recipe(20).is_some());
         // Slot still alive while items remain.
-        assert!(p.in_flight.is_some());
+        assert!(!p.in_flight.is_empty());
         assert!(p.take_recipe(30).is_some());
         // Last item drains the slot.
-        assert!(p.in_flight.is_none());
+        assert!(p.in_flight.is_empty());
+    }
+
+    /// A batch queued behind a running one keeps its own tracking: the
+    /// first batch's image lands with that batch's recipe, and the first
+    /// batch ending leaves the second tracked, its progress showing.
+    #[test]
+    fn a_queued_batch_keeps_its_tracking_when_the_first_ends() {
+        let mut p = fixture();
+        let mut second = fixture_recipe();
+        second.mask = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings { gamma: 2.0, ..Default::default() });
+        p.track_dispatch(fixture_recipe(), [1]);
+        p.track_dispatch(second.clone(), [2]);
+        assert!(p.take_recipe(1).is_some_and(|r| r != second), "the first batch's image keeps its own recipe");
+        assert_eq!(p.current_dispatch_progress(), Some((0, 1)), "the first batch is done; the queued one shows on");
+        assert_eq!(p.take_recipe(2), Some(second));
+        assert_eq!(p.current_dispatch_progress(), None);
+
+        let first = p.track_dispatch(fixture_recipe(), [3, 4]);
+        p.track_streamed(5);
+        let queued = p.track_dispatch(fixture_recipe(), [6]);
+        p.take_recipe(3);
+        let mut unanswered = p.finish_batch(first);
+        unanswered.sort();
+        assert_eq!(unanswered, vec![4, 5], "its end names its own unanswered images, an admitted one too");
+        assert_eq!(p.current_dispatch_progress(), Some((0, 1)), "the queued one still shows");
+        assert_eq!(p.finish_batch(queued), vec![6]);
+        assert_eq!(p.current_dispatch_progress(), None);
     }
 
     #[test]

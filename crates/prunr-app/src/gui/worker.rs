@@ -286,6 +286,8 @@ impl ProcessingConfig {
 
 pub(crate) enum WorkerMessage {
     BatchProcess {
+        /// The id its completion names (`Processor::track_dispatch`).
+        batch: u64,
         items: Vec<WorkItem>,
         /// Tier 2 items: re-postprocess from cached tensor (skip inference).
         tier2_items: Vec<CachedTensorWork>,
@@ -326,9 +328,8 @@ pub enum WorkerResult {
     },
     /// The image a chained cut starts from, built as it was sent.
     ChainStart { item_id: u64, image: Arc<image::RgbaImage> },
-    /// The batch is over; `items` are the images it owned (given at the
-    /// start or admitted while it ran).
-    BatchComplete { items: Vec<u64> },
+    /// Batch `batch` is over.
+    BatchComplete { batch: u64 },
     Cancelled,
     /// Subprocess crashed — retrying with reduced concurrency.
     SubprocessRetry {
@@ -398,7 +399,7 @@ pub(crate) fn spawn_worker(
                         warm = spawn_warm(*cfg, &res_tx, &ctx);
                     }
                     WorkerMessage::BatchProcess {
-                        items, tier2_items, add_edge_items, config, cancels,
+                        batch, items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
                         let needed = ProcessingConfig { jobs: pool_jobs(config.jobs, items.len()), ..(*config).clone() };
@@ -430,7 +431,7 @@ pub(crate) fn spawn_worker(
                             "subprocess cold-start",
                         );
                         let state = BatchRunState::new(
-                            items, tier2_items, add_edge_items, additional_items_rx, *config,
+                            batch, items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
                         warm = run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx)
                             .map(|(sub, cfg)| WarmWorker { release_at: Instant::now() + idle_after_run(cfg.model), sub, cfg });
@@ -454,24 +455,19 @@ struct BatchRunState {
     /// Items admitted by the memory controller after the batch started.
     additional_rx: Option<mpsc::Receiver<WorkItem>>,
     completed: std::collections::HashSet<u64>,
-    /// Every image this batch was given or admitted, so its end frees
-    /// only its own.
-    owned: std::collections::HashSet<u64>,
+    batch: u64,
     max_jobs: usize,
 }
 
 impl BatchRunState {
     fn new(
+        batch: u64,
         items: Vec<WorkItem>,
         tier2_items: Vec<CachedTensorWork>,
         add_edge_items: Vec<CachedTensorWork>,
         additional_rx: Option<mpsc::Receiver<WorkItem>>,
         config: ProcessingConfig,
     ) -> Self {
-        let owned = items.iter().map(|i| i.0)
-            .chain(tier2_items.iter().map(|w| w.item_id))
-            .chain(add_edge_items.iter().map(|w| w.item_id))
-            .collect();
         Self {
             max_jobs: config.jobs,
             config,
@@ -480,18 +476,17 @@ impl BatchRunState {
             pending_add_edge: add_edge_items.into(),
             additional_rx,
             completed: std::collections::HashSet::new(),
-            owned,
+            batch,
         }
     }
 
     /// An image admitted while the batch runs joins it.
     fn admit(&mut self, item: WorkItem) {
-        self.owned.insert(item.0);
         self.pending.push_back(item);
     }
 
     fn complete_event(&self) -> WorkerResult {
-        WorkerResult::BatchComplete { items: self.owned.iter().copied().collect() }
+        WorkerResult::BatchComplete { batch: self.batch }
     }
 
     fn nothing_pending(&self) -> bool {
@@ -1355,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_owns_what_it_was_given_and_what_it_admits_later() {
+    fn a_batch_completion_names_its_batch() {
         let cfg = ProcessingConfig {
             model: ModelKind::Silueta, jobs: 2, mask: MaskSettings::default(), force_cpu: false,
             line_mode: LineMode::Off, edge: super::super::item_settings::ItemSettings::default().edge_settings(),
@@ -1365,11 +1360,9 @@ mod tests {
             item_id: 3, tensor_data: Vec::new(), tensor_height: 1, tensor_width: 1,
             model: ModelKind::Silueta, original_bytes: Arc::clone(&bytes), mask: MaskSettings::default(),
         };
-        let mut state = BatchRunState::new(vec![(1, Arc::clone(&bytes), None), (2, Arc::clone(&bytes), None)], vec![tier2], Vec::new(), None, cfg);
+        let mut state = BatchRunState::new(7, vec![(1, Arc::clone(&bytes), None), (2, Arc::clone(&bytes), None)], vec![tier2], Vec::new(), None, cfg);
         state.admit((4, bytes, None));
-        let WorkerResult::BatchComplete { mut items } = state.complete_event() else { panic!("a completion") };
-        items.sort();
-        assert_eq!(items, vec![1, 2, 3, 4]);
+        assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
     }
 
     #[test]
