@@ -613,7 +613,11 @@ impl PrunrApp {
         if self.settings.model.is_inpaint() {
             can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(BatchItem::has_painted_region))
         } else {
-            self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
+            // A batch still admitting images into its RAM budget takes the
+            // next Process once every one of them is on its way; the worker
+            // queues batches, the budget cannot feed two.
+            !self.processor.admission_still_feeding()
+                && self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
         }
     }
 

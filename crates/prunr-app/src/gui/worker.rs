@@ -234,7 +234,9 @@ pub enum WorkerResult {
         /// Only populated when the run used edge detection.
         edge_cache: Option<EdgeTensorCache>,
     },
-    BatchComplete,
+    /// The batch is over; `items` are the images it owned (given at the
+    /// start or admitted while it ran).
+    BatchComplete { items: Vec<u64> },
     Cancelled,
     /// Subprocess crashed — retrying with reduced concurrency.
     SubprocessRetry {
@@ -377,6 +379,9 @@ struct BatchRunState {
     /// Items admitted by the memory controller after the batch started.
     additional_rx: Option<mpsc::Receiver<WorkItem>>,
     completed: std::collections::HashSet<u64>,
+    /// Every image this batch was given or admitted, so its end frees
+    /// only its own.
+    owned: std::collections::HashSet<u64>,
     max_jobs: usize,
 }
 
@@ -388,6 +393,10 @@ impl BatchRunState {
         additional_rx: Option<mpsc::Receiver<WorkItem>>,
         config: ProcessingConfig,
     ) -> Self {
+        let owned = items.iter().map(|i| i.0)
+            .chain(tier2_items.iter().map(|w| w.item_id))
+            .chain(add_edge_items.iter().map(|w| w.item_id))
+            .collect();
         Self {
             max_jobs: config.jobs,
             config,
@@ -396,7 +405,18 @@ impl BatchRunState {
             pending_add_edge: add_edge_items.into(),
             additional_rx,
             completed: std::collections::HashSet::new(),
+            owned,
         }
+    }
+
+    /// An image admitted while the batch runs joins it.
+    fn admit(&mut self, item: WorkItem) {
+        self.owned.insert(item.0);
+        self.pending.push_back(item);
+    }
+
+    fn complete_event(&self) -> WorkerResult {
+        WorkerResult::BatchComplete { items: self.owned.iter().copied().collect() }
     }
 
     fn nothing_pending(&self) -> bool {
@@ -489,7 +509,7 @@ fn run_batch_with_retry(
 
         match poll_additional_items(&mut state) {
             WaitAction::Complete => {
-                let _ = res_tx.send(WorkerResult::BatchComplete);
+                let _ = res_tx.send(state.complete_event());
                 ctx.request_repaint();
                 return live;
             }
@@ -556,7 +576,7 @@ fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
     };
     match rx.try_recv() {
         Ok(item) => {
-            state.pending.push_back(item);
+            state.admit(item);
             WaitAction::Continue
         }
         Err(mpsc::TryRecvError::Disconnected) => WaitAction::Complete,
@@ -590,7 +610,7 @@ fn spawn_and_initial_burst(
     drop_cancelled_pending(state, cancels, res_tx, ctx);
     let total_pending = state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
     if total_pending == 0 {
-        let _ = res_tx.send(WorkerResult::BatchComplete);
+        let _ = res_tx.send(state.complete_event());
         ctx.request_repaint();
         return None;
     }
@@ -611,7 +631,7 @@ fn spawn_and_initial_burst(
             }
             Err(e) => {
                 emit_pending_errors(state, &e, res_tx);
-                let _ = res_tx.send(WorkerResult::BatchComplete);
+                let _ = res_tx.send(state.complete_event());
                 ctx.request_repaint();
                 return None;
             }
@@ -703,7 +723,7 @@ fn run_event_loop(
         if sent.is_empty() && state.nothing_pending() {
             if let Some(rx) = state.additional_rx.as_ref() {
                 match rx.try_recv() {
-                    Ok(item) => state.pending.push_back(item),
+                    Ok(item) => state.admit(item),
                     Err(mpsc::TryRecvError::Disconnected) => subprocess_finished = true,
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
@@ -900,7 +920,7 @@ fn admit_next_item(
             } else if send_item_to_sub(sub, &item).is_ok() {
                 sent.items.push(item);
             } else {
-                state.pending.push_back(item);
+                state.admit(item);
             }
         }
     }
@@ -1010,10 +1030,11 @@ fn handle_crash_and_retry(
 
     // Drain late additions before re-queuing so the original in-flight
     // order stays at the front.
-    if let Some(rx) = state.additional_rx.as_ref() {
-        while let Ok(item) = rx.try_recv() {
-            state.pending.push_back(item);
-        }
+    let late: Vec<WorkItem> = state.additional_rx.as_ref()
+        .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect())
+        .unwrap_or_default();
+    for item in late {
+        state.admit(item);
     }
     for item in re_queued.into_iter().rev() {
         state.pending.push_front(item);
@@ -1028,7 +1049,7 @@ fn handle_crash_and_retry(
     if old_jobs == 1 {
         let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
         emit_pending_errors(state, &err_msg, res_tx);
-        let _ = res_tx.send(WorkerResult::BatchComplete);
+        let _ = res_tx.send(state.complete_event());
         ctx.request_repaint();
         return false;
     }
@@ -1088,17 +1109,17 @@ fn finalize_or_continue(
         if let Some(rx) = state.additional_rx.as_ref() {
             match rx.try_recv() {
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    let _ = res_tx.send(WorkerResult::BatchComplete);
+                    let _ = res_tx.send(state.complete_event());
                     ctx.request_repaint();
                     return false;
                 }
-                Ok(item) => state.pending.push_back(item),
+                Ok(item) => state.admit(item),
                 Err(mpsc::TryRecvError::Empty) => {
                     // More might be coming — loop back.
                 }
             }
         } else {
-            let _ = res_tx.send(WorkerResult::BatchComplete);
+            let _ = res_tx.send(state.complete_event());
             ctx.request_repaint();
             return false;
         }
@@ -1185,6 +1206,24 @@ mod tests {
         assert!(!built.reusable_by(&ProcessingConfig { jobs: 5, ..built.clone() }), "a larger pool needs a new worker");
         assert!(!built.reusable_by(&ProcessingConfig { model: ModelKind::Silueta, ..built.clone() }));
         assert!(!built.reusable_by(&ProcessingConfig { force_cpu: true, ..built.clone() }));
+    }
+
+    #[test]
+    fn a_batch_owns_what_it_was_given_and_what_it_admits_later() {
+        let cfg = ProcessingConfig {
+            model: ModelKind::Silueta, jobs: 2, mask: MaskSettings::default(), force_cpu: false,
+            line_mode: LineMode::Off, edge: super::super::item_settings::ItemSettings::default().edge_settings(),
+        };
+        let bytes = Arc::new(Vec::new());
+        let tier2 = CachedTensorWork {
+            item_id: 3, tensor_data: Vec::new(), tensor_height: 1, tensor_width: 1,
+            model: ModelKind::Silueta, original_bytes: Arc::clone(&bytes), mask: MaskSettings::default(),
+        };
+        let mut state = BatchRunState::new(vec![(1, Arc::clone(&bytes), None), (2, Arc::clone(&bytes), None)], vec![tier2], Vec::new(), None, cfg);
+        state.admit((4, bytes, None));
+        let WorkerResult::BatchComplete { mut items } = state.complete_event() else { panic!("a completion") };
+        items.sort();
+        assert_eq!(items, vec![1, 2, 3, 4]);
     }
 
     #[test]
