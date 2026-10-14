@@ -1058,7 +1058,7 @@ pub fn run_worker() -> ! {
                         let filled = prunr_core::inpaint::process_inpaint_with(
                             &image, &mask, model_id, sd_req.clone(),
                             sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
-                        ).map_err(|e| format!("inpaint: {e:?}"))?;
+                        ).map_err(|e| e.message())?;
                         progress.step(prunr_core::Step::Blending);
                         Ok((prunr_core::inpaint_blend::finalize_inpaint(
                             &filled.rgba, &image, &mask, feather_px, sharpen,

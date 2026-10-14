@@ -2306,14 +2306,13 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, free_mb: u64, resid
     if free_mb >= need_mb {
         return Ok(());
     }
+    tracing::info!(id = ?desc.id, free_mb, need_mb, "SD: refused to load");
     Err(format!(
-        "{} refused to load: only {:.1} GB RAM free, \
-         {:.1} GB minimum recommended (includes {:.1} GB safety \
-         headroom). Close other apps, or {LIGHTER_ERASER_HINT}.",
-        desc.display_name,
-        free_mb as f64 / 1024.0,
+        "This eraser needs {:.1} GB of free memory to load, {:.1} GB of it kept spare \
+         for other apps; {:.1} GB is free. Close other apps, or {LIGHTER_ERASER_HINT}.",
         need_mb as f64 / 1024.0,
         tuning.margin_mb as f64 / 1024.0,
+        free_mb as f64 / 1024.0,
     ))
 }
 
