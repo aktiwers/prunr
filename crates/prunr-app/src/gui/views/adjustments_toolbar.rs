@@ -1271,8 +1271,7 @@ fn role_caption(role: crate::gui::knob_catalog::ModelRole) -> &'static str {
 }
 
 /// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
-/// sets `change.model_changed` + `commit` when the selection flips so caller
-/// can invalidate tensor caches and fire a fresh Tier 1.
+/// sets `change.model_changed` + `commit` when the selection flips.
 pub(super) fn render_model_dropdown(
     ui: &mut Ui,
     app_settings: &mut Settings,
@@ -1379,7 +1378,10 @@ pub(super) fn render_model_dropdown(
             app_settings.parallel_jobs = max;
         }
         change.model_changed = true;
-        aggregate_bool(true, StaticKnob::Model, change);
+        // Not the Model knob's cache impact: the old model's cut-out stays
+        // on screen and the brushes correct it from its segmentation. The
+        // next Process drops that once it runs the new model.
+        change.commit = true;
     }
 }
 
