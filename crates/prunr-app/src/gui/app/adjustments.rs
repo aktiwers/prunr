@@ -47,7 +47,7 @@ impl PrunrApp {
 
     /// Open the Model Store; the flyout or popover that asked for it
     /// closes, or it stays drawn over the store.
-    pub(super) fn open_model_store(&mut self, req: adjustments_toolbar::ModelStoreRequest, ctx: &egui::Context) {
+    pub(crate) fn open_model_store(&mut self, req: adjustments_toolbar::ModelStoreRequest, ctx: &egui::Context) {
         egui::Popup::close_all(ctx);
         self.model_store = Some(req);
     }

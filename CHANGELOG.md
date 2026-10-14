@@ -6,6 +6,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- **Model Store in the top bar:** a store icon beside Settings opens it from anywhere.
 - **See the faces Faces found.** While the Faces strip or panel is open, every face it found is ringed in the accent purple, around the exact area it redraws; a face it missed has no ring. The rings pop in with a bounce and one bright glow as the search lands, then rest; under Largest the faces left alone are faint. An Outline switch in the strip turns them off.
 - Eraser (RORem) has an Advanced chip: Steps (2–8; fewer are faster but rougher, more than the 4 it was trained for changes little) and Pin seed.
 - **Process works on the ticked images for every model.** Upscalers and Colorize take them one at a time (the capsule counts "Image 2 of 5"); an eraser fills every ticked image that has a painted region, one after the other, and says how many had none. Tick boxes are bigger. The footer shows how large an erase filled its region ("Fill 24%"), and a pill at the bottom of the canvas says "Rendering…" or "Preparing…" when work goes on for more than a second with nothing else to show for it.
