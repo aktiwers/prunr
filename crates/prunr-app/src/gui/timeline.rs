@@ -26,7 +26,7 @@ pub(crate) const TIMELINE_DEPTH: usize = 64;
 
 /// Knob changes closer together than this are one step: a slider drag,
 /// or a few clicks on a stepper.
-const ADJUST_MERGE_WINDOW: Duration = Duration::from_millis(1200);
+const ADJUST_MERGE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepKind {
@@ -519,11 +519,13 @@ mod tests {
             t.push(DocState { at: start + Duration::from_millis(100 * i as u64), ..state(StepKind::Adjust, g) });
         }
         assert_eq!((t.undo_steps(), gamma(&t)), (1, 1.3));
+        t.push(DocState { at: start + Duration::from_millis(800), ..state(StepKind::Adjust, 1.4) });
+        assert_eq!(t.undo_steps(), 2, "two knobs set 0.6 s apart are two steps");
         t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.5) });
-        assert_eq!(t.undo_steps(), 2, "a pause starts a new step");
+        assert_eq!(t.undo_steps(), 3, "a pause starts a new step");
         t.undo();
         t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.6) });
-        assert_eq!(t.undo_steps(), 2, "after an undo a knob change is its own step");
+        assert_eq!(t.undo_steps(), 3, "after an undo a knob change is its own step");
     }
 
     #[test]
