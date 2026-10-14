@@ -1228,7 +1228,11 @@ pub(crate) fn render_model_only(
     change
 }
 
-const MODEL_PICKER_WIDTH: f32 = 360.0;
+/// Room for egui's gap between a chip and the popup under it.
+const POPUP_GAP: f32 = 4.0;
+
+/// The picker's last row: its title and description.
+const MORE_MODELS: (&str, &str) = ("Get more models", "Open the Model Store");
 
 fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
     let default_pct = ItemSettings::default().color_strength_pct;
@@ -1301,12 +1305,38 @@ pub(super) fn render_model_dropdown(
         let resp = chip::tooltip(resp, "Model", body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
-            ui.set_width(MODEL_PICKER_WIDTH);
-            let mut role = None;
-            let models = SettingsModel::ALL.iter().copied()
+            // A model not downloaded yet shows "Get" and its size; picking
+            // it opens the Model Store on its section.
+            let rows: Vec<_> = SettingsModel::ALL.iter().copied()
                 .filter(|v| *v != SettingsModel::None)
-                .chain(std::iter::once(SettingsModel::None));
-            for variant in models {
+                .chain(std::iter::once(SettingsModel::None))
+                .map(|variant| {
+                    let missing = variant.to_model_id().filter(|_| !installed.has_model(variant));
+                    let blurb = match missing {
+                        Some(id) => std::borrow::Cow::Borrowed(super::get_model::badge_and_size(id)),
+                        None => super::model_blurb(variant),
+                    };
+                    (variant, missing, blurb)
+                })
+                .collect();
+            // As wide as its longest row, so no blank band runs down the right.
+            let width = rows.iter()
+                .map(|(variant, _, blurb)| chip::choice_list_row_width(ui, model_info(*variant).name, blurb))
+                .fold(chip::choice_list_row_width(ui, MORE_MODELS.0, MORE_MODELS.1), f32::max);
+            ui.set_width(width);
+            // The list runs down to the window's bottom edge and scrolls
+            // past it. The room is measured from the chip, where the list
+            // opens below it: measured from wherever the popup sits, a list
+            // placed beside the chip would size itself to stay there. The
+            // popup's area also keeps last frame's size as its limit, so
+            // the height is set, not left to grow.
+            let frame = ui.spacing().menu_margin.sum().y;
+            let room = (ui.ctx().content_rect().bottom() - resp.rect.bottom() - frame - POPUP_GAP - theme::SPACE_MD).max(160.0);
+            ui.set_max_height(room);
+            egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+            ui.set_width(width);
+            let mut role = None;
+            for (variant, missing, blurb) in rows {
                 if variant == SettingsModel::None {
                     ui.add_space(theme::SPACE_XS);
                     ui.separator();
@@ -1314,18 +1344,10 @@ pub(super) fn render_model_dropdown(
                     role = Some(variant.role());
                     chip::panel_section(ui, role_caption(variant.role()), None);
                 }
-                let id = variant.to_model_id();
-                let advisory = id
+                let advisory = variant.to_model_id()
                     .and_then(prunr_models::descriptor)
                     .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
-                // A model not downloaded yet shows "Get" and its size; picking
-                // it opens the Model Store on its section.
-                let missing = id.filter(|_| !installed.has_model(variant));
-                let blurb = match missing {
-                    Some(id) => std::borrow::Cow::Borrowed(super::get_model::badge_and_size(id)),
-                    None => super::model_blurb(variant),
-                };
                 let row = chip::choice_list_row(ui, info.icon, info.name, &blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
@@ -1339,11 +1361,12 @@ pub(super) fn render_model_dropdown(
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
             }
-            let more = chip::choice_list_row(ui, ICON_DOWNLOAD.codepoint, "Get more models", "Open the Model Store", false, chip::LIST_ACTION_FILL);
+            let more = chip::choice_list_row(ui, ICON_DOWNLOAD.codepoint, MORE_MODELS.0, MORE_MODELS.1, false, chip::LIST_ACTION_FILL);
             if more.clicked() {
                 change.open_model_store = Some(ModelStoreRequest::default());
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }
+            });
         });
     });
 
