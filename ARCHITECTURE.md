@@ -124,8 +124,10 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 
 | Backend | Engines | ORT intra-op threads |
 |---------|---------|----------------------|
-| CPU | parallel-jobs setting | `num_cpus / engines` |
+| CPU (OpenVINO included: it runs on the host CPU here) | parallel-jobs setting for Silueta and U2Net; 1 for BiRefNet, whose single run fills every core (a second engine only doubled RAM) | `num_cpus / engines` |
 | GPU | `min(jobs, 2)` (VRAM) | same |
+
+`batch::engine_pool_size` is the one rule; the worker builds by it and the admission estimate reads it.
 
 The ORT CPU arena is off to lower the baseline; the subprocess absorbs any OOM. Jobs share a 64-unit semaphore weighted by megapixels, so small images run in parallel, a 40 MP image runs nearly alone, and FIFO order keeps small arrivals from starving it.
 

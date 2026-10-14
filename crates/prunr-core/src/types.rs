@@ -50,6 +50,16 @@ impl ModelKind {
         }
     }
 
+    /// Whether a batch on the host CPU runs faster with an engine per job.
+    /// One run of a heavy model already fills every core, so a second
+    /// engine only doubles RAM (BiRefNet-lite: 4 × 12 MP in 39.7 s with
+    /// one engine, 42.3 s with two); a light model's run leaves room to
+    /// overlap the next image's decode and encode (Silueta 27 %, U2Net
+    /// 18 % faster with four, on a 4-core i7).
+    pub fn parallel_jobs_pay_on_cpu(self) -> bool {
+        matches!(self, ModelKind::Silueta | ModelKind::U2net)
+    }
+
     /// The registry id; `const` so a `ModelId` constant can name a kind.
     pub const fn model_id(self) -> prunr_models::ModelId {
         match self {

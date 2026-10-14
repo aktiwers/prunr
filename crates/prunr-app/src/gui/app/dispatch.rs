@@ -278,7 +278,7 @@ impl PrunrApp {
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
-        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs);
+        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs, self.settings.cpu_only());
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let batch = &mut self.batch;
         let (initial_items, additional_items_rx) =
