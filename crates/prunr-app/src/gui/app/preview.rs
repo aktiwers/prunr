@@ -113,8 +113,8 @@ impl PrunrApp {
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
         let batch_items = &mut self.batch.items;
-        let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style, action)
+        let wait = self.processor.live_preview.tick(|id, kind, settled| {
+            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style, action, !settled)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -149,6 +149,7 @@ impl PrunrApp {
         is_filter_only: bool,
         style: crate::gui::background_io::SelectionStyle,
         action: crate::gui::brush_state::CutoutAction,
+        quick: bool,
     ) -> Option<crate::gui::live_preview::DispatchInputs> {
         use crate::gui::live_preview::{DispatchInputs, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id)?;
@@ -244,6 +245,7 @@ impl PrunrApp {
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Some(DispatchInputs {
+            quick,
             start,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
