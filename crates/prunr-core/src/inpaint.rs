@@ -465,12 +465,6 @@ struct LamaSession {
     mask_input_name: String,
 }
 
-/// Idle-release window for LaMa sessions. Mirrors `SD_IDLE_RELEASE_SECS`
-/// in `inpaint_sd.rs`. A 5-minute window balances "user might paint
-/// again any second" against "session is hundreds of MB to a few GB
-/// after EP compile and the OS should get it back if they switched
-/// away or moved on to bg removal."
-const LAMA_IDLE_RELEASE_SECS: u64 = 300;
 
 /// Background sweeper interval. 60 s gives reclaim within ~1 minute of
 /// the idle threshold.
@@ -517,7 +511,7 @@ fn ensure_lama_sweeper_running() {
             .name("lama-idle-sweeper".to_string())
             .spawn(|| {
                 let interval = Duration::from_secs(LAMA_SWEEP_INTERVAL_SECS);
-                let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
+                let idle = crate::IDLE_RELEASE;
                 loop {
                     std::thread::sleep(interval);
                     let cache = lama_cache();
@@ -529,7 +523,7 @@ fn ensure_lama_sweeper_running() {
                     if dropped > 0 {
                         tracing::info!(
                             dropped,
-                            idle_secs = LAMA_IDLE_RELEASE_SECS,
+                            idle_secs = crate::IDLE_RELEASE.as_secs(),
                             rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
                             "LaMa: background sweeper released idle session(s)",
                         );
@@ -542,7 +536,7 @@ fn ensure_lama_sweeper_running() {
 
 impl LamaSession {
     /// Per-id cache. Each LamaSession is built once on first use, kept
-    /// in an `Arc`, and released after `LAMA_IDLE_RELEASE_SECS` of no
+    /// in an `Arc`, and released after `crate::IDLE_RELEASE` of no
     /// `get()` calls. Mirrors `SdSession::get` so both inpaint backends
     /// have the same lifecycle: in-flight callers hold their own Arc
     /// (no use-after-free), the cache drops its ref on idle, the OS
@@ -555,7 +549,7 @@ impl LamaSession {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
         let now = Instant::now();
-        let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
+        let idle = crate::IDLE_RELEASE;
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the seconds-long build.
@@ -565,7 +559,7 @@ impl LamaSession {
             if dropped > 0 {
                 tracing::info!(
                     dropped,
-                    idle_secs = LAMA_IDLE_RELEASE_SECS,
+                    idle_secs = crate::IDLE_RELEASE.as_secs(),
                     rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
                     "LaMa: released idle session(s)",
                 );

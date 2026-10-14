@@ -22,12 +22,8 @@ use crate::subprocess::manager::SubprocessManager;
 use crate::subprocess::protocol::SubprocessEvent;
 use prunr_core::inpaint_sd::SdInpaintRequest;
 use prunr_models::ModelId;
+use prunr_core::IDLE_RELEASE;
 
-/// Idle window before the bridge drops its subprocess to reclaim RAM.
-/// Mirrors `inpaint_sd::SdSession::IDLE_RELEASE`. 5 minutes balances
-/// "user might paint again any second" vs "bundle is 5 GB and the OS
-/// should get it back if they switched away."
-const IDLE_RELEASE: Duration = Duration::from_secs(5 * 60);
 
 /// Whether the idle eraser subprocess goes now: nothing in flight, idle
 /// past the window, and the user did not ask to keep it loaded.

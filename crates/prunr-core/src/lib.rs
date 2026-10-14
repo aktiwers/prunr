@@ -30,6 +30,11 @@ pub mod sam;
 pub mod progress;
 pub mod subject;
 
+/// How long an unused model session stays loaded before its memory goes
+/// back to the OS: "paint again" or "Process again" within it finds the
+/// model ready; a user who moved on gets the RAM back.
+pub const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub use engine::{InferenceEngine, OrtEngine};
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, ColorizeRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
 pub use types::{

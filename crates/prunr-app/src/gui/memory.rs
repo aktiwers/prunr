@@ -78,12 +78,12 @@ impl AdmissionController {
         Self { budget_bytes, committed_bytes: 0, admitted: HashMap::new(), pending: Vec::new() }
     }
 
-    /// Add pending items. Sorts them for best-fit (largest first).
     /// Whether images are still waiting for room in the budget.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 
+    /// Add pending items. Sorts them for best-fit (largest first).
     pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
         costs.sort_by(|a, b| b.total.cmp(&a.total));
         self.pending.extend(costs);
@@ -163,11 +163,14 @@ pub fn under_memory_pressure() -> bool {
 /// the model registry — adding a new segmentation model is a registry edit,
 /// no `memory.rs` change required.
 fn per_engine_cost(model: ModelKind) -> usize {
+    working_set_mb(model) as usize * 1024 * 1024
+}
+
+/// The model's registry working set in MB.
+pub(crate) fn working_set_mb(model: ModelKind) -> u32 {
     let id: prunr_models::ModelId = model.into();
-    let mb = prunr_models::descriptor(id)
-        .map(|d| d.working_set_mb as usize)
-        .unwrap_or(800); // unreachable: every ModelKind has a descriptor.
-    mb * 1024 * 1024
+    // unreachable fallback: every ModelKind has a descriptor.
+    prunr_models::descriptor(id).map_or(800, |d| d.working_set_mb)
 }
 
 /// Fixed overhead for the engine pool the worker will build for `jobs`.
