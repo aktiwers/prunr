@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::mpsc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Engine, ImageSource};
+use crate::gui::item::{BatchItem, BatchStatus, Cutter, Engine, ImageSource};
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
@@ -207,13 +207,15 @@ impl PrunrApp {
             item.unpark_result();
         }
 
-        let tiers = self.batch.classify(&candidate_ids, model);
+        let cutter = Cutter::of(self.settings.model.to_model_kind());
+        let chained = self.batch.chained_cuts(&candidate_ids, step, cutter);
+        let tiers = self.batch.classify(&candidate_ids, model, &chained);
         self.notify_skip(tiers.skip_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
 
         for id in tiers.all_process_ids() {
             if let Some(item) = self.batch.find_by_id_mut(id) {
-                item.start_job(step, Engine::Segment);
+                item.start_cut(step, cutter, chained.contains(&id));
             }
         }
 
@@ -241,11 +243,12 @@ impl PrunrApp {
         if let Some(shown) = self.batch.selected_idx_clamped() {
             self.batch.share_settings(shown, &dispatches.iter().map(|(id, _)| *id).collect());
         }
+        let chained = self.batch.chained_cuts(&dispatches.iter().map(|(id, _)| *id).collect(), step, Cutter::NoModel);
         for (id, source) in dispatches {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             item.status = BatchStatus::Processing;
-            item.start_job(step, Engine::Segment);
-            let input = item.job_input();
+            item.start_cut(step, Cutter::NoModel, chained.contains(&id));
+            let input = item.job_run_image();
             self.batch.request_filter_only(id, &source, input, settings.fill_style);
         }
     }
@@ -443,6 +446,40 @@ mod process_targets_tests {
         let other = &app.batch.items[1];
         assert_eq!(other.settings.feather, 3.0, "the ticked image took the shown settings");
         assert_eq!(other.status, crate::gui::item::BatchStatus::Processing, "and reruns under them");
+    }
+
+    /// Process by another model than the one that cut the image on screen
+    /// builds on that cut-out, with No model too; the same model, or a
+    /// knob's re-run, redoes the step from its own start.
+    #[test]
+    fn process_by_another_model_builds_on_the_cutout_on_screen() {
+        use crate::gui::item::{BatchStatus, Cutter};
+        use prunr_core::ModelKind;
+        let mut app = two_images(SettingsModel::Silueta);
+        for item in &mut app.batch.items {
+            item.start_cut(Some(StepKind::Process), Cutter::Model(ModelKind::Silueta), false);
+            item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
+            item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
+            item.status = BatchStatus::Done;
+            item.finish_job();
+        }
+        let chained = |app: &PrunrApp, i: usize| app.batch.items[i].job.as_ref().map(|j| j.keep.is_some());
+
+        app.process_items(|i| i.id == 1, Some(StepKind::Process));
+        assert_eq!(chained(&app, 0), None, "the same model: up to date, nothing runs");
+
+        app.settings.model = SettingsModel::BiRefNetLite;
+        app.process_items(|i| i.id == 1, None);
+        assert_eq!(chained(&app, 0), Some(false), "a knob's re-run redoes the Silueta step");
+        app.batch.items[0].abandon_job();
+
+        app.process_items(|i| i.id == 1, Some(StepKind::Process));
+        assert_eq!(chained(&app, 0), Some(true), "Process by BiRefNet builds on the Silueta cut-out");
+        assert!(app.batch.items[0].job_builds_on_shown_result(), "which stays on screen while it runs");
+
+        app.settings.model = SettingsModel::None;
+        app.process_items(|i| i.id == 2, Some(StepKind::Process));
+        assert_eq!(chained(&app, 1), Some(true), "No model's pass builds on it too");
     }
 
     /// The picker lists a model that is not on disk with "Get"; Process

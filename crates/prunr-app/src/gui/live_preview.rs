@@ -141,6 +141,8 @@ pub struct PreviewResult {
     pub version: u64,
     /// Where the preview started (`None`: the source).
     pub(crate) start: Option<crate::gui::timeline::RunStart>,
+    /// The segmentation it cut with, if any.
+    pub(crate) cutter: Option<crate::gui::item::Cutter>,
     /// The edge planes an Edge dispatch built (not the ones it reused), with
     /// the key they were built for, for the item's cache. `None` for the
     /// other kinds.
@@ -383,6 +385,7 @@ impl LivePreview {
                     // ships a placeholder and doesn't care.
                     let _ = tx.send(PreviewResult {
                         item_id: id, rgba, kind: dispatch_kind, generation, version, start,
+                        cutter: seg_model.map(crate::gui::item::Cutter::Model),
                         new_edge, new_bold, new_masked_base,
                         new_reference: output.built_reference,
                         new_faced: output.built_faced.zip(faced_key),
@@ -1235,7 +1238,7 @@ mod tests {
             42,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
             item_id: 42,
             rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
@@ -1268,7 +1271,7 @@ mod tests {
             99,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
             item_id: 99,
             rgba: Arc::new(RgbaImage::new(2, 2)),
             kind: PreviewKind::Mask,
@@ -1300,7 +1303,7 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult { version: 0, start: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
             item_id: 777,
             rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
@@ -1329,7 +1332,7 @@ mod tests {
             11,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
             item_id: 11,
             rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,
@@ -1365,7 +1368,7 @@ mod tests {
             22,
             Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
-        lp.result_tx.send(PreviewResult { version: 0, start: None,
+        lp.result_tx.send(PreviewResult { version: 0, start: None, cutter: None,
             item_id: 22,
             rgba: Arc::new(RgbaImage::new(1, 1)),
             kind: PreviewKind::Mask,

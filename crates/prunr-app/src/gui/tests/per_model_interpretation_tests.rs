@@ -481,6 +481,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
         generation: 0,
         version: inputs.version,
         start: None,
+        cutter: None,
         new_edge: None,
         new_bold: None,
         new_masked_base: None,
@@ -658,6 +659,7 @@ fn a_recut_landing_off_screen_keeps_the_image_parked() {
         generation: 0,
         version: inputs.version,
         start: None,
+        cutter: None,
         new_edge: None,
         new_bold: None,
         new_masked_base: None,
@@ -820,4 +822,67 @@ fn a_model_switch_keeps_the_shown_cutout_correctable() {
     let item = &h.state().batch.items[0];
     assert!(item.selection_mask.is_none(), "Escape folded the selection");
     assert!(item.edits.is_some(), "into the edits the next run re-applies");
+}
+
+/// A cached segmentation re-cuts only the step it cut. No model's pass on
+/// a cut-out already holds the cut in its start, and re-cutting it squared
+/// its edges' transparency; a tweak of that pass keeps it a pass. Another
+/// model's cut is never re-cut with it either.
+#[test]
+fn the_cached_segmentation_recuts_only_the_step_it_cut() {
+    use crate::gui::item::{BatchStatus, Cutter, Engine};
+    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let blank = || Arc::new(image::RgbaImage::new(8, 8));
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 4);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(blank());
+    give_tensor(item);
+    item.start_cut(Some(StepKind::Process), Cutter::Model(prunr_core::ModelKind::Silueta), false);
+    item.result_rgba = Some(blank());
+    item.status = BatchStatus::Done;
+    item.finish_job();
+    assert!(item.hot_seg_tensor().is_some(), "Silueta's own cut");
+
+    item.start_cut(Some(StepKind::Process), Cutter::NoModel, true);
+    item.chain_start_built(blank());
+    item.result_rgba = Some(blank());
+    item.finish_job();
+    assert!(item.hot_seg_tensor().is_none(), "No model's pass is not re-cut");
+
+    let style = app.selection_style();
+    let action = app.settings.brush.cutout_action;
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 4, PreviewKind::Mask, true, style, action, false)
+        .expect("the pass re-renders");
+    assert!(inputs.seg_tensor.is_none());
+    let landed = PreviewResult {
+        item_id: 4,
+        rgba: blank(),
+        kind: PreviewKind::Mask,
+        generation: 0,
+        version: inputs.version,
+        start: inputs.start.clone(),
+        cutter: None,
+        new_edge: None,
+        new_bold: None,
+        new_masked_base: None,
+        new_reference: None,
+        new_faced: None,
+        new_depth_photo: None,
+        applied_depth: Default::default(),
+        applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
+        applied_tier2_knobs: None,
+        applied_color_strength: None,
+        is_final: true,
+    };
+    app.apply_completed_previews(&ctx, vec![landed]);
+    let item = &mut app.batch.items[0];
+    assert!(item.hot_seg_tensor().is_none(), "still a pass after its tweak");
+
+    item.record_origin(Engine::Segment, None, Some(Cutter::Model(prunr_core::ModelKind::BiRefNetLite)));
+    assert!(item.hot_seg_tensor().is_none(), "another model's cut");
+    item.record_origin(Engine::Segment, None, None);
+    assert!(item.hot_seg_tensor().is_some(), "a step whose cutter is not known is re-cut as before");
 }
