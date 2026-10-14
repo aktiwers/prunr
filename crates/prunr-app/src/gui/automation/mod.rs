@@ -38,7 +38,13 @@ pub enum Request {
     /// Press on a control and keep holding; `Move` drags, `Release` lets go.
     Hold { name: String },
     /// Press at a window position (points) and keep holding: a brush stroke.
-    HoldAt { x: f32, y: f32 },
+    /// `alt` holds Alt until the release: a stroke that takes away.
+    HoldAt {
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        alt: bool,
+    },
     Move { dx: f32, dy: f32 },
     Release,
     /// Turn the wheel over a control, `lines` up (positive) or down: what
@@ -124,7 +130,8 @@ pub struct Automation {
     frames: std::collections::VecDeque<InputFrame>,
     deferred: Vec<Deferred>,
     /// Where a `Hold` left the pointer, until `Release`.
-    held_at: Option<egui::Pos2>,
+    /// Where the pointer is held, and the modifiers held with it.
+    held_at: Option<(egui::Pos2, Option<egui::Modifiers>)>,
 }
 
 impl Automation {
@@ -184,21 +191,25 @@ impl Automation {
             }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true, None)].into()]);
+                self.held_at = Some((pos, None));
                 (3, Response::ok(target))
             }
-            Request::HoldAt { x, y } => {
+            Request::HoldAt { x, y, alt } => {
                 let pos = egui::pos2(x, y);
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                let modifiers = alt.then_some(egui::Modifiers::ALT);
+                self.frames.extend([
+                    InputFrame { events: vec![egui::Event::PointerMoved(pos)], modifiers },
+                    InputFrame { events: vec![press(pos, true, modifiers)], modifiers },
+                ]);
+                self.held_at = Some((pos, modifiers));
                 (3, Response::ok(()))
             }
             Request::Move { dx, dy } => {
-                let from = self.held_at.ok_or("nothing is held")?;
+                let (from, modifiers) = self.held_at.ok_or("nothing is held")?;
                 let to = from + egui::vec2(dx, dy);
-                self.frames.push_back(vec![egui::Event::PointerMoved(to)].into());
-                self.held_at = Some(to);
+                self.frames.push_back(InputFrame { events: vec![egui::Event::PointerMoved(to)], modifiers });
+                self.held_at = Some((to, modifiers));
                 (2, Response::ok([to.x, to.y]))
             }
             Request::Scroll { name, lines } => {
@@ -213,8 +224,11 @@ impl Automation {
                 (4, Response::ok(target))
             }
             Request::Release => {
-                let pos = self.held_at.take().ok_or("nothing is held")?;
-                self.frames.push_back(vec![press(pos, false)].into());
+                let (pos, modifiers) = self.held_at.take().ok_or("nothing is held")?;
+                self.frames.push_back(InputFrame { events: vec![press(pos, false, modifiers)], modifiers });
+                if modifiers.is_some() {
+                    self.frames.push_back(InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) });
+                }
                 (3, Response::ok(()))
             }
             Request::Key { chord } => {
@@ -277,8 +291,8 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     app.automation = Some(auto);
 }
 
-fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
-    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+fn press(pos: egui::Pos2, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
+    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: modifiers.unwrap_or_default() }
 }
 
 /// The controls in the tree, flat, without their children.
