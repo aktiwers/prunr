@@ -407,7 +407,7 @@ pub fn process_inpaint_with(
     };
     // One session for every region the fill scale fills on its own. The
     // fit reads the tall crop as the RAM gate above left it.
-    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), |img, m| {
+    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), progress, |img, m, progress| {
         paint_regions(&bundle, &vae, img, m, &req, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
