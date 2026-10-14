@@ -116,6 +116,7 @@ Common flags:
 | `--debug` | Verbose diagnostics for bug reports |
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
+| `bench` | Time every installed model on the CPU and on the GPU path, compare their outputs, write `prunr-bench.md` + `.json`; `--models a,b`, `--runs N`, `--image PATH`, `--heavy`, `--out PATH` |
 
 `prunr --help` for the full list. Magic Brush and the generative erasers are GUI features; the CLI covers background removal, lines, mask-driven erasing with LaMa, upscaling, colorizing and depth maps. On-demand models download in the app's Model Store.
 
@@ -163,6 +164,8 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 
 The active backend is shown in the status bar. For diagnostics, run `prunr --doctor` to dump the full hardware profile, runtime status, model availability, and resolution chain — pasteable directly into bug reports.
 
+To check acceleration model by model, run `prunr bench`. Each installed model runs on the CPU and through the backend the app would pick; the report names the backend each one landed on (and why another was passed over), times the session build, first run and steady runs, and flags a model whose GPU output differs from the CPU's.
+
 ## Build from Source
 
 The pinned toolchain (`rust-toolchain.toml`) installs itself through rustup; on Linux you also need the GTK3 development libraries.
@@ -182,6 +185,7 @@ cargo xtask install-runtime onnxruntime-openvino <version>
 # Diagnostic
 target/release/prunr --doctor                     # hardware + runtime status dump
 target/release/prunr --clear-ep-cache             # reset EP compatibility cache
+target/release/prunr bench                        # CPU vs GPU path, per model
 ```
 
 The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is resolved at startup from (in order):

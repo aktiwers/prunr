@@ -243,6 +243,41 @@ pub struct Cli {
     /// Write only the depth maps, nothing else.
     #[arg(long, requires = "depth_map")]
     pub depth_only: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Command {
+    /// Time every installed model on the CPU and on the GPU path the app
+    /// takes, check the two outputs agree, and write a report to send back.
+    Bench(BenchArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BenchArgs {
+    /// Models to run, comma-separated (e.g. silueta,real_esrgan_x2plus,migan);
+    /// every installed one when left out.
+    #[arg(long, value_delimiter = ',', value_name = "NAMES")]
+    pub models: Vec<String>,
+
+    /// Timed runs on each side after the first, untimed one.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=100))]
+    pub runs: u32,
+
+    /// Run on this picture instead of the built-in one.
+    #[arg(long, value_name = "PATH")]
+    pub image: Option<PathBuf>,
+
+    /// Also run the multi-GB models: Stable Diffusion 1.5 (both), RORem
+    /// and 4xNomos8kSCHAT-L. Minutes each on a CPU.
+    #[arg(long)]
+    pub heavy: bool,
+
+    /// Where to write the Markdown report; a JSON copy goes beside it.
+    #[arg(long, value_name = "PATH", default_value = "prunr-bench.md")]
+    pub out: PathBuf,
 }
 
 /// Upscale model selection.
@@ -489,7 +524,7 @@ impl Cli {
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
     pub fn writes_to_terminal(&self) -> bool {
-        self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache
+        self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
     }
 
     fn mask_settings(&self) -> MaskSettings {
@@ -1468,6 +1503,90 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
         |p| p.display().to_string())
 }
 
+/// `prunr bench`: each step on stderr as it starts, the machine and the
+/// results table on stdout, and the report rewritten after every step so
+/// a crash still leaves one naming the step it crashed in.
+pub fn run_bench(args: &BenchArgs) -> i32 {
+    use prunr_app::bench::{self, report};
+    let models = match bench::select(&args.models, args.heavy, prunr_models::is_available) {
+        Ok(models) => models,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let inputs = match &args.image {
+        None => bench::Inputs::built_in(),
+        Some(path) => match prunr_core::load_image_from_path(path) {
+            Ok(img) => bench::Inputs::from_photo(img.into_rgba8(), path.display().to_string()),
+            Err(e) => {
+                eprintln!("error: cannot read {}: {e}", path.display());
+                return 1;
+            }
+        },
+    };
+    let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None };
+    print!("{}", report::header_text(&report.header));
+    println!();
+    let mut files = ReportFiles::new(args.out.clone());
+    files.write(&report);
+    bench::run(&models, &inputs, args.runs, &mut |event| match event {
+        bench::Event::Stage { index, total, model, stage } => {
+            eprintln!("[{index}/{total}] {model}: {stage}");
+            report.running = Some(format!("{model}: {stage}"));
+            files.write(&report);
+        }
+        bench::Event::Done(row) => {
+            eprintln!("      {}: {}", row.model, row.verdict.label());
+            report.rows.push(row.clone());
+            report.running = None;
+            files.write(&report);
+        }
+    });
+    println!();
+    print!("{}", report::terminal_table(&report.rows));
+    println!();
+    println!("{}.", report::summary(&report.rows));
+    println!("Report: {} and {}", files.md.display(), files.json().display());
+    0
+}
+
+/// The report's Markdown file and its JSON copy. A path that cannot be
+/// written falls back once to the temp dir, so the report survives a
+/// read-only working directory.
+struct ReportFiles {
+    md: PathBuf,
+    warned: bool,
+}
+
+impl ReportFiles {
+    fn new(md: PathBuf) -> Self {
+        Self { md: std::path::absolute(&md).unwrap_or(md), warned: false }
+    }
+
+    fn json(&self) -> PathBuf {
+        self.md.with_extension("json")
+    }
+
+    fn write(&mut self, report: &prunr_app::bench::report::Report) {
+        let save = |files: &Self| -> std::io::Result<()> {
+            std::fs::write(&files.md, prunr_app::bench::report::markdown(report))?;
+            std::fs::write(files.json(), prunr_app::bench::report::json(report))
+        };
+        let Err(e) = save(self) else { return };
+        if self.warned {
+            return;
+        }
+        self.warned = true;
+        let fallback = std::env::temp_dir().join(self.md.file_name().unwrap_or(std::ffi::OsStr::new("prunr-bench.md")));
+        eprintln!("warning: cannot write {}: {e}; writing {} instead", self.md.display(), fallback.display());
+        self.md = fallback;
+        if let Err(e) = save(self) {
+            eprintln!("warning: cannot write {} either: {e}", self.md.display());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -1484,6 +1603,26 @@ mod tests {
         assert!(writes(&["--debug"]));
         assert!(!writes(&[]), "the GUI");
         assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
+        assert!(writes(&["bench"]));
+    }
+
+    /// `prunr bench` takes its own flags; a file named like it, or any
+    /// other input, is still an image to process.
+    #[test]
+    fn bench_is_a_subcommand_beside_the_image_inputs() {
+        let cli = super::Cli::parse_from(["prunr", "bench", "--models", "silueta,real_esrgan_x2plus", "--runs", "5", "--heavy", "--out", "r.md"]);
+        let Some(super::Command::Bench(args)) = &cli.command else { panic!("no bench: {cli:?}") };
+        assert_eq!(args.models, ["silueta", "real_esrgan_x2plus"]);
+        assert_eq!((args.runs, args.heavy, args.out.as_path()), (5, true, std::path::Path::new("r.md")));
+        assert!(cli.inputs.is_empty());
+        let defaults = super::Cli::parse_from(["prunr", "bench"]);
+        let Some(super::Command::Bench(args)) = &defaults.command else { panic!("no bench") };
+        assert_eq!((args.models.len(), args.runs, args.heavy, args.image.as_ref()), (0, 3, false, None));
+        assert_eq!(args.out, std::path::Path::new("prunr-bench.md"));
+        let photo = super::Cli::parse_from(["prunr", "bench.jpg", "b.png"]);
+        assert!(photo.command.is_none());
+        assert_eq!(photo.inputs.len(), 2);
+        assert!(super::Cli::try_parse_from(["prunr", "bench", "--runs", "500"]).is_err());
     }
 
     /// `-o` with one input is the output file; with several it is the
