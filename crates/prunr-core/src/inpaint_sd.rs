@@ -429,13 +429,28 @@ fn paint_regions(
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
+    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
+    paint_regions_with(image, mask, max_side, progress, |crop, crop_mask, crop_progress| {
+        run_one_tile(bundle, vae, crop, crop_mask, req, crop_progress)
+    })
+}
+
+/// `paint_regions` with the filler passed in: `fill` gets each crop or
+/// tile, its mask, and a handle framed on where it sits, so what it
+/// reports of its own pixels lands there.
+fn paint_regions_with(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    max_side: u32,
+    progress: &crate::progress::Progress,
+    mut fill: impl FnMut(&RgbaImage, &GrayImage, &crate::progress::Progress) -> Result<RgbaImage, CoreError>,
+) -> Result<RgbaImage, CoreError> {
     use crate::progress::{TileRect, Unit};
     let components = mask_regions(mask);
     // One plan per component, made once: the outer progress total and
     // the loop read the same value, so they cannot disagree about how
     // many tiles a region near an image edge really gets.
     let (img_w, img_h) = image.dimensions();
-    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
     let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
     let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
     // The crops and tiles, in the order they run: the tile map's layout.
@@ -459,7 +474,7 @@ fn paint_regions(
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
                 // A failed region fails the run: left as it was, it would read
                 // as a finished erase.
-                let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
+                let painted = fill(&cropped_img, &cropped_mask, &progress.within((cx, cy, cw, ch), (img_w, img_h)))?;
                 image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
                 progress.tile(tile_idx, true);
                 tile_idx += 1;
@@ -478,7 +493,7 @@ fn paint_regions(
             start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
+            let painted = fill(&cropped_img, &cropped_mask, &progress.within((tile.x, tile.y, tile.w, tile.h), (img_w, img_h)))?;
             blend_tile(&mut out, &painted, &tile);
             progress.tile(tile_idx, true);
             tile_idx += 1;
@@ -821,7 +836,7 @@ fn run_one_tile(
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    use crate::progress::{Step, Unit};
+    use crate::progress::Step;
     let (w, h) = image.dimensions();
     let (pw, ph) = padded_dims(w, h);
     let padded_image = pad_to(image, pw, ph);
@@ -876,63 +891,36 @@ fn run_one_tile(
     drop(mask_latent);
     let prelude_ms = timer.lap();
 
-    let steps = req.num_inference_steps as usize;
-    let mut scheduler = match req.scheduler {
-        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
-        SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
-    };
+    let mut scheduler = Scheduler::new_sd15(req.scheduler, req.num_inference_steps as usize);
     let seed = req.seed.unwrap_or_else(fresh_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    let total_steps = scheduler.timesteps().len() as u32;
-    progress.step(Step::Denoising);
-    progress.inner(0, total_steps, Unit::Step);
-
-    // Hold denoising state as Vec<f32> + captured dim. f16 conversion
-    // uses ArrayView4::from_shape (zero-copy on the f32 side); the
-    // scheduler writes via step_array_into into a reused scratch buffer.
     let latent_dim = (1_usize, 4_usize, lh, lw);
-    let mut latent_buf: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
+    let noise: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
 
-    // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
-    // Without CFG: just one UNet pass with cond.
-    let timesteps = scheduler.timesteps().to_vec();
+    // With CFG: noise_pred = uncond + scale * (cond - uncond). Without
+    // CFG: just one UNet pass with cond.
     let scale = req.guidance_scale;
-    // Scratch buffer for step output — hoisted outside the loop so
-    // mem::swap reuses the allocation across steps (no per-step alloc).
-    let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
-    for (i, &t) in timesteps.iter().enumerate() {
-        // Check cancel between UNet steps. ORT has no per-op cancel, so
-        // worst-case latency on cancel is one UNet step (multi-second).
-        if progress.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
-        // Zero-copy view of latent_buf — only the Array4<f16> output stays.
+    let predict = |latent: &[f32], t: i64| {
+        // Zero-copy view of the latent — only the Array4<f16> output stays.
         let latent_f16 = f32_to_f16_view(
-            ndarray::ArrayView4::from_shape(latent_dim, &latent_buf)
-                .expect("latent_dim matches latent_buf length by construction"),
+            ndarray::ArrayView4::from_shape(latent_dim, latent)
+                .expect("latent_dim matches the latent's length by construction"),
         );
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
-        let noise_pred = match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
-            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale)?,
-            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond))?,
-            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw))?,
-        };
-        let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
-        let is_final = i + 1 == timesteps.len();
-        let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
-        step_array_into(
-            &mut scheduler, &latent_buf, np_slice, i, t, t_prev, is_final,
-            &mut rng, &mut step_out_buf,
-        );
-        // step_out_buf now holds the new denoised state; swap so
-        // latent_buf becomes current and step_out_buf is the stale
-        // scratch (overwritten next iteration).
-        std::mem::swap(&mut latent_buf, &mut step_out_buf);
-        progress.inner(i as u32 + 1, total_steps, Unit::Step);
-    }
+        match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
+            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale),
+            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond)),
+            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
+        }
+    };
+    let show = |x0: &[f32]| progress.tile_preview((0, 0, w, h), (w, h), |width, height| {
+        let estimate = estimate_picture(x0, (lw, lh), bundle.latent);
+        crop_preview(image, mask, &estimate, width, height)
+    });
+    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show)?;
 
     let unet_ms = timer.lap();
 
@@ -943,7 +931,7 @@ fn run_one_tile(
     let painted = vae_decode(vae, &final_array)?;
     let decode_ms = timer.lap();
     let out = composite(image, &painted, mask, w, h);
-    let steps_run = timesteps.len() as u64;
+    let steps_run = scheduler.timesteps().len() as u64;
     tracing::info!(
         w, h, steps = steps_run, prelude_ms,
         unet_ms_per_step = unet_ms / steps_run.max(1),
@@ -953,6 +941,103 @@ fn run_one_tile(
         "SD: tile done",
     );
     Ok(out)
+}
+
+/// The denoising loop from `latent` (the starting noise): per step, the
+/// UNet's noise prediction for the current latent (`predict`), the
+/// scheduler's step and the count. When previews are asked for, `show`
+/// gets the step's clean-latent estimate first; it only reads, so the
+/// result is the same bits with previews on or off. Cancel is checked
+/// between steps: ORT has no per-op cancel, so a cancel waits out at
+/// most one UNet step.
+fn denoise(
+    scheduler: &mut Scheduler,
+    mut latent: Vec<f32>,
+    rng: &mut ChaCha8Rng,
+    progress: &crate::progress::Progress,
+    mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
+    show: impl Fn(&[f32]),
+) -> Result<Vec<f32>, CoreError> {
+    use crate::progress::{Step, Unit};
+    let timesteps = scheduler.timesteps().to_vec();
+    let total = timesteps.len() as u32;
+    progress.step(Step::Denoising);
+    progress.inner(0, total, Unit::Step);
+    // Hoisted so the swap below reuses one allocation across steps.
+    let mut next: Vec<f32> = Vec::with_capacity(latent.len());
+    for (i, &t) in timesteps.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let noise_pred = predict(&latent, t)?;
+        let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
+        if progress.preview_edge().is_some() {
+            show(&scheduler.x0(&latent, np_slice, i));
+        }
+        let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
+        let is_final = i + 1 == timesteps.len();
+        step_array_into(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng, &mut next);
+        std::mem::swap(&mut latent, &mut next);
+        progress.inner(i as u32 + 1, total, Unit::Step);
+    }
+    Ok(latent)
+}
+
+/// ComfyUI's latent-preview factors (comfy/latent_formats.py, `SD15` and
+/// `SDXL`): a linear fit from a scaled latent's four channels (rows) to
+/// the RGB, in [-1, 1], its VAE decodes it to; then the bias.
+fn preview_factors(space: prunr_models::SdLatent) -> ([[f32; 3]; 4], [f32; 3]) {
+    match space {
+        prunr_models::SdLatent::Sd15 => (
+            [[0.3512, 0.2297, 0.3227], [0.3250, 0.4974, 0.2350], [-0.2829, 0.1762, 0.2721], [-0.2120, -0.2616, -0.7177]],
+            [0.0; 3],
+        ),
+        prunr_models::SdLatent::Sdxl => (
+            [[0.3651, 0.4232, 0.4341], [-0.2533, -0.0042, 0.1068], [0.1076, 0.1111, -0.0362], [-0.3165, -0.2492, -0.2188]],
+            [0.1084, -0.0175, -0.0011],
+        ),
+    }
+}
+
+/// The latent `x0` (planar 4 × `lh` × `lw`) as RGB through `space`'s
+/// preview factors, one pixel per latent cell.
+fn latent_to_rgb(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> RgbaImage {
+    let (factors, bias) = preview_factors(space);
+    let plane = lw * lh;
+    RgbaImage::from_fn(lw as u32, lh as u32, |x, y| {
+        let i = y as usize * lw + x as usize;
+        let c = |ch: usize| unit_to_byte(bias[ch] + (0..4).map(|k| x0[k * plane + i] * factors[k][ch]).sum::<f32>());
+        image::Rgba([c(0), c(1), c(2), 255])
+    })
+}
+
+/// What a step's clean-latent estimate `x0` looks like at the size of
+/// the crop's padded input (`8·lw × 8·lh`): through the latent space's
+/// colour factors, enlarged. Not TAESD even when it is the run's VAE:
+/// its decode of a 512² crop took 1.06 s on an i7-6700, no small part
+/// of a step; this and `crop_preview` took 45-100 ms in a debug build.
+///
+/// Peak per step with previews on, all at latent or crop scale (`x0`,
+/// this picture, the crop composited; the preview is at most the crop):
+///
+/// | Crop      | x0     | Picture | Composite | Total   |
+/// |-----------|--------|---------|-----------|---------|
+/// | 512 × 512 | 64 KB  | 1 MB    | 1 MB      | ~3.1 MB |
+/// | 768 × 512 | 96 KB  | 1.5 MB  | 1.5 MB    | ~4.6 MB |
+fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> RgbaImage {
+    let cells = latent_to_rgb(x0, (lw, lh), space);
+    crate::formats::resize_rgba(&cells, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
+}
+
+/// The crop with `painted` inside its mask, as the final paste puts it,
+/// at `width × height` for its preview.
+fn crop_preview(image: &RgbaImage, mask: &GrayImage, painted: &RgbaImage, width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = image.dimensions();
+    let filled = composite(image, painted, mask, w, h);
+    if (width, height) == (w, h) {
+        return filled.into_raw();
+    }
+    crate::formats::resize_rgba(&filled, width, height, crate::formats::ResizeFilter::Lanczos3).into_raw()
 }
 
 /// Stage clock for one tile's log line.
@@ -2059,15 +2144,18 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
     let mut out = RgbaImage::new(w as u32, h as u32);
     let dst = out.as_mut();
     for i in 0..plane {
-        let r = ((buf[i]              + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let g = ((buf[plane + i]      + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let b = ((buf[plane * 2 + i]  + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        dst[i * 4]     = r;
-        dst[i * 4 + 1] = g;
-        dst[i * 4 + 2] = b;
+        dst[i * 4]     = unit_to_byte(buf[i]);
+        dst[i * 4 + 1] = unit_to_byte(buf[plane + i]);
+        dst[i * 4 + 2] = unit_to_byte(buf[plane * 2 + i]);
         dst[i * 4 + 3] = 255;
     }
     out
+}
+
+/// A channel in [-1, 1] as a byte, as the VAE's output is read.
+#[inline]
+fn unit_to_byte(v: f32) -> u8 {
+    ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
 }
 
 /// Mask → latent space (1, 1, h/8, w/8) f32 in [0, 1].
@@ -2725,6 +2813,13 @@ pub enum Scheduler {
 }
 
 impl Scheduler {
+    pub fn new_sd15(kind: SchedulerKind, steps: usize) -> Self {
+        match kind {
+            SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
+            SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
+        }
+    }
+
     pub fn timesteps(&self) -> &[i64] {
         match self {
             Scheduler::Lcm(s) => s.timesteps(),
@@ -2906,6 +3001,158 @@ mod tests {
             dpm.step(&latent, &noise_pred, i);
             assert_eq!(dpm.prev_model_output.as_deref(), Some(&x0[..]), "step {i}");
         }
+    }
+
+    /// ComfyUI's factors on known latents: zero is each space's bias, a
+    /// single channel picks out its row, and the cells are planar.
+    #[test]
+    fn the_latent_preview_maps_known_latents_through_comfyuis_factors() {
+        use prunr_models::SdLatent;
+        let px = |img: &RgbaImage, x: u32| img.get_pixel(x, 0).0;
+        // Two cells: channel 0 at 1 in the first, channel 3 at 2 in the second.
+        let mut x0 = vec![0.0_f32; 8];
+        x0[0] = 1.0;
+        x0[3 * 2 + 1] = 2.0;
+        let sd15 = latent_to_rgb(&x0, (2, 1), SdLatent::Sd15);
+        // (v + 1) · 127.5, truncated: 0.3512 → 172, 0.2297 → 156, 0.3227 → 168.
+        assert_eq!(px(&sd15, 0), [172, 156, 168, 255]);
+        // 2 · (-0.2120, -0.2616, -0.7177) → 73, 60, and below black → 0.
+        assert_eq!(px(&sd15, 1), [73, 60, 0, 255]);
+        // SDXL's bias alone: 0.1084 → 141, -0.0175 → 125, -0.0011 → 127.
+        assert_eq!(px(&latent_to_rgb(&[0.0; 4], (1, 1), SdLatent::Sdxl), 0), [141, 125, 127, 255]);
+        // Its first row plus the bias: 0.4735 → 187, 0.4057 → 179, 0.4330 → 182.
+        assert_eq!(px(&latent_to_rgb(&[1.0, 0.0, 0.0, 0.0], (1, 1), SdLatent::Sdxl), 0), [187, 179, 182, 255]);
+        assert_eq!(estimate_picture(&x0, (2, 1), SdLatent::Sd15).dimensions(), (16, 8), "a latent cell is 8 px");
+    }
+
+    /// A step's preview changes the crop only inside its mask, reading
+    /// the top-left of the padded picture as the final paste does.
+    #[test]
+    fn a_step_preview_changes_only_the_masked_pixels() {
+        let image = RgbaImage::from_fn(60, 44, |x, y| Rgba([x as u8, y as u8, 200, 255 - x as u8]));
+        let mask = GrayImage::from_fn(60, 44, |x, y| Luma([if (10..30).contains(&x) && (5..20).contains(&y) { 255 } else { 0 }]));
+        let painted = RgbaImage::from_pixel(64, 48, Rgba([1, 2, 3, 255]));
+        let out = crop_preview(&image, &mask, &painted, 60, 44);
+        for ((i, src), m) in image.pixels().enumerate().zip(mask.pixels()) {
+            let want = if m[0] > 127 { [1, 2, 3, src[3]] } else { src.0 };
+            assert_eq!(out[i * 4..i * 4 + 4], want, "pixel {i}");
+        }
+        assert_eq!(crop_preview(&image, &mask, &painted, 30, 22).len(), 30 * 22 * 4, "resampled to the preview's size");
+    }
+
+    /// Driven with a stand-in UNet, the real step loop shows each step's
+    /// estimate once, before counting the step, with the source kept
+    /// outside the mask; and ends on the same latent bits with previews
+    /// on, off, or not listened to.
+    #[test]
+    fn the_step_loop_previews_each_step_without_changing_the_result() {
+        use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
+        let image = RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 90, 255]));
+        let mask = GrayImage::from_fn(64, 64, |x, y| Luma([if (16..48).contains(&x) && (16..48).contains(&y) { 255 } else { 0 }]));
+        for (kind, steps) in [(SchedulerKind::Lcm, 4), (SchedulerKind::DpmPp2MKarras, 6)] {
+            let run = |progress: &Progress| {
+                let mut scheduler = Scheduler::new_sd15(kind, steps);
+                let mut rng = ChaCha8Rng::seed_from_u64(7);
+                let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
+                let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
+                let show = |x0: &[f32]| progress.tile_preview((0, 0, 64, 64), (64, 64), |w, h| {
+                    crop_preview(&image, &mask, &estimate_picture(x0, (8, 8), prunr_models::SdLatent::Sd15), w, h)
+                });
+                denoise(&mut scheduler, noise, &mut rng, progress, predict, show).expect("denoise")
+            };
+            let sink = Arc::new(RecordingSink::default());
+            let previewed = run(&Progress::new(sink.clone()).with_tile_previews(64));
+            let quiet = Arc::new(RecordingSink::default());
+            assert_eq!(previewed, run(&Progress::new(quiet.clone())), "{kind:?}: previews change nothing");
+            assert_eq!(previewed, run(&Progress::none()), "{kind:?}");
+            assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
+
+            let updates = sink.updates();
+            assert_eq!(check_contract(&updates), Ok(()));
+            let order: Vec<String> = updates.iter().filter_map(|u| match u {
+                ProgressUpdate::TilePreview(_) => Some("preview".to_string()),
+                ProgressUpdate::Inner { done, .. } => Some(done.to_string()),
+                _ => None,
+            }).collect();
+            let want: Vec<String> = std::iter::once("0".to_string())
+                .chain((1..=steps).flat_map(|i| ["preview".to_string(), i.to_string()]))
+                .collect();
+            assert_eq!(order, want, "{kind:?}: one preview per step, before its count");
+            assert_eq!(updates[0], ProgressUpdate::Step(ProgressStep::Denoising));
+            for u in &updates {
+                let ProgressUpdate::TilePreview(p) = u else { continue };
+                assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (0, 0, 64, 64, 64, 64));
+                let changed = image.pixels().zip(mask.pixels()).zip(p.rgba.chunks(4)).filter(|((src, m), got)| {
+                    assert!(m[0] > 127 || *got == src.0.as_slice(), "outside the mask the source stays");
+                    m[0] > 127 && *got != src.0.as_slice()
+                }).count();
+                assert!(changed > 0, "{kind:?}: the estimate shows inside the mask");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_step_loop_stops_before_the_next_unet_call() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let progress = crate::progress::Progress::none().with_cancel(flag);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let called = std::cell::Cell::new(false);
+        let predict = |_: &[f32], _: i64| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
+        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {});
+        assert!(matches!(result, Err(CoreError::Cancelled)) && !called.get());
+    }
+
+    /// Each crop or tile reports its preview where it sits: a region
+    /// that fits one crop, one that needs three tiles, and a region
+    /// filled on a scaled-down copy, all on the photo's preview.
+    #[test]
+    fn each_crop_previews_where_it_sits_in_the_photo() {
+        use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
+        let fake_fill = |crop: &RgbaImage, _: &GrayImage, p: &Progress| {
+            let (w, h) = crop.dimensions();
+            p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![9; (pw * ph * 4) as usize]);
+            Ok(crop.clone())
+        };
+        let places = |updates: &[ProgressUpdate]| -> Vec<(u32, u32, u32, u32, u32, u32)> {
+            updates.iter().filter_map(|u| match u {
+                ProgressUpdate::TilePreview(p) => Some((p.x, p.y, p.width, p.height, p.full_width, p.full_height)),
+                _ => None,
+            }).collect()
+        };
+
+        let image = RgbaImage::from_pixel(1200, 900, Rgba([50, 60, 70, 255]));
+        let mut mask = GrayImage::new(1200, 900);
+        for (x, y) in (0..1200).flat_map(|x| (0..100).map(move |y| (x, y))).chain((1000..1100).flat_map(|x| (700..800).map(move |y| (x, y)))) {
+            mask.put_pixel(x, y, Luma([255]));
+        }
+        let sink = Arc::new(RecordingSink::default());
+        paint_regions_with(&image, &mask, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
+        // At half size: the strip's three tiles at x 0, 384, 688, then the
+        // square's crop at (688, 388).
+        assert_eq!(places(&sink.updates()), vec![
+            (0, 0, 256, 256, 600, 450), (192, 0, 256, 256, 600, 450),
+            (344, 0, 256, 256, 600, 450), (344, 194, 256, 256, 600, 450),
+        ]);
+        let mut run = vec![ProgressUpdate::Step(ProgressStep::Erasing)];
+        run.extend(sink.updates());
+        assert_eq!(check_contract(&run), Ok(()));
+
+        let photo = RgbaImage::from_pixel(1600, 1200, Rgba([50, 60, 70, 255]));
+        let mut hole = GrayImage::new(1600, 1200);
+        for (x, y) in (600..900).flat_map(|x| (400..700).map(move |y| (x, y))) {
+            hole.put_pixel(x, y, Luma([255]));
+        }
+        let sink = Arc::new(RecordingSink::default());
+        let fit = crate::inpaint::Fit { long: 448, short: 448 };
+        crate::inpaint::fill_at_scale(&photo, &hole, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, p| {
+            paint_regions_with(img, m, SD_TILE, p, fake_fill)
+        }).expect("fill");
+        let found = places(&sink.updates());
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (x, y, w, h, full_w, full_h) = found[0];
+        assert_eq!((full_w, full_h), (800, 600), "the photo's preview, not the shrunk copy's");
+        assert!(x <= 300 && y <= 200 && x + w >= 450 && y + h >= 350, "covers the hole at half size: {:?}", found[0]);
+        assert!(w < full_w && h < full_h, "only the crop around the hole: {:?}", found[0]);
     }
 
     #[test]
