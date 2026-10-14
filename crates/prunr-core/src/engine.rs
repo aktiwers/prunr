@@ -415,6 +415,7 @@ impl OrtEngine {
             } else {
                 (builder, Cow::Borrowed(model_bytes))
             };
+            let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
             let res = builder.with_execution_providers([
                 ep.provider(model_id, EpSite::Engine { threads: intra_threads }),
             ]);
@@ -433,6 +434,7 @@ impl OrtEngine {
             match built.commit_from_memory(&bytes_owner) {
                 Ok(session) => {
                     tracing::info!(?model, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
+                    coverage.report(model_id, None);
                     return Ok(Self {
                         session: Mutex::new(session),
                         provider_name: ep.as_str().to_string(),

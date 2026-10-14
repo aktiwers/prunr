@@ -702,6 +702,7 @@ fn build_lama_session(
         } else {
             (builder, Cow::Borrowed(bytes))
         };
+        let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
         let registered = builder.with_execution_providers([
             ep.provider(id, EpSite::Fill { threads }),
         ]);
@@ -716,6 +717,7 @@ fn build_lama_session(
         let mut session = match built.commit_from_memory(&bytes_owner) {
             Ok(s) => {
                 tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+                coverage.report(id, None);
                 s
             }
             Err(e) => {

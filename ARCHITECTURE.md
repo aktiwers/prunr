@@ -429,6 +429,8 @@ Each session walks a ladder of the GPU EPs the loaded runtime actually has compi
 | Windows | OpenVINO → CUDA → DirectML → CPU |
 | macOS | CoreML → CPU |
 
+CoreML compiles ML Programs (the format fp16 graphs need). A CoreML session swaps ORT's log sink for one that keeps CoreML's own `GetCapability` summary and logs it on commit as `partitions`, `nodes` and `coreml_nodes`: every partition edge is a CPU↔GPU round trip, so these counts are the data for deciding per model whether CoreML pays.
+
 OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machines don't have an OpenVINO runtime loaded, so they fall through to CUDA. OpenVINO's thread pool is capped to the rayon budget to avoid oversubscription. `force_cpu` (Settings, CLI) skips the ladder.
 
 ### Per-(model, EP) compatibility filter
