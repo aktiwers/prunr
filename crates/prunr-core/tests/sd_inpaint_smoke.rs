@@ -48,9 +48,7 @@ fn sd_inpaint_modifies_painted_region() {
     let progress = prunr_core::Progress::none();
     let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress) {
         Ok(r) => r.rgba,
-        // The pre-flight RAM gate is an environmental refusal (SD wants
-        // ~12 GB free), not a pipeline failure — skip like a missing bundle.
-        Err(e) if e.to_string().contains("RAM free") => {
+        Err(e) if refused_for_ram(&e) => {
             eprintln!("[sd_inpaint_smoke] SKIP: {e}");
             return;
         }
@@ -87,6 +85,116 @@ fn sd_inpaint_modifies_painted_region() {
     }
 }
 
+/// The pre-flight RAM gate refused the load: not enough free memory on
+/// this machine right now, so the test skips like a missing bundle.
+fn refused_for_ram(e: &prunr_core::CoreError) -> bool {
+    e.to_string().contains("of free memory to load")
+}
+
+/// `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
+/// eraser, each at the app's defaults for it, instead of SD 1.5:
+/// (model, steps, guidance, scheduler).
+fn bench_model() -> (prunr_models::ModelId, u32, f32, inpaint_sd::SchedulerKind) {
+    match std::env::var("PRUNR_SD_BENCH_MODEL").as_deref() {
+        Ok("lcm") => (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm),
+        Ok("rorem") => (prunr_models::ModelId::RoremFp16, inpaint_sd::ROREM_STEPS, 1.0, inpaint_sd::SchedulerKind::Lcm),
+        _ => (prunr_models::ModelId::SdV15InpaintFp16, 25, 4.0, inpaint_sd::SchedulerKind::DpmPp2MKarras),
+    }
+}
+
+/// Step previews on the real model: one per denoising step, placed on
+/// the photo's preview over the erased region, and the fill the same
+/// bytes as a run without them. Ignored by default (it runs the model
+/// two or three times on one kept session); the model is picked as for
+/// `sd_bench`, `PRUNR_SD_BENCH_STEPS` sets the step count, and
+/// `PRUNR_SD_PREVIEW_OUT=dir` saves each step's preview pasted on the
+/// photo's, and the fills, as PNGs.
+#[test]
+#[ignore]
+fn sd_step_previews() {
+    use prunr_core::progress::{check_contract, ProgressUpdate, RecordingSink};
+    let _ = tracing_subscriber::fmt::try_init();
+    if skip_if_no_ort("sd_step_previews") { return; }
+    let (id, default_steps, guidance, scheduler) = bench_model();
+    if !prunr_models::is_available(id) {
+        eprintln!("SKIP: {id:?} bundle not installed");
+        return;
+    }
+    let steps = std::env::var("PRUNR_SD_BENCH_STEPS").ok().map_or(default_steps, |v| v.parse().expect("PRUNR_SD_BENCH_STEPS"));
+    let (w, h) = (900u32, 700u32);
+    let image = RgbaImage::from_fn(w, h, |x, y| {
+        let stripe = if (x / 40 + y / 40) % 2 == 0 { 40 } else { 0 };
+        Rgba([(60 + x / 6) as u8, (90 + y / 8) as u8 + stripe, 120, 255])
+    });
+    let mut mask = GrayImage::new(w, h);
+    for y in 260..440 {
+        for x in 380..520 {
+            mask.put_pixel(x, y, Luma([255]));
+        }
+    }
+    // One kept session for every run, so the runs differ only in their
+    // previews.
+    let req = SdInpaintRequest {
+        prompt: "clean background".to_string(),
+        num_inference_steps: steps,
+        guidance_scale: guidance,
+        scheduler,
+        seed: Some(42),
+        tuning: inpaint_sd::plan_tuning(true, inpaint_sd::SD_DEFAULT_MARGIN_MB).with_env_overrides(),
+        ..Default::default()
+    };
+    let fill = |progress: &prunr_core::Progress| inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), progress).map(|f| f.rgba);
+    const EDGE: u32 = 600;
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let previewed = match fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)) {
+        Ok(rgba) => rgba,
+        Err(e) if refused_for_ram(&e) => {
+            eprintln!("[sd_step_previews] SKIP: {e}");
+            return;
+        }
+        Err(e) => panic!("SD inpaint should succeed: {e}"),
+    };
+    let plain = fill(&prunr_core::Progress::none()).expect("the run without previews");
+    let out_dir = std::env::var("PRUNR_SD_PREVIEW_OUT").ok();
+    if let Some(dir) = &out_dir {
+        previewed.save(format!("{dir}/{id:?}_fill.png")).expect("save the fill");
+        plain.save(format!("{dir}/{id:?}_fill_without_previews.png")).expect("save the fill");
+    }
+
+    let updates = sink.updates();
+    assert_eq!(check_contract(&updates), Ok(()));
+    let previews: Vec<_> = updates.iter().filter_map(|u| match u {
+        ProgressUpdate::TilePreview(p) => Some(p),
+        _ => None,
+    }).collect();
+    assert_eq!(previews.len(), steps as usize, "one preview per step of the one crop");
+    let scale = EDGE as f32 / w as f32;
+    let backdrop = image::imageops::resize(&image, EDGE, (h as f32 * scale).round() as u32, image::imageops::FilterType::Triangle);
+    for p in &previews {
+        assert_eq!((p.full_width, p.full_height), backdrop.dimensions());
+        let (hx, hy) = ((380.0 * scale) as u32, (260.0 * scale) as u32);
+        assert!(p.x <= hx && p.y <= hy && p.x + p.width >= (520.0 * scale) as u32 && p.y + p.height >= (440.0 * scale) as u32,
+            "the preview covers the erased region: {:?}", (p.x, p.y, p.width, p.height));
+    }
+    if let Some(dir) = &out_dir {
+        for (i, p) in previews.iter().enumerate() {
+            let tile = RgbaImage::from_raw(p.width, p.height, p.rgba.clone()).expect("the preview's size");
+            let mut frame = backdrop.clone();
+            image::imageops::replace(&mut frame, &tile, p.x as i64, p.y as i64);
+            frame.save(format!("{dir}/{id:?}_step{:02}.png", i + 1)).expect("save a preview");
+        }
+    }
+
+    let differing = |a: &RgbaImage, b: &RgbaImage| a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
+    if previewed != plain {
+        // A second plain run tells previews apart from a model that
+        // differs run to run on this machine's provider.
+        let again = fill(&prunr_core::Progress::none()).expect("the second run without previews");
+        assert!(again == plain, "the model differs run to run here ({} px), so previews cannot be told apart", differing(&again, &plain));
+        panic!("previews change the fill: {} px differ", differing(&previewed, &plain));
+    }
+}
+
 /// Timing run for scripts/sd_bench.sh: the shape of a real erase (a
 /// 328×607 painted region inside a larger photo, so it tiles today),
 /// guided, 20 steps, fixed seed. Ignored by default; prints the stage
@@ -96,13 +204,7 @@ fn sd_inpaint_modifies_painted_region() {
 fn sd_bench() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_bench") { return; }
-    // `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
-    // eraser, each at the app's defaults for it, instead of SD 1.5.
-    let (id, steps, guidance, scheduler) = match std::env::var("PRUNR_SD_BENCH_MODEL").as_deref() {
-        Ok("lcm") => (prunr_models::ModelId::SdV15LcmInpaintFp16, 8, 1.5, inpaint_sd::SchedulerKind::Lcm),
-        Ok("rorem") => (prunr_models::ModelId::RoremFp16, inpaint_sd::ROREM_STEPS, 1.0, inpaint_sd::SchedulerKind::Lcm),
-        _ => (prunr_models::ModelId::SdV15InpaintFp16, 25, 4.0, inpaint_sd::SchedulerKind::DpmPp2MKarras),
-    };
+    let (id, steps, guidance, scheduler) = bench_model();
     if !prunr_models::is_available(id) {
         eprintln!("SKIP: {id:?} bundle not installed");
         return;
@@ -174,7 +276,7 @@ fn sd_bench() {
                     let started = std::time::Instant::now();
                     let result = match inpaint_sd::process_inpaint_with(image, mask, id, req, &progress) {
                         Ok(r) => r.rgba,
-                        Err(e) if e.to_string().contains("RAM free") => {
+                        Err(e) if refused_for_ram(&e) => {
                             eprintln!("[sd_bench] SKIP: {e}");
                             return;
                         }

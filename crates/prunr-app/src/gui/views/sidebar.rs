@@ -190,12 +190,14 @@ fn render_item_row(
         actions.hovered = Some((app.batch.items[i].id, item_response.is_pointer_button_down_on()));
     }
 
-    if matches!(app.batch.items[i].status, BatchStatus::Processing) {
+    let running = app.batch.items[i].is_running();
+    if running {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
         actions.needs_repaint = true;
     }
 
-    if paint_status_indicator(ui, &app.batch.items[i].status, item_rect, ctx.anim_time) {
+    let status = if running { &BatchStatus::Processing } else { &app.batch.items[i].status };
+    if paint_status_indicator(ui, status, item_rect, ctx.anim_time) {
         actions.needs_repaint = true;
     }
 

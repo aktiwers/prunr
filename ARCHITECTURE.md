@@ -75,7 +75,7 @@ Tests and outside tools drive the app through **the control tree**: the AccessKi
 
 ## Progress
 
-Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have.
+Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have. Pictures travel apart from the counts: a run's `PictureSink` sends a finished tile to the canvas while the run's own check says it may still land, and the result later reveals over the preview they build. Work on a scaled-down crop reports through `Progress::within`, so its tiles and previews land where the crop sits in the photo.
 
 Time left runs from the moment the count first moves, so model loading and graph compiles never inflate it.
 
@@ -298,7 +298,9 @@ One exception, by design: Process with another cut-out model (or No model) than 
 
 ### CLI
 
-`main.rs` routes `--worker`, `--doctor`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+`main.rs` routes `--worker`, `--doctor`, `bench`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+
+`prunr bench` (`prunr_app::bench`) runs each installed model in-process through the app's own entry points, once CPU-only and once through the EP ladder, one session at a time, released before the next model. Every session records a `SessionPick` (provider, weights, each provider that failed on the way), so the report says where a model landed and why. The report is rewritten after every step: one a crash left behind names the step it crashed in.
 
 ## Inference Pipeline
 
