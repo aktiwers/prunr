@@ -105,9 +105,10 @@ fn bench_model() -> (prunr_models::ModelId, u32, f32, inpaint_sd::SchedulerKind)
 /// Step previews on the real model: one per denoising step, placed on
 /// the photo's preview over the erased region, and the fill the same
 /// bytes as a run without them. Ignored by default (it runs the model
-/// twice); the model is picked as for `sd_bench`, `PRUNR_SD_BENCH_STEPS`
-/// sets the step count, and `PRUNR_SD_PREVIEW_OUT=dir` saves each step's
-/// preview pasted on the photo's, and the fill, as PNGs.
+/// two or three times on one kept session); the model is picked as for
+/// `sd_bench`, `PRUNR_SD_BENCH_STEPS` sets the step count, and
+/// `PRUNR_SD_PREVIEW_OUT=dir` saves each step's preview pasted on the
+/// photo's, and the fills, as PNGs.
 #[test]
 #[ignore]
 fn sd_step_previews() {
@@ -131,27 +132,34 @@ fn sd_step_previews() {
             mask.put_pixel(x, y, Luma([255]));
         }
     }
+    // One kept session for every run, so the runs differ only in their
+    // previews.
     let req = SdInpaintRequest {
         prompt: "clean background".to_string(),
         num_inference_steps: steps,
         guidance_scale: guidance,
         scheduler,
         seed: Some(42),
-        tuning: inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB).with_env_overrides(),
+        tuning: inpaint_sd::plan_tuning(true, inpaint_sd::SD_DEFAULT_MARGIN_MB).with_env_overrides(),
         ..Default::default()
     };
+    let fill = |progress: &prunr_core::Progress| inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), progress).map(|f| f.rgba);
     const EDGE: u32 = 600;
     let sink = std::sync::Arc::new(RecordingSink::default());
-    let previewed = match inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), &prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)) {
-        Ok(r) => r.rgba,
+    let previewed = match fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)) {
+        Ok(rgba) => rgba,
         Err(e) if refused_for_ram(&e) => {
             eprintln!("[sd_step_previews] SKIP: {e}");
             return;
         }
         Err(e) => panic!("SD inpaint should succeed: {e}"),
     };
-    let plain = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &prunr_core::Progress::none()).expect("the run without previews");
-    assert!(previewed == plain.rgba, "previews change the fill");
+    let plain = fill(&prunr_core::Progress::none()).expect("the run without previews");
+    let out_dir = std::env::var("PRUNR_SD_PREVIEW_OUT").ok();
+    if let Some(dir) = &out_dir {
+        previewed.save(format!("{dir}/{id:?}_fill.png")).expect("save the fill");
+        plain.save(format!("{dir}/{id:?}_fill_without_previews.png")).expect("save the fill");
+    }
 
     let updates = sink.updates();
     assert_eq!(check_contract(&updates), Ok(()));
@@ -168,14 +176,22 @@ fn sd_step_previews() {
         assert!(p.x <= hx && p.y <= hy && p.x + p.width >= (520.0 * scale) as u32 && p.y + p.height >= (440.0 * scale) as u32,
             "the preview covers the erased region: {:?}", (p.x, p.y, p.width, p.height));
     }
-    if let Ok(dir) = std::env::var("PRUNR_SD_PREVIEW_OUT") {
+    if let Some(dir) = &out_dir {
         for (i, p) in previews.iter().enumerate() {
             let tile = RgbaImage::from_raw(p.width, p.height, p.rgba.clone()).expect("the preview's size");
             let mut frame = backdrop.clone();
             image::imageops::replace(&mut frame, &tile, p.x as i64, p.y as i64);
             frame.save(format!("{dir}/{id:?}_step{:02}.png", i + 1)).expect("save a preview");
         }
-        previewed.save(format!("{dir}/{id:?}_fill.png")).expect("save the fill");
+    }
+
+    let differing = |a: &RgbaImage, b: &RgbaImage| a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
+    if previewed != plain {
+        // A second plain run tells previews apart from a model that
+        // differs run to run on this machine's provider.
+        let again = fill(&prunr_core::Progress::none()).expect("the second run without previews");
+        assert!(again == plain, "the model differs run to run here ({} px), so previews cannot be told apart", differing(&again, &plain));
+        panic!("previews change the fill: {} px differ", differing(&previewed, &plain));
     }
 }
 
