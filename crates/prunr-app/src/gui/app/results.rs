@@ -627,8 +627,14 @@ impl PrunrApp {
         // dispatch round-trip closed for this item.
         tracing::info!(item_id, status = ?item.status, "item processing complete");
 
-        if let Some(provider) = backend_update {
-            self.settings.note_backend(provider);
+        // A model the accelerator does not run used the CPU by design; the
+        // app's accelerator, and the job count derived from it, stay.
+        if let Some(provider) = backend_update.filter(|p| !p.is_empty() && *p != self.settings.active_backend) {
+            let runs_on_accelerator = self.settings.model.to_model_id()
+                .is_none_or(|m| prunr_core::engine::model_runs_on(m, &self.settings.active_backend));
+            if runs_on_accelerator {
+                self.settings.note_backend(provider);
+            }
         }
 
         self.refresh_batch_progress_status();
@@ -1552,6 +1558,24 @@ mod timeline_contract_tests {
     }
 
     /// A Process result that lands on the state it started from is a step.
+    /// Silueta cannot run on OpenVINO and reports the CPU by design; its
+    /// result used to switch the app's accelerator to the CPU (Settings
+    /// lost its Processor row) and reset the Parallel jobs you set.
+    #[test]
+    fn a_model_the_accelerator_does_not_run_leaves_the_backend_and_jobs_alone() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        app.settings.active_backend = "OpenVINO".into();
+        app.settings.parallel_jobs = 3;
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        item.status = BatchStatus::Processing;
+        let cpu = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, 1, Ok(cpu), None, None);
+        assert_eq!(app.settings.active_backend, "OpenVINO");
+        assert_eq!(app.settings.parallel_jobs, 3);
+    }
+
     #[test]
     fn a_process_result_lands_as_its_own_step() {
         let ctx = egui::Context::default();
