@@ -21,6 +21,17 @@
 
 use crate::progress::{Progress, ProgressUpdate, Step, TilePreview, TileRect, Unit};
 
+/// Bytes per output pixel at the run's peak, as it finishes: the RGB
+/// accumulator and weights (16), the enlarged alpha (1) and the output
+/// (4) live together.
+const PEAK_BYTES_PER_OUTPUT_PIXEL: u64 = 21;
+
+/// What an upscale to `out_w` × `out_h` holds at its peak, besides the
+/// input image and the model.
+pub fn peak_bytes(out_w: u32, out_h: u32) -> u64 {
+    u64::from(out_w) * u64::from(out_h) * PEAK_BYTES_PER_OUTPUT_PIXEL
+}
+
 use image::{GrayImage, RgbImage, RgbaImage};
 
 use crate::CoreError;
@@ -281,6 +292,13 @@ fn blend_weight_sided(x: u32, edge: u32, size: u32, has_low: bool, has_high: boo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_peak_matches_the_table_and_does_not_overflow() {
+        let mb = |b: u64| b / (1024 * 1024);
+        assert_eq!(mb(peak_bytes(4096, 4096)), 336, "1024 x 1024 at 4x: the table's 272 MB plus the output");
+        assert_eq!(peak_bytes(100_000, 100_000), 210_000_000_000);
+    }
+
     use super::*;
 
     /// Every input pixel must be covered by at least one tile.

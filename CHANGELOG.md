@@ -109,7 +109,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
-- Process under an upscaler or Colorize leaves an image whose result already matches its settings alone ("Already up to date"), as background removal does, and a Sharpen, AI blend, Color match or Strength change carried to the ticked images finishes their kept run again instead of running the model; a batch of four Nomos8k upscales pressed again took 146 s for the same images.
+- Process again on an upscale enlarges it again (2× then 2× gives 4×, each its own undo step), also after undoing back to an earlier upscale; it re-ran the same upscale from the original instead, into an identical step (four Nomos8k images: 146 s). A changed Scale or upscaler still redoes the shown upscale from where it started. An upscale too large for the free memory is refused with a message saying how much it needs.
+- Process under Colorize leaves an image already colorized as asked alone ("Already up to date"), and a Sharpen, AI blend, Color match or Strength change carried to the ticked images finishes their kept run again instead of running the model.
 - The Parallel jobs hint names the models that run several images at once on the CPU (Silueta and U2Net) instead of BiRefNet alone.
 - Slider handles are clean white discs on the rail again; a light ring had appeared around them, with the value box sitting a little low.
 - Colorize's Strength panel is as wide as its slider needs instead of half the window, and the sliders in it and in the eraser's Advanced panels span the panel.

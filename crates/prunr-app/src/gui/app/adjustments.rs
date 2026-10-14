@@ -80,7 +80,9 @@ impl PrunrApp {
                     .and_then(|n| n.to_str());
                 // Upscale row shows projected output size: the size of the
                 // image the next upscale starts from.
-                let source_dims = item.run_input_dims(Engine::Upscale);
+                let source_dims = settings_ref.model.dispatch_model_kind()
+                    .filter(|m| m.is_upscale())
+                    .map_or_else(|| item.run_input_dims(Engine::Upscale), |m| item.next_upscale_dims(m));
                 let state = adjustments_toolbar::ToolbarState {
                     magic_brush_active: self.magic_brush_state.is_active(),
                     brush_available,
