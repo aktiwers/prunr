@@ -396,6 +396,67 @@ fn matches_cpu(gpu: GpuVendor, cpu: CpuVendor) -> bool {
     )
 }
 
+/// The GPUs the system names, for a report a user sends back: Windows'
+/// video controllers with their driver versions, macOS's chipsets, Linux's
+/// PCI display devices. Runs a system tool (about a second on Windows), so
+/// never on a frame; empty when the tool is missing or names none.
+pub fn gpu_names() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            "Get-CimInstance Win32_VideoController | ForEach-Object { \"$($_.Name) (driver $($_.DriverVersion))\" }",
+        ]).creation_flags(CREATE_NO_WINDOW);
+        command_stdout(cmd).map_or_else(Vec::new, |out| non_empty_lines(&out))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("system_profiler");
+        cmd.arg("SPDisplaysDataType");
+        command_stdout(cmd).map_or_else(Vec::new, |out| chipsets_from_system_profiler(&out))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        command_stdout(std::process::Command::new("lspci")).map_or_else(Vec::new, |out| displays_from_lspci(&out))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+fn command_stdout(mut cmd: std::process::Command) -> Option<String> {
+    let out = cmd.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn non_empty_lines(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+/// `Chipset Model: Apple M2 Pro` lines of `system_profiler SPDisplaysDataType`.
+#[cfg(any(target_os = "macos", test))]
+fn chipsets_from_system_profiler(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("Chipset Model:"))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The device names of `lspci`'s VGA, 3D and display controllers.
+#[cfg(any(target_os = "linux", test))]
+fn displays_from_lspci(text: &str) -> Vec<String> {
+    const CLASSES: [&str; 3] = ["VGA compatible controller: ", "3D controller: ", "Display controller: "];
+    text.lines()
+        .filter_map(|l| CLASSES.iter().find_map(|class| l.split_once(class).map(|(_, name)| name.trim().to_string())))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -407,6 +468,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn gpu_names_come_from_each_systems_tool_output() {
+        let lspci = "00:00.0 Host bridge: Intel Corporation Xeon E3-1200 v5\n\
+                     00:02.0 VGA compatible controller: Intel Corporation HD Graphics 530 (rev 06)\n\
+                     01:00.0 3D controller: NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)\n";
+        assert_eq!(displays_from_lspci(lspci), ["Intel Corporation HD Graphics 530 (rev 06)", "NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)"]);
+        let profiler = "Graphics/Displays:\n\n    Apple M2 Pro:\n\n      Chipset Model: Apple M2 Pro\n      Type: GPU\n      Total Number of Cores: 19\n";
+        assert_eq!(chipsets_from_system_profiler(profiler), ["Apple M2 Pro"]);
+        assert_eq!(non_empty_lines("NVIDIA GeForce RTX 4090 (driver 32.0.15.6094)\r\n\r\n"), ["NVIDIA GeForce RTX 4090 (driver 32.0.15.6094)"]);
+    }
 
     #[test]
     fn classify_intel_via_vendor_id() {

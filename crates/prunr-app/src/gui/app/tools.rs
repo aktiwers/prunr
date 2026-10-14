@@ -135,8 +135,8 @@ impl PrunrApp {
                 SelectionAction::Delete => Some(CutoutAction::Erase),
                 SelectionAction::Clear => Some(self.settings.brush.cutout_action),
                 SelectionAction::Cut => {
-                    if let Some((mask, base)) = self.selection_edit_inputs(idx) {
-                        self.system.copy_image(&mask.copy_to_rgba(&base));
+                    if let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) {
+                        self.system.copy_image(&selected);
                         self.set_temporary_status("Selection cut to clipboard");
                     }
                     Some(CutoutAction::Erase)
@@ -161,13 +161,15 @@ impl PrunrApp {
                 self.apply_selection_cut(idx, &mask, &base, ctx);
             }
             SelectionAction::Copy => {
-                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                self.system.copy_image(&mask.copy_to_rgba(&base));
+                let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) else { return };
+                self.system.copy_image(&selected);
                 self.set_temporary_status("Selection copied to clipboard");
             }
             SelectionAction::Cut => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                self.system.copy_image(&mask.copy_to_rgba(&base));
+                if let Some(selected) = mask.copy_to_rgba(&base) {
+                    self.system.copy_image(&selected);
+                }
                 self.apply_selection_cut(idx, &mask, &base, ctx);
                 self.set_temporary_status("Selection cut to clipboard");
             }

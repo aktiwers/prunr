@@ -95,10 +95,10 @@ impl ModelId {
     /// What the SD pipeline needs to know about an SD-family bundle;
     /// `None` for every other model.
     pub fn sd_spec(&self) -> Option<SdSpec> {
-        const SD15: SdSpec = SdSpec { vae_scale: 0.18215, cpu_output_correct: false, takes_taesd: true, lean_sessions: false };
+        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false };
         match self {
             ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 => Some(SD15),
-            ModelId::RoremFp16 => Some(SdSpec { vae_scale: 0.13025, cpu_output_correct: true, takes_taesd: false, lean_sessions: true }),
+            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true }),
             _ => None,
         }
     }
@@ -930,7 +930,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
         display_name: "4xNomos8kSCHAT-L",
-        description: "Photo-tuned HAT-L super-resolution (fp16). Higher quality, slower than Real-ESRGAN; slow on CPU EP.",
+        description: "Photo-tuned HAT-L super-resolution. The most detailed upscaler and the slowest: about a minute for a small photo without a graphics card.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
@@ -1508,18 +1508,38 @@ pub fn keeps_weights_apart(id: ModelId) -> bool {
 /// See `ModelId::sd_spec`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SdSpec {
-    /// Diffusers' `vae.config.scaling_factor`: SD 1.5's VAE or SDXL's.
-    pub vae_scale: f32,
+    pub latent: SdLatent,
     /// The ORT CPU EP's output is right. SD 1.5's FP16 bundles come out
     /// as text-like artifacts on it, so they need a GPU EP; RORem's
     /// matches its PyTorch reference.
     pub cpu_output_correct: bool,
-    /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
-    pub takes_taesd: bool,
     /// Sessions run without ORT's memory-pattern planning. Measured on
     /// RORem (prunr-export/rorem_mem): 15 GB peak instead of 21.7 at the
     /// same speed. SD 1.5 is unmeasured, so it keeps ORT's default.
     pub lean_sessions: bool,
+}
+
+/// The latent space an SD-family model denoises in, named by the VAE
+/// that encodes and decodes it. RORem is SDXL-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdLatent {
+    Sd15,
+    Sdxl,
+}
+
+impl SdLatent {
+    /// Diffusers' `vae.config.scaling_factor`.
+    pub fn vae_scale(self) -> f32 {
+        match self {
+            Self::Sd15 => 0.18215,
+            Self::Sdxl => 0.13025,
+        }
+    }
+
+    /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
+    pub fn takes_taesd(self) -> bool {
+        self == Self::Sd15
+    }
 }
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:
@@ -2010,6 +2030,16 @@ mod tests {
         assert!(!ModelId::BiRefNetLite.is_sd_family());
         assert!(!ModelId::Teed.is_sd_family());
         assert!(!ModelId::TaesdFp16.is_sd_family());
+    }
+
+    #[test]
+    fn rorem_denoises_sdxl_latents_and_only_sd15_takes_taesd() {
+        let latent = |id: ModelId| id.sd_spec().map(|s| s.latent);
+        assert_eq!(latent(ModelId::SdV15InpaintFp16), Some(SdLatent::Sd15));
+        assert_eq!(latent(ModelId::SdV15LcmInpaintFp16), Some(SdLatent::Sd15));
+        assert_eq!(latent(ModelId::RoremFp16), Some(SdLatent::Sdxl));
+        assert_eq!((SdLatent::Sd15.vae_scale(), SdLatent::Sdxl.vae_scale()), (0.18215, 0.13025));
+        assert!(SdLatent::Sd15.takes_taesd() && !SdLatent::Sdxl.takes_taesd());
     }
 
     #[test]

@@ -211,17 +211,6 @@ impl EpKind {
     }
 }
 
-/// Which weights a session loads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Weights {
-    /// The model's own file: FP32 for segmentation and upscale.
-    Base,
-    /// The half-precision copy GPU providers try first.
-    Fp16,
-    /// The quantised copy the CPU tries first.
-    Int8,
-}
-
 /// Why a provider gave no session.
 #[derive(Debug)]
 pub(crate) enum Miss {
@@ -232,30 +221,34 @@ pub(crate) enum Miss {
     Failed { error: String, from_cache: bool },
 }
 
-/// Each provider in `eps` with `weights` until `commit` builds a session.
-/// Pairs declared or known to fail are skipped; a new failure is recorded
-/// against these weights only.
+/// Each provider in `eps` with `weights` until `commit` builds a session,
+/// returned with the failures on the way (`SessionPick::failed`). Pairs
+/// declared or known to fail are skipped; a new failure is recorded
+/// against these weights only, so FP16 failing never bars FP32.
 pub(crate) fn walk_ladder<S>(
     model: prunr_models::ModelId,
     weights: Weights,
     eps: &[EpKind],
     mut commit: impl FnMut(EpKind) -> Result<S, Miss>,
-) -> Result<(S, EpKind), String> {
-    let mut last_err = None;
+) -> Result<(S, EpKind, Vec<String>), String> {
+    let mut failed = Vec::new();
+    let mut skipped = Vec::new();
     for &ep in eps {
         if !prunr_models::is_ep_compatible(model, ep.as_str()) {
             tracing::debug!(?model, ep = %ep, "EP statically incompatible; skipping");
+            skipped.push(format!("{ep} is declared incompatible"));
             continue;
         }
         if crate::ep_compat::is_known_failure(ep, model, weights) {
             tracing::debug!(?model, ?weights, ep = %ep, "EP cached as incompatible; skipping");
+            skipped.push(format!("{ep} failed this model before"));
             continue;
         }
         match commit(ep) {
-            Ok(session) => return Ok((session, ep)),
+            Ok(session) => return Ok((session, ep, failed)),
             Err(Miss::Unusable(error)) => {
                 tracing::warn!(?model, ep = %ep, %error, "GPU EP unusable — trying next EP");
-                last_err = Some(error);
+                failed.push(error);
             }
             Err(Miss::Failed { error, from_cache }) => {
                 tracing::warn!(?model, ?weights, ep = %ep, %error, "GPU session creation failed — trying next EP");
@@ -264,11 +257,60 @@ pub(crate) fn walk_ladder<S>(
                     || crate::cache::optimized_model_path(model, ep.as_str()),
                     &error,
                 );
-                last_err = Some(error);
+                failed.push(error);
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| "No GPU EPs available on this platform".to_string()))
+    Err(if !failed.is_empty() {
+        failed.join("; ")
+    } else if !skipped.is_empty() {
+        format!("no GPU provider to try: {}", skipped.join(", "))
+    } else {
+        "No GPU EPs available on this platform".to_string()
+    })
+}
+
+/// The GPU providers the loaded runtime offers, in the order a session
+/// tries them.
+pub fn gpu_provider_names() -> Vec<&'static str> {
+    available_gpu_eps().iter().map(EpKind::as_str).collect()
+}
+
+/// The weights file a session loaded: the model's own (FP32 for
+/// segmentation and upscale; an SD bundle's own half-precision weights
+/// count as these too), or the FP16 (GPU) or INT8 (CPU) variant beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Weights {
+    #[default]
+    Fp32,
+    Fp16,
+    Int8,
+}
+
+impl Weights {
+    pub fn label(self) -> &'static str {
+        match self {
+            Weights::Fp32 => "FP32",
+            Weights::Fp16 => "FP16",
+            Weights::Int8 => "INT8",
+        }
+    }
+}
+
+/// Where a session ended up: the provider it runs on, the weights it
+/// loaded, and each earlier try that failed, in order, with the
+/// provider's own error text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionPick {
+    pub provider: String,
+    pub weights: Weights,
+    pub failed: Vec<String>,
+}
+
+impl SessionPick {
+    pub(crate) fn on(provider: &str) -> Self {
+        Self { provider: provider.to_string(), ..Default::default() }
+    }
 }
 
 /// ORT-backed inference engine. Holds one Session per model selection.
@@ -279,7 +321,7 @@ pub(crate) fn walk_ladder<S>(
 /// references while still satisfying ort's mutability requirement.
 pub struct OrtEngine {
     session: Mutex<Session>,
-    provider_name: String,
+    pick: SessionPick,
     model_kind: ModelKind,
 }
 
@@ -350,16 +392,18 @@ impl OrtEngine {
         level: GraphOptimizationLevel,
     ) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
+        let mut failed = Vec::new();
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
         if let Some((optimized, weights)) = Self::optimized_variant_bytes(model, cpu_only) {
             tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
             match Self::build_session(&optimized, weights, intra_threads, model, cpu_only, level) {
                 Ok(engine) => {
-                    tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (optimized variant)");
+                    tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (optimized variant)");
                     return Ok(engine);
                 }
                 Err(e) => {
                     tracing::warn!(?model, error = %e, "optimized variant failed — falling back to FP32");
+                    failed.push(format!("{} weights: {e}", weights.label()));
                 }
             }
         } else {
@@ -372,26 +416,47 @@ impl OrtEngine {
         let id: prunr_models::ModelId = model.into();
         let fp32 = prunr_models::resolve_bytes(id)
             .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        match Self::build_session(&fp32, Weights::Base, intra_threads, model, cpu_only, level) {
-            Ok(engine) => {
-                tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
+        match Self::build_session(&fp32, Weights::Fp32, intra_threads, model, cpu_only, level) {
+            Ok(mut engine) => {
+                tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (FP32)");
+                failed.append(&mut engine.pick.failed);
+                engine.pick.failed = failed;
                 Ok(engine)
             }
             Err(e) if !cpu_only => {
                 tracing::warn!(?model, error = %e, "GPU session creation failed — retrying CPU-only");
+                failed.push(format!("FP32 weights: {e}"));
                 // Recurse so the cpu_only=true path also tries its
                 // CPU-targeted optimized variant (INT8) before falling
                 // back to FP32. Otherwise the GPU-fail-then-CPU path
                 // ends up on FP32 even when an INT8 variant is on disk.
-                let engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
+                let mut engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
                 tracing::info!(
-                    ?model, provider = %engine.provider_name,
+                    ?model, provider = %engine.pick.provider,
                     "OrtEngine ready (CPU fallback after GPU failure)",
                 );
+                failed.append(&mut engine.pick.failed);
+                engine.pick.failed = failed;
                 Ok(engine)
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// `model`'s session as the app builds it: the model's graph
+    /// optimisation level, through the GPU providers unless `cpu_only`.
+    pub fn for_model(model: prunr_models::ModelId, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        let descriptor = prunr_models::descriptor(model)
+            .ok_or_else(|| CoreError::Model(format!("{model:?} is not a known model")))?;
+        let kind = ModelKind::try_from(model)
+            .map_err(|id| CoreError::Model(format!("{id:?} has no session kind")))?;
+        Self::new_with_fallback_and_level(kind, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor))
+    }
+
+    /// The provider this session runs on, its weights, and what failed
+    /// before it.
+    pub fn pick(&self) -> &SessionPick {
+        &self.pick
     }
 
     /// Try to load an optimized model variant from the filesystem.
@@ -431,7 +496,7 @@ impl OrtEngine {
             tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
                 session: Mutex::new(session),
-                provider_name: "CPU".to_string(),
+                pick: SessionPick { weights, ..SessionPick::on("CPU") },
                 model_kind: model,
             });
         }
@@ -442,7 +507,7 @@ impl OrtEngine {
         // reached — exactly the DirectML AbiCustomRegistry failure seen in the
         // wild). Fall through on error; the caller retries with cpu_only=true
         // if all GPU EPs fail.
-        let (session, ep) = walk_ladder(model_id, weights, available_gpu_eps(), |ep| {
+        let (session, ep, failed) = walk_ladder(model_id, weights, available_gpu_eps(), |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
@@ -463,7 +528,7 @@ impl OrtEngine {
         }).map_err(CoreError::Inference)?;
         Ok(Self {
             session: Mutex::new(session),
-            provider_name: ep.as_str().to_string(),
+            pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
             model_kind: model,
         })
     }
@@ -518,7 +583,7 @@ pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
         return true;
     };
     let fp16_tried = cfg!(not(target_os = "macos")) && prunr_models::has_fp16_variant(model);
-    !crate::ep_compat::is_known_failure(ep, model, Weights::Base)
+    !crate::ep_compat::is_known_failure(ep, model, Weights::Fp32)
         || (fp16_tried && !crate::ep_compat::is_known_failure(ep, model, Weights::Fp16))
 }
 
@@ -618,7 +683,7 @@ impl OrtEngine {
 
 impl InferenceEngine for OrtEngine {
     fn active_provider(&self) -> &str {
-        &self.provider_name
+        &self.pick.provider
     }
 }
 
@@ -747,17 +812,17 @@ mod tests {
         let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) else { return };
         let cache_file = dir.join("optimized.onnx");
         std::fs::write(&cache_file, b"stale").unwrap();
-        let initial = crate::ep_compat::is_known_failure(ep, id, Weights::Base);
+        let initial = crate::ep_compat::is_known_failure(ep, id, Weights::Fp32);
 
         handle_commit_failure(
-            true, ep, id, Weights::Base,
+            true, ep, id, Weights::Fp32,
             || crate::cache::optimized_model_path(id, ep.as_str()),
             "test cache failure",
         );
 
         assert!(!cache_file.exists(), "cache file must be deleted");
         assert_eq!(
-            crate::ep_compat::is_known_failure(ep, id, Weights::Base), initial,
+            crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), initial,
             "record_failure must NOT fire on was_cached=true",
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -814,11 +879,28 @@ mod tests {
             }
         };
         assert!(walk_ladder(model, Weights::Fp16, &[ep], commit_fp16_fails(Weights::Fp16)).is_err());
-        let picked = walk_ladder(model, Weights::Base, &[ep], commit_fp16_fails(Weights::Base));
-        assert_eq!(picked, Ok(("session", ep)), "FP32 ran on the provider FP16 failed on");
-        assert_eq!(*tried.borrow(), [(ep, Weights::Fp16), (ep, Weights::Base)]);
+        let picked = walk_ladder(model, Weights::Fp32, &[ep], commit_fp16_fails(Weights::Fp32));
+        assert_eq!(picked, Ok(("session", ep, Vec::new())), "FP32 ran on the provider FP16 failed on");
+        assert_eq!(*tried.borrow(), [(ep, Weights::Fp16), (ep, Weights::Fp32)]);
         assert!(crate::ep_compat::is_known_failure(ep, model, Weights::Fp16), "the FP16 failure is remembered");
-        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Base), "and only that");
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "and only that");
+    }
+
+    /// A session says where it landed: a CPU-only one on the CPU, with
+    /// nothing failed on the way and never the GPU's FP16 weights.
+    #[test]
+    fn a_cpu_session_names_the_cpu_and_its_weights() {
+        use prunr_models::ModelId;
+        assert!(OrtEngine::for_model(ModelId::Teed, 1, true).is_err(), "TEED has no engine kind");
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let engine = OrtEngine::for_model(ModelId::Silueta, 1, true).expect("Silueta is bundled");
+        let pick = engine.pick();
+        assert_eq!((pick.provider.as_str(), engine.active_provider()), ("CPU", "CPU"));
+        assert!(pick.failed.is_empty(), "{:?}", pick.failed);
+        assert_ne!(pick.weights, Weights::Fp16);
+        assert_eq!(engine.model_kind(), ModelKind::Silueta);
     }
 
     // Integration tests require dev-models feature and downloaded models.
