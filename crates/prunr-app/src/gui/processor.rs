@@ -1256,6 +1256,7 @@ impl Processor {
                 InpaintOutcome::Failed(msg) => errors.push((item_id, msg)),
                 InpaintOutcome::Done { rgba, fill_scale, generation } => {
                     if self.inpaint_latest_gen.get(&item_id) == Some(&generation) {
+                        tracing::info!(item_id, fill_scale, "erase landed");
                         out.push(LandedFill { item_id, rgba, fill_scale });
                     }
                 }
