@@ -230,14 +230,15 @@ impl PrunrApp {
         self.batch.items[idx].commit(StepKind::Edit);
     }
 
-    /// Eager encoder: the selected image gets an embedding as soon as it
-    /// has a decoded source, so Magic Brush is ready the moment it is
-    /// turned on. Runs from `reconcile_selected` every frame. With the tool
-    /// off it waits for the warm sessions and an idle item, and a refusal
-    /// is remembered instead of retried; with the tool on, admission or
-    /// encoder failure turns the tool off, so this cannot retry in a loop.
+    /// Eager encoder: once Magic Brush has been used, the selected image
+    /// gets an embedding as soon as it has a decoded source, so the tool
+    /// is ready the moment it is turned on again. Runs from
+    /// `reconcile_selected` every frame. With the tool off it waits for
+    /// the warm sessions and an idle item, and a refusal is remembered
+    /// instead of retried; with the tool on, admission or encoder failure
+    /// turns the tool off, so this cannot retry in a loop.
     pub(super) fn ensure_magic_embedding_for_selected(&mut self, ctx: &egui::Context) {
-        if !self.magic_brush_wanted() || self.magic_brush_state.has_pending_encoder() {
+        if !self.magic_brush_ready_ahead() || self.magic_brush_state.has_pending_encoder() {
             return;
         }
         if let Some(wait) = self.magic_brush_state.settle_remaining(std::time::Instant::now()) {
@@ -288,9 +289,17 @@ impl PrunrApp {
     }
 
     /// Whether the selected model has brushes, so Magic Brush's models
-    /// belong in memory.
+    /// may be in memory.
     pub(crate) fn magic_brush_wanted(&self) -> bool {
         shows(self.settings.model, Surface::Brushes)
+    }
+
+    /// Whether Magic Brush's models load and encode ahead of a click: the
+    /// model has brushes and the tool has been on this session. The
+    /// encoder costs seconds of every core for each image looked at,
+    /// which someone who never uses the brush should not pay.
+    pub(crate) fn magic_brush_ready_ahead(&self) -> bool {
+        self.magic_brush_wanted() && self.magic_brush_state.used()
     }
 
     /// After a model switch: a model without brushes turns them off and
@@ -298,7 +307,9 @@ impl PrunrApp {
     /// so nothing encodes behind an upscale; one with brushes warms it.
     pub(super) fn fit_brush_models_to_model(&mut self) {
         if self.magic_brush_wanted() {
-            self.processor.warm_sam_sessions();
+            if self.magic_brush_ready_ahead() {
+                self.processor.warm_sam_sessions();
+            }
             // An eraser's only input is a painted region: the brush comes
             // on by itself, unless a tool is in use already.
             if self.settings.model.is_inpaint() && self.active_tool().is_none() {
@@ -646,6 +657,22 @@ mod tool_mutual_exclusion_tests {
         app.set_tool(Some(Tool::Magic));
         app.fit_brush_models_to_model();
         assert_eq!(on(&app), (false, true), "Magic Brush stays the tool");
+    }
+
+    /// Magic Brush loads and encodes ahead only once it has been used in
+    /// the session: the encoder costs seconds of every core per image
+    /// looked at, which someone who never uses the brush should not pay.
+    #[test]
+    fn magic_brush_works_ahead_only_after_its_first_use() {
+        let mut app = app();
+        app.settings.model = SettingsModel::Silueta;
+        app.fit_brush_models_to_model();
+        assert!(!app.magic_brush_ready_ahead(), "never used: nothing ahead");
+        app.set_tool(Some(Tool::Magic));
+        app.set_tool(None);
+        assert!(app.magic_brush_ready_ahead(), "used once: each image shown is encoded ahead");
+        app.settings.model = SettingsModel::RealEsrganUpscale;
+        assert!(!app.magic_brush_ready_ahead(), "never under a model without brushes");
     }
 
     /// A model without brushes turns both off.
