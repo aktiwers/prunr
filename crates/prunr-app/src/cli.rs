@@ -485,6 +485,13 @@ fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
 }
 
 impl Cli {
+    /// Whether this run writes to the terminal it was started from. A
+    /// Windows release build has no console of its own, so it borrows
+    /// that one, or its output goes nowhere.
+    pub fn writes_to_terminal(&self) -> bool {
+        self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache
+    }
+
     fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
@@ -1464,6 +1471,20 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    /// Every run that prints borrows the terminal on Windows, where a
+    /// release build has none of its own; `--doctor` and
+    /// `--clear-ep-cache` printed nowhere there. The GUI does not.
+    #[test]
+    fn every_printing_run_writes_to_the_terminal() {
+        let writes = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args)).writes_to_terminal();
+        assert!(writes(&["--doctor"]));
+        assert!(writes(&["--clear-ep-cache"]));
+        assert!(writes(&["photo.jpg"]));
+        assert!(writes(&["--debug"]));
+        assert!(!writes(&[]), "the GUI");
+        assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
+    }
 
     /// `-o` with one input is the output file; with several it is the
     /// folder each result goes into.

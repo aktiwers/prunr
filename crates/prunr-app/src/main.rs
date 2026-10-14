@@ -42,7 +42,7 @@ fn main() {
     // parent stderr to work by luck and worker stderr (via Stdio::inherit)
     // to silently drop on Windows windows_subsystem=windows builds.
     #[cfg(windows)]
-    if cli.debug || !cli.inputs.is_empty() {
+    if cli.writes_to_terminal() {
         attach_parent_console();
     }
 
