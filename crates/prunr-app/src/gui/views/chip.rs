@@ -465,7 +465,7 @@ fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipC
         return panel_slider(ui, label, slider);
     }
     let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
-    let resp = ui.add(slider.show_value(true)).labelled_by(label.id);
+    let resp = add_slider(ui, slider).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
 }
 
@@ -513,7 +513,23 @@ fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChan
 
 /// A slider with its value box, named `label` for the tree.
 fn chip_named_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> Response {
-    named(ui.add(slider.show_value(true)), label)
+    named(add_slider(ui, slider), label)
+}
+
+/// The value box's padding above and below its number.
+const SLIDER_VALUE_PAD_Y: f32 = 1.0;
+
+/// A slider and its value box. The box keeps egui's slim vertical
+/// padding: taller than the slider, it would make the response (the
+/// union of both) taller than the rail, and the white handle, painted
+/// at the response's centre, would slide off egui's own handle and
+/// leave its outline showing as a ring.
+fn add_slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding.y = SLIDER_VALUE_PAD_Y;
+        ui.add(slider.show_value(true))
+    })
+    .inner
 }
 
 /// The handle's colour: near-white over the rail.
@@ -1381,6 +1397,21 @@ pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// With the app's pill padding the value box would stand taller than
+    /// the slider and drag the painted handle off the rail.
+    #[test]
+    fn a_slider_with_its_value_box_is_no_taller_than_its_rail() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
+            let thickness = ui.text_style_height(&egui::TextStyle::Body).max(ui.spacing().interact_size.y);
+            let mut v = 0.5f32;
+            let resp = ui.horizontal(|ui| add_slider(ui, egui::Slider::new(&mut v, 0.0..=1.0))).inner;
+            assert!(resp.rect.height() <= thickness + 0.5, "{} > {thickness}", resp.rect.height());
+        });
+    }
 
     /// The painted handle sits where egui's mapping puts it: linear, and
     /// log10 for a logarithmic slider (Gamma 1.0 on 0.01-10 is two thirds).
