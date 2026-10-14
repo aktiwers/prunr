@@ -298,7 +298,9 @@ One exception, by design: Process with another cut-out model (or No model) than 
 
 ### CLI
 
-`main.rs` routes `--worker`, `--doctor`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+`main.rs` routes `--worker`, `--doctor`, `bench`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+
+`prunr bench` (`prunr_app::bench`) runs each installed model in-process through the app's own entry points, once CPU-only and once through the EP ladder, one session at a time, released before the next model. Every session records a `SessionPick` (provider, weights, each provider that failed on the way), so the report says where a model landed and why. The report is rewritten after every step: one a crash left behind names the step it crashed in.
 
 ## Inference Pipeline
 
