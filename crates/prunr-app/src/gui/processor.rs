@@ -395,11 +395,14 @@ pub(crate) struct DepthResult {
 }
 
 /// One photo to measure, queued for the depth thread.
-struct DepthJob {
-    item_id: u64,
-    epoch: u64,
-    input: RunInput,
-    cpu_only: bool,
+pub(crate) struct DepthJob {
+    pub(crate) item_id: u64,
+    pub(crate) epoch: u64,
+    pub(crate) input: RunInput,
+    pub(crate) cpu_only: bool,
+    /// The faces a Faces search already found in this photo; `None`: the
+    /// depth thread finds them.
+    pub(crate) faces: Option<Vec<prunr_core::face::FacePlace>>,
 }
 
 /// The depth thread's queue and its warm engine. One thread measures the
@@ -417,26 +420,30 @@ impl DepthQueue {
         let warm: WarmEngine = Arc::new(Mutex::new(None));
         let engine_slot = Arc::clone(&warm);
         std::thread::spawn(move || {
+            let mut faces = prunr_core::face::LazyFaceFinder::default();
             for job in job_rx {
-                let result = measure_depth(&engine_slot, &progress, job.input, job.cpu_only);
+                let (item_id, epoch) = (job.item_id, job.epoch);
+                let result = measure_depth(&engine_slot, &progress, job, &mut faces);
                 if let Err(err) = &result {
-                    tracing::warn!(item_id = job.item_id, %err, "depth run failed");
+                    tracing::warn!(item_id, %err, "depth run failed");
                 }
-                let _ = done_tx.send(DepthResult { item_id: job.item_id, epoch: job.epoch, result });
+                let _ = done_tx.send(DepthResult { item_id, epoch, result });
             }
         });
         Self { jobs, done, warm }
     }
 }
 
-/// Measure one photo on the warm engine. The capsule shows it only when
-/// nothing else is showing, since it cannot be cancelled.
+/// Measure one photo on the warm engine, with the faces in it for Auto
+/// focus. The capsule shows it only when nothing else is showing, since
+/// it cannot be cancelled.
 fn measure_depth(
     engine_slot: &WarmEngine,
     slot: &super::dispatch_progress::DispatchProgressSlot,
-    input: RunInput,
-    cpu_only: bool,
+    job: DepthJob,
+    finder: &mut prunr_core::face::LazyFaceFinder,
 ) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
+    let DepthJob { input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     if !admitted(descriptor) {
@@ -454,7 +461,9 @@ fn measure_depth(
     let result = input.load()
         .and_then(|photo| {
             let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads, level)?;
-            prunr_core::depth::estimate_depth(&engine, &photo, &progress)
+            let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
+            let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
+            Ok(map.with_faces(&faces))
         })
         .map(Arc::new)
         .map_err(|e| e.to_string());
@@ -941,10 +950,10 @@ impl Processor {
         });
     }
 
-    /// Queue `item_id`'s photo for a depth map; it lands through
-    /// `pump_depth_results`, tagged with `epoch`.
-    pub(crate) fn dispatch_depth(&self, item_id: u64, epoch: u64, input: RunInput, cpu_only: bool) {
-        let _ = self.depth.jobs.send(DepthJob { item_id, epoch, input, cpu_only });
+    /// Queue a photo for a depth map; it lands through
+    /// `pump_depth_results`, tagged with the job's epoch.
+    pub(crate) fn dispatch_depth(&self, job: DepthJob) {
+        let _ = self.depth.jobs.send(job);
     }
 
     pub(crate) fn pump_depth_results(&mut self) -> Vec<DepthResult> {
