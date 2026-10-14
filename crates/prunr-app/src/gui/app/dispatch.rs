@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 use std::sync::mpsc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Cutter, Engine, ImageSource};
+use crate::gui::item::{BatchItem, BatchStatus, Cutter, Engine, ImageSource, KeptRunTier};
+use crate::gui::live_preview::PreviewKind;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
@@ -37,6 +38,50 @@ impl PrunrApp {
                 return;
             }
         }
+    }
+
+    /// Process on an upscaler or the colorizer. Every target takes the
+    /// shown image's settings first, as a cut-out run does; one already
+    /// showing this model's run as asked is left alone, one that took
+    /// only a Refine or Strength change finishes its kept run again, and
+    /// the rest queue for a run.
+    pub(super) fn process_kept_run_items(&mut self) {
+        let model = if self.settings.model.is_colorize() { crate::gui::settings::COLORIZER } else {
+            let Some(kind) = self.settings.model.dispatch_model_kind() else { return };
+            kind
+        };
+        let ids = self.batch.items_to_process();
+        let shown = self.batch.selected_idx_clamped();
+        let shown_settings = shown.map(|i| self.batch.items[i].settings);
+        let adopting: HashSet<u64> = ids.iter().copied()
+            .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| Some(i.settings) != shown_settings))
+            .collect();
+        if let Some(shown) = shown {
+            self.batch.share_settings(shown, &ids.iter().copied().collect());
+        }
+        let refinish = if model.is_upscale() { PreviewKind::UpscaleTier2 } else { PreviewKind::ColorizeTier2 };
+        let (mut runs, mut up_to_date, mut refinished) = (Vec::new(), 0, 0);
+        for id in ids {
+            let Some(item) = self.batch.find_by_id_mut(id) else { continue };
+            match item.kept_run_tier(model) {
+                KeptRunTier::UpToDate => up_to_date += 1,
+                KeptRunTier::Refinish => {
+                    // The shown image's own knob change is a step already.
+                    if adopting.contains(&id) {
+                        item.commit(StepKind::Adjust);
+                    }
+                    self.processor.live_preview.mark_tweak(id, refinish);
+                    self.processor.live_preview.flush(id);
+                    refinished += 1;
+                }
+                KeptRunTier::Full => runs.push(id),
+            }
+        }
+        self.notify_skip(up_to_date, runs.len() + refinished);
+        // One image at a time through the run queue: an upscale's working
+        // set can be most of the machine's RAM.
+        self.processor.queue_runs(runs);
+        self.dispatch_next_queued_run();
     }
 
     /// Upscale branch of `handle_process_intent`. Resolves the input image
@@ -499,6 +544,34 @@ mod process_targets_tests {
         app.processor.set_upscale_in_flight_for_test(false);
         app.dispatch_next_queued_run();
         assert_eq!(app.processor.next_queued_run(), None, "every image that could not start passed its turn on; none is left waiting");
+    }
+
+    /// Process on an upscaler leaves an image whose upscale is what the
+    /// settings ask alone, and re-finishes the kept upscale of one that
+    /// took only a Refine change from the shown image.
+    #[test]
+    fn process_on_an_upscaler_runs_only_what_changed() {
+        use crate::gui::item::{BatchStatus, Engine, UpscaleCache};
+        let mut app = two_images(SettingsModel::RealEsrganUpscale);
+        let model = app.settings.model.dispatch_model_kind().expect("an upscaler");
+        let img = std::sync::Arc::new(image::RgbaImage::new(4, 4));
+        for item in &mut app.batch.items {
+            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+            item.applied_recipe = Some(item.settings.current_recipe(model));
+            item.land_upscale(UpscaleCache::new(img.clone(), img.clone(), None));
+            item.status = BatchStatus::Done;
+            item.selected = true;
+        }
+        app.handle_process_intent();
+        assert!(!app.processor.is_upscale_in_flight() && app.batch.items.iter().all(|i| i.job.is_none()), "both up to date: nothing runs");
+
+        app.batch.items[0].settings.sharpen = 0.4;
+        let steps = app.batch.items[1].timeline.undo_steps();
+        app.handle_process_intent();
+        assert!(!app.processor.is_upscale_in_flight(), "a Sharpen change needs no new upscale");
+        assert!(app.processor.live_preview.is_pending_for(2), "the ticked image re-finishes its kept upscale");
+        assert_eq!(app.batch.items[1].settings.sharpen, 0.4, "with the shown image's Sharpen");
+        assert_eq!(app.batch.items[1].timeline.undo_steps(), steps + 1, "as a step of its own");
     }
 
     #[test]

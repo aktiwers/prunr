@@ -568,21 +568,21 @@ impl PrunrApp {
             return;
         }
         let model = self.settings.model;
-        let ids = if model.is_upscale() || model.is_colorize() {
-            self.batch.items_to_process()
-        } else if model.is_inpaint() {
-            let (with_region, without) = self.erase_targets();
-            if without > 0 {
-                self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
-            }
-            with_region.iter().map(|&idx| self.batch.items[idx].id).collect()
-        } else {
+        if model.is_upscale() || model.is_colorize() {
+            self.process_kept_run_items();
+            return;
+        }
+        if !model.is_inpaint() {
             self.handle_remove_bg();
             return;
-        };
-        // One image at a time through the run queue: an upscale's or a
-        // fill's working set can be most of the machine's RAM.
-        self.processor.queue_runs(ids);
+        }
+        let (with_region, without) = self.erase_targets();
+        if without > 0 {
+            self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
+        }
+        // One image at a time through the run queue: a fill's working set
+        // can be most of the machine's RAM.
+        self.processor.queue_runs(with_region.iter().map(|&idx| self.batch.items[idx].id).collect());
         self.dispatch_next_queued_run();
     }
 

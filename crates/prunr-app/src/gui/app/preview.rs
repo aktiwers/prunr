@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Engine};
+use crate::gui::item::{BatchItem, BatchStatus, Engine, KeptRunTier};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::background_io::TexTarget;
 use super::{PrunrApp, BUSY_PILL_AFTER};
@@ -454,14 +454,14 @@ impl PrunrApp {
     /// knobs since its upscale, so its kept run can be re-finished.
     pub(super) fn wants_upscale_tier2(&self, idx: usize) -> bool {
         let model = self.settings.model.dispatch_model_kind();
-        self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| item.refine_only_changed(model))
+        self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| model.is_upscale() && item.kept_run_tier(model) == KeptRunTier::Refinish)
     }
 
     /// Whether the image at `idx` changed only in Strength since its
     /// colorize, so its kept run can be re-rendered.
     pub(super) fn wants_colorize_tier2(&self, idx: usize) -> bool {
         self.settings.model.is_colorize()
-            && self.batch.items.get(idx).is_some_and(|item| item.strength_only_changed(crate::gui::settings::COLORIZER))
+            && self.batch.items.get(idx).is_some_and(|item| item.kept_run_tier(crate::gui::settings::COLORIZER) == KeptRunTier::Refinish)
     }
 }
 
