@@ -407,7 +407,7 @@ Edge planes are kept per scale: Bold, for the dual-scale style, and the newest o
 `ort` (2.0.0-rc.13) is built with `load-dynamic`: no ONNX Runtime is linked in. `prunr_core::ort_runtime` resolves `libonnxruntime` once per process, first hit wins:
 
 1. `ORT_DYLIB_PATH` (developer override; set but missing is an error, never a fall-through)
-2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/` (first entry by name that holds the dylib)
+2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/`: the entry named in `runtimes/preferred`, else the first by name that holds the dylib. One process loads one runtime and no wheel carries another's EP, so with two installed the choice is a file every process reads (GUI, worker, CLI); installing a runtime makes it the preferred one
 3. **Bundled**: `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
 
 Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
