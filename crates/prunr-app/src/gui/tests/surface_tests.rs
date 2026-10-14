@@ -577,3 +577,34 @@ fn a_dialog_reopened_from_a_menu_stays_open() {
     h.run_steps(10);
     assert!(h.state().show_settings, "Settings opened on Hotkeys stays open");
 }
+
+/// The capsule and the canvas animate while a run works, for minutes at
+/// a time: thirty frames a second keeps them smooth at half the drawing.
+#[test]
+fn a_run_in_flight_draws_thirty_frames_a_second() {
+    use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
+    for status in [BatchStatus::Done, BatchStatus::Processing] {
+        // egui takes the frame time off every wait it is asked for: at
+        // the harness's default quarter second, each would read as none.
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_eframe(|cc| {
+                egui_material_icons::initialize(&cc.egui_ctx);
+                PrunrApp::new_for_test()
+            });
+        let photo = h.ctx.load_texture("photo", egui::ColorImage::filled([4, 4], egui::Color32::GRAY), Default::default());
+        {
+            let app = h.state_mut();
+            let item = push_test_item(app, 1);
+            item.status = status.clone();
+            item.source_texture = Some(photo.clone());
+            item.thumb_texture = Some(photo);
+            app.batch.select_item(0);
+            app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
+        }
+        h.run_steps(3);
+        let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(delay >= std::time::Duration::from_millis(15), "{status:?}: the next frame is asked for {delay:?} ahead");
+    }
+}
