@@ -1355,6 +1355,12 @@ impl Processor {
     /// cancel (user or worker-side) and by the cancelled-message handler.
     /// Leaves the cancel registry untouched — that's owned by the caller's
     /// cancel protocol.
+    /// Whether the running batch still has images waiting for room in
+    /// the RAM budget: a new batch opened now would orphan them.
+    pub(crate) fn admission_still_feeding(&self) -> bool {
+        self.admission.as_ref().is_some_and(AdmissionController::has_pending)
+    }
+
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
         self.admission_tx = None;

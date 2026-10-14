@@ -502,7 +502,7 @@ impl PrunrApp {
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
-                WorkerResult::BatchComplete => self.on_batch_complete(),
+                WorkerResult::BatchComplete { items } => self.on_batch_complete(&items),
                 WorkerResult::Cancelled => self.on_cancelled(),
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
@@ -656,13 +656,14 @@ impl PrunrApp {
         self.status.pct = report.pct;
     }
 
-    fn on_batch_complete(&mut self) {
+    /// `items` are the images the finished batch owned. One of them still
+    /// marked as processing was never answered and must not wait on, with
+    /// nothing under way; an image of a batch queued behind this one is
+    /// left to its own batch.
+    fn on_batch_complete(&mut self, items: &[u64]) {
         self.processor.drain_recipes();
-        // The worker has answered for everything it was given; an image
-        // still marked as processing was never answered and must not wait
-        // on, with nothing under way.
         let unanswered: Vec<u64> = self.batch.items.iter()
-            .filter(|i| i.status == BatchStatus::Processing && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
+            .filter(|i| items.contains(&i.id) && i.status == BatchStatus::Processing && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
             .map(|i| i.id)
             .collect();
         for item_id in unanswered {
@@ -1494,10 +1495,30 @@ mod timeline_contract_tests {
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
         item.status = BatchStatus::Processing;
-        app.on_batch_complete();
+        app.on_batch_complete(&[1]);
         assert_eq!(app.batch.items[0].status, BatchStatus::Done);
         assert!(app.batch.items[0].job.is_none());
         assert!(!crate::gui::automation::state::dump(&app).busy);
+    }
+
+    /// Process pressed while a batch runs queues a second batch behind it;
+    /// the first batch's end frees only the images it owned.
+    #[test]
+    fn a_batch_ending_leaves_the_queued_batch_processing() {
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let queued = push_test_item(&mut app, 2);
+        queued.dimensions = (4, 4);
+        for item in &mut app.batch.items {
+            item.start_job(Some(StepKind::Process), Engine::Segment);
+            item.status = BatchStatus::Processing;
+        }
+        app.on_batch_complete(&[1]);
+        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "its own unanswered image is freed");
+        assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "the queued batch's image waits for its own batch");
+        assert!(app.batch.items[1].job.is_some());
+        app.on_batch_complete(&[2]);
+        assert_eq!(app.batch.items[1].status, BatchStatus::Pending, "never answered and never had a result: back to Pending");
+        assert!(app.batch.items[1].job.is_none());
     }
 
     /// A Process result that lands on the state it started from is a step.
