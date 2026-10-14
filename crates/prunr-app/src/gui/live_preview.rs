@@ -427,7 +427,6 @@ impl LivePreview {
         out
     }
 
-    /// True while a preview waits for its debounce or runs.
     /// The images with a render queued that reads the photo (not a Refine
     /// or Strength re-render of a kept run).
     pub(crate) fn pending_photo_renders(&self) -> impl Iterator<Item = u64> + '_ {
@@ -436,6 +435,7 @@ impl LivePreview {
             .map(|(id, _)| *id)
     }
 
+    /// True while a preview waits for its debounce or runs.
     pub fn is_busy(&self) -> bool {
         !self.pending.is_empty() || !self.in_flight.is_empty()
     }
@@ -1163,11 +1163,6 @@ mod tests {
         );
     }
 
-    /// `tick` returning `None` (no remaining wait) is the readiness
-    /// signal even when snapshot can't assemble inputs — the contract
-    /// that matters here is that the entry is RECOGNISED as ready, not
-    /// that the rayon dispatch actually fires (which depends on
-    /// whether the snapshot has the source RGBA decoded etc).
     /// A drag's in-between frames are told apart from the release: the
     /// snapshot sees `settled` only after a flush, and a new tweak after
     /// it is a drag again.
@@ -1188,6 +1183,11 @@ mod tests {
         assert_eq!(seen, vec![false, true, false]);
     }
 
+    /// `tick` returning `None` (no remaining wait) is the readiness
+    /// signal even when snapshot can't assemble inputs — the contract
+    /// that matters here is that the entry is RECOGNISED as ready, not
+    /// that the rayon dispatch actually fires (which depends on
+    /// whether the snapshot has the source RGBA decoded etc).
     #[test]
     fn tick_recognises_ready_entry_after_synthetic_debounce() {
         let clock = MockClock::new(Instant::now());
