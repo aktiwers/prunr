@@ -117,6 +117,12 @@ pub fn motion_clock(ctx: &egui::Context) -> f32 {
     if motion(ctx) { ctx.input(|i| i.time) as f32 } else { STILL_MOMENT }
 }
 
+/// How often the animations that last as long as a run draw (the
+/// progress capsule, the working canvas, the busy pills): thirty frames
+/// a second keeps a turning ring smooth at half the drawing of sixty,
+/// which a laptop on battery feels over a run of minutes.
+pub const WORK_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+
 /// A fade's length: `secs`, or none while animations are off.
 pub fn fade_secs(ctx: &egui::Context, secs: f32) -> f32 {
     if motion(ctx) { secs } else { 0.0 }
