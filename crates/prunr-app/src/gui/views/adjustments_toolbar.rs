@@ -1318,10 +1318,20 @@ pub(super) fn render_model_dropdown(
                     (variant, missing, blurb)
                 })
                 .collect();
-            // As wide as its longest row, so no blank band runs down the right.
-            let width = rows.iter()
-                .map(|(variant, _, blurb)| chip::choice_list_row_width(ui, model_info(*variant).name, blurb))
-                .fold(chip::choice_list_row_width(ui, MORE_MODELS.0, MORE_MODELS.1), f32::max);
+            // As wide as its longest row, so no blank band runs down the right;
+            // measured once per set of installed models, not every frame.
+            let width_id = pop_id.with("width");
+            let cached = ui.data(|d| d.get_temp::<(crate::gui::hardware_cache::HardwareInstallCache, f32)>(width_id));
+            let width = match cached.filter(|(for_installed, _)| *for_installed == installed) {
+                Some((_, width)) => width,
+                None => {
+                    let width = rows.iter()
+                        .map(|(variant, _, blurb)| chip::choice_list_row_width(ui, model_info(*variant).name, blurb))
+                        .fold(chip::choice_list_row_width(ui, MORE_MODELS.0, MORE_MODELS.1), f32::max);
+                    ui.data_mut(|d| d.insert_temp(width_id, (installed, width)));
+                    width
+                }
+            };
             ui.set_width(width);
             // The list runs down to the window's bottom edge and scrolls
             // past it. The room is measured from the chip, where the list
