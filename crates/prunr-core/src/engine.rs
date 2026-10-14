@@ -108,6 +108,48 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
     if cpu_only { &[] } else { available_gpu_eps() }
 }
 
+/// The GPU providers the loaded runtime offers, in the order a session
+/// tries them.
+pub fn gpu_provider_names() -> Vec<&'static str> {
+    available_gpu_eps().iter().map(EpKind::as_str).collect()
+}
+
+/// The weights file a session loaded: the model's own FP32, or the FP16
+/// (GPU) or INT8 (CPU) variant beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Weights {
+    #[default]
+    Fp32,
+    Fp16,
+    Int8,
+}
+
+impl Weights {
+    pub fn label(self) -> &'static str {
+        match self {
+            Weights::Fp32 => "FP32",
+            Weights::Fp16 => "FP16",
+            Weights::Int8 => "INT8",
+        }
+    }
+}
+
+/// Where a session ended up: the provider it runs on, the weights it
+/// loaded, and each earlier try that failed, in order, with the
+/// provider's own error text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionPick {
+    pub provider: String,
+    pub weights: Weights,
+    pub failed: Vec<String>,
+}
+
+impl SessionPick {
+    pub(crate) fn on(provider: &str) -> Self {
+        Self { provider: provider.to_string(), ..Default::default() }
+    }
+}
+
 /// ORT-backed inference engine. Holds one Session per model selection.
 /// Create once per model; reuse across all images — never instantiate per-image.
 ///
@@ -116,7 +158,7 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
 /// references while still satisfying ort's mutability requirement.
 pub struct OrtEngine {
     session: Mutex<Session>,
-    provider_name: String,
+    pick: SessionPick,
     model_kind: ModelKind,
 }
 
@@ -188,16 +230,20 @@ impl OrtEngine {
         level: GraphOptimizationLevel,
     ) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
+        let mut failed = Vec::new();
         // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
         if let Some(optimized) = Self::optimized_variant_bytes(model, cpu_only) {
             tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
+            let weights = if cpu_only { Weights::Int8 } else { Weights::Fp16 };
             match Self::build_session(&optimized, intra_threads, model, cpu_only, level) {
-                Ok(engine) => {
-                    tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (optimized variant)");
+                Ok(mut engine) => {
+                    tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (optimized variant)");
+                    engine.pick.weights = weights;
                     return Ok(engine);
                 }
                 Err(e) => {
                     tracing::warn!(?model, error = %e, "optimized variant failed — falling back to FP32");
+                    failed.push(format!("{} weights: {e}", weights.label()));
                 }
             }
         } else {
@@ -211,25 +257,46 @@ impl OrtEngine {
         let fp32 = prunr_models::resolve_bytes(id)
             .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
         match Self::build_session(&fp32, intra_threads, model, cpu_only, level) {
-            Ok(engine) => {
-                tracing::info!(?model, provider = %engine.provider_name, "OrtEngine ready (FP32)");
+            Ok(mut engine) => {
+                tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (FP32)");
+                failed.append(&mut engine.pick.failed);
+                engine.pick.failed = failed;
                 Ok(engine)
             }
             Err(e) if !cpu_only => {
                 tracing::warn!(?model, error = %e, "GPU session creation failed — retrying CPU-only");
+                failed.push(format!("FP32 weights: {e}"));
                 // Recurse so the cpu_only=true path also tries its
                 // CPU-targeted optimized variant (INT8) before falling
                 // back to FP32. Otherwise the GPU-fail-then-CPU path
                 // ends up on FP32 even when an INT8 variant is on disk.
-                let engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
+                let mut engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
                 tracing::info!(
-                    ?model, provider = %engine.provider_name,
+                    ?model, provider = %engine.pick.provider,
                     "OrtEngine ready (CPU fallback after GPU failure)",
                 );
+                failed.append(&mut engine.pick.failed);
+                engine.pick.failed = failed;
                 Ok(engine)
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// `model`'s session as the app builds it: the model's graph
+    /// optimisation level, through the GPU providers unless `cpu_only`.
+    pub fn for_model(model: prunr_models::ModelId, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        let descriptor = prunr_models::descriptor(model)
+            .ok_or_else(|| CoreError::Model(format!("{model:?} is not a known model")))?;
+        let kind = ModelKind::try_from(model)
+            .map_err(|id| CoreError::Model(format!("{id:?} has no session kind")))?;
+        Self::new_with_fallback_and_level(kind, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor))
+    }
+
+    /// The provider this session runs on, its weights, and what failed
+    /// before it.
+    pub fn pick(&self) -> &SessionPick {
+        &self.pick
     }
 
     /// Try to load an optimized model variant from the filesystem.
@@ -269,7 +336,7 @@ impl OrtEngine {
             tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
                 session: Mutex::new(session),
-                provider_name: "CPU".to_string(),
+                pick: SessionPick::on("CPU"),
                 model_kind: model,
             });
         }
@@ -282,7 +349,8 @@ impl OrtEngine {
         // if all GPU EPs fail.
         let gpu_eps = available_gpu_eps();
 
-        let mut last_err: Option<CoreError> = None;
+        let mut failed: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
         for &ep in gpu_eps {
             // Static catalog: declared-incompatible per the model's
             // ModelDescriptor. Dynamic cache: discovered failures
@@ -290,10 +358,12 @@ impl OrtEngine {
             // entirely — no failed-load tax.
             if !prunr_models::is_ep_compatible(model_id, ep.as_str()) {
                 tracing::debug!(?model, ep = %ep, "EP statically incompatible; skipping");
+                skipped.push(format!("{ep} is declared incompatible"));
                 continue;
             }
             if crate::ep_compat::is_known_failure(ep, model_id) {
                 tracing::debug!(?model, ep = %ep, "EP cached as incompatible; skipping");
+                skipped.push(format!("{ep} failed this model before"));
                 continue;
             }
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
@@ -359,9 +429,9 @@ impl OrtEngine {
             let mut built = match res {
                 Ok(b) => b,
                 Err(e) => {
-                    let err = CoreError::Inference(format!("ORT register {ep} EP failed: {e}"));
+                    let err = format!("ORT register {ep} EP failed: {e}");
                     tracing::warn!(?model, ep = %ep, error = %err, "GPU EP register failed");
-                    last_err = Some(err);
+                    failed.push(err);
                     continue;
                 }
             };
@@ -372,12 +442,12 @@ impl OrtEngine {
                     tracing::info!(?model, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
                     return Ok(Self {
                         session: Mutex::new(session),
-                        provider_name: ep.as_str().to_string(),
+                        pick: SessionPick { failed, ..SessionPick::on(ep.as_str()) },
                         model_kind: model,
                     });
                 }
                 Err(e) => {
-                    let err = CoreError::Inference(format!("ORT session creation failed ({ep}): {e}"));
+                    let err = format!("ORT session creation failed ({ep}): {e}");
                     tracing::warn!(?model, ep = %ep, error = %err, "GPU session creation failed — trying next EP");
                     handle_commit_failure(
                         matches!(bytes_owner, Cow::Owned(_)),
@@ -385,13 +455,17 @@ impl OrtEngine {
                         || crate::cache::optimized_model_path(model_id, ep.as_str()),
                         &format!("{e}"),
                     );
-                    last_err = Some(err);
+                    failed.push(err);
                 }
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            CoreError::Inference("No GPU EPs available on this platform".to_string())
+        Err(CoreError::Inference(if !failed.is_empty() {
+            failed.join("; ")
+        } else if !skipped.is_empty() {
+            format!("no GPU provider to try: {}", skipped.join(", "))
+        } else {
+            "No GPU EPs available on this platform".to_string()
         }))
     }
 
@@ -536,7 +610,7 @@ impl OrtEngine {
 
 impl InferenceEngine for OrtEngine {
     fn active_provider(&self) -> &str {
-        &self.provider_name
+        &self.pick.provider
     }
 }
 
@@ -678,6 +752,23 @@ mod tests {
             "record_failure must NOT fire on was_cached=true",
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session says where it landed: a CPU-only one on the CPU, with
+    /// nothing failed on the way and never the GPU's FP16 weights.
+    #[test]
+    fn a_cpu_session_names_the_cpu_and_its_weights() {
+        use prunr_models::ModelId;
+        assert!(OrtEngine::for_model(ModelId::Teed, 1, true).is_err(), "TEED has no engine kind");
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let engine = OrtEngine::for_model(ModelId::Silueta, 1, true).expect("Silueta is bundled");
+        let pick = engine.pick();
+        assert_eq!((pick.provider.as_str(), engine.active_provider()), ("CPU", "CPU"));
+        assert!(pick.failed.is_empty(), "{:?}", pick.failed);
+        assert_ne!(pick.weights, Weights::Fp16);
+        assert_eq!(engine.model_kind(), ModelKind::Silueta);
     }
 
     // Integration tests require dev-models feature and downloaded models.

@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::engine::EpKind;
+use crate::engine::{EpKind, SessionPick};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -1198,6 +1198,8 @@ pub(crate) struct SdSession {
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
     /// `TEXT_CACHE_ENTRIES`; ~118 KB each.
     text_cache: Mutex<Vec<(String, Arc<Array3<f16>>)>>,
+    /// Where each part runs, in build order.
+    picks: Vec<(&'static str, SessionPick)>,
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
@@ -1262,6 +1264,18 @@ pub(crate) fn release(id: prunr_models::ModelId) {
     if guard.len() < before {
         tracing::info!(?id, "SD: cache entry released after dispatch");
     }
+}
+
+/// Load `id`'s bundle for `tuning` (or find it loaded) and say where each
+/// part runs. A run with the same tuning uses this bundle; it stays
+/// loaded between runs when `tuning.keep_loaded`.
+pub fn load_bundle(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Vec<(&'static str, SessionPick)>, CoreError> {
+    SdSession::get(id, &tuning.session_key(), tuning.keep_loaded).map(|bundle| bundle.picks.clone())
+}
+
+/// Release every loaded bundle, kept ones too.
+pub fn release_all() {
+    sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
 }
 
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
@@ -1401,9 +1415,9 @@ impl SdSession {
         ];
 
         let build = |&(key, smoke): &(&'static str, SmokeFn)|
-            -> Result<(&'static str, Session, String), String> {
-                let (s, ep) = build_part_with_ep_ladder(id, key, &by_key, smoke, session_key)?;
-                Ok((key, s, ep))
+            -> Result<(&'static str, Session, SessionPick), String> {
+                let (s, pick) = build_part_with_ep_ladder(id, key, &by_key, smoke, session_key)?;
+                Ok((key, s, pick))
             };
 
         // A bundle with its prompt baked in ships no text encoder.
@@ -1411,7 +1425,7 @@ impl SdSession {
         let wanted: Vec<(&'static str, SmokeFn)> = PARTS.iter().copied()
             .filter(|(key, _)| *key != "text_encoder" || has_text)
             .collect();
-        let mut parts: Vec<(&'static str, Session, String)> =
+        let mut parts: Vec<(&'static str, Session, SessionPick)> =
             if crate::engine::directml_active() {
                 wanted.iter().map(build).collect::<Result<_, _>>()?
             } else {
@@ -1422,11 +1436,12 @@ impl SdSession {
         // Match by key so the destructure below survives reordering of
         // PARTS. `IndexedParallelIterator::collect` preserves order, so
         // this is defensive — cheap at N=4.
+        let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
         let mut take = |want: &str| -> Result<(Session, String), String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
-            let (_, s, ep) = parts.swap_remove(pos);
-            Ok((s, ep))
+            let (_, s, pick) = parts.swap_remove(pos);
+            Ok((s, pick.provider))
         };
         let text = has_text.then(|| take("text_encoder")).transpose()?;
         let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
@@ -1467,6 +1482,7 @@ impl SdSession {
             vae_f32,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
+            picks,
         })
     }
 }
@@ -1481,11 +1497,12 @@ fn build_part_with_ep_ladder(
     by_key: &HashMap<&str, PathBuf>,
     smoke_test: fn(&mut Session, &str) -> Result<(), String>,
     session_key: &SdSessionKey,
-) -> Result<(Session, String), String> {
+) -> Result<(Session, SessionPick), String> {
     let path = by_key.get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
 
     let gpu_eps = session_key.gpu_eps();
+    let mut failed: Vec<String> = Vec::new();
 
     for &ep in gpu_eps {
         if !prunr_models::is_ep_compatible(id, ep.as_str()) {
@@ -1567,6 +1584,7 @@ fn build_part_with_ep_ladder(
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: register EP failed");
+                failed.push(format!("ORT register {ep} EP failed: {e}"));
                 continue;
             }
         };
@@ -1579,17 +1597,19 @@ fn build_part_with_ep_ladder(
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
                 record_failure(&format!("{e}"));
+                failed.push(format!("ORT session creation failed ({ep}): {e}"));
                 continue;
             }
         };
         match smoke_test(&mut session, key) {
             Ok(()) => {
                 tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
-                return Ok((session, ep.as_str().to_string()));
+                return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) }));
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
                 record_failure(&e);
+                failed.push(format!("{ep} test run failed: {e}"));
             }
         }
     }
@@ -1619,7 +1639,7 @@ fn build_part_with_ep_ladder(
         .commit_from_file(&load_path)
         .map_err(|e| format!("SD {key}: load from {}: {e}", load_path.display()))?;
     tracing::info!(?id, part = %key, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
-    Ok((session, "CPU".to_string()))
+    Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
 }
 
 /// `lean`: the model's sessions skip ORT's memory-pattern planning unless
