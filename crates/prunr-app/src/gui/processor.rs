@@ -2159,7 +2159,7 @@ fn run_sam_decoder_inline(
 
 /// The SD pipeline's request for an erase under `tuning`; `None` for an
 /// eraser outside the SD family.
-fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
+pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
     use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
     let base = SdInpaintRequest {
         seed: tuning.sd_seed,
