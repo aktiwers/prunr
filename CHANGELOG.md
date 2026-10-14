@@ -105,6 +105,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Set focus in the Depth panel closes the panel first, so a click anywhere on the image sets the focus; a click under the panel used to go to the panel and the focus never moved.
 - A photo whose file is gone by the time a batch reaches it fails with "Failed to load" instead of staying Pending forever and holding its share of the batch's memory budget.
 - A No-model result no longer blanks the image for a frame while its texture is rebuilt: the old one stays until the new one is uploaded, as every other result does.
 - The Stable Diffusion eraser on Fast no longer finishes with nothing changed on a wide or tall area: its fast decoder only takes 512 px squares, so such an area failed and was skipped silently. It now runs at 512 px, and a part that fails stops the erase with a message.

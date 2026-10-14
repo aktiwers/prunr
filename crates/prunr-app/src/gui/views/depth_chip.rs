@@ -48,7 +48,13 @@ const BLUR_MODES: [chip::Choice<LensBlurMode>; 3] = [
 /// `picking` is true while the next click on the image sets the focus.
 pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking: bool) -> DepthChange {
     let mut change = DepthChange::default();
-    let summary: std::borrow::Cow<'static, str> = if installed { summary(look).into() } else { get_model::BADGE.into() };
+    let summary: std::borrow::Cow<'static, str> = if !installed {
+        get_model::BADGE.into()
+    } else if picking {
+        "Click the image\u{2026}".into()
+    } else {
+        summary(look).into()
+    };
     let group = chip::GroupChip {
         id_salt: "depth",
         icon: ICON_LANDSCAPE.codepoint,
