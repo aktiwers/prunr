@@ -122,6 +122,17 @@ jobs:
         timeout-minutes: 15
         run: cargo xtask install-runtime onnxruntime 1.24.1
 
+      # The runtime the macOS release ships must load under our ort
+      # version, carry CoreML and run a model. It is staged, not put in
+      # the runtime store, so the inference tests keep soft-skipping here
+      # until CoreML in a runner VM is known to work.
+      - name: Smoke-test the shipped runtime (macOS arm64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        timeout-minutes: 15
+        run: |
+          cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
+          cargo xtask probe-load-dynamic runtime-stage/libonnxruntime.dylib --require-ep CoreMLExecutionProvider
+
       # Linux has a runtime installed above, so a suite that soft-skips
       # there means the install or cache broke — fail instead of passing.
       - name: Test

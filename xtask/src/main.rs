@@ -81,8 +81,10 @@ fn main() -> anyhow::Result<()> {
 /// Usage:
 ///   cargo xtask probe-load-dynamic <path-to-libonnxruntime.so>
 ///   cargo xtask probe-load-dynamic       # falls back to ORT_DYLIB_PATH
+///   cargo xtask probe-load-dynamic <path> --require-ep CoreMLExecutionProvider
 fn probe_load_dynamic() -> anyhow::Result<()> {
     use ort::{
+        ep::ExecutionProvider,
         inputs as ort_inputs,
         session::{Session, builder::GraphOptimizationLevel},
         value::Tensor,
@@ -95,9 +97,21 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         move |e| anyhow::anyhow!("{stage}: {e}")
     }
 
-    let dylib_path: std::path::PathBuf = std::env::args().nth(2)
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from))
+    let mut dylib_arg: Option<PathBuf> = None;
+    let mut required_eps: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        if arg == "--require-ep" {
+            required_eps.push(args.next()
+                .ok_or_else(|| anyhow::anyhow!("--require-ep needs an ORT provider name"))?);
+        } else if arg.starts_with("--") {
+            anyhow::bail!("unknown flag: {arg}");
+        } else {
+            dylib_arg = Some(PathBuf::from(arg));
+        }
+    }
+    let dylib_path: PathBuf = dylib_arg
+        .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from))
         .ok_or_else(|| anyhow::anyhow!(
             "no dylib path supplied — pass as 2nd arg or set ORT_DYLIB_PATH"
         ))?;
@@ -117,6 +131,26 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         anyhow::bail!("ort env commit returned false (already committed?)");
     }
     println!("OK ort::init_from + commit");
+
+    let providers: [&dyn ExecutionProvider; 4] = [
+        &ort::ep::CoreML::default(),
+        &ort::ep::CUDA::default(),
+        &ort::ep::DirectML::default(),
+        &ort::ep::OpenVINO::default(),
+    ];
+    println!("Execution providers compiled into this runtime:");
+    for p in providers {
+        let available = p.is_available().map_err(ort_err("GetAvailableProviders"))?;
+        println!("  {:<28} {}", p.name(), if available { "yes" } else { "no" });
+    }
+    for want in &required_eps {
+        let p = providers.iter().find(|p| p.name() == want).ok_or_else(|| anyhow::anyhow!(
+            "--require-ep {want}: not one of {:?}", providers.map(|p| p.name()),
+        ))?;
+        if !p.is_available().map_err(ort_err("GetAvailableProviders"))? {
+            anyhow::bail!("{want} is not compiled into {}", dylib_path.display());
+        }
+    }
 
     let silueta = prunr_models::silueta_bytes();
     println!("Building session against bundled Silueta ({} bytes)", silueta.len());
