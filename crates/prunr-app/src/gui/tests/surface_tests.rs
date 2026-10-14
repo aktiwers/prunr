@@ -133,6 +133,23 @@ fn the_tool_strip_follows_the_paint_brush() {
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
 }
 
+/// The strip draws on the foreground layer: under an open dialog it
+/// would sit on top of the dialog, so it leaves while one is up.
+#[test]
+fn the_tool_strip_leaves_while_a_dialog_is_open() {
+    use super::tree_tests::names;
+    let mut h = loaded();
+    h.state_mut().brush_state.enable();
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is up");
+    h.state_mut().show_cli_help = true;
+    settle(&mut h);
+    assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip over the command-line reference");
+    h.state_mut().show_cli_help = false;
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is back once the dialog closes");
+}
+
 /// Under an eraser both brushes carry the region knobs, since either
 /// paints the region the erase fills.
 #[test]
