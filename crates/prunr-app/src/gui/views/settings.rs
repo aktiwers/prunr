@@ -700,10 +700,7 @@ fn render_tab_model_credits(ui: &mut egui::Ui) {
 }
 
 fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDescriptor) {
-    let (author, license_name, source_url) = match descriptor.license() {
-        Some(info) => (info.author, info.license, info.source_url),
-        None => ("Bundled with Prunr", "Project license", ""),
-    };
+    let prunr_models::LicenseInfo { author, license: license_name, source_url, .. } = descriptor.license();
 
     ui.add_space(theme::SPACE_SM);
     ui.horizontal(|ui| {
@@ -750,7 +747,9 @@ mod model_credits_tests {
             display_name,
             description: "",
             category: ModelCategory::Segmentation,
-            source: ModelSource::Bundled { license: None },
+            source: ModelSource::Bundled {
+                license: prunr_models::LicenseInfo { author: "test", license: "MIT", license_url: "", source_url: "" },
+            },
             version: "1.0.0",
             gpu: GpuRequirement::None,
             incompatible_eps: &[],
