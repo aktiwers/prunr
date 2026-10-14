@@ -930,7 +930,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
         display_name: "4xNomos8kSCHAT-L",
-        description: "Photo-tuned HAT-L super-resolution (fp16). Higher quality, slower than Real-ESRGAN; slow on CPU EP.",
+        description: "Photo-tuned HAT-L super-resolution. The most detailed upscaler and the slowest: about a minute for a small photo without a graphics card.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
