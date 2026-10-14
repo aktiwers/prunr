@@ -15,8 +15,10 @@ use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
+use crate::gui::hardware_cache::HardwareInstallCache;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
+use crate::runtime_install::RuntimeId;
 
 use super::chip::{button, ButtonKind};
 use super::{hint, kv_row};
@@ -67,9 +69,11 @@ impl SettingsTab {
 /// Read-only snapshot of runtime-install state passed into the Hardware
 /// page so its renderer doesn't need a `&mut PrunrApp`.
 pub(crate) struct HardwareSectionContext {
-    pub openvino_installed: bool,
-    pub install_in_progress: bool,
-    pub install_status_text: Option<String>,
+    /// The runtimes this platform offers, `RuntimeId::OFFERED`.
+    pub offered: &'static [RuntimeId],
+    pub installs: HardwareInstallCache,
+    /// The runtime being installed, with its progress line.
+    pub installing: Option<(RuntimeId, String)>,
     pub active_provider: String,
     pub sd_margin_mb: u64,
 }
@@ -78,9 +82,10 @@ pub(crate) struct HardwareSectionContext {
 /// (rfd, runtime install) live on the orchestrator, not the view.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HardwareSectionIntent {
-    StartInstall(crate::runtime_install::RuntimeId),
+    StartInstall(RuntimeId),
     CancelInstall,
-    Uninstall(crate::runtime_install::RuntimeId),
+    Uninstall(RuntimeId),
+    PreferRuntime(RuntimeId),
     ClearCompiledCache,
 }
 
@@ -143,17 +148,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 }
 
 fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
-    use crate::runtime_install::{InstallEvent, start_install};
     match intent {
-        HardwareSectionIntent::StartInstall(rt) => {
-            let h = start_install(rt);
-            app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
-                runtime: rt,
-                rx: h.events,
-                cancel: h.cancel,
-                last_event: InstallEvent::Preparing,
-            });
-        }
+        HardwareSectionIntent::StartInstall(rt) => app.start_runtime_install(rt),
         HardwareSectionIntent::CancelInstall => {
             if let Some(p) = app.runtime_install.as_ref() {
                 p.cancel.store(true, std::sync::atomic::Ordering::Release);
@@ -164,6 +160,18 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
                 Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
                 Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
             };
+            app.refresh_install_cache();
+        }
+        HardwareSectionIntent::PreferRuntime(rt) => {
+            match crate::runtime_install::prefer(rt) {
+                Ok(()) if app.hardware_install_cache.loaded_runtime != Some(rt) => {
+                    app.toasts.info(format!("Restart Prunr to switch to {}", rt.display_name()));
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    app.toasts.error(format!("Could not choose {}: {e}", rt.display_name()));
+                }
+            }
             app.refresh_install_cache();
         }
         HardwareSectionIntent::ClearCompiledCache => {
@@ -183,9 +191,9 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
         SettingsTab::Performance => { render_page_performance(ui, &mut app.settings); None }
         SettingsTab::Hardware => {
             let hw_ctx = HardwareSectionContext {
-                openvino_installed: app.hardware_install_cache.openvino,
-                install_in_progress: app.runtime_install.is_some(),
-                install_status_text: app.runtime_install.as_ref().map(|p| p.last_event.status_text()),
+                offered: RuntimeId::OFFERED,
+                installs: app.hardware_install_cache,
+                installing: app.runtime_install.as_ref().map(|p| (p.runtime, p.last_event.status_text())),
                 active_provider: app.settings.active_backend.clone(),
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
             };
@@ -424,9 +432,8 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
     });
 }
 
-fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Option<HardwareSectionIntent> {
+pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Option<HardwareSectionIntent> {
     use crate::hardware;
-    use crate::runtime_install::RuntimeId;
     let mut intent = None;
     let p = hardware::profile();
     let avail_ram = hardware::available_ram_bytes_throttled();
@@ -479,31 +486,25 @@ fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Opti
     });
 
     group_heading(ui, "Acceleration");
-    let rt = RuntimeId::OpenVino;
-    let installed = ctx.openvino_installed;
-    let status = match (ctx.install_in_progress, ctx.install_status_text.as_deref()) {
-        (true, Some(s)) => s.to_string(),
-        _ if installed => "Installed.".to_string(),
-        _ if p.recommends_openvino() => format!(
-            "Not installed ({} MB). Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
-            rt.approx_download_mb(),
-        ),
-        _ => format!("Not installed ({} MB).", rt.approx_download_mb()),
-    };
+    let recommended = p.recommended_runtime();
     group(ui, |rows| {
-        rows.row(rt.display_name(), &status, |ui| {
-            if ctx.install_in_progress {
-                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
-                    intent = Some(HardwareSectionIntent::CancelInstall);
+        for &rt in ctx.offered {
+            runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
+        }
+        if ctx.offered.iter().filter(|&&rt| ctx.installs.has_runtime(rt)).count() > 1 {
+            rows.row("Runtime", "Which one Prunr uses. A change takes effect when you restart Prunr.", |ui| {
+                let mut chosen = ctx.installs.preferred_runtime.or(ctx.installs.loaded_runtime);
+                let choices = RuntimeId::ALL.map(|rt| super::chip::Choice {
+                    value: Some(rt),
+                    name: rt.choice_name(),
+                    description: rt.choice_description(),
+                    enabled: ctx.offered.contains(&rt) && ctx.installs.has_runtime(rt),
+                });
+                if super::chip::choice_buttons(ui, &choices, &mut chosen) {
+                    intent = chosen.map(HardwareSectionIntent::PreferRuntime);
                 }
-            } else if installed {
-                if button(ui, ButtonKind::Destructive, "Uninstall").clicked() {
-                    intent = Some(HardwareSectionIntent::Uninstall(rt));
-                }
-            } else if button(ui, ButtonKind::Primary, "Install").clicked() {
-                intent = Some(HardwareSectionIntent::StartInstall(rt));
-            }
-        });
+            });
+        }
         rows.row(
             "Compiled-model cache",
             "Models are compiled for your graphics hardware the first time they run. Clear it if a compiled file is corrupt or to free disk space.",
@@ -515,6 +516,35 @@ fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Opti
         );
     });
     intent
+}
+
+/// One runtime: its state, and Install, Uninstall or Cancel. One install
+/// runs at a time.
+fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId, recommended: bool, intent: &mut Option<HardwareSectionIntent>) {
+    let installed = ctx.installs.has_runtime(rt);
+    let installing_this = ctx.installing.as_ref().filter(|(r, _)| *r == rt);
+    let status = match installing_this {
+        Some((_, progress)) => progress.clone(),
+        None if installed => "Installed.".to_string(),
+        None if recommended => format!("Not installed ({} MB). {}", rt.approx_download_mb(), rt.recommendation()),
+        None => format!("Not installed ({} MB).", rt.approx_download_mb()),
+    };
+    rows.row(rt.display_name(), &status, |ui| {
+        if installing_this.is_some() {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                *intent = Some(HardwareSectionIntent::CancelInstall);
+            }
+        } else if installed {
+            if super::chip::named(button(ui, ButtonKind::Destructive, "Uninstall"), rt.uninstall_label()).clicked() {
+                *intent = Some(HardwareSectionIntent::Uninstall(rt));
+            }
+        } else {
+            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Install")).inner;
+            if super::chip::named(resp, rt.install_button_label()).clicked() {
+                *intent = Some(HardwareSectionIntent::StartInstall(rt));
+            }
+        }
+    });
 }
 
 fn render_page_images(ui: &mut egui::Ui, settings: &mut Settings) {

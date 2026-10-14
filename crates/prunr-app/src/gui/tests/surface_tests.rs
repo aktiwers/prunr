@@ -294,6 +294,28 @@ fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
 }
 
+/// The first-launch runtime prompt is a modal for either runtime: its
+/// buttons are named, and Escape closes it as Not now.
+#[test]
+fn the_runtime_prompt_is_a_modal_that_escape_closes() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    use crate::runtime_install::RuntimeId;
+    let mut h = loaded();
+    for rt in RuntimeId::ALL {
+        h.state_mut().runtime_prompt = Some(rt);
+        settle(&mut h);
+        let present = names(&h);
+        for n in [rt.install_button_label(), "Not now", "Open Settings"] {
+            assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+        }
+        assert_all_controls_named(&h, rt.display_name());
+        h.key_press(egui::Key::Escape);
+        settle(&mut h);
+        assert!(h.state().runtime_prompt.is_none(), "Escape closed the {rt:?} prompt");
+        assert!(h.state().settings.is_runtime_prompt_snoozed(rt), "as Not now");
+    }
+}
+
 /// The save dialog opens ready for a name: text typed at once goes into
 /// it. (Saving writes the presets folder, so Enter is checked live.)
 #[test]
