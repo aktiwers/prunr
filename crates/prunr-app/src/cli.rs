@@ -13,7 +13,7 @@ pub struct Cli {
     /// Input image file(s).
     pub inputs: Vec<PathBuf>,
 
-    /// Output path. File for single image, directory for batch.
+    /// Output path: a file for one image (a name without an extension is saved as .png), a directory for a batch.
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
@@ -850,6 +850,9 @@ fn output_path_with_suffix(
     let name = format!("{stem}{suffix}");
     match output {
         Some(out) if is_batch || out.is_dir() => out.join(name),
+        // A name without an extension is a file, saved as PNG: the
+        // extension names the format, and every mode writes one.
+        Some(out) if out.extension().is_none() => out.with_extension("png"),
         Some(out) => out.clone(),
         None => input.with_file_name(name),
     }
@@ -1496,6 +1499,18 @@ mod tests {
 
     /// The upscale flags parse into a mode; its knobs need it, and faces
     /// need a face model named.
+    #[test]
+    fn an_output_name_without_an_extension_is_a_png_file() {
+        use super::output_path_with_suffix;
+        use std::path::PathBuf;
+        let input = std::path::Path::new("/photos/a.jpg");
+        let out = |o: &str| output_path_with_suffix(input, &Some(PathBuf::from(o)), false, "_x.png");
+        assert_eq!(out("/tmp/result"), PathBuf::from("/tmp/result.png"));
+        assert_eq!(out("/tmp/result.webp"), PathBuf::from("/tmp/result.webp"));
+        assert_eq!(output_path_with_suffix(input, &Some(PathBuf::from("/tmp/dir")), true, "_x.png"), PathBuf::from("/tmp/dir/a_x.png"));
+        assert_eq!(output_path_with_suffix(input, &None, false, "_x.png"), PathBuf::from("/photos/a_x.png"));
+    }
+
     /// `--line-fade` reads the depth model only when lines are drawn;
     /// on its own it does nothing and must not refuse the run.
     #[test]
