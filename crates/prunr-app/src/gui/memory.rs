@@ -79,6 +79,11 @@ impl AdmissionController {
     }
 
     /// Add pending items. Sorts them for best-fit (largest first).
+    /// Whether images are still waiting for room in the budget.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
         costs.sort_by(|a, b| b.total.cmp(&a.total));
         self.pending.extend(costs);
