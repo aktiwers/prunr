@@ -115,6 +115,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 ### Fixed
 
 - An image being upscaled, colorized or erased shows the working dot and glow in the sidebar; it showed the grey waiting dot. Images queued behind it keep the waiting dot.
+- `prunr --doctor` and `prunr --clear-ep-cache` printed nothing in a Windows terminal; they print there now.
 - A face search could not be stopped: the capsule's Cancel and Esc did nothing while Faces searched, which on a large group photo can take a minute. Both stop it now, after the face it is on, and the Faces panel says "Stopped. Turn Faces off and on to search again."
 - The Faces panel's status line ("7 faces found.", or "These apply while Faces is on.") heads the panel instead of sitting under Include hair, where it read as part of that switch.
 - Running Silueta or U2Net, which OpenVINO does not run, switched the app's accelerator to the CPU: the status bar said "Backend: CPU", Settings dropped its Processor choice, and the Parallel jobs you set went back to the default. A model the accelerator does not run now leaves all three alone.
