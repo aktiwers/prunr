@@ -109,6 +109,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Running Silueta or U2Net, which OpenVINO does not run, switched the app's accelerator to the CPU: the status bar said "Backend: CPU", Settings dropped its Processor choice, and the Parallel jobs you set went back to the default. A model the accelerator does not run now leaves all three alone.
 - Help › Keyboard shortcuts flashed Settings open and shut when Settings had been closed with its shortcut or Escape before: the click on the menu item counted as a click beside the dialog. Any dialog reopened that way stays open now.
 - Settings › Credits gave BiRefNet-lite's author as "Bundled with Prunr" under a "Project license"; it credits Peng Zheng's BiRefNet (MIT) with its source now, and every model has to name its authors and licence.
 - Process again on an upscale enlarges it again (2× then 2× gives 4×, each its own undo step), also after undoing back to an earlier upscale; it re-ran the same upscale from the original instead, into an identical step (four Nomos8k images: 146 s). A changed Scale or upscaler still redoes the shown upscale from where it started. An upscale too large for the free memory is refused with a message saying how much it needs.
