@@ -27,6 +27,9 @@ const WORKER_POLL_PER_FRAME: usize = 8;
 /// Same rationale as `WORKER_POLL_PER_FRAME`.
 const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
 
+/// The status line when a face search is stopped (Cancel or Esc).
+const FACE_SEARCH_STOPPED: &str = "Face search stopped";
+
 impl PrunrApp {
     pub(super) fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
         // Bridge → inpaint_rx fan-in must run before the drain.
@@ -300,12 +303,16 @@ impl PrunrApp {
     /// blend them in; a search for anything else is dropped.
     fn land_faces(&mut self, landed: crate::gui::processor::FacesResult) {
         let Some(idx) = self.batch.index_of(landed.item_id) else { return };
-        let item_id = landed.item_id;
+        let (item_id, stopped) = (landed.item_id, landed.stopped);
         let stage = self.face_stage();
         match self.batch.items[idx].keep_faces(landed, stage) {
             None => return,
             Some(Ok(0)) => self.set_temporary_status("No faces found"),
             Some(Ok(_)) => {}
+            Some(Err(_)) if stopped => {
+                tracing::info!(item_id, "face search stopped");
+                self.set_temporary_status(FACE_SEARCH_STOPPED);
+            }
             Some(Err(err)) => {
                 tracing::warn!(item_id, %err, "face restore failed");
                 self.toasts.error(format!("Restore faces failed: {err}"));
@@ -997,14 +1004,15 @@ mod faces_tests {
         assert_eq!(app.batch.items[0].faces_to_find(&photo), Some(FaceModel::Gfpgan.id()), "tried again");
     }
 
-    /// A stopped search says so and is not started again on its own;
-    /// turning Faces on again (a search change) searches.
+    /// A stopped search says so, not as a failure, and is not started
+    /// again on its own; turning Faces on again (a search change) searches.
     #[test]
     fn a_stopped_search_waits_to_be_asked_again() {
         use crate::gui::item::FaceStage;
         use crate::gui::views::faces_chip::{FaceSearch, FacesChange};
         let (mut app, source) = app_with_faces_on();
         app.land_faces(FacesResult { result: Err("cancelled".into()), stopped: true, ..landed(&source, FaceModel::Gfpgan) });
+        assert_eq!(app.status.text, super::FACE_SEARCH_STOPPED, "a status line, not a failure toast");
         let photo = app.batch.items[0].face_photo(FaceStage::Photo).expect("the source");
         assert!(app.batch.items[0].faces_to_find(&photo).is_none(), "not restarted on the next frame");
         assert!(matches!(super::PrunrApp::face_search(&app.batch.items[0], FaceStage::Photo), Some(FaceSearch::Stopped)));
