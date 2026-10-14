@@ -179,29 +179,52 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, blend: Fac
     FaceRestorer::new(id)?.find_and_restore(image, blend, progress)
 }
 
+/// The face detector built into the app (YuNet), loaded once for as many
+/// photos as its owner looks at.
+pub struct FaceFinder {
+    detector: Session,
+}
+
+impl FaceFinder {
+    pub fn new() -> Result<Self, CoreError> {
+        let bytes = prunr_models::resolve_bytes(prunr_models::ModelId::YuNet)
+            .ok_or_else(|| CoreError::Inference("the face finder is missing from this build".into()))?;
+        let detector = crate::ort_runtime::session_builder()?
+            .commit_from_memory(&bytes)
+            .map_err(|e| CoreError::Inference(format!("face finder: {e}")))?;
+        Ok(Self { detector })
+    }
+
+    /// The faces in `image`, best first.
+    pub fn find(&mut self, image: &RgbaImage) -> Result<Vec<Face>, CoreError> {
+        detect(&mut self.detector, image)
+    }
+}
+
 /// A face model loaded once for several photos (a command-line batch).
 /// The restorer (~1.2 GB for GFPGAN) loads on the first face and stays
 /// until this is dropped.
 pub struct FaceRestorer {
     id: prunr_models::ModelId,
-    detector: Session,
+    finder: FaceFinder,
     restorer_path: std::path::PathBuf,
     restorer: Option<Session>,
 }
 
 impl FaceRestorer {
     pub fn new(id: prunr_models::ModelId) -> Result<Self, CoreError> {
-        let parts = prunr_models::multi_part_paths(id)
-            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        let part = |key: &str| parts.iter().find(|(k, _)| *k == key).map(|(_, p)| p.clone())
-            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no {key} part")));
-        Ok(Self { id, detector: load(&part("detector")?)?, restorer_path: part("restorer")?, restorer: None })
+        let restorer_path = prunr_models::multi_part_paths(id)
+            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?
+            .into_iter()
+            .find_map(|(key, path)| (key == "restorer").then_some(path))
+            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no restorer part")))?;
+        Ok(Self { id, finder: FaceFinder::new()?, restorer_path, restorer: None })
     }
 
     /// `find_and_restore` with the models this holds.
     pub fn find_and_restore(&mut self, image: &RgbaImage, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
         progress.step(Step::FindingFaces);
-        let faces = detect(&mut self.detector, image)?;
+        let faces = self.finder.find(image)?;
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }

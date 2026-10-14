@@ -498,7 +498,7 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 
 | Source | Models |
 |--------|--------|
-| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED |
+| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED, the YuNet face finder (0.2 MB, so faces are found without a face model) |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
 | `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts); restrictive licenses need an explicit accept |

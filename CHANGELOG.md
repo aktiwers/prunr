@@ -53,6 +53,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.
 - Nomos8k's line in the model picker says it is the slowest upscaler, and its Model Store text says how slow.
 - Scroll bars are slim and translucent, without a rail, to sit on the dark glass panels.
+- **The face finder is built in** (YuNet, 0.2 MB), so faces are found with no download; GFPGAN and RestoreFormer++ download only their own model. Face models already installed keep working as they are.
 - A feature whose model is not downloaded says the same thing everywhere — "Get <model> · <size>" — and opens the Model Store on that model: the Faces and Depth chips show "Get" on their face, the Model picker lists every model with "Get · <size>" on the ones not yet downloaded, and the eraser's Fast quality and fast decoder name the download they need.
 - **Lines now come from TEED** instead of DexiNed: cleaner lines, faster (a Sketch on a 20 MP photo takes 1.8 s instead of 2.7 s), and the app is about 130 MB smaller. The Balanced scale is folded into Fused; saved settings, presets and `--line-scale balanced` read it as Fused.
 - An upscaled result keeps its place on screen: a fitted image stays fitted, a zoomed-in view keeps its spot.
