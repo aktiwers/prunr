@@ -487,6 +487,8 @@ impl FaceStage {
 #[derive(Clone)]
 pub(crate) struct FoundFaces {
     pub(crate) photo: FacePhoto,
+    /// When the search landed, for the outlines' arrival.
+    pub(crate) found_at: std::time::Instant,
     pub(crate) model: prunr_models::ModelId,
     pub(crate) faces: Arc<Vec<prunr_core::face::RestoredFace>>,
     /// The search failed: none are blended, and it is not repeated until
@@ -1219,7 +1221,7 @@ impl BatchItem {
             }
             Err(err) => (Vec::new(), Err(err)),
         };
-        self.found_faces = Some(FoundFaces { photo: landed.photo, model: landed.model, faces: Arc::new(faces), failed: outcome.is_err() });
+        self.found_faces = Some(FoundFaces { photo: landed.photo, found_at: std::time::Instant::now(), model: landed.model, faces: Arc::new(faces), failed: outcome.is_err() });
         self.faces_changed();
         Some(outcome)
     }
