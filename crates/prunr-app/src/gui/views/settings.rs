@@ -370,16 +370,33 @@ fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::Ra
     .on_hover_text(name);
 }
 
+fn jobs_hint(on_cpu: bool, max_jobs: usize) -> String {
+    if on_cpu {
+        format!("Images at once. 1\u{2013}{max_jobs}. On the CPU only {} run several; the other models take one at a time, since one run already uses every core.", models_running_several_on_cpu())
+    } else {
+        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
+    }
+}
+
+/// "Silueta and U2Net": the registry's models that gain from parallel
+/// jobs on the CPU, built once.
+fn models_running_several_on_cpu() -> &'static str {
+    static NAMES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let names: Vec<_> = prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu).map(|d| d.display_name).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => names.concat(),
+        }
+    })
+}
+
 fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
     use crate::gui::settings::{ComputeMode, SdMemoryGuard};
     use super::chip::Choice;
     group_heading(ui, "Processing");
     let max_jobs = settings.max_jobs();
-    let jobs_hint = if settings.runs_on_host_cpu() {
-        format!("Images at once. 1\u{2013}{max_jobs}. BiRefNet takes one at a time on the CPU, since one run already uses every core.")
-    } else {
-        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
-    };
+    let jobs_hint = jobs_hint(settings.runs_on_host_cpu(), max_jobs);
     let gpu = settings.is_gpu();
     group(ui, |rows| {
         rows.row("Parallel jobs", &jobs_hint, |ui| stepper(ui, "Parallel jobs", &mut settings.parallel_jobs, 1..=max_jobs));
@@ -778,5 +795,19 @@ mod model_credits_tests {
     fn sort_empty_input_returns_empty() {
         let sorted = sort_for_model_credits(&[]);
         assert!(sorted.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jobs_hint_tests {
+    use super::jobs_hint;
+
+    #[test]
+    fn the_cpu_jobs_hint_names_the_models_that_run_several_at_once() {
+        let hint = jobs_hint(true, 8);
+        for d in prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu) {
+            assert!(hint.contains(d.display_name), "{hint:?} names {}", d.display_name);
+        }
+        assert!(!hint.contains("BiRefNet"), "{hint:?} reads as if only BiRefNet took one at a time");
     }
 }
