@@ -219,6 +219,11 @@ pub(crate) fn render(
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
+                // Opens ready for a name; a click elsewhere in the dialog keeps its focus.
+                // After the Enter check: focusing first would hide the loss Enter caused.
+                if !commit && ui.memory(|m| m.focused().is_none()) {
+                    text_resp.request_focus();
+                }
                 let trimmed = name_buf.trim();
                 let is_prunr_name = trimmed.eq_ignore_ascii_case(PRUNR_PRESET);
                 if is_prunr_name {
