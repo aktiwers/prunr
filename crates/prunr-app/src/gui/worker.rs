@@ -16,6 +16,10 @@ const HANG_TIMEOUT: Duration = Duration::from_secs(60);
 /// to drop its model caches cleanly, short enough that a misbehaving worker
 /// doesn't block the UI thread indefinitely.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the worker that ran the last batch stays warm; the same as
+/// the LaMa session and the SD worker.
+const WARM_IDLE: Duration = Duration::from_secs(300);
+const WARM_POLL: Duration = Duration::from_secs(30);
 
 /// True when the subprocess is alive but hasn't produced events for too long.
 /// Pure so it's unit-testable — the event loop calls this each iteration and
@@ -184,6 +188,16 @@ pub struct ProcessingConfig {
     pub edge: EdgeSettings,
 }
 
+impl ProcessingConfig {
+    /// Whether a worker built for `self` can run `next`: the same model
+    /// on the same processor, with a pool at least as large. Mask, Sketch
+    /// mode and line settings are not part of it; a batch sends those with
+    /// `Configure`.
+    pub fn reusable_by(&self, next: &ProcessingConfig) -> bool {
+        self.model == next.model && self.force_cpu == next.force_cpu && self.jobs >= next.jobs
+    }
+}
+
 pub enum WorkerMessage {
     BatchProcess {
         items: Vec<WorkItem>,
@@ -239,11 +253,11 @@ pub enum WorkerResult {
 /// translates to subprocess IPC, handles crash+retry, sends `WorkerResult` back.
 ///
 /// When `prewarm` is `Some`, the bridge boots a subprocess with that config
-/// at startup and keeps it alive until the first `BatchProcess`. If the
-/// batch's config matches, the warm sub is reused and the user skips the
-/// 1–5 second model-load cost. Mismatched config (user tweaked model /
-/// jobs / line_mode before clicking Process) falls back to a fresh spawn,
-/// dropping the warm sub.
+/// at startup. A batch reuses the warm worker when its model, processor
+/// and pool size fit (`ProcessingConfig::reusable_by`) and sends it the
+/// run's mask and Sketch settings; the worker that ran a batch stays warm
+/// for `WARM_IDLE` after it, so the next Process skips the model load.
+/// A model switch (`ReleaseWarm`), a crash or Cancel drops it.
 pub fn spawn_worker(
     ctx: egui::Context,
     prewarm: Option<ProcessingConfig>,
@@ -259,7 +273,7 @@ pub fn spawn_worker(
             // load duration (UI stays responsive — bridge has its own
             // thread). If a Process click arrives during warm-up, it
             // queues on msg_rx and gets picked up once the sub is live.
-            let mut warm: Option<(SubprocessManager, ProcessingConfig)> = None;
+            let mut warm: Option<(SubprocessManager, ProcessingConfig, Instant)> = None;
             if let Some(cfg) = prewarm {
                 let ProcessingConfig { model, jobs, mask, force_cpu, line_mode, edge } = cfg.clone();
                 let started = std::time::Instant::now();
@@ -275,7 +289,7 @@ pub fn spawn_worker(
                         );
                         let _ = res_tx.send(WorkerResult::BackendReady(provider));
                         ctx.request_repaint();
-                        warm = Some((sub, cfg));
+                        warm = Some((sub, cfg, Instant::now()));
                     }
                     Err(err) => {
                         tracing::warn!(%err, "pre-warm subprocess failed, falling back to per-batch spawn");
@@ -283,15 +297,24 @@ pub fn spawn_worker(
                 }
             }
 
-            while let Ok(msg) = msg_rx.recv() {
+            loop {
+                let msg = match msg_rx.recv_timeout(WARM_POLL) {
+                    Ok(msg) => msg,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if warm.as_ref().is_some_and(|(_, _, since)| since.elapsed() >= WARM_IDLE) {
+                            if let Some((mut sub, cfg, _)) = warm.take() {
+                                tracing::info!(model = ?cfg.model, "seg subprocess released after idling");
+                                let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
+                            }
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 match msg {
                     WorkerMessage::ReleaseWarm => {
-                        if let Some((mut sub, cfg)) = warm.take() {
-                            tracing::info!(
-                                model = ?cfg.model,
-                                line_mode = ?cfg.line_mode,
-                                "seg subprocess released on model switch",
-                            );
+                        if let Some((mut sub, cfg, _)) = warm.take() {
+                            tracing::info!(model = ?cfg.model, "seg subprocess released on model switch");
                             let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
                         }
                     }
@@ -299,25 +322,26 @@ pub fn spawn_worker(
                         items, tier2_items, add_edge_items, config, cancels,
                         additional_items_rx,
                     } => {
-                        // Reuse the warm sub only when its Init config
-                        // matches AND it's still alive. Any mismatch or
-                        // dead process drops it and re-spawns.
-                        let mut reuse: Option<SubprocessManager> = None;
+                        // The pool this batch needs: one engine per image
+                        // of its first burst, up to the jobs setting.
+                        let needed = ProcessingConfig { jobs: config.jobs.min(items.len().max(1)), ..(*config).clone() };
+                        let mut reuse: Option<(SubprocessManager, ProcessingConfig)> = None;
                         let respawn_reason = match warm.take() {
-                            None => Some("no_prewarm"),
-                            Some((mut sub, cfg)) => {
-                                if cfg == *config && sub.is_alive() {
-                                    reuse = Some(sub);
+                            None => Some("no_warm_worker"),
+                            Some((mut sub, cfg, _)) => {
+                                if !sub.is_alive() {
+                                    Some("warm_worker_dead")
+                                } else if cfg.reusable_by(&needed) {
+                                    reuse = Some((sub, cfg));
                                     None
-                                } else if cfg != *config {
-                                    Some("config_mismatch")
                                 } else {
-                                    Some("prewarm_dead")
+                                    let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(2));
+                                    Some("engines_differ")
                                 }
                             }
                         };
                         let (decision, reason) = match respawn_reason {
-                            None => ("reuse", "match"),
+                            None => ("reuse", "fits"),
                             Some(r) => ("respawn", r),
                         };
                         tracing::info!(
@@ -331,7 +355,8 @@ pub fn spawn_worker(
                         let state = BatchRunState::new(
                             items, tier2_items, add_edge_items, additional_items_rx, *config,
                         );
-                        run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx);
+                        warm = run_batch_with_retry(reuse, state, &cancels, &res_tx, &ctx)
+                            .map(|(sub, cfg)| (sub, cfg, Instant::now()));
                     }
                 }
             }
@@ -439,16 +464,19 @@ enum WaitAction {
         initial_jobs = state.max_jobs,
     ),
 )]
+/// Runs the batch to its end and returns the worker that is still alive
+/// afterwards, with the config it was built for, to stay warm for the
+/// next batch; `None` after a crash, a Cancel or a failed spawn.
 fn run_batch_with_retry(
-    prewarm: Option<SubprocessManager>,
+    warm: Option<(SubprocessManager, ProcessingConfig)>,
     mut state: BatchRunState,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) {
-    // Pre-warm sub is consumed on the first iteration; crash retries
-    // always spawn fresh.
-    let mut prewarm = prewarm;
+) -> Option<(SubprocessManager, ProcessingConfig)> {
+    // The worker in hand: the warm one, then the last spawn's; a crash
+    // drops it and the next round spawns fresh.
+    let mut live = warm;
 
     emit_loading_status(&state, res_tx, ctx);
 
@@ -456,14 +484,14 @@ fn run_batch_with_retry(
         if cancels.is_global_cancelled() {
             let _ = res_tx.send(WorkerResult::Cancelled);
             ctx.request_repaint();
-            return;
+            return live;
         }
 
         match poll_additional_items(&mut state) {
             WaitAction::Complete => {
                 let _ = res_tx.send(WorkerResult::BatchComplete);
                 ctx.request_repaint();
-                return;
+                return live;
             }
             WaitAction::Sleep => {
                 std::thread::sleep(Duration::from_millis(50));
@@ -472,24 +500,26 @@ fn run_batch_with_retry(
             WaitAction::Continue => {}
         }
 
-        let Some(burst) = spawn_and_initial_burst(prewarm.take(), &mut state, cancels, res_tx, ctx) else {
-            return; // spawn failed — errors + BatchComplete already sent
+        let Some(burst) = spawn_and_initial_burst(live.take(), &mut state, cancels, res_tx, ctx) else {
+            return None; // spawn failed — errors + BatchComplete already sent
         };
-        let InitialBurst { mut sub, mut sent } = burst;
+        let InitialBurst { mut sub, mut sent, engines } = burst;
 
         let outcome = run_event_loop(&mut sub, &mut state, &mut sent, cancels, res_tx, ctx);
 
         match outcome {
-            EventLoopOutcome::Cancelled => return,
+            EventLoopOutcome::Cancelled => return None,
             EventLoopOutcome::Crashed(reason) => {
                 let should_retry = handle_crash_and_retry(&mut state, sent, reason, &mut sub, res_tx, ctx);
                 if !should_retry {
-                    return;
+                    return None;
                 }
             }
             EventLoopOutcome::Finished => {
-                if !finalize_or_continue(&mut state, &mut sub, res_tx, ctx) {
-                    return;
+                if finalize_or_continue(&mut state, res_tx, ctx) {
+                    live = Some((sub, engines));
+                } else {
+                    return Some((sub, engines));
                 }
             }
         }
@@ -540,14 +570,16 @@ fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
 struct InitialBurst {
     sub: SubprocessManager,
     sent: SentWork,
+    /// What the worker's engines were built for.
+    engines: ProcessingConfig,
 }
 
-/// Spawn a subprocess (or accept a pre-warmed one) and send the initial
-/// burst (Tier 2 first — no inference needed — then Tier 1 up to
-/// `max_jobs`). On spawn failure, reports errors for every pending item
-/// and sends `BatchComplete`; returns `None`.
+/// Spawn a subprocess (or accept a warm one), give it the batch's run
+/// settings, and send the initial burst (Tier 2 first — no inference
+/// needed — then Tier 1 up to `max_jobs`). On spawn failure, reports
+/// errors for every pending item and sends `BatchComplete`; returns `None`.
 fn spawn_and_initial_burst(
-    prewarm: Option<SubprocessManager>,
+    warm: Option<(SubprocessManager, ProcessingConfig)>,
     state: &mut BatchRunState,
     cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -566,8 +598,8 @@ fn spawn_and_initial_burst(
     // use the seg engine pool.
     let effective_jobs = state.max_jobs.min(state.pending.len().max(1));
 
-    let mut sub = match prewarm {
-        Some(sub) => sub,
+    let (mut sub, engines) = match warm {
+        Some(pair) => pair,
         None => match SubprocessManager::spawn(
             state.config.model, effective_jobs, state.config.mask, state.config.force_cpu,
             WorkerLines::app(state.config.line_mode, state.config.edge),
@@ -575,7 +607,7 @@ fn spawn_and_initial_burst(
             Ok((s, active_provider)) => {
                 let _ = res_tx.send(WorkerResult::BackendReady(active_provider));
                 ctx.request_repaint();
-                s
+                (s, ProcessingConfig { jobs: effective_jobs, ..state.config.clone() })
             }
             Err(e) => {
                 emit_pending_errors(state, &e, res_tx);
@@ -585,6 +617,10 @@ fn spawn_and_initial_burst(
             }
         },
     };
+    // A dead worker fails here too; the event loop reports it as a crash.
+    if let Err(err) = sub.send_configure(state.config.mask, state.config.line_mode, state.config.edge) {
+        tracing::warn!(%err, "worker did not take the batch's run settings");
+    }
 
     let mut sent = SentWork::default();
     let burst = state.max_jobs.min(total_pending);
@@ -605,7 +641,7 @@ fn spawn_and_initial_burst(
             break;
         }
     }
-    Some(InitialBurst { sub, sent })
+    Some(InitialBurst { sub, sent, engines })
 }
 
 /// Drive one subprocess through its lifecycle — poll events, admit more work
@@ -1040,12 +1076,11 @@ fn emit_pending_errors(
     }
 }
 
-/// After a subprocess finishes normally, decide whether the batch is done or
-/// another subprocess needs spawning. Returns `false` when the batch is done
-/// (BatchComplete already sent); `true` to loop back and spawn again.
+/// After a subprocess finishes its sent work, decide whether the batch is
+/// done or more is to come. Returns `false` when the batch is done
+/// (BatchComplete already sent); `true` to loop back with the same worker.
 fn finalize_or_continue(
     state: &mut BatchRunState,
-    sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
@@ -1068,10 +1103,6 @@ fn finalize_or_continue(
             return false;
         }
     }
-
-    // 5s covers model-cache teardown; if the worker ignores us, Drop's
-    // shorter timeout + force-kill closes the gap.
-    let _ = sub.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
     true
 }
 
@@ -1137,6 +1168,24 @@ fn try_send_add_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_worker_is_reused_for_the_same_engines_whatever_the_run_settings() {
+        let built = ProcessingConfig {
+            model: ModelKind::BiRefNetLite, jobs: 4, mask: MaskSettings::default(), force_cpu: false,
+            line_mode: LineMode::Off, edge: super::super::item_settings::ItemSettings::default().edge_settings(),
+        };
+        let mut lines = built.clone();
+        lines.line_mode = LineMode::SubjectOutline;
+        lines.mask.gamma = 2.0;
+        lines.edge.edge_scale = prunr_core::EdgeScale::Fine;
+        lines.jobs = 1;
+        assert!(built.reusable_by(&lines), "mask, Sketch and lines travel with the batch");
+        assert!(built.reusable_by(&ProcessingConfig { jobs: 4, ..built.clone() }));
+        assert!(!built.reusable_by(&ProcessingConfig { jobs: 5, ..built.clone() }), "a larger pool needs a new worker");
+        assert!(!built.reusable_by(&ProcessingConfig { model: ModelKind::Silueta, ..built.clone() }));
+        assert!(!built.reusable_by(&ProcessingConfig { force_cpu: true, ..built.clone() }));
+    }
 
     #[test]
     fn is_stalled_false_when_no_work_in_flight() {

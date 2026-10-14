@@ -84,6 +84,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The Blurred photo background and Refine's Sharpen blur on every core: a 24 MP background blurs in half a second instead of four.
 - Holding a Lens blur, Fog or Aerial slider on a large photo previews the look at 2048 px; the full-size render follows when the slider is released.
 - On the CPU, BiRefNet takes a batch one image at a time: a second parallel job gained nothing and doubled RAM. Silueta and U2Net keep the parallel jobs, which make them 27 % and 18 % faster on four cores.
+- **Process no longer reloads the model every time.** The worker that ran the last batch stays ready for five minutes and takes new Mask and Sketch settings as they are; the one warmed at start-up serves the first Process. With BiRefNet on a 2015 4-core CPU that is 7 seconds saved on every Process and on every Sketch mode change.
 
 ### Performance
 

@@ -140,6 +140,15 @@ pub enum SubprocessCommand {
     /// Cancel one item by id — worker emits `ImageError { error:
     /// CANCELLED_ERR_MSG }` at the next dispatch check.
     CancelItem { item_id: u64 },
+    /// New mask, Sketch mode and line settings for a worker already
+    /// running: every later `ProcessImage` and `AddEdgeInference` reads
+    /// them, and the worker builds the engines the mode needs that it
+    /// does not have yet, so a change never costs a respawn.
+    Configure {
+        mask: MaskSettings,
+        line_mode: LineMode,
+        edge: EdgeSettings,
+    },
     /// Shut down gracefully.
     Shutdown,
 }
@@ -569,6 +578,15 @@ mod tests {
     #[test]
     fn command_shutdown_roundtrip() {
         roundtrip(&SubprocessCommand::Shutdown);
+    }
+
+    #[test]
+    fn command_configure_roundtrip() {
+        roundtrip(&SubprocessCommand::Configure {
+            mask: MaskSettings { gamma: 1.4, ..MaskSettings::default() },
+            line_mode: LineMode::SubjectOutline,
+            edge: EdgeSettings { line_strength: 0.8, solid_line_color: None, edge_thickness: 2, edge_scale: prunr_core::EdgeScale::Fine, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
+        });
     }
 
     #[test]
