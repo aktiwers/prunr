@@ -182,6 +182,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Progress counters are scoped to the current dispatch; cancel routing is per kind.
 - Buttons react to hover and press; choice rows no longer wrap inside a label; a stray accent line is gone.
 - Windows CI no longer trips over `Instant` arithmetic on fresh runners.
+- Process pressed while a batch runs: when the first batch finishes, the second keeps its progress and Cancel, and the first batch's images keep their own settings record.
 - The Save preset dialog opens ready for a name: typing goes straight into it and Enter saves.
 - After a model switch the brushes still correct the cut-out on screen: an Erase or Restore made then is kept by the next run instead of dropped, and a Mask knob re-cuts it live.
 

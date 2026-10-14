@@ -338,11 +338,12 @@ impl PrunrApp {
             .collect();
 
         let recipe = current_settings.current_recipe(model);
-        self.processor.track_dispatch(recipe, process_ids.iter().copied());
+        let batch = self.processor.track_dispatch(recipe, process_ids.iter().copied());
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
         let _ = self.processor.worker_tx.send(WorkerMessage::BatchProcess {
+            batch,
             items,
             tier2_items,
             add_edge_items,
