@@ -762,6 +762,12 @@ pub(crate) struct Processor {
     sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
     sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
     sam_sessions: SamSessionSlot,
+    /// Whether dispatches run their models. A test app's runs start
+    /// and stay in flight until the test lands or fails them with the
+    /// `_for_test` helpers: a real run would build an ORT session the
+    /// test process never initialises, and the pool worker it blocks is
+    /// lost for every test after it.
+    runs_models: bool,
     faces_tx: mpsc::Sender<FacesResult>,
     faces_rx: mpsc::Receiver<FacesResult>,
     depth: DepthQueue,
@@ -809,10 +815,29 @@ impl Processor {
             sam_decoder_tx,
             sam_decoder_rx,
             sam_sessions: Arc::new(Mutex::new(None)),
+            runs_models: true,
             faces_tx,
             faces_rx,
             depth,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stub_model_runs(&mut self) {
+        self.runs_models = false;
+    }
+
+    /// Build the LaMa / Big-LaMa / MI-GAN session in the background, so
+    /// the first stroke skips the 5-10 s build.
+    pub(crate) fn prewarm_eraser(&self, id: prunr_models::ModelId, cpu_only: bool) {
+        if !self.runs_models {
+            return;
+        }
+        rayon::spawn(move || {
+            if let Err(e) = prunr_core::inpaint::prewarm(id, cpu_only) {
+                tracing::warn!(?id, %e, "Inpaint prewarm failed");
+            }
+        });
     }
 
     /// Queue `item_id`'s photo for a depth map; it lands through
@@ -938,6 +963,9 @@ impl Processor {
         if tuning.backend.is_sd_family() {
             // The SD subprocess reports through the bridge to `run`.
             self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
+            return;
+        }
+        if !self.runs_models {
             return;
         }
         let tx = self.inpaint_tx.clone();
@@ -1697,6 +1725,9 @@ impl Processor {
                 ENCODER_COST_MB, available_ram_mb,
             ));
         }
+        if !self.runs_models {
+            return Ok(());
+        }
         let tx = self.sam_encoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
@@ -1739,10 +1770,9 @@ impl Processor {
     }
 
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
-    /// at startup so the first Magic Brush use never waits for them.
-    /// Load the Magic Brush sessions in the background unless they are.
+    /// so the first Magic Brush use never waits for them.
     pub(crate) fn warm_sam_sessions(&self) {
-        if self.sam_sessions_ready() {
+        if !self.runs_models || self.sam_sessions_ready() {
             return;
         }
         let sessions = Arc::clone(&self.sam_sessions);
@@ -1769,6 +1799,9 @@ impl Processor {
     /// worker too, so the UI thread only merges the result; the logits
     /// come back with it for later re-thresholding.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
+        if !self.runs_models {
+            return;
+        }
         let tx = self.sam_decoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         rayon::spawn(move || {
