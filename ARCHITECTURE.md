@@ -415,7 +415,7 @@ Every session in the workspace starts from `ort_runtime::session_builder()`, whi
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
 | Linux / Windows | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA / DirectML builds via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
-| macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
+| macOS (arm64, 14+) | ORT 1.24.1 PyPI wheel, which carries CoreML | built in |
 
 Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm`, so it needs no graphics context; Windows detection is a stub, so the prompt never fires there.
 
@@ -533,9 +533,9 @@ A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 | macos-aarch64 | `.dmg`, `.tar.gz` |
 | windows-x86_64 | `.zip`, Inno Setup `.exe` |
 
-Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Linux and Windows stage the CPU wheel with `cargo xtask install-runtime` (the in-app store's code) into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS builds ORT with CoreML and ships it in `Contents/Frameworks/`.
+Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Every platform stages Microsoft's wheel with `cargo xtask install-runtime` (the in-app store's code): Linux and Windows the CPU one into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS the arm64 one, which carries CoreML, into `Contents/Frameworks/`. That wheel sets the Mac floor: its minimum macOS (14.0) is the app's `LSMinimumSystemVersion` and the binary's deployment target.
 
-The workspace `version` is the app version; packages take theirs from the tag. ORT versions pinned in the workflow YAML are mirrored in Rust consts, and a test fails when they differ.
+The workspace `version` is the app version; packages take theirs from the tag. The ORT version pinned in the workflow YAML is mirrored in a Rust const, and a test fails when they differ.
 
 ## Key Dependencies
 
