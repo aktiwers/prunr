@@ -4,10 +4,10 @@ use egui_material_icons::icons::*;
 use crate::gui::theme;
 use super::{kv_row, section_heading};
 
-/// Returns true if the modal should close.
 /// Room kept under the scrolling page for the "Press F2 to close" line.
 const FOOTER_HEIGHT: f32 = 28.0;
 
+/// Returns true if the modal should close.
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",

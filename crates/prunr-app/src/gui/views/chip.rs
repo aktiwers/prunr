@@ -588,9 +588,6 @@ fn row_name(title: &str, description: &str) -> String {
     if description.is_empty() { title.to_owned() } else { format!("{title}\n{description}") }
 }
 
-/// A choice-list row: an icon in a dim circle, the title over
-/// a one-line description, and when picked a purple wash and a check.
-/// Reads as a button named title, newline, description.
 /// A choice list row's geometry: the icon circle's inset and radius, the
 /// gap to the text, and the room kept right of the text for the check.
 const LIST_ICON_INSET: f32 = 12.0;
@@ -607,6 +604,9 @@ pub(super) fn choice_list_row_width(ui: &Ui, title: &str, description: &str) -> 
     LIST_ICON_INSET + 2.0 * LIST_ICON_RADIUS + LIST_TEXT_GAP + text + LIST_CHECK_ROOM
 }
 
+/// A choice-list row: an icon in a dim circle, the title over
+/// a one-line description, and when picked a purple wash and a check.
+/// Reads as a button named title, newline, description.
 pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description: &str, selected: bool, icon_fill: Color32) -> Response {
     const HEIGHT: f32 = 46.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), egui::Sense::click());

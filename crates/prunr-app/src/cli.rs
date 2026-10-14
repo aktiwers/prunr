@@ -1497,8 +1497,7 @@ mod tests {
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
     }
 
-    /// The upscale flags parse into a mode; its knobs need it, and faces
-    /// need a face model named.
+    /// An `-o` name without an extension saves a PNG, whatever the mode.
     #[test]
     fn an_output_name_without_an_extension_is_a_png_file() {
         use super::output_path_with_suffix;
@@ -1523,6 +1522,8 @@ mod tests {
         assert!(!wants(&["--lines"]));
     }
 
+    /// The upscale flags parse into a mode; its knobs need it, and faces
+    /// need a face model named.
     #[test]
     fn the_upscale_flags_need_upscale_mode() {
         let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);

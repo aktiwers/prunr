@@ -1645,8 +1645,6 @@ mod depth_tests {
         assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the map is there");
     }
 
-    /// Set focus stores the click as fractions, makes it an undo step and
-    /// re-renders the photo.
     /// A By depth click on an image whose map is not there yet waits for
     /// the map and selects when it lands; the brush turned off meanwhile
     /// drops it.
@@ -1681,6 +1679,8 @@ mod depth_tests {
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
     }
 
+    /// Set focus stores the click as fractions, makes it an undo step and
+    /// re-renders the photo.
     #[test]
     fn a_focus_click_is_a_step_that_re_renders() {
         let mut app = PrunrApp::new_for_test();
