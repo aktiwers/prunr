@@ -21,6 +21,11 @@ pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 /// was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
 
+/// The longer side of the preview a run shows while it works: about a
+/// canvas at most, so a preview costs a few MB whatever the photo's
+/// size. Runs in the app and in the worker ask for the same.
+pub const TILE_PREVIEW_EDGE: u32 = 1536;
+
 /// Which line scales a worker runs the detector at for each image.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InferredScales {

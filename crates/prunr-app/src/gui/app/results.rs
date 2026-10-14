@@ -32,8 +32,6 @@ const FACE_SEARCH_STOPPED: &str = "Face search stopped";
 
 impl PrunrApp {
     pub(super) fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
-        // Bridge → inpaint_rx fan-in must run before the drain.
-        self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
         // A cancelled or failed erase records nothing; the painted region
         // stays for another try.
@@ -96,30 +94,21 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Paint each finished upscale tile into its square of the item's
-    /// preview texture, made on the run's first tile. Only the tile is
-    /// uploaded (`set_partial`).
-    pub(super) fn pump_upscale_previews(&mut self, ctx: &egui::Context) {
-        let tiles = self.processor.pump_upscale_previews();
-        if tiles.is_empty() {
+    /// Land each run's pictures on their item, one kind per arm. Whether a
+    /// run's pictures may still land is its `PictureSink`'s call; here
+    /// the item has only to exist.
+    pub(super) fn pump_run_pictures(&mut self, ctx: &egui::Context) {
+        let pictures = self.processor.pump_pictures();
+        if pictures.is_empty() {
             return;
         }
-        for (item_id, tile) in tiles {
+        for (item_id, picture) in pictures {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if !item.job_is_current() {
-                continue;
+            match picture {
+                // A tile is part of the result the item awaits.
+                prunr_core::ProgressUpdate::TilePreview(tile) if item.job_is_current() => item.paint_tile_preview(ctx, &tile),
+                _ => {}
             }
-            let full = [tile.full_width as usize, tile.full_height as usize];
-            let texture = match &mut item.tile_preview {
-                Some(t) if t.size() == full => t,
-                slot => slot.insert(ctx.load_texture(
-                    format!("tile-preview-{item_id}"),
-                    egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
-                    egui::TextureOptions::LINEAR,
-                )),
-            };
-            let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
-            texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
         }
         ctx.request_repaint();
     }
@@ -1209,6 +1198,29 @@ mod timeline_contract_tests {
 
         app.land_bg_image(load(false, Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
         assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
+    }
+
+    /// A run's finished tile lands in its square of its item's preview
+    /// while the item awaits a run; one for an item that awaits nothing,
+    /// or that is gone, is dropped.
+    #[test]
+    fn a_runs_tiles_land_on_the_item_that_awaits_it() {
+        use prunr_core::{ProgressUpdate, TilePreview};
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        let send = |app: &PrunrApp, item_id: u64, x: u32| {
+            let tile = TilePreview { x, y: 0, width: 1, height: 2, full_width: 3, full_height: 2, rgba: vec![200; 8] };
+            app.processor.picture_sender().send((item_id, ProgressUpdate::TilePreview(tile))).unwrap();
+        };
+        send(&app, 1, 0);
+        app.pump_run_pictures(&ctx);
+        assert!(app.batch.items[0].tile_preview.is_none(), "nothing awaited, nothing shown");
+
+        app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+        send(&app, 1, 2);
+        send(&app, 99, 0);
+        app.pump_run_pictures(&ctx);
+        assert_eq!(app.batch.items[0].tile_preview.as_ref().map(|t| t.size()), Some([3, 2]), "the whole image's preview, made on the first tile");
     }
 
     /// Refine's after-the-model knobs re-finish the kept upscale; a Scale
