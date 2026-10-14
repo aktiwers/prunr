@@ -738,6 +738,7 @@ mod model_credits_tests {
             gpu: GpuRequirement::None,
             incompatible_eps: &[],
             working_set_mb: 100,
+            parallel_jobs_pay_on_cpu: false,
             tile_size_multiple: None,
             recommended_tile: None,
             attribution_required,
