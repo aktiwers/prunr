@@ -1824,6 +1824,18 @@ impl BatchItem {
         self.run_input(engine).map_or_else(|| self.original_run_input(), super::processor::RunInput::Decoded)
     }
 
+    /// Where the faces are in the original photo, when a Faces search has
+    /// found them there already, so a depth run need not look again.
+    pub(crate) fn faces_found_in_original(&self) -> Option<Vec<prunr_core::face::FacePlace>> {
+        let source = self.source_rgba.as_ref()?;
+        let original = |photo: &FacePhoto| matches!(photo, FacePhoto::Source(s) if Arc::ptr_eq(s, source));
+        if let Some(found) = self.found_faces.as_ref().filter(|f| !f.failed && original(&f.photo)) {
+            return Some(found.faces.iter().map(|f| *f.place()).collect());
+        }
+        let pending = self.faces_pending.as_ref().filter(|p| original(&p.photo))?;
+        pending.found.as_ref().map(|(places, _)| places.to_vec())
+    }
+
     /// The decoded original, else the source for the run's thread to
     /// decode.
     pub(crate) fn original_run_input(&self) -> super::processor::RunInput {
@@ -2787,6 +2799,64 @@ mod tests {
         assert!(weak.upgrade().is_none(), "the cache does not keep the old result alive");
         item.refresh_lens_focus();
         assert_ne!(item.backdrop_key(), near, "the subject at another depth is another focus");
+    }
+
+    /// The lens backdrop's focus is measured with the faces the depth map
+    /// knows: the same map with a face found focuses (and keys) anew.
+    #[test]
+    fn a_lens_backdrop_focuses_on_the_faces_its_depth_map_knows() {
+        use prunr_core::depth::DepthMap;
+        let mut item = fixture_item(1);
+        item.settings.bg_effect = prunr_core::BgEffect::LensBlur { amount_pct: 50 };
+        let raw: Vec<f32> = (0..100).map(|y| y as f32).collect();
+        item.depth = Some(Arc::new(DepthMap::from_raw(1, 100, raw.clone())));
+        item.refresh_lens_focus();
+        let (faceless, key) = (item.lens_focus.as_ref().map(|f| f.value), item.backdrop_key());
+        let face = prunr_core::face::Face {
+            score: 0.9,
+            bbox: [0.0, 20.0, 100.0, 40.0],
+            landmarks: [[30.0, 25.0], [70.0, 25.0], [50.0, 30.0], [35.0, 36.0], [65.0, 36.0]],
+        };
+        let faced = DepthMap::from_raw(1, 100, raw).with_faces(&[prunr_core::face::FacePlace::of(&face, [100, 100])]);
+        item.depth = Some(Arc::new(faced));
+        item.refresh_lens_focus();
+        let focus = item.lens_focus.as_ref().map(|f| f.value);
+        assert!(focus.is_some_and(|f| (f - 0.3).abs() < 0.02) && focus != faceless, "the face, not the nearest tenth: {focus:?} {faceless:?}");
+        assert_ne!(item.backdrop_key(), key);
+    }
+
+    /// A depth run takes the faces a Faces search found in the original
+    /// photo instead of looking again; none from another photo, or from
+    /// a search that failed.
+    #[test]
+    fn a_depth_run_reuses_the_faces_found_in_the_original() {
+        let mut item = fixture_item(1);
+        let source = Arc::new(image::RgbaImage::new(100, 100));
+        item.source_rgba = Some(Arc::clone(&source));
+        let face = prunr_core::face::Face {
+            score: 0.9,
+            bbox: [10.0, 10.0, 60.0, 70.0],
+            landmarks: [[25.0, 30.0], [45.0, 30.0], [35.0, 40.0], [27.0, 52.0], [43.0, 52.0]],
+        };
+        let place = prunr_core::face::FacePlace::of(&face, [100, 100]);
+        assert_eq!(item.faces_found_in_original(), None, "nothing searched");
+
+        item.begin_face_search(FacePhoto::Source(Arc::clone(&source)), prunr_models::ModelId::FaceGfpgan);
+        assert_eq!(item.faces_found_in_original(), None, "searching, nothing found yet");
+        if let Some(pending) = item.faces_pending.as_mut() {
+            pending.found = Some((vec![place].into(), std::time::Instant::now()));
+        }
+        assert_eq!(item.faces_found_in_original(), Some(vec![place]), "found, still redrawing");
+
+        let restored = Arc::new(vec![prunr_core::face::RestoredFace::unchanged_for_test(place)]);
+        let found = |photo, failed| FoundFaces { photo, found_at: std::time::Instant::now(), model: prunr_models::ModelId::FaceGfpgan, faces: Arc::clone(&restored), failed, stopped: false };
+        item.faces_pending = None;
+        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), false));
+        assert_eq!(item.faces_found_in_original(), Some(vec![place]));
+        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), true));
+        assert_eq!(item.faces_found_in_original(), None, "a failed search");
+        item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
+        assert_eq!(item.faces_found_in_original(), None, "another photo");
     }
 
     /// An image whose file is gone when its run would start fails there,

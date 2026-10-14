@@ -1158,7 +1158,7 @@ struct LineDepth {
 
 impl LineDepth {
     fn new(fade_pct: u8) -> Self {
-        Self { measurer: prunr_core::depth::Measurer::default(), amount: prunr_core::math::pct(fade_pct) }
+        Self { measurer: prunr_core::depth::Measurer::lines_only(), amount: prunr_core::math::pct(fade_pct) }
     }
 
     /// `photo`'s depth map; `None` (lines drawn unfaded) when the model
