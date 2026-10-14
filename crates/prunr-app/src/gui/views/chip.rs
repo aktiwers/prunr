@@ -575,6 +575,22 @@ fn row_name(title: &str, description: &str) -> String {
 /// A choice-list row: an icon in a dim circle, the title over
 /// a one-line description, and when picked a purple wash and a check.
 /// Reads as a button named title, newline, description.
+/// A choice list row's geometry: the icon circle's inset and radius, the
+/// gap to the text, and the room kept right of the text for the check.
+const LIST_ICON_INSET: f32 = 12.0;
+const LIST_ICON_RADIUS: f32 = 15.0;
+const LIST_TEXT_GAP: f32 = 12.0;
+const LIST_CHECK_INSET: f32 = 14.0;
+const LIST_CHECK_ROOM: f32 = LIST_CHECK_INSET + 16.0 + LIST_TEXT_GAP;
+
+/// The width a `choice_list_row` needs to show `title` and `description`
+/// whole, for a list that sizes itself to its longest row.
+pub(super) fn choice_list_row_width(ui: &Ui, title: &str, description: &str) -> f32 {
+    let width = |text: &str, size: f32| ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(size), theme::TEXT_PRIMARY).size().x;
+    let text = width(title, theme::FONT_SIZE_BODY).max(width(description, theme::FONT_SIZE_SECONDARY));
+    LIST_ICON_INSET + 2.0 * LIST_ICON_RADIUS + LIST_TEXT_GAP + text + LIST_CHECK_ROOM
+}
+
 pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description: &str, selected: bool, icon_fill: Color32) -> Response {
     const HEIGHT: f32 = 46.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEIGHT), egui::Sense::click());
@@ -582,17 +598,17 @@ pub(super) fn choice_list_row(ui: &mut Ui, icon: &str, title: &str, description:
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, theme::ROW_ROUNDING, row_wash(&resp, selected));
-        let icon_center = egui::pos2(rect.left() + 12.0 + 15.0, rect.center().y);
-        painter.circle_filled(icon_center, 15.0, icon_fill);
+        let icon_center = egui::pos2(rect.left() + LIST_ICON_INSET + LIST_ICON_RADIUS, rect.center().y);
+        painter.circle_filled(icon_center, LIST_ICON_RADIUS, icon_fill);
         painter.text(icon_center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), theme::GLOW);
-        let text_x = icon_center.x + 15.0 + 12.0;
+        let text_x = icon_center.x + LIST_ICON_RADIUS + LIST_TEXT_GAP;
         let dim = if ui.is_enabled() { 1.0 } else { 0.5 };
         painter.text(egui::pos2(text_x, rect.center().y - 1.0), egui::Align2::LEFT_BOTTOM, title,
             egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY.gamma_multiply(dim));
         painter.text(egui::pos2(text_x, rect.center().y + 2.0), egui::Align2::LEFT_TOP, description,
             egui::FontId::proportional(theme::FONT_SIZE_SECONDARY), theme::TEXT_SECONDARY.gamma_multiply(dim));
         if selected {
-            paint_row_check(painter, rect, 14.0);
+            paint_row_check(painter, rect, LIST_CHECK_INSET);
         }
     }
     resp
