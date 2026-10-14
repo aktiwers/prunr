@@ -48,9 +48,7 @@ fn sd_inpaint_modifies_painted_region() {
     let progress = prunr_core::Progress::none();
     let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress) {
         Ok(r) => r.rgba,
-        // The pre-flight RAM gate is an environmental refusal (SD wants
-        // ~12 GB free), not a pipeline failure — skip like a missing bundle.
-        Err(e) if e.to_string().contains("RAM free") => {
+        Err(e) if refused_for_ram(&e) => {
             eprintln!("[sd_inpaint_smoke] SKIP: {e}");
             return;
         }
@@ -85,6 +83,12 @@ fn sd_inpaint_modifies_painted_region() {
             "unmasked pixel at ({x},{y}) drifted",
         );
     }
+}
+
+/// The pre-flight RAM gate refused the load: not enough free memory on
+/// this machine right now, so the test skips like a missing bundle.
+fn refused_for_ram(e: &prunr_core::CoreError) -> bool {
+    e.to_string().contains("of free memory to load")
 }
 
 /// `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
@@ -140,7 +144,7 @@ fn sd_step_previews() {
     let sink = std::sync::Arc::new(RecordingSink::default());
     let previewed = match inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), &prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)) {
         Ok(r) => r.rgba,
-        Err(e) if e.to_string().contains("RAM free") => {
+        Err(e) if refused_for_ram(&e) => {
             eprintln!("[sd_step_previews] SKIP: {e}");
             return;
         }
@@ -256,7 +260,7 @@ fn sd_bench() {
                     let started = std::time::Instant::now();
                     let result = match inpaint_sd::process_inpaint_with(image, mask, id, req, &progress) {
                         Ok(r) => r.rgba,
-                        Err(e) if e.to_string().contains("RAM free") => {
+                        Err(e) if refused_for_ram(&e) => {
                             eprintln!("[sd_bench] SKIP: {e}");
                             return;
                         }
