@@ -494,6 +494,8 @@ pub(crate) struct FoundFaces {
     /// The search failed: none are blended, and it is not repeated until
     /// a search setting changes.
     pub(crate) failed: bool,
+    /// It failed because it was stopped (Cancel or Esc).
+    pub(crate) stopped: bool,
 }
 
 /// Where `BatchItem::warm_steps` holds the step an undo goes back to and
@@ -1221,7 +1223,7 @@ impl BatchItem {
             }
             Err(err) => (Vec::new(), Err(err)),
         };
-        self.found_faces = Some(FoundFaces { photo: landed.photo, found_at: std::time::Instant::now(), model: landed.model, faces: Arc::new(faces), failed: outcome.is_err() });
+        self.found_faces = Some(FoundFaces { photo: landed.photo, found_at: std::time::Instant::now(), model: landed.model, faces: Arc::new(faces), failed: outcome.is_err(), stopped: landed.stopped });
         self.faces_changed();
         Some(outcome)
     }

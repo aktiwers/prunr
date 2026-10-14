@@ -177,6 +177,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     // The capsule counts the queued images too: its Cancel ends them all.
                     CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
+                    CancelTarget::Faces => app.processor.cancel_faces(),
                 }
             }
         }
