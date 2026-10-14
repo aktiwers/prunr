@@ -82,6 +82,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
                 *s = FaceSettings { model, ..FaceSettings::default() };
                 change.search = true;
             }
+            hint(ui, &found_text(s.on, found));
             let models = FaceModel::ALL.map(|m| chip::Choice {
                 value: m,
                 name: model_name(m),
@@ -98,7 +99,6 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, installed: HardwareInsta
             hint(ui, "Up to 50% adds detail and keeps the photo's own shading; above, the redrawn shading too.");
             change.blend |= chip::choice_row(ui, "Faces", &WHICH, &mut s.largest_only);
             change.blend |= chip::toggle_row(ui, "Include hair", &mut s.hair).commit;
-            hint(ui, &found_text(s.on, found));
         }
     });
     change
@@ -130,7 +130,7 @@ fn model_description(m: FaceModel) -> &'static str {
 
 fn found_text(on: bool, found: FoundCount) -> std::borrow::Cow<'static, str> {
     match (on, found) {
-        (false, _) => "Faces are found and redrawn when this is on.".into(),
+        (false, _) => "These apply while Faces is on.".into(),
         (true, None) => "Faces are found once the image is processed.".into(),
         (true, Some(FaceSearch::RestoredEarlier)) => "Faces were restored in an earlier step; they are not restored twice.".into(),
         (true, Some(FaceSearch::Failed)) => "The face search failed. Turn Faces off and on to try again.".into(),
