@@ -93,8 +93,12 @@ impl PrunrApp {
         if let Some(msg) = self.pending_onboarding_toast.take() {
             self.toasts.info(msg);
         }
+        // The SD eraser's reports and result come through its bridge. A
+        // run sends its pictures before its result, and they land first:
+        // the result reveals over them.
+        self.processor.pump_inpaint_subprocess();
+        self.pump_run_pictures(ctx);
         self.pump_inpaint_results(ctx);
-        self.pump_upscale_previews(ctx);
         self.pump_upscale_results(ctx);
         self.pump_colorize_results(ctx);
         self.pump_sam_results(ctx);

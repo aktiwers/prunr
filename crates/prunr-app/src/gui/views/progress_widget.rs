@@ -191,13 +191,21 @@ fn single_line(painter: &Painter, text: String, size: f32, color: Color32, max_w
     painter.layout_job(job)
 }
 
-/// Dim the tiles still to come, light the one running, and show the done
-/// ones from `preview`, or clear without one.
+/// Dim the tiles still to come; show the running one, under working
+/// light, and the done ones from `preview`, or clear without one.
+/// Cells an earlier layout finished stay as they were.
 fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress, preview: Option<egui::TextureId>, t: f32) {
     let to_screen = |r: &prunr_core::TileRect| Rect::from_min_size(
         img_rect.min + Vec2::new(r.x * img_rect.width(), r.y * img_rect.height()),
         Vec2::new(r.w * img_rect.width(), r.h * img_rect.height()),
     );
+    let show_preview = |cell: &prunr_core::TileRect| {
+        if let Some(texture) = preview {
+            let uv = Rect::from_min_size(Pos2::new(cell.x, cell.y), Vec2::new(cell.w, cell.h));
+            painter.image(texture, to_screen(cell), uv, Color32::WHITE);
+        }
+    };
+    progress.finished.iter().for_each(show_preview);
     for (cell, state) in progress.tiles.iter().zip(progress.tile_states.iter()) {
         let r = to_screen(cell);
         match state {
@@ -205,15 +213,11 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
                 painter.rect(r, 0.0, theme::TILE_WAITING, Stroke::new(0.5, theme::TILE_GRID), StrokeKind::Inside);
             }
             TileState::Running => {
+                show_preview(cell);
                 super::effects::paint_working(painter, r, t);
                 super::effects::paint_working_frame(painter, r);
             }
-            TileState::Done => {
-                if let Some(texture) = preview {
-                    let uv = Rect::from_min_size(Pos2::new(cell.x, cell.y), Vec2::new(cell.w, cell.h));
-                    painter.image(texture, r, uv, Color32::WHITE);
-                }
-            }
+            TileState::Done => show_preview(cell),
         }
     }
 }

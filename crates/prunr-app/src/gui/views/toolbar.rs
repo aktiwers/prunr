@@ -72,6 +72,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             app.pending_open_dialog = true;
         }
 
+        if tooltip(icon_button(ui, ICON_STOREFRONT.codepoint), "Model Store", "Get more models: erasers, upscalers, faces and more.", None).clicked() {
+            app.open_model_store(super::adjustments_toolbar::ModelStoreRequest { filter: None }, ui.ctx());
+        }
+
         if tooltip(icon_button(ui, ICON_SETTINGS.codepoint), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
                 app.close_settings(ui.ctx());
@@ -107,7 +111,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         });
 
         // Model, groups and presets live on the adjustments toolbar; this
-        // row stays minimal: Open, Settings, Help, and the action cluster.
+        // row stays minimal: Open, Model Store, Settings, Help, and the
+        // action cluster.
 
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(|i| i.timeline.can_undo());

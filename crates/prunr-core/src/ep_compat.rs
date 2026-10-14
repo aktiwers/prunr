@@ -57,7 +57,7 @@ fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
 
 fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Option<u64>) -> String {
     let copy = match weights {
-        Weights::Base => "",
+        Weights::Fp32 => "",
         Weights::Fp16 => "/fp16",
         Weights::Int8 => "/int8",
     };
@@ -135,10 +135,10 @@ mod tests {
     #[test]
     fn key_format_is_stable_openvino() {
         assert_eq!(
-            key(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Base),
+            key(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32),
             "OpenVINO::Silueta",
         );
-        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Base)
+        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
             .starts_with("CUDA::SdV15InpaintFp16@"));
     }
 
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn key_format_is_stable_coreml() {
         assert_eq!(
-            key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Base),
+            key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Fp32),
             "CoreML::Silueta",
         );
     }
@@ -154,7 +154,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn key_format_is_stable_directml() {
-        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16, Weights::Base)
+        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
             .starts_with("DirectML::SdV15InpaintFp16@"));
     }
 
@@ -165,10 +165,10 @@ mod tests {
     #[test]
     fn a_new_download_of_a_model_is_a_new_key() {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        let old = key_with(EpKind::OpenVino, lcm, Weights::Base, Some(1));
-        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Base, Some(2)));
+        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(1));
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(2)));
         assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
-        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Base, None), "OpenVINO::Silueta",
+        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None), "OpenVINO::Silueta",
             "built-in models keep the historic key; the app version scopes them");
     }
 
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn each_copy_of_the_weights_has_its_own_key() {
         let u2net = prunr_models::ModelId::U2net;
-        let keys = [Weights::Base, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0)));
+        let keys = [Weights::Fp32, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0)));
         assert_eq!(keys, [
             "OpenVINO::U2net@0000000000005ca0",
             "OpenVINO::U2net/fp16@0000000000005ca0",

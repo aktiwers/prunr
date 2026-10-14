@@ -541,8 +541,9 @@ pub(crate) struct BatchItem {
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
     pub(crate) subject: Option<SubjectOutline>,
-    /// The upscale under way's finished tiles, small, each in its square
-    /// of a preview of the whole image.
+    /// The run under way's finished tiles, small, each in its square of a
+    /// preview of the whole image: an upscale's, or an erase's over the
+    /// photo it started from.
     pub(crate) tile_preview: Option<egui::TextureHandle>,
     /// The images of the steps an undo and a redo go to (`BACK`, `AHEAD`),
     /// unpacked off the UI thread and held so they stay unpacked: either
@@ -914,6 +915,13 @@ impl BatchItem {
         self.last_decode = None;
     }
 
+    /// True while a model works on this image: a cut-out the worker has
+    /// taken, or an upscale, colorize or erase, which start their job only
+    /// when they run (a queued cut-out holds its job while it waits).
+    pub(crate) fn is_running(&self) -> bool {
+        self.status == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
+    }
+
     /// True while a run, a decode, a texture or a thumbnail is still to land.
     pub(crate) fn is_busy(&self) -> bool {
         self.status == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
@@ -1049,8 +1057,25 @@ impl BatchItem {
         }
     }
 
-    /// An upscale has landed: its finished-tile preview, the whole image
-    /// by now, is shown until the result's texture lands and the result
+    /// Paint a finished tile into its square of the run's preview, made
+    /// on the run's first tile (or anew when the size changes). Only the
+    /// tile is uploaded (`set_partial`).
+    pub(crate) fn paint_tile_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview) {
+        let full = [tile.full_width as usize, tile.full_height as usize];
+        let texture = match &mut self.tile_preview {
+            Some(t) if t.size() == full => t,
+            slot => slot.insert(ctx.load_texture(
+                format!("tile-preview-{}", self.id),
+                egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
+                egui::TextureOptions::LINEAR,
+            )),
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+        texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
+    }
+
+    /// A run has landed: its finished-tile preview, the whole image by
+    /// now, is shown until the result's texture lands and the result
     /// reveals over it. Without one, the shown image is held as usual.
     pub(crate) fn hold_tile_preview_for_reveal(&mut self) {
         match self.tile_preview.take() {
@@ -1080,10 +1105,10 @@ impl BatchItem {
         self.thumb_pending = true;
     }
 
-    /// Show `rgba` as the result: what is on screen is held to reveal it
-    /// over, and a waiting image is done.
+    /// Show `rgba` as the result: what is on screen, or the run's tile
+    /// preview, is held to reveal it over, and a waiting image is done.
     pub(crate) fn show_result(&mut self, rgba: Arc<image::RgbaImage>) {
-        self.hold_for_reveal();
+        self.hold_tile_preview_for_reveal();
         self.unpark_result();
         self.take_result(rgba);
         if self.status == BatchStatus::Pending {
@@ -1432,6 +1457,7 @@ impl BatchItem {
         self.job = None;
         self.reveal = None;
         self.subject = None;
+        self.tile_preview = None;
         let has_result = self.result_rgba.is_some() || self.result_parked();
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
@@ -2178,6 +2204,22 @@ mod tests {
     /// A landed upscale reveals over its finished-tile preview, which
     /// stays on screen until the result's texture lands; a new run never
     /// shows the last run's tiles.
+    #[test]
+    fn an_image_is_running_while_a_model_works_on_it() {
+        let mut item = fixture_item(1);
+        assert!(!item.is_running());
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(!item.is_running(), "a queued cut-out waits");
+        item.status = BatchStatus::Processing;
+        assert!(item.is_running(), "the worker has taken it");
+        for engine in [Engine::Upscale, Engine::Colorize, Engine::Erase] {
+            let mut item = fixture_item(2);
+            item.status = BatchStatus::Done;
+            item.start_job(None, engine);
+            assert!(item.is_running(), "{engine:?} runs from its start");
+        }
+    }
+
     #[test]
     fn an_upscale_reveals_over_its_tile_preview() {
         let ctx = egui::Context::default();

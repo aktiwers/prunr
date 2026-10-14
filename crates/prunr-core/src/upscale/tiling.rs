@@ -19,7 +19,7 @@
 //! working_set_mb admission gate refuses to dispatch when free RAM is
 //! below this peak.
 
-use crate::progress::{Progress, ProgressUpdate, Step, TilePreview, TileRect, Unit};
+use crate::progress::{Progress, Step, TileRect, Unit};
 
 /// Bytes per output pixel at the run's peak, as it finishes: the RGB
 /// accumulator and weights (16), the enlarged alpha (1) and the output
@@ -208,9 +208,7 @@ where
             }
         }
 
-        if let Some(edge) = progress.preview_edge() {
-            progress.report(ProgressUpdate::TilePreview(preview_tile(input, &inferred, tile, scale, edge)));
-        }
+        progress.tile_preview((tile.x, tile.y, tile.w, tile.h), (in_w, in_h), |w, h| preview_tile(input, &inferred, tile, scale, w, h));
         drop(inferred);
         progress.inner(tile_idx as u32 + 1, total, Unit::Tile);
         progress.tile(tile_idx as u32, true);
@@ -237,26 +235,17 @@ where
     Ok(out_img)
 }
 
-/// The finished `tile` as it sits on a preview of the whole image whose
-/// longer side is at most `edge` pixels: the model's output resampled with
-/// Lanczos3 into the tile's square, with the input's alpha. Costs one
+/// The finished `tile` at `width × height` for its preview: the model's
+/// output resampled with Lanczos3, with the input's alpha. Costs one
 /// resample of the tile, a small share of its inference.
-fn preview_tile(input: &RgbaImage, inferred: &RgbImage, tile: &UpscaleTilePlacement, scale: u32, edge: u32) -> TilePreview {
-    let (in_w, in_h) = input.dimensions();
-    let s = (edge as f64 / in_w.max(in_h).max(1) as f64).min(1.0);
-    let at = |v: u32| (v as f64 * s).round() as u32;
-    let (full_width, full_height) = (at(in_w).max(1), at(in_h).max(1));
-    let (x, y) = (at(tile.x).min(full_width - 1), at(tile.y).min(full_height - 1));
-    let width = at(tile.x + tile.w).clamp(x + 1, full_width) - x;
-    let height = at(tile.y + tile.h).clamp(y + 1, full_height) - y;
+fn preview_tile(input: &RgbaImage, inferred: &RgbImage, tile: &UpscaleTilePlacement, scale: u32, width: u32, height: u32) -> Vec<u8> {
     // A padded tile is copied out first: the filter would pull the padding in.
     let unpadded = (tile.padded_w != tile.w || tile.padded_h != tile.h)
         .then(|| image::imageops::crop_imm(inferred, 0, 0, tile.w * scale, tile.h * scale).to_image());
     let rgb = crate::formats::resize_rgb_image_lanczos3(unpadded.as_ref().unwrap_or(inferred), width, height);
     let alpha = GrayImage::from_fn(tile.w, tile.h, |ax, ay| image::Luma([input.get_pixel(tile.x + ax, tile.y + ay)[3]]));
     let alpha = crate::formats::resize_gray_lanczos3(&alpha, width, height);
-    let rgba = rgb.pixels().zip(alpha.pixels()).flat_map(|(c, a)| [c[0], c[1], c[2], a[0]]).collect();
-    TilePreview { x, y, width, height, full_width, full_height, rgba }
+    rgb.pixels().zip(alpha.pixels()).flat_map(|(c, a)| [c[0], c[1], c[2], a[0]]).collect()
 }
 
 fn extract_rgb_tile(input: &RgbaImage, tile: &UpscaleTilePlacement) -> RgbImage {
@@ -449,7 +438,7 @@ mod tests {
     /// colours with the input's alpha; not asked, it sends none.
     #[test]
     fn previews_show_each_finished_tile_in_its_square() {
-        use crate::progress::{check_contract, RecordingSink};
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
         let scale = 4u32;
         let input = RgbaImage::from_pixel(600, 300, image::Rgba([0, 0, 0, 128]));
         let cfg = TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 16 };
