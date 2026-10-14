@@ -399,6 +399,12 @@ impl SubprocessManager {
         Ok(())
     }
 
+    /// New mask, Sketch mode and line settings for the running worker.
+    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge })
+            .map_err(|e| format!("Failed to send Configure: {e}"))
+    }
+
     /// Cancel one item by id — worker drops it at the next dispatch check
     /// and emits `ImageError { error: "Cancelled" }`.
     pub fn send_cancel_item(&mut self, item_id: u64) -> Result<(), String> {

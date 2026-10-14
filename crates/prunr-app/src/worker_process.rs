@@ -287,12 +287,15 @@ pub fn run_worker() -> ! {
     // Inpaint-only subprocess: skip seg/edge engine creation entirely.
     // Inpaint sessions are built lazily by `process_inpaint_with` on
     // first dispatch, so the worker can enter the command loop now.
+    // The run settings a `Configure` command replaces; the engines a
+    // later mode needs are built at its first dispatch.
+    let (mut mask, mut line_mode, mut edge) = (mask, line_mode, edge);
     let needs_edge = !inpaint_only && line_mode != LineMode::Off;
     let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
 
-    let line_depth = (needs_edge && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
-    let traced_scales = edge_scales.of(&edge);
-    let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
+    let line_depth = (!inpaint_only && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
+    let mut traced_scales = edge_scales.of(&edge);
+    let mut edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
             Ok(e) => Some(Arc::new(e)),
             Err(e) => {
@@ -309,7 +312,7 @@ pub fn run_worker() -> ! {
     };
 
     // Create segmentation engine pool
-    let engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
+    let mut engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
         match create_engine_pool(model, jobs, cpu_only) {
             Ok(e) => e,
             Err(e) => {
@@ -335,8 +338,9 @@ pub fn run_worker() -> ! {
         active_provider: active_provider.clone(),
     });
 
-    // Build rayon pool for parallel inference
-    let pool_size = engines.len().max(1);
+    // Build rayon pool for parallel inference, sized for the engines a
+    // later `Configure` may still build.
+    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &active_provider) };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
@@ -375,7 +379,34 @@ pub fn run_worker() -> ! {
         };
 
         match cmd {
+            SubprocessCommand::Configure { mask: new_mask, line_mode: new_mode, edge: new_edge } => {
+                mask = new_mask;
+                line_mode = new_mode;
+                edge = new_edge;
+                traced_scales = edge_scales.of(&edge);
+                tracing::info!(?line_mode, "worker: run settings replaced");
+            }
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
+                let built = (|| -> Result<(), String> {
+                    if line_mode != LineMode::Off && edge_engine.is_none() {
+                        edge_engine = Some(Arc::new(EdgeEngine::new().map_err(|e| format!("Edge engine failed: {e}"))?));
+                    }
+                    if line_mode != LineMode::EdgesOnly && engines.is_empty() {
+                        let started = std::time::Instant::now();
+                        engines = create_engine_pool(model, jobs, cpu_only).map_err(|e| format!("Engine pool failed: {e}"))?;
+                        tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: engine pool built on first use");
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = built {
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                    let mut inputs: Vec<&std::path::Path> = vec![&image_path];
+                    if let Some(ci) = chain_input.as_ref() {
+                        inputs.push(&ci.path);
+                    }
+                    cleanup_ipc_temps(&ipc_dir, &inputs);
+                    continue;
+                }
                 let engine = if !engines.is_empty() {
                     Some(engines[engine_idx % engines.len()].clone())
                 } else {
@@ -805,6 +836,16 @@ pub fn run_worker() -> ! {
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
                 mask: cmd_mask,
             } => {
+                if edge_engine.is_none() {
+                    match EdgeEngine::new() {
+                        Ok(e) => edge_engine = Some(Arc::new(e)),
+                        Err(e) => {
+                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: format!("Edge engine failed: {e}") });
+                            cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
+                            continue;
+                        }
+                    }
+                }
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
