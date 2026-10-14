@@ -418,9 +418,15 @@ impl PrunrApp {
         if !item.needs_depth_run() {
             return;
         }
-        let input = item.original_run_input();
+        let job = crate::gui::processor::DepthJob {
+            item_id: item.id,
+            epoch: item.depth_run.epoch,
+            input: item.original_run_input(),
+            cpu_only,
+            faces: item.faces_found_in_original(),
+        };
         item.depth_run.pending = true;
-        self.processor.dispatch_depth(item.id, item.depth_run.epoch, input, cpu_only);
+        self.processor.dispatch_depth(job);
     }
 
     /// Depth maps: keep what lands and re-render what reads it; measure

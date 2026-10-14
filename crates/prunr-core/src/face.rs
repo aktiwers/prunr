@@ -65,11 +65,13 @@ pub struct Face {
 }
 
 /// Where a found face sits in its photo: its alignment onto the
-/// restorers' crop, and the photo's size. Enough to outline the face and
-/// tell the largest before it is redrawn.
+/// restorers' crop, its box, and the photo's size. Enough to outline the
+/// face, tell the largest and focus on it before it is redrawn.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FacePlace {
     to_crop: Similarity,
+    /// The detector's box, x0, y0, x1, y1 in photo pixels.
+    bbox: [f32; 4],
     /// The photo it was found in, width and height.
     photo_size: [u32; 2],
 }
@@ -77,7 +79,14 @@ pub struct FacePlace {
 impl FacePlace {
     /// Where `face`, found in a photo of `photo_size`, sits.
     pub fn of(face: &Face, photo_size: [u32; 2]) -> Self {
-        Self { to_crop: Similarity::fit(&face.landmarks, &TEMPLATE), photo_size }
+        Self { to_crop: Similarity::fit(&face.landmarks, &TEMPLATE), bbox: face.bbox, photo_size }
+    }
+
+    /// The face's box as fractions of the photo (x0, y0, x1, y1), within it.
+    pub fn bounds(&self) -> [f32; 4] {
+        let [w, h] = self.photo_size.map(|v| v.max(1) as f32);
+        let [x0, y0, x1, y1] = self.bbox;
+        [x0 / w, y0 / h, x1 / w, y1 / h].map(|v| v.clamp(0.0, 1.0))
     }
 
     /// The area its redraw covers in the photo: the crop's face ellipse
@@ -197,7 +206,37 @@ impl FaceFinder {
 
     /// The faces in `image`, best first.
     pub fn find(&mut self, image: &RgbaImage) -> Result<Vec<Face>, CoreError> {
-        detect(&mut self.detector, image)
+        detect(&mut self.detector, image.dimensions(), |w, h| crate::formats::resize_rgba(image, w, h, crate::formats::ResizeFilter::Bilinear))
+    }
+
+    /// `find` for a decoded photo in any layout: it is shrunk as it is,
+    /// never expanded to a full-size RGBA copy first.
+    pub fn find_decoded(&mut self, photo: &image::DynamicImage) -> Result<Vec<Face>, CoreError> {
+        use image::GenericImageView;
+        detect(&mut self.detector, photo.dimensions(), |w, h| crate::formats::resize_to_rgba(photo, w, h, crate::formats::ResizeFilter::Bilinear))
+    }
+}
+
+/// A face finder built at the first photo that asks and kept for the
+/// rest; one that fails to build is tried again at the next photo.
+#[derive(Default)]
+pub struct LazyFaceFinder(Option<FaceFinder>);
+
+impl LazyFaceFinder {
+    /// Where the faces `find` sees in a photo of `photo_size` sit; none
+    /// when the finder fails, which is logged.
+    pub fn places(&mut self, photo_size: [u32; 2], find: impl FnOnce(&mut FaceFinder) -> Result<Vec<Face>, CoreError>) -> Vec<FacePlace> {
+        if self.0.is_none() {
+            self.0 = FaceFinder::new().map_err(|err| tracing::warn!(%err, "face finder unavailable")).ok();
+        }
+        let Some(finder) = self.0.as_mut() else { return Vec::new() };
+        match find(finder) {
+            Ok(faces) => faces.iter().map(|f| FacePlace::of(f, photo_size)).collect(),
+            Err(err) => {
+                tracing::warn!(%err, "face finder failed");
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -319,13 +358,13 @@ fn load(path: &std::path::Path) -> Result<Session, CoreError> {
         .map_err(|e| CoreError::Inference(format!("face model {}: {e}", path.display())))
 }
 
-/// YuNet over the photo, scaled to `DETECT_MAX_SIDE` and padded to a
-/// multiple of 32. Returns faces in photo pixels, best first.
-fn detect(session: &mut Session, image: &RgbaImage) -> Result<Vec<Face>, CoreError> {
-    let (w, h) = image.dimensions();
+/// YuNet over a `w × h` photo, which `shrink(sw, sh)` gives scaled to
+/// `DETECT_MAX_SIDE`, padded to a multiple of 32. Returns faces in photo
+/// pixels, best first.
+fn detect(session: &mut Session, (w, h): (u32, u32), shrink: impl FnOnce(u32, u32) -> RgbaImage) -> Result<Vec<Face>, CoreError> {
     let scale = (DETECT_MAX_SIDE as f32 / w.max(h) as f32).min(1.0);
     let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
-    let small = crate::formats::resize_rgba(image, sw, sh, crate::formats::ResizeFilter::Bilinear);
+    let small = shrink(sw, sh);
     let (pw, ph) = (sw.div_ceil(32) * 32, sh.div_ceil(32) * 32);
     // YuNet reads BGR at 0-255.
     let mut input = Array4::<f32>::zeros((1, 3, ph as usize, pw as usize));
@@ -819,7 +858,7 @@ mod tests {
     }
 
     fn placed(to_crop: Similarity, photo_size: [u32; 2]) -> FacePlace {
-        FacePlace { to_crop, photo_size }
+        FacePlace { to_crop, bbox: [0.0; 4], photo_size }
     }
 
     /// A textured 900 × 600 photo with two faces as the detector reports
