@@ -851,8 +851,9 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             painted = Some(img_rect);
         }
     } else if let Some(it) = item {
-        // Until the new result's texture lands, the image it replaces stays.
-        let shown = it.result_texture.as_ref().or(it.held_texture())?;
+        // Until the new result's texture lands, the image it reveals over
+        // stays: the one it replaces, or the run's tile preview.
+        let shown = it.held_texture().or(it.result_texture.as_ref())?;
         let img_rect = compute_img_rect(canvas_rect, it.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
         paint_backdrop(ui, img_rect, it, it.frame_size());
