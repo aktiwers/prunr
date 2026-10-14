@@ -663,15 +663,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Required,
         incompatible_eps: &[],
-        // Architecture-derived ceiling — cross-hardware, not tuned to
-        // any one observed system:
-        //   ~5 GB resident (UNet 1.7 + VAE 0.16 + text-encoder 0.25
-        //                   + ORT session overhead ~3)
-        //   ~3 GB load transient (graph optimization + initial scratch)
-        //   ~2 GB EP overhead worst-case (OpenVINO heaviest)
-        // Older 16 GB number encoded a then-unfixed bundle-build race;
-        // race is closed by the per-id OnceLock pattern in inpaint_sd.
-        working_set_mb: 10000,
+        // The peak while the bundle loads on OpenVINO's CPU device, its
+        // heaviest provider: 13.6-14.1 GB measured for the Fast bundle,
+        // which has this one's architecture and size. An estimate of
+        // 10 GB let erases start that the memory watchdog then killed
+        // halfway through the load.
+        working_set_mb: 14000,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -733,9 +730,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        // LCM is a training-schedule variant; bundle footprint matches
-        // standard SD 1.5 inpaint.
-        working_set_mb: 10000,
+        // Measured peak while the bundle loads on OpenVINO's CPU device:
+        // 13.6-14.1 GB.
+        working_set_mb: 14000,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,

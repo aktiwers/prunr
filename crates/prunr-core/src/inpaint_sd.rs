@@ -3385,6 +3385,20 @@ mod tests {
         }
     }
 
+    /// The Fast bundle peaks at about 14 GB while it loads: with 12 GB
+    /// free and the default headroom the erase is refused before it
+    /// starts, not killed by the memory watchdog halfway through.
+    #[test]
+    fn an_erase_that_cannot_fit_its_load_is_refused_up_front() {
+        for id in [prunr_models::ModelId::SdV15LcmInpaintFp16, prunr_models::ModelId::SdV15InpaintFp16] {
+            let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
+            assert!(fit_ram(id, &mut t, 12_147, false).is_err(), "{id:?} refused with 12 GB free");
+            let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
+            assert!(fit_ram(id, &mut t, 16_500, false).is_ok(), "{id:?} runs with 16.5 GB free");
+        }
+        assert_eq!(sd_ram_fit(12_147, SD_DEFAULT_MARGIN_MB), SdRamFit::Refused);
+    }
+
     /// "CPU only" reaches the SD parts through the bundle key, so a
     /// worker process needs no extra state, and a bundle built under the
     /// other policy is never reused.
