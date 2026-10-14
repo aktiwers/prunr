@@ -341,6 +341,14 @@ pub struct ModelDescriptor {
     /// admission. The number includes load-transient peaks (OpenVINO
     /// graph creation, sequential VAE+UNet+text-encoder loads for SD).
     pub working_set_mb: u32,
+    /// For a segmentation model: whether a batch on the host CPU runs
+    /// faster with an engine per job. One run of a heavy model already
+    /// fills every core, so a second engine only doubles RAM (BiRefNet-lite:
+    /// 4 × 12 MP in 39.7 s with one engine, 42.3 s with two); a light
+    /// model's run leaves room to overlap the next image's decode and
+    /// encode (Silueta 27 %, U2Net 18 % faster with four, on a 4-core i7).
+    /// `false` for every other model.
+    pub parallel_jobs_pay_on_cpu: bool,
     /// Window-size multiple constraint for window-attention transformers
     /// (HAT, Swin). Both H and W must be multiples of this at inference
     /// time — the upscale tiler pads bottom-right and trims output.
@@ -464,6 +472,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // quantized_cast type mismatch. Both verified 2026-04-26.
         incompatible_eps: &["OpenVINO"],
         working_set_mb: 200,
+        parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -491,6 +500,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 800,
+        parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -506,6 +516,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 2500,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -528,6 +539,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 300,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -555,6 +567,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 700,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -582,6 +595,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 700,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -609,6 +623,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 150,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -669,6 +684,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // 10 GB let erases start that the memory watchdog then killed
         // halfway through the load.
         working_set_mb: 14000,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -733,6 +749,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured peak while the bundle loads on OpenVINO's CPU device:
         // 13.6-14.1 GB.
         working_set_mb: 14000,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -809,6 +826,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // weights widened for the CPU kernels, the VAE, activations);
         // the 4.8 GiB of mapped weight files on top are reclaimable.
         working_set_mb: 16000,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -853,6 +871,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
         working_set_mb: 100,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -885,6 +904,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 600,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         attribution_required: false,
@@ -921,6 +941,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 1200,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(16),
         recommended_tile: Some(256),
         attribution_required: true,
@@ -958,6 +979,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 1000,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(2),
         recommended_tile: Some(512),
         attribution_required: false,
@@ -995,6 +1017,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 600,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         attribution_required: false,
@@ -1027,6 +1050,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 800,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         attribution_required: true,
@@ -1064,6 +1088,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         working_set_mb: 600,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         attribution_required: false,
@@ -1097,6 +1122,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         working_set_mb: 1600,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1126,6 +1152,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         working_set_mb: 500,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1166,6 +1193,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // activation scratch typical 2-3× = 400-800 MB peak.
         // Validate empirically on a 4 GB RAM machine before bumping.
         working_set_mb: 800,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1200,6 +1228,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 1200,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1234,6 +1263,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         working_set_mb: 1200,
+        parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
         attribution_required: false,
@@ -1834,6 +1864,15 @@ mod tests {
                 | ModelId::DdcolorTiny
                 | ModelId::DepthAnythingV2Small => {}
             }
+        }
+    }
+
+    /// Only a segmentation model builds an engine pool, so only one can
+    /// gain from an engine per job.
+    #[test]
+    fn only_segmentation_models_pay_for_parallel_jobs() {
+        for d in REGISTRY {
+            assert!(!d.parallel_jobs_pay_on_cpu || d.category == ModelCategory::Segmentation, "{:?}", d.id);
         }
     }
 
