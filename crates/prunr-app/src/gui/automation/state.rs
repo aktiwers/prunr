@@ -53,6 +53,8 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             "magic_brush"
         } else if app.brush_state.is_enabled() {
             "paint_brush"
+        } else if app.picking_depth_focus {
+            "set_focus"
         } else {
             "none"
         },
