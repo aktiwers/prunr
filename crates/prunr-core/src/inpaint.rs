@@ -1029,6 +1029,18 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// f32 accumulators instead of ~250 MB. Pixels outside the bbox are
 /// guaranteed mask==0 and so would be skipped by the composite loop
 /// anyway — the bbox crop is bit-exact with the full-image variant.
+///
+/// Asked for previews, each finished tile goes out as its fill over the
+/// photo (`fill_preview`), made in the tile's photo crop, which the loop
+/// holds anyway; the result is the same either way. Extra per tile (the
+/// resample) and for a listener that paints them all into one preview
+/// of the whole photo:
+///
+/// | Photo, preview edge | Extra per tile     | Whole preview |
+/// |---------------------|--------------------|---------------|
+/// | 1024 × 768, 1536    | none (1:1)         | 3 MB          |
+/// | 4096 × 3072, 1536   | 150 KB             | 7 MB          |
+/// | 8192 × 6144, 1536   | 40 KB              | 7 MB          |
 // `pub` to be reachable from `benches/tile_compose.rs`; `#[doc(hidden)]`
 // because it's still an internal kernel — callers should use
 // `process_inpaint`.
@@ -1079,6 +1091,7 @@ where
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
+        progress.tile_preview((tile.x, tile.y, tile.w, tile.h), (w, h), |pw, ph| fill_preview(tile_rgba, &painted, &tile_mask, pw, ph));
         progress.inner(i as u32 + 1, total, Unit::Tile);
         progress.tile(i as u32, true);
     }
@@ -1119,6 +1132,21 @@ where
         }
     }
     Ok(out)
+}
+
+/// A finished tile as the erase shows it, at `width × height`: the fill
+/// where the mask is set (the rule the final composite follows), the
+/// photo elsewhere, the photo's alpha throughout. Fills `photo` in place.
+fn fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, width: u32, height: u32) -> Vec<u8> {
+    for ((p, f), m) in photo.pixels_mut().zip(painted.pixels()).zip(mask.pixels()) {
+        if m.0[0] != 0 {
+            p.0[..3].copy_from_slice(&f.0[..3]);
+        }
+    }
+    if photo.dimensions() != (width, height) {
+        photo = crate::formats::resize_rgba(&photo, width, height, crate::formats::ResizeFilter::Lanczos3);
+    }
+    photo.into_raw()
 }
 
 /// Bounding box of pixels where `mask >= min_value`, expanded by
@@ -1254,6 +1282,58 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); t.clone() });
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
+    }
+
+    /// Asked for previews, each finished tile is sent once, while it
+    /// runs, at its place: the fill inside the mask, the photo untouched
+    /// outside it. A photo of one tile goes the same way. The result is
+    /// the same with or without previews, and none is sent unless asked.
+    #[test]
+    fn tile_compose_previews_each_finished_tile_over_the_photo() {
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
+        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        for (w, h) in [(1200, 600), (300, 200)] {
+            let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, 40, 200]));
+            let mut mask = GrayImage::new(w, h);
+            for (x, y) in [(100, 100), (101, 100), (w - 20, h - 30)] {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+            mask.put_pixel(102, 100, Luma([60]));
+            let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+            let sink = std::sync::Arc::new(RecordingSink::default());
+            let with = tile_compose(&img, &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
+            let updates = sink.updates();
+            assert_eq!(check_contract(&updates), Ok(()));
+
+            let mut running = None;
+            let mut previews = 0;
+            for u in &updates {
+                match u {
+                    ProgressUpdate::Tile { index, done: false } => running = Some(*index as usize),
+                    ProgressUpdate::Tile { done: true, .. } => running = None,
+                    ProgressUpdate::TilePreview(p) => {
+                        let t = work[running.expect("a preview is sent while its tile runs")];
+                        assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (t.x, t.y, t.w, t.h, w, h), "at its place");
+                        for (i, px) in p.rgba.chunks(4).enumerate() {
+                            let (x, y) = (t.x + i as u32 % t.w, t.y + i as u32 / t.w);
+                            let photo = img.get_pixel(x, y).0;
+                            let want = if mask.get_pixel(x, y).0[0] != 0 { [250, 0, 0, photo[3]] } else { photo };
+                            assert_eq!(px, want, "({x}, {y})");
+                        }
+                        previews += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(previews, work.len(), "one preview per tile, {w} × {h}");
+            assert!(w > TILE || work.len() == 1, "a small photo is one tile");
+
+            let quiet = std::sync::Arc::new(RecordingSink::default());
+            let without = tile_compose(&img, &mask, &Progress::new(quiet.clone()), fill).unwrap();
+            assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
+            assert_eq!(with.as_raw(), without.as_raw(), "previews leave the result as it is");
+            assert_eq!(tile_compose(&img, &mask, &Progress::none(), fill).unwrap().as_raw(), with.as_raw());
+        }
     }
 
     #[test]
