@@ -79,6 +79,9 @@ pub struct DispatchProgress {
     /// The tile map: where the work happens, and how far each tile is.
     pub tiles: Arc<[prunr_core::TileRect]>,
     pub tile_states: Arc<Vec<TileState>>,
+    /// Cells an earlier layout of this run finished (an erase fills
+    /// region by region): they stay done.
+    pub finished: Arc<[prunr_core::TileRect]>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
 }
@@ -113,6 +116,7 @@ impl DispatchProgress {
             inner_unit: None,
             tiles: Arc::new([]),
             tile_states: Arc::default(),
+            finished: Arc::new([]),
             pace: None,
         }
     }
@@ -133,6 +137,8 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
+                let done = self.tiles.iter().zip(self.tile_states.iter()).filter(|(_, s)| **s == TileState::Done).map(|(c, _)| *c);
+                self.finished = self.finished.iter().copied().chain(done).collect();
                 self.tiles = rects.as_slice().into();
                 self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
@@ -478,8 +484,12 @@ mod tests {
         assert_eq!(*p.tile_states, [TileState::Running, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tile { index: 0, done: true });
         assert_eq!(*p.tile_states, [TileState::Done, TileState::Waiting]);
-        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.5)]));
         assert_eq!(*p.tile_states, [TileState::Waiting], "a new layout starts over");
+        assert_eq!(*p.finished, [half(0.0)], "what the last one finished stays done");
+        p.apply(&ProgressUpdate::Tile { index: 0, done: true });
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        assert_eq!(*p.finished, [half(0.0), half(0.5)]);
     }
 
     #[test]

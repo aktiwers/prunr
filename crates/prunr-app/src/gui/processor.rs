@@ -464,6 +464,21 @@ fn measure_depth(
     result
 }
 
+/// Lay the photo an erase starts from under its tiles' previews, so the
+/// preview is the whole image filling in and the result reveals over it.
+/// One resample of the photo to the preview's size, off the UI thread;
+/// the preview holds at most `TILE_PREVIEW_EDGE`² RGBA (9 MB).
+fn preview_the_photo(progress: &prunr_core::Progress, photo: &image::RgbaImage) {
+    let size = photo.dimensions();
+    progress.tile_preview((0, 0, size.0, size.1), size, |w, h| {
+        if (w, h) == size {
+            photo.as_raw().clone()
+        } else {
+            prunr_core::formats::resize_rgba(photo, w, h, prunr_core::formats::ResizeFilter::Lanczos3).into_raw()
+        }
+    });
+}
+
 /// A picture a run made for its item (a finished tile, …), on its way
 /// to the canvas.
 pub(crate) type RunPicture = (u64, prunr_core::ProgressUpdate);
@@ -495,6 +510,13 @@ impl PictureSink {
     pub(crate) fn of_run(item_id: u64, run: super::dispatch_progress::RunSink, pictures: mpsc::Sender<RunPicture>) -> Self {
         let shown = run.clone();
         Self::new(item_id, Some(run), move || shown.current(), pictures)
+    }
+
+    /// The run is over: the pill clears unless a newer run took it.
+    pub(crate) fn end(&self) {
+        if let Some(run) = &self.pill {
+            run.end();
+        }
     }
 
     /// A progress handle reporting here that asks for tile previews.
@@ -748,8 +770,8 @@ pub(crate) struct Processor {
     /// drain path ignores the result. Cancel button + Esc key both
     /// flip the flag for the currently-selected item.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// The progress run each in-flight eraser stroke reports to.
-    inpaint_runs: HashMap<u64, super::dispatch_progress::RunSink>,
+    /// The run each in-flight eraser stroke reports to.
+    inpaint_runs: HashMap<u64, PictureSink>,
     /// Channels to the dedicated SD-inpaint subprocess bridge thread.
     /// LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path; only
     /// SD-family dispatches go through these. Bridge spawns the
@@ -1032,16 +1054,19 @@ impl Processor {
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint);
-        let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
+        let run = self.dispatch_progress.begin(initial);
+        let sink = PictureSink::of_run(item_id, run.clone(), self.picture_sender());
+        let progress = sink.clone().into_progress().with_cancel(cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
-        self.inpaint_runs.insert(item_id, run.clone());
+        self.inpaint_runs.insert(item_id, sink);
         if tuning.backend.is_sd_family() {
-            // The SD subprocess reports through the bridge to `run`.
-            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
+            // The SD subprocess reports through the bridge to the run's sink.
+            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning, progress);
             return;
         }
         let tx = self.inpaint_tx.clone();
         self.spawn_model(move || {
+            preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN.
             let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.backend, tuning.cpu_only, tuning.fill_scale, &progress);
@@ -1177,6 +1202,7 @@ impl Processor {
         image: &std::sync::Arc<image::RgbaImage>,
         correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: &InpaintTuning,
+        progress: prunr_core::Progress,
     ) {
         // PNG-encode + temp-file write is 150-300 ms per stroke at 4K
         // — moving it onto rayon keeps the egui frame loop responsive
@@ -1198,6 +1224,8 @@ impl Processor {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
             };
             if cancelled() { send_cancelled(); return; }
+            // Before the dispatch, so it lands under the worker's previews.
+            preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             let sd_req = sd_request(&tuning);
             let dir = crate::subprocess::protocol::ipc_temp_dir();
@@ -1239,11 +1267,7 @@ impl Processor {
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
-                InpaintBridgeResult::Report { item_id, update } => {
-                    if let Some(run) = self.inpaint_runs.get(&item_id) {
-                        prunr_core::ProgressSink::report(run, update);
-                    }
-                }
+                InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale } => {
                     let outcome = match super::worker::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
@@ -1285,10 +1309,18 @@ impl Processor {
         }
     }
 
+    /// An SD stroke's report reaches its run as an in-process one's does:
+    /// a picture to the canvas, the rest to the pill.
+    pub(crate) fn report_inpaint(&self, item_id: u64, update: prunr_core::ProgressUpdate) {
+        if let Some(sink) = self.inpaint_runs.get(&item_id) {
+            prunr_core::ProgressSink::report(sink, update);
+        }
+    }
+
     /// The SD stroke's run is over: clear the progress it showed.
     fn end_inpaint_run(&self, item_id: u64) {
-        if let Some(run) = self.inpaint_runs.get(&item_id) {
-            run.end();
+        if let Some(sink) = self.inpaint_runs.get(&item_id) {
+            sink.end();
         }
     }
 
@@ -2276,6 +2308,27 @@ mod sam_dispatch_tests {
 mod tests {
     use super::*;
     use prunr_models::ModelId;
+
+    /// An erase lays the photo it starts from under its tiles: the whole
+    /// photo as one picture, at the preview's size, as it is when it fits.
+    #[test]
+    fn an_erase_lays_its_photo_under_its_tiles() {
+        use prunr_core::progress::RecordingSink;
+        use prunr_core::{Progress, ProgressUpdate};
+        let sink = Arc::new(RecordingSink::default());
+        let progress = Progress::new(sink.clone()).with_tile_previews(crate::subprocess::protocol::TILE_PREVIEW_EDGE);
+        let small = image::RgbaImage::from_fn(30, 20, |x, y| image::Rgba([x as u8, y as u8, 7, 200]));
+        preview_the_photo(&progress, &image::RgbaImage::from_pixel(3072, 1000, image::Rgba([10, 20, 30, 255])));
+        preview_the_photo(&progress, &small);
+        let pictures: Vec<_> = sink.updates().into_iter().map(|u| match u {
+            ProgressUpdate::TilePreview(p) => p,
+            u => panic!("{u:?}"),
+        }).collect();
+        assert_eq!((pictures[0].x, pictures[0].y, pictures[0].width, pictures[0].height, pictures[0].full_width, pictures[0].full_height), (0, 0, 1536, 500, 1536, 500));
+        assert!(pictures[0].rgba.chunks(4).all(|p| p == [10, 20, 30, 255]));
+        assert_eq!((pictures[1].width, pictures[1].height, pictures[1].full_width), (30, 20, 30));
+        assert_eq!(pictures[1].rgba, small.into_raw(), "a photo that fits is laid as it is");
+    }
 
     /// A run's pictures reach the canvas's channel while the run says
     /// they may land, and its steps reach the pill; a run another has
