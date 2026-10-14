@@ -40,6 +40,8 @@ pub(crate) enum EpKind {
 /// OpenVINO's provider name, defined on every platform so code that
 /// reads a provider string needs no per-platform branch.
 pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
+/// DirectML's provider name, on every platform for the same reason.
+pub const DIRECTML_NAME: &str = "DirectML";
 
 impl EpKind {
     /// Stable display string used by logs, the active-provider label,
@@ -55,7 +57,7 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => "CoreML",
             #[cfg(windows)]
-            EpKind::DirectMl => "DirectML",
+            EpKind::DirectMl => DIRECTML_NAME,
         }
     }
 }
