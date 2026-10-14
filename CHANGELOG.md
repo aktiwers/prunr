@@ -81,6 +81,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The window can be made narrower: 900 px minimum, down from 1100; a narrow toolbar shows its chips as icons.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
 - The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
+- The Blurred photo background and Refine's Sharpen blur on every core: a 24 MP background blurs in half a second instead of four.
 
 ### Performance
 

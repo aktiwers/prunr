@@ -28,7 +28,7 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
         return src.clone();
     }
     // reused as the result, pixel by pixel after reading its blur value
-    let mut out = image::imageops::fast_blur(src, sigma.max(0.3));
+    let mut out = crate::blur::blur_rgba(src, sigma.max(0.3));
     for (o, p) in out.pixels_mut().zip(src.pixels()) {
         for c in 0..3 {
             let (v, bv) = (p.0[c] as f32, o.0[c] as f32);
