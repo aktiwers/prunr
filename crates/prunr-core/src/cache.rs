@@ -2,8 +2,9 @@
 //!
 //! Every EP that supports caching its compiled IR (OpenVINO model
 //! cache, CoreML mlmodelc cache, ORT graph optimization for CPU /
-//! CUDA) gets a directory under `<data>/prunr/ep_cache/<ep>/<key>/`,
-//! where `<key>` is `<model_stable_name>-<model_version>-v<format>`.
+//! CUDA) gets a directory under `<cache root>/<ep>/<key>/` (see
+//! [`cache_root`]), where `<key>` is
+//! `<model_stable_name>-<model_version>-ort<runtime>-v<format>`.
 //! Bumping any component invalidates the cache automatically.
 //!
 //! EP names match `OrtEngine::active_provider()`'s output (`"OpenVINO"`,
@@ -29,15 +30,26 @@ const CACHE_FORMAT_VERSION: u32 = 1;
 /// 16 has plenty of headroom while still terminating.
 const MAX_WALK_DEPTH: u32 = 16;
 
-/// Root cache directory: `<data>/prunr/ep_cache/`. Returns `None` on
-/// platforms where `data_dir()` itself is unavailable; callers fall
-/// back to no-cache rather than erroring out.
+/// Root cache directory: `<data>/prunr/ep_cache/`, on macOS
+/// `~/Library/Caches/prunr/ep_cache/`. Returns `None` when the OS gives
+/// no such dir; callers fall back to no-cache rather than erroring out.
 pub fn cache_root() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(root) = tests::temp_root() {
         return Some(root);
     }
-    prunr_models::data_dir().map(|d| d.join("ep_cache"))
+    root_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"))
+}
+
+/// macOS keeps the cache out of `Application Support`: CoreML opens
+/// its compiled model through a file URL that a space in the path can
+/// turn into nil (microsoft/onnxruntime#33306).
+fn root_in(prunr_data_dir: Option<PathBuf>, os_cache_dir: Option<PathBuf>, macos: bool) -> Option<PathBuf> {
+    if macos {
+        os_cache_dir.map(|d| d.join("prunr").join("ep_cache"))
+    } else {
+        prunr_data_dir.map(|d| d.join("ep_cache"))
+    }
 }
 
 /// Pure path builder — no filesystem side effects. Use this from any
@@ -281,6 +293,18 @@ mod tests {
         let info = "ORT Build Info: git-branch=rel-1.24.1, git-commit-id=abc, build type=Release";
         assert_eq!(crate::ort_runtime::runtime_version_from_info(info).as_deref(), Some("1.24.1"));
         assert_eq!(crate::ort_runtime::runtime_version_from_info("no branch here"), None);
+    }
+
+    #[test]
+    fn the_macos_cache_path_has_no_space_for_coreml_to_trip_on() {
+        let home = Path::new("/Users/ada");
+        let data = Some(home.join("Library/Application Support/prunr"));
+        let caches = Some(home.join("Library/Caches"));
+        let mac = root_in(data, caches, true).unwrap();
+        assert!(!mac.to_string_lossy().contains(' '), "{mac:?}");
+
+        let linux = root_in(Some("/home/ada/.local/share/prunr".into()), Some("/home/ada/.cache".into()), false);
+        assert_eq!(linux, Some(PathBuf::from("/home/ada/.local/share/prunr/ep_cache")));
     }
 
     #[test]
