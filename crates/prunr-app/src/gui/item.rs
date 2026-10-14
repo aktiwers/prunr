@@ -1636,15 +1636,6 @@ impl BatchItem {
         Some((self.id, bytes, input))
     }
 
-    /// Whether the awaited run works on the result on screen, so the
-    /// canvas shows that result while it runs.
-    pub(crate) fn job_builds_on_shown_result(&self) -> bool {
-        let shown = self.timeline.current().result.as_ref();
-        let Some(job) = &self.job else { return false };
-        job.keep.is_some()
-            || job.start.as_ref().zip(shown).is_some_and(|(start, shown)| Arc::ptr_eq(&start.image, shown))
-    }
-
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
     /// point used by both the toolbar dispatcher and batch classification.
     pub(crate) fn apply_cache_impact(

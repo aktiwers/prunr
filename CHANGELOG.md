@@ -87,6 +87,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - On the CPU, BiRefNet takes a batch one image at a time: a second parallel job gained nothing and doubled RAM. Silueta and U2Net keep the parallel jobs, which make them 27 % and 18 % faster on four cores. A machine whose models run through OpenVINO counts as a CPU here (Settings' hint and the default job count follow).
 - **Process no longer reloads the model every time.** The worker that ran the last batch stays ready for five minutes and takes new Mask and Sketch settings as they are; the one warmed at start-up serves the first Process. With BiRefNet on a 2015 4-core CPU that is 7 seconds saved on every Process and on every Sketch mode change.
 - Process with another background-removal model (or No model) works on the cut-out on screen instead of starting over from the photo: the new model can only take more away, your brush edits and effects carry over (effects applied once), and the cut-out stays on screen while it runs. Undo gets back to before.
+- While a cut-out or No-model run works, the canvas shows the image you are editing, the newest result, instead of the photo the run may start from.
 - A cut never shows what its image hides: a photo with its own transparency keeps it, and a cut of a cut-out can only take more away. Restore strokes still bring pixels back.
 
 ### Performance
