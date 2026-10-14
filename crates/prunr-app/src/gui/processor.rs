@@ -27,7 +27,7 @@ use prunr_core::ProcessingRecipe;
 use super::inpaint_bridge::{InpaintBridgeMsg, InpaintBridgeResult, spawn_inpaint_bridge};
 use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
-use super::worker::{ProcessingConfig, WorkerMessage, WorkerResult, WorkItem};
+use super::worker::{EngineSpec, WorkerMessage, WorkerResult, WorkItem};
 
 #[derive(Clone)]
 pub struct CancelRegistry {
@@ -777,7 +777,7 @@ pub(crate) struct Processor {
     faces_rx: mpsc::Receiver<FacesResult>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
-    seg_warm_due: Option<(std::time::Instant, ProcessingConfig)>,
+    seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
 }
 
 /// How long the picked model must stay picked before it loads: clicking
@@ -835,10 +835,10 @@ impl Processor {
         }
     }
 
-    /// Load `cfg`'s model in the worker once it has stayed picked for
+    /// Load `spec`'s model in the worker once it has stayed picked for
     /// `SEG_WARM_DEBOUNCE`, so the first Process skips the load.
-    pub(crate) fn schedule_seg_warm(&mut self, cfg: ProcessingConfig, now: std::time::Instant) {
-        self.seg_warm_due = Some((now + SEG_WARM_DEBOUNCE, cfg));
+    pub(crate) fn schedule_seg_warm(&mut self, spec: EngineSpec, now: std::time::Instant) {
+        self.seg_warm_due = Some((now + SEG_WARM_DEBOUNCE, spec));
     }
 
     /// Send the warm-up when it is due; how long until it is, if it waits.
@@ -851,8 +851,8 @@ impl Processor {
         if let Some(wait) = due.checked_duration_since(now).filter(|w| !w.is_zero()) {
             return Some(wait);
         }
-        let (_, cfg) = self.seg_warm_due.take()?;
-        let _ = self.worker_tx.send(WorkerMessage::Warm(Box::new(cfg)));
+        let (_, spec) = self.seg_warm_due.take()?;
+        let _ = self.worker_tx.send(WorkerMessage::Warm(spec));
         None
     }
 
@@ -2232,14 +2232,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (_result_tx, result_rx) = mpsc::channel();
         let mut p = Processor::new(tx, result_rx);
-        let cfg = |model| ProcessingConfig {
-            model,
-            jobs: 1,
-            mask: Default::default(),
-            force_cpu: false,
-            line_mode: prunr_core::LineMode::Off,
-            edge: Default::default(),
-        };
+        let cfg = |model| EngineSpec { model, jobs: 1, force_cpu: false };
         let warmed = |rx: &mpsc::Receiver<WorkerMessage>| rx.try_iter().filter_map(|m| match m {
             WorkerMessage::Warm(c) => Some(c.model),
             _ => None,
