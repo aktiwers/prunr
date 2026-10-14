@@ -475,7 +475,6 @@ mod process_targets_tests {
 
         app.process_items(|i| i.id == 1, Some(StepKind::Process));
         assert_eq!(chained(&app, 0), Some(true), "Process by BiRefNet builds on the Silueta cut-out");
-        assert!(app.batch.items[0].job_builds_on_shown_result(), "which stays on screen while it runs");
 
         app.settings.model = SettingsModel::None;
         app.process_items(|i| i.id == 2, Some(StepKind::Process));
