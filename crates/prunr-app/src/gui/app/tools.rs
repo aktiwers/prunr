@@ -266,6 +266,27 @@ impl PrunrApp {
         }
     }
 
+    /// A Magic Brush click with By depth on: everything near that depth.
+    /// Before the image's map is there the click waits for it; the map
+    /// is on its way, since the brush asks for the shown image's map,
+    /// and `pump_depth` runs the click when it lands.
+    pub(crate) fn magic_depth_click(&mut self, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
+        let Some(depth) = self.batch.find_by_id(item_id).and_then(|i| i.depth.clone()) else {
+            self.magic_brush_state.pending_depth_click = Some(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode });
+            return;
+        };
+        let (w, h) = dims;
+        self.processor.dispatch_depth_select(crate::gui::processor::DepthSelectRequest {
+            item_id,
+            depth,
+            at: ((at.0 + 0.5) / w as f32, (at.1 + 0.5) / h as f32),
+            range: self.settings.brush.magic_depth_range,
+            mode,
+            source_dims: dims,
+            reading: self.settings.brush.magic_reading(),
+        });
+    }
+
     /// Whether the selected model has brushes, so Magic Brush's models
     /// belong in memory.
     pub(crate) fn magic_brush_wanted(&self) -> bool {
