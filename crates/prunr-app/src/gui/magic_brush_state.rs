@@ -14,10 +14,22 @@ use super::brush_state::Trail;
 /// cannot be cancelled).
 pub(crate) const ENCODE_SETTLE: Duration = Duration::from_millis(250);
 
+/// A By depth click made before the image's depth map was there; it runs
+/// when the map lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PendingDepthClick {
+    pub(crate) item_id: u64,
+    /// The click in source pixels.
+    pub(crate) at: (f32, f32),
+    pub(crate) dims: (u32, u32),
+    pub(crate) mode: prunr_core::selection::BrushMode,
+}
+
 /// Magic Brush tool coordinator.
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
     active: bool,
+    pub(crate) pending_depth_click: Option<PendingDepthClick>,
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
     pub(crate) rethreshold_in_flight: bool,
@@ -57,6 +69,7 @@ impl MagicBrushState {
     /// result lands, so no second encode of the same image starts.
     pub fn deactivate(&mut self) {
         self.active = false;
+        self.pending_depth_click = None;
         self.clear_stroke();
     }
 
