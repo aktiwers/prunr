@@ -464,27 +464,58 @@ fn measure_depth(
     result
 }
 
-/// The longer side of the preview an upscale shows while it runs: about a
-/// canvas at most, so the preview costs a few MB whatever the output size.
-const UPSCALE_PREVIEW_EDGE: u32 = 1536;
+/// A picture a run made for its item (a finished tile, …), on its way
+/// to the canvas.
+pub(crate) type RunPicture = (u64, prunr_core::ProgressUpdate);
 
-/// An upscale's listener: finished-tile previews go to the canvas's
-/// channel, everything else to the progress pill.
-struct UpscaleSink {
-    run: super::dispatch_progress::RunSink,
+/// A run's listener: its pictures go to the canvas while the run says
+/// they may still land; its steps and counts go to the progress pill,
+/// when it has one.
+#[derive(Clone)]
+pub(crate) struct PictureSink {
     item_id: u64,
-    previews: mpsc::Sender<(u64, prunr_core::TilePreview)>,
+    pill: Option<super::dispatch_progress::RunSink>,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+    pictures: mpsc::Sender<RunPicture>,
 }
 
-impl prunr_core::ProgressSink for UpscaleSink {
+impl PictureSink {
+    /// Pictures for `item_id` land while `current` holds. Without a
+    /// `pill` (another run shows on it) steps and counts go nowhere.
+    pub(crate) fn new(
+        item_id: u64,
+        pill: Option<super::dispatch_progress::RunSink>,
+        current: impl Fn() -> bool + Send + Sync + 'static,
+        pictures: mpsc::Sender<RunPicture>,
+    ) -> Self {
+        Self { item_id, pill, current: Arc::new(current), pictures }
+    }
+
+    /// A run on the pill: its pictures land while it is the run shown.
+    pub(crate) fn of_run(item_id: u64, run: super::dispatch_progress::RunSink, pictures: mpsc::Sender<RunPicture>) -> Self {
+        let shown = run.clone();
+        Self::new(item_id, Some(run), move || shown.current(), pictures)
+    }
+
+    /// A progress handle reporting here that asks for tile previews.
+    pub(crate) fn into_progress(self) -> prunr_core::Progress {
+        prunr_core::Progress::new(Arc::new(self)).with_tile_previews(crate::subprocess::protocol::TILE_PREVIEW_EDGE)
+    }
+}
+
+impl prunr_core::ProgressSink for PictureSink {
     fn report(&self, update: prunr_core::ProgressUpdate) {
         match update {
-            prunr_core::ProgressUpdate::TilePreview(tile) => {
-                if self.run.current() {
-                    let _ = self.previews.send((self.item_id, tile));
+            update @ prunr_core::ProgressUpdate::TilePreview(_) => {
+                if (self.current)() {
+                    let _ = self.pictures.send((self.item_id, update));
                 }
             }
-            update => self.run.report(update),
+            update => {
+                if let Some(run) = &self.pill {
+                    run.report(update);
+                }
+            }
         }
     }
 }
@@ -750,9 +781,9 @@ pub(crate) struct Processor {
     /// pass). First dispatch (which already requires ORT) initializes
     /// the slot; cancel before any dispatch is a no-op.
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
-    /// Each finished upscale tile, small, for the canvas to show in place.
-    upscale_preview_tx: mpsc::Sender<(u64, prunr_core::TilePreview)>,
-    upscale_preview_rx: mpsc::Receiver<(u64, prunr_core::TilePreview)>,
+    /// The pictures runs make for their items (`PictureSink`).
+    picture_tx: mpsc::Sender<RunPicture>,
+    picture_rx: mpsc::Receiver<RunPicture>,
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
@@ -795,7 +826,7 @@ impl Processor {
     ) -> Self {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
-        let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
+        let (picture_tx, picture_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         let (faces_tx, faces_rx) = mpsc::channel();
@@ -822,8 +853,8 @@ impl Processor {
             upscale: RunSlot::new(),
             run_queue: Mutex::new(RunQueue::default()),
             upscale_run_options: std::sync::OnceLock::new(),
-            upscale_preview_tx,
-            upscale_preview_rx,
+            picture_tx,
+            picture_rx,
             dispatch_progress,
             colorize: RunSlot::new(),
             sam_encoder_tx,
@@ -1537,10 +1568,9 @@ impl Processor {
         // `upscale::tiling::upscale_tiled` (cancel flag) and in
         // `is_upscale_in_flight` (active flag).
         let done = self.upscale.begin(run.clone());
-        let sink = UpscaleSink { run, item_id, previews: self.upscale_preview_tx.clone() };
-        let progress = prunr_core::Progress::new(Arc::new(sink))
-            .with_cancel(Arc::clone(&self.upscale.cancel))
-            .with_tile_previews(UPSCALE_PREVIEW_EDGE);
+        let progress = PictureSink::of_run(item_id, run, self.picture_sender())
+            .into_progress()
+            .with_cancel(Arc::clone(&self.upscale.cancel));
 
         let engine_slot = Arc::clone(&self.upscale.warm);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
@@ -1624,9 +1654,14 @@ impl Processor {
         tracing::debug!(terminate_ok, "upscale cancel requested");
     }
 
-    /// Drain the finished-tile previews of the upscale under way.
-    pub(crate) fn pump_upscale_previews(&mut self) -> Vec<(u64, prunr_core::TilePreview)> {
-        self.upscale_preview_rx.try_iter().collect()
+    /// Where a `PictureSink` sends its run's pictures.
+    pub(crate) fn picture_sender(&self) -> mpsc::Sender<RunPicture> {
+        self.picture_tx.clone()
+    }
+
+    /// Drain the pictures runs have made since the last frame, oldest first.
+    pub(crate) fn pump_pictures(&mut self) -> Vec<RunPicture> {
+        self.picture_rx.try_iter().collect()
     }
 
     /// Drain completed upscale results from the background thread.
@@ -2241,6 +2276,43 @@ mod sam_dispatch_tests {
 mod tests {
     use super::*;
     use prunr_models::ModelId;
+
+    /// A run's pictures reach the canvas's channel while the run says
+    /// they may land, and its steps reach the pill; a run another has
+    /// replaced sends neither; a run without the pill still sends its
+    /// pictures but leaves the pill to the run that has it.
+    #[test]
+    fn a_picture_sink_sends_pictures_while_its_run_is_current() {
+        use super::super::dispatch_progress::{DispatchProgress, DispatchProgressSlot, ProgressKind};
+        use prunr_core::{ProgressSink, ProgressUpdate, Step, TilePreview};
+        let tile = || ProgressUpdate::TilePreview(TilePreview { x: 0, y: 0, width: 1, height: 1, full_width: 1, full_height: 1, rgba: vec![9; 4] });
+        let slot = DispatchProgressSlot::new();
+        let (tx, rx) = mpsc::channel();
+        let first = PictureSink::of_run(4, slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Loading")), tx.clone());
+        first.report(tile());
+        first.report(ProgressUpdate::Step(Step::Erasing));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(4, tile())]);
+        assert_eq!(slot.read().map(|p| p.step_label), Some(Step::Erasing.label().into()));
+
+        let second = PictureSink::of_run(5, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), tx.clone());
+        first.report(tile());
+        first.report(ProgressUpdate::Step(Step::Blending));
+        assert!(rx.try_recv().is_err(), "a replaced run's pictures are dropped");
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()));
+
+        let open = std::sync::Arc::new(AtomicBool::new(true));
+        let flag = open.clone();
+        let no_pill = PictureSink::new(6, None, move || flag.load(Ordering::Acquire), tx);
+        no_pill.report(ProgressUpdate::Step(Step::Finishing));
+        no_pill.report(tile());
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(6, tile())]);
+        open.store(false, Ordering::Release);
+        no_pill.report(tile());
+        assert!(rx.try_recv().is_err(), "its own check stops its pictures");
+        second.report(tile());
+        assert_eq!(rx.try_iter().count(), 1);
+    }
 
     /// Picking a cut-out model loads it once it has stayed picked a second:
     /// a quick second pick replaces the first, a run under way drops it
