@@ -339,12 +339,32 @@ impl MaskArtifact {
         self.scale_alpha(rgba, |c| 1.0 - c);
     }
 
-    /// Returns a copy of `source` with alpha scaled by coverage — pixels
-    /// outside the selection become transparent. Basis of clipboard Copy/Cut.
-    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> image::RgbaImage {
-        let mut out = source.clone();
-        self.scale_alpha(&mut out, |c| c);
-        out
+    /// The selected part of `source` (a plane of its size): cropped to
+    /// the selection's bounds, alpha scaled by coverage. What clipboard
+    /// Copy and Cut carry; `None` when nothing is selected.
+    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> Option<image::RgbaImage> {
+        let r = self.bounds()?;
+        let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
+        self.crop(r).scale_alpha(&mut out, |c| c);
+        Some(out)
+    }
+
+    /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
+    pub fn bounds(&self) -> Option<CellRect> {
+        let w = self.width as usize;
+        if self.is_blank() || w == 0 {
+            return None;
+        }
+        self.data
+            .par_chunks(w)
+            .enumerate()
+            .filter_map(|(y, row)| {
+                let x0 = row.iter().position(|&v| v != 0)? as u32;
+                // the row has a non-zero cell, found just above
+                let x1 = row.iter().rposition(|&v| v != 0).unwrap_or(0) as u32;
+                Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
+            })
+            .reduce_with(CellRect::union)
     }
 
     /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
@@ -620,11 +640,26 @@ mod tests {
     fn copy_to_rgba_keeps_selected_alpha_and_clears_the_rest() {
         let m = mask(2, 2, vec![FULL, 0, 0, -FULL]);
         let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([10u8, 20, 30, 200]));
-        let out = m.copy_to_rgba(&source);
+        let out = m.copy_to_rgba(&source).expect("a selection");
         assert_eq!(out.get_pixel(0, 0).0[3], 200);
         assert_eq!(out.get_pixel(1, 0).0[3], 0);
         assert_eq!(out.get_pixel(0, 1).0[3], 0);
         assert_eq!(out.get_pixel(1, 1).0[3], 200);
+    }
+
+    #[test]
+    fn copy_to_rgba_carries_only_the_selections_bounds() {
+        let mut cells = vec![0; 5 * 4];
+        cells[5 + 1] = FULL;
+        cells[2 * 5 + 3] = FULL / 2;
+        let source = image::RgbaImage::from_fn(5, 4, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let out = mask(5, 4, cells).copy_to_rgba(&source).expect("a selection");
+        assert_eq!(out.dimensions(), (3, 2), "columns 1-3, rows 1-2");
+        assert_eq!(out.get_pixel(0, 0).0, [1, 1, 0, 255], "the selected pixel, where it was in the bounds");
+        assert_eq!(out.get_pixel(2, 1).0[..2], [3, 2], "the half-selected one");
+        assert!(out.get_pixel(2, 1).0[3] > 100 && out.get_pixel(2, 1).0[3] < 155);
+        assert_eq!(out.get_pixel(1, 0).0[3], 0, "an unselected pixel inside the bounds is clear");
+        assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
     }
 
     /// A soft stroke keeps hardness, strength and direction in the plane
