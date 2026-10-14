@@ -120,10 +120,19 @@ pub fn tensor_to_mask_from_flat(
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, resize, edge shift, guided filter, feather and contrast.
 pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> GrayImage {
-    // Materializing rgba here is wasteful when refine_edges is false; callers on
-    // the hot path should use `postprocess()` which shares the RGBA buffer.
-    let rgba = if opts.mask_settings.refine_edges { Some(original.to_rgba8()) } else { None };
-    tensor_to_mask_core(raw, original.width(), original.height(), rgba.as_ref(), opts)
+    // Materializing rgba here is wasteful when neither the guided filter nor
+    // the image's own transparency needs it; callers on the hot path should
+    // use `postprocess()` which shares the RGBA buffer.
+    let owned;
+    let base = match original.as_rgba8() {
+        Some(rgba) => Some(rgba),
+        None if opts.mask_settings.refine_edges || original.color().has_alpha() => {
+            owned = original.to_rgba8();
+            Some(&owned)
+        }
+        None => None,
+    };
+    tensor_to_mask_core(raw, original.width(), original.height(), base, opts)
 }
 
 /// Same as `tensor_to_mask` but reuses an already-materialized RGBA buffer.
@@ -135,7 +144,7 @@ fn tensor_to_mask_core(
     raw: ArrayView4<f32>,
     ow: u32,
     oh: u32,
-    rgba_for_guided: Option<&RgbaImage>,
+    base: Option<&RgbaImage>,
     opts: &PostprocessOpts<'_>,
 ) -> GrayImage {
     let mask_settings = opts.mask_settings;
@@ -217,7 +226,7 @@ fn tensor_to_mask_core(
     }
 
     if mask_settings.refine_edges {
-        if let Some(rgba) = rgba_for_guided {
+        if let Some(rgba) = base {
             mask = guided_filter_alpha(
                 rgba,
                 &mask,
@@ -238,6 +247,12 @@ fn tensor_to_mask_core(
         apply_contrast(&mut mask, mask_settings.contrast);
     }
 
+    // A cut of an earlier cut-out only takes more away: what that image
+    // hides stays hidden, whatever the model sees in the colours under it.
+    if let Some(base) = base {
+        keep_hidden(&mut mask, base);
+    }
+
     // Strokes go last, at full resolution: they are exact intent, and
     // refining or feathering them would pull them onto nearby edges.
     if let Some(corr) = correction {
@@ -245,6 +260,27 @@ fn tensor_to_mask_core(
     }
 
     mask
+}
+
+/// Scale `mask` by `base`'s alpha: a pixel the base hides stays hidden,
+/// a half-transparent one keeps at most its share. Opaque rows cost a scan.
+fn keep_hidden(mask: &mut GrayImage, base: &RgbaImage) {
+    let width = base.width() as usize;
+    if width == 0 || mask.dimensions() != base.dimensions() {
+        return;
+    }
+    let scale = |m: &mut [u8], px: &[u8]| {
+        for (v, p) in m.iter_mut().zip(px.chunks_exact(4)) {
+            if p[3] != 255 {
+                *v = ((*v as u16 * p[3] as u16 + 127) / 255) as u8;
+            }
+        }
+    };
+    if width * base.height() as usize >= ROW_PAR_THRESHOLD {
+        mask.as_mut().par_chunks_mut(width).zip(base.as_raw().par_chunks(width * 4)).for_each(|(m, px)| scale(m, px));
+    } else {
+        mask.as_mut().chunks_mut(width).zip(base.as_raw().chunks(width * 4)).for_each(|(m, px)| scale(m, px));
+    }
 }
 
 /// Steepen the mask's edge around half coverage at full resolution:
@@ -850,6 +886,37 @@ mod tests {
         // effect). The 1/255 residue is imperceptible.
         assert!(center_after <= 1, "subtract stroke should drive painted pixel to ~0, got {}", center_after);
         assert_eq!(edge_after, baseline.get_pixel(10, 10)[0], "untouched pixels should match baseline");
+    }
+
+    /// A cut of an earlier cut-out only takes more away: what its image
+    /// hides stays hidden, half-transparent pixels keep at most their share,
+    /// and a Restore stroke still brings the colours under it back.
+    #[test]
+    fn a_cut_keeps_what_its_start_image_hides() {
+        use crate::brush::paint_circle;
+        use crate::selection::BrushMode;
+        let raw = make_raw_tensor(1.0);
+        let mut start = image::RgbaImage::from_pixel(320, 320, image::Rgba([90, 90, 90, 255]));
+        for (x, _, p) in start.enumerate_pixels_mut() {
+            if x < 100 { p.0[3] = 0 } else if x < 200 { p.0[3] = 128 }
+        }
+        let start = DynamicImage::ImageRgba8(start);
+        let mask_settings = MaskSettings::default();
+        let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
+        let opaque = tensor_to_mask(raw.view(), &solid_rgb(320, 320), &opts).get_pixel(250, 160)[0];
+
+        let mask = tensor_to_mask(raw.view(), &start, &opts);
+        assert_eq!(mask.get_pixel(50, 160)[0], 0, "hidden stays hidden");
+        let half = mask.get_pixel(150, 160)[0];
+        assert!((126..=130).contains(&half), "half-transparent keeps its share of the model's {opaque}, got {half}");
+        assert_eq!(mask.get_pixel(250, 160)[0], opaque, "opaque follows the model alone");
+        let rgba = postprocess(raw.view(), &start, &opts);
+        assert_eq!(rgba.get_pixel(50, 160)[3], 0, "the composite agrees");
+
+        let mut restore = MaskArtifact::new_empty(320, 320);
+        paint_circle(&mut restore, 50.0, 160.0, 20.0, crate::brush::Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Add });
+        let restored = tensor_to_mask(raw.view(), &start, &opts.with_correction(Some(&restore)));
+        assert!(restored.get_pixel(50, 160)[0] >= 254, "a Restore stroke wins over the hidden start");
     }
 
     /// A stroke is the user's exact intent: it lands pixel for pixel where
