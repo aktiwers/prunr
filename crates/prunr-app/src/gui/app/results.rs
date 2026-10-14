@@ -755,7 +755,13 @@ impl PrunrApp {
         let mut decode_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            decode_arrived |= item.land_decode(result);
+            if item.land_decode(result) {
+                decode_arrived = true;
+            } else {
+                // A render waiting on this photo would ask for it again
+                // every frame, and fail again.
+                self.processor.live_preview.cancel(item_id);
+            }
         }
         landed |= decode_arrived;
         if decode_arrived {

@@ -611,6 +611,21 @@ mod busy_pill_tests {
         assert!(!app.batch.items[0].decode_pending, "an image with nothing queued is left alone");
     }
 
+    /// A render that waits on a decode that fails is dropped: asking for
+    /// the decode again every frame would only fail again.
+    #[test]
+    fn a_failed_decode_drops_the_render_waiting_for_it() {
+        let mut app = app();
+        push_test_item(&mut app, 2);
+        app.processor.live_preview.mark_tweak(2, crate::gui::live_preview::PreviewKind::Mask);
+        app.pump_live_preview(&egui::Context::default());
+        app.batch.bg_io.decode_tx.send((2, Err("bad file".into()))).unwrap();
+        app.drain_background_channels(&egui::Context::default());
+        app.pump_live_preview(&egui::Context::default());
+        assert!(!app.batch.items[1].decode_pending, "no second decode");
+        assert!(!app.processor.live_preview.is_pending_for(2), "the render is gone");
+    }
+
     #[test]
     fn the_pill_waits_a_second_and_leaves_with_the_work() {
         let mut app = app();
