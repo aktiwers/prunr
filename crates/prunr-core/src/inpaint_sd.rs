@@ -400,7 +400,7 @@ pub fn process_inpaint_with(
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
     // silently fall back to standard VAE — same graceful pattern as LCM.
-    let taesd = if req.use_taesd && sd_spec(id).takes_taesd { TaesdSession::get().ok() } else { None };
+    let taesd = if req.use_taesd && sd_spec(id).latent.takes_taesd() { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
@@ -1102,7 +1102,7 @@ pub(crate) struct SdSession {
     unet_inputs: [String; 3],
     vae_encoder_input: String,
     vae_decoder_input: String,
-    vae_scale: f32,
+    latent: prunr_models::SdLatent,
     /// The VAE takes f32: SDXL's overflows in f16.
     vae_f32: bool,
     /// Set once a batched UNet call fails (a static batch-1 export, the
@@ -1378,7 +1378,7 @@ impl SdSession {
             unet_inputs,
             vae_encoder_input,
             vae_decoder_input,
-            vae_scale: sd_spec(id).vae_scale,
+            latent: sd_spec(id).latent,
             vae_f32,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
@@ -1810,7 +1810,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
             let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
             let mut latent = extract_4d(&outputs[0], "vae encoder")?;
-            latent *= bundle.vae_scale;
+            latent *= bundle.latent.vae_scale();
             Ok(latent)
         }
         VaeBackend::Taesd(taesd) => {
@@ -1826,7 +1826,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
 fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
     match backend {
         VaeBackend::Standard(bundle) => {
-            let t = tensor_in(latent / bundle.vae_scale, bundle.vae_f32)
+            let t = tensor_in(latent / bundle.latent.vae_scale(), bundle.vae_f32)
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
             let mut session = bundle.vae_decoder.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
