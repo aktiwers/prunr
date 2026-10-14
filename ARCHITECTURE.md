@@ -421,7 +421,7 @@ Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install
 
 ### EP ladder
 
-Each session walks a ladder of the GPU EPs the loaded runtime actually has compiled in (`is_available`), registering one EP per attempt so the log names the winner and a crashing EP cannot abort the CPU fallback. If every GPU EP fails the engine retries CPU-only.
+Each session walks a ladder of the GPU EPs the loaded runtime actually has compiled in (`is_available`), registering one EP per attempt so the log names the winner and a crashing EP cannot abort the CPU fallback. If every GPU EP fails the engine retries CPU-only. Every EP is built in one place, `EpKind::provider`, set to fail its registration: ort's default logs the failure and commits on the CPU, under the GPU's name. A failed registration is a fact about the machine, so it moves to the next EP without an `ep_compat` record.
 
 | Platform | Ladder |
 |---|---|
