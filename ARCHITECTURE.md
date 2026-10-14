@@ -440,7 +440,7 @@ Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVIN
 
 ### Compiled-model cache
 
-`<data>/prunr/ep_cache/<ep>/<model>-<version>-v<format>/` holds the compiled artefact so the second session build skips graph optimisation: ORT's optimised graph for CPU and CUDA, CoreML's compiled model on macOS. OpenVINO and DirectML are not cached (OpenVINO re-keys its cache every launch and rewrote ~3 GB per build for no speedup; DirectML relies on the OS shader cache). The format version is bumped with every `ort` upgrade because cached graphs are not portable across ORT versions. A commit that fails on a cached graph deletes the cache file instead of marking the EP incompatible. Stale versions are collected at session build; model uninstall and a Settings button clear it.
+`<data>/prunr/ep_cache/<ep>/<model>-<version>-ort<runtime>-v<format>/` (macOS: under `~/Library/Caches/prunr/`) holds the compiled artefact so the second session build skips graph optimisation: ORT's optimised graph for CPU and CUDA, CoreML's compiled model on macOS. OpenVINO and DirectML are not cached (OpenVINO re-keys its cache every launch and rewrote ~3 GB per build for no speedup; DirectML relies on the OS shader cache). The format version is bumped with every `ort` upgrade because cached graphs are not portable across ORT versions. A commit that fails on a cached graph deletes the cache file instead of marking the EP incompatible. Stale versions are collected at session build; model uninstall and a Settings button clear it.
 
 ### Model variants
 
@@ -485,6 +485,7 @@ A drag is one PNG matching the canvas, background baked in like Save and Copy. W
 | `settings.json`, `presets/*.json` | `{config_dir}/prunr/` |
 | On-demand models | `{data_dir}/prunr/models/` |
 | Runtime Store, compiled-model cache, EP compatibility | `{data_dir}/prunr/runtimes/`, `ep_cache/`, `ep_compat.json` |
+| Compiled-model cache on macOS | `~/Library/Caches/prunr/ep_cache/`: CoreML can fail to open a compiled model under a path with a space |
 
 Directories come from `dirs` (`~/.config` and `~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows). Settings hold user choices only, hotkey overrides and accepted model licenses included; CPU forcing and the active backend reset every launch. Old files load through serde defaults and a v1 migration.
 
