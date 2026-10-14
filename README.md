@@ -26,7 +26,7 @@ AppImage or tar.gz on a minimal install and hit a missing-library error,
 install: `libgtk-3-0`, `libxkbcommon0`, `libfontconfig1`. Already present
 on Ubuntu 22.04+ / Fedora 40+ / openSUSE Tumbleweed.
 
-### macOS (Apple Silicon)
+### macOS (Apple Silicon, macOS 14 Sonoma or later)
 
 | Format | Link |
 |--------|------|
@@ -190,7 +190,7 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 2. User Runtime Store: `~/.local/share/prunr/runtimes/<id>/libonnxruntime.so`
 3. Bundled fallback: `<exe>/runtime/libonnxruntime.so`
 
-Linux + Windows artifacts (tar.gz / AppImage / .deb / .rpm / .zip / installer) ship a CPU-only ORT in (3) so the app works on a clean machine. CI stages it via `cargo xtask install-runtime onnxruntime <ver> --stage-to <pkg>/runtime/` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. macOS artifacts (.app / .dmg / .tar.gz) ship a custom **CoreML-enabled** ORT build instead, bundled into `Prunr.app/Contents/Frameworks/` and resolved via rpath. Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
+Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux and Windows get the CPU-only runtime in `<exe>/runtime/`; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 

@@ -14,6 +14,8 @@ class Prunr < Formula
   version "0.4.4"
   license "Apache-2.0"
 
+  depends_on macos: :sonoma
+
   on_macos do
     on_arm do
       url "https://github.com/aktiwers/prunr/releases/download/v#{version}/prunr-macos-aarch64.tar.gz"
@@ -21,8 +23,11 @@ class Prunr < Formula
     end
   end
 
+  # prunr loads libonnxruntime.dylib from beside its real path, so both
+  # stay together in libexec and bin only holds a link.
   def install
-    bin.install "prunr"
+    libexec.install "prunr", "libonnxruntime.dylib"
+    bin.install_symlink libexec/"prunr"
   end
 
   test do
