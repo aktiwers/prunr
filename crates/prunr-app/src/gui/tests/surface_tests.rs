@@ -556,3 +556,24 @@ fn the_faces_strip_opens_the_store_and_steps_aside() {
     assert_eq!(store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Face)));
     assert!(!egui::Popup::is_any_open(&h.ctx), "the Faces strip closed");
 }
+
+/// A dialog closed by a shortcut rather than its own backdrop or button
+/// still ignores the click that opens it again: Help › Keyboard
+/// shortcuts used to flash Settings open and shut after an earlier
+/// Settings had been closed with its shortcut.
+#[test]
+fn a_dialog_reopened_from_a_menu_stays_open() {
+    use crate::gui::views::shortcuts::Action;
+    let mut h = loaded();
+    let ctx = h.ctx.clone();
+    h.state_mut().perform(Action::Settings, &ctx);
+    settle(&mut h);
+    assert!(h.state().show_settings);
+    h.state_mut().perform(Action::Settings, &ctx);
+    h.run_steps(30);
+    assert!(!h.state().show_settings, "closed by its shortcut");
+    click(&mut h, "Help");
+    click(&mut h, "Keyboard shortcuts");
+    h.run_steps(10);
+    assert!(h.state().show_settings, "Settings opened on Hotkeys stays open");
+}
