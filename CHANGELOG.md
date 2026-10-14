@@ -109,6 +109,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Help › Keyboard shortcuts flashed Settings open and shut when Settings had been closed with its shortcut or Escape before: the click on the menu item counted as a click beside the dialog. Any dialog reopened that way stays open now.
 - Settings › Credits gave BiRefNet-lite's author as "Bundled with Prunr" under a "Project license"; it credits Peng Zheng's BiRefNet (MIT) with its source now, and every model has to name its authors and licence.
 - Process again on an upscale enlarges it again (2× then 2× gives 4×, each its own undo step), also after undoing back to an earlier upscale; it re-ran the same upscale from the original instead, into an identical step (four Nomos8k images: 146 s). A changed Scale or upscaler still redoes the shown upscale from where it started. An upscale too large for the free memory is refused with a message saying how much it needs.
 - Process under Colorize leaves an image already colorized as asked alone ("Already up to date"), and a Sharpen, AI blend, Color match or Strength change carried to the ticked images finishes their kept run again instead of running the model.

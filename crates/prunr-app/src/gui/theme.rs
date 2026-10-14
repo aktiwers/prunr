@@ -260,10 +260,19 @@ fn show_modal(
     size: [f32; 2],
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
-    let opened_at_key = egui::Id::new(id).with("opened_at");
+    let opened_key = egui::Id::new(id).with("opened_at");
     let now = ctx.input(|i| i.time);
+    let pass = ctx.cumulative_pass_nr();
+    // (opened at, last pass shown). A modal missing from the last pass was
+    // closed some other way (its shortcut, Escape) and opens now: the
+    // click that opened it must not count as a click on its backdrop.
     let opened_at = ctx.memory_mut(|m| {
-        *m.data.get_temp_mut_or_insert_with(opened_at_key, || now)
+        let shown = m.data.get_temp_mut_or_insert_with(opened_key, || (now, pass));
+        if shown.1 + 1 < pass {
+            shown.0 = now;
+        }
+        shown.1 = pass;
+        shown.0
     });
     let debounce_passed = (now - opened_at) >= MODAL_BACKDROP_DEBOUNCE_SECS;
 
@@ -294,12 +303,7 @@ fn show_modal(
         ctx.set_sublayer(backdrop, shown.response.layer_id);
     }
 
-    let close = !open || (debounce_passed && backdrop_clicked(ctx, &resp));
-    if close {
-        // Reset so the next reopen starts a fresh debounce window.
-        ctx.memory_mut(|m| m.data.remove_temp::<f64>(opened_at_key));
-    }
-    close
+    !open || (debounce_passed && backdrop_clicked(ctx, &resp))
 }
 
 // === Colors (plum logo palette) ===
