@@ -1438,6 +1438,9 @@ pub fn run_doctor() {
         Some((p, src)) => println!("Active source:  {src} → {}", p.display()),
         None => println!("Active source:  NONE — `prunr` will refuse to start without --doctor"),
     }
+    for (lib, exists) in &diag.beside_runtime {
+        println!("Beside it:      {} {}", lib.display(), if *exists { "OK" } else { "(absent)" });
+    }
     println!();
 
     section("Models");
