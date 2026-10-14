@@ -324,14 +324,9 @@ fn card_details(ui: &mut egui::Ui, desc: &ModelDescriptor, state: &DownloadState
             ui.label(RichText::new(value).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY));
         });
     };
-    match license {
-        Some(l) => {
-            line(ui, "License", l.license);
-            line(ui, "Author", l.author);
-            ui.hyperlink_to(RichText::new("Source \u{2197}").size(theme::FONT_SIZE_SECONDARY), l.source_url);
-        }
-        None => line(ui, "License", "Bundled with Prunr"),
-    }
+    line(ui, "License", license.license);
+    line(ui, "Author", license.author);
+    ui.hyperlink_to(RichText::new("Source \u{2197}").size(theme::FONT_SIZE_SECONDARY), license.source_url);
     if let DownloadState::Failed { error } = state {
         ui.label(RichText::new(format!("Last attempt: {error}")).size(theme::FONT_SIZE_SECONDARY).color(FAILED_TEXT));
     }
@@ -407,7 +402,10 @@ pub fn render_license_dialog(
 ) -> (bool, bool) {
     let Some(desc) = model_descriptor(id) else { return (true, false) };
     // A bundled model was accepted at build time and never asks.
-    let Some(license) = desc.license() else { return (true, false) };
+    if desc.source.is_bundled() {
+        return (true, false);
+    }
+    let license = desc.license();
 
     let mut close_requested = false;
     let mut accepted = false;
@@ -507,7 +505,9 @@ mod tests {
             display_name: "test",
             description: "test",
             category: prunr_models::ModelCategory::Segmentation,
-            source: ModelSource::Bundled { license: None },
+            source: ModelSource::Bundled {
+                license: prunr_models::LicenseInfo { author: "test", license: "MIT", license_url: "", source_url: "" },
+            },
             version: "1.0.0",
             gpu: prunr_models::GpuRequirement::None,
             incompatible_eps: &[],

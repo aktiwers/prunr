@@ -227,9 +227,8 @@ pub struct OnDemandVariant {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ModelSource {
-    /// Embedded in the binary. `license` is `None` where the Credits tab
-    /// shows the project's own licence.
-    Bundled { license: Option<LicenseInfo> },
+    /// Embedded in the binary.
+    Bundled { license: LicenseInfo },
     OnDemand {
         filename: &'static str,
         url: &'static str,
@@ -277,6 +276,11 @@ impl ModelSource {
             ModelSource::OnDemand { .. } => "OnDemand",
             ModelSource::MultiPartOnDemand { .. } => "MultiPart",
         }
+    }
+
+    /// Embedded in the binary: nothing to download or accept.
+    pub fn is_bundled(&self) -> bool {
+        matches!(self, ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. })
     }
 }
 
@@ -404,13 +408,14 @@ impl UpscaleModelKnobs {
 }
 
 impl ModelDescriptor {
-    /// Upstream author and licence, where the source carries one.
-    pub fn license(&self) -> Option<LicenseInfo> {
+    /// Upstream author and licence; every model carries one, bundled
+    /// ones too, since Settings › Credits is where they are credited.
+    pub fn license(&self) -> LicenseInfo {
         match self.source {
             ModelSource::OnDemand { license, .. }
             | ModelSource::MultiPartOnDemand { license, .. }
-            | ModelSource::MultiPartBundled { license, .. } => Some(license),
-            ModelSource::Bundled { license } => license,
+            | ModelSource::MultiPartBundled { license, .. }
+            | ModelSource::Bundled { license } => license,
         }
     }
 
@@ -457,12 +462,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         description: "Fast and tiny — pick when speed matters more than edge fidelity.",
         category: ModelCategory::Segmentation,
         source: ModelSource::Bundled {
-            license: Some(LicenseInfo {
+            license: LicenseInfo {
                 author: "Daniel Gatis (rembg), after U\u{b2}-Net by Xuebin Qin",
                 license: "MIT",
                 license_url: "https://github.com/danielgatis/rembg/blob/main/LICENSE.txt",
                 source_url: "https://github.com/danielgatis/rembg",
-            }),
+            },
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -511,7 +516,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "BiRefNet-lite",
         description: "Default model. Best detail on hair and leaves at 1024×1024.",
         category: ModelCategory::Segmentation,
-        source: ModelSource::Bundled { license: None },
+        source: ModelSource::Bundled {
+            license: LicenseInfo {
+                author: "Peng Zheng (ZhengPeng7)",
+                license: "MIT",
+                license_url: "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE",
+                source_url: "https://github.com/ZhengPeng7/BiRefNet",
+            },
+        },
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
@@ -528,12 +540,12 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         description: "Edge / line extraction. Used by line-mode toolbar.",
         category: ModelCategory::EdgeDetection,
         source: ModelSource::Bundled {
-            license: Some(LicenseInfo {
+            license: LicenseInfo {
                 author: "Xavier Soria Poma",
                 license: "MIT",
                 license_url: "https://opensource.org/licenses/MIT",
                 source_url: "https://github.com/xavysp/TEED",
-            }),
+            },
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -1867,6 +1879,17 @@ mod tests {
         }
     }
 
+    /// Settings › Credits is where the models are credited (THIRD-PARTY.md
+    /// points there): every model, bundled ones too, names its authors,
+    /// licence and source.
+    #[test]
+    fn every_model_names_its_authors_license_and_source() {
+        for d in REGISTRY {
+            let info = d.license();
+            assert!(!info.author.is_empty() && !info.license.is_empty() && !info.source_url.is_empty(), "{:?}: {info:?}", d.id);
+        }
+    }
+
     /// Only a segmentation model builds an engine pool, so only one can
     /// gain from an engine per job.
     #[test]
@@ -2143,7 +2166,7 @@ mod tests {
     #[test]
     fn upscale_attribution_required_matches_license_class() {
         for desc in REGISTRY {
-            let Some(lic) = desc.license() else { continue };
+            let lic = desc.license();
             if lic.license.starts_with("CC-BY") {
                 assert!(
                     desc.attribution_required,
@@ -2154,19 +2177,6 @@ mod tests {
                 assert!(
                     !desc.attribution_required,
                     "{:?} has permissive license but attribution_required=true",
-                    desc.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_license_info_has_author() {
-        for desc in REGISTRY {
-            if let Some(author) = desc.license().map(|l| l.author) {
-                assert!(
-                    !author.is_empty(),
-                    "{:?} has empty author in LicenseInfo",
                     desc.id
                 );
             }
