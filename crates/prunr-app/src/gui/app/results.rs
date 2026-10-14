@@ -422,7 +422,7 @@ impl PrunrApp {
             let current = landed.epoch == item.depth_run.epoch;
             if item.land_depth(landed.epoch, landed.result) {
                 tracing::info!(item_id = landed.item_id, "depth map landed");
-                self.after_depth_landed(idx);
+                self.on_depth_landed(idx);
                 ctx.request_repaint();
             } else if let Some(err) = error.filter(|_| current) {
                 self.toasts.error(format!("Depth failed: {err}"));
@@ -431,6 +431,20 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         if self.wants_depth_now(idx) {
             self.request_depth(idx);
+        }
+    }
+
+    /// The image's depth map is there: what reads it re-renders, and a
+    /// By depth click that waited for it runs, if the brush is still on.
+    pub(crate) fn on_depth_landed(&mut self, idx: usize) {
+        self.after_depth_landed(idx);
+        let item_id = self.batch.items[idx].id;
+        let waiting = self.magic_brush_state.pending_depth_click.filter(|c| c.item_id == item_id);
+        if let Some(click) = waiting {
+            self.magic_brush_state.pending_depth_click = None;
+            if self.magic_brush_state.is_active() {
+                self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
+            }
         }
     }
 
@@ -1625,6 +1639,40 @@ mod depth_tests {
 
     /// Set focus stores the click as fractions, makes it an undo step and
     /// re-renders the photo.
+    /// A By depth click on an image whose map is not there yet waits for
+    /// the map and selects when it lands; the brush turned off meanwhile
+    /// drops it.
+    #[test]
+    fn a_by_depth_click_before_the_map_runs_when_it_lands() {
+        use crate::gui::processor::DecodedSelection;
+        use prunr_core::selection::BrushMode;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        push_test_item(&mut app, 1);
+        app.batch.items[0].dimensions = (8, 8);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        assert!(app.magic_brush_state.pending_depth_click.is_some(), "parked until the map is there");
+        assert!(app.processor.pump_sam_decoder_results().is_empty());
+        let epoch = app.batch.items[0].depth_run.epoch;
+        assert!(app.batch.items[0].land_depth(epoch, Ok(map())));
+        app.on_depth_landed(0);
+        assert!(app.magic_brush_state.pending_depth_click.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let result = loop {
+            if let Some(r) = app.processor.pump_sam_decoder_results().pop() { break r; }
+            assert!(std::time::Instant::now() < deadline, "the click never ran");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(matches!(result.result, Ok(DecodedSelection::ByDepth(_))), "selected by depth");
+
+        app.batch.items[0].depth = None;
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.magic_brush_state.deactivate();
+        assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
+    }
+
     #[test]
     fn a_focus_click_is_a_step_that_re_renders() {
         let mut app = PrunrApp::new_for_test();

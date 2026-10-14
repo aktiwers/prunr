@@ -450,20 +450,8 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
 /// A Magic Brush click with Depth on: select everything near the clicked
 /// depth, or say the map is still being measured.
-fn depth_click(app: &mut PrunrApp, item_id: u64, (px, py): (f32, f32), (w, h): (u32, u32), mode: prunr_core::selection::BrushMode) {
-    let Some(depth) = app.batch.find_by_id(item_id).and_then(|i| i.depth.clone()) else {
-        app.toasts.info("The depth map is not ready yet.");
-        return;
-    };
-    app.processor.dispatch_depth_select(crate::gui::processor::DepthSelectRequest {
-        item_id,
-        depth,
-        at: ((px + 0.5) / w as f32, (py + 0.5) / h as f32),
-        range: app.settings.brush.magic_depth_range,
-        mode,
-        source_dims: (w, h),
-        reading: app.settings.brush.magic_reading(),
-    });
+fn depth_click(app: &mut PrunrApp, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
+    app.magic_depth_click(item_id, at, dims, mode);
 }
 
 /// A screen position as a source pixel, or `None` off the image: only
