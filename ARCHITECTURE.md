@@ -408,7 +408,7 @@ Edge planes are kept per scale: Bold, for the dual-scale style, and the newest o
 
 1. `ORT_DYLIB_PATH` (developer override; set but missing is an error, never a fall-through)
 2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/` (first entry by name that holds the dylib)
-3. **Bundled**: `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
+3. **Bundled**: `<exe>/runtime/` or `<exe>/`; in a macOS `.app`, `Contents/Frameworks/`
 
 Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
 
