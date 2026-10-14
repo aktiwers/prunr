@@ -12,7 +12,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::{apply_ort_graph_cache, EpKind};
+use crate::engine::{apply_ort_graph_cache, EpKind, SessionPick};
 use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
 
@@ -466,6 +466,13 @@ struct LamaSession {
     session: Mutex<Session>,
     image_input_name: String,
     mask_input_name: String,
+    pick: SessionPick,
+}
+
+/// Load `id`'s LaMa-family session (or find it loaded) and say where it
+/// runs. `process_lama` with the same `cpu_only` uses this session.
+pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPick, CoreError> {
+    LamaSession::get(id, cpu_only).map(|s| s.pick.clone())
 }
 
 
@@ -600,7 +607,7 @@ impl LamaSession {
         // Try GPU EPs first; fall back to CPU on any failure. Mirrors
         // `OrtEngine`'s one-EP-at-a-time ladder so a crashing EP can't
         // abort the whole session creation. Logs which EP won.
-        let (session, provider) = build_lama_session(id, bytes, threads, cpu_only)?;
+        let (session, pick) = build_lama_session(id, bytes, threads, cpu_only)?;
 
         let inputs = session.inputs().iter()
             .map(|i| i.name().to_string())
@@ -613,7 +620,7 @@ impl LamaSession {
             ?id,
             image_input = %img_name,
             mask_input = %mask_name,
-            provider = %provider,
+            provider = %pick.provider,
             threads,
             "Inpaint session ready",
         );
@@ -621,6 +628,7 @@ impl LamaSession {
             session: Mutex::new(session),
             image_input_name: img_name,
             mask_input_name: mask_name,
+            pick,
         })
     }
 
@@ -662,9 +670,9 @@ impl Drop for LamaSession {
 }
 
 /// Build the LaMa ORT session, trying GPU EPs first and falling back
-/// to CPU. Returns `(session, provider_name)` so the caller can log
-/// which path won. CPU is the universal fallback; if even CPU fails
-/// we propagate the error string.
+/// to CPU. Returns the session and where it runs, with each GPU
+/// provider that failed on the way. CPU is the universal fallback; if
+/// even CPU fails we propagate the error string.
 ///
 /// Each GPU candidate is **smoke-tested** with a tiny inference before
 /// being accepted — some EPs (notably CUDA on certain ORT versions)
@@ -679,8 +687,9 @@ fn build_lama_session(
     bytes: &[u8],
     threads: usize,
     cpu_only: bool,
-) -> Result<(Session, String), String> {
+) -> Result<(Session, SessionPick), String> {
     let gpu_eps = crate::engine::gpu_eps_for(cpu_only);
+    let mut failed: Vec<String> = Vec::new();
 
     for &ep in gpu_eps {
         // Static catalog + dynamic cache, same as engine.rs.
@@ -747,6 +756,7 @@ fn build_lama_session(
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(ep = %ep, %e, "LaMa: register EP failed");
+                failed.push(format!("ORT register {ep} EP failed: {e}"));
                 continue;
             }
         };
@@ -764,13 +774,14 @@ fn build_lama_session(
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &format!("{e}"),
                 );
+                failed.push(format!("ORT session creation failed ({ep}): {e}"));
                 continue;
             }
         };
         match smoke_test_session(&mut session) {
             Ok(()) => {
                 tracing::info!(ep = %ep, "LaMa: GPU session validated");
-                return Ok((session, ep.as_str().to_string()));
+                return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) }));
             }
             Err(e) => {
                 tracing::warn!(
@@ -783,6 +794,7 @@ fn build_lama_session(
                     || crate::cache::optimized_model_path(id, ep.as_str()),
                     &e,
                 );
+                failed.push(format!("{ep} test run failed: {e}"));
             }
         }
     }
@@ -796,7 +808,7 @@ fn build_lama_session(
         .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
     tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
-    Ok((session, "CPU".to_string()))
+    Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
 }
 
 /// Run one inference with zero-padded inputs to validate that the
