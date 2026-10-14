@@ -46,6 +46,13 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/teed.onnx",
         sha256: "8aab32bf7b9da0a4f03108c7f5dd9b9799e22601f212249659ea3ab1d59a5a1a",
     },
+    // YuNet (MIT, OpenCV Zoo), pinned to the zoo commit it was taken from.
+    ModelSpec {
+        id: prunr_models::ModelId::YuNet,
+        name: "face_detection_yunet_2026may.onnx",
+        url: "https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+        sha256: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+    },
     // LaMa for the Eraser tool. OnDemand: distributed via Model Store at
     // runtime. Dev-mode uses `models/lama_fp32.onnx`; this xtask also
     // mirrors it to the user data dir so the dev workflow exercises the
