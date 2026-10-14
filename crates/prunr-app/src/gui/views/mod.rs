@@ -52,16 +52,18 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
 /// container wider than the screen — egui's default Label is single-line
 /// which forces parents to grow to the longest hint, which is what we
 /// don't want inside narrow popovers (brush_chip) and fixed-width modals.
+/// Ragged right: in a justified layout (every popup's) egui would justify
+/// the lines and spread the words apart.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
     if text.is_empty() { return; }
-    ui.add(
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| ui.add(
         egui::Label::new(
             RichText::new(text)
                 .color(theme::HINT)
                 .size(theme::FONT_SIZE_CAPTION),
         )
         .wrap(),
-    );
+    ));
 }
 
 /// Two-column key/value row for use inside `egui::Grid::new(..).num_columns(2)`.
