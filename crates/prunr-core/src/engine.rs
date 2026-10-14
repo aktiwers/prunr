@@ -432,6 +432,14 @@ pub fn runs_on_host_cpu(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("CPU") || provider.eq_ignore_ascii_case(OPENVINO_NAME)
 }
 
+/// Whether `model` runs on the accelerator `provider`: not declared
+/// incompatible in the registry, nor skipped after it failed there on an
+/// earlier run. A model it does not run falls back to the CPU by design.
+pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
+    prunr_models::is_ep_compatible(model, provider)
+        && !available_gpu_eps().iter().any(|&ep| ep.as_str().eq_ignore_ascii_case(provider) && crate::ep_compat::is_known_failure(ep, model))
+}
+
 /// Whether DirectML is the active GPU provider on this platform.
 ///
 /// Used to gate parallel session-build paths: DirectML's
