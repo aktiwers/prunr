@@ -174,6 +174,15 @@ fn settings_opens_from_its_toolbar_button() {
 }
 
 #[test]
+fn the_model_store_opens_from_its_toolbar_button() {
+    let mut harness = harness();
+    settle(&mut harness);
+    assert!(harness.state().model_store.is_none());
+    click(&mut harness, "Model Store");
+    assert_eq!(harness.state().model_store.map(|r| r.filter), Some(None), "the whole store, no category picked");
+}
+
+#[test]
 fn help_modals_name_every_control() {
     let mut harness = harness();
     for (flag, surface) in [(1, "cli help"), (2, "pipeline flow")] {
