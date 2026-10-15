@@ -116,6 +116,12 @@ fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     }
 }
 
+fn send_rss(evt_tx: &mpsc::Sender<SubprocessEvent>) {
+    if let Some(stats) = memory_stats::memory_stats() {
+        let _ = evt_tx.send(SubprocessEvent::RssUpdate { rss_bytes: stats.physical_mem as u64 });
+    }
+}
+
 /// Remove an image's IPC inputs: its file and, for a chained run, its start.
 fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, chain: Option<&std::path::Path>) {
     match chain {
@@ -716,12 +722,7 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    // Report RSS after each image
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
-                    }
+                    send_rss(&evt_tx);
 
                     cleanup_inputs();
                     if let Some(token) = spare_token {
@@ -800,19 +801,9 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    // Clean up temp files
-                    if tensor_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&tensor_path);
-                    }
-                    if original_image_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&original_image_path);
-                    }
+                    cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
 
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
-                    }
+                    send_rss(&evt_tx);
 
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -914,20 +905,12 @@ pub fn run_worker() -> ! {
                         }
                         Err(e) => {
                             let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
-                            if seg_tensor_path.starts_with(ipc.as_ref()) {
-                                let _ = std::fs::remove_file(&seg_tensor_path);
-                            }
+                            cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
                         }
                     }
 
-                    if image_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&image_path);
-                    }
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
-                    }
+                    cleanup_ipc_temps(&ipc, &[&image_path]);
+                    send_rss(&evt_tx);
                     if let Some(token) = spare_token {
                         drop(sem_guard);
                         let skip = cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
