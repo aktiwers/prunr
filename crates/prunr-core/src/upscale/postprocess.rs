@@ -175,9 +175,13 @@ impl Refine {
         Self { sharpen: r.sharpen(), sharpen_sigma: r.output_scale.sharpen_sigma(), ai_blend: r.ai_blend(), color_match: r.color_match }
     }
 
+    fn blends(&self) -> bool {
+        self.ai_blend < 1.0 - f32::EPSILON
+    }
+
     /// AI blend and Color match compare against the upscaled image's input.
     fn needs_reference(&self) -> bool {
-        self.ai_blend < 1.0 - f32::EPSILON || self.color_match
+        self.blends() || self.color_match
     }
 
     fn change_nothing(&self) -> bool {
@@ -213,7 +217,7 @@ pub fn refine(
             Arc::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom))
         })
     });
-    let blend = reference.as_deref().filter(|_| knobs.ai_blend < 1.0 - f32::EPSILON);
+    let blend = reference.as_deref().filter(|_| knobs.blends());
     let mut shown = match blend {
         Some(reference) => {
             let mut blended = (**raw).clone();
