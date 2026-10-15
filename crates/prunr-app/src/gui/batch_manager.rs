@@ -168,10 +168,24 @@ impl BatchManager {
     /// IDs of checkbox-selected items currently in a given status. Used by
     /// the partial-cancel path to decide which in-flight items to stop.
     pub(crate) fn selected_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
-        self.items.iter()
-            .filter(|i| i.selected && i.status == status)
-            .map(|i| i.id)
-            .collect()
+        self.selected_with_status(status).map(|i| i.id).collect()
+    }
+
+    /// Whether any checkbox-selected item is in `status`: the same set
+    /// `selected_ids_with_status` returns, without collecting it.
+    pub(crate) fn any_selected_with_status(&self, status: BatchStatus) -> bool {
+        self.selected_with_status(status).next().is_some()
+    }
+
+    fn selected_with_status(&self, status: BatchStatus) -> impl Iterator<Item = &BatchItem> {
+        self.items.iter().filter(move |i| i.selected && i.status == status)
+    }
+
+    /// Tick or untick every item's checkbox.
+    pub(crate) fn set_all_selected(&mut self, selected: bool) {
+        for item in &mut self.items {
+            item.selected = selected;
+        }
     }
 
     /// Selected-item index clamped to the current batch size. `None` when
@@ -1533,6 +1547,28 @@ mod tests {
         assert_eq!(bm.drag_targets(0), [0]);
         bm.items[1].status = BatchStatus::Processing;
         assert!(bm.drag_targets(1).is_empty());
+    }
+
+    /// The Cancel button's "Selected" label and the partial-cancel gate
+    /// read the same set.
+    #[test]
+    fn any_selected_with_status_agrees_with_the_ids() {
+        let mut bm = fixture();
+        for id in 0..3 {
+            bm.items.push(item_with_cache(id, 0));
+        }
+        bm.items[1].status = BatchStatus::Processing;
+        let agree = |bm: &BatchManager| {
+            bm.any_selected_with_status(BatchStatus::Processing)
+                == !bm.selected_ids_with_status(BatchStatus::Processing).is_empty()
+        };
+        assert!(!bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm));
+        bm.items[0].selected = true;
+        assert!(!bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm), "ticked but not processing");
+        bm.set_all_selected(true);
+        assert!(bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm));
+        bm.set_all_selected(false);
+        assert!(bm.items.iter().all(|i| !i.selected));
     }
 
     #[test]
