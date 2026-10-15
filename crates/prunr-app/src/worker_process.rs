@@ -21,6 +21,8 @@ use prunr_app::subprocess::spare_scales::{next_token, SpareScales};
 use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
 use prunr_app::gui::settings::LineMode;
 
+const SEG_ENGINE_MISSING: &str = "segmentation engine not initialized";
+
 /// Weighted memory semaphore for processing.
 /// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
 /// Small images run in parallel; large images throttle automatically.
@@ -433,14 +435,15 @@ pub fn run_worker() -> ! {
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
                     let cleanup_inputs = || cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
-
-                    if cancel.is_cancelled() {
-                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                            item_id,
-                            error: CANCELLED_ERR_MSG.into(),
-                        });
+                    // An early exit: report the error, drop the inputs, leave the in-flight count.
+                    let fail = |error: String| {
+                        let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                         cleanup_inputs();
                         in_flight.fetch_sub(1, Ordering::AcqRel);
+                    };
+
+                    if cancel.is_cancelled() {
+                        fail(CANCELLED_ERR_MSG.into());
                         return;
                     }
 
@@ -448,12 +451,7 @@ pub fn run_worker() -> ! {
                     let img_bytes = match std::fs::read(&image_path) {
                         Ok(b) => b,
                         Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                item_id,
-                                error: format!("Failed to read image: {e}"),
-                            });
-                            cleanup_inputs();
-                            in_flight.fetch_sub(1, Ordering::AcqRel);
+                            fail(format!("Failed to read image: {e}"));
                             return;
                         }
                     };
@@ -520,22 +518,13 @@ pub fn run_worker() -> ! {
                                 // Non-chain: split pipeline so the seg tensor is captured
                                 // for Tier 2 mask reruns and cross-mode transitions.
                                 let Some(eng) = engine.as_ref() else {
-                                    let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                        item_id,
-                                        error: "segmentation engine not initialized".into(),
-                                    });
-                                    cleanup_inputs();
-                                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                                    fail(SEG_ENGINE_MISSING.into());
                                     return;
                                 };
                                 let decoded = match prunr_core::load_image_from_bytes(&img_bytes) {
                                     Ok(img) => img,
                                     Err(e) => {
-                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                            item_id, error: e.to_string(),
-                                        });
-                                        cleanup_inputs();
-                                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                                        fail(e.to_string());
                                         return;
                                     }
                                 };
@@ -574,12 +563,7 @@ pub fn run_worker() -> ! {
                             // Split pipeline: infer_only → tensor_to_mask → apply_mask
                             // This captures the raw tensor for future Tier 2 mask reruns.
                             let Some(eng) = engine.as_ref() else {
-                                let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                    item_id,
-                                    error: "segmentation engine not initialized".into(),
-                                });
-                                in_flight.fetch_sub(1, Ordering::AcqRel);
-                                cleanup_inputs();
+                                fail(SEG_ENGINE_MISSING.into());
                                 return;
                             };
                             let decoded;
@@ -589,12 +573,7 @@ pub fn run_worker() -> ! {
                                 match prunr_core::load_image_from_bytes(&img_bytes) {
                                     Ok(img) => { decoded = img; &decoded }
                                     Err(e) => {
-                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                            item_id,
-                                            error: e.to_string(),
-                                        });
-                                        in_flight.fetch_sub(1, Ordering::AcqRel);
-                                        cleanup_inputs();
+                                        fail(e.to_string());
                                         return;
                                     }
                                 }
