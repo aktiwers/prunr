@@ -269,9 +269,7 @@ pub fn upscale_rgba_with_engine(
     progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError> {
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
+    let descriptor = prunr_models::descriptor(model_id)
         .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
 
     let knobs = upscale_knobs(descriptor)?;
@@ -361,18 +359,14 @@ mod tests {
     /// session due to Level3 shape baking during graph optimisation.
     #[test]
     fn pick_optimization_level_uses_level2_for_hat_family() {
-        let nomos = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::Nomos8kSchatL)
+        let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
             .expect("Nomos8kSchatL registered");
         assert!(
             matches!(pick_optimization_level(nomos), GraphOptimizationLevel::Level2),
             "Nomos8kSchatL must use Level2 (has tile_size_multiple)"
         );
 
-        let esrgan = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX4Plus)
+        let esrgan = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX4Plus)
             .expect("RealEsrganX4Plus registered");
         assert!(
             matches!(pick_optimization_level(esrgan), GraphOptimizationLevel::Level3),
@@ -401,9 +395,7 @@ mod tests {
 
     #[test]
     fn upscale_knobs_fp16_matches_export() {
-        let nomos = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::Nomos8kSchatL)
+        let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
             .expect("Nomos8kSchatL registered");
         let nomos_knobs = upscale_knobs(nomos).expect("Nomos8kSchatL has upscale knobs");
         assert!(
@@ -415,9 +407,7 @@ mod tests {
             "Nomos8kSchatL (Phhofm HAT-L) names the input tensor `input`"
         );
 
-        let esrgan = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX4Plus)
+        let esrgan = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX4Plus)
             .expect("RealEsrganX4Plus registered");
         let esrgan_knobs = upscale_knobs(esrgan).expect("RealEsrganX4Plus has upscale knobs");
         assert!(
@@ -436,9 +426,7 @@ mod tests {
     /// same export script → same tensor names and dtype).
     #[test]
     fn x2plus_knobs_fp16_false_and_input_data() {
-        let x2 = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX2Plus)
+        let x2 = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX2Plus)
             .expect("RealEsrganX2Plus registered");
         let knobs = upscale_knobs(x2).expect("RealEsrganX2Plus has upscale knobs");
         assert!(!knobs.is_fp16, "x2plus exports fp32 — must NOT pack f16 tensors");
