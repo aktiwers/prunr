@@ -30,6 +30,28 @@ const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
 const FACE_SEARCH_STOPPED: &str = "Face search stopped";
 
 impl PrunrApp {
+    /// Land what every subsystem finished since the last frame: runs,
+    /// pictures, Magic Brush masks, faces, depth maps, downloads and the
+    /// runtime install.
+    pub(super) fn pump_results(&mut self, ctx: &egui::Context) {
+        if let Some(msg) = self.pending_onboarding_toast.take() {
+            self.toasts.info(msg);
+        }
+        // The SD eraser's reports and result come through its bridge. A
+        // run sends its pictures before its result, and they land first:
+        // the result reveals over them.
+        self.processor.pump_inpaint_subprocess();
+        self.pump_run_pictures(ctx);
+        self.pump_inpaint_results(ctx);
+        self.pump_upscale_results(ctx);
+        self.pump_colorize_results(ctx);
+        self.pump_sam_results(ctx);
+        self.pump_faces();
+        self.pump_depth(ctx);
+        self.pump_download_manager(ctx);
+        self.pump_runtime_install(ctx);
+    }
+
     pub(super) fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
         // A cancelled or failed erase records nothing; the painted region

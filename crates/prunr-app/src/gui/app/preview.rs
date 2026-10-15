@@ -93,25 +93,7 @@ impl PrunrApp {
     }
 
     /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
-    /// Called once per frame at the start of `ui()` so the current frame renders
-    /// with the newest available results.
     pub(super) fn pump_live_preview(&mut self, ctx: &egui::Context) {
-        if let Some(msg) = self.pending_onboarding_toast.take() {
-            self.toasts.info(msg);
-        }
-        // The SD eraser's reports and result come through its bridge. A
-        // run sends its pictures before its result, and they land first:
-        // the result reveals over them.
-        self.processor.pump_inpaint_subprocess();
-        self.pump_run_pictures(ctx);
-        self.pump_inpaint_results(ctx);
-        self.pump_upscale_results(ctx);
-        self.pump_colorize_results(ctx);
-        self.pump_sam_results(ctx);
-        self.pump_faces();
-        self.pump_depth(ctx);
-        self.pump_download_manager(ctx);
-        self.pump_runtime_install(ctx);
         self.recipe_drift_tripwire();
 
         // Dispatch phase: tick() invokes the closure for each item whose
