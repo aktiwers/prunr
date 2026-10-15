@@ -2294,8 +2294,12 @@ impl BatchItem {
     /// Returns None when no decoded source is available — caller should warn
     /// and skip the dispatch.
     pub(crate) fn source_for_inpaint(&self) -> Option<Arc<image::RgbaImage>> {
-        self.result_rgba.as_ref().cloned()
-            .or_else(|| self.source_rgba.as_ref().cloned())
+        self.result_rgba.clone().or_else(|| self.decoded_source())
+    }
+
+    /// The decoded source as RGBA: `source_rgba`, else a copy out of `source_dyn`.
+    pub(crate) fn decoded_source(&self) -> Option<Arc<image::RgbaImage>> {
+        self.source_rgba.clone()
             .or_else(|| self.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())))
     }
 

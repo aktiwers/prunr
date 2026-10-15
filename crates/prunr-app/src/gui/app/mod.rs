@@ -752,7 +752,7 @@ impl PrunrApp {
         let Some(reroll) = item.reroll() else { return };
         let start = match reroll.start.as_ref() {
             Some(s) => s.image.load(),
-            None => item.source_rgba.clone().or_else(|| item.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8()))),
+            None => item.decoded_source(),
         };
         let (Some(source), Some(region)) = (start, reroll.region.load()) else {
             tracing::warn!(item_id = item.id, "try another skipped: its start image or region is unavailable");
