@@ -458,10 +458,7 @@ impl PrunrApp {
         // Safety: we're still in `new`, before any worker thread spawns.
         unsafe { std::env::remove_var("PRUNR_OPEN_FILE"); }
         if let Some(path) = preload {
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("untitled")
-                .to_string();
+            let name = import::display_name(&path, import::UNTITLED);
             let _ = app.batch.bg_io.file_load_tx.send((path, name));
         }
         // Test-harness escape hatch: PRUNR_OPEN_TAB pre-selects a Settings

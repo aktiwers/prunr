@@ -40,10 +40,7 @@ impl PrunrApp {
             self.set_temporary_status("Could not load image");
             return;
         };
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("image")
-            .to_string();
+        let filename = display_name(&path, "image");
         self.load_image_source(ImageSource::Path(path), dims, filename);
     }
 
@@ -70,20 +67,23 @@ impl PrunrApp {
             // invariant: paths.len() == 1 checked in the guard above.
             self.handle_open_path(paths.into_iter().next().unwrap());
         } else {
-            // Send file paths for lazy loading — bytes read on demand.
-            let tx = self.batch.bg_io.file_load_tx.clone();
-            std::thread::spawn(move || {
-                for path in paths {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("untitled")
-                        .to_string();
-                    if tx.send((path, name)).is_err() {
-                        break;
-                    }
-                }
-            });
+            self.queue_file_loads(paths);
         }
+    }
+
+    /// Send `paths` for lazy loading on a background thread — bytes are
+    /// read on demand, not all into RAM up front.
+    fn queue_file_loads(&self, paths: Vec<PathBuf>) {
+        let tx = self.batch.bg_io.file_load_tx.clone();
+        std::thread::spawn(move || {
+            for path in paths {
+                let name = display_name(&path, UNTITLED);
+                // Once the receiver is gone every later send fails too.
+                if tx.send((path, name)).is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     pub fn remove_selected(&mut self) {
@@ -191,18 +191,8 @@ impl PrunrApp {
             );
         }
 
-        // Send file paths for lazy loading (avoids reading all into RAM upfront).
         if !resolved.is_empty() {
-            let tx = self.batch.bg_io.file_load_tx.clone();
-            std::thread::spawn(move || {
-                for path in resolved {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("untitled")
-                        .to_string();
-                    let _ = tx.send((path, name));
-                }
-            });
+            self.queue_file_loads(resolved);
         }
 
         // Handle inline bytes immediately (Wayland — already in memory, no I/O)
@@ -229,6 +219,15 @@ impl PrunrApp {
 }
 
 /// Reads only the header, never the pixels.
+/// The batch name of an image loaded by path without being opened on its own.
+pub(super) const UNTITLED: &str = "untitled";
+
+/// The name `path`'s image goes by in the batch: its file name, else
+/// `fallback`.
+pub(super) fn display_name(path: &Path, fallback: &str) -> String {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or(fallback).to_string()
+}
+
 fn probe_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
