@@ -15,24 +15,18 @@ use crate::gui::theme;
 use super::chip::{self, GroupChip};
 use super::{differs, fmt, get_model, hint};
 
-
-#[derive(Default)]
-pub struct EraserRowChange {
-    pub committed: bool,
-}
-
-/// Render the SD-eraser chips. Caller decides placement.
+/// Render the SD-eraser chips. Caller decides placement. Returns true
+/// when a setting was committed.
 pub(crate) fn render(
     ui: &mut egui::Ui,
     app_settings: &mut Settings,
     installed: crate::gui::hardware_cache::HardwareInstallCache,
     shown_seed: Option<u64>,
-) -> EraserRowChange {
-    let mut change = EraserRowChange::default();
-    change.committed |= render_quality_chip(ui, app_settings, installed.lcm_bundle);
-    change.committed |= render_prompt_chip(ui, &mut app_settings.brush);
-    change.committed |= render_advanced_group(ui, &mut app_settings.brush, installed.taesd, shown_seed);
-    change
+) -> bool {
+    let mut committed = render_quality_chip(ui, app_settings, installed.lcm_bundle);
+    committed |= render_prompt_chip(ui, &mut app_settings.brush);
+    committed |= render_advanced_group(ui, &mut app_settings.brush, installed.taesd, shown_seed);
+    committed
 }
 
 fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
