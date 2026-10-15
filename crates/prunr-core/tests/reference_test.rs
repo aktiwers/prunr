@@ -18,7 +18,7 @@ use prunr_core::{
 };
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
@@ -90,11 +90,7 @@ fn pixel_match_percent(our_rgba: &RgbaImage, reference_mask: &image::GrayImage, 
 #[test]
 fn test_rembg_reference() {
     if skip_if_no_ort("test_rembg_reference") { return; }
-    // U2Net is OnDemand — skip unless installed.
-    if !prunr_models::is_available(prunr_models::ModelId::U2net) {
-        eprintln!("Skipping rembg reference: U2Net not installed in user data dir");
-        return;
-    }
+    if skip_if_model_missing("test_rembg_reference", prunr_models::ModelId::U2net) { return; }
     let engine = OrtEngine::new(ModelKind::U2net, 1)
         .expect("Failed to create OrtEngine — U2Net reported available but session creation failed");
 
@@ -372,11 +368,7 @@ fn test_inpaint_smoke() {
         eprintln!("Skipping inpaint smoke test: car-1.jpg not found");
         return;
     }
-    // LaMa is OnDemand — skip unless the user has it in their data dir.
-    if !prunr_models::is_available(prunr_models::ModelId::LaMaFp32) {
-        eprintln!("Skipping inpaint smoke test: LaMa not installed in user data dir");
-        return;
-    }
+    if skip_if_model_missing("test_inpaint_smoke", prunr_models::ModelId::LaMaFp32) { return; }
 
     let dyn_img = image::open(&image_path).expect("Failed to open car-1.jpg");
     let img = dyn_img.into_rgba8();

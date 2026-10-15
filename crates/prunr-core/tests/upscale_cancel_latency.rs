@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use prunr_core::upscale::{upscale_rgba_with_engine, UpscaleRunOptions};
 use prunr_core::{CoreError, InferenceEngine, OrtEngine};
-use prunr_models::{is_available, ModelId};
-use test_common::skip_if_no_ort;
+use prunr_models::ModelId;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 #[ignore = "needs an installed upscale model and measures wall-clock"]
@@ -32,8 +32,7 @@ fn terminate_aborts_a_running_tile() {
         return;
     }
     let id = ModelId::FourXNmkdSiaxCx;
-    if !is_available(id) {
-        eprintln!("SKIP: {id:?} not installed");
+    if skip_if_model_missing("upscale_cancel_latency", id) {
         return;
     }
     let t0 = Instant::now();
@@ -82,8 +81,7 @@ fn full_run_time() {
         return;
     }
     let id = ModelId::FourXNmkdSiaxCx;
-    if !is_available(id) {
-        eprintln!("SKIP: {id:?} not installed");
+    if skip_if_model_missing("upscale_full_run", id) {
         return;
     }
     let engine = OrtEngine::for_model(id, 2, false).expect("engine");

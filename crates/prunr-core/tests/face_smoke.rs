@@ -10,7 +10,7 @@ mod test_common;
 
 use image::{Rgba, RgbaImage};
 use prunr_core::face::FaceFinder;
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn the_built_in_face_finder_runs() {
@@ -73,8 +73,7 @@ fn an_installed_face_model_finds_with_the_built_in_finder() {
     }
     let sky = RgbaImage::from_pixel(640, 480, Rgba([150, 190, 235, 255]));
     for id in [ModelId::FaceGfpgan, ModelId::FaceRestoreFormerPp] {
-        if !prunr_models::is_available(id) {
-            eprintln!("[face] SKIP: {id:?} is not installed");
+        if skip_if_model_missing("face", id) {
             continue;
         }
         let mut restorer = prunr_core::face::FaceRestorer::new(id).expect("an installed face model opens");

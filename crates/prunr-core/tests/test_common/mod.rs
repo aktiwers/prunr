@@ -29,6 +29,16 @@ pub fn skip_if_no_ort(label: &str) -> bool {
     false
 }
 
+/// Returns `true` when the OnDemand model `id` isn't installed, after
+/// printing a `[label] SKIP:` line.
+pub fn skip_if_model_missing(label: &str, id: prunr_models::ModelId) -> bool {
+    if prunr_models::is_available(id) {
+        return false;
+    }
+    eprintln!("[{label}] SKIP: {id:?} is not installed");
+    true
+}
+
 // ---------- golden harness driver (shared by both golden tiers) ----------
 
 fn list_fixture_dirs(root: &Path) -> Vec<PathBuf> {

@@ -9,17 +9,13 @@ mod test_common;
 
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 use prunr_core::inpaint;
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn big_lama_modifies_painted_region() {
     if skip_if_no_ort("big_lama_smoke") { return; }
     let id = prunr_models::ModelId::BigLaMa;
-    if !prunr_models::is_available(id) {
-        eprintln!("SKIP: Big-LaMa not installed at {:?}",
-            prunr_models::on_demand_dir());
-        return;
-    }
+    if skip_if_model_missing("big_lama_smoke", id) { return; }
 
     // 256×256 solid red. Mask covers the centre 64×64 region.
     let w: u32 = 256;
