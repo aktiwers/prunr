@@ -70,6 +70,8 @@ fn main() {
         worker_process::run_worker();
     }
 
+    std::thread::spawn(prunr_core::cache::remove_retired_root);
+
     if let Some(cli::Command::Bench(args)) = &cli.command {
         std::process::exit(cli::run_bench(args));
     }
