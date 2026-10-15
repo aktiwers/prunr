@@ -1488,12 +1488,17 @@ pub fn not_installed_error(id: ModelId) -> String {
 pub fn is_available(id: ModelId) -> bool {
     match descriptor(id).map(|d| d.source) {
         Some(ModelSource::Bundled { .. }) | Some(ModelSource::MultiPartBundled { .. }) => true,
-        Some(ModelSource::OnDemand { filename, .. }) => {
-            on_demand_dir().is_some_and(|d| d.join(filename).is_file())
-        }
+        Some(ModelSource::OnDemand { .. }) => download_path(id).is_some_and(|p| p.is_file()),
         Some(ModelSource::MultiPartOnDemand { .. }) => multi_part_paths(id).is_some(),
         None => false,
     }
+}
+
+/// Where a single-file download keeps `id`'s own weights, installed or
+/// not; `None` for a bundled or multi-part model.
+pub fn download_path(id: ModelId) -> Option<std::path::PathBuf> {
+    let ModelSource::OnDemand { filename, .. } = descriptor(id)?.source else { return None };
+    Some(on_demand_dir()?.join(filename))
 }
 
 /// Resolve absolute paths to every part of a multi-part bundle. Returns
