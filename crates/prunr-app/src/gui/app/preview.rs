@@ -538,7 +538,7 @@ mod upscale_tier2_routing_tests {
         );
     }
 
-    /// Regression guard for Bug #3: a recipe-diff built with a model-kind
+    /// A recipe-diff built with a model-kind
     /// mismatch (BiRefNetLite vs RealEsrganX4Plus) must NOT resolve to
     /// UpscaleTier2 — the bug was caused by the broken fallback masking
     /// upscale variants as seg models.
@@ -574,7 +574,7 @@ mod upscale_tier2_routing_tests {
         );
     }
 
-    /// Same as above but for all four Tier-2 knobs, ensuring each independently
+    /// Same as above but for each Tier-2 knob, ensuring each independently
     /// triggers the live-preview dispatch.
     #[test]
     fn tier2_chain_each_knob_individually_routes_to_upscale_tier2() {

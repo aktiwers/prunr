@@ -99,10 +99,10 @@ impl PrunrApp {
         self.dispatch_next_queued_run();
     }
 
-    /// Upscale branch of `handle_process_intent`. Resolves the input image
-    /// from the timeline (`BatchItem::run_input_or_source`), then hands off
-    /// to `Processor::dispatch_upscale`. Must only be called after
-    /// `can_process_intent()` confirms the model is installed and idle.
+    /// Start an upscale of `item_id` from where its timeline says a run
+    /// starts, refusing an output too large for free memory. Must only be
+    /// called after `can_process_intent()` confirms the model is installed
+    /// and idle.
     fn dispatch_upscale_for(&mut self, item_id: u64) -> bool {
         let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let model_id = match self.settings.model.to_model_id() {
@@ -140,8 +140,8 @@ impl PrunrApp {
         true
     }
 
-    /// Colorize branch of `handle_process_intent`: the selected image, from
-    /// where its timeline says a run starts, to `Processor::dispatch_colorize`.
+    /// Start a colorize of `item_id` from where its timeline says a run
+    /// starts.
     fn dispatch_colorize_for(&mut self, item_id: u64) -> bool {
         let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let input = item.run_input_or_source(Engine::Colorize);

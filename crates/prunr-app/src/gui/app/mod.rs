@@ -112,8 +112,7 @@ pub struct PrunrApp {
     // Settings
     pub(crate) show_settings: bool,
     pub(crate) settings: Settings,
-    /// Which Settings tab the modal is showing. Transient UI state — not
-    /// persisted; opening Settings always starts on General.
+    /// Which Settings tab the modal is showing; not persisted.
     pub(crate) settings_tab: super::views::settings::SettingsTab,
     /// Inline "Reset to defaults" confirmation. Set when the user clicks
     /// the reset button; the next render shows a confirm/cancel pair.
@@ -176,7 +175,7 @@ const SETTINGS_SAVE_DELAY: std::time::Duration = std::time::Duration::from_milli
 
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        // Worker is spawned below after prewarm_engine is created
+        // Worker is spawned below after prewarm is created
         let worker_ctx = cc.egui_ctx.clone();
 
         // Initialize material icons font
@@ -231,8 +230,7 @@ impl PrunrApp {
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
         // PRUNR_OPEN_MODEL must apply BEFORE the worker prewarm config below
         // — otherwise the wrong model loads at startup and the first Process
-        // click pays a full subprocess respawn (~15 s on this CPU). The env
-        // var is consumed here; PrunrApp::new no longer needs to re-read it.
+        // click pays a full subprocess respawn (~15 s on this CPU).
         if let Some(name) = std::env::var_os("PRUNR_OPEN_MODEL") {
             unsafe { std::env::remove_var("PRUNR_OPEN_MODEL"); }
             if let Some(s) = name.to_str() {
@@ -472,8 +470,8 @@ impl PrunrApp {
         // Test-harness escape hatch: PRUNR_OPEN_TAB pre-selects a Settings
         // tab and auto-opens the modal at startup. Lets the harness capture
         // each tab without driving mouse clicks (unreliable under Xephyr's
-        // coord-space mismatch). Values match SettingsTab labels: General /
-        // Behavior / Hotkeys (case-sensitive). Not exposed on --help.
+        // coord-space mismatch). Values are `SettingsTab` labels
+        // (case-sensitive). Not exposed on --help.
         if let Some(name) = std::env::var_os("PRUNR_OPEN_TAB") {
             unsafe { std::env::remove_var("PRUNR_OPEN_TAB"); }
             if let Some(s) = name.to_str() {
@@ -595,7 +593,7 @@ impl PrunrApp {
     /// Single source of truth for the Process / Reprocess action.
     /// Routes between upscale dispatch, inpaint dispatch (eraser models),
     /// and the seg pipeline, with consistent gating. All input surfaces —
-    /// toolbar button, Cmd+R keyboard shortcut, future menu items — call this.
+    /// the toolbar button and the Cmd+R shortcut — call this.
     pub fn handle_process_intent(&mut self) {
         if !self.can_process_intent() {
             return;
@@ -923,10 +921,6 @@ impl PrunrApp {
         }
     }
 
-    /// Escape dismisses the topmost interruptable state. Priority order:
-    /// in-flight upscale → in-flight eraser stroke → active batch processing
-    /// → active selection → open modal. Selection clear sits above modal
-    /// dismissal so Esc is the natural "cancel what I just drew" key.
     /// Escape: the top-most modal first, then a run in flight, then
     /// the selection. One press does one thing.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
@@ -1098,7 +1092,7 @@ impl eframe::App for PrunrApp {
             self.update_on_screen();
         }
         // Held while the pointer stays down, so the press that dismissed a
-        // popover is spent in full (see canvas.rs).
+        // popover is spent in full.
         let popup_open = super::theme::dismissable_popup_open(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
@@ -1306,10 +1300,6 @@ fn step_toast(steps: &[StepKind], verb: &str) -> String {
     }
 }
 
-/// Drain any `Event::Screenshot` replies and persist them as PNGs. The
-/// directory is `$PRUNR_SCREENSHOT_DIR` (test-harness sets this) or
-/// `<temp>/prunr-screenshots/`. Filename is the unix-millis timestamp
-/// so a scenario that fires Shift+F12 multiple times never collides.
 /// Where `Action::Screenshot` writes: `PRUNR_SCREENSHOT_DIR` or the temp dir.
 pub(crate) fn screenshot_dir() -> PathBuf {
     std::env::var_os("PRUNR_SCREENSHOT_DIR")
@@ -1317,6 +1307,9 @@ pub(crate) fn screenshot_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("prunr-screenshots"))
 }
 
+/// Drain any `Event::Screenshot` replies and persist them as PNGs into
+/// `screenshot_dir()`. Filename is the unix-millis timestamp so a
+/// scenario that fires Shift+F12 multiple times never collides.
 fn drain_screenshot_replies(ctx: &egui::Context) {
     let images: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
         i.events.iter().filter_map(|e| match e {
