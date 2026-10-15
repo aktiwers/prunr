@@ -163,10 +163,6 @@ fn tensor_to_mask_core(
         }
     };
 
-    // Both branches fold over the prediction values to get min/max for stretch.
-    // For rembg models the fold is over raw logits; for BiRefNet the fold is over
-    // sigmoid'd values — canonical rembg birefnet_general.py and BiRefNet/inference.py
-    // both apply (x - min) / (max - min) after sigmoid, not before.
     let (lo, hi) = if pred_slice.len() >= ROW_PAR_THRESHOLD {
         pred_slice
             .par_iter()
@@ -411,9 +407,8 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             if block_size < 2 { return; }
             let (w, h) = rgba.dimensions();
             // Sample one pixel per block (top-left corner) into a small
-            // LUT before any mutation. Replaces the previous full-image
-            // `rgba.clone()` (~48 MB at 4K) with a block-grid scratch
-            // (~144 KB at block_size=16, ~9 MB at block_size=2).
+            // LUT before any mutation, not a full copy: ~144 KB at
+            // block_size=16, ~9 MB at block_size=2.
             let bs = block_size;
             let blocks_x = w.div_ceil(bs);
             let blocks_y = h.div_ceil(bs);
@@ -427,7 +422,6 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             }
             // Row-parallel: postprocess runs in the subprocess worker,
             // never nested inside rayon (so par_chunks_mut won't deadlock).
-            use rayon::prelude::*;
             let row_stride = (w * 4) as usize;
             rgba.as_mut().par_chunks_mut(row_stride).enumerate().for_each(|(y, row)| {
                 let row_block = ((y as u32) / bs) * blocks_x;
@@ -463,10 +457,8 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             let max_r_sq = (half * half) as u32;
             let row_stride = (w * 4) as usize;
 
-            // Read each pixel's luma BEFORE writing the same pixel. The
-            // earlier bug read cell-top-left luma, which had already been
-            // mutated by the time later rows ran; reading `(x, y)` itself
-            // is safe because the write at `(x, y)` happens after.
+            // Read each pixel's own luma before writing it: a cell's
+            // other pixels may already be overwritten by earlier rows.
             let process_row = |(y, row): (usize, &mut [u8])| {
                 let cy = ((y as i32) / spacing) * spacing + half;
                 let dy = y as i32 - cy;
@@ -793,8 +785,7 @@ mod tests {
 
     #[test]
     fn test_postprocess_no_sigmoid_uniform_zero() {
-        // All-zero tensor: mi = ma = 0, range = 1e-6
-        // (0 - 0) / 1e-6 = 0 -> alpha = 0
+        // A flat output at or below one half reads as no subject.
         let raw = make_raw_tensor(0.0);
         let original = solid_rgb(32, 32);
         let result = postprocess(raw.view(), &original, &PostprocessOpts::new(&MaskSettings::default(), ModelKind::Silueta));

@@ -12,7 +12,7 @@
 //! Public entry point `apply_denoise` operates on full-image RGBA:
 //!   - Sequential per-channel (R, G, B); alpha copied unchanged.
 //!   - `strength == 0.0` early-returns a clone (bit-identical to the
-//!     unfiltered path — pinned by `apply_denoise_strength_zero_is_identity`).
+//!     unfiltered path).
 //!   - `strength` linearly blends filtered output toward input.
 //!
 //! Peak RAM (canonical 2560×1920 input, sequential channels):
@@ -24,11 +24,9 @@
 //!   | bilateral v-pass / out (f32)| ~19.7 MB  |
 //!   | peak (one channel at a time)| ~49 MB    |
 //!
-//! Concurrency: rayon row-parallelism here is safe because the only
-//! production caller — `Processor::dispatch_upscale::build_inference_input`
-//! (crates/prunr-app/src/gui/processor.rs) — invokes `apply_denoise`
-//! BEFORE the ORT session is created or driven. It is not nested inside
-//! the tiled-inference inner loop or any ort callback.
+//! Concurrency: the rayon row-parallelism here is safe only while
+//! `apply_denoise` runs before the upscale's ORT session is driven, never
+//! nested inside the tiled-inference loop or an ort callback.
 
 use image::RgbaImage;
 use rayon::prelude::*;
@@ -41,8 +39,7 @@ use rayon::prelude::*;
 /// at image edges (standard image-processing default).
 ///
 /// Each row is independent — parallelised with rayon. The histogram is
-/// `[u32; 256]` on the stack — the per-row inner loop is allocation-free
-/// per CLAUDE.md `## Hot paths`.
+/// `[u32; 256]` on the stack, so the per-row inner loop is allocation-free.
 pub(crate) fn median_filter_channel(
     src: &[u8],
     width: usize,
@@ -107,15 +104,13 @@ pub(crate) fn median_filter_channel(
 /// units — NOT 0..255).
 ///
 /// Two-pass separable: horizontal row pass writes to an f32 scratch buffer;
-/// vertical column pass writes to the u8 output (clamp+cast at the boundary
-/// per CLAUDE.md `## Numerical & color invariants`).
+/// vertical column pass writes to the u8 output (clamp+cast at the boundary).
 ///
 /// Spatial kernel is precomputed once (not per-pixel) as a `Vec<f32>` of
 /// length `2*radius+1`. Rows processed in parallel via rayon.
 ///
-/// Variance guard: when the denominator (sum of weights) is < 1e-6, the
-/// unfiltered pixel value is used — defends against the `0/0` case on
-/// degenerate inputs.
+/// The weight sum is floored at 1e-6 before dividing, which defends
+/// against `0/0` on degenerate inputs.
 pub(crate) fn bilateral_filter_channel(
     src: &[u8],
     width: usize,
