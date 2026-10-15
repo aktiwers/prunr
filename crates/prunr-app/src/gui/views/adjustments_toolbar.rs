@@ -393,7 +393,6 @@ fn reset_group(fields: &[chip::Field<ItemSettings>], s: &mut ItemSettings, d: &I
     }
 }
 
-/// The five mask stages, in the order the pipeline applies them.
 fn mask_gamma(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     aggregate_knob(chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)), StaticKnob::Gamma, change);
 }
@@ -924,8 +923,6 @@ impl BgKind {
     }
 }
 
-/// Unified Background chip: one control for "what fills the transparent
-/// area behind the subject" — solid color or a source-derived effect.
 /// Editable + display state for the background chip. Grouped because the
 /// chip needs three live-edit fields plus image-availability metadata —
 /// past the param-count alarm without this grouping.
@@ -939,6 +936,8 @@ struct BgChipState<'a> {
     bg_image_label: Option<&'a str>,
 }
 
+/// Unified Background chip: one control for "what fills the transparent
+/// area behind the subject" — solid color or a source-derived effect.
 fn render_background_chip(
     ui: &mut Ui,
     state: BgChipState<'_>,
