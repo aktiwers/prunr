@@ -123,14 +123,14 @@ impl EdgeEngine {
     pub fn infer_input(&self, input: &EdgeInput, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
         let wants = |s: EdgeScale| scales.contains(&s);
         let (fine_h, fine_w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
-        let unprepared = |run: &str| CoreError::Inference(format!("Edge input was not resized for the {run} run"));
+        let unprepared = |w: u32, h: u32| CoreError::Inference(format!("Edge input was not resized for the {w}×{h} run"));
         let base_input = if wants(EdgeScale::Bold) || wants(EdgeScale::Fused) {
-            Some(to_tensor(input.base.as_ref().ok_or_else(|| unprepared("640×480"))?))
+            Some(to_tensor(input.base.as_ref().ok_or_else(|| unprepared(BASE_W, BASE_H))?))
         } else {
             None
         };
         let fine_input = if wants(EdgeScale::Fine) {
-            Some(to_tensor(input.fine.as_ref().ok_or_else(|| unprepared("1280×960"))?))
+            Some(to_tensor(input.fine.as_ref().ok_or_else(|| unprepared(fine_w, fine_h))?))
         } else {
             None
         };
