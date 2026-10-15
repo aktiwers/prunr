@@ -644,7 +644,6 @@ impl LamaSession {
     }
 
     fn run_tile(&self, image: &RgbaImage, mask: &GrayImage) -> Result<RgbaImage, CoreError> {
-        let (w, h) = image.dimensions();
         let (img_in, mask_in) = encode_tile(image, mask);
 
         // Borrow the output view straight into `decode_tile` — no
@@ -667,7 +666,7 @@ impl LamaSession {
             .map_err(|e| CoreError::Inference(format!("LaMa: output extract: {e}")))?
             .into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?;
-        Ok(decode_tile(view, image, mask, w, h))
+        Ok(decode_tile(view, image, mask))
     }
 }
 
@@ -844,9 +843,8 @@ fn decode_tile(
     output: ndarray::ArrayView4<'_, f32>,
     source: &RgbaImage,
     mask: &GrayImage,
-    w: u32,
-    h: u32,
 ) -> RgbaImage {
+    let (w, h) = source.dimensions();
     let s = TILE as usize;
     let plane = s * s;
     let buf = output.as_slice().unwrap_or(&[]);
@@ -1570,7 +1568,7 @@ mod tests {
         // Fill output with junk to prove we don't read it.
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         for v in output.iter_mut() { *v = 0.5; }
-        let out = decode_tile(output.view(), &src, &mask, 64, 64);
+        let out = decode_tile(output.view(), &src, &mask);
         assert_eq!(out.as_raw(), src.as_raw(), "unmasked pixels must equal source");
     }
 
@@ -1586,7 +1584,7 @@ mod tests {
         output[[0, 0, 4, 4]] = 1.0;
         output[[0, 1, 4, 4]] = 0.0;
         output[[0, 2, 4, 4]] = 128.0 / 255.0;
-        let out = decode_tile(output.view(), &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask);
         let p = out.get_pixel(4, 4);
         assert_eq!(p[0], 255);
         assert_eq!(p[1], 0);
@@ -1606,7 +1604,7 @@ mod tests {
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         // Big values across the whole tile so the heuristic picks 1.0 scale.
         for v in output.iter_mut() { *v = 200.0; }
-        let out = decode_tile(output.view(), &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask);
         assert_eq!(out.get_pixel(4, 4).0[0], 200, "200.0 in [0,255] range stays 200");
     }
 
