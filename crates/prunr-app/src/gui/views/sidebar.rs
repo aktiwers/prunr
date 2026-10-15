@@ -59,7 +59,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
         if actions.needs_repaint || app.batch.has_pending_work() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+            ui.ctx().request_repaint_after(theme::ANIM_FRAME);
         }
         if let Some(due) = app.drag_export.note_hover(actions.hovered, std::time::Instant::now()) {
             ui.ctx().request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
@@ -260,7 +260,7 @@ fn render_thumbnail_layer(
     let fade = ui.ctx().animate_bool_with_time(
         egui::Id::new(("thumb_fade", app.batch.items[i].id)),
         has_thumb,
-        theme::fade_secs(ui.ctx(), 0.2),
+        theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
     // Bg-image texture is built off-thread (kicked from the file-pick

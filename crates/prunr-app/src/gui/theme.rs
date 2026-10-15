@@ -129,6 +129,13 @@ pub const SCRUB_OPACITY: f32 = 0.7;
 /// which a laptop on battery feels over a run of minutes.
 pub const WORK_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
+/// How often the slow ambient animations draw (the processing canvas,
+/// the sidebar's sweeps and pending thumbnails): about fifteen a second.
+pub const ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
+
+/// An image's fade-in, on the canvas and in its thumbnail.
+pub const IMAGE_FADE_SECS: f32 = 0.2;
+
 /// A fade's length: `secs`, or none while animations are off.
 pub fn fade_secs(ctx: &egui::Context, secs: f32) -> f32 {
     if motion(ctx) { secs } else { 0.0 }

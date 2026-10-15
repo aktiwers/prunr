@@ -743,7 +743,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
-            theme::fade_secs(ui.ctx(), 0.2),
+            theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
         );
         let alpha = (fade * 255.0) as u8;
         if fade < 1.0 { ui.ctx().request_repaint(); }
@@ -823,7 +823,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     });
 
     if theme::motion(ui.ctx()) {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+        ui.ctx().request_repaint_after(theme::ANIM_FRAME);
     }
     painted
 }
