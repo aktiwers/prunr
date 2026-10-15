@@ -2569,9 +2569,9 @@ impl LcmScheduler {
     }
 
     /// The consistency function at `t`, per latent value: the clean
-    /// latent LCM predicts from a value and its noise prediction. One
-    /// definition for `step`, `step_at` and `denoised`, so a preview
-    /// shows the estimate the step itself uses.
+    /// latent LCM predicts from a value and its noise prediction. The
+    /// steps and the step previews share it, so a preview shows the
+    /// estimate the step itself uses.
     fn denoiser(&self, t: i64) -> impl Fn(f32, f32) -> f32 {
         let alpha_t = self.alpha_cumprod(t);
         let sqrt_alpha_t = alpha_t.sqrt();

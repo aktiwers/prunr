@@ -75,7 +75,7 @@ Tests and outside tools drive the app through **the control tree**: the AccessKi
 
 ## Progress
 
-Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have. Pictures travel apart from the counts: a run's `PictureSink` sends a finished tile to the canvas while the run's own check says it may still land, and the result later reveals over the preview they build. Work on a scaled-down crop reports through `Progress::within`, so its tiles and previews land where the crop sits in the photo.
+Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have. Pictures (finished tiles, a step's estimate) travel apart from the counts and are made only while the run's result can still land; each names where it sits in the photo, so the result later reveals over the preview they build.
 
 Time left runs from the moment the count first moves, so model loading and graph compiles never inflate it.
 
@@ -424,7 +424,7 @@ Every session in the workspace starts from `ort_runtime::session_builder()`, whi
 | Windows | DirectML ORT 1.24.1 (PyPI `onnxruntime-directml`: `onnxruntime.dll` + `DirectML.dll`, +23.5 MB over the CPU build) | built in; OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
 | macOS (arm64, 14+) | ORT 1.24.1 PyPI wheel, which carries CoreML | built in |
 
-Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers OpenVINO for an Intel iGPU, except on a Windows machine with an NVIDIA or AMD GPU or one with 2 GB of dedicated memory, which the built-in DirectML already covers. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers OpenVINO for an Intel iGPU, unless the built-in DirectML already has a graphics card to run on. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context.
 
 ### EP ladder
 
@@ -445,7 +445,7 @@ OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machi
 Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVINO + Silueta):
 
 1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles).
-2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session commit fails. An entry names the EP, the model and the copy of its weights that failed, so FP16 failing on an EP still lets the FP32 weights try that EP. Keyed on the app version, so an upgrade retries everything. `prunr --clear-ep-cache` wipes it.
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Keyed on the app version, so an upgrade retries everything; `prunr --clear-ep-cache` wipes it.
 
 ### Compiled-model cache
 
