@@ -198,12 +198,18 @@ fn unmultiply_alpha(buf: &mut [u8]) {
     }
 }
 
+/// Either side past `LARGE_IMAGE_LIMIT`, for callers that only have the
+/// dimensions (e.g. read from a file header).
+pub fn exceeds_large_image_limit(w: u32, h: u32) -> bool {
+    w > LARGE_IMAGE_LIMIT || h > LARGE_IMAGE_LIMIT
+}
+
 /// Check whether the image exceeds the large image limit (8000px in either dimension).
 /// Returns Some(CoreError::LargeImage) if exceeded; None otherwise.
 /// The caller decides what to do: prompt user, auto-downscale, or abort.
 pub fn check_large_image(img: &DynamicImage) -> Option<CoreError> {
     let (w, h) = (img.width(), img.height());
-    if w > LARGE_IMAGE_LIMIT || h > LARGE_IMAGE_LIMIT {
+    if exceeds_large_image_limit(w, h) {
         Some(CoreError::LargeImage { width: w, height: h, limit: LARGE_IMAGE_LIMIT })
     } else {
         None
@@ -613,6 +619,14 @@ mod tests {
             }
             other => panic!("Expected LargeImage, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn exceeds_large_image_limit_is_strictly_past_either_side() {
+        let l = LARGE_IMAGE_LIMIT;
+        assert!(!exceeds_large_image_limit(l, l));
+        assert!(exceeds_large_image_limit(l + 1, 1));
+        assert!(exceeds_large_image_limit(1, l + 1));
     }
 
     #[test]

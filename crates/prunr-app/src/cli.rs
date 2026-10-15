@@ -1019,7 +1019,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
             })
         {
             Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
-                && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
+                && prunr_core::exceeds_large_image_limit(w, h) =>
             {
                 // Oversized — downscale to temp file, pass temp path to subprocess
                 match downscale_to_png(input, args.quiet) {
