@@ -42,9 +42,9 @@ pub struct SubprocessManager {
 }
 
 /// Refresh `rss_limit` every Nth `RssUpdate` from the child. Children
-/// emit RssUpdate at ~1 Hz, so 16 ≈ once every ~15 s — cheap enough
-/// (one `sysinfo::refresh_memory` ≈ a few ms) and responsive enough
-/// for cross-subprocess pressure shifts.
+/// emit one RssUpdate per finished job, so this re-queries every 16th
+/// job — cheap enough (one `sysinfo::refresh_memory` ≈ a few ms) and
+/// responsive enough for cross-subprocess pressure shifts.
 const RSS_LIMIT_REFRESH_EVERY: u32 = 16;
 
 /// Events from the reader thread.
@@ -94,8 +94,8 @@ impl SubprocessManager {
     /// Spawn a SD-inpaint-only subprocess. The worker skips engine
     /// creation when `inpaint_only` is set, so the seg fields on
     /// `Init` are dead weight at this stage — we pass placeholders.
-    /// Used by `Processor::dispatch_inpaint` for SD models so an OOM
-    /// during the bundle build kills the subprocess, not the GUI.
+    /// Used by the inpaint bridge for SD models so an OOM during the
+    /// bundle build kills the subprocess, not the GUI.
     pub fn spawn_inpaint_only() -> Result<(Self, String), String> {
         Self::spawn_inner(
             ModelKind::Silueta, 1,
@@ -409,7 +409,7 @@ impl SubprocessManager {
     }
 
     /// Cancel one item by id — worker drops it at the next dispatch check
-    /// and emits `ImageError { error: "Cancelled" }`.
+    /// and emits `ImageError` with `CANCELLED_ERR_MSG`.
     pub fn send_cancel_item(&mut self, item_id: u64) -> Result<(), String> {
         self.send_cmd(&SubprocessCommand::CancelItem { item_id })
             .map_err(|e| format!("Failed to send CancelItem: {e}"))
