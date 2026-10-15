@@ -805,6 +805,12 @@ impl BatchItem {
         self.edge_planes = Default::default();
     }
 
+    /// Drop the seg tensor and every edge cache tier together.
+    pub(crate) fn drop_tensor_caches(&mut self) {
+        self.set_cached_tensor(None);
+        self.invalidate_edge_cache();
+    }
+
     /// The kept lines lack a scale the settings draw.
     pub(crate) fn lacks_drawn_scales(&self) -> bool {
         self.settings.line_mode != prunr_core::LineMode::Off
@@ -1945,10 +1951,7 @@ impl BatchItem {
             CacheImpact::Nothing => {}
             CacheImpact::EdgeCache => self.invalidate_edge_cache(),
             CacheImpact::SegCache => self.set_cached_tensor(None),
-            CacheImpact::Both => {
-                self.set_cached_tensor(None);
-                self.invalidate_edge_cache();
-            }
+            CacheImpact::Both => self.drop_tensor_caches(),
         }
     }
 
@@ -2061,9 +2064,8 @@ impl BatchItem {
                     self.set_cached_tensor(Some(new));
                 }
                 if let Some(new) = edge_cache.and_then(super::worker::CompressedEdgeTensors::from_raw) {
+                    self.invalidate_edge_cache();
                     self.cached_edge_tensors = Some(new);
-                    self.volatile_edge_tensor = None;
-                    self.edge_planes = Default::default();
                 }
                 self.cached_masked_base = None;
                 // Note: we used to null `source_rgba` / `source_texture` on
@@ -2085,8 +2087,7 @@ impl BatchItem {
                 // Clear recipe + tensors so retry runs a fresh Tier 1
                 // (otherwise resolve_tier might return Skip for an errored item).
                 self.status = BatchStatus::Error(e);
-                self.set_cached_tensor(None);
-                self.invalidate_edge_cache();
+                self.drop_tensor_caches();
                 self.invalidate_upscale_cache();
                 self.invalidate_colorize_cache();
                 self.applied_recipe = None;

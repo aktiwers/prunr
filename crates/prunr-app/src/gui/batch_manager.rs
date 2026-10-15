@@ -554,8 +554,7 @@ impl BatchManager {
             // Preserve the selected item's tensors (most likely to be reused).
             if Some(item.id) == selected_id { continue; }
             remaining -= item.evictable_tensor_bytes();
-            item.set_cached_tensor(None);
-            item.invalidate_edge_cache();
+            item.drop_tensor_caches();
         }
     }
 
@@ -608,8 +607,7 @@ impl BatchManager {
         let selected_id = self.selected_item().map(|b| b.id);
         for item in &mut self.items {
             if Some(item.id) != selected_id {
-                item.set_cached_tensor(None);
-                item.invalidate_edge_cache();
+                item.drop_tensor_caches();
             }
         }
     }
