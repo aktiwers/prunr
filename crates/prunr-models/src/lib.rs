@@ -1405,8 +1405,7 @@ pub fn resolve_part_bytes(
     id: ModelId,
     part_key: &str,
 ) -> Result<Arc<Vec<u8>>, ResolveError> {
-    let desc = REGISTRY.iter().find(|d| d.id == id)
-        .ok_or(ResolveError::NotInRegistry)?;
+    let desc = descriptor(id).ok_or(ResolveError::NotInRegistry)?;
     match desc.source {
         ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
             let part = parts.iter().find(|p| p.key == part_key)
@@ -2576,7 +2575,7 @@ mod tests {
 
     #[test]
     fn sam2_registry_entry() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall)
+        let desc = descriptor(ModelId::Sam21HieraSmall)
             .expect("Sam21HieraSmall must be registered");
         assert_eq!(desc.category, ModelCategory::Selection);
         assert!(matches!(desc.source, ModelSource::MultiPartBundled { .. }));
@@ -2587,7 +2586,7 @@ mod tests {
 
     #[test]
     fn sam2_has_encoder_and_decoder_parts() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
+        let desc = descriptor(ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
@@ -2599,7 +2598,7 @@ mod tests {
 
     #[test]
     fn sam2_license_is_apache_2_no_acceptance_required() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
+        let desc = descriptor(ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { license, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
@@ -2612,7 +2611,7 @@ mod tests {
     /// consolidates them into one part, this test fails.
     #[test]
     fn sam2_encoder_decoder_separate_engines() {
-        let desc = REGISTRY.iter().find(|d| d.id == ModelId::Sam21HieraSmall).unwrap();
+        let desc = descriptor(ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
