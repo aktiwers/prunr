@@ -366,7 +366,6 @@ fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
     };
     match result {
         Ok(()) => {
-            prunr_models::evict_on_demand_cache(id);
             // Compiled-model cache (CUDA optimized.onnx, CoreML mlmodelc) is
             // useless without the source weights. Off-thread because a
             // multi-GB rmtree on a slow disk would stall the GUI frame.

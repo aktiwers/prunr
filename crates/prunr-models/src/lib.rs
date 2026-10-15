@@ -10,8 +10,7 @@
 // Models are declared in `REGISTRY`; bytes are resolved via `resolve_bytes`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 // ── Registry types ──────────────────────────────────────────────────────────
 
@@ -1374,14 +1373,18 @@ pub enum ResolveError {
 /// Resolve bytes for a model. Returns `None` for `OnDemand` entries that
 /// haven't been downloaded yet. Bundled entries return `Cow::Borrowed`
 /// (zero-copy from the embedded zstd cache); OnDemand entries are read
-/// once from disk, then cached for the process lifetime so repeated
-/// `OrtEngine::new` calls — e.g. user switching between U2Net and a
-/// bundled model in a single session — don't re-read 168 MB each time.
+/// from disk on every call and owned by the caller: a session copies the
+/// weights it is built from, so keeping the file's bytes would hold up
+/// to a few hundred MB per model for nothing.
 pub fn resolve_bytes(id: ModelId) -> Option<Cow<'static, [u8]>> {
+    resolve_bytes_from(id, on_demand_dir().as_deref())
+}
+
+fn resolve_bytes_from(id: ModelId, downloads: Option<&std::path::Path>) -> Option<Cow<'static, [u8]>> {
     let desc = descriptor(id)?;
     match desc.source {
         ModelSource::Bundled { .. } => Some(Cow::Borrowed(bundled_bytes(id))),
-        ModelSource::OnDemand { filename, .. } => on_demand_bytes(id, filename).map(Cow::Borrowed),
+        ModelSource::OnDemand { filename, .. } => read_on_demand(downloads?, filename).map(Cow::Owned),
         // Multi-part models aren't a single byte-blob — callers go
         // through `resolve_part_bytes(id, key)` or `multi_part_paths(id)`
         // and load each part separately.
@@ -1424,56 +1427,6 @@ pub fn resolve_part_bytes(
         }
         _ => Err(ResolveError::NotMultiPart),
     }
-}
-
-/// Process-lifetime cache for OnDemand model bytes. Entries are
-/// `Box::leak`'d into `&'static [u8]` so repeated lookups can return
-/// borrowed slices without re-allocating or holding a lock. Memory
-/// cost is bounded by REGISTRY size and matches what the user would
-/// pay if the model were bundled.
-fn on_demand_cache() -> &'static Mutex<HashMap<ModelId, &'static [u8]>> {
-    static CACHE: OnceLock<Mutex<HashMap<ModelId, &'static [u8]>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn on_demand_bytes(id: ModelId, filename: &str) -> Option<&'static [u8]> {
-    {
-        let cache = on_demand_cache().lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(slice) = cache.get(&id) {
-            return Some(slice);
-        }
-    }
-    let bytes = read_on_demand_from_any_path(filename)?;
-    let mut cache = on_demand_cache().lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Re-check under lock: a concurrent caller may have already loaded +
-    // inserted while we were reading. If so, return their slice and let
-    // our `bytes` Vec drop normally — Box::leak only runs for the winner,
-    // so the loser's ~200 MB allocation never escapes to `'static`.
-    if let Some(slice) = cache.get(&id) {
-        return Some(slice);
-    }
-    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    cache.insert(id, leaked);
-    Some(leaked)
-}
-
-fn read_on_demand_from_any_path(filename: &str) -> Option<Vec<u8>> {
-    let dir = on_demand_dir()?;
-    read_on_demand(&dir, filename)
-}
-
-/// Drop the cached `&'static [u8]` slot for `id`. Call this after the
-/// file is removed from disk so a subsequent re-download repopulates
-/// from the new bytes instead of returning stale cached content. The
-/// previously-leaked slice is intentionally NOT freed — anyone who
-/// already received it (e.g. a still-loaded session) keeps using it
-/// safely; the OS reclaims on process exit.
-pub fn evict_on_demand_cache(id: ModelId) {
-    let mut cache = on_demand_cache().lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.remove(&id);
 }
 
 /// User-facing error string when an OnDemand model isn't yet installed.
@@ -2200,6 +2153,23 @@ mod tests {
             read_on_demand(dir.path(), "blob.onnx").as_deref(),
             Some(b"hello-bytes".as_slice()),
         );
+    }
+
+    #[test]
+    fn a_download_is_read_for_each_load_and_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let ModelSource::OnDemand { filename, .. } = descriptor(ModelId::U2net).unwrap().source else {
+            panic!("U2Net is a download");
+        };
+        std::fs::write(dir.path().join(filename), b"weights").unwrap();
+        let bytes = resolve_bytes_from(ModelId::U2net, Some(dir.path())).expect("on disk");
+        assert!(
+            matches!(bytes, Cow::Owned(_)),
+            "a session copies the weights it is built from: a kept copy holds the file's size in RAM for nothing",
+        );
+        assert_eq!(&*bytes, b"weights");
+        std::fs::write(dir.path().join(filename), b"redownloaded").unwrap();
+        assert_eq!(&*resolve_bytes_from(ModelId::U2net, Some(dir.path())).unwrap(), b"redownloaded");
     }
 
     #[test]
