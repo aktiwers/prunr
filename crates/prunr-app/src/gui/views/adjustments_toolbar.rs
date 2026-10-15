@@ -18,7 +18,7 @@ use super::shortcuts::Action;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::{Backdrop, ItemSettings};
 use crate::gui::knob_catalog::{
-    self, shows, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob, Surface,
+    self, shows, CacheImpact, DispatchKind, KnobContext, LineModeChange, StaticKnob, Surface,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
@@ -200,9 +200,9 @@ pub(crate) fn render(
         model_is_none: matches!(app_settings.model, SettingsModel::None),
         line_mode: item_settings.line_mode,
     };
-    let mask_active = knob_catalog::knob_enabled(KnobRequirement::MaskProduced, knob_ctx);
-    let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
-    let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
+    let mask_active = knob_catalog::knob_enabled(StaticKnob::Gamma.requirement(), knob_ctx);
+    let fill_style_active = knob_catalog::knob_enabled(StaticKnob::FillStyle.requirement(), knob_ctx);
+    let bg_active = knob_catalog::knob_enabled(StaticKnob::BgColor.requirement(), knob_ctx);
 
     // The row goes compact (chips show their icon only) when its full
     // left cluster and its right cluster, both measured on earlier
@@ -792,12 +792,12 @@ fn mark_preset_apply(acc: &mut ToolbarChange) {
 
 /// Flag an `InputTransform` change. Dispatch is deferred to the caller's
 /// `resolve_auto_dispatch`, which has item state (cached_seg) for the
-/// precise AddEdgeInference vs FullPipeline choice. Cache impact is the
-/// same in both warm and cold paths (EdgeCache), so we fold it here.
+/// precise AddEdgeInference vs FullPipeline choice. The cache impact does
+/// not depend on that choice, so it is folded here.
 fn mark_input_transform_change(acc: &mut ToolbarChange) {
     acc.input_transform_changed = true;
     acc.commit = true;
-    acc.cache_impact = acc.cache_impact.union(CacheImpact::EdgeCache);
+    acc.cache_impact = acc.cache_impact.union(knob_catalog::input_transform_spec(false).cache_impact);
 }
 
 fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
