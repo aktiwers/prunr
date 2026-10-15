@@ -37,14 +37,8 @@ fn sd_inpaint_modifies_painted_region() {
         ..Default::default()
     };
     let progress = prunr_core::Progress::none();
-    let result = match inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress) {
-        Ok(r) => r.rgba,
-        Err(e) if refused_for_ram(&e) => {
-            eprintln!("[sd_inpaint_smoke] SKIP: {e}");
-            return;
-        }
-        Err(e) => panic!("SD inpaint should succeed: {e}"),
-    };
+    let run = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).map(|r| r.rgba);
+    let Some(result) = fill_or_skip("sd_inpaint_smoke", run) else { return; };
 
     assert_eq!(result.dimensions(), image.dimensions());
 
@@ -67,10 +61,18 @@ fn sd_inpaint_modifies_painted_region() {
     }
 }
 
-/// The pre-flight RAM gate refused the load: not enough free memory on
-/// this machine right now, so the test skips like a missing bundle.
-fn refused_for_ram(e: &prunr_core::CoreError) -> bool {
-    e.to_string().contains("of free memory to load")
+/// The run's fill, or `None` after a SKIP line when the pre-flight RAM
+/// gate refused the load: not enough free memory on this machine right
+/// now, so the test skips like a missing bundle.
+fn fill_or_skip(label: &str, run: Result<RgbaImage, prunr_core::CoreError>) -> Option<RgbaImage> {
+    match run {
+        Ok(rgba) => Some(rgba),
+        Err(e) if e.to_string().contains("of free memory to load") => {
+            eprintln!("[{label}] SKIP: {e}");
+            None
+        }
+        Err(e) => panic!("SD inpaint should succeed: {e}"),
+    }
 }
 
 /// `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
@@ -120,14 +122,8 @@ fn sd_step_previews() {
     let fill = |progress: &prunr_core::Progress| inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), progress).map(|f| f.rgba);
     const EDGE: u32 = 600;
     let sink = std::sync::Arc::new(RecordingSink::default());
-    let previewed = match fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)) {
-        Ok(rgba) => rgba,
-        Err(e) if refused_for_ram(&e) => {
-            eprintln!("[sd_step_previews] SKIP: {e}");
-            return;
-        }
-        Err(e) => panic!("SD inpaint should succeed: {e}"),
-    };
+    let run = fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE));
+    let Some(previewed) = fill_or_skip("sd_step_previews", run) else { return; };
     let plain = fill(&prunr_core::Progress::none()).expect("the run without previews");
     let out_dir = std::env::var("PRUNR_SD_PREVIEW_OUT").ok();
     if let Some(dir) = &out_dir {
@@ -239,14 +235,8 @@ fn sd_bench() {
                         ..Default::default()
                     };
                     let started = std::time::Instant::now();
-                    let result = match inpaint_sd::process_inpaint_with(image, mask, id, req, &progress) {
-                        Ok(r) => r.rgba,
-                        Err(e) if refused_for_ram(&e) => {
-                            eprintln!("[sd_bench] SKIP: {e}");
-                            return;
-                        }
-                        Err(e) => panic!("SD inpaint should succeed: {e}"),
-                    };
+                    let run = inpaint_sd::process_inpaint_with(image, mask, id, req, &progress).map(|r| r.rgba);
+                    let Some(result) = fill_or_skip("sd_bench", run) else { return; };
                     assert_eq!(result.dimensions(), image.dimensions());
                     eprintln!("[sd_bench] {stem} steps={steps} seed={seed} fill={fill_scale} total {} ms", started.elapsed().as_millis());
                     if let Some(dir) = &out_dir {
