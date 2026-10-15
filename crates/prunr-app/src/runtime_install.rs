@@ -94,19 +94,17 @@ impl RuntimeId {
         match self { Self::OpenVino => "OpenVINO Runtime" }
     }
 
-    /// Settings › Hardware's note when the hardware suits this runtime.
-    pub fn recommendation(self) -> &'static str {
-        match self {
-            Self::OpenVino => "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
+    /// Settings › Hardware's line while this runtime is not installed: its
+    /// download, and why to get it when the hardware suits it.
+    pub fn not_installed(self, recommended: bool) -> &'static str {
+        match (self, recommended) {
+            (Self::OpenVino, false) => "Not installed (80 MB).",
+            (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
         }
     }
 
     pub fn uninstall_label(self) -> &'static str {
         match self { Self::OpenVino => "Uninstall OpenVINO Runtime" }
-    }
-
-    pub fn approx_download_mb(self) -> u32 {
-        match self { Self::OpenVino => 80 }
     }
 
     /// Pre-baked first-launch prompt body. Static-str instead of a
