@@ -763,7 +763,6 @@ pub(crate) struct Processor {
     pub(crate) admission: Option<AdmissionController>,
     /// Sender for streaming additional items to the worker.
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
-    /// In-flight batch: recipe + pending IDs. `None` between batches.
     /// The batches sent and not finished, oldest first: one queued behind
     /// a running one keeps its own images and recipe.
     in_flight: Vec<InFlightBatch>,
@@ -1051,8 +1050,7 @@ impl Processor {
         self.upscale.active.store(active, Ordering::Release);
     }
 
-    /// `true` while an upscale dispatch is in flight. The intent
-    /// gates (`can_process_intent`, `apply_cancel_shortcut`) read this.
+    /// `true` while an upscale dispatch is in flight.
     pub fn is_upscale_in_flight(&self) -> bool {
         self.upscale.in_flight()
     }
@@ -2189,11 +2187,6 @@ fn run_sam_decoder_inline(
     Ok(prunr_core::sam::SamDecoderOutput { masks, iou_predictions })
 }
 
-// ── SAM dispatch channels tests ─────────────────────────────────────────────
-// Tests avoid constructing Processor (which initialises ORT RunOptions and
-// spawns the inpaint bridge thread). Admission and enum correctness use the
-// shared `admission_check` free function directly.
-
 /// The SD pipeline's request for an erase under `tuning`; `None` for an
 /// eraser outside the SD family.
 pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
@@ -2425,8 +2418,6 @@ mod tests {
         assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(2)), None);
         assert!(warmed(&rx).is_empty(), "a release clears it");
     }
-
-    // ── is_upscale_in_flight + admission_check ─────────────────────────────
 
     /// Cancel reaches the face search under way, and a new search starts
     /// with a flag of its own. A search's pictures land while it is the
@@ -2959,7 +2950,7 @@ mod tests {
         assert_eq!(p.finish_batch(again), vec![3]);
     }
 
-    // ── Brush gate boundary contract (M-GUI-9) ───────────────────────────────
+    // ── Brush gate boundary contract ───────────────────────────────
     //
     // `canvas::render` computes:
     //   brush_active = is_enabled && !inpaint_in_flight_for_selected && …
