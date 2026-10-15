@@ -371,7 +371,6 @@ impl PrunrApp {
                     }
                     continue;
                 }
-                let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
                 let new_rgba = r.rgba;
                 item.unpark_result();
                 item.result_rgba = Some(new_rgba.clone());
@@ -433,9 +432,9 @@ impl PrunrApp {
                     item.settle_faced(stage.engine(), blended);
                 }
                 tracing::debug!(
-                    event = "upscale_tier2_apply",
+                    event = "preview_applied",
                     item_id = item.id,
-                    is_upscale_tier2,
+                    kind = ?r.kind,
                     is_final = r.is_final,
                     "apply_completed_previews: result drained"
                 );
