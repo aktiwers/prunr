@@ -560,7 +560,7 @@ impl OrtEngine {
         if eps.is_empty() {
             crate::cache::gc_stale_for_model(model_id, "CPU");
             let builder = Self::builder_with_base(intra_threads, level)?;
-            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
+            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU", weights);
             let started = Instant::now();
             let session = builder
                 .with_execution_providers([
@@ -590,7 +590,7 @@ impl OrtEngine {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
-                apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str())
+                apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str(), weights)
             } else {
                 (builder, Cow::Borrowed(model_bytes), None)
             };
@@ -601,7 +601,7 @@ impl OrtEngine {
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
-                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep),
+                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep, weights),
             })?;
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
@@ -780,11 +780,11 @@ fn clear_suspect_cache(path: &std::path::Path) {
 
 /// The cached optimized graph a session loaded, when `hit` (an
 /// `apply_ort_graph_cache` hit comes back as owned bytes).
-pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep: EpKind) -> Option<PathBuf> {
-    hit.then(|| crate::cache::optimized_model_path(model, ep.as_str())).flatten()
+pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep: EpKind, weights: Weights) -> Option<PathBuf> {
+    hit.then(|| crate::cache::optimized_model_path(model, ep.as_str(), weights)).flatten()
 }
 
-/// Per-(model, EP) ORT-graph-optimization cache. On hit returns the
+/// Per-(model, EP, weights) ORT-graph-optimization cache. On hit returns the
 /// optimized bytes so commit skips optimization; on miss sets
 /// `with_optimized_model_path` so ORT writes the optimized graph for
 /// the next launch. Cache failures are best-effort — any I/O or ORT
@@ -794,8 +794,9 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     model_bytes: &'a [u8],
     model_id: prunr_models::ModelId,
     ep_name: &str,
+    weights: Weights,
 ) -> (ort::session::builder::SessionBuilder, Cow<'a, [u8]>, Option<crate::cache::GraphDraft>) {
-    let Some(path) = crate::cache::optimized_model_path(model_id, ep_name) else {
+    let Some(path) = crate::cache::optimized_model_path(model_id, ep_name, weights) else {
         return (builder, Cow::Borrowed(model_bytes), None);
     };
     match std::fs::read(&path) {
