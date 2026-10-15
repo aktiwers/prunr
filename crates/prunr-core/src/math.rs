@@ -8,6 +8,12 @@ pub fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Logistic sigmoid, logit → probability.
+#[inline]
+pub(crate) fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
 /// One bilinear tap along an axis: the two source indices and the
 /// weight of the second.
 #[derive(Clone, Copy, Debug)]
