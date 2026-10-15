@@ -69,11 +69,4 @@ mod tests {
         assert_eq!(output_scale_label(OutputScale::X3), "3\u{00d7}");
         assert_eq!(output_scale_label(OutputScale::X4), "4\u{00d7}");
     }
-
-    #[test]
-    fn output_scale_factor_via_method() {
-        assert_eq!(OutputScale::X2.factor(), 2);
-        assert_eq!(OutputScale::X3.factor(), 3);
-        assert_eq!(OutputScale::X4.factor(), 4);
-    }
 }

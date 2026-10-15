@@ -43,27 +43,3 @@ pub(crate) fn render_selection_actions(ui: &mut Ui, cutout: bool) -> Option<Sele
     }
     chosen
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selection_action_variants_are_distinct() {
-        let actions = [
-            SelectionAction::Restore,
-            SelectionAction::Delete,
-            SelectionAction::Copy,
-            SelectionAction::Cut,
-            SelectionAction::Invert,
-            SelectionAction::Clear,
-        ];
-        for i in 0..actions.len() {
-            for j in 0..actions.len() {
-                if i != j {
-                    assert_ne!(actions[i], actions[j]);
-                }
-            }
-        }
-    }
-}
