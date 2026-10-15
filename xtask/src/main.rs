@@ -642,41 +642,28 @@ fn git_show_head(path: &Path) -> Result<Vec<u8>, GitShowErr> {
     Err(GitShowErr::Other(stderr.into_owned()))
 }
 
+/// Neutral gray behind the panels, so the separators show.
+const PANEL_BG: image::Rgba<u8> = image::Rgba([200, 200, 200, 255]);
+const PANEL_SEP: u32 = 2;
+
+fn pixel_max_diff(a: &image::Rgba<u8>, b: &image::Rgba<u8>) -> u8 {
+    a.0.iter().zip(b.0).map(|(x, y)| x.abs_diff(y)).max().unwrap_or(0)
+}
+
 /// Per-pixel max channel absolute diff, scaled ×4 + clamped to 255 so that
 /// small differences (the common case after a math-neutral-ish refactor)
 /// remain visible. Output is RGBA with alpha=255 throughout.
 fn scaled_abs_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> image::RgbaImage {
     let (w, h) = a.dimensions();
-    let mut out = image::ImageBuffer::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let pa = a.get_pixel(x, y).0;
-            let pb = b.get_pixel(x, y).0;
-            let mut d = 0u32;
-            for c in 0..4 {
-                let cd = pa[c].abs_diff(pb[c]) as u32;
-                if cd > d {
-                    d = cd;
-                }
-            }
-            let scaled = (d * 4).min(255) as u8;
-            out.put_pixel(x, y, image::Rgba([scaled, scaled, scaled, 255]));
-        }
-    }
-    out
+    image::ImageBuffer::from_fn(w, h, |x, y| {
+        let d = u32::from(pixel_max_diff(a.get_pixel(x, y), b.get_pixel(x, y)));
+        let scaled = (d * 4).min(255) as u8;
+        image::Rgba([scaled, scaled, scaled, 255])
+    })
 }
 
 fn max_channel_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> u8 {
-    let mut max = 0u8;
-    for (pa, pb) in a.pixels().zip(b.pixels()) {
-        for c in 0..4 {
-            let d = pa.0[c].abs_diff(pb.0[c]);
-            if d > max {
-                max = d;
-            }
-        }
-    }
-    max
+    a.pixels().zip(b.pixels()).map(|(pa, pb)| pixel_max_diff(pa, pb)).max().unwrap_or(0)
 }
 
 /// Lay out three same-size images horizontally with thin separators.
@@ -686,18 +673,10 @@ fn compose_triptych(
     diff: &image::RgbaImage,
 ) -> image::RgbaImage {
     let (w, h) = before.dimensions();
-    let sep = 2u32;
-    let total_w = w * 3 + sep * 2;
-    let mut out = image::ImageBuffer::new(total_w, h);
-
-    // Fill with neutral gray so separators are visible.
-    for p in out.pixels_mut() {
-        *p = image::Rgba([200, 200, 200, 255]);
-    }
-
+    let mut out = image::ImageBuffer::from_pixel(w * 3 + PANEL_SEP * 2, h, PANEL_BG);
     blit(&mut out, before, 0, 0);
-    blit(&mut out, after, w + sep, 0);
-    blit(&mut out, diff, (w + sep) * 2, 0);
+    blit(&mut out, after, w + PANEL_SEP, 0);
+    blit(&mut out, diff, (w + PANEL_SEP) * 2, 0);
     out
 }
 
@@ -707,15 +686,9 @@ fn compose_dim_mismatch(
 ) -> image::RgbaImage {
     let (bw, bh) = before.dimensions();
     let (aw, ah) = after.dimensions();
-    let sep = 2u32;
-    let total_w = bw + aw + sep;
-    let total_h = bh.max(ah);
-    let mut out = image::ImageBuffer::new(total_w, total_h);
-    for p in out.pixels_mut() {
-        *p = image::Rgba([200, 200, 200, 255]);
-    }
+    let mut out = image::ImageBuffer::from_pixel(bw + aw + PANEL_SEP, bh.max(ah), PANEL_BG);
     blit(&mut out, before, 0, 0);
-    blit(&mut out, after, bw + sep, 0);
+    blit(&mut out, after, bw + PANEL_SEP, 0);
     out
 }
 
