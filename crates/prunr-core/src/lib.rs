@@ -5,6 +5,7 @@ pub mod colorize;
 pub mod depth;
 pub mod ort_runtime;
 pub mod engine;
+pub mod env;
 pub mod types;
 pub mod pipeline;
 pub mod preprocess;

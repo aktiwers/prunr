@@ -18,7 +18,7 @@ pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read("PRUNR_GAMMA") { item.gamma = v; }
     if let Some(v) = read("PRUNR_CONTRAST") { item.contrast = v; }
     if let Some(v) = read("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
-    if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
+    if let Some(v) = prunr_core::env::flag("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
     if let Some(v) = read("PRUNR_FEATHER") { item.feather = v; }
     if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
     if let Some(v) = read_line_mode("PRUNR_LINE_MODE") { item.line_mode = v; }
@@ -31,7 +31,7 @@ pub fn apply_to_item_settings(item: &mut ItemSettings) {
 /// process without the harness having to send `Ctrl+R`. Mirrored on the
 /// `Settings` rather than per-item because that's where the toggle lives.
 pub fn auto_process_override() -> Option<bool> {
-    read_bool("PRUNR_AUTO_PROCESS")
+    prunr_core::env::flag("PRUNR_AUTO_PROCESS")
 }
 
 /// `PRUNR_CONTROL_PORT=<port>` opens the control socket on localhost.
@@ -41,15 +41,6 @@ pub fn control_port() -> Option<u16> {
 
 fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
     std::env::var(var).ok()?.trim().parse().ok()
-}
-
-fn read_bool(var: &str) -> Option<bool> {
-    let s = std::env::var(var).ok()?;
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
 }
 
 /// Hex RGB ("ffffff") or RGBA ("ffffff80"). Leading `#` allowed.
