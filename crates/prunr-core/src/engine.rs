@@ -261,8 +261,9 @@ pub(crate) enum Miss {
 pub enum Skip {
     /// The registry declares the model incompatible with it.
     Declared,
-    /// It failed these weights of the model on an earlier run; skipped
-    /// until `prunr --clear-ep-cache`.
+    /// It failed these weights of the model on an earlier run, under the
+    /// same drivers and runtime; skipped until they change or the list is
+    /// reset (Settings › Hardware, `prunr --clear-ep-cache`).
     FailedBefore,
 }
 
@@ -326,6 +327,7 @@ pub(crate) fn walk_ladder<S>(
     eps: &[EpKind],
     mut commit: impl FnMut(EpKind) -> Result<S, Miss>,
 ) -> Result<(S, EpKind, Vec<String>), Walk> {
+    crate::ep_compat::refresh();
     let mut walk = Walk::default();
     for &ep in eps {
         if let Some(skip) = skip_reason(model, weights, ep) {
