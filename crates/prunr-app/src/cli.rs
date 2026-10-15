@@ -808,8 +808,7 @@ fn run_each_input(
 }
 
 /// Eraser mode: load image + mask, run LaMa, save inpainted result.
-/// Single-file only for now — batch eraser via per-image mask paths
-/// would need a `--mask-dir` flag (not yet wired).
+/// Single-file only.
 fn run_inpaint(args: &Cli) -> i32 {
     if args.inputs.len() != 1 {
         eprintln!("error: --inpaint accepts exactly one input image (got {})", args.inputs.len());
@@ -982,7 +981,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));
-            // 250 ms (was 80 ms): the worker emits Progress at fixed
+            // 250 ms tick: the worker emits Progress at fixed
             // pipeline checkpoints, with multi-second silence across
             // `session.run()`. Without a tick the spinner glyph would
             // freeze during the most-uncertain wait. The outer
@@ -1054,10 +1053,9 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     let mask = args.mask_settings();
 
     let line_mode = args.line_mode();
-    // `Some("zzzzzz")` and `None` collapsed to the same `None` before,
-    // which silently dropped a typo'd `--line-color "ff00aa "` (note
-    // trailing space). Distinguish "flag absent" from "flag set to
-    // garbage" so automation scripts can detect the failure.
+    // Distinguish "flag absent" from "flag set to garbage" (e.g. a
+    // typo'd `--line-color "ff00aa "` with a trailing space) so
+    // automation scripts can detect the failure.
     let solid_line_color = match args.line_color.as_deref() {
         Some(s) => match parse_hex_color(s) {
             Some(c) => Some(c),
@@ -1198,7 +1196,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 /// Accepts file paths — bytes are read lazily by the subprocess.
 // Single-call CLI dispatch — recipe (model + mask + line_mode + edge + bg*)
 // + runtime knobs (jobs, force_cpu) + UI surface (spinners, paths, quiet)
-// arrive together. A struct split here trades 14 args for 14 fields
+// arrive together. A struct split here trades each arg for a field
 // behind a builder no other site reuses.
 #[allow(clippy::too_many_arguments)]
 fn run_batch_subprocess(
@@ -1222,9 +1220,8 @@ fn run_batch_subprocess(
     let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
     let mut max_jobs = initial_jobs;
 
-    // Inverse index: orig_idx (item_id cast to usize) → batch_results slot.
-    // The event loop previously linear-scanned valid_indices per event;
-    // on a 1000-image batch that was O(n²) over the run. This map is O(1).
+    // Inverse index: orig_idx (item_id cast to usize) → batch_results slot,
+    // so each event finds its slot without scanning valid_indices.
     let orig_to_batch: std::collections::HashMap<usize, usize> = valid_indices
         .iter()
         .enumerate()
