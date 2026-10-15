@@ -208,6 +208,18 @@ fn send_spare_scales(
     let _ = evt_tx.send(SubprocessEvent::SpareEdgeScales { item_id, token, outcome });
 }
 
+/// The token a run's spare scales go under, when it owes them: its edge
+/// cache was written, it kept a photo for them, and its image is on screen.
+fn owed_spare_token(edge_cached: bool, spare: &SpareScales, on_screen: &Shown, item_id: u64) -> Option<u64> {
+    (edge_cached && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token)
+}
+
+/// Whether owed spare scales are skipped after all: the run was
+/// cancelled, the worker is stopping, or the image left the screen.
+fn spare_skipped(cancel: &DispatchCancel, stopping: &AtomicBool, on_screen: &Shown, item_id: u64) -> bool {
+    cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id)
+}
+
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
 fn pixel_weight(image_bytes: &[u8]) -> usize {
     // Read dimensions from header without full decode
@@ -653,7 +665,7 @@ pub fn run_worker() -> ! {
 
                             let edge_cache = edge_tensor_for_cache.as_ref()
                                 .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
-                            let spare_scales = (edge_cache.is_some() && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token);
+                            let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
@@ -703,7 +715,7 @@ pub fn run_worker() -> ! {
                     cleanup_inputs();
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = spare_skipped(&cancel, &stopping, &on_screen, item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -854,7 +866,7 @@ pub fn run_worker() -> ! {
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
                             let edge_cache = write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, &edge_res);
-                            let spare_scales = (edge_cache.is_some() && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token);
+                            let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
                             drop(rgba);
@@ -887,7 +899,7 @@ pub fn run_worker() -> ! {
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = spare_skipped(&cancel, &stopping, &on_screen, item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
