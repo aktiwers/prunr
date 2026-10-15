@@ -120,7 +120,8 @@ impl RunImage {
     }
 }
 
-/// Raw tensor data from subprocess → parent (IPC transfer format).
+/// A decompressed seg tensor: as the subprocess hands it over, or as
+/// `CompressedTensor::bundle` unpacks it.
 pub struct TensorCache {
     pub data: Vec<f32>,
     pub height: u32,
@@ -263,19 +264,12 @@ impl CompressedEdgeTensors {
     }
 }
 
-/// Decompressed seg tensor + metadata — one Tier-2-ready input bundle.
-/// Shared by `drag_export` (subject / mask layers) and `animation_sweep`.
-pub struct SegBundle {
-    pub data: Vec<f32>,
-    pub height: u32,
-    pub width: u32,
-    pub model: ModelKind,
-}
+pub type SegBundle = TensorCache;
 
 impl CompressedTensor {
     /// Decompress into a bundle. `None` when the stored blob fails to decode.
-    pub fn bundle(&self) -> Option<SegBundle> {
-        Some(SegBundle {
+    pub fn bundle(&self) -> Option<TensorCache> {
+        Some(TensorCache {
             data: self.decompress()?,
             height: self.height,
             width: self.width,
