@@ -481,6 +481,15 @@ fn preview_the_photo(progress: &prunr_core::Progress, photo: &image::RgbaImage) 
 /// to the canvas.
 pub(crate) type RunPicture = (u64, prunr_core::ProgressUpdate);
 
+/// Where a tile picture lands: its item and its rectangle on a preview
+/// of that size. `None` for any other picture.
+fn tile_place((item_id, picture): &RunPicture) -> Option<(u64, [u32; 6])> {
+    match picture {
+        prunr_core::ProgressUpdate::TilePreview(t) => Some((*item_id, [t.x, t.y, t.width, t.height, t.full_width, t.full_height])),
+        _ => None,
+    }
+}
+
 /// A run's listener: its pictures go to the canvas while the run says
 /// they may still land; its steps and counts go to the progress pill,
 /// when it has one.
@@ -1714,8 +1723,18 @@ impl Processor {
     }
 
     /// Drain the pictures runs have made since the last frame, oldest first.
+    /// A tile painted again in the same place before the frame goes: only
+    /// its newest picture is kept, in the order it came, so what lands on
+    /// the canvas is the same and its upload is made once.
     pub(crate) fn pump_pictures(&mut self) -> Vec<RunPicture> {
-        self.picture_rx.try_iter().collect()
+        let mut pictures: Vec<RunPicture> = Vec::new();
+        for picture in self.picture_rx.try_iter() {
+            if let Some(place) = tile_place(&picture) {
+                pictures.retain(|p| tile_place(p) != Some(place));
+            }
+            pictures.push(picture);
+        }
+        pictures
     }
 
     /// Drain completed upscale results from the background thread.
@@ -2353,6 +2372,25 @@ mod tests {
         assert!(pictures[0].rgba.chunks(4).all(|p| p == [10, 20, 30, 255]));
         assert_eq!((pictures[1].width, pictures[1].height, pictures[1].full_width), (30, 20, 30));
         assert_eq!(pictures[1].rgba, small.into_raw(), "a photo that fits is laid as it is");
+    }
+
+    /// A tile painted again in the same place before the frame drains
+    /// lands once, its newest picture where it came; other places, other
+    /// items and other pictures all stay.
+    #[test]
+    fn a_tile_painted_twice_before_a_frame_lands_once() {
+        use prunr_core::{ProgressUpdate, TilePreview};
+        let tile = |x: u32, v: u8| ProgressUpdate::TilePreview(TilePreview { x, y: 0, width: 2, height: 2, full_width: 8, full_height: 8, rgba: vec![v; 16] });
+        let mut p = fixture();
+        let tx = p.picture_sender();
+        for picture in [(1, tile(0, 1)), (1, tile(4, 2)), (2, tile(0, 3)), (1, ProgressUpdate::Faces(Vec::new())), (1, tile(0, 4))] {
+            tx.send(picture).expect("the processor holds the receiver");
+        }
+        assert_eq!(
+            p.pump_pictures(),
+            vec![(1, tile(4, 2)), (2, tile(0, 3)), (1, ProgressUpdate::Faces(Vec::new())), (1, tile(0, 4))],
+        );
+        assert!(p.pump_pictures().is_empty());
     }
 
     /// A run's pictures reach the canvas's channel while the run says
