@@ -64,7 +64,9 @@ fn is_transient(error: &str) -> bool {
 
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
-    version: String,
+    // The on-disk key predates the scope growing past the app version.
+    #[serde(rename = "version")]
+    scope: String,
     failures: HashMap<String, String>,
 }
 
@@ -130,7 +132,7 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 /// another scope, `None` when the file cannot be read.
 fn load_from(path: &Path, scope: &str) -> Option<HashMap<String, String>> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.version == scope { file.failures } else { HashMap::new() })
+    Some(if file.scope == scope { file.failures } else { HashMap::new() })
 }
 
 /// Written whole and renamed into place, so another process reading it
@@ -139,7 +141,7 @@ fn save_to(path: &Path, scope: &str, failures: &HashMap<String, String>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile { version: scope.to_string(), failures: failures.clone() };
+    let file = CacheFile { scope: scope.to_string(), failures: failures.clone() };
     let Ok(json) = serde_json::to_string_pretty(&file) else { return };
     let draft = path.with_extension(format!("json.{}", std::process::id()));
     if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
@@ -346,7 +348,7 @@ mod tests {
         // Pre-existing user cache JSON — must still parse and round-trip
         // unchanged so an upgrade doesn't wipe `ep_compat.json` entries.
         let stale = CacheFile {
-            version: "0.0.0-stale".to_string(),
+            scope: "0.0.0-stale".to_string(),
             failures: HashMap::from([(
                 "OpenVINO::Silueta".to_string(),
                 "graph cycles".to_string(),
@@ -356,8 +358,8 @@ mod tests {
         assert!(json.contains("\"OpenVINO::Silueta\""));
         assert!(json.contains("\"version\":\"0.0.0-stale\""));
         let parsed: CacheFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, "0.0.0-stale");
-        assert_ne!(parsed.version, APP_VERSION);
+        assert_eq!(parsed.scope, "0.0.0-stale");
+        assert_ne!(parsed.scope, APP_VERSION);
         assert_eq!(
             parsed.failures.get("OpenVINO::Silueta").map(String::as_str),
             Some("graph cycles"),
