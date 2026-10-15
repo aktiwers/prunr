@@ -287,11 +287,7 @@ pub(crate) fn render(
                 .then(|| trimmed.to_string())
         });
         if let Some(name) = target_name {
-            // Falls back to the workspace default model in filter-only
-            // mode (no model_id) so the file is still keyed correctly.
-            let model_id = settings.model.to_model_id()
-                .or_else(|| Settings::default().model.to_model_id())
-                .expect("Settings::default().model always has a model_id");
+            let model_id = settings.preset_model();
             let (brush, sd) = crate::gui::presets::split_brush_for_save(
                 &settings.brush,
                 model_id,
@@ -307,12 +303,7 @@ pub(crate) fn render(
                 // other-scheduler bundles stay intact.
                 crate::gui::presets_fs::save_merged(&name, model_id, mp)
             } else {
-                let mut models = std::collections::HashMap::new();
-                models.insert(crate::gui::presets::model_id_key(model_id), mp);
-                let file = crate::gui::presets::PresetFile {
-                    format_version: crate::gui::presets::PRESET_FORMAT_VERSION,
-                    models,
-                };
+                let file = crate::gui::presets::PresetFile::single(model_id, mp);
                 crate::gui::presets_fs::save(&name, &file)
             };
 
@@ -345,7 +336,7 @@ pub(crate) fn render(
 mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
-    use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
+    use crate::gui::presets::{ModelPreset, PresetFile};
     use std::collections::HashMap;
 
     /// Wrap an `ItemSettings` into a v2 single-entry `PresetFile` keyed by
@@ -353,13 +344,11 @@ mod tests {
     /// took a bare `ItemSettings`.
     fn wrap(s: &Settings, item: ItemSettings) -> PresetFile {
         let mid = s.model.to_model_id().expect("test settings have a model_id");
-        let mut models = HashMap::new();
-        models.insert(model_id_key(mid), ModelPreset {
+        PresetFile::single(mid, ModelPreset {
             item_settings: item,
             brush: Default::default(),
             sd: None,
-        });
-        PresetFile { format_version: PRESET_FORMAT_VERSION, models }
+        })
     }
 
     #[test]
@@ -411,7 +400,6 @@ mod tests {
     fn button_label_dirty_indicator_includes_brush_diff() {
         use crate::gui::brush_state::BrushSettings;
         use crate::gui::settings::SettingsModel;
-        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
@@ -422,10 +410,7 @@ mod tests {
             brush: preset_brush,
             sd: None,
         };
-        let mut models = HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        s.presets.insert("Foo".to_string(), file);
+        s.presets.insert("Foo".to_string(), PresetFile::single(prunr_models::ModelId::Silueta, mp));
 
         // ItemSettings still equals the preset's; only brush diverges.
         let current = ItemSettings::default();
