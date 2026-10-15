@@ -458,7 +458,7 @@ impl OrtEngine {
     /// Tries each available GPU provider in turn, then the CPU. Call
     /// active_provider() after creation to see which one won.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        Self::new_with_fallback(model, intra_threads, false)
+        Self::with_threads(model, intra_threads, false)
     }
 
     pub fn model_kind(&self) -> ModelKind {
@@ -467,22 +467,12 @@ impl OrtEngine {
 
     /// Create a CPU-only engine. Instant — no GPU compilation.
     pub fn new_cpu_only(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
-        Self::new_with_fallback(model, intra_threads, true)
+        Self::with_threads(model, intra_threads, true)
     }
 
-    fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
-        Self::new_with_fallback_and_level(model, intra_threads, cpu_only, GraphOptimizationLevel::Level3)
-    }
-
-    /// Core session-creation path shared by `new`, `new_cpu_only`, and
-    /// `for_model`: the GPU providers unless `cpu_only`, then the CPU.
-    fn new_with_fallback_and_level(
-        model: ModelKind,
-        intra_threads: usize,
-        cpu_only: bool,
-        level: GraphOptimizationLevel,
-    ) -> Result<Self, CoreError> {
-        Self::build_with(model, intra_threads, gpu_eps_for(cpu_only), cpu_only, level)
+    /// The GPU providers unless `cpu_only`, then the CPU.
+    pub fn with_threads(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
+        Self::build_with(model, intra_threads, gpu_eps_for(cpu_only), cpu_only, GraphOptimizationLevel::Level3)
     }
 
     /// Each weights a session tries in turn (its lighter copy, when on
@@ -537,7 +527,7 @@ impl OrtEngine {
             .ok_or_else(|| CoreError::Model(format!("{model:?} is not a known model")))?;
         let kind = ModelKind::try_from(model)
             .map_err(|id| CoreError::Model(format!("{id:?} has no session kind")))?;
-        Self::new_with_fallback_and_level(kind, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor))
+        Self::build_with(kind, intra_threads, gpu_eps_for(cpu_only), cpu_only, crate::upscale::pick_optimization_level(descriptor))
     }
 
     /// The provider this session runs on, its weights, and what failed
@@ -1092,9 +1082,10 @@ mod tests {
     #[cfg(feature = "dev-models")]
     #[test]
     fn level2_constructs_for_existing_model() {
-        let engine = OrtEngine::new_with_fallback_and_level(
+        let engine = OrtEngine::build_with(
             ModelKind::Silueta,
             1,
+            gpu_eps_for(false),
             false,
             GraphOptimizationLevel::Level2,
         )

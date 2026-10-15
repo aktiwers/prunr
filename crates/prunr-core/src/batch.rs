@@ -50,10 +50,6 @@ pub fn create_engine_pool(
         ort_intra_threads(pool_size)
     };
 
-    let create = |threads| {
-        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
-    };
-
     // Build engines in parallel where the EP allows it. CPU, OpenVINO,
     // CUDA, CoreML are thread-safe during session creation. DirectML
     // is NOT — `commit_from_memory` on parallel threads has triggered
@@ -64,7 +60,7 @@ pub fn create_engine_pool(
     // Held for the whole pool: a bundled model unpacks once for every
     // engine, built in parallel or one after another, and is freed after.
     let _weights = prunr_models::resolve_bytes(model.into());
-    let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
+    let build = |_idx| OrtEngine::with_threads(model, intra_threads, cpu_only).map(std::sync::Arc::new);
     if serial {
         (0..pool_size).map(build).collect()
     } else {
