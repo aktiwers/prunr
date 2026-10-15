@@ -81,9 +81,16 @@ impl PrunrApp {
             return;
         }
         self.last_drift_check = None;
-        tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
-        self.processor.live_preview.mark_tweak(id, PreviewKind::Mask);
-        self.processor.live_preview.flush(id);
+        let live = &mut self.processor.live_preview;
+        if live.is_pending_for(id) {
+            // A drag under way: its queued frame goes now instead of at the
+            // throttle, and the drag settles on release or stillness, not here.
+            live.hurry(id);
+        } else if !live.works_on(id) {
+            tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
+            live.mark_tweak(id, PreviewKind::Mask);
+            live.flush(id);
+        }
     }
 
     /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
@@ -582,6 +589,56 @@ mod upscale_tier2_routing_tests {
                  so the live-preview gate fires for that knob",
             );
         }
+    }
+}
+
+/// The drift check against a drag: the drag settles on its own, so the
+/// check never re-marks the image every frame nor settles it early.
+#[cfg(test)]
+mod drift_tests {
+    use std::sync::Arc;
+    use super::PrunrApp;
+    use crate::gui::item::BatchStatus;
+    use crate::gui::live_preview::PreviewKind;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    /// A cut-out whose mask settings have moved past the mask it applied.
+    fn drifted() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+        item.settings.gamma = 1.5;
+        app.batch.select_item(0);
+        app
+    }
+
+    #[test]
+    fn a_drag_owing_its_settle_is_not_marked_again_every_frame() {
+        let mut app = drifted();
+        app.processor.live_preview.owe_for_test(1, PreviewKind::Mask);
+        for _ in 0..3 {
+            app.recipe_drift_tripwire();
+            assert!(!app.processor.live_preview.is_pending_for(1), "the held-still settle is the drag's own");
+        }
+    }
+
+    #[test]
+    fn a_drags_queued_frame_is_hurried_not_settled() {
+        let mut app = drifted();
+        app.processor.live_preview.mark_tweak(1, PreviewKind::Mask);
+        app.recipe_drift_tripwire();
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(false));
+    }
+
+    #[test]
+    fn with_no_render_under_way_the_drift_is_cut_again() {
+        let mut app = drifted();
+        app.recipe_drift_tripwire();
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
     }
 }
 

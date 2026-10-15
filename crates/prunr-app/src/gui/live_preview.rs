@@ -2,9 +2,13 @@
 //!
 //! When the user tweaks a mask or edge knob in the adjustments toolbar,
 //! `mark_tweak` registers a pending preview for the affected item. Every
-//! frame, `tick` checks if 300ms have passed since the last tweak for that
-//! item and, if so, spawns a background thread to run the Tier 2 postprocess
-//! (mask) or edge finalize (edge) on the cached tensor.
+//! frame, `tick` checks if `DEBOUNCE` has passed since the window's first
+//! tweak and, if so, spawns a background thread to run the Tier 2
+//! postprocess (mask) or edge finalize (edge) on the cached tensor.
+//!
+//! On an image larger than `QUICK_FRAME_SIDE`, a drag's in-between renders
+//! are quick frames. The full-size render goes out when the slider is let
+//! go (`flush`) or held still for `SETTLE_AFTER`, whichever comes first.
 //!
 //! Staleness handling: if multiple dispatches are in flight for the same item
 //! (possible during a continuous drag — a new dispatch fires every DEBOUNCE
@@ -67,6 +71,10 @@ use crate::gui::worker::CompressedTensor;
 /// Release / commit paths call `flush` instead, so the final result on
 /// knob-release lands immediately.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// How long a drag holds still before its full-size render is made, for
+/// a user who waits with the slider held instead of letting go.
+pub const SETTLE_AFTER: Duration = Duration::from_millis(300);
 
 /// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
 /// different cached tensors (segmentation vs TEED) and different pipeline
@@ -198,10 +206,20 @@ impl Clock for SystemClock {
 
 /// State for a pending (debounced) preview dispatch.
 struct Pending {
-    last_tweak_at: Instant,
+    /// When the throttle window opened: its first tweak, never re-armed.
+    armed_at: Instant,
+    /// The newest tweak, which the settle on stillness counts from.
+    latest_tweak_at: Instant,
     kind: PreviewKind,
     /// The edit settled (slider released): the render is the one kept.
     settled: bool,
+}
+
+/// A drag whose last render was a quick frame: it owes the full-size
+/// render, made once no tweak has come for `SETTLE_AFTER`.
+struct Owed {
+    kind: PreviewKind,
+    latest_tweak_at: Instant,
 }
 
 /// State for an in-flight dispatch. Used to cancel when a new tweak arrives.
@@ -213,6 +231,7 @@ struct InFlight {
 pub struct LivePreview {
     pending: HashMap<u64, Pending>,
     in_flight: HashMap<u64, InFlight>,
+    owed: HashMap<u64, Owed>,
     generation_counter: u64,
     result_tx: mpsc::Sender<PreviewResult>,
     result_rx: mpsc::Receiver<PreviewResult>,
@@ -234,6 +253,7 @@ impl LivePreview {
         Self {
             pending: HashMap::new(),
             in_flight: HashMap::new(),
+            owed: HashMap::new(),
             generation_counter: 0,
             result_tx: tx,
             result_rx: rx,
@@ -241,7 +261,7 @@ impl LivePreview {
         }
     }
 
-    /// Pin `last_tweak_at` on the first tweak in a window and never re-arm —
+    /// Pin `armed_at` on the first tweak in a window and never re-arm —
     /// `tick`'s removal-on-dispatch starts the next window.
     pub fn mark_tweak(&mut self, item_id: u64, kind: PreviewKind) {
         let now = self.clock.now();
@@ -251,8 +271,9 @@ impl LivePreview {
             .and_modify(|p| {
                 p.kind = kind;
                 p.settled = false;
+                p.latest_tweak_at = now;
             })
-            .or_insert_with(|| Pending { last_tweak_at: now, kind, settled: false });
+            .or_insert_with(|| Pending { armed_at: now, latest_tweak_at: now, kind, settled: false });
         tracing::debug!(
             event = "upscale_tier2_mark_tweak",
             item_id,
@@ -265,30 +286,48 @@ impl LivePreview {
     }
 
     /// Flush: expire the pending tweak timer so the next `tick` dispatches
-    /// immediately. Used when an edit settles (slider released, checkbox
-    /// toggled, color picked) so the user doesn't wait the full debounce.
+    /// immediately, as the settled render. Used when an edit settles
+    /// (slider released, checkbox toggled, color picked) so the user
+    /// doesn't wait the full debounce. A drag whose last frame was quick
+    /// and has nothing queued gets its full-size render queued.
     ///
-    /// Idempotent — no-op if there's no pending tweak for `item_id`.
+    /// Idempotent — no-op if there's nothing pending or owed for `item_id`.
     pub fn flush(&mut self, item_id: u64) {
+        let expired = self.expired_arm();
         if let Some(p) = self.pending.get_mut(&item_id) {
             p.settled = true;
-            // Anti-date past DEBOUNCE so next tick dispatches immediately.
-            // checked_sub guards against early-boot monotonic clock underflow.
-            let now = self.clock.now();
-            p.last_tweak_at = now
-                .checked_sub(DEBOUNCE + Duration::from_millis(10))
-                .unwrap_or(now);
+            p.armed_at = expired;
+        } else if let Some(owed) = self.owed.remove(&item_id) {
+            self.pending.insert(item_id, Pending { armed_at: expired, latest_tweak_at: owed.latest_tweak_at, kind: owed.kind, settled: true });
         }
+    }
+
+    /// Dispatch `item_id`'s queued render at the next tick, as a drag's
+    /// in-between frame: it is not settled.
+    pub(crate) fn hurry(&mut self, item_id: u64) {
+        let expired = self.expired_arm();
+        if let Some(p) = self.pending.get_mut(&item_id) {
+            p.armed_at = expired;
+        }
+    }
+
+    /// An arm time already past DEBOUNCE, so the next tick dispatches.
+    /// checked_sub guards against early-boot monotonic clock underflow.
+    fn expired_arm(&self) -> Instant {
+        let now = self.clock.now();
+        now.checked_sub(DEBOUNCE + Duration::from_millis(10)).unwrap_or(now)
     }
 
     /// Per-frame tick. Returns the time until the next tween we're waiting on
     /// (useful for `ctx.request_repaint_after`), or `None` if nothing pending.
+    /// That includes a held-still drag's settle: a pointer that does not
+    /// move sends no input, so nothing else would wake the frame loop.
     ///
     /// `snapshot` provides per-item inputs (tensors, settings, original image)
-    /// for any dispatches we fire this frame, told whether the edit has
-    /// settled (a release) or is a drag's in-between frame. Items that
-    /// aren't in the snapshot (e.g. tensor cache evicted) are silently
-    /// skipped.
+    /// for any dispatches we fire this frame. A dispatch is quick when the
+    /// edit has not settled (a drag's in-between frame) and its image is
+    /// larger than a quick frame. Items that aren't in the snapshot (e.g.
+    /// tensor cache evicted) are silently skipped.
     pub fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
         F: FnMut(u64, PreviewKind) -> Option<DispatchInputs>,
@@ -296,14 +335,27 @@ impl LivePreview {
         let now = self.clock.now();
         let mut ready_ids: Vec<u64> = Vec::new();
         let mut wait_for: Option<Duration> = None;
+        let mut wait = |remaining: Duration| wait_for = Some(wait_for.map_or(remaining, |w: Duration| w.min(remaining)));
+
+        let mut held_still: Vec<u64> = Vec::new();
+        for (id, o) in self.owed.iter().filter(|(id, _)| !self.pending.contains_key(id)) {
+            let held = now.saturating_duration_since(o.latest_tweak_at);
+            if held >= SETTLE_AFTER {
+                held_still.push(*id);
+            } else {
+                wait(SETTLE_AFTER - held);
+            }
+        }
+        for id in held_still {
+            self.flush(id);
+        }
 
         for (id, p) in &self.pending {
-            let elapsed = now.saturating_duration_since(p.last_tweak_at);
+            let elapsed = now.saturating_duration_since(p.armed_at);
             if elapsed >= DEBOUNCE {
                 ready_ids.push(*id);
             } else {
-                let remaining = DEBOUNCE - elapsed;
-                wait_for = Some(wait_for.map_or(remaining, |w| w.min(remaining)));
+                wait(DEBOUNCE - elapsed);
             }
         }
 
@@ -313,8 +365,8 @@ impl LivePreview {
             // switch), we keep the pending entry so the next tick retries.
             // Dropping it here silently swallowed the tweak and left the
             // user thinking live preview was dead.
-            let (kind, settled) = match self.pending.get(&id) {
-                Some(p) => (p.kind, p.settled),
+            let (kind, settled, latest_tweak_at) = match self.pending.get(&id) {
+                Some(p) => (p.kind, p.settled, p.latest_tweak_at),
                 None => continue,
             };
             tracing::debug!(
@@ -341,7 +393,12 @@ impl LivePreview {
                 continue;
             };
             self.pending.remove(&id);
-            inputs.quick = !settled;
+            inputs.quick = !settled && inputs.can_be_quick();
+            if inputs.quick {
+                self.owed.insert(id, Owed { kind, latest_tweak_at });
+            } else {
+                self.owed.remove(&id);
+            }
             self.generation_counter = self.generation_counter.wrapping_add(1);
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));
@@ -406,8 +463,9 @@ impl LivePreview {
 
     /// Drain any completed previews. Returned results are already filtered
     /// to the latest generation; each result's `is_final` is set to `true`
-    /// iff no new tweak for that item is currently pending — i.e. the drag
-    /// has settled and this is the last result of the session.
+    /// iff nothing more is coming for that item — no new tweak pending and
+    /// no full-size render owed — i.e. the drag has settled and this is the
+    /// last result of the session.
     pub fn drain_results(&mut self) -> Vec<PreviewResult> {
         let mut out = Vec::new();
         while let Ok(mut r) = self.result_rx.try_recv() {
@@ -418,10 +476,7 @@ impl LivePreview {
                 .is_some_and(|f| f.generation == r.generation);
             if is_latest {
                 self.in_flight.remove(&r.item_id);
-                // If pending has a fresh entry for this item, the user is
-                // still mid-drag (a tweak landed after the current dispatch
-                // started). Empty pending = drag settled = final result.
-                r.is_final = !self.pending.contains_key(&r.item_id);
+                r.is_final = !self.pending.contains_key(&r.item_id) && !self.owed.contains_key(&r.item_id);
                 out.push(r);
             }
         }
@@ -436,9 +491,20 @@ impl LivePreview {
             .map(|(id, _)| *id)
     }
 
-    /// True while a preview waits for its debounce or runs.
+    /// True while a preview waits for its debounce or runs, or a drag
+    /// owes its full-size render.
     pub fn is_busy(&self) -> bool {
-        !self.pending.is_empty() || !self.in_flight.is_empty()
+        !self.pending.is_empty() || !self.in_flight.is_empty() || !self.owed.is_empty()
+    }
+
+    /// True while `item_id` has a render queued, running, or owed.
+    pub(crate) fn works_on(&self, item_id: u64) -> bool {
+        self.pending.contains_key(&item_id) || self.in_flight.contains_key(&item_id) || self.owed.contains_key(&item_id)
+    }
+
+    /// True while a render for `item_id` waits for its debounce.
+    pub(crate) fn is_pending_for(&self, item_id: u64) -> bool {
+        self.pending.contains_key(&item_id)
     }
 
     /// True while a rayon dispatch hasn't drained yet.
@@ -446,13 +512,14 @@ impl LivePreview {
         !self.in_flight.is_empty()
     }
 
-    /// Drop the pending and running previews of one item: what they would
-    /// show belongs to a state it has left.
+    /// Drop the pending, running and owed previews of one item: what they
+    /// would show belongs to a state it has left.
     pub fn cancel(&mut self, item_id: u64) {
         if let Some(f) = self.in_flight.remove(&item_id) {
             f.cancel.store(true, Ordering::Release);
         }
         self.pending.remove(&item_id);
+        self.owed.remove(&item_id);
     }
 
     /// Cancel all in-flight + pending previews. Called on batch clear or shutdown.
@@ -462,6 +529,7 @@ impl LivePreview {
         }
         self.in_flight.clear();
         self.pending.clear();
+        self.owed.clear();
     }
 }
 
@@ -551,6 +619,22 @@ impl DispatchInputs {
             faces: None,
             depth: None,
         }
+    }
+
+    /// The long side of the image this render makes.
+    fn full_side(&self) -> u32 {
+        let (w, h) = match self.kind {
+            PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
+            PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
+            PreviewKind::Mask | PreviewKind::Edge => (self.original.width(), self.original.height()),
+        };
+        w.max(h)
+    }
+
+    /// Whether a drag's in-between frame of this render is a quick one:
+    /// only an image larger than a quick frame has one.
+    pub(crate) fn can_be_quick(&self) -> bool {
+        self.full_side() > QUICK_FRAME_SIDE
     }
 }
 
@@ -784,8 +868,9 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     RunOutput { built_faced, built_depth_photo, ..output }
 }
 
-/// The long side a drag's in-between depth look is made at.
-const QUICK_LOOK_SIDE: u32 = 2048;
+/// The long side a drag's quick frames are made at. A larger image's
+/// in-between frames are quick; its settled render is full size.
+pub(crate) const QUICK_FRAME_SIDE: u32 = 2048;
 
 /// Swap `inputs.original` for the photo with the Depth chip's look on it:
 /// the one made last time when it still matches, or a fresh one, which
@@ -798,7 +883,7 @@ fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, c
         return None;
     }
     if inputs.quick {
-        let looked = look.apply_quick(&prunr_core::rgba_view(&inputs.original), &depth.map, QUICK_LOOK_SIDE)?;
+        let looked = look.apply_quick(&prunr_core::rgba_view(&inputs.original), &depth.map, QUICK_FRAME_SIDE)?;
         inputs.original = Arc::new(DynamicImage::ImageRgba8(looked));
         return None;
     }
@@ -922,12 +1007,18 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     }
 }
 
+#[cfg(test)]
 impl LivePreview {
-    /// Test-only spy: true iff `dispatch_brush_rerun` queued a preview for
-    /// this item (i.e. `mark_tweak` was called with this item_id).
-    #[cfg(test)]
-    pub(crate) fn is_pending_for(&self, item_id: u64) -> bool {
-        self.pending.contains_key(&item_id)
+    /// A drag on `item_id` whose last render was a quick frame, its latest
+    /// tweak now.
+    pub(crate) fn owe_for_test(&mut self, item_id: u64, kind: PreviewKind) {
+        let latest_tweak_at = self.clock.now();
+        self.owed.insert(item_id, Owed { kind, latest_tweak_at });
+    }
+
+    /// Whether the render queued for `item_id` is the settled one.
+    pub(crate) fn pending_settled_for_test(&self, item_id: u64) -> Option<bool> {
+        self.pending.get(&item_id).map(|p| p.settled)
     }
 }
 
@@ -1132,13 +1223,13 @@ mod tests {
         // never fire until the user stopped moving.
         let mut lp = LivePreview::default();
         lp.mark_tweak(1, PreviewKind::Mask);
-        let first_arm = lp.pending.get(&1).expect("armed").last_tweak_at;
+        let first_arm = lp.pending.get(&1).expect("armed").armed_at;
 
         // Simulate a second tweak "soon after" (short of DEBOUNCE). The timer
         // should NOT move — otherwise the dispatch would be pushed out.
         std::thread::sleep(Duration::from_millis(5));
         lp.mark_tweak(1, PreviewKind::Mask);
-        let second_arm = lp.pending.get(&1).expect("still armed").last_tweak_at;
+        let second_arm = lp.pending.get(&1).expect("still armed").armed_at;
 
         assert_eq!(
             first_arm, second_arm,
@@ -1147,7 +1238,7 @@ mod tests {
     }
 
     /// Slow frames put `elapsed >= DEBOUNCE` on every tweak. The broken
-    /// shape re-armed `last_tweak_at` in that branch and `tick` could
+    /// shape re-armed `armed_at` in that branch and `tick` could
     /// never see a ready dispatch — mid-drag preview silently disabled.
     /// The current shape pins the timer on first tweak and only clears
     /// it via `tick`'s removal-on-dispatch.
@@ -1192,6 +1283,155 @@ mod tests {
         assert_eq!(settled(&lp), Some(true));
         lp.mark_tweak(1, PreviewKind::Mask);
         assert_eq!(settled(&lp), Some(false));
+    }
+
+    /// A render of an image `long_side` px on its long side, which a
+    /// worker makes in no time (no tensor: the filters on a blank photo).
+    fn photo_inputs(long_side: u32) -> DispatchInputs {
+        let photo = Arc::new(image::DynamicImage::new_rgba8(long_side, 1));
+        DispatchInputs::new(PreviewKind::Mask, 0, photo, ItemSettings::default())
+    }
+
+    fn large() -> Option<DispatchInputs> {
+        Some(photo_inputs(QUICK_FRAME_SIDE + 1))
+    }
+
+    /// The last dispatch for item 1: its generation and whether it was a
+    /// quick frame (one that leaves the full-size render owed).
+    fn dispatched(lp: &LivePreview) -> Option<(u64, bool)> {
+        lp.in_flight.get(&1).map(|f| (f.generation, lp.owed.contains_key(&1)))
+    }
+
+    /// A drag on item 1 of a large photo, its first quick frame dispatched
+    /// at `DEBOUNCE` after the tweak; the clock stands there.
+    fn dragging() -> (Arc<MockClock>, LivePreview) {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        lp.mark_tweak(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, true))), "a drag's in-between frame is quick");
+        (clock, lp)
+    }
+
+    /// Held still with the slider down: the full-size render goes out
+    /// `SETTLE_AFTER` after the last tweak, with no release.
+    #[test]
+    fn holding_a_drag_still_settles_it_without_a_release() {
+        let (clock, mut lp) = dragging();
+        let quick = dispatched(&lp);
+        clock.advance(SETTLE_AFTER - DEBOUNCE - Duration::from_millis(1));
+        lp.tick(|_, _| large());
+        assert_eq!(dispatched(&lp), quick, "not yet");
+        clock.advance(Duration::from_millis(1));
+        lp.tick(|_, _| large());
+        let settled = dispatched(&lp).expect("dispatched");
+        assert!(!settled.1 && settled.0 > quick.expect("dispatched").0, "the full-size render goes out");
+        assert!(lp.is_busy(), "and is under way");
+    }
+
+    /// Tweaks that keep coming never settle the drag, however long it
+    /// lasts: every frame of it is quick.
+    #[test]
+    fn a_drag_that_keeps_moving_never_settles_mid_drag() {
+        let (clock, mut lp) = dragging();
+        for _ in 0..40 {
+            lp.mark_tweak(1, PreviewKind::Mask);
+            clock.advance(SETTLE_AFTER / 4);
+            lp.tick(|_, _| large());
+            assert!(matches!(dispatched(&lp), Some((_, true))), "still quick");
+        }
+    }
+
+    /// A release settles at once: with a tweak queued, and with none
+    /// queued (the release frame left the value as it was).
+    #[test]
+    fn a_release_settles_the_drag_at_once() {
+        let (_clock, mut lp) = dragging();
+        lp.flush(1);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, false))), "nothing queued: the owed render goes out");
+
+        let (_clock, mut lp) = dragging();
+        lp.mark_tweak(1, PreviewKind::Mask);
+        lp.flush(1);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, false))), "a queued tweak goes out settled");
+    }
+
+    /// The settle goes out once: holding still longer queues nothing more.
+    #[test]
+    fn a_drag_settles_once() {
+        let (clock, mut lp) = dragging();
+        clock.advance(SETTLE_AFTER);
+        lp.tick(|_, _| large());
+        let settled = dispatched(&lp);
+        assert!(matches!(settled, Some((_, false))));
+        for _ in 0..5 {
+            clock.advance(SETTLE_AFTER);
+            assert_eq!(lp.tick(|_, _| large()), None, "nothing to wait for");
+            assert_eq!(dispatched(&lp), settled, "no second render");
+        }
+    }
+
+    /// A tweak after the settle starts a new drag: quick frames again,
+    /// then its own settle.
+    #[test]
+    fn a_tweak_after_a_settle_starts_a_new_quick_cycle() {
+        let (clock, mut lp) = dragging();
+        clock.advance(SETTLE_AFTER);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, false))));
+        lp.mark_tweak(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, true))), "quick again");
+        clock.advance(SETTLE_AFTER);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, false))), "and settles again");
+    }
+
+    /// A held-still pointer sends no input: the wait `tick` returns wakes
+    /// the frame loop for the settle.
+    #[test]
+    fn the_wait_covers_the_settle_deadline() {
+        let (clock, mut lp) = dragging();
+        assert_eq!(lp.tick(|_, _| large()), Some(SETTLE_AFTER - DEBOUNCE), "from the last tweak");
+        clock.advance(Duration::from_millis(100));
+        assert_eq!(lp.tick(|_, _| large()), Some(SETTLE_AFTER - DEBOUNCE - Duration::from_millis(100)));
+        lp.mark_tweak(1, PreviewKind::Mask);
+        assert_eq!(lp.tick(|_, _| large()), Some(DEBOUNCE), "a queued tweak waits for its throttle first");
+    }
+
+    /// An image no larger than a quick frame renders full size mid-drag,
+    /// as before quick frames: nothing is owed and nothing settles later.
+    #[test]
+    fn a_small_photo_has_no_quick_frames() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        lp.mark_tweak(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE);
+        lp.tick(|_, _| Some(photo_inputs(QUICK_FRAME_SIDE)));
+        let full = dispatched(&lp);
+        assert!(matches!(full, Some((_, false))), "full size");
+        assert!(!lp.owed.contains_key(&1));
+        clock.advance(SETTLE_AFTER * 2);
+        assert_eq!(lp.tick(|_, _| Some(photo_inputs(QUICK_FRAME_SIDE))), None);
+        assert_eq!(dispatched(&lp), full, "no settle render");
+    }
+
+    /// Hurrying a drag's queued frame sends it out at the next tick, still
+    /// as a drag frame.
+    #[test]
+    fn hurrying_a_queued_frame_does_not_settle_it() {
+        let (_clock, mut lp) = dragging();
+        lp.mark_tweak(1, PreviewKind::Mask);
+        lp.hurry(1);
+        lp.tick(|_, _| large());
+        assert!(matches!(dispatched(&lp), Some((_, true))));
+        assert!(lp.works_on(1), "the drag still owes its settle");
+        lp.cancel(1);
+        assert!(!lp.works_on(1) && !lp.is_busy(), "a cancel drops the owed settle too");
     }
 
     /// `tick` returning `None` (no remaining wait) is the readiness
@@ -1313,7 +1553,7 @@ mod tests {
         );
         lp.pending.insert(
             22,
-            Pending { last_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
+            Pending { armed_at: Instant::now(), latest_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
         lp.result_tx.send(PreviewResult { generation: 2, is_final: false, ..PreviewResult::mask_for_test(22, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
 
