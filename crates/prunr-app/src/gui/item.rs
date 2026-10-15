@@ -601,6 +601,7 @@ pub(crate) struct BatchItem {
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
     pub(crate) result_tex_pending: bool,
+    result_tex_request: u64,
     /// The transition to the next image after a discrete change (a run,
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
@@ -1271,6 +1272,14 @@ impl BatchItem {
         self.take_result(shown);
     }
 
+    /// A texture of the result now held is to be made: any asked for
+    /// earlier no longer lands. `live` swaps it in without a reveal.
+    pub(crate) fn request_result_texture(&mut self, live: bool) -> super::background_io::TexTarget {
+        use super::background_io::TexTarget;
+        self.result_tex_request += 1;
+        if live { TexTarget::LiveResult(self.result_tex_request) } else { TexTarget::Result(self.result_tex_request) }
+    }
+
     /// A prepared texture lands on the side it was made for; a result's
     /// reveals over what was held.
     pub(crate) fn land_texture(&mut self, tex: egui::TextureHandle, target: super::background_io::TexTarget) {
@@ -1282,10 +1291,13 @@ impl BatchItem {
                 tracing::info!(item_id = self.id, kind = "source", "texture uploaded");
             }
             TexTarget::QuickFrame(generation) => self.quick.land(tex, generation),
-            TexTarget::Result | TexTarget::LiveResult => {
+            TexTarget::Result(request) | TexTarget::LiveResult(request) if request != self.result_tex_request => {
+                tracing::debug!(item_id = self.id, "superseded result texture dropped");
+            }
+            TexTarget::Result(_) | TexTarget::LiveResult(_) => {
                 self.result_texture = Some(tex);
                 self.result_tex_pending = false;
-                if target == TexTarget::Result {
+                if matches!(target, TexTarget::Result(_)) {
                     self.start_reveal();
                 }
                 // The faces it laid over the image are in the image now.
@@ -2009,6 +2021,8 @@ impl BatchItem {
         // would force a full re-upscale on every Tier-2 tweak. Tier-1
         // invalidation paths call `invalidate_upscale_cache()` explicitly.
         self.result_texture = None;
+        // A result texture still being made is of the result this drops.
+        self.result_tex_request += 1;
         self.thumb_texture = None;
         self.thumb_pending = false;
         self.source_tex_pending = false;
@@ -2208,6 +2222,7 @@ impl BatchItem {
             quick: Default::default(),
             source_tex_pending: false,
             result_tex_pending: false,
+            result_tex_request: 0,
             reveal: None,
             subject: None,
             tile_preview: None,
@@ -2802,7 +2817,6 @@ mod tests {
     /// then reveals over it; a waiting image is done with it.
     #[test]
     fn a_result_keeps_the_old_texture_until_its_own_lands() {
-        use crate::gui::background_io::TexTarget;
         let ctx = egui::Context::default();
         let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let mut item = fixture_item(1);
@@ -2814,10 +2828,38 @@ mod tests {
         assert!(item.result_tex_pending && item.thumb_pending, "and a new one and thumbnail are on their way");
         assert_eq!(item.status, BatchStatus::Done);
         let new = tex("new");
-        item.land_texture(new.clone(), TexTarget::Result);
+        let target = item.request_result_texture(false);
+        item.land_texture(new.clone(), target);
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(new.id()));
         assert!(!item.result_tex_pending);
         assert!(matches!(item.reveal, Some(Reveal::Running(..))), "the new result reveals over the old");
+    }
+
+    /// Result textures are made on threads and finish in any order: one
+    /// asked for before the result changed never lands over the newer,
+    /// nor over the original an undo went back to.
+    #[test]
+    fn a_result_texture_lands_only_for_the_result_held() {
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.commit(StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.commit(StepKind::Adjust);
+
+        let dragged = item.request_result_texture(true);
+        assert!(item.undo_step().is_some());
+        let restored = item.request_result_texture(false);
+        let shown = tex("restored");
+        item.land_texture(shown.clone(), restored);
+        item.land_texture(tex("dragged"), dragged);
+        assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(shown.id()), "the undone render lands no more");
+
+        let stale = item.request_result_texture(false);
+        assert!(item.undo_step().is_some());
+        item.land_texture(tex("stale"), stale);
+        assert!(item.result_texture.is_none(), "the original has no result to show");
     }
 
     /// A drag's quick frame is what is on screen until the state it was
