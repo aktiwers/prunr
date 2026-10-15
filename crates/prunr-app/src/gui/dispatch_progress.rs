@@ -14,7 +14,7 @@
 //! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
@@ -317,12 +317,6 @@ impl DispatchProgressSlot {
         let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
         self.set(Some(initial));
         RunSink { slot: self.clone(), run }
-    }
-
-    /// A progress handle for a run starting now, with its cancel flag.
-    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<AtomicBool>) -> (prunr_core::Progress, RunSink) {
-        let sink = self.begin(initial);
-        (prunr_core::Progress::new(Arc::new(sink.clone())).with_cancel(cancel), sink)
     }
 
     /// Replace the active progress snapshot. Pass `None` to clear when
