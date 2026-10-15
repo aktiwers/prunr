@@ -847,6 +847,12 @@ pub(crate) struct Processor {
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
+    /// The image on screen whose run shows a first look at its subject,
+    /// shared with the worker, which reads it as each run starts.
+    pub(crate) first_look: super::worker::Shown,
+    /// How long each cut-out model takes per image here, which decides
+    /// whether a first look shows.
+    pub(crate) cut_times: super::first_look::CutTimes,
 }
 
 /// How long the picked model must stay picked before it loads: clicking
@@ -903,6 +909,8 @@ impl Processor {
             faces_latest: Arc::default(),
             depth,
             seg_warm_due: None,
+            first_look: Default::default(),
+            cut_times: Default::default(),
         }
     }
 
@@ -1152,6 +1160,19 @@ impl Processor {
     /// allocated.
     pub(crate) fn release_inpaint_subprocess(&self) {
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Release);
+    }
+
+    /// The image on screen whose run would show a first look. Once first
+    /// looks go off, the warm worker lets its first-look model go.
+    pub(crate) fn show_first_look(&mut self, item: Option<u64>) {
+        if self.first_look.set(item).is_some() && item.is_none() {
+            let _ = self.worker_tx.send(WorkerMessage::FirstLookOff);
+        }
+    }
+
+    /// Whether a batch of cut-outs is under way.
+    pub(crate) fn batch_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
     }
 
     /// Tell the seg/edge worker bridge to drop its warm subprocess.

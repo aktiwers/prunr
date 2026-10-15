@@ -16,6 +16,7 @@ use prunr_core::{
 
 use prunr_app::subprocess::protocol::*;
 use prunr_app::subprocess::ipc::{read_message, write_message};
+use prunr_app::subprocess::first_look::{FirstLook, Look};
 use prunr_app::gui::settings::LineMode;
 
 /// Weighted memory semaphore for processing.
@@ -378,6 +379,7 @@ pub fn run_worker() -> ! {
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
+    let first_look = FirstLook::default();
 
     let ipc_dir = Arc::new(ipc_dir);
 
@@ -395,12 +397,13 @@ pub fn run_worker() -> ! {
         };
 
         match cmd {
-            SubprocessCommand::Configure { mask: new_mask, line_mode: new_mode, edge: new_edge } => {
+            SubprocessCommand::Configure { mask: new_mask, line_mode: new_mode, edge: new_edge, first_look: shown } => {
                 mask = new_mask;
                 line_mode = new_mode;
                 edge = new_edge;
                 traced_scales = edge_scales.of(&edge);
-                tracing::info!(?line_mode, "worker: run settings replaced");
+                first_look.show_for(shown);
+                tracing::info!(?line_mode, ?shown, "worker: run settings replaced");
             }
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
                 let built = (|| -> Result<(), String> {
@@ -436,6 +439,8 @@ pub fn run_worker() -> ! {
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
                 let cancel_flags_for_dispatch = cancel_flags.clone();
+                let first_look = first_look.clone();
+                let pool_size = engines.len();
                 // Per-item mid-inference cancel flag. Registered before
                 // the closure starts heavy work so a `CancelItem` can
                 // flip it; the guard inside the closure removes the
@@ -491,6 +496,9 @@ pub fn run_worker() -> ! {
                     let _sem_guard = sem.acquire(weight);
                     let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(seg_cancel.clone());
                     progress.step(prunr_core::Step::ReadingImage);
+                    // Whether this image is the one on screen is settled
+                    // as its run starts, here.
+                    let look = first_look.for_run(item_id, model, pool_size);
 
                     // For LineMode::Off we use the split pipeline (infer_only +
                     // tensor_to_mask + apply_mask) to capture the raw tensor for
@@ -568,7 +576,8 @@ pub fn run_worker() -> ! {
                                 if let Some(err) = prunr_core::check_large_image(original) {
                                     Err(err)
                                 } else {
-                                    prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                    let look = look.as_ref().and_then(Look::engine);
+                                    prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
                                         progress.step(prunr_core::Step::RefiningEdges);
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
@@ -628,7 +637,8 @@ pub fn run_worker() -> ! {
                             if let Some(err) = prunr_core::check_large_image(original) {
                                 Err(err)
                             } else {
-                                prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                let look = look.as_ref().and_then(Look::engine);
+                                prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
                                     progress.step(prunr_core::Step::RefiningEdges);
 
                                     let th = ir.tensor_height;

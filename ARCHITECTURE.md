@@ -92,6 +92,8 @@ ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold 
 | Depth maps | in-process, one queue thread, photos one at a time | engine kept warm until model or hardware change; the ~1 MB map stays on the item until its photo changes |
 | Filters only (no model) | background thread per item | — |
 
+**First look.** A slow cut-out (BiRefNet, U2Net) on the image on screen first runs Silueta, on the CPU, and reports its subject through the run's progress, so the canvas outlines the subject in about a second instead of at the end. It runs before the slow model rather than beside it: measured on a 4-core CPU, the outline lands at 1.1 s instead of 2.9 s and the run ends sooner. The app sets which image is on screen and the worker settles it as each run starts (`Configure` carries it; the bridge re-sends it when it changes mid-batch), so background images of a batch never run Silueta. Silueta's session lives in the seg worker beside the slow model's, loaded on first need and let go when first looks go off (Animations off, or the model timed under 2 s per image on its provider this session).
+
 SD has its own process because its multi-GB bundle is the likeliest OOM and a UNet step can't be interrupted: Cancel kills the process so RAM frees at once, and a watchdog kills it if free system RAM drops below 1 GB mid-erase.
 
 ### IPC

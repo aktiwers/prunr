@@ -32,10 +32,13 @@ pub struct AdmissionController {
 pub(crate) const RESIDENT_HISTORY_STEPS: usize = 10;
 
 impl AdmissionController {
-    /// Create a new controller. Queries available system RAM and applies safety margin.
-    pub fn new(model: ModelKind, jobs: usize, cpu_only: bool) -> Self {
+    /// Create a new controller. Queries available system RAM and applies
+    /// safety margin; `first_look`: the first-look model may load beside
+    /// the engines.
+    pub fn new(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> Self {
         let available = available_ram();
-        let overhead = model_overhead(model, jobs, cpu_only);
+        let overhead = model_overhead(model, jobs, cpu_only)
+            + if first_look { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL) } else { 0 };
         let budget = ((available as f64) * 0.85) as usize;
         let budget = budget.saturating_sub(overhead);
         Self {

@@ -399,9 +399,11 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// New mask, Sketch mode and line settings for the running worker.
-    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge })
+    /// New mask, Sketch mode and line settings for the running worker, and
+    /// the image that shows a first look (`None`: no first look, and the
+    /// worker lets its first-look model go).
+    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings, first_look: Option<u64>) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge, first_look })
             .map_err(|e| format!("Failed to send Configure: {e}"))
     }
 
