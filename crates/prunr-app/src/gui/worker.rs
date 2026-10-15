@@ -1011,24 +1011,18 @@ fn handle_subprocess_event(
     }
 }
 
-/// Read the result RGBA from the subprocess's temp file and wrap it. Always
-/// removes the temp file (success or parse failure) to keep `/dev/shm` tidy.
 fn read_result_image(
     result_path: &std::path::Path,
     width: u32,
     height: u32,
     active_provider: &str,
 ) -> Result<ProcessResult, String> {
-    let result = std::fs::read(result_path)
-        .ok()
-        .and_then(|data| image::RgbaImage::from_raw(width, height, data))
+    crate::subprocess::ipc::read_result_rgba(result_path, width, height)
         .map(|rgba_image| ProcessResult {
             rgba_image,
             active_provider: active_provider.to_string(),
         })
-        .ok_or_else(|| "Failed to read result from subprocess".to_string());
-    let _ = std::fs::remove_file(result_path);
-    result
+        .ok_or_else(|| "Failed to read result from subprocess".to_string())
 }
 
 /// Read the segmentation tensor cache from disk.
