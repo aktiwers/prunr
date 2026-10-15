@@ -173,7 +173,7 @@ fn the_hardware_page_names_every_runtime_control() {
     use crate::runtime_install::RuntimeId;
     use crate::runtime_install::RuntimeChoice;
     let mut both = HardwareInstallCache::all_installed();
-    both.preferred_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
+    both.next_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
     let mut built_in_only = HardwareInstallCache::default();
     built_in_only.built_in_gpu = true;
     let installing = Some((RuntimeId::OpenVino, "Downloading 40% (32/80 MB)".to_string()));
