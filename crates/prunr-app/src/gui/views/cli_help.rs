@@ -64,7 +64,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "White background instead of transparent");
                 }
 
-                // ── Lines ──
+                // ── Sketch ──
                 1 => {
                     section_heading(ui, "Line Extraction");
                     hint(ui, "Trace edges and outlines with the line-detection model.");

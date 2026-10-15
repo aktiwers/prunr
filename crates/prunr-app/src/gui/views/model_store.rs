@@ -17,7 +17,8 @@ use super::format_byte_size;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CardAction {
-    /// Bundled model — no action available, button reads "Built-in".
+    /// Bundled model — no action available; the footer reads "Built-in"
+    /// and the badge "Ready".
     Bundled,
     Download,
     Cancel,
@@ -66,8 +67,7 @@ fn disk_usage_bytes_uncached() -> u64 {
 /// 1 s TTL cache around the per-OnDemand-model `fs::metadata` walk —
 /// the modal repaints every frame while the user drags a scrollbar
 /// or hovers a row, which fired ~7 stat syscalls per frame (~420
-/// stat/sec on cold-cache disk). Same TTL pattern as
-/// `hardware::available_ram_bytes_throttled`.
+/// stat/sec on cold-cache disk).
 fn disk_usage_bytes() -> u64 {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;

@@ -411,7 +411,7 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
             theme::PROCESSING_SWEEP,
         );
     }
-    // Pulsing blue border.
+    // Pulsing accent border.
     let pulse = (anim_time * 2.5).sin() * 0.5 + 0.5;
     let border_alpha = (40.0 + pulse * 80.0) as u8;
     ui.painter().rect_stroke(
@@ -589,8 +589,8 @@ fn paint_insertion_line(ui: &egui::Ui, item_response: &egui::Response, item_rect
     }
 }
 
-/// Apply everything collected during the row loop. Ordering mirrors the
-/// pre-refactor code: remove → save → reorder.
+/// Apply everything collected during the row loop, in the order
+/// remove → save → reorder.
 fn apply_actions(app: &mut PrunrApp, actions: &SidebarActions) {
     if let Some(idx) = actions.remove_idx {
         app.remove_batch_item(idx);

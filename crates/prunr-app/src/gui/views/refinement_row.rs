@@ -1,4 +1,4 @@
-//! The Refine group for the upscale row: six knobs, before- and
+//! The Refine group for the upscale row: four knobs, before- and
 //! after-upscale, in processing order.
 //!
 //! Mutations land on `item_settings` directly; the recipe diff at the
