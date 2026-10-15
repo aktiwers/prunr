@@ -145,7 +145,6 @@ fn found_text(on: bool, found: FoundCount) -> std::borrow::Cow<'static, str> {
         (true, Some(FaceSearch::Failed)) => "The face search failed. Turn Faces off and on to try again.".into(),
         (true, Some(FaceSearch::Stopped)) => "Stopped. Turn Faces off and on to search again.".into(),
         (true, Some(FaceSearch::Found(0))) => "No faces found.".into(),
-        (true, Some(FaceSearch::Found(1))) => "1 face found.".into(),
-        (true, Some(FaceSearch::Found(n))) => format!("{n} faces found.").into(),
+        (true, Some(FaceSearch::Found(n))) => format!("{} found.", fmt::count(n, "face", "faces")).into(),
     }
 }
