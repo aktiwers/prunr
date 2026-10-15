@@ -187,11 +187,8 @@ impl ExportBg {
 
     /// The photo the effect is made from, and whether it is the original.
     fn photo(&self) -> Option<(Arc<image::RgbaImage>, bool)> {
-        let chosen = match &self.photo {
-            Some(BackdropPhoto::Edited(stored)) => stored.load().map(|photo| (photo, false)),
-            Some(BackdropPhoto::Original(photo)) => Some((Arc::clone(photo), true)),
-            None => None,
-        };
+        let chosen = self.photo.as_ref()
+            .and_then(|p| Some((p.load()?, matches!(p, BackdropPhoto::Original(_)))));
         chosen.or_else(|| self.depth.source.decode_rgba().ok().map(|photo| (photo, true)))
     }
 }
