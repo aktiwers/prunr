@@ -168,6 +168,8 @@ pub struct PreviewResult {
     pub new_faced: Option<(Arc<DynamicImage>, FacedKey)>,
     /// The depth-looked photo this dispatch built, for the item to reuse.
     pub(crate) new_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
+    /// The photo a quick frame shrank, for the drag's next frames.
+    pub(crate) new_quick_photo: Option<QuickPhoto>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -513,6 +515,7 @@ impl LivePreview {
                         new_reference: output.built_reference,
                         new_faced: output.built_faced.zip(faced_key),
                         new_depth_photo: output.built_depth_photo,
+                        new_quick_photo: output.built_quick_photo,
                         applied_mask: mask_recipe,
                         applied_depth,
                         applied_tier2_knobs,
@@ -649,6 +652,8 @@ pub struct DispatchInputs {
     pub faces: Option<FacesInput>,
     /// The photo's depth map, for the Depth chip's look and fading lines.
     pub(crate) depth: Option<DepthInput>,
+    /// The photo shrunk for an earlier quick frame.
+    pub(crate) quick_photo: Option<QuickPhoto>,
 }
 
 /// What a preview reads from the depth map: the look to put on the photo
@@ -684,6 +689,7 @@ impl DispatchInputs {
             colorize: None,
             faces: None,
             depth: None,
+            quick_photo: None,
         }
     }
 
@@ -866,11 +872,12 @@ struct RunOutput {
     built_reference: Option<Arc<image::RgbaImage>>,
     built_faced: Option<Arc<DynamicImage>>,
     built_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
+    built_quick_photo: Option<QuickPhoto>,
 }
 
 impl RunOutput {
     fn empty() -> Self {
-        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None, built_depth_photo: None }
+        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None, built_depth_photo: None, built_quick_photo: None }
     }
 }
 
@@ -920,8 +927,9 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
     let full_width = inputs.original.width();
+    let mut built_quick_photo = None;
     if inputs.quick {
-        inputs.original = quick_photo(&inputs.original);
+        (inputs.original, built_quick_photo) = QuickPhoto::shrink(&inputs.original, inputs.quick_photo.as_ref());
     }
     // The Depth chip's look goes on the faced photo, before the lines.
     let built_depth_photo = apply_depth_look(&mut inputs);
@@ -930,22 +938,45 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     }
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
     let output = run_photo_preview(inputs);
-    RunOutput { built_faced, built_depth_photo, ..output }
+    RunOutput { built_faced, built_depth_photo, built_quick_photo, ..output }
 }
 
 /// The long side a drag's quick frames are made at. A larger image's
 /// in-between frames are quick; its settled render is full size.
 pub(crate) const QUICK_FRAME_SIDE: u32 = 2048;
 
+/// A photo shrunk for quick frames, and the one it was shrunk from, held
+/// weakly so the pair never keeps a full-size photo alive.
+#[derive(Clone)]
+pub(crate) struct QuickPhoto {
+    from: std::sync::Weak<DynamicImage>,
+    small: Arc<DynamicImage>,
+}
+
+impl QuickPhoto {
+    /// `photo` no larger than a quick frame: the kept one when it was
+    /// shrunk from `photo`, else a fresh one, returned to keep.
+    fn shrink(photo: &Arc<DynamicImage>, kept: Option<&QuickPhoto>) -> (Arc<DynamicImage>, Option<QuickPhoto>) {
+        // The weak reference holds the allocation, so an equal address is
+        // the same photo, never a new one at a freed address.
+        if let Some(kept) = kept.filter(|k| std::ptr::eq(k.from.as_ptr(), Arc::as_ptr(photo))) {
+            return (Arc::clone(&kept.small), None);
+        }
+        let small = quick_photo(photo);
+        let built = (!Arc::ptr_eq(&small, photo)).then(|| QuickPhoto { from: Arc::downgrade(photo), small: Arc::clone(&small) });
+        (small, built)
+    }
+}
+
 /// `photo` no larger than a quick frame.
 fn quick_photo(photo: &Arc<DynamicImage>) -> Arc<DynamicImage> {
-    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+    use prunr_core::formats::{fit_long_side, resize_to_rgba, ResizeFilter};
     let (w, h) = (photo.width(), photo.height());
     if w.max(h) <= QUICK_FRAME_SIDE {
         return Arc::clone(photo);
     }
     let (qw, qh) = fit_long_side(w, h, QUICK_FRAME_SIDE);
-    Arc::new(DynamicImage::ImageRgba8(resize_rgba(&prunr_core::rgba_view(photo), qw, qh, ResizeFilter::Bilinear)))
+    Arc::new(DynamicImage::ImageRgba8(resize_to_rgba(photo, qw, qh, ResizeFilter::Bilinear)))
 }
 
 /// Fit a quick frame's inputs to its smaller photo: the pixel-sized knobs
@@ -1200,7 +1231,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None,
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None,
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,
@@ -1789,6 +1820,47 @@ mod tests {
         }
         let upscale = DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), settings);
         assert!(!upscale.can_be_quick(), "a kept run re-finishes at full size");
+    }
+
+    /// A drag's quick frames shrink the photo once: the next frame reuses
+    /// it, another photo does not, and the kept pair holds no full photo.
+    #[test]
+    fn quick_frames_shrink_the_photo_once() {
+        let photo = Arc::new(image::DynamicImage::new_rgb8(QUICK_FRAME_SIDE * 2, 10));
+        let (small, kept) = QuickPhoto::shrink(&photo, None);
+        assert_eq!((small.width(), small.height()), (QUICK_FRAME_SIDE, 5));
+        let kept = kept.expect("a fresh shrink is kept");
+        let (again, built) = QuickPhoto::shrink(&photo, Some(&kept));
+        assert!(Arc::ptr_eq(&again, &small) && built.is_none(), "the next frame reuses it");
+        let other = Arc::new(image::DynamicImage::new_rgb8(QUICK_FRAME_SIDE * 2, 10));
+        let (fresh, built) = QuickPhoto::shrink(&other, Some(&kept));
+        assert!(!Arc::ptr_eq(&fresh, &small) && built.is_some(), "another photo is shrunk anew");
+        assert_eq!(Arc::strong_count(&photo), 1, "the kept pair holds the photo weakly");
+        let tiny = Arc::new(image::DynamicImage::new_rgb8(8, 8));
+        let (same, built) = QuickPhoto::shrink(&tiny, None);
+        assert!(Arc::ptr_eq(&same, &tiny) && built.is_none(), "a small photo is its own quick frame");
+    }
+
+    /// What a 24 MP cut-out costs per drag frame, quick and settled.
+    /// `cargo test --profile profiling -p prunr-app --lib quick_frame_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn quick_frame_timing() {
+        use crate::gui::item_settings::ItemSettings;
+        let photo = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(6000, 4000, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8]))));
+        let seg = Arc::new(SegTensor { data: (0..1024 * 1024).map(|i| ((i % 1024) as f32 / 512.0) - 1.0).collect(), height: 1024, width: 1024, model: ModelKind::BiRefNetLite });
+        let mut kept = None;
+        for refine_edges in [false, true] {
+            let settings = ItemSettings { gamma: 1.4, feather: 2.0, refine_edges, ..ItemSettings::default() };
+            for quick in [true, false, true, false, true, false] {
+                let inputs = DispatchInputs { quick, seg_tensor: Some(Arc::clone(&seg)), quick_photo: kept.clone(), ..DispatchInputs::new(PreviewKind::Mask, 0, Arc::clone(&photo), settings) };
+                let t = Instant::now();
+                let out = run_preview(inputs, &AtomicBool::new(false));
+                let took = t.elapsed();
+                kept = out.built_quick_photo.or(kept);
+                println!("refine {refine_edges} quick {quick}: {took:?} -> {:?}", out.rgba.expect("rendered").dimensions());
+            }
+        }
     }
 
     /// No model's photo preview puts the Depth chip's look on the photo,
