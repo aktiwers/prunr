@@ -145,13 +145,13 @@ impl Settings {
     /// Should the SD inpaint dispatcher route to the LCM checkpoint?
     /// True only when ALL of: user picked SD, scheduler is LCM, the
     /// LCM descriptor is in the registry (artifact published), and
-    /// the bundle is downloaded. When any clause fails, raw_backend
+    /// the bundle is downloaded. When any clause fails, picked_model
     /// passes through and standard SD runs. Pinned in one place so
     /// adding a 5th clause (e.g. license-accepted) doesn't silently
     /// diverge between dispatch and UI gating.
-    pub fn lcm_routing_active(&self, raw_backend: prunr_models::ModelId) -> bool {
+    pub fn lcm_routing_active(&self, picked_model: prunr_models::ModelId) -> bool {
         use crate::gui::brush_state::SdScheduler;
-        raw_backend == prunr_models::ModelId::SdV15InpaintFp16
+        picked_model == prunr_models::ModelId::SdV15InpaintFp16
             && self.brush.sd_scheduler == SdScheduler::Lcm
             && Self::can_select_lcm_scheduler()
     }
@@ -286,11 +286,11 @@ impl Settings {
     /// Record the provider a worker reports. Under "CPU only" the report
     /// says CPU by choice, so the detected accelerator is kept (Settings
     /// still offers Auto). A new provider re-derives the job count.
-    pub fn note_backend(&mut self, provider: String) {
-        if provider.is_empty() || self.cpu_only() || self.active_backend == provider {
+    pub fn note_backend(&mut self, backend: String) {
+        if backend.is_empty() || self.cpu_only() || self.active_backend == backend {
             return;
         }
-        self.active_backend = provider;
+        self.active_backend = backend;
         self.parallel_jobs = self.default_jobs();
     }
 
@@ -558,7 +558,7 @@ pub enum SettingsModel {
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
     None,
-    /// Object-removal / inpaint mode (LaMa-fp32 backend). Brush is the
+    /// Object-removal / inpaint mode (LaMa-fp32 model). Brush is the
     /// only input; stroke release runs the inpainter over the painted
     /// region. Bg-removal knobs are inert in this mode.
     Inpaint,
@@ -1113,9 +1113,9 @@ mod tests {
         assert!(!s.lcm_routing_active(prunr_models::ModelId::SdV15InpaintFp16));
     }
 
-    /// Non-SD backend short-circuits before the install gate.
+    /// Non-SD model short-circuits before the install gate.
     #[test]
-    fn lcm_routing_inactive_for_non_sd_backend() {
+    fn lcm_routing_inactive_for_non_sd_model() {
         use crate::gui::brush_state::SdScheduler;
         let mut s = Settings::default();
         s.brush.sd_scheduler = SdScheduler::Lcm;

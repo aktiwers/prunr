@@ -359,7 +359,7 @@ pub(crate) enum WorkerMessage {
     },
     /// Drop any warm seg subprocess so its engine pool's resident RAM
     /// is reclaimed. Sent by the GUI on every `model_changed` so a
-    /// previous backend (e.g. BiRefNetLite at ~2 GB) doesn't pin
+    /// previous model (e.g. BiRefNetLite at ~2 GB) doesn't pin
     /// memory across the user's "I'm done with that model" signal.
     /// Idempotent; no-op when nothing is warm.
     ReleaseWarm,

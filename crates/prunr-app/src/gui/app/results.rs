@@ -572,7 +572,7 @@ impl PrunrApp {
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
-                WorkerResult::BackendReady(provider) => self.settings.note_backend(provider),
+                WorkerResult::BackendReady(backend) => self.settings.note_backend(backend),
             }
         }
     }

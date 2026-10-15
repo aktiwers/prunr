@@ -71,7 +71,7 @@ pub enum InpaintBridgeMsg {
     ///      switch) rather than a user-facing Cancel button.
     ///
     /// Sent by `apply_toolbar_change` when the user picks a
-    /// non-SD-family inpaint backend or a non-inpaint model.
+    /// non-SD-family eraser model or a non-inpaint model.
     Release,
 }
 
