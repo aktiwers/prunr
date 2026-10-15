@@ -948,8 +948,6 @@ fn denoise(
     let total = timesteps.len() as u32;
     progress.step(Step::Denoising);
     progress.inner(0, total, Unit::Step);
-    // Hoisted so the swap below reuses one allocation across steps.
-    let mut next: Vec<f32> = Vec::with_capacity(latent.len());
     for (i, &t) in timesteps.iter().enumerate() {
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -961,8 +959,7 @@ fn denoise(
         }
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
-        step_array_into(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng, &mut next);
-        std::mem::swap(&mut latent, &mut next);
+        latent = step_array(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng);
         progress.inner(i as u32 + 1, total, Unit::Step);
     }
     Ok(latent)
@@ -2299,13 +2296,12 @@ fn cfg_blend(
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
-/// Scheduler step dispatched from `denoise`, writing the new latent
-/// state into `out`.
+/// Scheduler step dispatched from `denoise`: the next latent state.
 // `step_idx` is only meaningful to the DPM++ multistep arm, but the
 // dispatch is shared. Threading it through a `StepCtx` struct would
 // force the LCM arm to carry a field it never reads.
 #[allow(clippy::too_many_arguments)]
-fn step_array_into(
+fn step_array(
     scheduler: &mut Scheduler,
     latent: &[f32],
     noise_pred: &[f32],
@@ -2314,12 +2310,11 @@ fn step_array_into(
     t_prev: i64,
     is_final_step: bool,
     rng: &mut ChaCha8Rng,
-    out: &mut Vec<f32>,
-) {
+) -> Vec<f32> {
     match scheduler {
         Scheduler::Lcm(s) => {
             if is_final_step {
-                *out = s.denoised(latent, noise_pred, t);
+                s.denoised(latent, noise_pred, t)
             } else {
                 // LCM mixes Gaussian noise back in on every non-final
                 // step. Sample from the same seeded RNG that drove the
@@ -2327,12 +2322,10 @@ fn step_array_into(
                 // reproducible from `seed`.
                 let dist = StandardNormal;
                 let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
-                *out = s.step_at(latent, noise_pred, t, t_prev, &noise);
+                s.step_at(latent, noise_pred, t, t_prev, &noise)
             }
         }
-        Scheduler::DpmPp2M(s) => {
-            *out = s.step(latent, noise_pred, step_idx);
-        }
+        Scheduler::DpmPp2M(s) => s.step(latent, noise_pred, step_idx),
     }
 }
 
