@@ -365,21 +365,22 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
             .map_err(|e| format!("extract {}: {e}", dest.display()))?;
     }
 
-    let dylib = target_dir.join(dylib_name());
+    let dylib = target_dir.join(DYLIB_NAME);
     if !dylib.is_file() {
         return Err(format!(
-            "{} missing after extract — wheel layout may have changed",
-            dylib_name(),
+            "{DYLIB_NAME} missing after extract — wheel layout may have changed",
         ));
     }
     Ok(target_dir.to_path_buf())
 }
 
-pub fn dylib_name() -> &'static str {
-    if cfg!(windows) { "onnxruntime.dll" }
-    else if cfg!(target_os = "macos") { "libonnxruntime.dylib" }
-    else { "libonnxruntime.so" }
-}
+pub const DYLIB_NAME: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
 
 #[cfg(test)]
 mod tests {
