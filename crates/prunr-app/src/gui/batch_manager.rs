@@ -692,22 +692,22 @@ impl BatchManager {
 /// needs, and how many were already up to date (for the toast).
 #[derive(Default)]
 pub(crate) struct ClassifiedTiers {
-    pub(crate) tier1: HashSet<u64>,
-    pub(crate) tier2: HashSet<u64>,
-    pub(crate) tier_add_edge: HashSet<u64>,
-    pub(crate) skip_count: usize,
+    pub(crate) full: HashSet<u64>,
+    pub(crate) mask: HashSet<u64>,
+    pub(crate) add_edge: HashSet<u64>,
+    pub(crate) up_to_date_count: usize,
 }
 
 impl ClassifiedTiers {
     pub(crate) fn process_count(&self) -> usize {
-        self.tier1.len() + self.tier2.len() + self.tier_add_edge.len()
+        self.full.len() + self.mask.len() + self.add_edge.len()
     }
 
     /// Every image the run sends.
     pub(crate) fn all_process_ids(&self) -> HashSet<u64> {
-        self.tier1.iter()
-            .chain(self.tier2.iter())
-            .chain(self.tier_add_edge.iter())
+        self.full.iter()
+            .chain(self.mask.iter())
+            .chain(self.add_edge.iter())
             .copied().collect()
     }
 }
@@ -730,14 +730,14 @@ impl BatchManager {
         let mut tiers = ClassifiedTiers::default();
         for item in self.in_set(ids) {
             if item.chains(step, cutter) {
-                tiers.tier1.insert(item.id);
+                tiers.full.insert(item.id);
                 continue;
             }
             match item.run_tier(model) {
-                RunTier::UpToDate => tiers.skip_count += 1,
-                RunTier::Full => { tiers.tier1.insert(item.id); }
-                RunTier::Mask => { tiers.tier2.insert(item.id); }
-                RunTier::AddEdge => { tiers.tier_add_edge.insert(item.id); }
+                RunTier::UpToDate => tiers.up_to_date_count += 1,
+                RunTier::Full => { tiers.full.insert(item.id); }
+                RunTier::Mask => { tiers.mask.insert(item.id); }
+                RunTier::AddEdge => { tiers.add_edge.insert(item.id); }
             }
         }
         tiers
