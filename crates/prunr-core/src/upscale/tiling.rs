@@ -159,8 +159,7 @@ where
     let mut weight_buf: Vec<f32> = vec![0.0; pixel_count];
 
     // Sequential: ort sessions are Mutex-guarded internally and nested
-    // rayon inside the subprocess worker path has caused deadlocks
-    // historically (see `apply_background_color` for the same rule).
+    // rayon inside the subprocess worker path deadlocks.
     for (tile_idx, tile) in tiles.iter().enumerate() {
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);

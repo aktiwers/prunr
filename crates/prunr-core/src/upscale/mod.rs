@@ -295,9 +295,7 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     out
 }
 
-/// Convenience wrapper: constructs an engine internally then delegates to
-/// `upscale_rgba_with_engine`. Preserves the existing public API for
-/// callers that don't need the warm-engine cache (CLI, tests).
+/// Builds its own engine; for callers without a warm engine (CLI, tests).
 ///
 /// Peak working-set RAM (additive to the `upscale_tiled` accumulators
 /// documented in `tiling.rs`):
@@ -374,11 +372,6 @@ mod tests {
         );
     }
 
-    /// `is_fp16` selects the output-extraction dtype in `pack_output`.
-    /// A regression that flipped Nomos8kSCHAT-L's flag to `false` (or
-    /// RealESRGAN's to `true`) would surface as a runtime ORT
-    /// "Unexpected input data type" panic on the first dispatch —
-    /// caught here at compile-time-of-the-test instead.
     #[test]
     fn fit_to_scale_resamples_to_every_offered_factor() {
         let input = RgbaImage::from_pixel(4, 6, image::Rgba([10, 20, 30, 200]));
@@ -393,6 +386,11 @@ mod tests {
         assert_eq!(fit_to_scale(native2, &input, 4).dimensions(), (16, 24));
     }
 
+    /// `is_fp16` selects the output-extraction dtype in `pack_output`.
+    /// A regression that flipped Nomos8kSCHAT-L's flag to `false` (or
+    /// RealESRGAN's to `true`) would surface as a runtime ORT
+    /// "Unexpected input data type" panic on the first dispatch —
+    /// caught here at compile-time-of-the-test instead.
     #[test]
     fn upscale_knobs_fp16_matches_export() {
         let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
@@ -419,8 +417,6 @@ mod tests {
             "RealEsrganX4Plus names the input tensor `data`"
         );
     }
-
-    // ── Two-pass scheduler tests ──────────────────────────────────────────────
 
     /// x2plus knobs match the x4plus export convention (same RRDB architecture,
     /// same export script → same tensor names and dtype).

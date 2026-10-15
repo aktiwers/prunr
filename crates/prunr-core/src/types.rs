@@ -967,8 +967,8 @@ mod tests {
 
     #[test]
     fn edge_settings_default_has_fused_scale() {
-        // Backwards-compat invariant: loading old settings/preset files that
-        // lack edge_scale must fall back to Fused, matching pre-Task-5 output.
+        // Loading old settings/preset files that lack edge_scale must fall
+        // back to Fused.
         assert_eq!(EdgeSettings::default().edge_scale, EdgeScale::Fused);
     }
 

@@ -191,13 +191,11 @@ impl OutputScale {
 
 /// Upscale settings. `None` model means upscale is disabled.
 ///
-/// All f32 knobs are stored as `u32::from_bits` for safe `PartialEq` + `Hash`
-/// (matches the `MaskRecipe::gamma_bits` pattern).
+/// f32 knobs are kept as their bits so the recipe is `Eq` + `Hash`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UpscaleRecipe {
     /// `None` = upscale disabled (no upscale model selected).
     pub model: Option<prunr_models::ModelId>,
-    /// User-facing output scale (replaces the prior `scale: u32`).
     pub output_scale: OutputScale,
     // ----- Tier-1 knobs (re-inference) -----
     /// Pre-inference denoise blend strength, range [0.0, 1.0].
