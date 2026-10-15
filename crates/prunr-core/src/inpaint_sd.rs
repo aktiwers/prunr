@@ -2319,7 +2319,7 @@ fn step_array_into(
     match scheduler {
         Scheduler::Lcm(s) => {
             if is_final_step {
-                *out = s.step(latent, noise_pred, t, true, &[]);
+                *out = s.denoised(latent, noise_pred, t);
             } else {
                 // LCM mixes Gaussian noise back in on every non-final
                 // step. Sample from the same seeded RNG that drove the
@@ -2596,31 +2596,10 @@ impl LcmScheduler {
         self.alphas_cumprod[idx]
     }
 
-    /// LCM consistency-function update. `noise_for_step` is the Gaussian
-    /// noise to mix in for the non-final-step stochastic term — caller
-    /// supplies it from a seeded RNG so the whole denoise is
-    /// deterministic from `(seed, prompt, mask)`. Pass an empty / zero
-    /// slice on the final step (it's unused there).
-    pub fn step(
-        &self,
-        latent_t: &[f32],
-        noise_pred: &[f32],
-        t: i64,
-        is_final_step: bool,
-        _noise_for_step: &[f32],
-    ) -> Vec<f32> {
-        debug_assert_eq!(latent_t.len(), noise_pred.len(),
-            "LCM step: latent and noise_pred shapes must match");
-        // step_array routes is_final_step=false to step_at — the
-        // non-final branch here is structurally unreachable.
-        if !is_final_step {
-            unreachable!("non-final LCM step: caller must use step_at with t_prev")
-        }
-        self.denoised(latent_t, noise_pred, t)
-    }
-
-    /// Non-final-step variant that takes the previous inference
-    /// timestep so we can sample correctly into the next noise level.
+    /// A non-final LCM step: the clean latent re-noised to `t_prev`'s
+    /// level with `noise_for_step`, which the caller draws from the
+    /// seeded RNG so the whole denoise is deterministic from
+    /// `(seed, prompt, mask)`. The final step is `denoised`.
     pub fn step_at(
         &self,
         latent_t: &[f32],
@@ -2933,7 +2912,7 @@ mod tests {
         let latent = vec![0.5_f32; 4];
         let noise = vec![0.1_f32; 4];
         let t = 500_i64;
-        let next = s.step(&latent, &noise, t, true, &[]);
+        let next = s.denoised(&latent, &noise, t);
 
         let alpha_t = s.alpha_cumprod(t);
         let beta_t = 1.0 - alpha_t;
@@ -3031,7 +3010,7 @@ mod tests {
         let latent = [0.5_f32, -0.25, 1.5, 0.0];
         let noise_pred = [0.1_f32, 0.4, -0.3, 0.9];
         let lcm = LcmScheduler::new_sd15(4);
-        let final_step = lcm.step(&latent, &noise_pred, lcm.timesteps()[3], true, &[]);
+        let final_step = lcm.denoised(&latent, &noise_pred, lcm.timesteps()[3]);
         assert_eq!(Scheduler::Lcm(lcm).x0(&latent, &noise_pred, 3), final_step);
         let mut dpm = DpmPp2MScheduler::new_sd15(8);
         for i in 0..2 {
