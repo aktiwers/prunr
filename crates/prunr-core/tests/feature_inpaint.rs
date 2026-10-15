@@ -17,10 +17,10 @@
 
 mod test_common;
 
-use image::{GrayImage, Luma, RgbaImage};
+use image::{GrayImage, RgbaImage};
 use prunr_core::inpaint::process_inpaint;
 use prunr_models::ModelId;
-use test_common::{skip_if_model_missing, skip_if_no_ort};
+use test_common::{changed_in, rect_mask, skip_if_model_missing, skip_if_no_ort};
 
 /// 256² source: solid teal background, used so masked-region inpaint
 /// output is easily distinguishable from the unmasked area's identity.
@@ -34,13 +34,7 @@ fn fixture_source() -> RgbaImage {
 /// 256² mask: small rectangle in the centre. Anything inside the rect
 /// is "to be inpainted"; outside is identity.
 fn fixture_mask() -> GrayImage {
-    let mut mask = GrayImage::new(256, 256);
-    for py in 100..160 {
-        for px in 100..160 {
-            mask.put_pixel(px, py, Luma([255]));
-        }
-    }
-    mask
+    rect_mask(256, 256, 100, 100, 60, 60)
 }
 
 fn run_inpaint_test(model_id: ModelId, label: &str) {
@@ -66,14 +60,7 @@ fn run_inpaint_test_with(
     // (We can't assert "every pixel differs" because the model may keep a
     // colour close to the mean; the strong contract is "the model did
     // something inside the mask.")
-    let mut differing = 0u32;
-    for py in 100..160u32 {
-        for px in 100..160u32 {
-            if out.get_pixel(px, py).0 != image.get_pixel(px, py).0 {
-                differing += 1;
-            }
-        }
-    }
+    let differing = changed_in(&out, &image, 100, 100, 60, 60);
     let total = 60 * 60;
     assert!(
         differing as f32 / total as f32 > 0.3,

@@ -6,7 +6,7 @@
 
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
-use image::{ImageBuffer, Rgba, RgbaImage};
+use image::{GrayImage, ImageBuffer, Luma, Rgba, RgbaImage};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -218,6 +218,25 @@ pub fn draw_circle_filled(img: &mut RgbaImage, cx: i32, cy: i32, r: i32, color: 
             }
         }
     }
+}
+
+/// `w`×`h` inpaint mask: 255 inside the `rw`×`rh` rect at (`x`, `y`),
+/// 0 elsewhere. The rect is clipped to the image.
+pub fn rect_mask(w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32) -> GrayImage {
+    GrayImage::from_fn(w, h, |px, py| {
+        let inside = (x..x + rw).contains(&px) && (y..y + rh).contains(&py);
+        Luma([if inside { 255 } else { 0 }])
+    })
+}
+
+/// Pixels inside the `rw`×`rh` rect at (`x`, `y`) that differ between `a`
+/// and `b`. The rect is clipped to `a`.
+pub fn changed_in(a: &RgbaImage, b: &RgbaImage, x: u32, y: u32, rw: u32, rh: u32) -> u32 {
+    let (xe, ye) = ((x + rw).min(a.width()), (y + rh).min(a.height()));
+    (y..ye)
+        .flat_map(|py| (x..xe).map(move |px| (px, py)))
+        .filter(|&(px, py)| a.get_pixel(px, py) != b.get_pixel(px, py))
+        .count() as u32
 }
 
 /// Helper for synthetic source generation: bootstrap an `RgbaImage` of the
