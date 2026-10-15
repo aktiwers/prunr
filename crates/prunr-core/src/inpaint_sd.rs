@@ -1351,9 +1351,7 @@ pub(crate) fn release_all() {
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
 /// returning the count dropped. Generic over `T` so tests can drive the
 /// sweep without spinning up a real ORT session.
-///
-/// `pub(crate)` so `inpaint::LamaSession`'s sweeper reuses this directly.
-pub(crate) fn sweep_idle<K: std::hash::Hash + Eq, T>(
+fn sweep_idle<K: std::hash::Hash + Eq, T>(
     cache: &mut HashMap<K, CacheEntry<T>>,
     now: Instant,
     idle: Duration,
@@ -1385,40 +1383,68 @@ fn admit<K: std::hash::Hash + Eq, T>(
     entry
 }
 
+/// `sweep_idle` against `crate::IDLE_RELEASE`, logging `what` when it
+/// dropped anything.
+pub(crate) fn sweep_and_log<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, CacheEntry<T>>,
+    now: Instant,
+    what: &'static str,
+) {
+    let dropped = sweep_idle(cache, now, crate::IDLE_RELEASE);
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            idle_secs = crate::IDLE_RELEASE.as_secs(),
+            rss_mb = process_rss_mb(),
+            "{what}",
+        );
+    }
+}
+
+impl<V, E> CacheEntry<Arc<OnceLock<Result<V, E>>>> {
+    /// Refresh `last_used` unless the slot already holds an Err —
+    /// otherwise a sticky build failure would keep refreshing its idle
+    /// timer on every retry and never evict. Healthy or in-flight slots
+    /// refresh.
+    pub(crate) fn touch(&mut self, now: Instant) {
+        if !matches!(self.value.get(), Some(Err(_))) {
+            self.last_used = now;
+        }
+    }
+}
+
 /// Background sweeper interval. 60 s gives reclaim within ~1 minute of
 /// the idle threshold without burning CPU; the sweep itself is a single
 /// HashMap::retain over <10 entries so it's free.
-const SD_SWEEP_INTERVAL_SECS: u64 = 60;
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Spawn a daemon thread that periodically evicts idle SD entries even
-/// when no caller invokes `get()`. Without this, RAM doesn't reclaim
-/// until the user touches SD again — which defeats the point of the
-/// idle release. Init-once via OnceLock so we don't accumulate threads.
+/// Spawn a daemon thread named `thread` that evicts idle entries of
+/// `cache` every `SWEEP_INTERVAL`, even when no caller invokes `get()`.
+/// Without it, RAM doesn't reclaim until the user touches the model
+/// again — which defeats the point of the idle release. Callers start it
+/// once through their own `OnceLock` so threads don't accumulate.
+pub(crate) fn spawn_idle_sweeper<K, T>(
+    thread: &'static str,
+    cache: fn() -> &'static Mutex<HashMap<K, CacheEntry<T>>>,
+    what: &'static str,
+) where
+    K: std::hash::Hash + Eq + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(thread.to_string())
+        .spawn(move || loop {
+            std::thread::sleep(SWEEP_INTERVAL);
+            let mut guard = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            sweep_and_log(&mut guard, Instant::now(), what);
+        })
+        .unwrap_or_else(|e| panic!("spawn {thread} thread: {e}"));
+}
+
 fn ensure_sweeper_running() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("sd-idle-sweeper".to_string())
-            .spawn(|| {
-                let interval = Duration::from_secs(SD_SWEEP_INTERVAL_SECS);
-                let idle = crate::IDLE_RELEASE;
-                loop {
-                    std::thread::sleep(interval);
-                    let cache = sd_cache();
-                    let mut guard = cache.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let dropped = sweep_idle(&mut guard, Instant::now(), idle);
-                    if dropped > 0 {
-                        tracing::info!(
-                            dropped,
-                            idle_secs = crate::IDLE_RELEASE.as_secs(),
-                            rss_mb = process_rss_mb(),
-                            "SD: background sweeper released idle session(s)",
-                        );
-                    }
-                }
-            })
-            .expect("spawn sd-idle-sweeper thread");
+        spawn_idle_sweeper("sd-idle-sweeper", sd_cache, "SD: background sweeper released idle session(s)");
     });
 }
 
@@ -1427,29 +1453,14 @@ impl SdSession {
         ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
-        let idle = crate::IDLE_RELEASE;
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the bundle build.
         let slot: SdBundleSlot = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let dropped = sweep_idle(&mut guard, now, idle);
-            if dropped > 0 {
-                tracing::info!(
-                    dropped,
-                    idle_secs = crate::IDLE_RELEASE.as_secs(),
-                    rss_mb = process_rss_mb(),
-                    "SD: released idle session bundle(s)",
-                );
-            }
+            sweep_and_log(&mut guard, now, "SD: released idle session bundle(s)");
             let entry = admit(&mut guard, (id, key.clone()), || Arc::new(std::sync::OnceLock::new()), now, pin);
-            // Don't refresh last_used when the slot already holds an
-            // Err — otherwise a sticky build failure would keep
-            // refreshing its idle timer on every retry and never
-            // evict. Healthy or in-flight slots refresh as before.
-            if !matches!(entry.value.get(), Some(Err(_))) {
-                entry.last_used = now;
-            }
+            entry.touch(now);
             entry.value.clone()
         };
 

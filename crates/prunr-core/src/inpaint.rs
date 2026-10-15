@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
@@ -482,9 +482,6 @@ pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPic
 }
 
 
-/// Background sweeper interval. 60 s gives reclaim within ~1 minute of
-/// the idle threshold.
-const LAMA_SWEEP_INTERVAL_SECS: u64 = 60;
 
 /// Per-id deferred session. The outer `Arc<OnceLock>` closes the build
 /// race between two concurrent
@@ -528,30 +525,11 @@ fn release_lama_sessions() {
 fn ensure_lama_sweeper_running() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("lama-idle-sweeper".to_string())
-            .spawn(|| {
-                let interval = Duration::from_secs(LAMA_SWEEP_INTERVAL_SECS);
-                let idle = crate::IDLE_RELEASE;
-                loop {
-                    std::thread::sleep(interval);
-                    let cache = lama_cache();
-                    let mut guard = cache.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let dropped = crate::inpaint_sd::sweep_idle(
-                        &mut guard, Instant::now(), idle,
-                    );
-                    if dropped > 0 {
-                        tracing::info!(
-                            dropped,
-                            idle_secs = crate::IDLE_RELEASE.as_secs(),
-                            rss_mb = crate::inpaint_sd::process_rss_mb(),
-                            "LaMa: background sweeper released idle session(s)",
-                        );
-                    }
-                }
-            })
-            .expect("spawn lama-idle-sweeper thread");
+        crate::inpaint_sd::spawn_idle_sweeper(
+            "lama-idle-sweeper",
+            lama_cache,
+            "LaMa: background sweeper released idle session(s)",
+        );
     });
 }
 
@@ -565,28 +543,15 @@ impl LamaSession {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
         let now = Instant::now();
-        let idle = crate::IDLE_RELEASE;
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the seconds-long build.
         let slot: LamaSlot = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let dropped = crate::inpaint_sd::sweep_idle(&mut guard, now, idle);
-            if dropped > 0 {
-                tracing::info!(
-                    dropped,
-                    idle_secs = crate::IDLE_RELEASE.as_secs(),
-                    rss_mb = crate::inpaint_sd::process_rss_mb(),
-                    "LaMa: released idle session(s)",
-                );
-            }
+            crate::inpaint_sd::sweep_and_log(&mut guard, now, "LaMa: released idle session(s)");
             let entry = guard.entry((id, cpu_only))
                 .or_insert_with(|| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::new()), now));
-            // Don't refresh last_used on Err entries — sticky failures
-            // shouldn't keep refreshing their idle timer.
-            if !matches!(entry.value.get(), Some(Err(_))) {
-                entry.last_used = now;
-            }
+            entry.touch(now);
             entry.value.clone()
         };
 
