@@ -692,16 +692,26 @@ impl PrunrApp {
     /// ones (a cancel, a shutdown) run nothing: the user stopped it.
     pub(super) fn on_spare_edge_scales(&mut self, item_id: u64, token: u64, landing: crate::gui::worker::SpareLanding) {
         use crate::gui::worker::SpareLanding;
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        let outcome = match &landing {
+            SpareLanding::Made(_) => "made",
+            SpareLanding::Skipped => "skipped",
+            SpareLanding::Failed => "failed",
+        };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else {
+            tracing::info!(item_id, token, outcome, "spare line scales dropped: image gone");
+            return;
+        };
         let failed = matches!(landing, SpareLanding::Failed);
         let made = match landing {
             SpareLanding::Made(tensors) => Some(tensors),
             SpareLanding::Skipped | SpareLanding::Failed => None,
         };
         if !item.land_spare_edge_scales(token, made) {
+            tracing::info!(item_id, token, outcome, "spare line scales dropped: the kept lines are another run's");
             return;
         }
         let rerun = failed && item.status == BatchStatus::Done && item.lines_need_a_run();
+        tracing::info!(item_id, token, outcome, rerun, "spare line scales landed");
         self.batch.enforce_tensor_budget();
         if rerun && self.batch.is_selected(item_id) {
             self.process_items(|i| i.id == item_id, None);
