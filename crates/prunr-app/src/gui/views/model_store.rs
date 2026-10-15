@@ -410,7 +410,7 @@ pub fn render_license_dialog(
 
     let backdrop_closed = theme::standard_modal_window(
         ctx, "license_dialog", "License acceptance",
-        [theme::SETTINGS_DIALOG_WIDTH, 360.0],
+        [theme::STANDARD_MODAL_WIDTH, 360.0],
         |ui| {
             ui.label(
                 RichText::new(desc.display_name)
