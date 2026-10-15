@@ -384,11 +384,42 @@ mod tests {
     /// cache), so they still must not interleave with each other.
     static DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// One temp directory per test process, in place of the real cache
-    /// root for every `cache_root()` call made under `cfg(test)`.
+    /// One directory per test process, in place of the real cache root
+    /// for every `cache_root()` call made under `cfg(test)`. A static is
+    /// never dropped, so a `TempDir` here leaked each run's optimized
+    /// graphs (up to ~450 MB) into the system temp dir, which on Linux is
+    /// often RAM. It lives beside the test binary instead, and each run
+    /// removes the directories of test processes that have ended.
     pub(super) fn temp_root() -> Option<PathBuf> {
-        static ROOT: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| tempfile::tempdir().ok()).as_ref().map(|d| d.path().join("ep_cache"))
+        static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let base = std::env::current_exe().ok()?.parent()?.parent()?.join("test-ep-cache");
+            remove_ended_runs(&base);
+            let own = base.join(std::process::id().to_string());
+            std::fs::create_dir_all(&own).ok()?;
+            Some(own.join("ep_cache"))
+        }).clone()
+    }
+
+    fn remove_ended_runs(base: &Path) {
+        let Ok(entries) = std::fs::read_dir(base) else { return };
+        for entry in entries.flatten() {
+            let ended = entry.file_name().to_str().and_then(|pid| pid.parse::<u32>().ok())
+                .is_some_and(|pid| !process_runs(pid));
+            if ended {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    /// Whether `pid` is a running process. Only Linux can tell cheaply;
+    /// elsewhere every directory is kept (CI machines are thrown away).
+    fn process_runs(pid: u32) -> bool {
+        if cfg!(target_os = "linux") {
+            Path::new("/proc").join(pid.to_string()).exists()
+        } else {
+            true
+        }
     }
 
     /// A draft becomes the cache only when published; one dropped (a
@@ -459,7 +490,9 @@ mod tests {
     #[test]
     fn tests_never_touch_the_real_cache() {
         let root = cache_root().unwrap();
-        assert!(root.starts_with(std::env::temp_dir()), "{root:?}");
+        let real = root_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"));
+        assert_ne!(Some(&root), real.as_ref());
+        assert!(root.ends_with(PathBuf::from(std::process::id().to_string()).join("ep_cache")), "one per test run: {root:?}");
     }
 
     /// Cross-EP collision would corrupt a load if e.g. CPU-optimized
