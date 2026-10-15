@@ -41,6 +41,10 @@ pub(crate) struct Bbox {
 }
 
 impl Bbox {
+    pub(crate) fn area(&self) -> usize {
+        (self.w as usize) * (self.h as usize)
+    }
+
     /// This box clipped to `rect` (x, y, w, h), which it must overlap.
     pub(crate) fn within(self, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
         let (x0, y0) = (self.x.max(x), self.y.max(y));
@@ -1797,6 +1801,17 @@ mod tests {
         mask.put_pixel(0, 0, Luma([255]));
         let bbox = mask_bbox(&mask, 128, 4).expect("non-empty");
         assert_eq!(bbox, Bbox { x: 0, y: 0, w: 5, h: 5 });
+    }
+
+    #[test]
+    fn mask_bbox_pads_an_interior_box_by_the_margin() {
+        let mut mask = GrayImage::new(64, 64);
+        for y in 20..30 {
+            for x in 25..35 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(mask_bbox(&mask, 128, 4), Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
     }
 
     #[test]

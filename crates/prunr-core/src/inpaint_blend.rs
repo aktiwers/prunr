@@ -31,6 +31,7 @@ use image::{GrayImage, RgbaImage};
 use rayon::prelude::*;
 
 use crate::guided_filter::{box_filter, box_filter_into};
+use crate::inpaint::{mask_bbox, Bbox};
 
 /// Default ring width for [`color_match_inpainted`] (pixels). Tuned for
 /// 1024-class inpaint output; on much-larger sources, the visible band
@@ -78,21 +79,6 @@ pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge
     MaskArtifact::from_cells(w, h, cells)
 }
 
-/// Bounding box of a region inside an image (top-left + size, all in pixels).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Bbox {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-}
-
-impl Bbox {
-    fn area(&self) -> usize {
-        (self.w as usize) * (self.h as usize)
-    }
-}
-
 /// Color-correct the inpainted region by matching its mean RGB to the
 /// source pixels just outside the mask boundary.
 ///
@@ -118,15 +104,14 @@ pub fn color_match_inpainted(
     {
         return inpainted.clone();
     }
-    let (img_w, img_h) = inpainted.dimensions();
-    let Some(bbox) = mask_bbox_expanded(mask, ring_px, img_w, img_h) else {
+    let Some(bbox) = mask_bbox(mask, 128, ring_px) else {
         return inpainted.clone();
     };
     let bwu = bbox.w as usize;
     let bhu = bbox.h as usize;
     let bxu = bbox.x as usize;
     let byu = bbox.y as usize;
-    let img_wu = img_w as usize;
+    let img_wu = inpainted.width() as usize;
 
     // Boundary detection via box-filtered binary mask, evaluated on the
     // cropped mask only — pixels with mean strictly between 0 and 1 are
@@ -232,9 +217,8 @@ pub fn seam_guided_blend(
     {
         return inpainted.clone();
     }
-    let (img_w, img_h) = inpainted.dimensions();
     let margin = radius + band_px.ceil() as u32 + 2;
-    let Some(bbox) = mask_bbox_expanded(mask, margin, img_w, img_h) else {
+    let Some(bbox) = mask_bbox(mask, 128, margin) else {
         return inpainted.clone();
     };
 
@@ -335,65 +319,6 @@ pub fn seam_guided_blend(
     }
 
     out
-}
-
-/// Find the bounding box of mask>=128 pixels, expanded by `margin` and
-/// clamped to image bounds. Parallel row-reduction — each row computes
-/// its own min/max in parallel, then merged. Returns `None` for an
-/// all-zero mask.
-fn mask_bbox_expanded(
-    mask: &GrayImage,
-    margin: u32,
-    img_w: u32,
-    img_h: u32,
-) -> Option<Bbox> {
-    let raw = mask.as_raw();
-    let w = mask.width() as usize;
-    let h = mask.height() as usize;
-
-    /// Per-row scan: returns (min_x, max_x, has_any) for one row.
-    fn row_extent(row: &[u8]) -> (usize, usize, bool) {
-        let mut min_x = usize::MAX;
-        let mut max_x = 0usize;
-        let mut any = false;
-        for (x, &v) in row.iter().enumerate() {
-            if v >= 128 {
-                if !any { min_x = x; }
-                max_x = x;
-                any = true;
-            }
-        }
-        (min_x, max_x, any)
-    }
-
-    let merged = (0..h)
-        .into_par_iter()
-        .map(|y| {
-            let row = &raw[y * w..(y + 1) * w];
-            let (rmin_x, rmax_x, any) = row_extent(row);
-            if any {
-                Some((rmin_x, y, rmax_x, y))
-            } else {
-                None
-            }
-        })
-        .reduce(
-            || None,
-            |a, b| match (a, b) {
-                (None, x) | (x, None) => x,
-                (Some((axn, ayn, axx, ayx)), Some((bxn, byn, bxx, byx))) => {
-                    Some((axn.min(bxn), ayn.min(byn), axx.max(bxx), ayx.max(byx)))
-                }
-            },
-        )?;
-    let (min_x, min_y, max_x, max_y) = merged;
-
-    let m = margin as usize;
-    let bx = min_x.saturating_sub(m) as u32;
-    let by = min_y.saturating_sub(m) as u32;
-    let bx_end = (max_x + m + 1).min(img_w as usize) as u32;
-    let by_end = (max_y + m + 1).min(img_h as usize) as u32;
-    Some(Bbox { x: bx, y: by, w: bx_end - bx, h: by_end - by })
 }
 
 fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
@@ -593,7 +518,7 @@ mod tests {
             }
         }
         let ring_px = 8;
-        let bbox = mask_bbox_expanded(&mask, ring_px, 512, 512).unwrap();
+        let bbox = mask_bbox(&mask, 128, ring_px).unwrap();
         let out = color_match_inpainted(&inp, &src, &mask, ring_px);
         for y in 0..512 {
             for x in 0..512 {
@@ -703,40 +628,6 @@ mod tests {
         // Outside the mask must remain pristine.
         let outside = out.get_pixel(40, 40);
         assert_eq!(outside[0], 200);
-    }
-
-    #[test]
-    fn bbox_finds_tight_box_with_margin() {
-        let mut mask = empty_mask(64, 64);
-        for y in 20..30 {
-            for x in 25..35 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        let bbox = mask_bbox_expanded(&mask, 4, 64, 64);
-        assert_eq!(bbox, Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
-    }
-
-    #[test]
-    fn bbox_clamps_to_image_bounds() {
-        let mut mask = empty_mask(32, 32);
-        mask.put_pixel(0, 0, Luma([255]));
-        let bbox = mask_bbox_expanded(&mask, 8, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 9, h: 9 }));
-    }
-
-    #[test]
-    fn bbox_empty_mask_returns_none() {
-        let mask = empty_mask(32, 32);
-        assert!(mask_bbox_expanded(&mask, 4, 32, 32).is_none());
-    }
-
-    /// Full-image mask: bbox spans the whole image plus margin (clamped).
-    #[test]
-    fn bbox_full_image_mask() {
-        let mask = GrayImage::from_pixel(32, 32, Luma([255]));
-        let bbox = mask_bbox_expanded(&mask, 4, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 32, h: 32 }));
     }
 
     /// Edge blend 0 is no blend at all: the fill is only colour-matched.
