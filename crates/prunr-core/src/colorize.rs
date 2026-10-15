@@ -55,9 +55,7 @@ pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) 
     let input = ndarray::Array4::from_shape_vec((1, 3, side, side), colorize_input(src))
         .map_err(|e| CoreError::Inference(format!("colorize: input shape: {e}")))?;
     let tensor = Tensor::from_array(input).map_err(|e| CoreError::Inference(format!("colorize: input tensor: {e}")))?;
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     let plane = engine.with_session(|session| {
         let outputs = session.run(inputs!["input" => &tensor])
             .map_err(|e| CoreError::Inference(format!("colorize: inference failed: {e}")))?;
@@ -68,9 +66,7 @@ pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) 
     if plane.len() != 2 * side * side {
         return Err(CoreError::Inference(format!("colorize: output has {} values, expected {}", plane.len(), 2 * side * side)));
     }
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     Ok(plane)
 }
 

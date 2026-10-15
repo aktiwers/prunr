@@ -231,6 +231,11 @@ impl Progress {
         self.cancel.as_ref().is_some_and(|f| f.load(Ordering::Acquire))
     }
 
+    /// `Err(Cancelled)` once cancelled, for `?`.
+    pub fn check_cancelled(&self) -> Result<(), crate::CoreError> {
+        if self.is_cancelled() { Err(crate::CoreError::Cancelled) } else { Ok(()) }
+    }
+
     pub fn report(&self, update: ProgressUpdate) {
         if let Some(sink) = &self.sink {
             sink.report(update);
@@ -449,8 +454,10 @@ mod tests {
             ProgressUpdate::Inner { done: 1, total: 2, unit: Unit::Tile },
         ]);
         assert!(!p.is_cancelled());
+        assert!(p.check_cancelled().is_ok());
         flag.store(true, Ordering::Release);
         assert!(p.is_cancelled());
+        assert!(matches!(p.check_cancelled(), Err(crate::CoreError::Cancelled)));
         assert!(!Progress::none().is_cancelled());
         Progress::none().step(Step::Erasing);
     }

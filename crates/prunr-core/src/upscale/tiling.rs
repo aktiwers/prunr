@@ -158,9 +158,7 @@ where
     // Sequential: ort sessions are Mutex-guarded internally and nested
     // rayon inside the subprocess worker path deadlocks.
     for (tile_idx, tile) in tiles.iter().enumerate() {
-        if progress.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
+        progress.check_cancelled()?;
         progress.tile(tile_idx as u32, false);
 
         let rgb_tile = extract_rgb_tile(input, tile);

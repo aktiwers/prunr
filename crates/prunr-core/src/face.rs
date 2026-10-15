@@ -251,9 +251,7 @@ impl FaceRestorer {
     pub fn find_and_restore(&mut self, image: &RgbaImage, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
         progress.step(Step::FindingFaces);
         let faces = self.finder.find(image)?;
-        if progress.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
+        progress.check_cancelled()?;
         if faces.is_empty() {
             return Ok(Vec::new());
         }
@@ -291,9 +289,7 @@ fn restore_each(
     let redrawn = blend.redrawn(places);
     let mut out = Vec::with_capacity(places.len());
     for (i, place) in places.iter().enumerate() {
-        if progress.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
+        progress.check_cancelled()?;
         progress.outer(i as u32, total, Unit::Face);
         let original = warp_to_crop(image, &place.to_crop);
         let restored = redraw(&original)?;
