@@ -112,6 +112,17 @@ pub fn distance_to_nearest(target: &[bool], w: usize, h: usize) -> Vec<f32> {
     d
 }
 
+/// A buffer's base pointer shared across parallel iterations that each
+/// write their own bytes of it. A closure must capture the whole struct
+/// (`let _ = &ptr;`): Rust 2021 disjoint capture would otherwise take the
+/// bare `*mut u8` field, which is not `Sync`.
+#[derive(Clone, Copy)]
+pub(crate) struct SendMutPtr(pub(crate) *mut u8);
+// SAFETY: every user partitions its writes so no two parallel
+// iterations touch the same byte.
+unsafe impl Send for SendMutPtr {}
+unsafe impl Sync for SendMutPtr {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

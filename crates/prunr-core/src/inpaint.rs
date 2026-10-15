@@ -195,16 +195,11 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
     // Output starts as image clone. Pixels outside the bbox are
     // mask <= 127 by definition (bbox covers all mask >= 128) — they
     // stay as source. Vertical blur + sharpen overrides bbox-masked
-    // pixels. Rows are write-disjoint → parallelise via SendMutPtr,
-    // same pattern as `inpaint_blend::composite_channel`.
+    // pixels. Rows are write-disjoint → parallelise via SendMutPtr.
     let mut out = image.clone();
     let out_raw = out.as_mut();
     let msk_raw = mask.as_raw();
-    #[derive(Clone, Copy)]
-    struct SendMutPtr(*mut u8);
-    unsafe impl Send for SendMutPtr {}
-    unsafe impl Sync for SendMutPtr {}
-    let dp = SendMutPtr(out_raw.as_mut_ptr());
+    let dp = crate::math::SendMutPtr(out_raw.as_mut_ptr());
     (0..bbox_h).into_par_iter().for_each(|by| {
         let global_y = bbox_y + by;
         for bx in 0..bbox_w {
@@ -234,9 +229,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                 unsafe { *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8; }
             }
         }
-        // Force whole-struct capture of `dp` (Rust 2021 disjoint
-        // capture would otherwise grab `dp.0: *mut u8` alone, which
-        // isn't Sync — same pattern as `guided_filter::box_filter`).
+        // Capture `dp` whole: its raw-pointer field alone is not Sync.
         let _ = &dp;
     });
     out
