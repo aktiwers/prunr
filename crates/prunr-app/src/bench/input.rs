@@ -1,7 +1,8 @@
 //! The fixed input every model runs on: a built-in synthetic photo, or
 //! the user's `--image`, cut to the size each kind of model sees.
 
-use image::{GrayImage, Luma, Rgba, RgbaImage};
+use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage};
+use prunr_core::formats;
 
 /// Side of the built-in photo.
 pub const PHOTO_SIDE: u32 = 512;
@@ -26,12 +27,20 @@ pub struct Inputs {
 
 impl Inputs {
     pub fn built_in() -> Self {
-        Self::from_photo(synthetic_photo(), format!("built-in {PHOTO_SIDE}×{PHOTO_SIDE} picture"))
+        Self::from_photo(DynamicImage::ImageRgba8(synthetic_photo()), format!("built-in {PHOTO_SIDE}×{PHOTO_SIDE} picture"))
     }
 
-    /// `photo` shrunk to `MAX_SIDE`, with `label` naming where it came from.
-    pub fn from_photo(photo: RgbaImage, label: String) -> Self {
-        let photo = fit_within(photo, MAX_SIDE);
+    /// `photo` shrunk to `MAX_SIDE` (resampled in its own layout, so a
+    /// large JPEG never expands to RGBA at full size), with `label` naming
+    /// where it came from.
+    pub fn from_photo(photo: DynamicImage, label: String) -> Self {
+        let (w, h) = (photo.width(), photo.height());
+        let photo = if w.max(h) > MAX_SIDE {
+            let (w, h) = formats::fit_long_side(w, h, MAX_SIDE);
+            formats::resize_to_rgba(&photo, w, h, formats::ResizeFilter::Lanczos3)
+        } else {
+            photo.into_rgba8()
+        };
         let (w, h) = photo.dimensions();
         let tile = center_crop(&photo, UPSCALE_SIDE);
         let label = format!("{label}, run at {w}×{h}; upscalers get its middle {}×{}", tile.width(), tile.height());
@@ -77,17 +86,6 @@ pub fn center_square_mask(w: u32, h: u32) -> GrayImage {
     })
 }
 
-/// `img` shrunk so its longer side is at most `max_side`, aspect kept.
-pub fn fit_within(img: RgbaImage, max_side: u32) -> RgbaImage {
-    let (w, h) = img.dimensions();
-    if w.max(h) <= max_side {
-        return img;
-    }
-    let scale = max_side as f32 / w.max(h) as f32;
-    let size = |v: u32| ((v as f32 * scale).round() as u32).max(1);
-    prunr_core::formats::resize_rgba(&img, size(w), size(h), prunr_core::formats::ResizeFilter::Lanczos3)
-}
-
 /// The middle `side` × `side` of `img`, or as much of it as there is.
 pub fn center_crop(img: &RgbaImage, side: u32) -> RgbaImage {
     let (w, h) = img.dimensions();
@@ -129,12 +127,12 @@ mod tests {
     #[test]
     fn a_large_image_is_shrunk_and_the_upscalers_get_its_middle() {
         let big = RgbaImage::from_pixel(3000, 1500, Rgba([1, 2, 3, 255]));
-        let inputs = Inputs::from_photo(big, "photo.jpg".into());
+        let inputs = Inputs::from_photo(DynamicImage::ImageRgba8(big), "photo.jpg".into());
         assert_eq!(inputs.photo.dimensions(), (MAX_SIDE, 512));
         assert_eq!(inputs.mask.dimensions(), inputs.photo.dimensions());
         assert_eq!(inputs.tile.dimensions(), (UPSCALE_SIDE, UPSCALE_SIDE));
         assert!(inputs.label.starts_with("photo.jpg, run at 1024×512"), "{}", inputs.label);
-        let small = Inputs::from_photo(RgbaImage::new(100, 60), "small.png".into());
+        let small = Inputs::from_photo(DynamicImage::ImageRgb8(image::RgbImage::new(100, 60)), "small.png".into());
         assert_eq!((small.photo.dimensions(), small.tile.dimensions()), ((100, 60), (100, 60)));
     }
 }

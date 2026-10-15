@@ -252,25 +252,22 @@ pub struct Row {
 
 /// What the runner is doing, for the terminal and the report written as
 /// the bench goes.
-pub enum Event<'a> {
+pub enum Event {
     Stage { index: usize, total: usize, model: &'static str, stage: &'static str },
-    Done(&'a Row),
+    Done(Box<Row>),
 }
 
 /// Run `models` one after the other on `inputs`, each side once untimed
 /// and `runs` times timed.
-pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event<'_>)) -> Vec<Row> {
+pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event)) {
     let total = models.len();
-    let mut rows = Vec::with_capacity(total);
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
         let row = bench_model(id, inputs, runs, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
-        on(Event::Done(&row));
-        rows.push(row);
+        on(Event::Done(Box::new(row)));
     }
-    rows
 }
 
 fn display_name(id: ModelId) -> &'static str {
@@ -297,8 +294,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
         row.verdict = Verdict::CpuByDesign;
         return row;
     };
-    // Read once here, so neither side's session time includes the disk.
-    let _ = prunr_models::resolve_bytes(id);
+    warm_weights(id);
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
     // A heavy model's CPU run takes minutes; one is enough for a reference.
@@ -330,6 +326,24 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
     row.cpu = cpu;
     row.gpu = gpu;
     row
+}
+
+/// Bring `id`'s own weights in before either side is timed, so neither
+/// session time includes the disk: a download is read through once into
+/// the page cache, keeping nothing (holding it would pin hundreds of MB
+/// per model for the rest of the run); bundled weights decompress into the
+/// copy every session of the process shares.
+fn warm_weights(id: ModelId) {
+    match prunr_models::download_path(id) {
+        Some(path) => {
+            if let Err(e) = std::fs::File::open(&path).and_then(|mut f| std::io::copy(&mut f, &mut std::io::sink())) {
+                tracing::debug!(model = ?id, %e, "could not read the weights ahead");
+            }
+        }
+        None => {
+            let _ = prunr_models::resolve_bytes(id);
+        }
+    }
 }
 
 /// Build one side's session, run it once, then `runs` timed times. The
