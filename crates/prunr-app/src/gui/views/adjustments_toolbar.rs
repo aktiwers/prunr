@@ -36,7 +36,7 @@ use super::{differs, model_info, variant_index};
 /// good after a line_mode toggle — only the edge tensor is stale then).
 /// Keeping unrelated caches alive means the user's next mask/edge tweak
 /// can still live-preview without a full Process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ToolbarChange {
     /// Any chip signalled a committed value (slider released, toggle
     /// flipped, color picked). Flushes pending debounced previews.
@@ -120,31 +120,6 @@ pub(crate) struct ToolbarState<'a> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModelStoreRequest {
     pub filter: Option<prunr_models::ModelCategory>,
-}
-
-impl Default for ToolbarChange {
-    fn default() -> Self {
-        Self {
-            commit: false,
-            model_changed: false,
-            preset_applied: false,
-            line_mode_from: None,
-            input_transform_changed: false,
-            cache_impact: CacheImpact::Nothing,
-            auto_dispatch: DispatchKind::None,
-            render_repaint: false,
-            brush_settings_committed: false,
-            open_model_store: None,
-            pick_bg_image: false,
-            clear_bg_image: false,
-            selection_action: None,
-            toggle_paint: false,
-            toggle_magic: false,
-            toggle_compare: false,
-            faces: Default::default(),
-            pick_depth_focus: false,
-        }
-    }
 }
 
 /// The Faces chip; a missing face model opens the Model Store on Faces.

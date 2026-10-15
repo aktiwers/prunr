@@ -247,8 +247,9 @@ impl StaticKnob {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CacheImpact {
+    #[default]
     Nothing,
     EdgeCache,
     SegCache,
@@ -270,8 +271,9 @@ impl CacheImpact {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DispatchKind {
+    #[default]
     None,
     Render,
     LivePreviewMask,
