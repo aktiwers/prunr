@@ -245,20 +245,11 @@ impl Settings {
         if is_v1 && !settings.presets.contains_key(LEGACY_PRESET) {
             let legacy_item = migrate_v1_item_settings(&value);
             if legacy_item != ItemSettings::default() {
-                let wrap_key = Settings::default()
-                    .model
-                    .to_model_id()
-                    .expect("Settings::default().model always has a model_id");
-                let mut models = HashMap::new();
-                models.insert(super::presets::model_id_key(wrap_key), super::presets::ModelPreset {
+                let file = super::presets::PresetFile::single(DEFAULT_PRESET_MODEL, super::presets::ModelPreset {
                     item_settings: legacy_item,
                     brush: Default::default(),
                     sd: None,
                 });
-                let file = super::presets::PresetFile {
-                    format_version: super::presets::PRESET_FORMAT_VERSION,
-                    models,
-                };
                 let _ = super::presets_fs::save(LEGACY_PRESET, &file);
                 settings.presets.insert(LEGACY_PRESET.to_string(), file);
             }
@@ -386,8 +377,8 @@ impl Settings {
 
     /// The model a preset entry is read for; No model reads the default
     /// model's entry (its filters and lines are the same knobs).
-    fn preset_model(&self) -> prunr_models::ModelId {
-        self.model.to_model_id().unwrap_or(prunr_models::ModelId::BiRefNetLite)
+    pub(crate) fn preset_model(&self) -> prunr_models::ModelId {
+        self.model.to_model_id().unwrap_or(DEFAULT_PRESET_MODEL)
     }
 
     /// Resolve the active preset to the live `ResolvedView` for the
@@ -739,7 +730,7 @@ impl SettingsModel {
     }
 
     /// Registry id, or `None` for the no-model variant.
-    pub fn to_model_id(self) -> Option<prunr_models::ModelId> {
+    pub const fn to_model_id(self) -> Option<prunr_models::ModelId> {
         match self {
             Self::Silueta => Some(prunr_models::ModelId::Silueta),
             Self::U2net => Some(prunr_models::ModelId::U2net),
@@ -760,6 +751,16 @@ impl SettingsModel {
     }
 }
 
+/// The model a fresh install starts on.
+pub const DEFAULT_MODEL: SettingsModel = SettingsModel::BiRefNetLite;
+
+/// Where a preset is filed when no model is chosen (and where v1 files,
+/// which predate per-model presets, land).
+pub(crate) const DEFAULT_PRESET_MODEL: prunr_models::ModelId = match DEFAULT_MODEL.to_model_id() {
+    Some(id) => id,
+    None => panic!("DEFAULT_MODEL must be a registered model"),
+};
+
 /// The model every colorize run uses, in the app and the CLI.
 pub const COLORIZER: ModelKind = ModelKind::DdcolorTiny;
 
@@ -768,7 +769,7 @@ pub use prunr_core::LineMode;
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            model: SettingsModel::BiRefNetLite,
+            model: DEFAULT_MODEL,
             auto_process_on_import: false,
             parallel_jobs: (num_cpus::get() / 2).max(1),
             dark_checker: false,
@@ -919,16 +920,11 @@ mod tests {
     /// by the active model. Mirrors the runtime save flow's wrap step.
     fn wrap_for_model(s: &Settings, item: ItemSettings) -> super::super::presets::PresetFile {
         let mid = s.model.to_model_id().expect("test settings have a model_id");
-        let mut models = HashMap::new();
-        models.insert(super::super::presets::model_id_key(mid), super::super::presets::ModelPreset {
+        super::super::presets::PresetFile::single(mid, super::super::presets::ModelPreset {
             item_settings: item,
             brush: Default::default(),
             sd: None,
-        });
-        super::super::presets::PresetFile {
-            format_version: super::super::presets::PRESET_FORMAT_VERSION,
-            models,
-        }
+        })
     }
 
     #[test]

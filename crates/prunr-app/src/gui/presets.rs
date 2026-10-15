@@ -64,6 +64,15 @@ impl Default for PresetFile {
     }
 }
 
+impl PresetFile {
+    pub(crate) fn single(model: ModelId, preset: ModelPreset) -> Self {
+        Self {
+            format_version: PRESET_FORMAT_VERSION,
+            models: HashMap::from([(model_id_key(model), preset)]),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ModelPreset {

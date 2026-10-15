@@ -34,7 +34,7 @@ use super::item_settings::ItemSettings;
 use super::presets::{
     model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
 };
-use super::settings::{PRUNR_PRESET, Settings};
+use super::settings::{DEFAULT_PRESET_MODEL, PRUNR_PRESET};
 use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
@@ -94,8 +94,7 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Wrap a v1 preset file (raw `ItemSettings` shape, no `format_version`
 /// key) into a v2 `PresetFile`. v1 files predate per-model bundling, so
 /// they carry no model identity — every v1 file wraps under the
-/// workspace default (`Settings::default().model`, currently
-/// `BiRefNetLite`). The resolver pulls Prunr-floor brush/sd values at
+/// default model (`DEFAULT_PRESET_MODEL`). The resolver pulls Prunr-floor brush/sd values at
 /// apply-time, so missing brush/sd is not data loss.
 ///
 /// Returns `None` when the JSON does not parse as `ItemSettings` — caller
@@ -109,20 +108,11 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
         return None;
     }
     let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
-    // Settings::default().model is BiRefNetLite, whose to_model_id() is
-    // Some(ModelId::BiRefNetLite) — invariant is local (settings.rs Default
-    // impl + SettingsModel::to_model_id match arms).
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let mut models = HashMap::new();
-    models.insert(model_id_key(wrap_key), ModelPreset {
+    Some(PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
         item_settings,
         brush: Default::default(),
         sd: None,
-    });
-    Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
+    }))
 }
 
 /// Load every preset file in the directory into a map. Malformed files
@@ -300,11 +290,6 @@ pub fn seed_builtins_once() {
     let Some(dir) = presets_dir() else { return };
     let marker = dir.join(SEED_MARKER);
     if marker.exists() { return; }
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let wrap_key = model_id_key(wrap_key);
     for (name, item_settings) in builtin_presets() {
         // Skip if a preset file with this name already exists. Protects
         // user customisations against two edge cases:
@@ -315,13 +300,11 @@ pub fn seed_builtins_once() {
         //      `_v2` — keeps their version, skips the rename.
         let Some(path) = preset_path(name) else { continue };
         if path.exists() { continue; }
-        let mut models = HashMap::new();
-        models.insert(wrap_key.clone(), ModelPreset {
+        let file = PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
             item_settings,
             brush: Default::default(),
             sd: None,
         });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
         let _ = save(name, &file);
     }
     let _ = std::fs::write(&marker, b"");
