@@ -61,6 +61,7 @@ impl PrunrApp {
             item.face_preview = None;
             // Likewise the photo with the Depth chip's look; the map stays.
             item.depth_photo = None;
+            item.quick_photo = None;
             // Up to two images; warmed again when the image is shown.
             item.set_on_screen(false);
             // A full-size picture made from the photo; rebuilt when shown.

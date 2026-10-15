@@ -741,6 +741,9 @@ pub(crate) struct BatchItem {
     /// was made from, so a line or effect tweak does not blur again. One
     /// image of RAM while the look is on; dropped off screen.
     pub(crate) depth_photo: Option<(Arc<image::DynamicImage>, DepthPhotoKey)>,
+    /// The photo shrunk for a drag's quick frames, so each frame does not
+    /// shrink it again. About 11 MB; dropped off screen.
+    pub(crate) quick_photo: Option<super::live_preview::QuickPhoto>,
 }
 
 /// The depth map's run for one photo: `epoch` counts the photos the item
@@ -2224,6 +2227,7 @@ impl BatchItem {
             depth: None,
             depth_run: DepthRun::default(),
             depth_photo: None,
+            quick_photo: None,
         }
     }
 
