@@ -82,15 +82,14 @@ impl Payload for MaskArtifact {
         raw.extend_from_slice(&self.width.to_le_bytes());
         raw.extend_from_slice(&self.height.to_le_bytes());
         raw.extend(self.cells().iter().map(|&c| c as u8));
-        zstd::encode_all(raw.as_slice(), 1)
+        zstd::encode_all(raw.as_slice(), super::history_disk::ZSTD_LEVEL)
     }
 
     fn decode(bytes: &[u8]) -> std::io::Result<Self> {
         let raw = zstd::decode_all(bytes)?;
         let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "selection plane does not match its size");
-        let (head, cells) = raw.split_at_checked(8).ok_or_else(bad)?;
-        let w = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
-        let h = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+        let (head, cells) = raw.split_first_chunk::<8>().ok_or_else(bad)?;
+        let (w, h) = super::history_disk::read_dims(head);
         if cells.len() != (w as usize) * (h as usize) {
             return Err(bad());
         }
@@ -594,6 +593,40 @@ mod tests {
         cells[20] = -40;
         let plane = MaskArtifact::from_cells(8, 8, cells);
         assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane);
+    }
+
+    /// Payloads at rest keep their bytes: the former inline mask encode
+    /// (literal zstd level 1) and header decode, kept here, must agree
+    /// with the shared framing on every input.
+    #[test]
+    fn payload_framing_matches_its_former_inline_code() {
+        fn old_mask_encode(m: &MaskArtifact) -> Vec<u8> {
+            let mut raw = Vec::with_capacity(8 + m.cells().len());
+            raw.extend_from_slice(&m.width.to_le_bytes());
+            raw.extend_from_slice(&m.height.to_le_bytes());
+            raw.extend(m.cells().iter().map(|&c| c as u8));
+            zstd::encode_all(raw.as_slice(), 1).unwrap()
+        }
+        fn old_dims(h: &[u8]) -> (u32, u32) {
+            (u32::from_le_bytes([h[0], h[1], h[2], h[3]]), u32::from_le_bytes([h[4], h[5], h[6], h[7]]))
+        }
+        let mut seed = 0x9E37_79B9u32;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
+
+        for _ in 0..10_000 {
+            let header: [u8; 8] = std::array::from_fn(|_| next() as u8);
+            assert_eq!(super::super::history_disk::read_dims(&header), old_dims(&header));
+        }
+        for (w, h) in [(1, 1), (3, 7), (64, 48), (257, 129)] {
+            let plane = MaskArtifact::from_cells(w, h, (0..w * h).map(|_| next() as i8).collect());
+            let bytes = plane.encode().unwrap();
+            assert_eq!(bytes, old_mask_encode(&plane), "{w}x{h} mask bytes");
+            assert_eq!(MaskArtifact::decode(&bytes).unwrap(), plane);
+            assert_eq!(MaskArtifact::decode(&old_mask_encode(&plane)).unwrap(), plane);
+
+            let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(next().to_le_bytes()));
+            assert_eq!(image::RgbaImage::decode(&img.encode().unwrap()).unwrap(), img, "{w}x{h} image");
+        }
     }
 
     #[test]
