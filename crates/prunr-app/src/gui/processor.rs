@@ -852,6 +852,9 @@ pub(crate) struct Processor {
     /// The image on screen whose run shows a first look at its subject,
     /// shared with the worker, which reads it as each run starts.
     pub(crate) first_look: super::worker::Shown,
+    /// The image on screen, shared with the worker: only its Sketch runs
+    /// make the line scales they do not draw.
+    pub(crate) on_screen: super::worker::Shown,
     /// How long each cut-out model takes per image here, which decides
     /// whether a first look shows.
     pub(crate) cut_times: super::first_look::CutTimes,
@@ -912,6 +915,7 @@ impl Processor {
             depth,
             seg_warm_due: None,
             first_look: Default::default(),
+            on_screen: Default::default(),
             cut_times: Default::default(),
         }
     }
