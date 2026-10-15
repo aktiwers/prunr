@@ -1584,93 +1584,6 @@ fn shared_bundled(slot: &Held, unpack: impl FnOnce() -> Vec<u8>) -> Arc<Vec<u8>>
     bytes
 }
 
-#[cfg(not(feature = "dev-models"))]
-static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static TEED_ZST: &[u8] = include_bytes!("../../../models/teed.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static YUNET_ZST: &[u8] = include_bytes!("../../../models/face_detection_yunet_2026may.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.encoder.onnx.zst");
-#[cfg(not(feature = "dev-models"))]
-static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.decoder.onnx.zst");
-
-#[cfg(not(feature = "dev-models"))]
-static SILUETA_CACHE: Held = Held::new(std::sync::Weak::new());
-#[cfg(not(feature = "dev-models"))]
-static BIREFNET_LITE_CACHE: Held = Held::new(std::sync::Weak::new());
-#[cfg(not(feature = "dev-models"))]
-static TEED_CACHE: Held = Held::new(std::sync::Weak::new());
-#[cfg(not(feature = "dev-models"))]
-static YUNET_CACHE: Held = Held::new(std::sync::Weak::new());
-#[cfg(not(feature = "dev-models"))]
-static SAM2_ENCODER_CACHE: Held = Held::new(std::sync::Weak::new());
-#[cfg(not(feature = "dev-models"))]
-static SAM2_DECODER_CACHE: Held = Held::new(std::sync::Weak::new());
-
-#[cfg(not(feature = "dev-models"))]
-pub fn silueta_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&SILUETA_CACHE, || {
-        zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
-            .expect("failed to decompress embedded silueta model")
-    })
-}
-
-#[cfg(not(feature = "dev-models"))]
-pub fn birefnet_lite_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&BIREFNET_LITE_CACHE, || {
-        zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
-            .expect("failed to decompress embedded birefnet-lite model")
-    })
-}
-
-#[cfg(not(feature = "dev-models"))]
-pub fn teed_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&TEED_CACHE, || {
-        zstd::bulk::decompress(TEED_ZST, 1024 * 1024)
-            .expect("failed to decompress embedded TEED model")
-    })
-}
-
-#[cfg(not(feature = "dev-models"))]
-pub fn yunet_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&YUNET_CACHE, || {
-        zstd::bulk::decompress(YUNET_ZST, 1024 * 1024)
-            .expect("failed to decompress embedded YuNet model")
-    })
-}
-
-#[cfg(not(feature = "dev-models"))]
-pub fn sam2_encoder_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&SAM2_ENCODER_CACHE, || {
-        zstd::bulk::decompress(SAM2_ENCODER_ZST, 200 * 1024 * 1024)
-            .expect("failed to decompress embedded SAM 2 encoder")
-    })
-}
-
-#[cfg(not(feature = "dev-models"))]
-pub fn sam2_decoder_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&SAM2_DECODER_CACHE, || {
-        zstd::bulk::decompress(SAM2_DECODER_ZST, 32 * 1024 * 1024)
-            .expect("failed to decompress embedded SAM 2 decoder")
-    })
-}
-
-#[cfg(feature = "dev-models")]
-static DEV_SILUETA: Held = Held::new(std::sync::Weak::new());
-#[cfg(feature = "dev-models")]
-static DEV_BIREFNET: Held = Held::new(std::sync::Weak::new());
-#[cfg(feature = "dev-models")]
-static DEV_TEED: Held = Held::new(std::sync::Weak::new());
-#[cfg(feature = "dev-models")]
-static DEV_YUNET: Held = Held::new(std::sync::Weak::new());
-#[cfg(feature = "dev-models")]
-static DEV_SAM2_ENCODER: Held = Held::new(std::sync::Weak::new());
-#[cfg(feature = "dev-models")]
-static DEV_SAM2_DECODER: Held = Held::new(std::sync::Weak::new());
-
 #[cfg(any(feature = "dev-models", debug_assertions))]
 fn workspace_model_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models").join(name)
@@ -1700,35 +1613,34 @@ fn dev_model_bytes_in(raw: &std::path::Path) -> Vec<u8> {
     )
 }
 
-#[cfg(feature = "dev-models")]
-pub fn silueta_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_SILUETA, || dev_model_bytes("silueta.onnx"))
+/// A bundled model's weights accessor, shared through its own `Held`
+/// slot: unpacked from the embedded `.zst` in release builds, read from
+/// `models/` under `dev-models`. A macro because the arguments
+/// themselves are cfg-split (`include_bytes!` takes a literal).
+macro_rules! bundled_model {
+    ($name:ident, $file:literal, $cap:expr, $what:literal) => {
+        pub fn $name() -> Arc<Vec<u8>> {
+            static SLOT: Held = Held::new(std::sync::Weak::new());
+            #[cfg(not(feature = "dev-models"))]
+            static ZST: &[u8] = include_bytes!(concat!("../../../models/", $file, ".zst"));
+            #[cfg(not(feature = "dev-models"))]
+            let unpack = || {
+                zstd::bulk::decompress(ZST, $cap)
+                    .expect(concat!("failed to decompress embedded ", $what))
+            };
+            #[cfg(feature = "dev-models")]
+            let unpack = || dev_model_bytes($file);
+            shared_bundled(&SLOT, unpack)
+        }
+    };
 }
 
-#[cfg(feature = "dev-models")]
-pub fn birefnet_lite_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_BIREFNET, || dev_model_bytes("birefnet_lite.onnx"))
-}
-
-#[cfg(feature = "dev-models")]
-pub fn teed_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_TEED, || dev_model_bytes("teed.onnx"))
-}
-
-#[cfg(feature = "dev-models")]
-pub fn yunet_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_YUNET, || dev_model_bytes("face_detection_yunet_2026may.onnx"))
-}
-
-#[cfg(feature = "dev-models")]
-pub fn sam2_encoder_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_SAM2_ENCODER, || dev_model_bytes("sam2.1_hiera_small.encoder.onnx"))
-}
-
-#[cfg(feature = "dev-models")]
-pub fn sam2_decoder_bytes() -> Arc<Vec<u8>> {
-    shared_bundled(&DEV_SAM2_DECODER, || dev_model_bytes("sam2.1_hiera_small.decoder.onnx"))
-}
+bundled_model!(silueta_bytes, "silueta.onnx", 50 * 1024 * 1024, "silueta model");
+bundled_model!(birefnet_lite_bytes, "birefnet_lite.onnx", 250 * 1024 * 1024, "birefnet-lite model");
+bundled_model!(teed_bytes, "teed.onnx", 1024 * 1024, "TEED model");
+bundled_model!(yunet_bytes, "face_detection_yunet_2026may.onnx", 1024 * 1024, "YuNet model");
+bundled_model!(sam2_encoder_bytes, "sam2.1_hiera_small.encoder.onnx", 200 * 1024 * 1024, "SAM 2 encoder");
+bundled_model!(sam2_decoder_bytes, "sam2.1_hiera_small.decoder.onnx", 32 * 1024 * 1024, "SAM 2 decoder");
 
 /// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
 /// `bundled_bytes(id)` pattern but keyed by `(ModelId, part_key)`.
