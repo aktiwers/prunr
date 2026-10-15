@@ -167,7 +167,8 @@ struct Look {
     file_name: Option<String>,
 }
 
-const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "svg"];
+/// The file types Open takes, from the dialog or a dropped folder.
+pub(crate) const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "svg"];
 const BACKGROUND_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp"];
 
 fn look(request: &DialogRequest) -> Look {
