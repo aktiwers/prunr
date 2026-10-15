@@ -1523,7 +1523,7 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     let inputs = match &args.image {
         None => bench::Inputs::built_in(),
         Some(path) => match prunr_core::load_image_from_path(path) {
-            Ok(img) => bench::Inputs::from_photo(img.into_rgba8(), path.display().to_string()),
+            Ok(img) => bench::Inputs::from_photo(img, path.display().to_string()),
             Err(e) => {
                 eprintln!("error: cannot read {}: {e}", path.display());
                 return 1;
@@ -1543,7 +1543,7 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
         }
         bench::Event::Done(row) => {
             eprintln!("      {}: {}", row.model, row.verdict.label());
-            report.rows.push(row.clone());
+            report.rows.push(*row);
             report.running = None;
             files.write(&report);
         }
