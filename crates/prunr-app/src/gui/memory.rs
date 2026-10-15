@@ -87,10 +87,8 @@ impl AdmissionController {
     }
 
     /// Add pending items. Sorts them for best-fit (largest first).
-    pub fn enqueue(&mut self, mut costs: Vec<ImageMemCost>) {
-        costs.sort_by(|a, b| b.total.cmp(&a.total));
+    pub fn enqueue(&mut self, costs: Vec<ImageMemCost>) {
         self.pending.extend(costs);
-        // Re-sort after extend in case there were existing pending items
         self.pending.sort_by(|a, b| b.total.cmp(&a.total));
     }
 
