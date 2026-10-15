@@ -280,7 +280,7 @@ impl Settings {
     /// may run on the host CPU: `runs_on_host_cpu`). Settings offers the
     /// Processor choice only then.
     pub fn is_gpu(&self) -> bool {
-        !self.active_backend.is_empty() && !self.active_backend.eq_ignore_ascii_case("CPU")
+        is_accelerator(&self.active_backend)
     }
 
     /// Record the provider a worker reports. Under "CPU only" the report
@@ -314,8 +314,7 @@ impl Settings {
     /// or the CPU when that accelerator does not run this model.
     pub fn model_backend(&self, model: prunr_core::ModelKind) -> &str {
         let backend = self.effective_backend();
-        let accelerated = !backend.is_empty() && !backend.eq_ignore_ascii_case("CPU");
-        if accelerated && prunr_core::engine::model_runs_on(model.model_id(), backend) { backend } else { "CPU" }
+        if is_accelerator(backend) && prunr_core::engine::model_runs_on(model.model_id(), backend) { backend } else { "CPU" }
     }
 
     /// Smart default for parallel jobs based on backend and model. In
@@ -323,19 +322,17 @@ impl Settings {
     /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
         let base = if self.runs_on_host_cpu() { (num_cpus::get() / 2).max(1) } else { 2 };
-        match self.model.to_model_kind() {
-            Some(model) => base.min(super::memory::safe_max_jobs(model)),
-            None => base,
-        }
+        self.cap_jobs_for_model(base)
     }
 
     /// Max recommended parallel jobs based on backend and model.
     pub fn max_jobs(&self) -> usize {
         let base = if self.runs_on_host_cpu() { num_cpus::get() } else { 4 };
-        match self.model.to_model_kind() {
-            Some(model) => base.min(super::memory::safe_max_jobs(model)),
-            None => base,
-        }
+        self.cap_jobs_for_model(base)
+    }
+
+    fn cap_jobs_for_model(&self, jobs: usize) -> usize {
+        self.model.to_model_kind().map_or(jobs, |model| jobs.min(super::memory::safe_max_jobs(model)))
     }
 
     /// A preset's image settings for the active model; factory values for
@@ -430,9 +427,8 @@ impl Settings {
     /// repeated call is a no-op (no duplicate entries, no extra disk write
     /// when the entry already exists).
     pub fn accept_license(&mut self, id: prunr_models::ModelId) {
-        let key = super::presets::model_id_key(id);
-        if !self.accepted_licenses.iter().any(|s| s == &key) {
-            self.accepted_licenses.push(key);
+        if !self.has_accepted_license(id) {
+            self.accepted_licenses.push(super::presets::model_id_key(id));
             self.save();
         }
     }
@@ -501,6 +497,7 @@ fn now_unix_secs() -> i64 {
 fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
     use prunr_core::LineMode;
 
+    let to_u8 = |x: &serde_json::Value| x.as_u64().unwrap_or(0).min(255) as u8;
     let mut s = ItemSettings::default();
     if let Some(x) = v.get("mask_gamma").and_then(|x| x.as_f64()) { s.gamma = x as f32; }
     if v.get("mask_threshold_enabled").and_then(|x| x.as_bool()) == Some(true) {
@@ -520,7 +517,6 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
     if v.get("solid_line_color").and_then(|x| x.as_bool()) == Some(true) {
         if let Some(arr) = v.get("line_color").and_then(|x| x.as_array()) {
             if let [r, g, b, ..] = arr.as_slice() {
-                let to_u8 = |x: &serde_json::Value| x.as_u64().unwrap_or(0).min(255) as u8;
                 s.solid_line_color = Some([to_u8(r), to_u8(g), to_u8(b)]);
             }
         }
@@ -528,7 +524,6 @@ fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
     if v.get("apply_bg_color").and_then(|x| x.as_bool()) == Some(true) {
         if let Some(arr) = v.get("bg_color").and_then(|x| x.as_array()) {
             if let [r, g, b, a, ..] = arr.as_slice() {
-                let to_u8 = |x: &serde_json::Value| x.as_u64().unwrap_or(0).min(255) as u8;
                 s.bg = Some([to_u8(r), to_u8(g), to_u8(b), to_u8(a)]);
             }
         }
@@ -738,6 +733,11 @@ impl SettingsModel {
             Self::None => None,
         }
     }
+}
+
+/// A provider other than the CPU (OpenVINO counts).
+fn is_accelerator(backend: &str) -> bool {
+    !backend.is_empty() && !backend.eq_ignore_ascii_case("CPU")
 }
 
 /// The model a fresh install starts on.
