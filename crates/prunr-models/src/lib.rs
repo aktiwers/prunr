@@ -35,9 +35,9 @@ pub enum ModelId {
     SdV15LcmInpaintFp16,
     /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
     /// and decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
-    /// VAE — ~3× faster decode at slight quality cost. Used as the VAE
-    /// backend when the LCM scheduler is active AND the bundle is
-    /// installed.
+    /// VAE — ~3× faster decode at slight quality cost. Used when installed
+    /// and the user's Fast-VAE toggle says so; left on auto, it follows
+    /// the LCM scheduler.
     ///
     /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
@@ -86,9 +86,7 @@ pub enum ModelId {
 impl ModelId {
     /// True for inpaint models that route through the dedicated SD
     /// subprocess. LaMa / Big-LaMa / MI-GAN have small footprints and
-    /// stay in-process. Single source of truth for the predicate;
-    /// previously duplicated in `prunr-core::inpaint` and
-    /// `prunr-app::gui::processor`.
+    /// stay in-process.
     pub fn is_sd_family(&self) -> bool {
         self.sd_spec().is_some()
     }
@@ -178,7 +176,7 @@ pub enum ModelCategory {
     /// Magic Brush — authors a selection mask rather than a final
     /// segmentation. Routes through the SAM dispatch, not the
     /// BG-removal pipeline. Encoder + decoder ship as separate ONNX
-    /// files (`MultiPartOnDemand`).
+    /// files (`MultiPartBundled`).
     Selection,
     /// Face restoration: a detector finds faces, a restorer redraws each
     /// one. Runs after the photo's own model, never in its place.
@@ -258,11 +256,10 @@ pub enum ModelSource {
     },
     /// Multi-part model whose ONNX files are zstd-compressed and embedded
     /// in the binary via `include_bytes!`. Used by SAM 2 (encoder +
-    /// decoder ~163 MiB combined zstd). Each part decompresses lazily
-    /// into a per-part `&'static [u8]` cache so repeated dispatch is
-    /// zero-copy. The license is carried through (unlike single-file
-    /// `Bundled`) so the Settings credits row still displays the
-    /// upstream author + license.
+    /// decoder). Each part unpacks on demand, shared while anyone holds
+    /// it (see `shared_bundled`). The license is carried through (unlike
+    /// single-file `Bundled`) so the Settings credits row still displays
+    /// the upstream author + license.
     MultiPartBundled {
         parts: &'static [BundledPart],
         license: LicenseInfo,
@@ -288,15 +285,15 @@ impl ModelSource {
 
 /// One component of a `MultiPartBundled` model. The bytes are resolved
 /// by `bundled_multipart_bytes(id, key)` — under release builds via
-/// `include_bytes!` + zstd decompress, under `dev-models` via on-disk
-/// read of `filename`. Adding a new bundled multipart model means
+/// `include_bytes!` + zstd decompress, under `dev-models` via an
+/// on-disk read. Adding a new bundled multipart model means
 /// adding a row here AND an arm in `bundled_multipart_bytes`.
 #[derive(Debug, Clone, Copy)]
 pub struct BundledPart {
     /// Logical key for inference dispatch, e.g. `"encoder"` / `"decoder"`.
     pub key: &'static str,
-    /// Source filename. Used by the `dev-models` feature to locate the
-    /// uncompressed ONNX in the workspace `models/` directory.
+    /// Source ONNX filename. Descriptive only: the byte loaders name
+    /// their files themselves (`include_bytes!` takes a literal).
     pub filename: &'static str,
 }
 
@@ -376,7 +373,7 @@ pub struct ModelDescriptor {
 }
 
 /// ONNX export contract for an upscale model. Centralises the bits the
-/// upscale dispatcher needs to know per-model so adding a third model
+/// upscale dispatcher needs to know per-model so adding another model
 /// is a pure data edit, not a code change in `prunr-core/src/upscale`.
 #[derive(Debug, Clone, Copy)]
 pub struct UpscaleModelKnobs {
@@ -704,12 +701,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // LCM-distilled SD 1.5 Inpaint FP16. ~2 GB total. Same UNet
-    // architecture as SdV15InpaintFp16 but trained to converge in ~4
-    // steps instead of 20 — ~5× faster on CPU/iGPU at slight quality
-    // cost. Selected when the user picks the LCM scheduler and the
-    // bundle is installed. Released at
-    // https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.1
+    // Released at https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.1
     // (1.0.1: exported with dynamic batch and spatial axes, so guided
     // steps batch into one UNet call and crops other than 512² load).
     ModelDescriptor {
@@ -846,9 +838,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // TAESD FP16: Tiny distilled VAE for SD 1.5. ~2.4 MB encoder + ~2.5
-    // MB decoder. Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
-    // Used as the VAE backend when the user enables Fast VAE on the SD chip; orthogonal to scheduler.
+    // Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
     ModelDescriptor {
         id: ModelId::TaesdFp16,
         display_name: "TAESD VAE (fast SD)",
@@ -1173,10 +1163,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         upscale: None,
     },
     // SAM 2.1 Hiera Small: Magic Brush. Apache 2.0 from Meta.
-    // Two ONNX files (encoder + decoder). Encoder is the heavy one cached
-    // on BatchItem.magic_brush_embedding; decoder runs per click/stroke.
-    // Bundled as zstd-compressed include_bytes! (~147 MiB combined) to
-    // avoid a first-run download gate.
+    // Two ONNX files: the heavy encoder runs once per image, the decoder
+    // per click/stroke. Bundled to avoid a first-run download gate.
     ModelDescriptor {
         id: ModelId::Sam21HieraSmall,
         display_name: "Magic Brush (SAM 2.1 Hiera Small)",
@@ -1341,8 +1329,8 @@ fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
     h
 }
 
-/// True when the static catalog says this (model, EP) pair should NOT
-/// be attempted. Cheap — pointer-walk a small `&'static [&str]`.
+/// False when the static catalog lists `ep` (case-insensitive) as
+/// known-broken for this model.
 pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
     descriptor(model)
         .map(|d| !d.incompatible_eps.iter().any(|s| s.eq_ignore_ascii_case(ep)))
@@ -1795,8 +1783,7 @@ fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
         | ModelId::FourXNmkdSuperscale => on_demand_stem(id)?,
-        // Nomos8k's published .onnx is already fp16; SAM 2 is
-        // MultiPartOnDemand with no fp16 sibling.
+        // Nomos8k's published .onnx is already fp16.
         ModelId::Nomos8kSchatL
         | ModelId::FourXNomos2RealPlksr
         | ModelId::Teed
@@ -2111,10 +2098,10 @@ mod tests {
 
     #[test]
     fn load_variant_returns_none_for_models_without_variants() {
-        // Models whose `load_variant` match arm explicitly returns None
+        // Models whose `variant_path` match arm explicitly returns None
         // (no variant lookup possible regardless of disk state). Update
-        // this set when a new model's arm in `load_variant` changes from
-        // a return-None arm to a stable-name-returning arm.
+        // this set when a new model's arm in `variant_path` changes from
+        // a return-None arm to a stem-returning arm.
         //
         // Excludes (these resolve to a filename stem and may legitimately
         // pick up a real `_fp16.onnx` / `_int8.onnx` file from the user's
@@ -2282,7 +2269,7 @@ mod tests {
     /// either makes a Segmentation/Inpaint descriptor accidentally
     /// expose upscale knobs, or leaves an Upscale entry without the
     /// data the dispatcher needs. Either direction silently breaks
-    /// the data-only "add a third upscale model" contract.
+    /// the data-only "add another upscale model" contract.
     #[test]
     fn upscale_knobs_set_iff_category_is_upscale() {
         for desc in REGISTRY {
