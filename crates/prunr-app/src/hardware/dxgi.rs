@@ -7,7 +7,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_NOT_FOUND, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
 };
 
-use super::AdapterFacts;
+use super::adapters::AdapterFacts;
 
 /// Every adapter DXGI lists, and the index of the one Windows ranks first
 /// for high performance (Windows 10 1803 and later).
