@@ -610,6 +610,12 @@ impl SentWork {
         self.len() == 0
     }
 
+    /// Only spare scales are owed: losing the worker now loses no image,
+    /// so it is no crash to retry or to run fewer jobs after.
+    fn only_spares(&self) -> bool {
+        !self.spares.is_empty() && self.len() == self.spares.len()
+    }
+
     fn forget(&mut self, item_id: u64) {
         self.items.retain(|(id, _, _)| *id != item_id);
         self.tier2_ids.retain(|id| *id != item_id);
@@ -708,6 +714,12 @@ fn run_batch_with_retry(
 
         match outcome {
             EventLoopOutcome::Cancelled => return None,
+            EventLoopOutcome::Crashed(reason) if sent.only_spares() => {
+                tracing::warn!(%reason, "worker lost while making spare line scales; no image to retry");
+                sent.abandon_spares(true, res_tx);
+                sub.kill();
+                crate::subprocess::protocol::cleanup_seg_pipeline_temps();
+            }
             EventLoopOutcome::Crashed(reason) => {
                 let should_retry = handle_crash_and_retry(&mut state, sent, reason, &mut sub, res_tx, ctx);
                 if !should_retry {
@@ -1444,6 +1456,10 @@ mod tests {
         sent.spares.push((4, 40));
         sent.spares.push((5, 50));
         assert_eq!(sent.len(), 2);
+        assert!(sent.only_spares(), "a worker lost now loses no image");
+        sent.tier2_ids.push(7);
+        assert!(!sent.only_spares(), "an image in flight makes it a crash");
+        sent.tier2_ids.clear();
         assert_eq!(sent.ids().count(), 0, "no cancel goes to a spare pass");
         let told = |failed: bool, sent: &mut SentWork| {
             let (tx, rx) = std::sync::mpsc::channel();
