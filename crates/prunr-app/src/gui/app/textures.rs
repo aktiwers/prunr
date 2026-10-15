@@ -172,8 +172,6 @@ impl PrunrApp {
         }
     }
 
-    /// Build a unique texture name for `spawn_tex_prep`. Single source-of-truth
-    /// for the four call sites so the naming scheme is easy to audit.
     pub(crate) fn tex_name(kind: &str, item_id: u64, switch: Option<u64>) -> String {
         match switch {
             Some(sw) => format!("{kind}_{item_id}_{sw}"),

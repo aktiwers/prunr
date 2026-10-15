@@ -35,7 +35,6 @@ impl PrunrApp {
     pub(super) fn dispatch_brush_rerun(&mut self, idx: usize) {
         use crate::gui::live_preview::PreviewKind;
         let item_id = self.batch.items[idx].id;
-        // Unconditional — see canvas::handle_brush_input.
         self.processor.live_preview.render_now(item_id, PreviewKind::Mask);
     }
 
@@ -89,7 +88,7 @@ impl PrunrApp {
     /// texture, so `ensure_selection_texture` rebuilds it next frame.
     ///
     /// Every call site that authors a selection (Paint Brush, Magic Brush,
-    /// Invert, any future tool) calls THIS method.
+    /// Invert) calls THIS method.
     pub(crate) fn commit_selection_and_dispatch(
         &mut self,
         item_id: u64,

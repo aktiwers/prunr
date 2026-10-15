@@ -902,7 +902,6 @@ impl PrunrApp {
             self.after_result_landed(item_id);
         }
 
-        // Drain files loaded by background thread (max 5 per frame to stay responsive)
         while let Ok((rgba, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
             self.finish_copy(&rgba, hint);
         }
