@@ -298,7 +298,7 @@ pub struct CachedTensorWork {
 pub struct EngineSpec {
     pub model: ModelKind,
     pub jobs: usize,
-    pub force_cpu: bool,
+    pub cpu_only: bool,
 }
 
 impl EngineSpec {
@@ -307,8 +307,8 @@ impl EngineSpec {
     /// job counts can make the same pool: BiRefNet on the CPU builds one
     /// either way).
     pub fn reusable_by(&self, next: &EngineSpec, provider: &str) -> bool {
-        let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, e.force_cpu, provider);
-        self.model == next.model && self.force_cpu == next.force_cpu && engines(self) >= engines(next)
+        let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, e.cpu_only, provider);
+        self.model == next.model && self.cpu_only == next.cpu_only && engines(self) >= engines(next)
     }
 }
 
@@ -820,7 +820,7 @@ fn spawn_and_initial_burst(
     let (mut sub, engines) = match warm {
         Some(pair) => pair,
         None => match SubprocessManager::spawn(
-            state.config.engines.model, effective_jobs, state.config.run.mask, state.config.engines.force_cpu,
+            state.config.engines.model, effective_jobs, state.config.run.mask, state.config.engines.cpu_only,
             WorkerLines::app(state.config.run.line_mode, state.config.run.edge),
         ) {
             Ok((s, active_provider)) => {
@@ -1309,7 +1309,7 @@ fn spawn_warm(
     let started = Instant::now();
     let neutral = RunSettings::neutral();
     let lines = WorkerLines::app(neutral.line_mode, neutral.edge);
-    match SubprocessManager::spawn(spec.model, spec.jobs, neutral.mask, spec.force_cpu, lines) {
+    match SubprocessManager::spawn(spec.model, spec.jobs, neutral.mask, spec.cpu_only, lines) {
         Ok((sub, provider)) => {
             tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?spec.model, "subprocess cold-start");
             let _ = res_tx.send(WorkerResult::BackendReady(provider));
@@ -1471,12 +1471,12 @@ mod tests {
     /// processor, with a pool at least as large.
     #[test]
     fn a_worker_is_reused_for_the_same_engines() {
-        let built = EngineSpec { model: ModelKind::BiRefNetLite, jobs: 4, force_cpu: false };
+        let built = EngineSpec { model: ModelKind::BiRefNetLite, jobs: 4, cpu_only: false };
         let on = |a: &EngineSpec, b: &EngineSpec| a.reusable_by(b, "CPU");
         assert!(on(&built, &EngineSpec { jobs: 1, ..built }));
         assert!(on(&built, &built));
         assert!(!on(&built, &EngineSpec { model: ModelKind::Silueta, ..built }));
-        assert!(!on(&built, &EngineSpec { force_cpu: true, ..built }));
+        assert!(!on(&built, &EngineSpec { cpu_only: true, ..built }));
         // On the CPU, Silueta builds an engine per job; BiRefNet one whatever the jobs.
         let with = |model, jobs| EngineSpec { model, jobs, ..built };
         assert!(!on(&with(ModelKind::Silueta, 4), &with(ModelKind::Silueta, 5)), "a larger pool needs a new worker");
@@ -1487,7 +1487,7 @@ mod tests {
     #[test]
     fn a_batch_completion_names_its_batch() {
         let cfg = ProcessingConfig {
-            engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, force_cpu: false },
+            engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, cpu_only: false },
             run: RunSettings::neutral(),
             first_look: Shown::default(),
             on_screen: Shown::default(),

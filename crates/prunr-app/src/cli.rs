@@ -1186,7 +1186,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 /// Run batch processing via subprocess with auto-retry on OOM.
 /// Accepts file paths — bytes are read lazily by the subprocess.
 // Single-call CLI dispatch — recipe (model + mask + line_mode + edge + bg*)
-// + runtime knobs (jobs, force_cpu) + UI surface (spinners, paths, quiet)
+// + runtime knobs (jobs, cpu_only) + UI surface (spinners, paths, quiet)
 // arrive together. A struct split here trades each arg for a field
 // behind a builder no other site reuses.
 #[allow(clippy::too_many_arguments)]
@@ -1196,7 +1196,7 @@ fn run_batch_subprocess(
     model: ModelKind,
     initial_jobs: usize,
     mask: MaskSettings,
-    force_cpu: bool,
+    cpu_only: bool,
     lines: prunr_app::subprocess::manager::WorkerLines,
     backdrop: &CliBackdrop,
     spinners: &[Option<ProgressBar>],
@@ -1225,7 +1225,7 @@ fn run_batch_subprocess(
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, lines,
+            model, effective_jobs, mask, cpu_only, lines,
         ) {
             Ok(s) => s,
             Err(e) => {

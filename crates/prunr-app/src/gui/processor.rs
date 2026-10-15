@@ -159,7 +159,7 @@ type WarmEngine =
 /// user chose "CPU only" (an engine built under the other choice misses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WarmEngineKey {
-    kind: prunr_core::ModelKind,
+    model: prunr_core::ModelKind,
     cpu_only: bool,
 }
 
@@ -197,7 +197,7 @@ fn ensure_warm_engine(
     if let Some(cached) = cached_warm_engine(slot, key) {
         return Ok(cached);
     }
-    let fresh = Arc::new(prunr_core::OrtEngine::for_model(key.kind.into(), intra_threads, key.cpu_only)?);
+    let fresh = Arc::new(prunr_core::OrtEngine::for_model(key.model.into(), intra_threads, key.cpu_only)?);
     *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
 }
@@ -465,7 +465,7 @@ fn measure_depth(
     let threads = prunr_core::batch::ort_intra_threads(1);
     let result = input.load()
         .and_then(|photo| {
-            let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads)?;
+            let engine = ensure_warm_engine(engine_slot, WarmEngineKey { model: kind, cpu_only }, threads)?;
             let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
             let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
             Ok(map.with_faces(&faces))
@@ -1211,7 +1211,7 @@ impl Processor {
         model_kind: prunr_core::ModelKind,
         cpu_only: bool,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
-        cached_warm_engine(&self.upscale.warm, WarmEngineKey { kind: model_kind, cpu_only })
+        cached_warm_engine(&self.upscale.warm, WarmEngineKey { model: model_kind, cpu_only })
     }
 
     /// Test-only accessor for injecting or inspecting the warm-engine slot.
@@ -1667,7 +1667,7 @@ impl Processor {
             // thread holds its own Arc, so a model swap that evicts the slot
             // mid-run never invalidates this session.
             let engine_for_thread = match ensure_warm_engine(
-                &engine_slot, WarmEngineKey { kind: cache_model_kind, cpu_only }, intra_threads,
+                &engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only }, intra_threads,
             ) {
                 Ok(engine) => engine,
                 Err(err) => {
@@ -1804,7 +1804,7 @@ impl Processor {
         let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(Arc::clone(&self.colorize.cancel));
         let engine_slot = Arc::clone(&self.colorize.warm);
         std::thread::spawn(move || {
-            let key = WarmEngineKey { kind, cpu_only };
+            let key = WarmEngineKey { model: kind, cpu_only };
             let result = input.load().and_then(|input| {
                 let engine = ensure_warm_engine(&engine_slot, key, intra_threads)?;
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
@@ -2391,7 +2391,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (_result_tx, result_rx) = mpsc::channel();
         let mut p = Processor::new(tx, result_rx);
-        let cfg = |model| EngineSpec { model, jobs: 1, force_cpu: false };
+        let cfg = |model| EngineSpec { model, jobs: 1, cpu_only: false };
         let warmed = |rx: &mpsc::Receiver<WorkerMessage>| rx.try_iter().filter_map(|m| match m {
             WorkerMessage::Warm(c) => Some(c.model),
             _ => None,
@@ -3109,7 +3109,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         let got = p
             .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, false)
             .expect("cache hit must return the sentinel Arc");
@@ -3131,7 +3131,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL, false);
         assert!(
             got.is_none(),
@@ -3151,7 +3151,7 @@ mod warm_cache_tests {
         };
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         p.upscale.release_engine();
         assert!(
             p.warm_upscale_engine_for_test().is_none(),
