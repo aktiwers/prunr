@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
+use crate::engine::Weights;
 
 /// Cache format version. Bump when the cache layout changes OR when
 /// the `ort` crate version bumps — cached optimized graphs and EP
@@ -112,14 +113,27 @@ pub fn cache_dir_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`.
-/// **No filesystem side effects** — mirrors the `cache_path_for` /
-/// `cache_dir_for` split. Read sites poll this and `fs::read` the path
-/// directly; write sites must call `cache_dir_for` first to ensure the
-/// parent directory exists.
-pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
-    cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
+/// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`
+/// built from `weights`: each copy of the weights optimizes to a graph
+/// of its own. **No filesystem side effects** — mirrors the
+/// `cache_path_for` / `cache_dir_for` split. Read sites poll this and
+/// `fs::read` the path directly; write sites must call `cache_dir_for`
+/// first to ensure the parent directory exists.
+pub fn optimized_model_path(id: ModelId, ep_name: &str, weights: Weights) -> Option<PathBuf> {
+    cache_path_for(id, ep_name).map(|d| d.join(optimized_file_name(weights)))
 }
+
+fn optimized_file_name(weights: Weights) -> &'static str {
+    match weights {
+        Weights::Fp32 => "optimized-fp32.onnx",
+        Weights::Fp16 => "optimized-fp16.onnx",
+        Weights::Int8 => "optimized-int8.onnx",
+    }
+}
+
+/// The optimized graph every copy of the weights once shared: it holds
+/// whichever copy built first, so no session can trust it.
+const SHARED_GRAPH_FILE: &str = "optimized.onnx";
 
 /// An optimized graph a session is writing for `path`. ORT writes it in
 /// place while the session builds, so it goes to a file of its own and
@@ -236,6 +250,7 @@ pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
 /// process gets a cache miss and rebuilds cold rather than crashing.
 pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
     let Some(current_path) = cache_path_for(id, ep_name) else { return };
+    remove_shared_graph(&current_path);
     let Some(ep_dir) = current_path.parent().map(Path::to_path_buf) else { return };
     let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else { return };
     let our_prefix = format!("{}-", id.stable_name());
@@ -269,6 +284,15 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
                 "gc: failed to remove stale cache entry",
             ),
         }
+    }
+}
+
+fn remove_shared_graph(entry: &Path) {
+    let path = entry.join(SHARED_GRAPH_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(cache = %path.display(), "gc: removed the optimized graph all weights shared"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(cache = %path.display(), %e, "gc: failed to remove the shared optimized graph"),
     }
 }
 
@@ -556,6 +580,36 @@ mod tests {
         assert!(!openvino_dir.exists());
         assert!(other.exists(), "other model's cache must be untouched");
         let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// FP32, FP16 and INT8 weights optimize to different graphs: a hit
+    /// on one copy's path must never hand a session another copy's graph.
+    #[test]
+    fn each_copy_of_the_weights_caches_its_own_graph() {
+        let Some(_) = cache_root() else { return };
+        let paths = [Weights::Fp32, Weights::Fp16, Weights::Int8]
+            .map(|w| optimized_model_path(ModelId::Silueta, "CPU", w).unwrap());
+        assert_ne!(paths[0], paths[1]);
+        assert_ne!(paths[0], paths[2]);
+        assert_ne!(paths[1], paths[2]);
+        assert!(paths.iter().all(|p| p.parent() == cache_path_for(ModelId::Silueta, "CPU").as_deref()));
+        assert!(paths.iter().all(|p| p.file_name().unwrap() != SHARED_GRAPH_FILE));
+    }
+
+    /// The graph all copies shared may hold any of them, so the sweep at
+    /// session build drops it and leaves each copy's own graph.
+    #[test]
+    fn gc_removes_the_graph_every_copy_shared() {
+        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(dir) = cache_dir_for(ModelId::Silueta, "CPU") else { return };
+        let shared = dir.join(SHARED_GRAPH_FILE);
+        let own = optimized_model_path(ModelId::Silueta, "CPU", Weights::Int8).unwrap();
+        std::fs::write(&shared, b"int8 graph").unwrap();
+        std::fs::write(&own, b"int8 graph").unwrap();
+        gc_stale_for_model(ModelId::Silueta, "CPU");
+        assert!(!shared.exists(), "the shared graph is dropped");
+        assert!(own.exists(), "each copy's own graph stays");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// True only when the directory exists AND has at least one entry.

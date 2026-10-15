@@ -717,7 +717,7 @@ fn lama_ladder(
         crate::cache::gc_stale_for_model(id, ep.as_str());
         let builder = builder().map_err(Miss::Unusable)?;
         let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
-            apply_ort_graph_cache(builder, bytes, id, ep.as_str())
+            apply_ort_graph_cache(builder, bytes, id, ep.as_str(), Weights::Fp32)
         } else {
             (builder, Cow::Borrowed(bytes), None)
         };
@@ -725,7 +725,7 @@ fn lama_ladder(
         let mut built = builder
             .with_execution_providers([ep.provider(id, EpSite::Fill { threads })])
             .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
-        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep) };
+        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep, Weights::Fp32) };
         let started = Instant::now();
         let mut session = built
             .commit_from_memory(&bytes_owner)
@@ -744,7 +744,7 @@ fn lama_ladder(
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
     crate::cache::gc_stale_for_model(id, "CPU");
-    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, "CPU");
+    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, "CPU", Weights::Fp32);
     let started = Instant::now();
     let session = builder
         .commit_from_memory(&cpu_bytes)
