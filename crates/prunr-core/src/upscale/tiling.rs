@@ -81,25 +81,7 @@ pub fn plan_upscale_tiles(
     let TilingConfig { tile_size, tile_multiple, overlap } = cfg;
     let step = tile_size.saturating_sub(overlap).max(1);
 
-    let mut xs: Vec<u32> = (0..width).step_by(step as usize).collect();
-    // Ensure the last column reaches the right edge.
-    if let Some(&last) = xs.last() {
-        if last + tile_size < width {
-            xs.push(width.saturating_sub(tile_size));
-        }
-    }
-    // Deduplicate and sort (last column may coincide with an earlier step).
-    xs.sort_unstable();
-    xs.dedup();
-
-    let mut ys: Vec<u32> = (0..height).step_by(step as usize).collect();
-    if let Some(&last) = ys.last() {
-        if last + tile_size < height {
-            ys.push(height.saturating_sub(tile_size));
-        }
-    }
-    ys.sort_unstable();
-    ys.dedup();
+    let (xs, ys) = (axis_starts(width, tile_size, step), axis_starts(height, tile_size, step));
 
     let mut tiles = Vec::with_capacity(xs.len() * ys.len());
     for &y in &ys {
@@ -117,6 +99,21 @@ pub fn plan_upscale_tiles(
         }
     }
     tiles
+}
+
+/// Tile starts along one axis of length `len`, the last one moved in so
+/// its tile reaches the far edge.
+fn axis_starts(len: u32, tile_size: u32, step: u32) -> Vec<u32> {
+    let mut starts: Vec<u32> = (0..len).step_by(step as usize).collect();
+    if let Some(&last) = starts.last() {
+        if last + tile_size < len {
+            starts.push(len.saturating_sub(tile_size));
+        }
+    }
+    // The edge tile may coincide with an earlier step.
+    starts.sort_unstable();
+    starts.dedup();
+    starts
 }
 
 /// Upscale an RGBA image tile-by-tile, blending overlapping regions with a
