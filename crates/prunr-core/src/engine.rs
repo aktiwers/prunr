@@ -41,6 +41,10 @@ pub(crate) enum EpKind {
 /// reads a provider string needs no per-platform branch.
 pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 
+/// The CPU provider's name: its label, its cache-dir key and the
+/// fallback when no GPU provider is available.
+pub(crate) const CPU_NAME: &str = "CPU";
+
 impl EpKind {
     /// Stable display string used by logs, the active-provider label,
     /// and the `ep_compat.json` cache keys. Returned as `&'static str`
@@ -561,9 +565,9 @@ impl OrtEngine {
     fn build_session(model_bytes: &[u8], weights: Weights, intra_threads: usize, model: ModelKind, eps: &[EpKind], level: GraphOptimizationLevel) -> Result<Self, CoreError> {
         let model_id: prunr_models::ModelId = model.into();
         if eps.is_empty() {
-            crate::cache::gc_stale_for_model(model_id, "CPU");
+            crate::cache::gc_stale_for_model(model_id, CPU_NAME);
             let builder = Self::builder_with_base(intra_threads, level)?;
-            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU", weights);
+            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights);
             let started = Instant::now();
             let session = builder
                 .with_execution_providers([
@@ -575,10 +579,10 @@ impl OrtEngine {
                 .commit_from_memory(&bytes)
                 .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
             if let Some(draft) = draft { draft.publish(); }
-            tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
+            tracing::info!(?model, ep = CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
                 session: Mutex::new(session),
-                pick: SessionPick { weights, ..SessionPick::on("CPU") },
+                pick: SessionPick { weights, ..SessionPick::on(CPU_NAME) },
                 model_kind: model,
             });
         }
@@ -643,7 +647,7 @@ impl OrtEngine {
             available_gpu_eps()
                 .first()
                 .map(|ep| ep.as_str().to_string())
-                .unwrap_or_else(|| "CPU".to_string())
+                .unwrap_or_else(|| CPU_NAME.to_string())
         }).clone()
     }
 
@@ -652,7 +656,7 @@ impl OrtEngine {
 /// Whether sessions on `provider` run on the host CPU: the CPU provider,
 /// and OpenVINO, which this app configures for no other device.
 pub fn runs_on_host_cpu(provider: &str) -> bool {
-    provider.eq_ignore_ascii_case("CPU") || provider.eq_ignore_ascii_case(OPENVINO_NAME)
+    provider.eq_ignore_ascii_case(CPU_NAME) || provider.eq_ignore_ascii_case(OPENVINO_NAME)
 }
 
 /// Whether `model` runs on the accelerator `provider`: not declared
