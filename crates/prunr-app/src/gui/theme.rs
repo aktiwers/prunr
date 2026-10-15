@@ -345,6 +345,9 @@ pub const ACCENT_RING: Color32 = Color32::from_rgb(0xb2, 0x7a, 0xe0);
 pub const CAUTION: Color32 = Color32::from_rgb(0xe8, 0xa8, 0x4c);
 /// Amber text, softer than `CAUTION` so a line of it stays readable.
 pub const CAUTION_TEXT: Color32 = Color32::from_rgb(0xc9, 0xa7, 0x7a);
+/// Text for a choice that works with a caveat (a model that runs, but
+/// slowly or in tiles).
+pub const ADVISORY_TEXT: Color32 = Color32::from_rgb(0xe1, 0xb3, 0x4e);
 
 // Floating overlays over the canvas: the progress capsule and its pills.
 pub const OVERLAY_CAPSULE_FILL: Color32 = Color32::from_rgba_premultiplied(18, 18, 22, 214);
