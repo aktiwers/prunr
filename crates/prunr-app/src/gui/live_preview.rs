@@ -168,7 +168,7 @@ pub struct PreviewResult {
     pub new_faced: Option<(Arc<DynamicImage>, FacedKey)>,
     /// The depth-looked photo this dispatch built, for the item to reuse.
     pub(crate) new_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
-    /// The photo a quick frame shrank, for the drag's next frames.
+    /// The image a quick frame shrank, for the drag's next frames.
     pub(crate) new_quick_photo: Option<QuickPhoto>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
@@ -672,7 +672,7 @@ pub struct DispatchInputs {
     pub faces: Option<FacesInput>,
     /// The photo's depth map, for the Depth chip's look and fading lines.
     pub(crate) depth: Option<DepthInput>,
-    /// The photo shrunk for an earlier quick frame.
+    /// The image shrunk for an earlier quick frame.
     pub(crate) quick_photo: Option<QuickPhoto>,
 }
 
@@ -924,10 +924,10 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         if inputs.quick {
             // Sharpen's radius is in output pixels; the plain enlargement
             // is made at the frame's size and not kept.
-            let raw = Arc::new(quick_rgba(&upscale.raw));
+            let (raw, built_quick_photo) = QuickPhoto::shrink(&upscale.raw, inputs.quick_photo.as_ref());
             let knobs = prunr_core::upscale::Refine { sharpen_sigma: knobs.sharpen_sigma * raw.width() as f32 / upscale.raw.width() as f32, ..knobs };
             let (shown, _) = prunr_core::upscale::refine(&raw, &upscale.input, None, &knobs);
-            return RunOutput { rgba: Some(shown), ..RunOutput::empty() };
+            return RunOutput { rgba: Some(shown), built_quick_photo, ..RunOutput::empty() };
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
@@ -941,12 +941,12 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             return RunOutput::empty();
         };
         let strength = inputs.settings.color_strength();
-        let shown = if inputs.quick {
-            prunr_core::colorize::colorized(&quick_rgba(&run.input), &run.plane, strength)
-        } else {
-            run.render(strength)
-        };
-        return RunOutput { rgba: Some(Arc::new(shown)), ..RunOutput::empty() };
+        if inputs.quick {
+            let (input, built_quick_photo) = QuickPhoto::shrink(&run.input, inputs.quick_photo.as_ref());
+            let shown = prunr_core::colorize::colorized(&input, &run.plane, strength);
+            return RunOutput { rgba: Some(Arc::new(shown)), built_quick_photo, ..RunOutput::empty() };
+        }
+        return RunOutput { rgba: Some(Arc::new(run.render(strength))), ..RunOutput::empty() };
     }
 
     // Faces go into the photo before the mask, the effect and the lines.
@@ -967,12 +967,19 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
     let full_width = inputs.original.width();
+    // A looked photo kept from a full-size render is the one to shrink;
+    // otherwise the photo is, and the look goes on the small one.
+    let kept_look = inputs.depth.as_ref()
+        .is_some_and(|d| d.photo.is_some() && d.look.is_some_and(|l| l.is_active()));
     let mut built_quick_photo = None;
-    if inputs.quick {
+    if inputs.quick && !kept_look {
         (inputs.original, built_quick_photo) = QuickPhoto::shrink(&inputs.original, inputs.quick_photo.as_ref());
     }
     // The Depth chip's look goes on the faced photo, before the lines.
     let built_depth_photo = apply_depth_look(&mut inputs);
+    if inputs.quick && kept_look {
+        (inputs.original, built_quick_photo) = QuickPhoto::shrink(&inputs.original, inputs.quick_photo.as_ref());
+    }
     if inputs.quick {
         shrink_to_quick_frame(&mut inputs, full_width);
     }
@@ -985,45 +992,88 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
 /// in-between frames are quick; its settled render is full size.
 pub(crate) const QUICK_FRAME_SIDE: u32 = 2048;
 
-/// A photo shrunk for quick frames, and the one it was shrunk from, held
-/// weakly so the pair never keeps a full-size photo alive.
+/// An image shrunk for quick frames (the photo, a kept upscale's output
+/// or a colorize run's input), and the one it was shrunk from, held
+/// weakly so the pair never keeps a full-size image alive.
 #[derive(Clone)]
 pub(crate) struct QuickPhoto {
-    from: std::sync::Weak<DynamicImage>,
-    small: Arc<DynamicImage>,
+    from: std::sync::Weak<dyn std::any::Any + Send + Sync>,
+    small: Small,
+}
+
+#[derive(Clone)]
+enum Small {
+    Photo(Arc<DynamicImage>),
+    Image(Arc<RgbaImage>),
+}
+
+/// An image a quick frame is made from.
+trait Shrinks: Sized + Send + Sync + 'static {
+    fn long_side(&self) -> u32;
+    fn shrunk(&self) -> Self;
+    fn kept(small: &Small) -> Option<Arc<Self>>;
+    fn keep(small: Arc<Self>) -> Small;
+}
+
+impl Shrinks for DynamicImage {
+    fn long_side(&self) -> u32 {
+        self.width().max(self.height())
+    }
+
+    fn shrunk(&self) -> Self {
+        use prunr_core::formats::{fit_long_side, resize_to_rgba, ResizeFilter};
+        let (qw, qh) = fit_long_side(self.width(), self.height(), QUICK_FRAME_SIDE);
+        DynamicImage::ImageRgba8(resize_to_rgba(self, qw, qh, ResizeFilter::Bilinear))
+    }
+
+    fn kept(small: &Small) -> Option<Arc<Self>> {
+        match small { Small::Photo(p) => Some(Arc::clone(p)), Small::Image(_) => None }
+    }
+
+    fn keep(small: Arc<Self>) -> Small {
+        Small::Photo(small)
+    }
+}
+
+impl Shrinks for RgbaImage {
+    fn long_side(&self) -> u32 {
+        self.width().max(self.height())
+    }
+
+    fn shrunk(&self) -> Self {
+        use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+        let (qw, qh) = fit_long_side(self.width(), self.height(), QUICK_FRAME_SIDE);
+        resize_rgba(self, qw, qh, ResizeFilter::Bilinear)
+    }
+
+    fn kept(small: &Small) -> Option<Arc<Self>> {
+        match small { Small::Image(i) => Some(Arc::clone(i)), Small::Photo(_) => None }
+    }
+
+    fn keep(small: Arc<Self>) -> Small {
+        Small::Image(small)
+    }
 }
 
 impl QuickPhoto {
-    /// `photo` no larger than a quick frame: the kept one when it was
-    /// shrunk from `photo`, else a fresh one, returned to keep.
-    fn shrink(photo: &Arc<DynamicImage>, kept: Option<&QuickPhoto>) -> (Arc<DynamicImage>, Option<QuickPhoto>) {
-        // The weak reference holds the allocation, so an equal address is
-        // the same photo, never a new one at a freed address.
-        if let Some(kept) = kept.filter(|k| std::ptr::eq(k.from.as_ptr(), Arc::as_ptr(photo))) {
-            return (Arc::clone(&kept.small), None);
+    /// `image` no larger than a quick frame: the kept one when it was
+    /// shrunk from `image`, else a fresh one, returned to keep.
+    fn shrink<T: Shrinks>(image: &Arc<T>, kept: Option<&QuickPhoto>) -> (Arc<T>, Option<QuickPhoto>) {
+        if image.long_side() <= QUICK_FRAME_SIDE {
+            return (Arc::clone(image), None);
         }
-        let small = quick_photo(photo);
-        let built = (!Arc::ptr_eq(&small, photo)).then(|| QuickPhoto { from: Arc::downgrade(photo), small: Arc::clone(&small) });
-        (small, built)
+        // The weak reference holds the allocation, so an equal address is
+        // the same image, never a new one at a freed address.
+        let hit = kept
+            .filter(|k| std::ptr::eq(k.from.as_ptr().cast::<()>(), Arc::as_ptr(image).cast::<()>()))
+            .and_then(|k| T::kept(&k.small));
+        if let Some(small) = hit {
+            return (small, None);
+        }
+        let small = Arc::new(image.shrunk());
+        let from: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(image) as _;
+        (Arc::clone(&small), Some(QuickPhoto { from: Arc::downgrade(&from), small: T::keep(small) }))
     }
-}
-
-/// `img` no larger than a quick frame.
-fn quick_rgba(img: &RgbaImage) -> RgbaImage {
-    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
-    let (qw, qh) = fit_long_side(img.width(), img.height(), QUICK_FRAME_SIDE);
-    resize_rgba(img, qw, qh, ResizeFilter::Bilinear)
-}
-
-/// `photo` no larger than a quick frame.
-fn quick_photo(photo: &Arc<DynamicImage>) -> Arc<DynamicImage> {
-    use prunr_core::formats::{fit_long_side, resize_to_rgba, ResizeFilter};
-    let (w, h) = (photo.width(), photo.height());
-    if w.max(h) <= QUICK_FRAME_SIDE {
-        return Arc::clone(photo);
-    }
-    let (qw, qh) = fit_long_side(w, h, QUICK_FRAME_SIDE);
-    Arc::new(DynamicImage::ImageRgba8(resize_to_rgba(photo, qw, qh, ResizeFilter::Bilinear)))
 }
 
 /// Fit a quick frame's inputs to its smaller photo: the pixel-sized knobs
@@ -1043,7 +1093,7 @@ fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, c
     let depth = inputs.depth.as_ref()?;
     let look = depth.look.filter(prunr_core::depth::DepthLook::is_active)?;
     if let Some(photo) = &depth.photo {
-        inputs.original = if inputs.quick { quick_photo(photo) } else { Arc::clone(photo) };
+        inputs.original = Arc::clone(photo);
         return None;
     }
     if inputs.quick {
@@ -1914,8 +1964,8 @@ mod tests {
         assert!(!faced.can_be_quick(), "an upscale with restored faces re-finishes at full size");
     }
 
-    /// A drag's quick frames shrink the photo once: the next frame reuses
-    /// it, another photo does not, and the kept pair holds no full photo.
+    /// A drag's quick frames shrink the image once: the next frame reuses
+    /// it, another image does not, and the kept pair holds no full image.
     #[test]
     fn quick_frames_shrink_the_photo_once() {
         let photo = Arc::new(image::DynamicImage::new_rgb8(QUICK_FRAME_SIDE * 2, 10));
@@ -1931,6 +1981,14 @@ mod tests {
         let tiny = Arc::new(image::DynamicImage::new_rgb8(8, 8));
         let (same, built) = QuickPhoto::shrink(&tiny, None);
         assert!(Arc::ptr_eq(&same, &tiny) && built.is_none(), "a small photo is its own quick frame");
+
+        // An upscale's output or a colorize input the same way.
+        let raw = Arc::new(RgbaImage::new(QUICK_FRAME_SIDE * 2, 10));
+        let (small, kept) = QuickPhoto::shrink(&raw, None);
+        let kept = kept.expect("kept");
+        let (again, built) = QuickPhoto::shrink(&raw, Some(&kept));
+        assert!(Arc::ptr_eq(&again, &small) && built.is_none(), "reused across frames");
+        assert_eq!(Arc::strong_count(&raw), 1, "held weakly");
     }
 
     /// What a kept upscale or colorize run costs per drag frame at 24 MP.
@@ -1961,23 +2019,28 @@ mod tests {
         use crate::gui::item_settings::ItemSettings;
         let input = Arc::new(input);
         let colorize = Arc::new(plane);
+        let (mut kept_upscale, mut kept_colorize) = (None, None);
         for _ in 0..3 {
             for (label, inputs) in [
                 ("upscale quick", DispatchInputs {
                     quick: true,
+                    quick_photo: kept_upscale.clone(),
                     upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None)),
                     upscale_tier2_knobs: Some(prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.6, color_match: true }),
                     ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
                 }),
                 ("colorize quick", DispatchInputs {
                     quick: true,
+                    quick_photo: kept_colorize.clone(),
                     colorize: Some(crate::gui::item::ColorizeCache::new(Arc::clone(&colorize), Arc::clone(&raw))),
                     ..DispatchInputs::new(PreviewKind::ColorizeTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
                 }),
             ] {
                 let t = Instant::now();
-                let _ = run_preview(inputs, &AtomicBool::new(false));
+                let out = run_preview(inputs, &AtomicBool::new(false));
                 println!("{label}: {:?}", t.elapsed());
+                let kept = if label.starts_with("upscale") { &mut kept_upscale } else { &mut kept_colorize };
+                *kept = out.built_quick_photo.or(kept.take());
             }
         }
     }
