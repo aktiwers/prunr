@@ -464,7 +464,7 @@ impl BatchManager {
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
-            let load = || source.load_bytes().map_err(|e| format!("Failed to load: {e}"));
+            let load = || source.load_bytes().map_err(super::item::load_failed);
             let (start, chain_start) = base.map_or((None, None), |run| run.resolve(item_id, load));
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
@@ -766,7 +766,7 @@ impl BatchManager {
                     item.status = BatchStatus::Processing;
                 }
                 (None, _) => start_over(item, "Tensor cache corrupt".into()),
-                (_, Err(e)) => start_over(item, format!("Failed to load: {e}")),
+                (_, Err(e)) => start_over(item, super::item::load_failed(e)),
             }
         }
         out
