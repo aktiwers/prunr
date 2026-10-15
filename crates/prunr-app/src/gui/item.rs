@@ -2046,7 +2046,6 @@ impl BatchItem {
         tensor_cache: Option<super::worker::TensorCache>,
         edge_cache: Option<super::worker::EdgeTensorCache>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
-        _is_selected: bool,
     ) -> Option<String> {
         match result {
             Ok(pr) => {
@@ -3056,7 +3055,6 @@ mod tests {
             None,
             None,
             fixture_recipe(),
-            true,
         );
 
         assert_eq!(provider.as_deref(), Some("CUDA"));
@@ -3077,7 +3075,6 @@ mod tests {
             None,
             None,
             fixture_recipe(),
-            true,
         );
 
         assert!(provider.is_none());
@@ -3085,13 +3082,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_tier_result_success_keeps_source_when_not_selected() {
-        // `source_rgba` is required for in-process live preview on any item
-        // — including ones that happened to be non-selected at the moment
-        // their batch result landed. The caller may not know in advance
-        // which items the user will tweak next. Memory-pressure eviction is
-        // handled separately via `evict_all_tensors` / `enforce_tensor_budget`
-        // on the batch manager.
+    fn apply_tier_result_success_keeps_source() {
+        // Live preview re-cuts from `source_rgba` on any item, including
+        // one that was not shown when its result landed.
         let mut item = fixture_item(1);
         item.status = BatchStatus::Processing;
         item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
@@ -3101,27 +3094,9 @@ mod tests {
             None,
             None,
             fixture_recipe(),
-            false, // not selected — but source_rgba should still be kept
         );
 
         assert!(item.source_rgba.is_some(), "source_rgba must stay for live preview");
-    }
-
-    #[test]
-    fn apply_tier_result_success_keeps_source_when_selected() {
-        let mut item = fixture_item(1);
-        item.status = BatchStatus::Processing;
-        item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
-
-        let _ = item.apply_tier_result(
-            Ok(fixture_process_result("CUDA")),
-            None,
-            None,
-            fixture_recipe(),
-            true, // selected — user is looking at it
-        );
-
-        assert!(item.source_rgba.is_some(), "source_rgba must stay populated for the selected item");
     }
 
     #[test]
@@ -3135,7 +3110,6 @@ mod tests {
             None,
             None,
             fixture_recipe(),
-            true,
         );
 
         assert!(provider.is_none());
