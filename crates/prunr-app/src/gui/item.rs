@@ -320,6 +320,18 @@ pub(crate) enum Engine {
     Colorize,
 }
 
+impl Engine {
+    /// The run's name at the start of a toast ("Upscale cancelled").
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Segment => "Processing",
+            Self::Erase => "Erase",
+            Self::Upscale => "Upscale",
+            Self::Colorize => "Colorize",
+        }
+    }
+}
+
 /// Who cut a step out: a background-removal model, or No model's pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cutter {
