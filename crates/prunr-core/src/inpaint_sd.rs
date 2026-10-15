@@ -51,11 +51,15 @@ use rand_distr::{Distribution, StandardNormal};
 use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
 use crate::types::CoreError;
 
-/// SD 1.5 native input side length. Latent space is 1/8 on each axis.
+/// SD 1.5 native input side length.
 pub const SD_TILE: u32 = 512;
+/// Pixels per latent cell on each axis: the VAE downsamples 8×.
+const VAE_FACTOR: u32 = 8;
+/// Pixels in one latent cell.
+const VAE_CELL_PIXELS: f32 = (VAE_FACTOR * VAE_FACTOR) as f32;
 /// Latent side of a 512² tile; the pipeline derives its own from the
-/// crop, this only shapes the session smoke tests.
-const SD_LATENT_SIDE: u32 = SD_TILE / 8;
+/// crop, this only shapes the session smoke tests and TAESD's input.
+const SD_LATENT_SIDE: u32 = SD_TILE / VAE_FACTOR;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
@@ -817,7 +821,7 @@ fn run_one_tile(
     let (pw, ph) = padded_dims(w, h);
     let padded_image = pad_to(image, pw, ph);
     let padded_mask = pad_to(mask, pw, ph);
-    let (lw, lh) = ((pw / 8) as usize, (ph / 8) as usize);
+    let (lw, lh) = ((pw / VAE_FACTOR) as usize, (ph / VAE_FACTOR) as usize);
     let mut timer = TileTimer::start();
 
 
@@ -990,19 +994,20 @@ fn latent_to_rgb(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLa
 /// `None` for the rest. What a step preview's colours are matched to.
 fn known_cells(image: &RgbaImage, mask: &GrayImage, (lw, lh): (usize, usize)) -> Vec<Option<[f32; 3]>> {
     let (w, h) = image.dimensions();
-    (0..lh as u32).flat_map(|cy| (0..lw as u32).map(move |cx| (cx * 8, cy * 8))).map(|(x0, y0)| {
-        if x0 + 8 > w || y0 + 8 > h {
+    const F: u32 = VAE_FACTOR;
+    (0..lh as u32).flat_map(|cy| (0..lw as u32).map(move |cx| (cx * F, cy * F))).map(|(x0, y0)| {
+        if x0 + F > w || y0 + F > h {
             return None;
         }
         let mut sum = [0.0_f32; 3];
-        for (x, y) in (y0..y0 + 8).flat_map(|y| (x0..x0 + 8).map(move |x| (x, y))) {
+        for (x, y) in (y0..y0 + F).flat_map(|y| (x0..x0 + F).map(move |x| (x, y))) {
             if mask.get_pixel(x, y)[0] > 0 {
                 return None;
             }
             let p = image.get_pixel(x, y);
             sum.iter_mut().zip(p.0).for_each(|(s, v)| *s += f32::from(v));
         }
-        Some(sum.map(|s| byte_to_unit(s / 64.0)))
+        Some(sum.map(|s| byte_to_unit(s / VAE_CELL_PIXELS)))
     }).collect()
 }
 
@@ -1039,11 +1044,11 @@ fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::S
         let cell = cells[y as usize * lw + x as usize];
         image::Rgba([unit_to_byte(cell[0] + shift[0]), unit_to_byte(cell[1] + shift[1]), unit_to_byte(cell[2] + shift[2]), 255])
     });
-    crate::formats::resize_rgba(&small, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
+    crate::formats::resize_rgba(&small, lw as u32 * VAE_FACTOR, lh as u32 * VAE_FACTOR, crate::formats::ResizeFilter::Bilinear)
 }
 
 /// The one latent size the installed TAESD decoder takes: a 512 px tile.
-const TAESD_LATENT: (usize, usize) = ((SD_TILE / 8) as usize, (SD_TILE / 8) as usize);
+const TAESD_LATENT: (usize, usize) = (SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize);
 
 /// A tile's step previews: the crop with each step's estimate inside its
 /// mask, as the final paste puts it, written into one copy of the crop
@@ -2176,21 +2181,22 @@ fn byte_to_unit(v: f32) -> f32 {
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let (w, h) = mask.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
-    let (lw, lh) = (w_us.div_ceil(8), h_us.div_ceil(8));
+    const F: usize = VAE_FACTOR as usize;
+    let (lw, lh) = (w_us.div_ceil(F), h_us.div_ceil(F));
     let mut a = Array4::<f32>::zeros((1, 1, lh, lw));
     // invariant: freshly allocated, standard layout — the slice view is valid.
     let buf = a.as_slice_mut().unwrap();
     let raw = mask.as_raw();
-    let inv = 1.0_f32 / (64.0 * 255.0);
+    let inv = 1.0_f32 / (VAE_CELL_PIXELS * 255.0);
     for ly in 0..lh {
         for lx in 0..lw {
             let mut sum = 0_u32;
-            for dy in 0..8 {
-                let sy = ly * 8 + dy;
+            for dy in 0..F {
+                let sy = ly * F + dy;
                 if sy >= h_us { continue; }
                 let row = sy * w_us;
-                for dx in 0..8 {
-                    let sx = lx * 8 + dx;
+                for dx in 0..F {
+                    let sx = lx * F + dx;
                     if sx >= w_us { continue; }
                     sum += raw[row + sx] as u32;
                 }
