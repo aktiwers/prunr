@@ -46,16 +46,7 @@ fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
 /// Hex RGB ("ffffff") or RGBA ("ffffff80"). Leading `#` allowed.
 fn read_hex_rgba(var: &str) -> Option<[u8; 4]> {
     let raw = std::env::var(var).ok()?;
-    let s = raw.trim().trim_start_matches('#');
-    let bytes = match s.len() {
-        6 | 8 => (0..s.len()).step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect::<Option<Vec<_>>>()?,
-        _ => return None,
-    };
-    let mut out = [0, 0, 0, 255];
-    for (i, b) in bytes.into_iter().enumerate() { out[i] = b; }
-    Some(out)
+    prunr_core::color::parse_hex_rgba(raw.trim().trim_start_matches('#'))
 }
 
 fn read_line_mode(var: &str) -> Option<LineMode> {
