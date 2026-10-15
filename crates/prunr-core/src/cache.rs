@@ -52,6 +52,33 @@ fn root_in(prunr_data_dir: Option<PathBuf>, os_cache_dir: Option<PathBuf>, macos
     }
 }
 
+/// Where macOS kept the cache before it moved to `Caches`: nothing
+/// reads it any more.
+fn retired_root_in(prunr_data_dir: Option<PathBuf>, macos: bool) -> Option<PathBuf> {
+    prunr_data_dir.filter(|_| macos).map(|d| d.join("ep_cache"))
+}
+
+/// Remove the cache macOS kept under `Application Support` before it
+/// moved (up to a few GB of compiled models). Returns the bytes freed;
+/// nothing to do once it is gone. Run off the UI thread.
+pub fn remove_retired_root() -> u64 {
+    let Some(old) = retired_root_in(prunr_models::data_dir(), cfg!(target_os = "macos")) else { return 0 };
+    if !old.exists() {
+        return 0;
+    }
+    let bytes = walk_dir_size(&old, 0).unwrap_or(0);
+    match std::fs::remove_dir_all(&old) {
+        Ok(()) => {
+            tracing::info!(dir = %old.display(), bytes, "removed the retired EP cache");
+            bytes
+        }
+        Err(e) => {
+            tracing::warn!(%e, dir = %old.display(), "failed to remove the retired EP cache");
+            0
+        }
+    }
+}
+
 /// Pure path builder — no filesystem side effects. Use this from any
 /// read-only check (`cache_populated_for`, prewarm decisions). Callers
 /// that actually need the directory to exist should use
@@ -359,6 +386,17 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"graph");
         drop(other);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
+    }
+
+    /// Only macOS has a retired cache, and it is never the live one.
+    #[test]
+    fn the_retired_cache_is_macos_application_support_only() {
+        let data = PathBuf::from("/Users/a/Library/Application Support/prunr");
+        let caches = PathBuf::from("/Users/a/Library/Caches");
+        assert_eq!(retired_root_in(Some(data.clone()), true), Some(data.join("ep_cache")));
+        assert_ne!(retired_root_in(Some(data.clone()), true), root_in(Some(data.clone()), Some(caches.clone()), true));
+        assert_eq!(retired_root_in(Some(data.clone()), false), None, "elsewhere that is the live cache");
+        assert_eq!(root_in(Some(data.clone()), Some(caches), false), Some(data.join("ep_cache")));
     }
 
     /// A graph ORT optimized is tied to that ORT build: one made by an
