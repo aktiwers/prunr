@@ -29,7 +29,7 @@ pub enum ProgressKind {
     Upscale,
     /// Colorize: one model run.
     Colorize,
-    /// Restore faces: a few seconds, not cancellable.
+    /// Restore faces: stops after the face it is on.
     Faces,
     /// Measuring a photo's depth: under a second, not cancellable.
     Depth,
@@ -62,9 +62,8 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
 #[derive(Debug, Clone)]
 pub struct DispatchProgress {
     pub kind: ProgressKind,
-    /// Per-stroke / per-batch unit when applicable. `None` for
-    /// non-tiled dispatches (Seg, Upscale today). `Some((current, total))`
-    /// for SD strokes split into multiple 512² patches.
+    /// Per-batch / per-stroke unit: images of a batch or queue, crops of
+    /// an SD stroke; `None` when the run counts one level only.
     pub outer: Option<(u32, u32)>,
     /// Step counter inside the current outer unit. `(0, 0)` means
     /// "indeterminate" — widgets render the spinner-only form.
