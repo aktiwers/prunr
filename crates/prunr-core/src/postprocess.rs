@@ -359,11 +359,10 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
             });
         }
         FillStyle::Posterize { levels } => {
-            let n = levels.max(2) as u16 - 1;
+            let n = posterize_steps(levels);
             apply_pixelwise(rgba, |p| {
                 for v in p.iter_mut().take(3) {
-                    let v_u16 = *v as u16;
-                    *v = ((v_u16 * n / 255) * 255 / n) as u8;
+                    *v = posterize_u8(*v, n);
                 }
             });
         }
@@ -511,8 +510,20 @@ fn gradient_map(rgba: &mut RgbaImage, stops: &[[u8; 3]]) {
 /// Rec. 709 luma of an 8-bit RGB triple. Used by every grayscale / duotone /
 /// threshold / splash variant.
 #[inline]
-fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8
+}
+
+/// The step count `posterize_u8` takes for `levels` output levels.
+#[inline]
+pub(crate) fn posterize_steps(levels: u8) -> u16 {
+    levels.max(2) as u16 - 1
+}
+
+/// `v` snapped to one of `n + 1` evenly spaced levels.
+#[inline]
+pub(crate) fn posterize_u8(v: u8, n: u16) -> u8 {
+    ((v as u16 * n / 255) * 255 / n) as u8
 }
 
 /// The picture `effect` makes from `source`, opaque, at the source's
@@ -1193,6 +1204,17 @@ mod tests {
 
     /// Duotone and Gradient map share one evenly-spaced gradient map; at
     /// every grey level it gives what each computed on its own before.
+    #[test]
+    fn posterize_keeps_black_and_white_and_snaps_to_its_levels() {
+        for levels in [0u8, 1, 2, 4, 255] {
+            let n = posterize_steps(levels);
+            assert_eq!(posterize_u8(0, n), 0);
+            assert_eq!(posterize_u8(255, n), 255);
+            let distinct: std::collections::BTreeSet<u8> = (0..=255u8).map(|v| posterize_u8(v, n)).collect();
+            assert_eq!(distinct.len(), n as usize + 1, "levels {levels}");
+        }
+    }
+
     #[test]
     fn duotone_and_gradient_map_match_their_former_formulas() {
         let blend = |lo: [u8; 3], hi: [u8; 3], t: u16| -> [u8; 3] {

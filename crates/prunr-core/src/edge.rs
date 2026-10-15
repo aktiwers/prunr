@@ -576,7 +576,7 @@ pub fn apply_input_transform<'a>(
         InputTransform::None | InputTransform::Smooth => unreachable!("returned above"),
         InputTransform::Grayscale => {
             for p in rgba.pixels_mut() {
-                let y = ((p.0[0] as u32 * 2126 + p.0[1] as u32 * 7152 + p.0[2] as u32 * 722) / 10000) as u8;
+                let y = crate::postprocess::luma_u8(p.0[0], p.0[1], p.0[2]);
                 p.0[0] = y; p.0[1] = y; p.0[2] = y;
             }
         }
@@ -592,11 +592,10 @@ pub fn apply_input_transform<'a>(
             }
         }
         InputTransform::Posterize { levels } => {
-            let n = levels.max(2) as u16 - 1;
+            let n = crate::postprocess::posterize_steps(levels);
             for p in rgba.pixels_mut() {
-                for i in 0..3 {
-                    let v = p.0[i] as u16;
-                    p.0[i] = ((v * n / 255) * 255 / n) as u8;
+                for v in &mut p.0[..3] {
+                    *v = crate::postprocess::posterize_u8(*v, n);
                 }
             }
         }
