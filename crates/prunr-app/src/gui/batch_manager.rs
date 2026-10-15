@@ -657,10 +657,10 @@ impl BatchManager {
 
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
-    pub fn share_settings(&mut self, from: usize, ids: &std::collections::HashSet<u64>) {
+    pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
         let Some(source) = self.items.get(from) else { return };
         let (settings, bg_image) = (source.settings, source.bg_image.clone());
-        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+        for item in self.in_set(ids) {
             item.adopt_settings(settings, bg_image.clone());
         }
     }
