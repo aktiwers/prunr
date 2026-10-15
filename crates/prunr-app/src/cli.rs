@@ -1285,8 +1285,7 @@ fn run_batch_subprocess(
                         // in_flight holds batch indices, each sent once a pass.
                         in_flight.retain(|&i| Some(i) != ridx);
 
-                        let result = std::fs::read(&result_path)
-                            .ok()
+                        let result = prunr_app::subprocess::ipc::read_and_delete(&result_path)
                             .and_then(|data| image::RgbaImage::from_raw(width, height, data))
                             .map(|mut rgba_image| {
                                 backdrop.apply(&mut rgba_image, &inputs[orig_idx]);
@@ -1296,6 +1295,7 @@ fn run_batch_subprocess(
                                 }
                             })
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
+                        // The CLI clears the file even when it could not be read.
                         let _ = std::fs::remove_file(&result_path);
 
                         if let Some(ridx) = ridx {
