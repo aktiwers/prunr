@@ -288,14 +288,10 @@ pub(crate) fn render(
         });
         if let Some(name) = target_name {
             let model_id = settings.preset_model();
-            let (brush, sd) = crate::gui::presets::split_brush_for_save(
-                &settings.brush,
-                model_id,
-            );
             let mp = crate::gui::presets::ModelPreset {
                 item_settings: *current_item,
-                brush,
-                sd,
+                brush: settings.brush.clone(),
+                sd: crate::gui::presets::sd_preset_for_save(&settings.brush, model_id),
             };
 
             let result = if is_overwrite {

@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn merge_save_dynamic_field_capture() {
         use super::super::brush_state::{BrushSettings, SdScheduler};
-        use super::super::presets::{fuse_brush_for_apply, split_brush_for_save};
+        use super::super::presets::{fuse_brush_for_apply, sd_preset_for_save};
         use prunr_models::ModelId;
 
         // Build a BrushSettings with every SD-tuning field mutated to a
@@ -856,11 +856,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
 
-        let (brush_split, sd) = split_brush_for_save(&base, ModelId::SdV15InpaintFp16);
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
-            brush: brush_split,
-            sd,
+            brush: base.clone(),
+            sd: sd_preset_for_save(&base, ModelId::SdV15InpaintFp16),
         };
         merge_save_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
 

@@ -204,15 +204,12 @@ pub(crate) fn entry_for(file: &PresetFile, model: ModelId) -> Option<&ModelPrese
     })
 }
 
-/// Save-time split: produce the on-disk shape from a unified live
-/// `BrushSettings`. For non-SD models the SD fields stay on the brush
-/// struct (they're session state) but no `SdPreset` is emitted.
-pub(crate) fn split_brush_for_save(
-    brush: &BrushSettings,
-    model: ModelId,
-) -> (BrushSettings, Option<SdPreset>) {
+/// The `SdPreset` a save of `brush` under `model` stores beside the brush.
+/// Non-SD models get none: their SD fields stay on the brush as session
+/// state.
+pub(crate) fn sd_preset_for_save(brush: &BrushSettings, model: ModelId) -> Option<SdPreset> {
     if !model.is_sd_family() {
-        return (brush.clone(), None);
+        return None;
     }
     let mut schedulers = HashMap::new();
     schedulers.insert(
@@ -230,7 +227,7 @@ pub(crate) fn split_brush_for_save(
         active_scheduler: brush.sd_scheduler,
         schedulers,
     };
-    (brush.clone(), Some(sd))
+    Some(sd)
 }
 
 /// Apply-time fuse: produce a unified `BrushSettings` from a stored
@@ -572,18 +569,16 @@ mod tests {
     }
 
     #[test]
-    fn split_brush_for_save_non_sd_model_returns_brush_only() {
+    fn sd_preset_for_save_non_sd_model_is_none() {
         let mut brush = BrushSettings::default();
         brush.sd_prompt = "carry-over".into();
         brush.sd_steps = 12;
 
-        let (out_brush, sd) = split_brush_for_save(&brush, ModelId::Silueta);
-        assert_eq!(out_brush, brush);
-        assert!(sd.is_none());
+        assert!(sd_preset_for_save(&brush, ModelId::Silueta).is_none());
     }
 
     #[test]
-    fn split_brush_for_save_sd_model_extracts_sd_fields() {
+    fn sd_preset_for_save_sd_model_extracts_sd_fields() {
         let brush = BrushSettings {
             sd_prompt: "hello".into(),
             sd_negative_prompt: "world".into(),
@@ -595,8 +590,7 @@ mod tests {
             ..BrushSettings::default()
         };
 
-        let (_, sd) = split_brush_for_save(&brush, ModelId::SdV15InpaintFp16);
-        let sd = sd.expect("SD model produces an SdPreset");
+        let sd = sd_preset_for_save(&brush, ModelId::SdV15InpaintFp16).expect("SD model produces an SdPreset");
         assert_eq!(sd.prompt, "hello");
         assert_eq!(sd.negative_prompt, "world");
         assert_eq!(sd.use_taesd, Some(true));
@@ -732,8 +726,8 @@ mod tests {
             ..BrushSettings::default()
         };
 
-        let (brush_out, sd) = split_brush_for_save(&original, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset { brush: brush_out, sd, ..ModelPreset::default() };
+        let sd = sd_preset_for_save(&original, ModelId::SdV15InpaintFp16);
+        let mp = ModelPreset { brush: original.clone(), sd, ..ModelPreset::default() };
         let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
         assert_eq!(fused, original);
     }
