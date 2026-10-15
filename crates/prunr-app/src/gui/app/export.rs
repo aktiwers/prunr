@@ -165,8 +165,8 @@ impl PrunrApp {
 
     /// Initiate an OS drag-out for the given batch item IDs.
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
-    /// On Linux: a one-time fallback toast, no files written (winit + drag
-    /// crate incompatibility; see Cargo.toml comment).
+    /// On Linux: a one-time fallback toast, no files written (winit and the
+    /// drag crate conflict on Linux).
     #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
         if !crate::gui::drag_export::DRAG_OUT_SUPPORTED {
