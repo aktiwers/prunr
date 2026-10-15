@@ -638,7 +638,7 @@ mod tests {
     fn the_lines_layer_matches_the_whole_photo_compose_for_dual_scale() {
         use crate::gui::item::{BatchItem, ImageSource};
         use crate::gui::item_settings::ItemSettings;
-        use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache};
+        use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors};
         use prunr_core::{EdgeScale, LineStyle};
         use std::sync::Arc;
 
@@ -647,7 +647,7 @@ mod tests {
             let (sh, sw) = prunr_core::edge_scale_dims(scale, h, w);
             vec![if scale == EdgeScale::Fine { 1.0_f32 } else { 0.0 }; (sh * sw) as usize]
         };
-        let raw = EdgeTensorCache { tensors: EdgeScale::ALL.map(tensor), height: h, width: w, spare: None };
+        let raw = RawEdgeTensors { tensors: EdgeScale::ALL.map(tensor), height: h, width: w, spare: None };
         let all_scales = prunr_core::EdgeInferenceResult { tensors: raw.tensors.clone(), height: h, width: w };
         let settings = ItemSettings {
             line_mode: LineMode::EdgesOnly,
@@ -676,13 +676,13 @@ mod tests {
     fn layers_carry_the_brush_corrections_and_the_cut_out_s_start_image() {
         use crate::gui::item::{BatchItem, ImageSource};
         use crate::gui::item_settings::ItemSettings;
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         use std::sync::Arc;
 
         let (w, h) = (16u32, 16u32);
         let mut item = BatchItem::new(1, "x.png".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (w, h), ItemSettings::default(), String::new());
         let all_background = vec![-10.0_f32; 64];
-        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: all_background, height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: all_background, height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let mut cells = vec![0i8; (w * h) as usize];
         cells[(5 * w + 5) as usize] = prunr_core::selection::FULL;
         let restore = Arc::new(prunr_core::selection::MaskArtifact::from_cells(w, h, cells));
@@ -705,14 +705,14 @@ mod tests {
     fn a_layer_job_renders_on_another_thread() {
         use crate::gui::item::{BatchItem, ImageSource};
         use crate::gui::item_settings::ItemSettings;
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
 
         let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
         assert!(!LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "nothing cached, no layers");
 
-        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let job = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
         let files = std::thread::spawn(move || job.render_bytes(&Default::default())).join().expect("render thread");
@@ -727,11 +727,11 @@ mod tests {
     fn the_layers_carry_the_cutout_edits() {
         use crate::gui::item::{BatchItem, ImageSource};
         use crate::gui::item_settings::ItemSettings;
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
 
         let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
-        item.cached_tensor = CompressedTensor::from_raw(TensorCache { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
+        item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let erased_left: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -prunr_core::selection::FULL } else { 0 }).collect();
         item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);

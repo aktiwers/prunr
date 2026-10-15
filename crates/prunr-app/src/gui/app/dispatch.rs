@@ -545,12 +545,12 @@ mod process_targets_tests {
     /// settings reruns under the shown ones, as the status bar promises.
     #[test]
     fn process_applies_the_shown_settings_to_every_ticked_image() {
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         let mut app = two_images(SettingsModel::Silueta);
         for item in &mut app.batch.items {
             // Both are done under their own settings, with the tensor a mask rerun needs.
             item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
-            item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
+            item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
             item.status = crate::gui::item::BatchStatus::Done;
             item.ticked = true;
         }

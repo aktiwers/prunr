@@ -16,7 +16,7 @@ use crate::gui::timeline::StepKind;
 use super::fixtures::push_test_item;
 use crate::gui::item::BatchItem;
 use crate::gui::live_preview::{DispatchInputs, PreviewKind};
-use crate::gui::worker::{CompressedTensor, TensorCache};
+use crate::gui::worker::{CompressedTensor, RawSegTensor};
 
 /// A segmentation result exists for the item: the correction has a tensor
 /// to apply to.
@@ -26,7 +26,7 @@ fn give_tensor(item: &mut BatchItem) {
 
 /// An 8×8 segmentation tensor made by `model`.
 fn give_tensor_of(item: &mut BatchItem, model: prunr_core::ModelKind) {
-    let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model };
+    let cache = RawSegTensor { data: vec![0.5; 64], height: 8, width: 8, model };
     item.set_cached_tensor(CompressedTensor::from_raw(cache));
 }
 

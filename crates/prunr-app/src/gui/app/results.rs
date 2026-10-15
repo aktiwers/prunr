@@ -556,8 +556,8 @@ impl PrunrApp {
                     self.processor.cut_times.note(item_id, &update, at);
                     self.on_seg_report(item_id, update, ctx);
                 }
-                WorkerResult::BatchItemDone { batch, item_id, result, tensor_cache, edge_cache } => {
-                    self.on_batch_item_done(ctx, batch, item_id, result, tensor_cache, edge_cache);
+                WorkerResult::BatchItemDone { batch, item_id, result, raw_seg, raw_edges } => {
+                    self.on_batch_item_done(ctx, batch, item_id, result, raw_seg, raw_edges);
                 }
                 WorkerResult::SpareEdgeScales { item_id, token, landing } => {
                     self.on_spare_edge_scales(item_id, token, landing);
@@ -636,8 +636,8 @@ impl PrunrApp {
         batch: u64,
         item_id: u64,
         result: Result<prunr_core::ProcessResult, String>,
-        tensor_cache: Option<crate::gui::worker::TensorCache>,
-        edge_cache: Option<crate::gui::worker::EdgeTensorCache>,
+        raw_seg: Option<crate::gui::worker::RawSegTensor>,
+        raw_edges: Option<crate::gui::worker::RawEdgeTensors>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
         let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
@@ -672,7 +672,7 @@ impl PrunrApp {
         if succeeded {
             item.hold_for_reveal();
         }
-        let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot);
+        let backend_update = item.apply_tier_result(result, raw_seg, raw_edges, recipe_snapshot);
         if succeeded {
             item.finish_job();
         } else {
@@ -1586,11 +1586,11 @@ mod timeline_contract_tests {
     /// cache by an earlier Off run.
     #[test]
     fn a_full_lines_rerun_never_composes_onto_an_old_cutout() {
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         let mut app = app_with_processed_item(SettingsModel::Silueta);
         let item = &mut app.batch.items[0];
         item.record_origin(Engine::Segment, None, None);
-        item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
+        item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
         item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.input_transform = prunr_core::InputTransform::Grayscale;
@@ -1808,7 +1808,7 @@ mod timeline_contract_tests {
     #[test]
     fn a_ticked_image_off_screen_gets_an_undo_step_for_its_rerun() {
         use crate::gui::item::{BatchStatus, Cutter};
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         use crate::gui::item_settings::ItemSettings;
         use prunr_core::ModelKind;
         let change: [(&str, fn(&mut ItemSettings)); 2] = [
@@ -1826,7 +1826,7 @@ mod timeline_contract_tests {
             let first = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255])));
             for item in &mut app.batch.items {
                 item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
-                item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
+                item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
                 item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), Arc::clone(&first));
                 item.ticked = true;
             }
@@ -1856,7 +1856,7 @@ mod timeline_contract_tests {
     #[test]
     fn a_cancelled_runs_late_answer_never_lands_on_the_next_run() {
         use crate::gui::item::Cutter;
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         use prunr_core::ModelKind;
         let cancelled = prunr_core::CoreError::Cancelled.message();
         let late_answers: [(&str, Result<prunr_core::ProcessResult, String>); 2] = [
@@ -1870,7 +1870,7 @@ mod timeline_contract_tests {
             let item = push_test_item(&mut app, 1);
             item.dimensions = (4, 4);
             item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
-            item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
+            item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
             item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), px(1));
             item.ticked = true;
             app.batch.select_item(0);
@@ -2282,7 +2282,7 @@ mod spare_scales_tests {
     use crate::gui::item::BatchStatus;
     use crate::gui::settings::SettingsModel;
     use crate::gui::tests::fixtures::push_test_item;
-    use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache, SpareLanding};
+    use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors, SpareLanding};
     use prunr_core::EdgeScale::{self, Bold, Fine, Fused};
 
     fn made(scales: &[EdgeScale]) -> SpareLanding {
@@ -2294,7 +2294,7 @@ mod spare_scales_tests {
             let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
             if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
         });
-        CompressedEdgeTensors::from_raw(EdgeTensorCache { tensors, height: 2, width: 2, spare })
+        CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare })
     }
 
     /// The image on screen, its Sketch result in with Bold and Fused

@@ -2055,8 +2055,8 @@ impl BatchItem {
     pub(crate) fn apply_tier_result(
         &mut self,
         result: Result<prunr_core::ProcessResult, String>,
-        tensor_cache: Option<super::worker::TensorCache>,
-        edge_cache: Option<super::worker::EdgeTensorCache>,
+        raw_seg: Option<super::worker::RawSegTensor>,
+        raw_edges: Option<super::worker::RawEdgeTensors>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
     ) -> Option<String> {
         match result {
@@ -2071,10 +2071,10 @@ impl BatchItem {
                 // the seg side). Clobbering it here silently killed live
                 // preview after any tier-2 result — the next gamma tweak had
                 // nothing to postprocess from.
-                if let Some(new) = tensor_cache.and_then(super::worker::CompressedTensor::from_raw) {
+                if let Some(new) = raw_seg.and_then(super::worker::CompressedTensor::from_raw) {
                     self.set_cached_tensor(Some(new));
                 }
-                if let Some(new) = edge_cache.and_then(super::worker::CompressedEdgeTensors::from_raw) {
+                if let Some(new) = raw_edges.and_then(super::worker::CompressedEdgeTensors::from_raw) {
                     self.invalidate_edge_cache();
                     self.cached_edge_tensors = Some(new);
                 }
@@ -2772,14 +2772,14 @@ mod tests {
     /// tensor to start from.
     #[test]
     fn a_process_run_is_as_small_as_the_change_allows() {
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         use prunr_core::{LineMode, ModelKind::Silueta};
         fn processed(with_tensor: bool, before: fn(&mut ItemSettings)) -> BatchItem {
             let mut item = fixture_item(1);
             before(&mut item.settings);
             item.applied_recipe = Some(item.settings.current_recipe(Silueta));
             if with_tensor {
-                item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: Silueta }));
+                item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: Silueta }));
             }
             item
         }
