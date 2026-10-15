@@ -180,17 +180,16 @@ impl Automation {
             Request::Click { name, secondary } => {
                 let (target, pos) = self.target(&name)?;
                 let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
-                let modifiers = egui::Modifiers::NONE;
                 self.frames.extend([
                     vec![egui::Event::PointerMoved(pos)].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }].into(),
+                    vec![press(pos, button, true, None)].into(),
+                    vec![press(pos, button, false, None)].into(),
                 ]);
                 (4, Response::ok(target))
             }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true, None)].into()]);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, egui::PointerButton::Primary, true, None)].into()]);
                 self.held_at = Some((pos, None));
                 (3, Response::ok(target))
             }
@@ -199,7 +198,7 @@ impl Automation {
                 let modifiers = alt.then_some(egui::Modifiers::ALT);
                 self.frames.extend([
                     InputFrame { events: vec![egui::Event::PointerMoved(pos)], modifiers },
-                    InputFrame { events: vec![press(pos, true, modifiers)], modifiers },
+                    InputFrame { events: vec![press(pos, egui::PointerButton::Primary, true, modifiers)], modifiers },
                 ]);
                 self.held_at = Some((pos, modifiers));
                 (3, Response::ok(()))
@@ -224,7 +223,7 @@ impl Automation {
             }
             Request::Release => {
                 let (pos, modifiers) = self.held_at.take().ok_or("nothing is held")?;
-                self.frames.push_back(InputFrame { events: vec![press(pos, false, modifiers)], modifiers });
+                self.frames.push_back(InputFrame { events: vec![press(pos, egui::PointerButton::Primary, false, modifiers)], modifiers });
                 if modifiers.is_some() {
                     self.frames.push_back(InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) });
                 }
@@ -290,8 +289,8 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     app.automation = Some(auto);
 }
 
-fn press(pos: egui::Pos2, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
-    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: modifiers.unwrap_or_default() }
+fn press(pos: egui::Pos2, button: egui::PointerButton, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
+    egui::Event::PointerButton { pos, button, pressed, modifiers: modifiers.unwrap_or_default() }
 }
 
 /// The controls in the tree, flat, without their children.
