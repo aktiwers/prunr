@@ -168,14 +168,7 @@ impl DownloadManager {
         size_mb: u32,
         fp16: Option<OnDemandVariant>,
     ) {
-        let Some(dir) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into());
-            return;
-        };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"));
-            return;
-        }
+        let Some(dir) = self.prepare_dir(id, None) else { return };
         let dest = dir.join(filename);
         let fp16_dest = fp16.as_ref().map(|v| dir.join(v.filename));
         // Combined byte budget for progress: main file + optional fp16
@@ -240,15 +233,7 @@ impl DownloadManager {
         subdir: &'static str,
         parts: &'static [ModelPart],
     ) {
-        let Some(root) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into());
-            return;
-        };
-        let bundle_dir = root.join(subdir);
-        if let Err(e) = std::fs::create_dir_all(&bundle_dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"));
-            return;
-        }
+        let Some(bundle_dir) = self.prepare_dir(id, Some(subdir)) else { return };
         let total: u64 = parts.iter().map(|p| p.size_bytes).sum();
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
@@ -303,6 +288,21 @@ impl DownloadManager {
         if self.active == Some(id) {
             self.active = None;
         }
+    }
+
+    /// The on-demand models directory (or its `sub` folder), created.
+    /// `None` after reporting the failure for `id`.
+    fn prepare_dir(&mut self, id: ModelId, sub: Option<&str>) -> Option<PathBuf> {
+        let Some(root) = on_demand_dir() else {
+            self.send_failure(id, "Could not resolve user data directory".into());
+            return None;
+        };
+        let dir = sub.map_or_else(|| root.clone(), |s| root.join(s));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.send_failure(id, format!("Could not create models directory: {e}"));
+            return None;
+        }
+        Some(dir)
     }
 
     fn send_failure(&mut self, id: ModelId, error: String) {
@@ -400,7 +400,7 @@ fn download_attempt(
     loop {
         if cancel.load(Ordering::Acquire) {
             let _ = std::fs::remove_file(&partial);
-            return Err(DownloadError::fatal("Cancelled by user"));
+            return Err(<DownloadError as prunr_runtime_install::Retryable>::cancelled());
         }
         let n = std::io::Read::read(&mut response, &mut buf)
             .map_err(|e| DownloadError::transient(format!("Read error: {e}")))?;
