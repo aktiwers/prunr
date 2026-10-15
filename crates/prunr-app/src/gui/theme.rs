@@ -119,6 +119,10 @@ pub fn motion_clock(ctx: &egui::Context) -> f32 {
     if motion(ctx) { ctx.input(|i| i.time) as f32 } else { STILL_MOMENT }
 }
 
+/// How opaque a flyout stays while one of its sliders is held: clear
+/// enough to watch the image change under it, solid enough to read.
+pub const SCRUB_OPACITY: f32 = 0.7;
+
 /// How often the animations that last as long as a run draw (the
 /// progress capsule, the working canvas, the busy pills): thirty frames
 /// a second keeps a turning ring smooth at half the drawing of sixty,
