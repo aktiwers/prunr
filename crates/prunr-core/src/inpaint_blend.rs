@@ -9,16 +9,17 @@
 //!
 //! ## RAM budget — peak working set scales with the **bbox** of the mask,
 //! not the image. Within `seam_guided_blend`, channels run sequentially
-//! and the four `mean_*` buffers are reused across channels via
+//! and the six `mean_*` buffers are reused across channels via
 //! [`crate::guided_filter::box_filter_into`]. Concurrent live `Vec<f32>`
-//! at peak: `guide`, `input`, `gi_a`, `gg_b`, `dist`, `mean_g`, `mean_i`,
-//! `mean_gi`, `mean_gg` = **9 × n** bytes ÷ 4 = **9n × 4 B**.
+//! of n = bbox pixels at peak: `guide`, `input`, `gi_a`, `gg_b`, `dist`,
+//! `mean_g`, `mean_i`, `mean_gi`, `mean_gg`, `mean_a`, `mean_b` =
+//! **11 × n × 4 B**.
 //!
 //! | bbox      | peak f32 working set |
 //! |-----------|----------------------|
-//! |  500²     | ~9 MB                |
-//! | 1000²     | ~36 MB               |
-//! | 4096×3072 | ~450 MB              |
+//! |  500²     | ~11 MB               |
+//! | 1000²     | ~44 MB               |
+//! | 4096×3072 | ~550 MB              |
 //!
 //! Plus the cloned `RgbaImage` output (4 × img_w × img_h u8 — full image,
 //! not bbox-scaled) and the byte-sized `crop_mask`.
@@ -389,10 +390,9 @@ fn composite_channel(
     });
 }
 
-/// Single source of truth for the inpaint post-process pipeline:
-/// color match → seam-guided blend → optional sharpen. Used by the
-/// LaMa rayon path and the subprocess worker arm so constants and
-/// order can't drift across call sites. `mask` is the [`fill_region`];
+/// The one post-process pipeline for every fill — color match →
+/// seam-guided blend → optional sharpen — so order and constants can't
+/// drift between callers. `mask` is the [`fill_region`];
 /// `feather_px <= 0.0` skips the blend, `sharpen <= 0.0` the sharpen.
 pub fn finalize_inpaint(
     raw: &RgbaImage,

@@ -18,8 +18,8 @@ use crate::types::CoreError;
 
 /// LaMa input/output side length in pixels.
 pub const TILE: u32 = 512;
-/// Overlap between adjacent tiles in pixels. Half the tile to stay safe
-/// on the corners; the feather blend tapers within this region.
+/// Overlap between adjacent tiles in pixels: context both tiles share,
+/// which the feather blend tapers across.
 pub const OVERLAP: u32 = 64;
 
 /// 5-tap separable Gaussian for `sharpen_inpainted`'s unsharp-mask blur
@@ -135,8 +135,7 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
 /// the blur without disturbing source pixels outside the mask.
 ///
 /// `amount` in [0.0, 2.0]. 0.0 leaves `image` unchanged. 0.3-0.7 is
-/// the practical range; higher introduces visible halos. Operates
-/// in-place by allocating a fresh RGBA and returning it.
+/// the practical range; higher introduces visible halos.
 ///
 /// Algorithm: `out = src + amount * (src - blur(src))`, applied only
 /// to pixels where `mask > 127`. Blur is a separable 5-tap Gaussian
@@ -160,8 +159,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
         );
         return image.clone();
     }
-    // No mask>127 pixels → nothing to sharpen. Bypasses the temp f32
-    // allocation entirely (was a ~150 MB no-op on full-image masks at 4K).
+    // No mask>127 pixels → nothing to sharpen; skip the temp f32 buffer.
     let Some(bbox) = mask_bbox(mask, 128, SHARPEN_MARGIN) else {
         return image.clone();
     };
@@ -488,8 +486,8 @@ pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPic
 /// the idle threshold.
 const LAMA_SWEEP_INTERVAL_SECS: u64 = 60;
 
-/// Per-id deferred session — same shape as `SdBundleSlot`. Outer
-/// `Arc<OnceLock>` closes the build race between two concurrent
+/// Per-id deferred session. The outer `Arc<OnceLock>` closes the build
+/// race between two concurrent
 /// `get()` callers (e.g. a prewarm racing the first stroke).
 type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
 /// Keyed by model and "CPU only", so a session built under one choice is
@@ -560,14 +558,9 @@ fn ensure_lama_sweeper_running() {
 impl LamaSession {
     /// Per-id cache. Each LamaSession is built once on first use, kept
     /// in an `Arc`, and released after `crate::IDLE_RELEASE` of no
-    /// `get()` calls. Mirrors `SdSession::get` so both inpaint backends
-    /// have the same lifecycle: in-flight callers hold their own Arc
-    /// (no use-after-free), the cache drops its ref on idle, the OS
-    /// reclaims the underlying ORT session.
-    ///
-    /// Pre-fix this was `Box::leak`'d to a `&'static`, which meant the
-    /// session lived for the whole process lifetime — a single LaMa
-    /// stroke pinned ~700 MB–2 GB of resident RAM until shutdown.
+    /// `get()` calls: in-flight callers hold their own Arc (no
+    /// use-after-free), the cache drops its ref on idle, the OS reclaims
+    /// the underlying ORT session.
     fn get(id: prunr_models::ModelId, cpu_only: bool) -> Result<Arc<LamaSession>, CoreError> {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
@@ -590,7 +583,7 @@ impl LamaSession {
             let entry = guard.entry((id, cpu_only))
                 .or_insert_with(|| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::new()), now));
             // Don't refresh last_used on Err entries — sticky failures
-            // shouldn't keep refreshing their idle timer (mirrors SD).
+            // shouldn't keep refreshing their idle timer.
             if !matches!(entry.value.get(), Some(Err(_))) {
                 entry.last_used = now;
             }
@@ -883,8 +876,6 @@ fn decode_tile(
     out
 }
 
-/// True when every pixel of `mask` is zero. O(n) scan; cheap relative
-/// to inference, and short-circuits the entire pipeline.
 /// No masked pixel inside `tile`, read in place.
 fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
     let w = mask.width() as usize;
@@ -895,6 +886,8 @@ fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
     })
 }
 
+/// True when every pixel of `mask` is zero. O(n) scan; cheap relative
+/// to inference, and short-circuits the entire pipeline.
 fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
@@ -1006,9 +999,7 @@ where
     let (w, h) = image.dimensions();
     let mut out = image.clone();
 
-    // No mask → no work. Avoids allocating accumulators for the all-zero
-    // case (was a 250 MB allocation on a 4K image even when nothing
-    // needed to be inpainted).
+    // No mask → no work, and no accumulators allocated.
     let Some(bbox) = mask_bbox(mask, 1, 0) else {
         return Ok(out);
     };
@@ -1108,12 +1099,8 @@ fn tile_fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage
 /// produce bit-identical output to a full-image variant — both clamp
 /// at the same image edge, just framed differently.
 ///
-/// Two callers in this module today:
-/// - `tile_compose`: `min_value=1, margin=0` (any nonzero pixel
-///   triggers inference; matches `mask_is_empty`'s convention).
-/// - `sharpen_inpainted`: `min_value=128, margin=SHARPEN_MARGIN`
-///   (binary mask threshold; margin = kernel half-width so clamped
-///   blur reads stay bit-identical to the full-image variant).
+/// `min_value = 1` finds any nonzero pixel (the inference trigger, as in
+/// `mask_is_empty`); `128` is the binary-mask threshold.
 pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<Bbox> {
     use rayon::prelude::*;
     let raw = mask.as_raw();
