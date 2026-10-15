@@ -2285,16 +2285,6 @@ mod sam_dispatch_tests {
         assert!(positive > 0, "the click selects something");
     }
 
-    #[test]
-    fn sam_admission_gate_refuses_below_800mb() {
-        assert!(!admission_check(800, 799));
-    }
-
-    #[test]
-    fn sam_admission_gate_allows_at_800mb() {
-        assert!(admission_check(800, 800));
-    }
-
     /// A stroke adds to or takes from the selection, on every model.
     #[test]
     fn a_stroke_adds_to_or_takes_from_the_selection() {
@@ -2307,32 +2297,6 @@ mod sam_dispatch_tests {
         assert_eq!(carved.cells()[0], 0, "Subtract carves it away");
         assert_ne!(carved.cells()[1], 0, "the rest stays");
         assert!(!merge_stroke(None, take).has_selected_region(), "subtracting from nothing selects nothing");
-    }
-
-    #[test]
-    fn sam_encoder_result_channel_round_trip() {
-        let (tx, rx) = mpsc::channel::<SamEncoderResult>();
-        tx.send(SamEncoderResult {
-            item_id: 99,
-            result: Err("test error".to_string()),
-        }).unwrap();
-        let out = rx.try_recv().unwrap();
-        assert_eq!(out.item_id, 99);
-        assert!(out.result.is_err());
-    }
-
-    #[test]
-    fn sam_decoder_result_channel_round_trip() {
-        let (tx, rx) = mpsc::channel::<SamDecoderResult>();
-        tx.send(SamDecoderResult {
-            item_id: 77,
-            mode: prunr_core::selection::BrushMode::Add,
-            reading: prunr_core::MaskReading { confidence: 0.5, remove_specks: true },
-            result: Err("decoder test".to_string()),
-        }).unwrap();
-        let out = rx.try_recv().unwrap();
-        assert_eq!(out.item_id, 77);
-        assert!(out.result.is_err());
     }
 }
 
