@@ -2636,13 +2636,22 @@ mod tests {
     /// Callers at the same time share one unpacked copy; once the last
     /// lets go it is freed, not kept for the process's life.
     #[test]
-    fn sam2_bundled_bytes_are_shared_while_held_and_then_freed() {
+    fn bundled_bytes_are_shared_while_held_and_then_freed() {
         let a = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
         let b = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
         assert!(Arc::ptr_eq(&a, &b), "unpacked once for both");
-        let held = Arc::downgrade(&a);
-        drop((a, b));
+        // Other tests hold SAM's real slot at times; a slot of its own
+        // shows the freeing.
+        static SLOT: Held = Held::new(std::sync::Weak::new());
+        let unpacks = std::sync::atomic::AtomicUsize::new(0);
+        let get = || shared_bundled(&SLOT, || { unpacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed); vec![7; 16] });
+        let (first, second) = (get(), get());
+        assert!(Arc::ptr_eq(&first, &second));
+        let held = Arc::downgrade(&first);
+        drop((first, second));
         assert!(held.upgrade().is_none(), "freed with its last holder");
+        drop(get());
+        assert_eq!(unpacks.load(std::sync::atomic::Ordering::Relaxed), 2, "unpacked again once it was freed");
     }
 
     // ── resolve_part_bytes error-path tests ──────────────────────────────
