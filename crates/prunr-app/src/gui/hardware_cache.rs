@@ -8,9 +8,9 @@ pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
     /// The app ships a GPU runtime (DirectML on Windows release builds).
     pub built_in_gpu: bool,
-    /// The runtime the store's preference names, `RuntimeChoice::preferred`.
-    pub preferred_runtime: Option<RuntimeChoice>,
-    /// The runtime this process loaded, `RuntimeChoice::loaded`.
+    /// The runtime the next start loads.
+    pub next_runtime: Option<RuntimeChoice>,
+    /// The runtime this process loaded.
     pub loaded_runtime: Option<RuntimeChoice>,
     /// The TAESD fast decoder bundle.
     pub taesd: bool,
@@ -31,7 +31,7 @@ impl HardwareInstallCache {
         Self {
             openvino: RuntimeId::OpenVino.is_installed(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
-            preferred_runtime: RuntimeChoice::preferred(),
+            next_runtime: RuntimeChoice::next(),
             loaded_runtime: RuntimeChoice::loaded(),
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
@@ -51,7 +51,7 @@ impl HardwareInstallCache {
         Self {
             openvino: true,
             built_in_gpu: true,
-            preferred_runtime: None,
+            next_runtime: None,
             loaded_runtime: None,
             taesd: true,
             lcm_bundle: true,

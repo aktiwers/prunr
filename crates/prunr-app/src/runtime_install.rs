@@ -4,7 +4,7 @@
 //! This module wires those into a `RuntimeId` enum + `mpsc::Sender`-based
 //! progress events for the GUI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 
@@ -59,16 +59,25 @@ impl RuntimeId {
         match self { Self::OpenVino => "onnxruntime-openvino" }
     }
 
-    fn pypi_version(self) -> &'static str {
-        match self { Self::OpenVino => prunr_runtime_install::PINNED_ORT_VERSION }
+    pub fn install_subdir(self) -> String {
+        ri::install_subdir(self.short_name(), ri::PINNED_ORT_VERSION)
     }
 
-    pub fn install_subdir(self) -> String {
-        ri::install_subdir(self.short_name(), self.pypi_version())
+    /// The offered runtime installed under `subdir` of the runtime store.
+    pub fn from_subdir(subdir: &str) -> Option<Self> {
+        Self::OFFERED.iter().copied().find(|rt| rt.install_subdir() == subdir)
     }
 
     pub fn install_dir(self) -> Option<PathBuf> {
         prunr_models::runtime_store_dir().map(|d| d.join(self.install_subdir()))
+    }
+
+    /// `install_dir`, its name checked to stay inside the runtime store
+    /// (no path separators), so removing or replacing it cannot reach
+    /// anything else.
+    fn checked_install_dir(self) -> Result<PathBuf, String> {
+        ri::validate_subdir(&self.install_subdir()).map_err(|e| format!("install_subdir invariant broken: {e}"))?;
+        self.install_dir().ok_or_else(|| "could not resolve user data dir".to_string())
     }
 
     pub fn is_installed(self) -> bool {
@@ -138,18 +147,6 @@ impl RuntimeChoice {
     /// Every choice Settings can show, in its order.
     pub const ALL: [RuntimeChoice; 2] = [Self::BuiltIn, Self::Store(RuntimeId::OpenVino)];
 
-    /// The choice the store's preference file names, when it names one.
-    pub fn preferred() -> Option<Self> {
-        Self::from_preference(&prunr_core::ort_runtime::preferred_runtime()?)
-    }
-
-    fn from_preference(value: &str) -> Option<Self> {
-        if value == prunr_core::ort_runtime::PREFER_BUILT_IN {
-            return Some(Self::BuiltIn);
-        }
-        RuntimeId::OFFERED.iter().copied().find(|rt| rt.install_subdir() == value).map(Self::Store)
-    }
-
     fn preference(self) -> String {
         match self {
             Self::BuiltIn => prunr_core::ort_runtime::PREFER_BUILT_IN.to_string(),
@@ -159,13 +156,25 @@ impl RuntimeChoice {
 
     /// The runtime this process loaded, once it has.
     pub fn loaded() -> Option<Self> {
-        use prunr_core::ort_runtime::{loaded_dylib, loaded_source, DylibSource};
-        match loaded_source()? {
+        use prunr_core::ort_runtime::{loaded_dylib, loaded_source};
+        Self::of_library(loaded_dylib()?, loaded_source()?)
+    }
+
+    /// The runtime every process loads from its next start: the
+    /// resolver's own pick, so a preferred install that has gone is not
+    /// shown as the one in use.
+    pub fn next() -> Option<Self> {
+        let (library, source) = prunr_core::ort_runtime::resolve_dylib_path().ok()?;
+        Self::of_library(&library, source)
+    }
+
+    /// The choice a runtime library is; `None` for one `ORT_DYLIB_PATH`
+    /// names, which no choice in Settings overrides.
+    fn of_library(library: &Path, source: prunr_core::ort_runtime::DylibSource) -> Option<Self> {
+        use prunr_core::ort_runtime::DylibSource;
+        match source {
             DylibSource::Bundled => Some(Self::BuiltIn),
-            DylibSource::RuntimeStore => {
-                let dir = loaded_dylib()?.parent()?;
-                RuntimeId::OFFERED.iter().copied().find(|rt| dir.ends_with(rt.install_subdir())).map(Self::Store)
-            }
+            DylibSource::RuntimeStore => RuntimeId::from_subdir(library.parent()?.file_name()?.to_str()?).map(Self::Store),
             DylibSource::EnvVar => None,
         }
     }
@@ -187,11 +196,10 @@ impl RuntimeChoice {
 
 /// Make `choice` the runtime every process loads from its next start.
 pub fn prefer(choice: RuntimeChoice) -> Result<(), String> {
-    let value = choice.preference();
-    if let RuntimeChoice::Store(_) = choice {
-        ri::validate_subdir(&value).map_err(|e| format!("install_subdir invariant broken: {e}"))?;
+    if let RuntimeChoice::Store(rt) = choice {
+        rt.checked_install_dir()?;
     }
-    prunr_core::ort_runtime::set_preferred_runtime(&value)
+    prunr_core::ort_runtime::set_preferred_runtime(&choice.preference())
 }
 
 /// Started install handle: progress receiver + cancel flag. Caller
@@ -221,10 +229,7 @@ pub fn start_install(runtime: RuntimeId) -> InstallHandle {
 /// short-name becomes user-supplied) can't escape `<data>/runtimes/` via
 /// embedded path separators.
 pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
-    ri::validate_subdir(&runtime.install_subdir())
-        .map_err(|e| format!("install_subdir invariant broken: {e}"))?;
-    let dir = runtime.install_dir()
-        .ok_or_else(|| "could not resolve user data dir".to_string())?;
+    let dir = runtime.checked_install_dir()?;
     if !dir.exists() {
         return Ok(()); // already absent — nothing to do
     }
@@ -279,7 +284,7 @@ fn run_install(
 fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
     let url = format!(
         "https://pypi.org/pypi/{}/{}/json",
-        rt.pypi_package(), rt.pypi_version(),
+        rt.pypi_package(), ri::PINNED_ORT_VERSION,
     );
     let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {e}"))?;
     let resp = client.get(&url).send()
@@ -292,11 +297,7 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
 }
 
 fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
-    ri::validate_subdir(&rt.install_subdir())
-        .map_err(|e| format!("install_subdir invariant broken: {e}"))?;
-    let target_dir = prunr_models::runtime_store_dir()
-        .ok_or_else(|| "could not resolve user data dir".to_string())?
-        .join(rt.install_subdir());
+    let target_dir = rt.checked_install_dir()?;
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)
             .map_err(|e| format!("clean install dir: {e}"))?;
@@ -310,16 +311,32 @@ fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// The preference file round-trips every choice, and the built-in
-    /// value can never name an install dir.
+    /// The preference file names each offered install by its dir, which
+    /// names the runtime back, and the built-in value can never name an
+    /// install dir.
     #[test]
     fn every_runtime_choice_round_trips_through_the_preference_file() {
-        for choice in RuntimeChoice::ALL {
-            assert_eq!(RuntimeChoice::from_preference(&choice.preference()), Some(choice));
+        use prunr_core::ort_runtime::PREFER_BUILT_IN;
+        for &rt in RuntimeId::OFFERED {
+            assert_eq!(RuntimeId::from_subdir(&RuntimeChoice::Store(rt).preference()), Some(rt));
         }
-        assert!(ri::validate_subdir(prunr_core::ort_runtime::PREFER_BUILT_IN).is_ok());
-        assert!(RuntimeId::OFFERED.iter().all(|rt| rt.install_subdir() != prunr_core::ort_runtime::PREFER_BUILT_IN));
-        assert_eq!(RuntimeChoice::from_preference("onnxruntime-1.24.1-linux-x64"), None, "a store entry Settings does not offer");
+        assert_eq!(RuntimeChoice::BuiltIn.preference(), PREFER_BUILT_IN);
+        assert!(ri::validate_subdir(PREFER_BUILT_IN).is_ok());
+        assert_eq!(RuntimeId::from_subdir(PREFER_BUILT_IN), None);
+        assert_eq!(RuntimeId::from_subdir("onnxruntime-1.24.1-linux-x64"), None, "a store entry Settings does not offer");
+    }
+
+    /// A runtime library is the built-in choice, an offered install by
+    /// its dir's name, or no choice at all when the environment names it.
+    #[test]
+    fn a_runtime_library_is_the_choice_its_place_names() {
+        use prunr_core::ort_runtime::{DylibSource, DYLIB_NAME};
+        let store = Path::new("/data/prunr/runtimes");
+        let openvino = store.join(RuntimeId::OpenVino.install_subdir()).join(DYLIB_NAME);
+        assert_eq!(RuntimeChoice::of_library(&openvino, DylibSource::RuntimeStore), Some(RuntimeChoice::Store(RuntimeId::OpenVino)));
+        assert_eq!(RuntimeChoice::of_library(&store.join("onnxruntime-1.24.1-linux-x64").join(DYLIB_NAME), DylibSource::RuntimeStore), None);
+        assert_eq!(RuntimeChoice::of_library(Path::new("/opt/prunr/runtime").join(DYLIB_NAME).as_path(), DylibSource::Bundled), Some(RuntimeChoice::BuiltIn));
+        assert_eq!(RuntimeChoice::of_library(&openvino, DylibSource::EnvVar), None);
     }
 
     #[test]
