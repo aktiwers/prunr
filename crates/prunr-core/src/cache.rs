@@ -81,9 +81,8 @@ pub fn remove_retired_root() -> u64 {
 }
 
 /// Pure path builder — no filesystem side effects. Use this from any
-/// read-only check (`cache_populated_for`, prewarm decisions). Callers
-/// that actually need the directory to exist should use
-/// `cache_dir_for` instead, which creates it.
+/// read-only check. Callers that actually need the directory to exist
+/// should use `cache_dir_for` instead, which creates it.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
     let key = cache_key(id, crate::ort_runtime::runtime_tag())?;
@@ -222,18 +221,6 @@ pub fn cache_dir_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<Path
 /// effects — same pure/creating split as `cache_path_for`.
 pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
     cache_path_for_part(id, ep_name, part).map(|d| d.join("optimized.onnx"))
-}
-
-/// True when the cache for `(id, ep_name)` exists on disk and is
-/// non-empty. Read-only — never creates a directory as a side
-/// effect. The EP itself validates contents on load; this check is
-/// just "should we skip the prewarm work?".
-pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
-    let Some(dir) = cache_path_for(id, ep_name) else { return false };
-    if !dir.is_dir() { return false; }
-    std::fs::read_dir(&dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false)
 }
 
 /// On session-build entry, sweep stale cache entries for the same
@@ -541,23 +528,6 @@ mod tests {
             "cache key must contain CACHE_FORMAT_VERSION; got {key:?}");
     }
 
-    /// Read-only check must not create the cache directory. Pre-fix
-    /// `cache_populated_for` indirected through `cache_dir_for` which
-    /// `create_dir_all`'d every poll — every prewarm decision was
-    /// silently `mkdir`-ing an empty directory.
-    #[test]
-    fn cache_populated_does_not_create_directory() {
-        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(path) = cache_path_for(ModelId::Teed, "CPU") else { return };
-        let _ = std::fs::remove_dir_all(&path);
-        let exists_before = path.exists();
-        let populated = cache_populated_for(ModelId::Teed, "CPU");
-        let exists_after = path.exists();
-        assert!(!populated);
-        assert_eq!(exists_before, exists_after,
-            "cache_populated_for must be read-only");
-    }
-
     /// Stale-entry GC must remove sibling dirs from older versions /
     /// older `CACHE_FORMAT_VERSION`s, leave the current entry alone,
     /// and never touch other models' caches.
@@ -642,24 +612,6 @@ mod tests {
         gc_stale_for_model(ModelId::Silueta, "CPU");
         assert!(!shared.exists(), "the shared graph is dropped");
         assert!(own.exists(), "each copy's own graph stays");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// True only when the directory exists AND has at least one entry.
-    /// Empty directory still reports false so the prewarm doesn't
-    /// skip a missing-IR case (e.g. partial wipe via `rm -rf` on a
-    /// subdir of the cache root).
-    #[test]
-    fn cache_populated_distinguishes_empty_from_nonempty() {
-        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else { return };
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(!cache_populated_for(ModelId::Migan, "CPU"),
-            "empty dir must report unpopulated");
-        std::fs::write(dir.join("optimized.onnx"), b"placeholder").unwrap();
-        assert!(cache_populated_for(ModelId::Migan, "CPU"),
-            "dir with content must report populated");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
