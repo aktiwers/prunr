@@ -145,9 +145,11 @@ pub struct BackgroundIO {
 pub enum TexTarget {
     Source,
     /// A result from a discrete change: it reveals over the held image.
-    Result,
+    /// Each result texture carries the item's request number: only the
+    /// newest asked for lands, as preps finish in any order.
+    Result(u64),
     /// A live re-cut during a slider drag: swaps in at once.
-    LiveResult,
+    LiveResult(u64),
     /// A drag's quick frame of this generation: shown over the image, not
     /// the result.
     QuickFrame(u64),
