@@ -38,6 +38,9 @@ use image::{DynamicImage, GrayImage, RgbaImage};
 use prunr_core::depth::LineFade;
 use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
 
+use crate::gui::item_settings::ItemSettings;
+use crate::gui::worker::CompressedTensor;
+
 /// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
 /// from the cached seg tensor to reproduce the segmented subject, so edges
 /// composite onto the masked subject instead of the raw photo. Returns None
@@ -61,9 +64,6 @@ fn build_masked_base(
     .ok()
     .map(DynamicImage::ImageRgba8)
 }
-
-use crate::gui::item_settings::ItemSettings;
-use crate::gui::worker::CompressedTensor;
 
 /// Throttle cadence for live-preview dispatch during a continuous drag.
 /// 150ms stays above the ~90ms baseline and ~240ms refine_edges worker
@@ -882,6 +882,7 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
 /// What `run_preview` produces. The built planes and `built_masked_base`
 /// hold only what this dispatch constructed, so the parent caches them —
 /// reused inputs pass through empty to avoid re-publishing.
+#[derive(Default)]
 struct RunOutput {
     rgba: Option<Arc<RgbaImage>>,
     built_edge: EdgePlanes,
@@ -893,12 +894,6 @@ struct RunOutput {
     built_quick_photo: Option<QuickPhoto>,
 }
 
-impl RunOutput {
-    fn empty() -> Self {
-        Self { rgba: None, built_edge: EdgePlanes::default(), built_bold: EdgePlanes::default(), built_masked_base: None, built_reference: None, built_faced: None, built_depth_photo: None, built_quick_photo: None }
-    }
-}
-
 /// Runs on a rayon worker thread.
 ///
 /// Respects the user's full mask settings, including `refine_edges`. The
@@ -907,18 +902,18 @@ impl RunOutput {
 /// Refine Edges on, and without running the filter the three refine knobs
 /// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
-    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
 
     // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
     // on the kept upscale run.
     if matches!(inputs.kind, PreviewKind::UpscaleTier2) {
         let Some(upscale) = inputs.upscale else {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "no upscale run kept");
-            return RunOutput::empty();
+            return RunOutput::default();
         };
         let Some(knobs) = inputs.upscale_tier2_knobs else {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_tier2_knobs is None");
-            return RunOutput::empty();
+            return RunOutput::default();
         };
         if inputs.quick {
             // Sharpen's radius is in output pixels; the plain enlargement
@@ -926,26 +921,26 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             let (raw, built_quick_photo) = QuickPhoto::shrink(&upscale.raw, inputs.quick_photo.as_ref());
             let knobs = prunr_core::upscale::Refine { sharpen_sigma: knobs.sharpen_sigma * raw.width() as f32 / upscale.raw.width() as f32, ..knobs };
             let (shown, _) = prunr_core::upscale::refine(&raw, &upscale.input, None, &knobs);
-            return RunOutput { rgba: Some(shown), built_quick_photo, ..RunOutput::empty() };
+            return RunOutput { rgba: Some(shown), built_quick_photo, ..RunOutput::default() };
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
         let (shown, reference) = finish_upscale(&upscale.raw, &upscale.input, upscale.reference, &knobs, faces);
         let built_reference = reference.filter(|_| !had_reference);
-        return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::empty() };
+        return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::default() };
     }
     if matches!(inputs.kind, PreviewKind::ColorizeTier2) {
         let Some(run) = inputs.colorize else {
             tracing::debug!(event = "colorize_tier2_run_abort", reason = "no colorize run kept");
-            return RunOutput::empty();
+            return RunOutput::default();
         };
         let strength = inputs.settings.color_strength();
         if inputs.quick {
             let (input, built_quick_photo) = QuickPhoto::shrink(&run.input, inputs.quick_photo.as_ref());
             let shown = prunr_core::colorize::colorized(&input, &run.plane, strength);
-            return RunOutput { rgba: Some(Arc::new(shown)), built_quick_photo, ..RunOutput::empty() };
+            return RunOutput { rgba: Some(Arc::new(shown)), built_quick_photo, ..RunOutput::default() };
         }
-        return RunOutput { rgba: Some(Arc::new(run.render(strength))), ..RunOutput::empty() };
+        return RunOutput { rgba: Some(Arc::new(run.render(strength))), ..RunOutput::default() };
     }
 
     // Faces go into the photo before the mask, the effect and the lines.
@@ -964,7 +959,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         }
         None => None,
     };
-    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let full_width = inputs.original.width();
     // A looked photo kept from a full-size render is the one to shrink;
     // otherwise the photo is, and the look goes on the small one.
@@ -982,7 +977,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if inputs.quick {
         shrink_to_quick_frame(&mut inputs, full_width);
     }
-    if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let output = run_photo_preview(inputs);
     RunOutput { built_faced, built_depth_photo, built_quick_photo, ..output }
 }
@@ -1151,16 +1146,16 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
                     let mut rgba = inputs.original.to_rgba8();
                     prunr_core::apply_fill_style(&mut rgba, inputs.settings.fill_style);
-                    return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::empty() };
+                    return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
-                else { return RunOutput::empty(); };
-                return RunOutput { rgba: Some(Arc::new(masked.to_rgba8())), ..RunOutput::empty() };
+                else { return RunOutput::default(); };
+                return RunOutput { rgba: Some(Arc::new(masked.to_rgba8())), ..RunOutput::default() };
             }
             // SubjectOutline: compose subject + edges via the selected mode.
             // All modes are compose-time only — no re-inference.
-            let Some(base_arc) = masked_base else { return RunOutput::empty(); };
+            let Some(base_arc) = masked_base else { return RunOutput::default(); };
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
             let edge_settings = inputs.settings.edge_settings();
@@ -1172,10 +1167,10 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
                 out_dims, fade,
             );
-            RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, ..RunOutput::empty() }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, ..RunOutput::default() }
         }
         PreviewKind::Edge => {
-            let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::empty(); };
+            let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::default(); };
             let edge_settings = inputs.settings.edge_settings();
 
             // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
@@ -1200,7 +1195,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 &mask, &base, &compose_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims, fade,
             );
-            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::empty() }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::default() }
         }
         PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
     }
