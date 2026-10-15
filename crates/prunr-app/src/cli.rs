@@ -920,8 +920,8 @@ fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, Core
     let img = load_image_from_path(path)?;
     if !quiet {
         eprintln!(
-            "warning: '{}' exceeds 8000px. Downscaling to {}px (use --large-image=process to skip).",
-            path.display(), DOWNSCALE_TARGET
+            "warning: '{}' exceeds {}px. Downscaling to {}px (use --large-image=process to skip).",
+            path.display(), prunr_core::LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET
         );
     }
     encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
