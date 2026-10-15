@@ -11,35 +11,17 @@ use models::MODELS;
 
 const XTASK_USER_AGENT: &str = "prunr-xtask/0.1";
 
-/// OnDemand filename from the registry, or `None` for Bundled models.
-/// Single source of truth — bumping a model's version in REGISTRY
-/// automatically updates xtask's mirror target.
-fn ondemand_target(id: prunr_models::ModelId) -> Option<&'static str> {
-    match prunr_models::descriptor(id)?.source {
-        prunr_models::ModelSource::OnDemand { filename, .. } => Some(filename),
-        // Multi-part bundles aren't single-file targets — xtask doesn't
-        // mirror them today; the production DownloadManager handles
-        // on-demand bundles, and bundled variants live in the binary.
-        prunr_models::ModelSource::Bundled { .. }
-        | prunr_models::ModelSource::MultiPartOnDemand { .. }
-        | prunr_models::ModelSource::MultiPartBundled { .. } => None,
+/// Copy `src` to where the app downloads `id` (the registry-versioned
+/// filename in the user data dir), so the production OnDemand path
+/// (`prunr_models::resolve_bytes`) resolves it without filesystem-shim
+/// heuristics. Bundled and multi-part models have no such place and
+/// are skipped: bundled ones live in the binary, and the production
+/// DownloadManager handles multi-part bundles.
+fn mirror_to_user_data_dir(src: &Path, id: prunr_models::ModelId) -> anyhow::Result<()> {
+    let Some(dst) = prunr_models::download_path(id) else { return Ok(()) };
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-}
-
-fn user_data_models_dir() -> Option<std::path::PathBuf> {
-    prunr_models::data_dir().map(|d| d.join("models"))
-}
-
-/// Copy `src` to the user data dir under the registry-versioned filename
-/// so the production OnDemand path (`prunr_models::resolve_bytes`)
-/// resolves it without filesystem-shim heuristics.
-fn mirror_to_user_data_dir(src: &Path, target: &str) -> anyhow::Result<()> {
-    let Some(dir) = user_data_models_dir() else {
-        eprintln!("  (skipping user-data-dir mirror: dirs::data_dir returned None)");
-        return Ok(());
-    };
-    std::fs::create_dir_all(&dir)?;
-    let dst = dir.join(target);
     std::fs::copy(src, &dst)?;
     println!("  Mirrored to {}", dst.display());
     Ok(())
@@ -254,9 +236,7 @@ fn fetch_models() -> anyhow::Result<()> {
 
             if hash == spec.sha256 {
                 println!("  OK (cached)");
-                if let Some(target) = ondemand_target(spec.id) {
-                    mirror_to_user_data_dir(&dest, target)?;
-                }
+                mirror_to_user_data_dir(&dest, spec.id)?;
                 continue;
             }
             println!("  Checksum mismatch — re-downloading");
@@ -287,9 +267,7 @@ fn fetch_models() -> anyhow::Result<()> {
         println!("  Saved to {}", dest.display());
 
         compress_to_zst(&dest, &bytes)?;
-        if let Some(target) = ondemand_target(spec.id) {
-            mirror_to_user_data_dir(&dest, target)?;
-        }
+        mirror_to_user_data_dir(&dest, spec.id)?;
     }
 
     // Catch any models with stale .zst (.onnx newer than .zst, or .zst missing).
