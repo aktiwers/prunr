@@ -239,7 +239,7 @@ fn extract_probabilities(
 pub(crate) fn calibrate_plane(plane: &mut [f32], h: usize, w: usize) {
     const MIN_RANGE: f32 = 0.25;
     const CORNER: usize = 8;
-    plane.par_iter_mut().for_each(|v| *v = 1.0 / (1.0 + (-*v).exp()));
+    plane.par_iter_mut().for_each(|v| *v = crate::math::sigmoid(*v));
     let min = plane.par_iter().copied().reduce(|| f32::INFINITY, f32::min);
     if h >= 2 * CORNER && w >= 2 * CORNER {
         for y in (0..CORNER).chain(h - CORNER..h) {

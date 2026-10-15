@@ -3,6 +3,7 @@ use ndarray::ArrayView4;
 use rayon::prelude::*;
 
 use crate::color::lerp_rgb;
+use crate::math::sigmoid;
 use crate::selection::MaskArtifact;
 use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
@@ -53,9 +54,13 @@ pub fn postprocess_from_flat(
     original: &DynamicImage,
     opts: &PostprocessOpts<'_>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
-    let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
-        .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
+    let view = flat_view(tensor, tensor_h, tensor_w)?;
     Ok(postprocess(view, original, opts))
+}
+
+fn flat_view(tensor: &[f32], h: usize, w: usize) -> Result<ArrayView4<'_, f32>, crate::types::CoreError> {
+    ArrayView4::from_shape((1, 1, h, w), tensor)
+        .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))
 }
 
 /// How a segmentation model's raw output reads as subject coverage in
@@ -100,11 +105,6 @@ impl SegNormaliser {
     }
 }
 
-#[inline]
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
 /// Flat-slice variant of `tensor_to_mask`. Reshapes `[1,1,H,W]` and forwards.
 pub fn tensor_to_mask_from_flat(
     tensor: &[f32],
@@ -113,8 +113,7 @@ pub fn tensor_to_mask_from_flat(
     original: &DynamicImage,
     opts: &PostprocessOpts<'_>,
 ) -> Result<GrayImage, crate::types::CoreError> {
-    let view = ArrayView4::from_shape((1, 1, tensor_h, tensor_w), tensor)
-        .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))?;
+    let view = flat_view(tensor, tensor_h, tensor_w)?;
     Ok(tensor_to_mask(view, original, opts))
 }
 
