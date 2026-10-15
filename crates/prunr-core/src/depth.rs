@@ -506,25 +506,6 @@ impl DepthLook {
         haze_in_place(&mut out, depth, pct(self.fog_pct), FOG_COLOR, pct(self.aerial_pct));
         Some(out)
     }
-
-    /// `apply` for a frame in the middle of a drag: made at no more than
-    /// `max_side` pixels on the long side and resampled back, so a 24 MP
-    /// photo's lens blur takes a fraction of a second instead of seconds.
-    /// The frame is softer near the in-focus edge than `apply`'s; the
-    /// settled render is made with `apply`.
-    pub fn apply_quick(&self, photo: &RgbaImage, depth: &DepthMap, max_side: u32) -> Option<RgbaImage> {
-        use crate::formats::{resize_rgba, ResizeFilter};
-        let (w, h) = photo.dimensions();
-        // Fog alone is one pass at full size: cheaper than the round trip,
-        // and as sharp as the settled render.
-        if w.max(h) <= max_side || !(self.blurs() || self.aerial_pct > 0) {
-            return self.apply(photo, depth);
-        }
-        let (qw, qh) = crate::formats::fit_long_side(w, h, max_side);
-        let small = resize_rgba(photo, qw, qh, ResizeFilter::Bilinear);
-        let looked = self.apply(&small, depth)?;
-        Some(resize_rgba(&looked, w, h, ResizeFilter::Bilinear))
-    }
 }
 
 /// Where focus goes with no point set: the largest face, or else what is
@@ -761,21 +742,6 @@ mod tests {
         let lens = lens_blur(&src, &depth, blurred.lens_focus(&depth), 0.8);
         let in_turn = aerial_perspective(&depth_fog(&lens, &depth, 0.4, FOG_COLOR), &depth, 0.7);
         assert_eq!(blurred.apply(&src, &depth), Some(in_turn));
-    }
-
-    #[test]
-    fn a_quick_look_is_the_look_itself_up_to_its_size_and_resampled_above() {
-        let src = RgbaImage::from_fn(64, 40, |x, y| image::Rgba([(x * 4) as u8, (y * 6) as u8, ((x + y) * 2) as u8, 255]));
-        let depth = ramp(8, 5);
-        let look = DepthLook { blur: LensBlurMode::Point, blur_pct: 60, fog_pct: 30, ..DepthLook::default() };
-        assert!(DepthLook::default().apply_quick(&src, &depth, 16).is_none());
-        assert_eq!(look.apply_quick(&src, &depth, 64), look.apply(&src, &depth));
-        let full = look.apply(&src, &depth).expect("active");
-        let quick = look.apply_quick(&src, &depth, 16).expect("active");
-        assert_eq!(quick.dimensions(), src.dimensions());
-        assert_ne!(quick, full, "made at 16 px and resampled");
-        let mean = quick.as_raw().iter().zip(full.as_raw()).map(|(a, b)| u32::from(a.abs_diff(*b))).sum::<u32>() as f32 / full.as_raw().len() as f32;
-        assert!(mean < 6.0, "close to the full render: mean {mean}");
     }
 
     #[test]

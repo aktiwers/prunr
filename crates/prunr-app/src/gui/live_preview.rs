@@ -189,6 +189,70 @@ pub struct PreviewResult {
     /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
     /// on this so the mid-drag sidebar doesn't flicker.
     pub is_final: bool,
+    /// A drag's in-between frame of a large image: shown, never kept as
+    /// the result (see `QuickFrames`).
+    pub quick: bool,
+}
+
+/// What an image shows of a drag's quick frames: the newest one's
+/// texture, drawn over the image in place of the result. A quick frame is
+/// never the result, its step or its thumbnail; it stays up until the
+/// full-size render's texture lands, so the old result never flashes back.
+#[derive(Default)]
+pub(crate) struct QuickFrames {
+    /// The newest quick frame drained (0: none); only its texture is
+    /// taken, and the one before it stays up until it lands.
+    generation: u64,
+    texture: Option<egui::TextureHandle>,
+    /// A full-size render was applied after the frame: it goes when that
+    /// render's texture lands.
+    superseded: bool,
+}
+
+impl QuickFrames {
+    /// A quick frame of `generation` drained; its texture is on its way.
+    pub(crate) fn expect(&mut self, generation: u64) {
+        self.generation = generation;
+        self.superseded = false;
+    }
+
+    /// A quick frame's texture lands: kept when it is the newest drained.
+    pub(crate) fn land(&mut self, texture: egui::TextureHandle, generation: u64) {
+        if generation == self.generation {
+            self.texture = Some(texture);
+        }
+    }
+
+    /// A full-size render was applied: the frame stays until its texture
+    /// lands.
+    pub(crate) fn supersede(&mut self) {
+        self.superseded = true;
+    }
+
+    /// A result texture landed: a superseded frame goes.
+    pub(crate) fn result_landed(&mut self) {
+        if self.superseded {
+            self.clear();
+        }
+    }
+
+    /// Each frame: the frame goes once no drag works on the image any more
+    /// (a cancel, a render that could not be made) and no full-size
+    /// render's texture is on its way to replace it.
+    pub(crate) fn settle(&mut self, drag_under_way: bool) {
+        if !drag_under_way && !self.superseded {
+            self.clear();
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The frame to draw in place of the result, when one is up.
+    pub(crate) fn texture(&self) -> Option<&egui::TextureHandle> {
+        self.texture.as_ref()
+    }
 }
 
 /// Source of timestamps for `mark_tweak` / `flush` / `tick`. Production
@@ -423,6 +487,7 @@ impl LivePreview {
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let applied_color_strength = matches!(inputs.kind, PreviewKind::ColorizeTier2).then_some(inputs.settings.color_strength());
                 let applied_depth = inputs.settings.depth;
+                let quick = inputs.quick;
                 let version = inputs.version;
                 let start = inputs.start.clone();
                 let faced_key = inputs.faces.as_ref().map(|f| f.key.clone());
@@ -453,6 +518,7 @@ impl LivePreview {
                         applied_tier2_knobs,
                         applied_color_strength,
                         is_final: false,
+                        quick,
                     });
                 }
             });
@@ -621,20 +687,12 @@ impl DispatchInputs {
         }
     }
 
-    /// The long side of the image this render makes.
-    fn full_side(&self) -> u32 {
-        let (w, h) = match self.kind {
-            PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
-            PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
-            PreviewKind::Mask | PreviewKind::Edge => (self.original.width(), self.original.height()),
-        };
-        w.max(h)
-    }
-
     /// Whether a drag's in-between frame of this render is a quick one:
-    /// only an image larger than a quick frame has one.
+    /// a cut-out or lines of a photo larger than a quick frame. A kept
+    /// upscale or colorize run re-finishes at full size every frame.
     pub(crate) fn can_be_quick(&self) -> bool {
-        self.full_side() > QUICK_FRAME_SIDE
+        matches!(self.kind, PreviewKind::Mask | PreviewKind::Edge)
+            && self.original.width().max(self.original.height()) > QUICK_FRAME_SIDE
     }
 }
 
@@ -861,8 +919,15 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         None => None,
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
+    let full_width = inputs.original.width();
+    if inputs.quick {
+        inputs.original = quick_photo(&inputs.original);
+    }
     // The Depth chip's look goes on the faced photo, before the lines.
     let built_depth_photo = apply_depth_look(&mut inputs);
+    if inputs.quick {
+        shrink_to_quick_frame(&mut inputs, full_width);
+    }
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
     let output = run_photo_preview(inputs);
     RunOutput { built_faced, built_depth_photo, ..output }
@@ -872,6 +937,27 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
 /// in-between frames are quick; its settled render is full size.
 pub(crate) const QUICK_FRAME_SIDE: u32 = 2048;
 
+/// `photo` no larger than a quick frame.
+fn quick_photo(photo: &Arc<DynamicImage>) -> Arc<DynamicImage> {
+    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+    let (w, h) = (photo.width(), photo.height());
+    if w.max(h) <= QUICK_FRAME_SIDE {
+        return Arc::clone(photo);
+    }
+    let (qw, qh) = fit_long_side(w, h, QUICK_FRAME_SIDE);
+    Arc::new(DynamicImage::ImageRgba8(resize_rgba(&prunr_core::rgba_view(photo), qw, qh, ResizeFilter::Bilinear)))
+}
+
+/// Fit a quick frame's inputs to its smaller photo: the pixel-sized knobs
+/// scale with it, and the planes kept from full-size renders don't fit.
+fn shrink_to_quick_frame(inputs: &mut DispatchInputs, full_width: u32) {
+    let scale = inputs.original.width() as f32 / full_width.max(1) as f32;
+    inputs.settings = inputs.settings.at_scale(scale);
+    inputs.cached_edge = EdgePlanes::default();
+    inputs.cached_bold = EdgePlanes::default();
+    inputs.cached_masked_base = None;
+}
+
 /// Swap `inputs.original` for the photo with the Depth chip's look on it:
 /// the one made last time when it still matches, or a fresh one, which
 /// is returned with its key for the item to keep.
@@ -879,11 +965,11 @@ fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, c
     let depth = inputs.depth.as_ref()?;
     let look = depth.look.filter(prunr_core::depth::DepthLook::is_active)?;
     if let Some(photo) = &depth.photo {
-        inputs.original = Arc::clone(photo);
+        inputs.original = if inputs.quick { quick_photo(photo) } else { Arc::clone(photo) };
         return None;
     }
     if inputs.quick {
-        let looked = look.apply_quick(&prunr_core::rgba_view(&inputs.original), &depth.map, QUICK_FRAME_SIDE)?;
+        let looked = look.apply(&prunr_core::rgba_view(&inputs.original), &depth.map)?;
         inputs.original = Arc::new(DynamicImage::ImageRgba8(looked));
         return None;
     }
@@ -1117,7 +1203,7 @@ impl PreviewResult {
             new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None,
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-            applied_tier2_knobs: None, applied_color_strength: None, is_final: true,
+            applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,
         }
     }
 }
@@ -1434,6 +1520,42 @@ mod tests {
         assert!(!lp.works_on(1) && !lp.is_busy(), "a cancel drops the owed settle too");
     }
 
+    /// A quick frame stays up from its texture's landing until a full-size
+    /// render's texture lands: an older frame's late texture is dropped, a
+    /// newer frame outlives an earlier render, and a drag that ends with
+    /// no render coming takes its frame with it.
+    #[test]
+    fn a_quick_frame_stays_up_until_the_full_size_render_lands() {
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
+        let shown = |q: &QuickFrames| q.texture().map(|t| t.id());
+        let mut q = QuickFrames::default();
+        q.expect(5);
+        q.expect(7);
+        q.land(tex("5"), 5);
+        assert_eq!(shown(&q), None, "an older frame's texture is dropped");
+        let seven = tex("7");
+        q.land(seven.clone(), 7);
+        assert_eq!(shown(&q), Some(seven.id()));
+        q.settle(true);
+        assert_eq!(shown(&q), Some(seven.id()), "kept while the drag goes on");
+        q.supersede();
+        q.settle(false);
+        assert_eq!(shown(&q), Some(seven.id()), "kept until the render's texture lands");
+        q.expect(9);
+        q.result_landed();
+        assert_eq!(shown(&q), Some(seven.id()), "a newer frame outlives the earlier render");
+        q.supersede();
+        q.result_landed();
+        assert_eq!(shown(&q), None, "the render's texture took over");
+        q.land(tex("9"), 9);
+        assert_eq!(shown(&q), None, "a texture landing after the render is dropped");
+        q.expect(11);
+        q.land(tex("11"), 11);
+        q.settle(false);
+        assert_eq!(shown(&q), None, "a drag ended with no render coming");
+    }
+
     /// `tick` returning `None` (no remaining wait) is the readiness
     /// signal even when snapshot can't assemble inputs — the contract
     /// that matters here is that the entry is RECOGNISED as ready, not
@@ -1639,6 +1761,34 @@ mod tests {
         assert!(output.rgba.is_some(), "UpscaleTier2 dispatch must produce an RGBA result");
         assert!(output.built_edge.dilated.is_none(), "UpscaleTier2 must not build an edge mask");
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
+    }
+
+    /// A quick frame is made at `QUICK_FRAME_SIDE`, whatever full-size
+    /// planes earlier renders kept; a settled render stays full size.
+    #[test]
+    fn a_quick_frame_is_made_small_and_a_settled_render_full_size() {
+        use crate::gui::item_settings::ItemSettings;
+        let (w, h) = (QUICK_FRAME_SIDE * 2, 600);
+        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 150, 255]))));
+        let full_plane = Arc::new(GrayImage::new(w, h));
+        let settings = ItemSettings { edge_shift: 8.0, feather: 4.0, line_mode: LineMode::EdgesOnly, ..ItemSettings::default() };
+        for kind in [PreviewKind::Mask, PreviewKind::Edge] {
+            let inputs = |quick: bool| DispatchInputs {
+                quick,
+                seg_tensor: Some(Arc::new(SegTensor { data: (0..64).map(|i| i as f32 / 64.0).collect(), height: 8, width: 8, model: ModelKind::Silueta })),
+                edge_tensor: Some(EdgeTensor { data: Arc::new(vec![0.5; 64]), height: 8, width: 8 }),
+                cached_edge: EdgePlanes { base: Some(Arc::clone(&full_plane)), dilated: Some(Arc::clone(&full_plane)) },
+                cached_masked_base: Some(Arc::new(RgbaImage::new(w, h))),
+                ..DispatchInputs::new(kind, 0, Arc::clone(&photo), settings)
+            };
+            assert!(inputs(false).can_be_quick(), "{kind:?}");
+            let quick = run_preview(inputs(true), &AtomicBool::new(false)).rgba.expect("rendered");
+            assert_eq!(quick.dimensions(), (QUICK_FRAME_SIDE, 300), "{kind:?}");
+            let settled = run_preview(inputs(false), &AtomicBool::new(false)).rgba.expect("rendered");
+            assert_eq!(settled.dimensions(), (w, h), "{kind:?}");
+        }
+        let upscale = DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), settings);
+        assert!(!upscale.can_be_quick(), "a kept run re-finishes at full size");
     }
 
     /// No model's photo preview puts the Depth chip's look on the photo,

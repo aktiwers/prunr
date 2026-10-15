@@ -39,20 +39,3 @@ fn blur_rgba_against_fast_blur() {
         println!("sigma {sigma}: fast_blur {fast:?}, blur_rgba {ours:?}, {}", diff(&a, &b));
     }
 }
-
-/// The lens look at full size against the quick render a drag uses.
-#[test]
-#[ignore]
-fn lens_look_full_against_quick() {
-    use prunr_core::depth::{DepthLook, DepthMap, LensBlurMode};
-    let src = photo(6000, 4000);
-    let depth = DepthMap::from_raw(60, 40, (0..2400).map(|i| (i % 40) as f32 / 40.0).collect());
-    let look = DepthLook { blur: LensBlurMode::Point, blur_pct: 60, fog_pct: 20, ..DepthLook::default() };
-    let t = Instant::now();
-    let full = look.apply(&src, &depth).expect("active");
-    let full_t = t.elapsed();
-    let t = Instant::now();
-    let quick = look.apply_quick(&src, &depth, 2048).expect("active");
-    let quick_t = t.elapsed();
-    println!("lens look 24 MP: full {full_t:?}, quick(2048) {quick_t:?}, {}", diff(&full, &quick));
-}

@@ -148,6 +148,10 @@ impl PrunrApp {
         if !results.is_empty() {
             self.apply_completed_previews(ctx, results);
         }
+        let live = &self.processor.live_preview;
+        for item in &mut self.batch.items {
+            item.quick.settle(live.works_on(item.id));
+        }
 
         // Covers the worker-running / not-yet-drained window. Same
         // self-extinguishing 50ms poll as the tex_pending loop in `logic()`.
@@ -361,6 +365,22 @@ impl PrunrApp {
                     // Computed for a state the item has since left.
                     continue;
                 }
+                if r.quick {
+                    // Shown only: the result, its step, its recipe and its
+                    // thumbnail wait for the full-size render. The faced
+                    // photo is made at full size before the frame shrinks.
+                    if let Some(faced) = r.new_faced {
+                        item.faced_photo = Some(faced);
+                    }
+                    if item.on_screen {
+                        item.quick.expect(r.generation);
+                        Self::spawn_tex_prep(
+                            r.rgba, item.id, Self::tex_name("quick", item.id, None),
+                            TexTarget::QuickFrame(r.generation), handles.clone(), ctx.clone(),
+                        );
+                    }
+                    continue;
+                }
                 let is_upscale_tier2 = matches!(r.kind, PreviewKind::UpscaleTier2);
                 let new_rgba = r.rgba;
                 item.unpark_result();
@@ -435,7 +455,9 @@ impl PrunrApp {
                         Arc::clone(&new_rgba), item.id, Self::tex_name("result", item.id, Some(switch)),
                         TexTarget::LiveResult, handles.clone(), ctx.clone(),
                     );
+                    item.quick.supersede();
                 } else {
+                    item.quick.clear();
                     item.result_tex_pending = false;
                     item.drop_hot_tensors();
                     item.source_dyn = None;
@@ -588,6 +610,105 @@ mod upscale_tier2_routing_tests {
                 "knob '{knob_name}' diff must resolve to UpscaleTier2 \
                  so the live-preview gate fires for that knob",
             );
+        }
+    }
+}
+
+/// How a live render of each kind lands: a quick frame is shown and kept
+/// nowhere; a settled render is the result, as before quick frames.
+#[cfg(test)]
+mod landing_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use image::RgbaImage;
+    use super::PrunrApp;
+    use crate::gui::background_io::TexTarget;
+    use crate::gui::item::BatchStatus;
+    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use crate::gui::timeline::StepKind;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    /// Every kind a live render can be.
+    fn every_kind() -> [PreviewKind; 4] {
+        let all = [PreviewKind::Mask, PreviewKind::Edge, PreviewKind::UpscaleTier2, PreviewKind::ColorizeTier2];
+        for kind in all {
+            // A new kind fails to compile here until it joins `all`.
+            match kind {
+                PreviewKind::Mask | PreviewKind::Edge | PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => {}
+            }
+        }
+        all
+    }
+
+    /// A result on screen, its step recorded.
+    fn shown() -> (PrunrApp, Arc<RgbaImage>) {
+        let mut app = PrunrApp::new_for_test();
+        let item = push_test_item(&mut app, 1);
+        let result = Arc::new(RgbaImage::new(2, 2));
+        item.result_rgba = Some(Arc::clone(&result));
+        item.status = BatchStatus::Done;
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+        item.commit(StepKind::Process);
+        item.set_on_screen(true);
+        app.batch.select_item(0);
+        (app, result)
+    }
+
+    /// A render of `kind` for the state shown, made with settings other
+    /// than the result's.
+    fn render(app: &PrunrApp, kind: PreviewKind, quick: bool, rgba: Arc<RgbaImage>) -> PreviewResult {
+        let mask = prunr_core::MaskSettings { gamma: 2.0, ..prunr_core::MaskSettings::default() };
+        PreviewResult {
+            kind,
+            quick,
+            generation: 3,
+            version: app.batch.items[0].timeline.version(),
+            applied_mask: prunr_core::MaskRecipe::from(&mask),
+            applied_tier2_knobs: (kind == PreviewKind::UpscaleTier2)
+                .then_some(prunr_core::upscale::Refine { sharpen: 0.7, sharpen_sigma: 2.0, ai_blend: 0.5, color_match: true }),
+            applied_color_strength: (kind == PreviewKind::ColorizeTier2).then_some(0.4),
+            ..PreviewResult::mask_for_test(1, rgba)
+        }
+    }
+
+    /// Land the next prepared texture on the item, as the frame loop does.
+    fn land_next_texture(app: &mut PrunrApp, ctx: &egui::Context) -> TexTarget {
+        let (id, name, image, target) = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
+        let texture = ctx.load_texture(name, image, Default::default());
+        app.batch.find_by_id_mut(id).expect("the item").land_texture(texture, target);
+        target
+    }
+
+    #[test]
+    fn a_quick_frame_is_shown_never_kept_and_a_settled_render_is_the_result() {
+        let ctx = egui::Context::default();
+        for kind in every_kind() {
+            let (mut app, result) = shown();
+            let recipe = app.batch.items[0].applied_recipe.clone();
+            let version = app.batch.items[0].timeline.version();
+
+            let frame = render(&app, kind, true, Arc::new(RgbaImage::new(1, 1)));
+            app.apply_completed_previews(&ctx, vec![frame]);
+            let item = &app.batch.items[0];
+            assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &result)), "{kind:?}: the result stays");
+            assert!(item.timeline.current().result.as_ref().is_some_and(|r| r.holds(&result)), "{kind:?}: so does its step");
+            assert_eq!(item.applied_recipe, recipe, "{kind:?}: and the recipe that made it");
+            assert_eq!(item.timeline.version(), version, "{kind:?}");
+            assert!(!item.thumb_pending && !item.result_tex_pending, "{kind:?}: no thumbnail or result texture");
+            assert_eq!(land_next_texture(&mut app, &ctx), TexTarget::QuickFrame(3), "{kind:?}: the frame's own texture");
+            assert!(app.batch.items[0].quick.texture().is_some(), "{kind:?}: shown");
+
+            let settled = Arc::new(RgbaImage::new(2, 2));
+            let full = render(&app, kind, false, Arc::clone(&settled));
+            app.apply_completed_previews(&ctx, vec![full]);
+            let item = &app.batch.items[0];
+            assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &settled)), "{kind:?}: a settled render is the result");
+            assert!(item.timeline.current().result.as_ref().is_some_and(|r| r.holds(&settled)), "{kind:?}: of the shown step");
+            assert_ne!(item.applied_recipe, recipe, "{kind:?}: made with the settings it rendered");
+            assert!(item.thumb_pending && item.result_tex_pending, "{kind:?}: its thumbnail and texture follow");
+            assert!(item.quick.texture().is_some(), "{kind:?}: the frame stays until that texture lands");
+            assert_eq!(land_next_texture(&mut app, &ctx), TexTarget::LiveResult);
+            assert!(app.batch.items[0].quick.texture().is_none(), "{kind:?}: then goes");
         }
     }
 }
