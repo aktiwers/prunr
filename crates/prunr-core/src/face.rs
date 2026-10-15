@@ -2,7 +2,10 @@
 //! face is aligned to the FFHQ 512 template and a restorer (GFPGAN v1.4
 //! or RestoreFormer++) redraws it. Finding and redrawing run once
 //! (`find_and_restore`); `compose_faces` blends what they kept back into
-//! the photo at a strength, cheaply enough to follow a slider.
+//! the photo at a strength, cheaply enough to follow a slider. While they
+//! run, the faces are reported as soon as they are found
+//! (`ProgressUpdate::Faces`) and each redrawn one as a preview of how it
+//! blends in, so a listener can show them one at a time.
 //!
 //! The blend is where this differs from a plain fade between the photo
 //! and the restored face, which doubles every edge halfway:
@@ -20,7 +23,7 @@ use image::{Rgb, RgbImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::Session, value::Tensor};
 
-use crate::progress::{Progress, Step, Unit};
+use crate::progress::{Progress, ProgressUpdate, Step, Unit};
 use crate::types::CoreError;
 
 /// The restorers' input and output side.
@@ -48,6 +51,10 @@ const MIN_EYE_DIST_PX: f32 = 8.0;
 /// face shape below, skin, hair and eye detail above.
 const DETAIL_SIGMA: f32 = 6.0;
 
+/// A mask weight below this moves no pixel by half a level, so the blend
+/// leaves the pixel as it was.
+const HALF_LEVEL: f32 = 0.5 / 255.0;
+
 /// One face the detector found, in photo pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Face {
@@ -57,15 +64,61 @@ pub struct Face {
     pub landmarks: [[f32; 2]; 5],
 }
 
+/// Where a found face sits in its photo: its alignment onto the
+/// restorers' crop, its box, and the photo's size. Enough to outline the
+/// face, tell the largest and focus on it before it is redrawn.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FacePlace {
+    to_crop: Similarity,
+    /// The detector's box, x0, y0, x1, y1 in photo pixels.
+    bbox: [f32; 4],
+    /// The photo it was found in, width and height.
+    photo_size: [u32; 2],
+}
+
+impl FacePlace {
+    /// Where `face`, found in a photo of `photo_size`, sits.
+    pub fn of(face: &Face, photo_size: [u32; 2]) -> Self {
+        Self { to_crop: Similarity::fit(&face.landmarks, &TEMPLATE), bbox: face.bbox, photo_size }
+    }
+
+    /// The face's box as fractions of the photo (x0, y0, x1, y1), within it.
+    pub fn bounds(&self) -> [f32; 4] {
+        let [w, h] = self.photo_size.map(|v| v.max(1) as f32);
+        let [x0, y0, x1, y1] = self.bbox;
+        [x0 / w, y0 / h, x1 / w, y1 / h].map(|v| v.clamp(0.0, 1.0))
+    }
+
+    /// The area its redraw covers in the photo: the crop's face ellipse
+    /// (with `hair`, the larger one) taken back through the alignment.
+    pub fn area(&self, hair: bool) -> FaceArea {
+        let (cx, cy, rx, ry) = face_ellipse(hair);
+        let back = self.to_crop.inverse();
+        let scale = back.scale();
+        FaceArea { center: back.apply([cx, cy]), radii: [rx * scale, ry * scale], angle: back.b.atan2(back.a), photo_size: self.photo_size }
+    }
+
+    /// The photo pixels a blend with `hair` can change, as (x, y, w, h):
+    /// where the soft face mask reaches, clipped to the photo.
+    fn reach(&self, hair: bool) -> Option<(u32, u32, u32, u32)> {
+        let [u0, v0, u1, v1] = face_mask(hair).reach;
+        let back = self.to_crop.inverse();
+        let corners = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]].map(|p| back.apply(p));
+        let [w, h] = self.photo_size;
+        let lo = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MAX, f32::min).floor().max(0.0) as u32).min(max);
+        let hi = |i: usize, max: u32| ((corners.iter().map(|p| p[i]).fold(f32::MIN, f32::max).ceil() + 1.0).max(0.0) as u32).min(max);
+        let (x0, y0, x1, y1) = (lo(0, w), lo(1, h), hi(0, w), hi(1, h));
+        (x1 > x0 && y1 > y0).then(|| (x0, y0, x1 - x0, y1 - y0))
+    }
+}
+
 /// A face found and redrawn, prepared for blending at any strength: the
 /// aligned crop of the photo and the restorer's version colour-matched to
 /// it, each split into shading (`*_low`) and detail. About 3 MB per face;
 /// what a strength change does is then a per-pixel mix.
 #[derive(Clone)]
 pub struct RestoredFace {
-    to_crop: Similarity,
-    /// The photo it was found in, width and height.
-    photo_size: [u32; 2],
+    place: FacePlace,
     original: RgbImage,
     restored: RgbImage,
     original_low: RgbImage,
@@ -73,8 +126,8 @@ pub struct RestoredFace {
 }
 
 impl RestoredFace {
-    fn new(to_crop: Similarity, photo_size: [u32; 2], original: RgbImage, restored: RgbImage) -> Self {
-        let mask = face_mask(false);
+    fn new(place: FacePlace, original: RgbImage, restored: RgbImage) -> Self {
+        let mask = &face_mask(false).weights;
         let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
         let original_planes = planes(&original);
         let restored_planes = colour_matched(planes(&restored), &original_planes, mask);
@@ -84,8 +137,7 @@ impl RestoredFace {
             Rgb(std::array::from_fn(|c| p[c][i].round().clamp(0.0, 255.0) as u8))
         });
         Self {
-            to_crop,
-            photo_size,
+            place,
             original_low: image(&low(&original_planes)),
             restored_low: image(&low(&restored_planes)),
             restored: image(&restored_planes),
@@ -95,13 +147,15 @@ impl RestoredFace {
 }
 
 impl RestoredFace {
-    /// The area its redraw covers in the photo: the crop's face ellipse
-    /// (with `hair`, the larger one) taken back through the alignment.
-    pub fn area(&self, hair: bool) -> FaceArea {
-        let (cx, cy, rx, ry) = face_ellipse(hair);
-        let back = self.to_crop.inverse();
-        let scale = back.scale();
-        FaceArea { center: back.apply([cx, cy]), radii: [rx * scale, ry * scale], angle: back.b.atan2(back.a), photo_size: self.photo_size }
+    pub fn place(&self) -> &FacePlace {
+        &self.place
+    }
+
+    /// A face at `place` that the restorer left as it was.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn unchanged_for_test(place: FacePlace) -> Self {
+        let grey = RgbImage::from_pixel(FACE_SIZE, FACE_SIZE, Rgb([128, 128, 128]));
+        Self::new(place, grey.clone(), grey)
     }
 }
 
@@ -116,18 +170,74 @@ pub struct FaceArea {
 }
 
 /// The face "Largest" redraws: the one its alignment shrinks most.
-pub fn largest_face(faces: &[RestoredFace]) -> Option<usize> {
-    faces.iter().enumerate().min_by(|(_, a), (_, b)| a.to_crop.scale().total_cmp(&b.to_crop.scale())).map(|(i, _)| i)
+pub fn largest_face<'a>(faces: impl IntoIterator<Item = &'a FacePlace>) -> Option<usize> {
+    faces.into_iter().enumerate().min_by(|(_, a), (_, b)| a.to_crop.scale().total_cmp(&b.to_crop.scale())).map(|(i, _)| i)
 }
 
 /// Find every face in `image` and redraw it with `id`'s restorer, loading
-/// the models for this one photo.
+/// the models for this one photo. `blend` is how previews show each face
+/// blended in; what is returned is the same whatever it is.
 ///
 /// Peak working set: the detector's input (≤ 1280² × 3 f32, 20 MB), the
 /// restorer session (~1.2 GB for GFPGAN while it runs), and two 512²
-/// RGB crops per face (1.5 MB each face).
-pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
-    FaceRestorer::new(id)?.find_and_restore(image, progress)
+/// RGB crops per face (1.5 MB each face). With previews asked for, one
+/// face blended at a time on top: its 512² RGB f32 planes (3 MB) and its
+/// preview, at most the preview's own size (1536² × 4 = 9 MB for a face
+/// filling the photo; a few hundred KB for a face in a group).
+pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
+    FaceRestorer::new(id)?.find_and_restore(image, blend, progress)
+}
+
+/// The face detector built into the app (YuNet), loaded once for as many
+/// photos as its owner looks at.
+pub struct FaceFinder {
+    detector: Session,
+}
+
+impl FaceFinder {
+    pub fn new() -> Result<Self, CoreError> {
+        let bytes = prunr_models::resolve_bytes(prunr_models::ModelId::YuNet)
+            .ok_or_else(|| CoreError::Inference("the face finder is missing from this build".into()))?;
+        let detector = crate::ort_runtime::session_builder()?
+            .commit_from_memory(&bytes)
+            .map_err(|e| CoreError::Inference(format!("face finder: {e}")))?;
+        Ok(Self { detector })
+    }
+
+    /// The faces in `image`, best first.
+    pub fn find(&mut self, image: &RgbaImage) -> Result<Vec<Face>, CoreError> {
+        detect(&mut self.detector, image.dimensions(), |w, h| crate::formats::resize_rgba(image, w, h, crate::formats::ResizeFilter::Bilinear))
+    }
+
+    /// `find` for a decoded photo in any layout: it is shrunk as it is,
+    /// never expanded to a full-size RGBA copy first.
+    pub fn find_decoded(&mut self, photo: &image::DynamicImage) -> Result<Vec<Face>, CoreError> {
+        use image::GenericImageView;
+        detect(&mut self.detector, photo.dimensions(), |w, h| crate::formats::resize_to_rgba(photo, w, h, crate::formats::ResizeFilter::Bilinear))
+    }
+}
+
+/// A face finder built at the first photo that asks and kept for the
+/// rest; one that fails to build is tried again at the next photo.
+#[derive(Default)]
+pub struct LazyFaceFinder(Option<FaceFinder>);
+
+impl LazyFaceFinder {
+    /// Where the faces `find` sees in a photo of `photo_size` sit; none
+    /// when the finder fails, which is logged.
+    pub fn places(&mut self, photo_size: [u32; 2], find: impl FnOnce(&mut FaceFinder) -> Result<Vec<Face>, CoreError>) -> Vec<FacePlace> {
+        if self.0.is_none() {
+            self.0 = FaceFinder::new().map_err(|err| tracing::warn!(%err, "face finder unavailable")).ok();
+        }
+        let Some(finder) = self.0.as_mut() else { return Vec::new() };
+        match find(finder) {
+            Ok(faces) => faces.iter().map(|f| FacePlace::of(f, photo_size)).collect(),
+            Err(err) => {
+                tracing::warn!(%err, "face finder failed");
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// A face model loaded once for several photos (a command-line batch).
@@ -135,50 +245,111 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, progress: 
 /// until this is dropped.
 pub struct FaceRestorer {
     id: prunr_models::ModelId,
-    detector: Session,
+    finder: FaceFinder,
     restorer_path: std::path::PathBuf,
     restorer: Option<Session>,
 }
 
 impl FaceRestorer {
     pub fn new(id: prunr_models::ModelId) -> Result<Self, CoreError> {
-        let parts = prunr_models::multi_part_paths(id)
-            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        let part = |key: &str| parts.iter().find(|(k, _)| *k == key).map(|(_, p)| p.clone())
-            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no {key} part")));
-        Ok(Self { id, detector: load(&part("detector")?)?, restorer_path: part("restorer")?, restorer: None })
+        let restorer_path = prunr_models::multi_part_paths(id)
+            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?
+            .into_iter()
+            .find_map(|(key, path)| (key == "restorer").then_some(path))
+            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no restorer part")))?;
+        Ok(Self { id, finder: FaceFinder::new()?, restorer_path, restorer: None })
     }
 
-    pub fn find_and_restore(&mut self, image: &RgbaImage, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
+    /// `find_and_restore` with the models this holds.
+    pub fn find_and_restore(&mut self, image: &RgbaImage, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
         progress.step(Step::FindingFaces);
-        let faces = detect(&mut self.detector, image)?;
+        let faces = self.finder.find(image)?;
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
         if faces.is_empty() {
             return Ok(Vec::new());
         }
+        // Before the restorer loads, which takes seconds the first time.
+        let places = report_found(image, &faces, progress);
         if self.restorer.is_none() {
             progress.step(Step::LoadingModel);
             self.restorer = Some(load(&self.restorer_path)?);
         }
         let restorer = self.restorer.as_mut().ok_or_else(|| CoreError::Inference(format!("face model {:?}: restorer not loaded", self.id)))?;
-        progress.step(Step::RestoringFaces);
-        let total = faces.len() as u32;
-        let mut out = Vec::with_capacity(faces.len());
-        for (i, face) in faces.iter().enumerate() {
-            if progress.is_cancelled() {
-                return Err(CoreError::Cancelled);
-            }
-            progress.outer(i as u32, total, Unit::Face);
-            let to_crop = Similarity::fit(&face.landmarks, &TEMPLATE);
-            let original = warp_to_crop(image, &to_crop);
-            let restored = restore(restorer, &original)?;
-            out.push(RestoredFace::new(to_crop, [image.width(), image.height()], original, restored));
-        }
-        progress.outer(total, total, Unit::Face);
-        Ok(out)
+        restore_each(image, &places, blend, progress, |crop| restore(restorer, crop))
     }
+}
+
+/// Where each detected face sits in `image`, reported as soon as known.
+fn report_found(image: &RgbaImage, faces: &[Face], progress: &Progress) -> Vec<FacePlace> {
+    let places: Vec<FacePlace> = faces.iter().map(|f| FacePlace::of(f, [image.width(), image.height()])).collect();
+    progress.report(ProgressUpdate::Faces(places.clone()));
+    places
+}
+
+/// Redraw the face at each of `places` in `image` with `redraw`, in
+/// order, reporting each one `blend` redraws as a preview once it is done.
+fn restore_each(
+    image: &RgbaImage,
+    places: &[FacePlace],
+    blend: FaceBlend,
+    progress: &Progress,
+    mut redraw: impl FnMut(&RgbImage) -> Result<RgbImage, CoreError>,
+) -> Result<Vec<RestoredFace>, CoreError> {
+    progress.step(Step::RestoringFaces);
+    let total = places.len() as u32;
+    let redrawn = blend.redrawn(places);
+    let mut out = Vec::with_capacity(places.len());
+    for (i, place) in places.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        progress.outer(i as u32, total, Unit::Face);
+        let original = warp_to_crop(image, &place.to_crop);
+        let restored = redraw(&original)?;
+        let face = RestoredFace::new(*place, original, restored);
+        if redrawn(i) && !progress.is_cancelled() {
+            report_preview(image, &face, blend, progress);
+        }
+        out.push(face);
+    }
+    progress.outer(total, total, Unit::Face);
+    Ok(out)
+}
+
+/// Report `face` as `blend` draws it into `image`, as a preview to lay
+/// over the image shown: the blended face, with the soft face mask (times
+/// the photo's alpha) as its alpha, over the pixels the mask reaches.
+/// Over the photo it shows what the blend makes there and leaves the rest
+/// as it is; over a cut-out of the photo, the cut-out shows round the face.
+fn report_preview(image: &RgbaImage, face: &RestoredFace, blend: FaceBlend, progress: &Progress) {
+    let strength = blend.strength.clamp(0.0, 1.0);
+    let Some(rect) = face.place.reach(blend.hair).filter(|_| strength > 0.0) else { return };
+    progress.tile_preview(rect, image.dimensions(), |w, h| {
+        let blended = blend_face(face, &Base::stored(face), strength);
+        let mask = &face_mask(blend.hair).weights;
+        let (x0, y0) = (rect.0 as f32, rect.1 as f32);
+        let (step_x, step_y) = (rect.2 as f32 / w as f32, rect.3 as f32 / h as f32);
+        let (last_x, last_y) = (image.width() - 1, image.height() - 1);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for py in 0..h {
+            for px in 0..w {
+                // The preview pixel's centre, in photo pixels.
+                let (x, y) = (x0 + (px as f32 + 0.5) * step_x - 0.5, y0 + (py as f32 + 0.5) * step_y - 0.5);
+                let [u, v] = face.place.to_crop.apply([x, y]);
+                if !in_crop(u, v) {
+                    rgba.extend([0; 4]);
+                    continue;
+                }
+                let photo_alpha = f32::from(image.get_pixel((x.round().max(0.0) as u32).min(last_x), (y.round().max(0.0) as u32).min(last_y))[3]);
+                let alpha = (sample_crop(mask, u, v) * photo_alpha).round().clamp(0.0, 255.0) as u8;
+                let [r, g, b] = std::array::from_fn(|c| sample_crop(&blended[c], u, v).round().clamp(0.0, 255.0) as u8);
+                rgba.extend([r, g, b, alpha]);
+            }
+        }
+        rgba
+    });
 }
 
 fn load(path: &std::path::Path) -> Result<Session, CoreError> {
@@ -187,13 +358,13 @@ fn load(path: &std::path::Path) -> Result<Session, CoreError> {
         .map_err(|e| CoreError::Inference(format!("face model {}: {e}", path.display())))
 }
 
-/// YuNet over the photo, scaled to `DETECT_MAX_SIDE` and padded to a
-/// multiple of 32. Returns faces in photo pixels, best first.
-fn detect(session: &mut Session, image: &RgbaImage) -> Result<Vec<Face>, CoreError> {
-    let (w, h) = image.dimensions();
+/// YuNet over a `w × h` photo, which `shrink(sw, sh)` gives scaled to
+/// `DETECT_MAX_SIDE`, padded to a multiple of 32. Returns faces in photo
+/// pixels, best first.
+fn detect(session: &mut Session, (w, h): (u32, u32), shrink: impl FnOnce(u32, u32) -> RgbaImage) -> Result<Vec<Face>, CoreError> {
     let scale = (DETECT_MAX_SIDE as f32 / w.max(h) as f32).min(1.0);
     let (sw, sh) = (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1));
-    let small = crate::formats::resize_rgba(image, sw, sh, crate::formats::ResizeFilter::Bilinear);
+    let small = shrink(sw, sh);
     let (pw, ph) = (sw.div_ceil(32) * 32, sh.div_ceil(32) * 32);
     // YuNet reads BGR at 0-255.
     let mut input = Array4::<f32>::zeros((1, 3, ph as usize, pw as usize));
@@ -283,7 +454,7 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
 }
 
 /// Rotation, uniform scale and shift: `q = [[a, -b], [b, a]]·p + t`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Similarity {
     a: f32,
     b: f32,
@@ -391,6 +562,16 @@ impl Default for FaceBlend {
     }
 }
 
+impl FaceBlend {
+    /// Whether it redraws face `i` of `faces`: every face, or with
+    /// `largest_only` the largest.
+    pub fn redrawn<'a>(&self, faces: impl IntoIterator<Item = &'a FacePlace>) -> impl Fn(usize) -> bool {
+        let largest = self.largest_only.then(|| largest_face(faces)).flatten();
+        let all = !self.largest_only;
+        move |i| all || largest == Some(i)
+    }
+}
+
 /// `image` with the faces blended back as `blend` says. Pure and
 /// crop-local: tens of ms per face.
 pub fn compose_faces(image: &RgbaImage, faces: &[RestoredFace], blend: FaceBlend) -> RgbaImage {
@@ -417,8 +598,9 @@ fn compose(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend, retake
     if strength == 0.0 || faces.is_empty() {
         return;
     }
-    let mask = face_mask(blend.hair);
-    let chosen: Vec<&RestoredFace> = if blend.largest_only { largest_face(faces).map(|i| &faces[i]).into_iter().collect() } else { faces.iter().collect() };
+    let mask = &face_mask(blend.hair).weights;
+    let redrawn = blend.redrawn(faces.iter().map(RestoredFace::place));
+    let chosen: Vec<&RestoredFace> = faces.iter().enumerate().filter(|&(i, _)| redrawn(i)).map(|(_, f)| f).collect();
     use rayon::prelude::*;
     let target: &RgbaImage = out;
     let blended: Vec<[Vec<f32>; 3]> = chosen.par_iter().map(|face| {
@@ -430,13 +612,31 @@ fn compose(out: &mut RgbaImage, faces: &[RestoredFace], blend: FaceBlend, retake
     }
 }
 
-/// The crop's face area, soft-edged, as 0-1 weights over the 512 crop:
-/// an ellipse from brow to chin on the FFHQ template, or with `hair` one
-/// that takes in the hair and ears. Built once per kind.
-fn face_mask(hair: bool) -> &'static [f32] {
-    static FACE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    static WITH_HAIR: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
-    if hair { WITH_HAIR.get_or_init(|| build_face_mask(true)) } else { FACE.get_or_init(|| build_face_mask(false)) }
+/// The crop's face area, soft-edged: an ellipse from brow to chin on the
+/// FFHQ template, or with `hair` one that takes in the hair and ears.
+struct FaceMask {
+    /// 0-1 over the 512 crop.
+    weights: Vec<f32>,
+    /// Where in the crop (u0, v0, u1, v1) a sample of the weights can
+    /// reach `HALF_LEVEL`: outside it a blend changes no pixel.
+    reach: [f32; 4],
+}
+
+/// The face mask of each kind, built once.
+fn face_mask(hair: bool) -> &'static FaceMask {
+    static FACE: std::sync::OnceLock<FaceMask> = std::sync::OnceLock::new();
+    static WITH_HAIR: std::sync::OnceLock<FaceMask> = std::sync::OnceLock::new();
+    let build = || {
+        let weights = build_face_mask(hair);
+        let n = FACE_SIZE as usize;
+        let reach = weights.iter().enumerate().filter(|&(_, &w)| w >= HALF_LEVEL).fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |r, (i, _)| {
+            let (x, y) = ((i % n) as f32, (i / n) as f32);
+            [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)]
+        });
+        // A bilinear sample reads the next pixel too.
+        FaceMask { weights, reach: [reach[0] - 1.0, reach[1] - 1.0, reach[2] + 1.0, reach[3] + 1.0] }
+    };
+    if hair { WITH_HAIR.get_or_init(build) } else { FACE.get_or_init(build) }
 }
 
 /// The face ellipse on the FFHQ crop: centre and radii, brow to chin, or
@@ -505,14 +705,14 @@ impl<'a> Base<'a> {
     /// are a mean shift apart, so moving the restoration by the change in
     /// the face's mean colour keeps it matched.
     fn retaken(face: &RestoredFace, image: &RgbaImage) -> Self {
-        let original = warp_to_crop(image, &face.to_crop);
+        let original = warp_to_crop(image, &face.place.to_crop);
         let planes: [Vec<f32>; 3] = std::array::from_fn(|c| original.pixels().map(|p| f32::from(p[c])).collect());
         let low: [Vec<f32>; 3] = std::array::from_fn(|c| gaussian(&planes[c], FACE_SIZE, DETAIL_SIGMA));
         let original_low = RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
             let i = (y * FACE_SIZE + x) as usize;
             Rgb(std::array::from_fn(|c| low[c][i].round().clamp(0.0, 255.0) as u8))
         });
-        let mask = face_mask(false);
+        let mask = &face_mask(false).weights;
         let weight = mask.iter().sum::<f32>().max(f32::EPSILON);
         let mean = |img: &RgbImage, c: usize| img.pixels().zip(mask).map(|(p, m)| f32::from(p[c]) * m).sum::<f32>() / weight;
         let shift = std::array::from_fn(|c| mean(&original, c) - mean(&face.original, c));
@@ -526,7 +726,7 @@ impl<'a> Base<'a> {
 /// proportion. A face's own sharpness can't decide this: an upscaler's
 /// invented edges measure as sharp as real detail.
 fn detail_reach(face: &RestoredFace) -> f32 {
-    face.to_crop.scale().clamp(0.25, 1.0)
+    face.place.to_crop.scale().clamp(0.25, 1.0)
 }
 
 /// `restored` shifted to the original's mean brightness and colour over
@@ -566,37 +766,45 @@ fn colour_matched(restored: [Vec<f32>; 3], original: &[Vec<f32>; 3], mask: &[f32
 /// Paste the blended crop into `out` through the face mask, over the
 /// photo pixels the crop covers. Alpha is left as it was.
 fn paste(out: &mut RgbaImage, face: &RestoredFace, blended: &[Vec<f32>; 3], mask: &[f32]) {
-    let to_photo = face.to_crop.inverse();
+    let to_photo = face.place.to_crop.inverse();
     let corners = [[0.0, 0.0], [FACE_SIZE as f32, 0.0], [0.0, FACE_SIZE as f32], [FACE_SIZE as f32, FACE_SIZE as f32]].map(|p| to_photo.apply(p));
     let (w, h) = out.dimensions();
     let lo = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MAX, f32::min).floor().max(0.0) as u32).min(max);
     let hi = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MIN, f32::max).ceil().max(0.0) as u32).min(max);
-    let n = FACE_SIZE as usize;
-    let sample = |plane: &[f32], u: f32, v: f32| -> f32 {
-        let (u0, v0) = (u.floor(), v.floor());
-        let (fu, fv) = (u - u0, v - v0);
-        let at = |x: f32, y: f32| plane[(y as usize).min(n - 1) * n + (x as usize).min(n - 1)];
-        let top = at(u0, v0) * (1.0 - fu) + at(u0 + 1.0, v0) * fu;
-        let bottom = at(u0, v0 + 1.0) * (1.0 - fu) + at(u0 + 1.0, v0 + 1.0) * fu;
-        top * (1.0 - fv) + bottom * fv
-    };
     for y in lo(1, h)..hi(1, h) {
         for x in lo(0, w)..hi(0, w) {
-            let [u, v] = face.to_crop.apply([x as f32, y as f32]);
-            if !(0.0..(FACE_SIZE - 1) as f32).contains(&u) || !(0.0..(FACE_SIZE - 1) as f32).contains(&v) {
+            let [u, v] = face.place.to_crop.apply([x as f32, y as f32]);
+            if !in_crop(u, v) {
                 continue;
             }
-            let m = sample(mask, u, v);
+            let m = sample_crop(mask, u, v);
             if m <= 0.0 {
                 continue;
             }
             let p = out.get_pixel_mut(x, y);
             for c in 0..3 {
-                let value = f32::from(p[c]) * (1.0 - m) + sample(&blended[c], u, v) * m;
+                let value = f32::from(p[c]) * (1.0 - m) + sample_crop(&blended[c], u, v) * m;
                 p[c] = value.round().clamp(0.0, 255.0) as u8;
             }
         }
     }
+}
+
+/// Whether crop point (`u`, `v`) has the four pixels a bilinear sample reads.
+fn in_crop(u: f32, v: f32) -> bool {
+    let inside = 0.0..(FACE_SIZE - 1) as f32;
+    inside.contains(&u) && inside.contains(&v)
+}
+
+/// Bilinear sample of a 512² crop plane, edges clamped.
+fn sample_crop(plane: &[f32], u: f32, v: f32) -> f32 {
+    let n = FACE_SIZE as usize;
+    let (u0, v0) = (u.floor(), v.floor());
+    let (fu, fv) = (u - u0, v - v0);
+    let at = |x: f32, y: f32| plane[(y as usize).min(n - 1) * n + (x as usize).min(n - 1)];
+    let top = at(u0, v0) * (1.0 - fu) + at(u0 + 1.0, v0) * fu;
+    let bottom = at(u0, v0 + 1.0) * (1.0 - fu) + at(u0 + 1.0, v0 + 1.0) * fu;
+    top * (1.0 - fv) + bottom * fv
 }
 
 #[cfg(test)]
@@ -649,9 +857,164 @@ mod tests {
         assert_eq!(f.landmarks[0], [20.0, 28.0]);
     }
 
+    fn placed(to_crop: Similarity, photo_size: [u32; 2]) -> FacePlace {
+        FacePlace { to_crop, bbox: [0.0; 4], photo_size }
+    }
+
+    /// A textured 900 × 600 photo with two faces as the detector reports
+    /// them: one at the crop's own size at (20, 10), one half that size
+    /// at (600, 50), right of the first.
+    fn two_faces() -> (RgbaImage, Vec<Face>) {
+        let image = RgbaImage::from_fn(900, 600, |x, y| Rgba([(x % 200) as u8 + 30, (y % 180) as u8 + 40, 120, 255]));
+        let face = |scale: f32, dx: f32, dy: f32| Face { score: 0.9, bbox: [0.0; 4], landmarks: TEMPLATE.map(|[x, y]| [x * scale + dx, y * scale + dy]) };
+        (image, vec![face(1.0, 20.0, 10.0), face(0.5, 600.0, 50.0)])
+    }
+
+    /// What the stand-in restorer draws: a fine check, about as much new
+    /// detail as a restorer adds to skin, nothing like the photo.
+    fn checks(_: &RgbImage) -> Result<RgbImage, CoreError> {
+        Ok(RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| if (x / 2 + y / 2) % 2 == 0 { Rgb([150, 140, 105]) } else { Rgb([115, 100, 135]) }))
+    }
+
+    fn previews(updates: &[ProgressUpdate]) -> Vec<&crate::progress::TilePreview> {
+        updates.iter().filter_map(|u| match u { ProgressUpdate::TilePreview(p) => Some(p), _ => None }).collect()
+    }
+
+    /// The faces are reported as soon as they are found, then each face,
+    /// once redrawn, as a preview over its own part of the photo, in the
+    /// order they were found.
+    #[test]
+    fn found_faces_are_reported_then_previewed_one_at_a_time() {
+        use crate::progress::{check_contract, RecordingSink};
+        let (image, faces) = two_faces();
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let progress = Progress::new(sink.clone()).with_tile_previews(1000);
+        progress.step(Step::FindingFaces);
+        let places = report_found(&image, &faces, &progress);
+        let center = places[0].area(false).center;
+        assert!((center[0] - 276.0).abs() < 0.01 && (center[1] - 290.0).abs() < 0.01, "where it was found: {center:?}");
+        let restored = restore_each(&image, &places, FaceBlend::default(), &progress, checks).expect("restored");
+        assert_eq!(restored.len(), 2);
+
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        let face = |n| ProgressUpdate::Outer { done: n, total: 2, unit: Unit::Face };
+        let without_pixels: Vec<_> = updates.iter().map(|u| match u {
+            ProgressUpdate::TilePreview(p) => format!("preview at {},{}", p.x, p.y),
+            u => format!("{u:?}"),
+        }).collect();
+        let at = |p: &FacePlace| {
+            let (x, y, ..) = p.reach(false).expect("on the photo");
+            format!("preview at {x},{y}")
+        };
+        assert_eq!(without_pixels, [
+            format!("{:?}", ProgressUpdate::Step(Step::FindingFaces)),
+            format!("{:?}", ProgressUpdate::Faces(places.clone())),
+            format!("{:?}", ProgressUpdate::Step(Step::RestoringFaces)),
+            format!("{:?}", face(0)), at(&places[0]),
+            format!("{:?}", face(1)), at(&places[1]),
+            format!("{:?}", face(2)),
+        ]);
+        let shown = previews(&updates);
+        assert!(shown.iter().all(|p| (p.full_width, p.full_height) == (900, 600)), "at the photo's own size");
+
+        let halved = std::sync::Arc::new(RecordingSink::default());
+        let progress = Progress::new(halved.clone()).with_tile_previews(450);
+        restore_each(&image, &places, FaceBlend::default(), &progress, checks).expect("restored");
+        let updates = halved.updates();
+        let small = previews(&updates)[0];
+        let alpha = |x: u32, y: u32| small.rgba[((y * small.width + x) * 4 + 3) as usize];
+        assert_eq!((small.full_width, small.full_height), (450, 300));
+        assert_eq!(alpha(small.width / 2, small.height / 2), 255, "the face's middle");
+        assert_eq!((alpha(0, 0), alpha(small.width - 1, small.height - 1)), (0, 0), "clear round the face");
+    }
+
+    /// Each preview laid over the photo shows what the blend makes of it
+    /// (the face at its strength, through its soft mask), and the blend
+    /// changes nothing outside the previews.
+    #[test]
+    fn a_face_preview_over_the_photo_is_the_blend() {
+        use crate::progress::RecordingSink;
+        let (image, faces) = two_faces();
+        for blend in [FaceBlend::default(), FaceBlend { strength: 1.0, hair: true, largest_only: false }] {
+            let sink = std::sync::Arc::new(RecordingSink::default());
+            let progress = Progress::new(sink.clone()).with_tile_previews(1000);
+            let places = report_found(&image, &faces, &Progress::none());
+            let restored = restore_each(&image, &places, blend, &progress, checks).expect("restored");
+            let blended = compose_faces(&image, &restored, blend);
+            let mut laid = image.clone();
+            for p in previews(&sink.updates()) {
+                for (i, px) in p.rgba.chunks_exact(4).enumerate() {
+                    let (x, y) = (p.x + i as u32 % p.width, p.y + i as u32 / p.width);
+                    let a = f32::from(px[3]) / 255.0;
+                    let under = laid.get_pixel_mut(x, y);
+                    for c in 0..3 {
+                        under[c] = (f32::from(under[c]) * (1.0 - a) + f32::from(px[c]) * a).round() as u8;
+                    }
+                }
+            }
+            let worst = laid.pixels().zip(blended.pixels()).map(|(a, b)| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0)).max();
+            assert!(worst <= Some(2), "{blend:?}: the previews differ from the blend by {worst:?}");
+            assert_ne!(blended, image, "the blend changed the faces");
+        }
+    }
+
+    /// Under "Largest" only the face it redraws is previewed; every face is
+    /// still redrawn, so turning it off needs no new search.
+    #[test]
+    fn largest_only_previews_only_the_largest_face() {
+        use crate::progress::RecordingSink;
+        let (image, faces) = two_faces();
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let progress = Progress::new(sink.clone()).with_tile_previews(1000);
+        let places = report_found(&image, &faces, &Progress::none());
+        let blend = FaceBlend { largest_only: true, ..FaceBlend::default() };
+        let restored = restore_each(&image, &places, blend, &progress, checks).expect("restored");
+        assert_eq!(restored.len(), 2);
+        let (x, y, ..) = places[0].reach(false).expect("on the photo");
+        assert_eq!(previews(&sink.updates()).iter().map(|p| (p.x, p.y)).collect::<Vec<_>>(), [(x, y)], "the crop-sized face only");
+    }
+
+    /// No preview is made unless one is asked for, nor when the blend
+    /// redraws nothing.
+    #[test]
+    fn no_preview_unless_asked_or_when_nothing_is_redrawn() {
+        use crate::progress::RecordingSink;
+        let (image, faces) = two_faces();
+        let places = report_found(&image, &faces, &Progress::none());
+        let unasked = std::sync::Arc::new(RecordingSink::default());
+        restore_each(&image, &places, FaceBlend::default(), &Progress::new(unasked.clone()), checks).expect("restored");
+        assert!(previews(&unasked.updates()).is_empty(), "not asked");
+        let at_zero = std::sync::Arc::new(RecordingSink::default());
+        let progress = Progress::new(at_zero.clone()).with_tile_previews(1000);
+        restore_each(&image, &places, FaceBlend { strength: 0.0, ..FaceBlend::default() }, &progress, checks).expect("restored");
+        assert!(previews(&at_zero.updates()).is_empty(), "strength 0 redraws nothing");
+    }
+
+    /// A stop asked for while a face is redrawn ends the search once that
+    /// face is done, without showing it.
+    #[test]
+    fn a_stop_ends_the_search_after_the_face_under_way() {
+        use crate::progress::RecordingSink;
+        let (image, faces) = two_faces();
+        let places = report_found(&image, &faces, &Progress::none());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let progress = Progress::new(sink.clone()).with_tile_previews(1000).with_cancel(stop.clone());
+        let mut redrawn = 0;
+        let result = restore_each(&image, &places, FaceBlend::default(), &progress, |crop| {
+            redrawn += 1;
+            stop.store(true, std::sync::atomic::Ordering::Release);
+            checks(crop)
+        });
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(redrawn, 1, "the face under way finishes, the next does not start");
+        assert!(previews(&sink.updates()).is_empty());
+    }
+
     fn face_of(original: RgbImage, restored: RgbImage) -> RestoredFace {
         // Crop pixel (u, v) is photo pixel (u, v) + (10, 20).
-        RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, [1000, 1000], original, restored)
+        RestoredFace::new(placed(Similarity { a: 1.0, b: 0.0, tx: -10.0, ty: -20.0 }, [1000, 1000]), original, restored)
     }
 
     /// A face's area is the crop's ellipse back in the photo: moved,
@@ -660,16 +1023,16 @@ mod tests {
     fn a_face_area_is_the_crop_ellipse_back_in_the_photo() {
         let flat = || RgbImage::from_pixel(512, 512, Rgb([120, 100, 90]));
         // Photo to crop: halve, then move by (-100, -50): the face is twice the crop's size.
-        let face = RestoredFace::new(Similarity { a: 0.5, b: 0.0, tx: -100.0, ty: -50.0 }, [2000, 1500], flat(), flat());
-        let area = face.area(false);
+        let face = RestoredFace::new(placed(Similarity { a: 0.5, b: 0.0, tx: -100.0, ty: -50.0 }, [2000, 1500]), flat(), flat());
+        let area = face.place().area(false);
         let (cx, cy, rx, ry) = face_ellipse(false);
         assert!((area.center[0] - (cx + 100.0) * 2.0).abs() < 1e-3 && (area.center[1] - (cy + 50.0) * 2.0).abs() < 1e-3, "{area:?}");
         assert!((area.radii[0] - rx * 2.0).abs() < 1e-3 && (area.radii[1] - ry * 2.0).abs() < 1e-3);
         assert!(area.angle.abs() < 1e-6 && area.photo_size == [2000, 1500]);
-        assert!(face.area(true).radii[0] > area.radii[0], "with hair, wider");
-        let turned = RestoredFace::new(Similarity { a: 0.0, b: 1.0, tx: 0.0, ty: 0.0 }, [2000, 1500], flat(), flat());
-        assert!((turned.area(false).angle + std::f32::consts::FRAC_PI_2).abs() < 1e-5, "a quarter turn back");
-        assert_eq!(largest_face(&[face.clone(), turned]), Some(0), "the one the crop shrinks");
+        assert!(face.place().area(true).radii[0] > area.radii[0], "with hair, wider");
+        let turned = RestoredFace::new(placed(Similarity { a: 0.0, b: 1.0, tx: 0.0, ty: 0.0 }, [2000, 1500]), flat(), flat());
+        assert!((turned.place().area(false).angle + std::f32::consts::FRAC_PI_2).abs() < 1e-5, "a quarter turn back");
+        assert_eq!(largest_face([face.place(), turned.place()]), Some(0), "the one the crop shrinks");
         assert_eq!(largest_face(&[]), None);
     }
 
@@ -679,8 +1042,8 @@ mod tests {
         let image = RgbaImage::from_pixel(1400, 700, Rgba([120, 100, 90, 255]));
         let flat = RgbImage::from_pixel(512, 512, Rgb([120, 100, 90]));
         let stripes = RgbImage::from_fn(512, 512, |x, _| if x % 2 == 0 { Rgb([160, 140, 130]) } else { Rgb([80, 60, 50]) });
-        let small = RestoredFace::new(Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, [1400, 700], flat.clone(), stripes.clone());
-        let big = RestoredFace::new(Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, [1400, 700], flat, stripes);
+        let small = RestoredFace::new(placed(Similarity { a: 2.0, b: 0.0, tx: -2000.0, ty: 0.0 }, [1400, 700]), flat.clone(), stripes.clone());
+        let big = RestoredFace::new(placed(Similarity { a: 1.0, b: 0.0, tx: 0.0, ty: 0.0 }, [1400, 700]), flat, stripes);
         let out = compose_faces(&image, &[small, big], FaceBlend { strength: 1.0, largest_only: true, hair: false });
         let changed = |x: u32, y: u32| out.get_pixel(x, y) != image.get_pixel(x, y);
         assert!(changed(256, 280), "the big face");
@@ -692,7 +1055,7 @@ mod tests {
     #[test]
     fn a_large_face_takes_the_restored_detail_in_proportion() {
         let flat = RgbImage::from_pixel(512, 512, Rgb([100, 100, 100]));
-        let at = |a: f32| detail_reach(&RestoredFace::new(Similarity { a, b: 0.0, tx: 0.0, ty: 0.0 }, [1000, 1000], flat.clone(), flat.clone()));
+        let at = |a: f32| detail_reach(&RestoredFace::new(placed(Similarity { a, b: 0.0, tx: 0.0, ty: 0.0 }, [1000, 1000]), flat.clone(), flat.clone()));
         assert_eq!(at(0.5), 0.5);
         assert_eq!(at(1.6), 1.0);
         assert_eq!(at(0.1), 0.25, "never below a quarter");

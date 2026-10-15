@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::engine::{EpKind, EpSite};
+use crate::engine::{EpKind, EpSite, SessionPick, Weights};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -400,14 +400,14 @@ pub fn process_inpaint_with(
     // is installed (the request flag carries that decision from
     // dispatch). Until the TAESD artifact ships, get() errors and we
     // silently fall back to standard VAE — same graceful pattern as LCM.
-    let taesd = if req.use_taesd && sd_spec(id).takes_taesd { TaesdSession::get().ok() } else { None };
+    let taesd = if req.use_taesd && sd_spec(id).latent.takes_taesd() { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
         None => VaeBackend::Standard(&bundle),
     };
     // One session for every region the fill scale fills on its own. The
     // fit reads the tall crop as the RAM gate above left it.
-    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), |img, m| {
+    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), progress, |img, m, progress| {
         paint_regions(&bundle, &vae, img, m, &req, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
@@ -429,13 +429,28 @@ fn paint_regions(
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
+    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
+    paint_regions_with(image, mask, max_side, progress, |crop, crop_mask, crop_progress| {
+        run_one_tile(bundle, vae, crop, crop_mask, req, crop_progress)
+    })
+}
+
+/// `paint_regions` with the filler passed in: `fill` gets each crop or
+/// tile, its mask, and a handle framed on where it sits, so what it
+/// reports of its own pixels lands there.
+fn paint_regions_with(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    max_side: u32,
+    progress: &crate::progress::Progress,
+    mut fill: impl FnMut(&RgbaImage, &GrayImage, &crate::progress::Progress) -> Result<RgbaImage, CoreError>,
+) -> Result<RgbaImage, CoreError> {
     use crate::progress::{TileRect, Unit};
     let components = mask_regions(mask);
     // One plan per component, made once: the outer progress total and
     // the loop read the same value, so they cannot disagree about how
     // many tiles a region near an image edge really gets.
     let (img_w, img_h) = image.dimensions();
-    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
     let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
     let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
     // The crops and tiles, in the order they run: the tile map's layout.
@@ -459,7 +474,7 @@ fn paint_regions(
                 let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
                 // A failed region fails the run: left as it was, it would read
                 // as a finished erase.
-                let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
+                let painted = fill(&cropped_img, &cropped_mask, &progress.within((cx, cy, cw, ch), (img_w, img_h)))?;
                 image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
                 progress.tile(tile_idx, true);
                 tile_idx += 1;
@@ -478,7 +493,7 @@ fn paint_regions(
             start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            let painted = run_one_tile(bundle, vae, &cropped_img, &cropped_mask, req, progress)?;
+            let painted = fill(&cropped_img, &cropped_mask, &progress.within((tile.x, tile.y, tile.w, tile.h), (img_w, img_h)))?;
             blend_tile(&mut out, &painted, &tile);
             progress.tile(tile_idx, true);
             tile_idx += 1;
@@ -821,7 +836,7 @@ fn run_one_tile(
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    use crate::progress::{Step, Unit};
+    use crate::progress::Step;
     let (w, h) = image.dimensions();
     let (pw, ph) = padded_dims(w, h);
     let padded_image = pad_to(image, pw, ph);
@@ -876,63 +891,37 @@ fn run_one_tile(
     drop(mask_latent);
     let prelude_ms = timer.lap();
 
-    let steps = req.num_inference_steps as usize;
-    let mut scheduler = match req.scheduler {
-        SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
-        SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
-    };
+    let mut scheduler = Scheduler::new_sd15(req.scheduler, req.num_inference_steps as usize);
     let seed = req.seed.unwrap_or_else(fresh_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    let total_steps = scheduler.timesteps().len() as u32;
-    progress.step(Step::Denoising);
-    progress.inner(0, total_steps, Unit::Step);
-
-    // Hold denoising state as Vec<f32> + captured dim. f16 conversion
-    // uses ArrayView4::from_shape (zero-copy on the f32 side); the
-    // scheduler writes via step_array_into into a reused scratch buffer.
     let latent_dim = (1_usize, 4_usize, lh, lw);
-    let mut latent_buf: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
+    let noise: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
 
-    // Denoising loop. With CFG: noise_pred = uncond + scale * (cond - uncond).
-    // Without CFG: just one UNet pass with cond.
-    let timesteps = scheduler.timesteps().to_vec();
+    // With CFG: noise_pred = uncond + scale * (cond - uncond). Without
+    // CFG: just one UNet pass with cond.
     let scale = req.guidance_scale;
-    // Scratch buffer for step output — hoisted outside the loop so
-    // mem::swap reuses the allocation across steps (no per-step alloc).
-    let mut step_out_buf: Vec<f32> = Vec::with_capacity(latent_buf.len());
-    for (i, &t) in timesteps.iter().enumerate() {
-        // Check cancel between UNet steps. ORT has no per-op cancel, so
-        // worst-case latency on cancel is one UNet step (multi-second).
-        if progress.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
-        // Zero-copy view of latent_buf — only the Array4<f16> output stays.
+    let predict = |latent: &[f32], t: i64| {
+        // Zero-copy view of the latent — only the Array4<f16> output stays.
         let latent_f16 = f32_to_f16_view(
-            ndarray::ArrayView4::from_shape(latent_dim, &latent_buf)
-                .expect("latent_dim matches latent_buf length by construction"),
+            ndarray::ArrayView4::from_shape(latent_dim, latent)
+                .expect("latent_dim matches the latent's length by construction"),
         );
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
-        let noise_pred = match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
-            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale)?,
-            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond))?,
-            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw))?,
-        };
-        let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
-        let is_final = i + 1 == timesteps.len();
-        let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
-        step_array_into(
-            &mut scheduler, &latent_buf, np_slice, i, t, t_prev, is_final,
-            &mut rng, &mut step_out_buf,
-        );
-        // step_out_buf now holds the new denoised state; swap so
-        // latent_buf becomes current and step_out_buf is the stale
-        // scratch (overwritten next iteration).
-        std::mem::swap(&mut latent_buf, &mut step_out_buf);
-        progress.inner(i as u32 + 1, total_steps, Unit::Step);
-    }
+        match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
+            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale),
+            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond)),
+            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
+        }
+    };
+    let known = progress.preview_edge().map_or_else(Vec::new, |_| known_cells(image, mask, (lw, lh)));
+    let show = |x0: &[f32]| progress.tile_preview((0, 0, w, h), (w, h), |width, height| {
+        let estimate = estimate_picture(x0, (lw, lh), bundle.latent, &known);
+        crop_preview(image, mask, &estimate, width, height)
+    });
+    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show)?;
 
     let unet_ms = timer.lap();
 
@@ -943,7 +932,7 @@ fn run_one_tile(
     let painted = vae_decode(vae, &final_array)?;
     let decode_ms = timer.lap();
     let out = composite(image, &painted, mask, w, h);
-    let steps_run = timesteps.len() as u64;
+    let steps_run = scheduler.timesteps().len() as u64;
     tracing::info!(
         w, h, steps = steps_run, prelude_ms,
         unet_ms_per_step = unet_ms / steps_run.max(1),
@@ -953,6 +942,139 @@ fn run_one_tile(
         "SD: tile done",
     );
     Ok(out)
+}
+
+/// The denoising loop from `latent` (the starting noise): per step, the
+/// UNet's noise prediction for the current latent (`predict`), the
+/// scheduler's step and the count. When previews are asked for, `show`
+/// gets the step's clean-latent estimate first; it only reads, so the
+/// result is the same bits with previews on or off. Cancel is checked
+/// between steps: ORT has no per-op cancel, so a cancel waits out at
+/// most one UNet step.
+fn denoise(
+    scheduler: &mut Scheduler,
+    mut latent: Vec<f32>,
+    rng: &mut ChaCha8Rng,
+    progress: &crate::progress::Progress,
+    mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
+    show: impl Fn(&[f32]),
+) -> Result<Vec<f32>, CoreError> {
+    use crate::progress::{Step, Unit};
+    let timesteps = scheduler.timesteps().to_vec();
+    let total = timesteps.len() as u32;
+    progress.step(Step::Denoising);
+    progress.inner(0, total, Unit::Step);
+    // Hoisted so the swap below reuses one allocation across steps.
+    let mut next: Vec<f32> = Vec::with_capacity(latent.len());
+    for (i, &t) in timesteps.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let noise_pred = predict(&latent, t)?;
+        let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
+        if progress.preview_edge().is_some() {
+            show(&scheduler.x0(&latent, np_slice, i));
+        }
+        let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
+        let is_final = i + 1 == timesteps.len();
+        step_array_into(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng, &mut next);
+        std::mem::swap(&mut latent, &mut next);
+        progress.inner(i as u32 + 1, total, Unit::Step);
+    }
+    Ok(latent)
+}
+
+/// ComfyUI's latent-preview factors (comfy/latent_formats.py, `SD15` and
+/// `SDXL`): a linear fit from a scaled latent's four channels (rows) to
+/// the RGB, in [-1, 1], its VAE decodes it to; then the bias.
+fn preview_factors(space: prunr_models::SdLatent) -> ([[f32; 3]; 4], [f32; 3]) {
+    match space {
+        prunr_models::SdLatent::Sd15 => (
+            [[0.3512, 0.2297, 0.3227], [0.3250, 0.4974, 0.2350], [-0.2829, 0.1762, 0.2721], [-0.2120, -0.2616, -0.7177]],
+            [0.0; 3],
+        ),
+        prunr_models::SdLatent::Sdxl => (
+            [[0.3651, 0.4232, 0.4341], [-0.2533, -0.0042, 0.1068], [0.1076, 0.1111, -0.0362], [-0.3165, -0.2492, -0.2188]],
+            [0.1084, -0.0175, -0.0011],
+        ),
+    }
+}
+
+/// The latent `x0` (planar 4 × `lh` × `lw`) as RGB in [-1, 1] through
+/// `space`'s preview factors, one value per latent cell, row-major.
+fn latent_to_rgb(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent) -> Vec<[f32; 3]> {
+    let (factors, bias) = preview_factors(space);
+    let plane = lw * lh;
+    (0..plane)
+        .map(|i| std::array::from_fn(|ch| bias[ch] + (0..4).map(|k| x0[k * plane + i] * factors[k][ch]).sum::<f32>()))
+        .collect()
+}
+
+/// The crop's own colour per latent cell, in [-1, 1]: the mean of the
+/// 8×8 pixels of each cell wholly inside the crop and outside the mask;
+/// `None` for the rest. What a step preview's colours are matched to.
+fn known_cells(image: &RgbaImage, mask: &GrayImage, (lw, lh): (usize, usize)) -> Vec<Option<[f32; 3]>> {
+    let (w, h) = image.dimensions();
+    (0..lh as u32).flat_map(|cy| (0..lw as u32).map(move |cx| (cx * 8, cy * 8))).map(|(x0, y0)| {
+        if x0 + 8 > w || y0 + 8 > h {
+            return None;
+        }
+        let mut sum = [0.0_f32; 3];
+        for (x, y) in (y0..y0 + 8).flat_map(|y| (x0..x0 + 8).map(move |x| (x, y))) {
+            if mask.get_pixel(x, y)[0] > 0 {
+                return None;
+            }
+            let p = image.get_pixel(x, y);
+            sum.iter_mut().zip(p.0).for_each(|(s, v)| *s += f32::from(v));
+        }
+        Some(sum.map(|s| s / 64.0 / 127.5 - 1.0))
+    }).collect()
+}
+
+/// What a step's clean-latent estimate `x0` looks like at the size of
+/// the crop's padded input (`8·lw × 8·lh`): through the latent space's
+/// colour factors, each channel shifted so the cells the crop's own
+/// pixels fill (`known`, from `known_cells`) average to those pixels,
+/// then enlarged. The factors are a rough fit: against TAESD's encoding
+/// of a photo they put blue ~30 levels high, and the shift brings a flat
+/// colour's hole within 3 levels. Not TAESD even when it is the run's
+/// VAE: its decode of a 512² crop took 1.06 s on an i7-6700, no small
+/// part of a step; this and `crop_preview` took 45-100 ms in a debug
+/// build.
+///
+/// Peak per step with previews on, all at latent or crop scale (`x0`
+/// and the cells, this picture, the crop composited; the preview is at
+/// most the crop):
+///
+/// | Crop      | x0, cells | Picture | Composite | Total   |
+/// |-----------|-----------|---------|-----------|---------|
+/// | 512 × 512 | 112 KB    | 1 MB    | 1 MB      | ~3.1 MB |
+/// | 768 × 512 | 168 KB    | 1.5 MB  | 1.5 MB    | ~4.7 MB |
+fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::SdLatent, known: &[Option<[f32; 3]>]) -> RgbaImage {
+    let cells = latent_to_rgb(x0, (lw, lh), space);
+    let (mut shift, mut n) = ([0.0_f32; 3], 0.0_f32);
+    for (cell, own) in cells.iter().zip(known) {
+        let Some(own) = own else { continue };
+        (0..3).for_each(|c| shift[c] += own[c] - cell[c]);
+        n += 1.0;
+    }
+    let shift = shift.map(|s| s / n.max(1.0));
+    let small = RgbaImage::from_fn(lw as u32, lh as u32, |x, y| {
+        let cell = cells[y as usize * lw + x as usize];
+        image::Rgba([unit_to_byte(cell[0] + shift[0]), unit_to_byte(cell[1] + shift[1]), unit_to_byte(cell[2] + shift[2]), 255])
+    });
+    crate::formats::resize_rgba(&small, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
+}
+
+/// The crop with `painted` inside its mask, as the final paste puts it,
+/// at `width × height` for its preview.
+fn crop_preview(image: &RgbaImage, mask: &GrayImage, painted: &RgbaImage, width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = image.dimensions();
+    let filled = composite(image, painted, mask, w, h);
+    if (width, height) == (w, h) {
+        return filled.into_raw();
+    }
+    crate::formats::resize_rgba(&filled, width, height, crate::formats::ResizeFilter::Lanczos3).into_raw()
 }
 
 /// Stage clock for one tile's log line.
@@ -1102,7 +1224,7 @@ pub(crate) struct SdSession {
     unet_inputs: [String; 3],
     vae_encoder_input: String,
     vae_decoder_input: String,
-    vae_scale: f32,
+    latent: prunr_models::SdLatent,
     /// The VAE takes f32: SDXL's overflows in f16.
     vae_f32: bool,
     /// Set once a batched UNet call fails (a static batch-1 export, the
@@ -1113,6 +1235,8 @@ pub(crate) struct SdSession {
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
     /// `TEXT_CACHE_ENTRIES`; ~118 KB each.
     text_cache: Mutex<Vec<(String, Arc<Array3<f16>>)>>,
+    /// Where each part runs, in build order.
+    picks: Vec<(&'static str, SessionPick)>,
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
@@ -1177,6 +1301,18 @@ pub(crate) fn release(id: prunr_models::ModelId) {
     if guard.len() < before {
         tracing::info!(?id, "SD: cache entry released after dispatch");
     }
+}
+
+/// Load `id`'s bundle for `tuning` (or find it loaded) and say where each
+/// part runs. A run with the same tuning uses this bundle; it stays
+/// loaded between runs when `tuning.keep_loaded`.
+pub fn load_bundle(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Vec<(&'static str, SessionPick)>, CoreError> {
+    SdSession::get(id, &tuning.session_key(), tuning.keep_loaded).map(|bundle| bundle.picks.clone())
+}
+
+/// Release every loaded bundle, kept ones too.
+pub fn release_all() {
+    sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
 }
 
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
@@ -1316,9 +1452,9 @@ impl SdSession {
         ];
 
         let build = |&(key, smoke): &(&'static str, SmokeFn)|
-            -> Result<(&'static str, Session, String), String> {
-                let (s, ep) = build_part_with_ep_ladder(id, key, &by_key, smoke, session_key)?;
-                Ok((key, s, ep))
+            -> Result<(&'static str, Session, SessionPick), String> {
+                let (s, pick) = build_part_with_ep_ladder(id, key, &by_key, smoke, session_key)?;
+                Ok((key, s, pick))
             };
 
         // A bundle with its prompt baked in ships no text encoder.
@@ -1326,7 +1462,7 @@ impl SdSession {
         let wanted: Vec<(&'static str, SmokeFn)> = PARTS.iter().copied()
             .filter(|(key, _)| *key != "text_encoder" || has_text)
             .collect();
-        let mut parts: Vec<(&'static str, Session, String)> =
+        let mut parts: Vec<(&'static str, Session, SessionPick)> =
             if crate::engine::directml_active() {
                 wanted.iter().map(build).collect::<Result<_, _>>()?
             } else {
@@ -1337,11 +1473,12 @@ impl SdSession {
         // Match by key so the destructure below survives reordering of
         // PARTS. `IndexedParallelIterator::collect` preserves order, so
         // this is defensive — cheap at N=4.
+        let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
         let mut take = |want: &str| -> Result<(Session, String), String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
-            let (_, s, ep) = parts.swap_remove(pos);
-            Ok((s, ep))
+            let (_, s, pick) = parts.swap_remove(pos);
+            Ok((s, pick.provider))
         };
         let text = has_text.then(|| take("text_encoder")).transpose()?;
         let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
@@ -1378,10 +1515,11 @@ impl SdSession {
             unet_inputs,
             vae_encoder_input,
             vae_decoder_input,
-            vae_scale: sd_spec(id).vae_scale,
+            latent: sd_spec(id).latent,
             vae_f32,
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
+            picks,
         })
     }
 }
@@ -1396,18 +1534,19 @@ fn build_part_with_ep_ladder(
     by_key: &HashMap<&str, PathBuf>,
     smoke_test: fn(&mut Session, &str) -> Result<(), String>,
     session_key: &SdSessionKey,
-) -> Result<(Session, String), String> {
+) -> Result<(Session, SessionPick), String> {
     let path = by_key.get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
 
     let gpu_eps = session_key.gpu_eps();
+    let mut failed: Vec<String> = Vec::new();
 
     for &ep in gpu_eps {
         if !prunr_models::is_ep_compatible(id, ep.as_str()) {
             tracing::debug!(?id, part = %key, ep = %ep, "SD: EP statically incompatible; skipping");
             continue;
         }
-        if crate::ep_compat::is_known_failure(ep, id) {
+        if crate::ep_compat::is_known_failure(ep, id, Weights::Fp32) {
             tracing::debug!(?id, part = %key, ep = %ep, "SD: EP cached as incompatible; skipping");
             continue;
         }
@@ -1428,7 +1567,7 @@ fn build_part_with_ep_ladder(
             if session_key.records_ep_failures() {
                 crate::engine::handle_commit_failure(
                     matches!(load_path, Cow::Owned(_)),
-                    ep, id,
+                    ep, id, Weights::Fp32,
                     || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
                     msg,
                 );
@@ -1443,6 +1582,7 @@ fn build_part_with_ep_ladder(
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: register EP failed");
+                failed.push(format!("ORT register {ep} EP failed: {e}"));
                 continue;
             }
         };
@@ -1456,17 +1596,19 @@ fn build_part_with_ep_ladder(
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
                 record_failure(&format!("{e}"));
+                failed.push(format!("ORT session creation failed ({ep}): {e}"));
                 continue;
             }
         };
         match smoke_test(&mut session, key) {
             Ok(()) => {
                 tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
-                return Ok((session, ep.as_str().to_string()));
+                return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) }));
             }
             Err(e) => {
                 tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
                 record_failure(&e);
+                failed.push(format!("{ep} test run failed: {e}"));
             }
         }
     }
@@ -1496,7 +1638,7 @@ fn build_part_with_ep_ladder(
         .commit_from_file(&load_path)
         .map_err(|e| format!("SD {key}: load from {}: {e}", load_path.display()))?;
     tracing::info!(?id, part = %key, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
-    Ok((session, "CPU".to_string()))
+    Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
 }
 
 /// `lean`: the model's sessions skip ORT's memory-pattern planning unless
@@ -1772,7 +1914,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
             let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
             let mut latent = extract_4d(&outputs[0], "vae encoder")?;
-            latent *= bundle.vae_scale;
+            latent *= bundle.latent.vae_scale();
             Ok(latent)
         }
         VaeBackend::Taesd(taesd) => {
@@ -1788,7 +1930,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
 fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
     match backend {
         VaeBackend::Standard(bundle) => {
-            let t = tensor_in(latent / bundle.vae_scale, bundle.vae_f32)
+            let t = tensor_in(latent / bundle.latent.vae_scale(), bundle.vae_f32)
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: input tensor: {e}")))?;
             let mut session = bundle.vae_decoder.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2021,15 +2163,18 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
     let mut out = RgbaImage::new(w as u32, h as u32);
     let dst = out.as_mut();
     for i in 0..plane {
-        let r = ((buf[i]              + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let g = ((buf[plane + i]      + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        let b = ((buf[plane * 2 + i]  + 1.0) * 127.5).clamp(0.0, 255.0) as u8;
-        dst[i * 4]     = r;
-        dst[i * 4 + 1] = g;
-        dst[i * 4 + 2] = b;
+        dst[i * 4]     = unit_to_byte(buf[i]);
+        dst[i * 4 + 1] = unit_to_byte(buf[plane + i]);
+        dst[i * 4 + 2] = unit_to_byte(buf[plane * 2 + i]);
         dst[i * 4 + 3] = 255;
     }
     out
+}
+
+/// A channel in [-1, 1] as a byte, as the VAE's output is read.
+#[inline]
+fn unit_to_byte(v: f32) -> u8 {
+    ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
 }
 
 /// Mask → latent space (1, 1, h/8, w/8) f32 in [0, 1].
@@ -2405,8 +2550,7 @@ impl LcmScheduler {
     }
 
     /// `(c_skip, c_out)` — the LCM consistency-function boundary
-    /// coefficients at timestep `t`. Single source so `step` and
-    /// `step_at` can't drift.
+    /// coefficients at timestep `t`.
     #[inline]
     fn consistency_coefficients(&self, t: i64) -> (f32, f32) {
         let scaled_t = (t as f32) * self.timestep_scaling;
@@ -2415,6 +2559,27 @@ impl LcmScheduler {
         let c_skip = sigma2 / denom2;
         let c_out = scaled_t / denom2.sqrt();
         (c_skip, c_out)
+    }
+
+    /// The consistency function at `t`, per latent value: the clean
+    /// latent LCM predicts from a value and its noise prediction. One
+    /// definition for `step`, `step_at` and `denoised`, so a preview
+    /// shows the estimate the step itself uses.
+    fn denoiser(&self, t: i64) -> impl Fn(f32, f32) -> f32 {
+        let alpha_t = self.alpha_cumprod(t);
+        let sqrt_alpha_t = alpha_t.sqrt();
+        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
+        let (c_skip, c_out) = self.consistency_coefficients(t);
+        move |l, eps| {
+            let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
+            c_out * pred_x0 + c_skip * l
+        }
+    }
+
+    /// The clean latent LCM predicts at `t`; the final step's output.
+    pub fn denoised(&self, latent_t: &[f32], noise_pred: &[f32], t: i64) -> Vec<f32> {
+        let denoise = self.denoiser(t);
+        latent_t.iter().zip(noise_pred).map(|(&l, &eps)| denoise(l, eps)).collect()
     }
 
     pub fn timesteps(&self) -> &[i64] {
@@ -2446,18 +2611,7 @@ impl LcmScheduler {
         if !is_final_step {
             unreachable!("non-final LCM step: caller must use step_at with t_prev")
         }
-
-        let alpha_t = self.alpha_cumprod(t);
-        let sqrt_alpha_t = alpha_t.sqrt();
-        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
-        let (c_skip, c_out) = self.consistency_coefficients(t);
-
-        latent_t.iter().zip(noise_pred.iter())
-            .map(|(&l, &eps)| {
-                let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
-                c_out * pred_x0 + c_skip * l
-            })
-            .collect()
+        self.denoised(latent_t, noise_pred, t)
     }
 
     /// Non-final-step variant that takes the previous inference
@@ -2475,10 +2629,7 @@ impl LcmScheduler {
         debug_assert_eq!(noise_for_step.len(), latent_t.len(),
             "LCM step_at: noise_for_step length must match latent");
 
-        let alpha_t = self.alpha_cumprod(t);
-        let sqrt_alpha_t = alpha_t.sqrt();
-        let sqrt_beta_t = (1.0 - alpha_t).sqrt();
-        let (c_skip, c_out) = self.consistency_coefficients(t);
+        let denoise = self.denoiser(t);
 
         // SD-1.5 ships set_alpha_to_one=false; final-step alpha_prev =
         // alphas_cumprod[0] (≈0.99915), not 1.0.
@@ -2489,11 +2640,7 @@ impl LcmScheduler {
         latent_t.iter()
             .zip(noise_pred.iter())
             .zip(noise_for_step.iter())
-            .map(|((&l, &eps), &n)| {
-                let pred_x0 = (l - sqrt_beta_t * eps) / sqrt_alpha_t;
-                let denoised = c_out * pred_x0 + c_skip * l;
-                sqrt_alpha_prev * denoised + sqrt_beta_prev * n
-            })
+            .map(|((&l, &eps), &n)| sqrt_alpha_prev * denoise(l, eps) + sqrt_beta_prev * n)
             .collect()
     }
 }
@@ -2546,6 +2693,12 @@ impl DpmPp2MScheduler {
 
     pub fn timesteps(&self) -> &[i64] { &self.timesteps }
 
+    /// The clean latent the noise prediction implies at step `step_idx`
+    /// (the step's `m0`).
+    pub fn x0(&self, latent: &[f32], noise_pred: &[f32], step_idx: usize) -> Vec<f32> {
+        convert_epsilon_to_x0(latent, noise_pred, self.sigmas[step_idx])
+    }
+
     pub fn step(
         &mut self,
         latent: &[f32],
@@ -2563,7 +2716,7 @@ impl DpmPp2MScheduler {
         let (_, sigma_s0_e) = sigma_to_alpha_sigma(sigma_s0);
         let (alpha_t, sigma_t_e) = sigma_to_alpha_sigma(sigma_t);
 
-        let m0 = convert_epsilon_to_x0(latent, noise_pred, sigma_s0);
+        let m0 = self.x0(latent, noise_pred, step_idx);
 
         let lambda_s0 = sigma_to_lambda(sigma_s0);
         let lambda_t = sigma_to_lambda(sigma_t);
@@ -2679,10 +2832,27 @@ pub enum Scheduler {
 }
 
 impl Scheduler {
+    pub fn new_sd15(kind: SchedulerKind, steps: usize) -> Self {
+        match kind {
+            SchedulerKind::Lcm => Scheduler::Lcm(LcmScheduler::new_sd15(steps)),
+            SchedulerKind::DpmPp2MKarras => Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(steps)),
+        }
+    }
+
     pub fn timesteps(&self) -> &[i64] {
         match self {
             Scheduler::Lcm(s) => s.timesteps(),
             Scheduler::DpmPp2M(s) => s.timesteps(),
+        }
+    }
+
+    /// What the picture would be if denoising stopped at step
+    /// `step_idx`: the clean latent this scheduler's step predicts from
+    /// `latent` and the UNet's `noise_pred`.
+    pub fn x0(&self, latent: &[f32], noise_pred: &[f32], step_idx: usize) -> Vec<f32> {
+        match self {
+            Scheduler::Lcm(s) => s.denoised(latent, noise_pred, s.timesteps[step_idx]),
+            Scheduler::DpmPp2M(s) => s.x0(latent, noise_pred, step_idx),
         }
     }
 }
@@ -2808,6 +2978,226 @@ mod tests {
             assert!((n - expected).abs() < 1e-5,
                 "lcm step_at zero-noise[{i}] = {n}, expected {expected}");
         }
+    }
+
+    /// A clean latent noised to each step's level with known noise, and
+    /// that noise given as the prediction: every scheduler's x0 is the
+    /// clean latent again, from pure noise down to the last step.
+    #[test]
+    fn every_schedulers_x0_recovers_the_clean_latent_from_the_true_noise() {
+        let clean = [0.8_f32, -1.2, 0.05, 2.0];
+        let eps = [0.3_f32, -0.7, 1.1, -0.2];
+        let noised = |(a, s): (f32, f32)| -> Vec<f32> { clean.iter().zip(eps).map(|(&x, e)| a * x + s * e).collect() };
+        let lcm = LcmScheduler::new_sd15(4);
+        let lcm_levels: Vec<_> = lcm.timesteps().iter().map(|&t| (lcm.alpha_cumprod(t).sqrt(), (1.0 - lcm.alpha_cumprod(t)).sqrt())).collect();
+        let dpm = DpmPp2MScheduler::new_sd15(8);
+        let dpm_levels: Vec<_> = dpm.sigmas[..dpm.num_inference].iter().map(|&s| sigma_to_alpha_sigma(s)).collect();
+        for (scheduler, levels) in [(Scheduler::Lcm(lcm), lcm_levels), (Scheduler::DpmPp2M(dpm), dpm_levels)] {
+            for (i, &level) in levels.iter().enumerate() {
+                let x0 = scheduler.x0(&noised(level), &eps, i);
+                for (got, want) in x0.iter().zip(clean) {
+                    assert!((got - want).abs() < 1e-3, "step {i}: x0 {got}, clean {want}");
+                }
+            }
+        }
+        // By hand at σ = 1: α = σ_eff = 1/√2, so x0 = √2·x − ε.
+        let x0 = convert_epsilon_to_x0(&[1.0], &[0.5], 1.0);
+        assert!((x0[0] - (std::f32::consts::SQRT_2 - 0.5)).abs() < 1e-6, "{x0:?}");
+    }
+
+    /// The estimate a preview shows is the one the step itself uses:
+    /// LCM's final step returns it, DPM++ keeps it as its history.
+    #[test]
+    fn the_x0_estimate_is_the_one_the_step_uses() {
+        let latent = [0.5_f32, -0.25, 1.5, 0.0];
+        let noise_pred = [0.1_f32, 0.4, -0.3, 0.9];
+        let lcm = LcmScheduler::new_sd15(4);
+        let final_step = lcm.step(&latent, &noise_pred, lcm.timesteps()[3], true, &[]);
+        assert_eq!(Scheduler::Lcm(lcm).x0(&latent, &noise_pred, 3), final_step);
+        let mut dpm = DpmPp2MScheduler::new_sd15(8);
+        for i in 0..2 {
+            let x0 = dpm.x0(&latent, &noise_pred, i);
+            dpm.step(&latent, &noise_pred, i);
+            assert_eq!(dpm.prev_model_output.as_deref(), Some(&x0[..]), "step {i}");
+        }
+    }
+
+    /// ComfyUI's factors on known latents: zero is each space's bias, a
+    /// single channel picks out its row, and the cells are planar.
+    #[test]
+    fn the_latent_preview_maps_known_latents_through_comfyuis_factors() {
+        use prunr_models::SdLatent;
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        // Two cells: channel 0 at 1 in the first, channel 3 at 2 in the second.
+        let mut x0 = vec![0.0_f32; 8];
+        x0[0] = 1.0;
+        x0[3 * 2 + 1] = 2.0;
+        let sd15 = latent_to_rgb(&x0, (2, 1), SdLatent::Sd15);
+        assert!(close(sd15[0], [0.3512, 0.2297, 0.3227]), "{sd15:?}");
+        assert!(close(sd15[1], [-0.424, -0.5232, -1.4354]), "{sd15:?}");
+        assert!(close(latent_to_rgb(&[0.0; 4], (1, 1), SdLatent::Sdxl)[0], [0.1084, -0.0175, -0.0011]), "SDXL's bias alone");
+        assert!(close(latent_to_rgb(&[1.0, 0.0, 0.0, 0.0], (1, 1), SdLatent::Sdxl)[0], [0.4735, 0.4057, 0.4330]), "row 0 plus the bias");
+
+        // With nothing to match, the cells read as the VAE's output does:
+        // (v + 1) · 127.5, truncated, each cell 8 px.
+        let picture = estimate_picture(&x0, (2, 1), SdLatent::Sd15, &[None, None]);
+        assert_eq!(picture.dimensions(), (16, 8));
+        assert_eq!(picture.get_pixel(0, 0).0, [172, 156, 168, 255]);
+        assert_eq!(picture.get_pixel(15, 7).0, [73, 60, 0, 255], "below black clamps to 0");
+    }
+
+    /// The projection is shifted per channel so the cells the crop's own
+    /// pixels fill match them, and the cells being filled move with them.
+    #[test]
+    fn the_preview_matches_its_colours_to_the_crops_own_pixels() {
+        use prunr_models::SdLatent;
+        // Zero latent: SD 1.5's projection is mid-grey in both cells. The
+        // first cell's own pixels are (60, 120, 200).
+        let own = [60.0_f32, 120.0, 200.0].map(|v| v / 127.5 - 1.0);
+        let picture = estimate_picture(&[0.0; 8], (2, 1), SdLatent::Sd15, &[Some(own), None]);
+        // Within one level: the bytes go through f32 and truncate.
+        let near = |p: [u8; 4], want: [u8; 3]| p[..3].iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 1);
+        assert!(near(picture.get_pixel(0, 0).0, [60, 120, 200]), "{:?}", picture.get_pixel(0, 0));
+        assert!(near(picture.get_pixel(12, 4).0, [60, 120, 200]), "the hole's cell moves by the same shift: {:?}", picture.get_pixel(12, 4));
+
+        let image = RgbaImage::from_fn(20, 8, |x, _| Rgba([if x < 8 { 30 } else { 90 }, 60, 90, 255]));
+        let mut mask = GrayImage::new(20, 8);
+        mask.put_pixel(9, 3, Luma([1]));
+        let cells = known_cells(&image, &mask, (3, 1));
+        assert_eq!(cells[0], Some([30.0_f32, 60.0, 90.0].map(|v| v / 127.5 - 1.0)), "the mean of its 8×8 pixels");
+        assert_eq!(cells[1], None, "any mask in the cell");
+        assert_eq!(cells[2], None, "past the crop's edge");
+    }
+
+    /// A step's preview changes the crop only inside its mask, reading
+    /// the top-left of the padded picture as the final paste does.
+    #[test]
+    fn a_step_preview_changes_only_the_masked_pixels() {
+        let image = RgbaImage::from_fn(60, 44, |x, y| Rgba([x as u8, y as u8, 200, 255 - x as u8]));
+        let mask = GrayImage::from_fn(60, 44, |x, y| Luma([if (10..30).contains(&x) && (5..20).contains(&y) { 255 } else { 0 }]));
+        let painted = RgbaImage::from_pixel(64, 48, Rgba([1, 2, 3, 255]));
+        let out = crop_preview(&image, &mask, &painted, 60, 44);
+        for ((i, src), m) in image.pixels().enumerate().zip(mask.pixels()) {
+            let want = if m[0] > 127 { [1, 2, 3, src[3]] } else { src.0 };
+            assert_eq!(out[i * 4..i * 4 + 4], want, "pixel {i}");
+        }
+        assert_eq!(crop_preview(&image, &mask, &painted, 30, 22).len(), 30 * 22 * 4, "resampled to the preview's size");
+    }
+
+    /// Driven with a stand-in UNet, the real step loop shows each step's
+    /// estimate once, before counting the step, with the source kept
+    /// outside the mask; and ends on the same latent bits with previews
+    /// on, off, or not listened to.
+    #[test]
+    fn the_step_loop_previews_each_step_without_changing_the_result() {
+        use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
+        let image = RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 90, 255]));
+        let mask = GrayImage::from_fn(64, 64, |x, y| Luma([if (16..48).contains(&x) && (16..48).contains(&y) { 255 } else { 0 }]));
+        let known = known_cells(&image, &mask, (8, 8));
+        for (kind, steps) in [(SchedulerKind::Lcm, 4), (SchedulerKind::DpmPp2MKarras, 6)] {
+            let run = |progress: &Progress| {
+                let mut scheduler = Scheduler::new_sd15(kind, steps);
+                let mut rng = ChaCha8Rng::seed_from_u64(7);
+                let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
+                let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
+                let show = |x0: &[f32]| progress.tile_preview((0, 0, 64, 64), (64, 64), |w, h| {
+                    crop_preview(&image, &mask, &estimate_picture(x0, (8, 8), prunr_models::SdLatent::Sd15, &known), w, h)
+                });
+                denoise(&mut scheduler, noise, &mut rng, progress, predict, show).expect("denoise")
+            };
+            let sink = Arc::new(RecordingSink::default());
+            let previewed = run(&Progress::new(sink.clone()).with_tile_previews(64));
+            let quiet = Arc::new(RecordingSink::default());
+            assert_eq!(previewed, run(&Progress::new(quiet.clone())), "{kind:?}: previews change nothing");
+            assert_eq!(previewed, run(&Progress::none()), "{kind:?}");
+            assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
+
+            let updates = sink.updates();
+            assert_eq!(check_contract(&updates), Ok(()));
+            let order: Vec<String> = updates.iter().filter_map(|u| match u {
+                ProgressUpdate::TilePreview(_) => Some("preview".to_string()),
+                ProgressUpdate::Inner { done, .. } => Some(done.to_string()),
+                _ => None,
+            }).collect();
+            let want: Vec<String> = std::iter::once("0".to_string())
+                .chain((1..=steps).flat_map(|i| ["preview".to_string(), i.to_string()]))
+                .collect();
+            assert_eq!(order, want, "{kind:?}: one preview per step, before its count");
+            assert_eq!(updates[0], ProgressUpdate::Step(ProgressStep::Denoising));
+            for u in &updates {
+                let ProgressUpdate::TilePreview(p) = u else { continue };
+                assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (0, 0, 64, 64, 64, 64));
+                let changed = image.pixels().zip(mask.pixels()).zip(p.rgba.chunks(4)).filter(|((src, m), got)| {
+                    assert!(m[0] > 127 || *got == src.0.as_slice(), "outside the mask the source stays");
+                    m[0] > 127 && *got != src.0.as_slice()
+                }).count();
+                assert!(changed > 0, "{kind:?}: the estimate shows inside the mask");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_step_loop_stops_before_the_next_unet_call() {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let progress = crate::progress::Progress::none().with_cancel(flag);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let called = std::cell::Cell::new(false);
+        let predict = |_: &[f32], _: i64| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
+        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {});
+        assert!(matches!(result, Err(CoreError::Cancelled)) && !called.get());
+    }
+
+    /// Each crop or tile reports its preview where it sits: a region
+    /// that fits one crop, one that needs three tiles, and a region
+    /// filled on a scaled-down copy, all on the photo's preview.
+    #[test]
+    fn each_crop_previews_where_it_sits_in_the_photo() {
+        use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
+        let fake_fill = |crop: &RgbaImage, _: &GrayImage, p: &Progress| {
+            let (w, h) = crop.dimensions();
+            p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![9; (pw * ph * 4) as usize]);
+            Ok(crop.clone())
+        };
+        let places = |updates: &[ProgressUpdate]| -> Vec<(u32, u32, u32, u32, u32, u32)> {
+            updates.iter().filter_map(|u| match u {
+                ProgressUpdate::TilePreview(p) => Some((p.x, p.y, p.width, p.height, p.full_width, p.full_height)),
+                _ => None,
+            }).collect()
+        };
+
+        let image = RgbaImage::from_pixel(1200, 900, Rgba([50, 60, 70, 255]));
+        let mut mask = GrayImage::new(1200, 900);
+        for (x, y) in (0..1200).flat_map(|x| (0..100).map(move |y| (x, y))).chain((1000..1100).flat_map(|x| (700..800).map(move |y| (x, y)))) {
+            mask.put_pixel(x, y, Luma([255]));
+        }
+        let sink = Arc::new(RecordingSink::default());
+        paint_regions_with(&image, &mask, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
+        // At half size: the strip's three tiles at x 0, 384, 688, then the
+        // square's crop at (688, 388).
+        assert_eq!(places(&sink.updates()), vec![
+            (0, 0, 256, 256, 600, 450), (192, 0, 256, 256, 600, 450),
+            (344, 0, 256, 256, 600, 450), (344, 194, 256, 256, 600, 450),
+        ]);
+        let mut run = vec![ProgressUpdate::Step(ProgressStep::Erasing)];
+        run.extend(sink.updates());
+        assert_eq!(check_contract(&run), Ok(()));
+
+        let photo = RgbaImage::from_pixel(1600, 1200, Rgba([50, 60, 70, 255]));
+        let mut hole = GrayImage::new(1600, 1200);
+        for (x, y) in (600..900).flat_map(|x| (400..700).map(move |y| (x, y))) {
+            hole.put_pixel(x, y, Luma([255]));
+        }
+        let sink = Arc::new(RecordingSink::default());
+        let fit = crate::inpaint::Fit { long: 448, short: 448 };
+        crate::inpaint::fill_at_scale(&photo, &hole, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, p| {
+            paint_regions_with(img, m, SD_TILE, p, fake_fill)
+        }).expect("fill");
+        let found = places(&sink.updates());
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (x, y, w, h, full_w, full_h) = found[0];
+        assert_eq!((full_w, full_h), (800, 600), "the photo's preview, not the shrunk copy's");
+        assert!(x <= 300 && y <= 200 && x + w >= 450 && y + h >= 350, "covers the hole at half size: {:?}", found[0]);
+        assert!(w < full_w && h < full_h, "only the crop around the hole: {:?}", found[0]);
     }
 
     #[test]

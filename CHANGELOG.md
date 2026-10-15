@@ -6,7 +6,11 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- **DirectML built into Windows.** The Windows download runs background removal, upscaling, colorize and the erasers on the graphics card: any DirectX 12 card, NVIDIA, AMD or Intel. A computer without one runs everything on the processor as before, from the same download. OpenVINO stays an optional download in Settings › Hardware; with it installed, a Runtime choice (Built in or OpenVINO) says which one Prunr uses after a restart. The Windows app takes about 24 MB more disk space. `prunr --doctor` shows the choice.
+- **Model Store in the top bar:** a store icon beside Settings opens it from anywhere.
 - **See the faces Faces found.** While the Faces strip or panel is open, every face it found is ringed in the accent purple, around the exact area it redraws; a face it missed has no ring. The rings pop in with a bounce and one bright glow as the search lands, then rest; under Largest the faces left alone are faint. An Outline switch in the strip turns them off.
+- **See the faces Faces found.** While the Faces strip or panel is open, every face it found is ringed in the accent purple, around the exact area it redraws; a face it missed has no ring. The rings pop in with a bounce and one bright glow as soon as the search finds the faces, before any is redrawn, then rest; under Largest the faces left alone are faint. An Outline switch in the strip turns them off.
+- **Faces appear one at a time.** Restore faces shows each face redrawn in its place, at the chosen strength, the moment it is done, instead of nothing until every face is; the finished image then takes over without a jump. Under Largest only the face it redraws appears. Cancel or Esc stops after the face under way and leaves the image as it was.
 - Eraser (RORem) has an Advanced chip: Steps (2–8; fewer are faster but rougher, more than the 4 it was trained for changes little) and Pin seed.
 - **Process works on the ticked images for every model.** Upscalers and Colorize take them one at a time (the capsule counts "Image 2 of 5"); an eraser fills every ticked image that has a painted region, one after the other, and says how many had none. Tick boxes are bigger. The footer shows how large an erase filled its region ("Fill 24%"), and a pill at the bottom of the canvas says "Rendering…" or "Preparing…" when work goes on for more than a second with nothing else to show for it.
 - `--feather` and `--edge-width` on the command line, so every Mask setting has a flag.
@@ -20,7 +24,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Fill scale** for every eraser (Auto, Full, 1/2, 1/4; `--fill-scale` on the command line). A large object used to fill as flat grey blocks, because the model works in 512 px squares and the middle of a big hole had no photo around it. Auto keeps small areas at full size and fills large ones at a smaller scale: a bench across a 12 MP photo now fills as snow, in 22 s instead of 99 s. Each area is judged on its own, so a small mark next to a large one stays sharp. The Stable Diffusion eraser fills a large area as one crop instead of a patchwork of tiles, and a selection in many pieces (a slatted bench from Magic Brush) is filled as one area instead of hundreds of crops.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
 - **Animations switch** (Settings › Editing): off, every result appears at once and the working highlights hold still; the progress spinner keeps turning.
-- **See the upscale as it happens.** Each finished tile shows its upscaled result in place, sharpened down to fit its square, and the final image reveals over the finished preview. The preview is at most screen-sized, so it costs a few MB whatever the output size, and the run takes as long as before.
+- **See the upscale or the erase as it happens.** Each finished tile shows its result in place: an upscale's sharpened down to fit its square, an erase's fill over the photo, also when a large area is filled at a smaller scale. The final image reveals over the finished preview. The preview is at most screen-sized, so it costs a few MB whatever the output size, and the run takes as long as before.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
 - **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
@@ -33,6 +37,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Depth** (Depth Anything V2 Small, 95 MB in the Model Store, about half a second per photo on the CPU): the app measures how near each part of the photo is once, then every depth effect updates live without running the model again.
   - **Lens blur background** for cut-outs: the photo behind the subject blurs more the farther it is from the subject's depth, like a wide-open lens. `--bg-effect lens[:N]` on the command line.
   - **Depth chip** on No model: Lens blur (Point or Tilt-shift, with Amount and Set focus: click the image where it should be sharp), Fog that thickens with distance, and Aerial perspective, which turns far things cooler and paler like distant hills. Sketch lines draw over the result.
+  - **Auto focus aims at faces.** Without a focus point set, the Lens blur and the lens blur background keep the largest face in the photo sharp; with no face, the background focuses on the cut-out's subject and the Depth chip on the nearest part of the photo, as before. Saves and the command line focus the same way.
   - **Fade with distance** in Sketch's settings: lines lighten the farther away they are. `--line-fade <0-100>` on the command line.
   - **Select by depth** with Magic Brush: turn on By depth on its strip and a click selects everything at about that depth; Range sets how far it reaches. Shift adds and Alt subtracts as usual.
   - **Depth map export**: Save options › Depth map also writes `<name>-depth.png` (16-bit grey, white = near) beside each saved image, layers included. `--depth-map` on the command line, `--depth-only` for the maps alone.
@@ -41,11 +46,16 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
 - Color splash shows which hues it keeps on a strip under its sliders.
 - **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and tooltips show your bindings. F1 opens this tab, with the mouse gestures below the keys.
+- **`prunr bench`** checks the GPU path model by model: each installed model runs on the CPU and through the accelerator the app would pick, timed (session build, first run, steady runs), and the two outputs are compared. It names the accelerator each model landed on and why one was passed over, and writes `prunr-bench.md` and `prunr-bench.json` to send back. `--models`, `--runs`, `--image`; `--heavy` adds Stable Diffusion, RORem and 4xNomos8kSCHAT-L.
 
 ### Changed
 
 - **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.24.1), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.
+- Copy selection and Cut put only the selected area on the clipboard, cropped to its edges; they put a full-size image with everything else clear.
+- Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.
+- Nomos8k's line in the model picker says it is the slowest upscaler, and its Model Store text says how slow.
 - Scroll bars are slim and translucent, without a rail, to sit on the dark glass panels.
+- **The face finder is built in** (YuNet, 0.2 MB), so faces are found with no download; GFPGAN and RestoreFormer++ download only their own model. Face models already installed keep working as they are.
 - A feature whose model is not downloaded says the same thing everywhere — "Get <model> · <size>" — and opens the Model Store on that model: the Faces and Depth chips show "Get" on their face, the Model picker lists every model with "Get · <size>" on the ones not yet downloaded, and the eraser's Fast quality and fast decoder name the download they need.
 - **Lines now come from TEED** instead of DexiNed: cleaner lines, faster (a Sketch on a 20 MP photo takes 1.8 s instead of 2.7 s), and the app is about 130 MB smaller. The Balanced scale is folded into Fused; saved settings, presets and `--line-scale balanced` read it as Fused.
 - An upscaled result keeps its place on screen: a fitted image stays fitted, a zoomed-in view keeps its spot.
@@ -111,7 +121,12 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- A model whose half-precision copy failed on the accelerator (U2Net on OpenVINO) never tried the accelerator again, not even with its full-precision weights, and ran on the processor from then on. It now falls back to the full-precision weights on the same accelerator, and only the copy that failed is skipped next time.
+- Settings › Hardware said "none detected" for the graphics on every Windows machine. It now finds the graphics card and the built-in graphics, and tells a virtual machine's or remote desktop's stand-in from a real one.
 - When a graphics card could not be used (no driver, a remote desktop, a virtual machine), the work quietly ran on the processor while the status bar still named the card. It now falls back to the processor openly and says "CPU".
+- The app froze while a file dialog was open (Open, Save, Save selected, Save layers, and choosing a background picture): the progress stopped, finished images waited, and the desktop could call the window not responding. The app now keeps working behind the dialog, and the dialog stays attached to the window.
+- An image being upscaled, colorized or erased shows the working dot and glow in the sidebar; it showed the grey waiting dot. Images queued behind it keep the waiting dot.
+- `prunr --doctor` and `prunr --clear-ep-cache` printed nothing in a Windows terminal; they print there now.
 - A face search could not be stopped: the capsule's Cancel and Esc did nothing while Faces searched, which on a large group photo can take a minute. Both stop it now, after the face it is on, and the Faces panel says "Stopped. Turn Faces off and on to search again."
 - The Faces panel's status line ("7 faces found.", or "These apply while Faces is on.") heads the panel instead of sitting under Include hair, where it read as part of that switch.
 - Running Silueta or U2Net, which OpenVINO does not run, switched the app's accelerator to the CPU: the status bar said "Backend: CPU", Settings dropped its Processor choice, and the Parallel jobs you set went back to the default. A model the accelerator does not run now leaves all three alone.

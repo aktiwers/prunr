@@ -28,6 +28,9 @@ pub struct DepthMap {
     width: u32,
     height: u32,
     near: Vec<f32>,
+    /// How near the photo's largest face is (the median nearness inside
+    /// its box), when its faces were looked for and one was found.
+    face: Option<f32>,
 }
 
 impl DepthMap {
@@ -37,7 +40,33 @@ impl DepthMap {
         let (lo, hi, _) = crate::math::slice_stats(&raw);
         let span = (hi - lo).max(1e-6);
         raw.iter_mut().for_each(|v| *v = ((*v - lo) / span).clamp(0.0, 1.0));
-        Self { width, height, near: raw }
+        Self { width, height, near: raw, face: None }
+    }
+
+    /// The map knowing the faces found in its photo: Auto focus aims at
+    /// the largest.
+    pub fn with_faces(mut self, faces: &[crate::face::FacePlace]) -> Self {
+        self.face = crate::face::largest_face(faces).map(|i| self.nearness_in(faces[i].bounds()));
+        self
+    }
+
+    /// How near the photo's largest face is, when one was found.
+    pub fn face_nearness(&self) -> Option<f32> {
+        self.face
+    }
+
+    /// The median nearness of the cells whose middles lie in `bounds`
+    /// (fractions of the photo: x0, y0, x1, y1); the cell under its
+    /// middle when it is smaller than a cell.
+    fn nearness_in(&self, [x0, y0, x1, y1]: [f32; 4]) -> f32 {
+        let cells = |lo: f32, hi: f32, n: u32| {
+            let first = (lo * n as f32 - 0.5).ceil().max(0.0) as u32;
+            let end = ((hi * n as f32 - 0.5).floor() + 1.0).max(0.0) as u32;
+            first..end.min(n)
+        };
+        let (cols, rows) = (cells(x0, x1, self.width), cells(y0, y1, self.height));
+        let mut inside: Vec<f32> = rows.flat_map(|y| cols.clone().map(move |x| self.near[(y * self.width + x) as usize])).collect();
+        percentile(&mut inside, 0.5).unwrap_or_else(|| self.at((x0 + x1) / 2.0, (y0 + y1) / 2.0))
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -99,9 +128,13 @@ pub fn engine() -> Result<OrtEngine, CoreError> {
 
 /// Measures photos on one `engine()`, built at the first photo and kept
 /// for the rest. A failed build is kept too, so a batch tries it once.
+/// Each map knows the faces in its photo, for Auto focus.
 #[derive(Default)]
 pub struct Measurer {
     engine: OnceLock<Option<OrtEngine>>,
+    faces: std::sync::Mutex<crate::face::LazyFaceFinder>,
+    /// The maps only fade lines, which focus on nothing: no faces looked for.
+    lines_only: bool,
 }
 
 impl Measurer {
@@ -115,13 +148,33 @@ impl Measurer {
         }
     }
 
+    /// A measurer whose maps only fade lines.
+    pub fn lines_only() -> Self {
+        Self { lines_only: true, ..Self::default() }
+    }
+
     pub fn measure(&self, photo: &RgbaImage) -> Result<DepthMap, CoreError> {
-        estimate_depth(self.engine()?, photo, &Progress::none())
+        let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
+        Ok(self.with_faces(map, photo.dimensions(), |f| f.find(photo)))
     }
 
     /// `measure` for a decoded photo in any layout.
     pub fn measure_decoded(&self, photo: &DynamicImage) -> Result<DepthMap, CoreError> {
-        estimate_depth_decoded(self.engine()?, photo, &Progress::none())
+        let map = estimate_depth_decoded(self.engine()?, photo, &Progress::none())?;
+        Ok(self.with_faces(map, (photo.width(), photo.height()), |f| f.find_decoded(photo)))
+    }
+
+    fn with_faces(
+        &self,
+        map: DepthMap,
+        (w, h): (u32, u32),
+        find: impl FnOnce(&mut crate::face::FaceFinder) -> Result<Vec<crate::face::Face>, CoreError>,
+    ) -> DepthMap {
+        if self.lines_only {
+            return map;
+        }
+        let places = self.faces.lock().unwrap_or_else(std::sync::PoisonError::into_inner).places([w, h], find);
+        map.with_faces(&places)
     }
 }
 
@@ -425,9 +478,8 @@ impl DepthLook {
         self.focus = Some([unit(fx), unit(fy)]);
     }
 
-    /// What stays sharp: the depth at the focus point (the nearest tenth
-    /// of the photo when none is set), or a band through it (the middle
-    /// when none is set).
+    /// What stays sharp: the depth at the focus point (`auto_focus` when
+    /// none is set), or a band through it (the middle when none is set).
     pub fn lens_focus(&self, depth: &DepthMap) -> Focus {
         let point = self.focus_point();
         match self.blur {
@@ -475,9 +527,15 @@ impl DepthLook {
     }
 }
 
+/// Where focus goes with no point set: the largest face, or else what is
+/// nearer than 90% of the photo.
+pub fn auto_focus(depth: &DepthMap) -> f32 {
+    depth.face.unwrap_or_else(|| nearest_tenth(depth))
+}
+
 /// The nearness that is nearer than 90% of the photo: where a camera
 /// with nothing else to go on would focus.
-pub fn auto_focus(depth: &DepthMap) -> f32 {
+fn nearest_tenth(depth: &DepthMap) -> f32 {
     let mut near = depth.near.clone();
     percentile(&mut near, 0.9).unwrap_or(1.0)
 }
@@ -495,10 +553,12 @@ pub fn subject_nearness(depth: &DepthMap, cutout: &RgbaImage) -> Option<f32> {
     percentile(&mut under, 0.5)
 }
 
-/// What a lens-blur background focuses on: the cut-out's subject, or
-/// `auto_focus` without one.
+/// What a lens-blur background focuses on: the largest face, else the
+/// cut-out's subject, else what is nearer than 90% of the photo.
 pub fn backdrop_focus(depth: &DepthMap, cutout: Option<&RgbaImage>) -> f32 {
-    cutout.and_then(|c| subject_nearness(depth, c)).unwrap_or_else(|| auto_focus(depth))
+    depth.face
+        .or_else(|| cutout.and_then(|c| subject_nearness(depth, c)))
+        .unwrap_or_else(|| nearest_tenth(depth))
 }
 
 fn percentile(values: &mut [f32], q: f32) -> Option<f32> {
@@ -624,6 +684,45 @@ mod tests {
         assert!((n - 0.75).abs() < 0.03, "{n}");
         assert_eq!(subject_nearness(&depth, &RgbaImage::new(10, 100)), None);
         assert_eq!(backdrop_focus(&depth, Some(&RgbaImage::new(10, 100))), auto_focus(&depth));
+    }
+
+    /// A face found in a 1000 × 1000 photo, `scale` times the restorers'
+    /// crop, with its box at `bounds` (fractions of the photo).
+    fn face(scale: f32, bounds: [f32; 4]) -> crate::face::FacePlace {
+        let landmarks = [[193.0, 240.0], [319.0, 240.0], [257.0, 314.0], [201.0, 371.0], [313.0, 371.0]].map(|[x, y]| [x * scale, y * scale]);
+        let found = crate::face::Face { score: 0.9, bbox: bounds.map(|v| v * 1000.0), landmarks };
+        crate::face::FacePlace::of(&found, [1000, 1000])
+    }
+
+    /// With no point set, focus goes to the largest face found, at its
+    /// median nearness; then, for a background, to the cut-out's subject;
+    /// then to the nearest tenth of the photo.
+    #[test]
+    fn auto_focus_aims_at_the_largest_face_first() {
+        let depth = ramp(10, 100);
+        let mut subject = RgbaImage::new(10, 100);
+        for y in 70..80 {
+            for x in 0..10 {
+                subject.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        assert!((auto_focus(&depth) - 0.9).abs() < 0.02, "no face: the nearest tenth");
+        assert!((backdrop_focus(&depth, Some(&subject)) - 0.75).abs() < 0.03, "no face: the subject");
+        assert_eq!(depth.clone().with_faces(&[]).face_nearness(), None, "none found");
+
+        // A small face low down, a large one high up: the large one counts.
+        let faced = depth.clone().with_faces(&[face(0.3, [0.4, 0.9, 0.5, 0.95]), face(1.0, [0.3, 0.2, 0.7, 0.4])]);
+        let near = faced.face_nearness().expect("a face");
+        assert!((near - 0.3).abs() < 0.02, "the median inside its box: {near}");
+        assert_eq!(auto_focus(&faced), near);
+        assert_eq!(backdrop_focus(&faced, Some(&subject)), near, "the face before the subject");
+        let mut look = DepthLook { blur: LensBlurMode::Point, blur_pct: 50, ..DepthLook::default() };
+        assert_eq!(look.lens_focus(&faced), Focus::Depth(near));
+        look.set_focus(0.5, 0.75);
+        assert_eq!(look.lens_focus(&faced), Focus::Depth(faced.at(0.5, 0.75)), "a point set wins");
+
+        let tiny = depth.clone().with_faces(&[face(0.01, [0.31, 0.505, 0.32, 0.506])]);
+        assert_eq!(tiny.face_nearness(), Some(depth.at(0.315, 0.5055)), "a face within one cell reads that cell");
     }
 
     #[test]
