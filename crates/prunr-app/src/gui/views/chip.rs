@@ -913,7 +913,7 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
     let expanded_id = pop_id.with("expanded");
     show_flyout(pop_id, &resp, below_chip(&resp, pop_id), |ui| {
             let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));
-            theme::pill_frame().show(ui, |ui| {
+            let strip = theme::pill_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // The row's centre line is set by its first height: the
                     // title and knobs centred on 18 px while the '...' grew
@@ -932,10 +932,12 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
             });
             if expanded {
                 ui.add_space(10.0);
-                theme::panel_frame().show(ui, |ui| {
-                    // Exactly its width: a right-aligned row takes all it
-                    // is offered, so a minimum would only ever grow.
-                    ui.set_width(g.width);
+                let frame = theme::panel_frame();
+                // As wide as the strip above it, exactly: a right-aligned
+                // row takes all it is offered, so a minimum would only grow.
+                let width = (strip.response.rect.width() - frame.total_margin().sum().x).max(g.width);
+                frame.show(ui, |ui| {
+                    ui.set_width(width);
                     let reset = panel_header(ui, g.label, header, !g.tuned);
                     panel_rows(ui, |ui| body(ui, Part::Full { reset }));
                 });

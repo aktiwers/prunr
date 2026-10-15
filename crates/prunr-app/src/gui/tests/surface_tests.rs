@@ -667,4 +667,6 @@ fn a_strip_s_full_panel_keeps_its_width() {
         h.run_steps(5);
     }
     assert_eq!(right(&h), first, "the panel's sliders end where they did");
+    let strip_right = h.get_by_label("All mask settings").rect().right();
+    assert!((first - strip_right).abs() < 100.0, "the panel spans the strip above it: {first} vs {strip_right}");
 }
