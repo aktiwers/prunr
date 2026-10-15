@@ -2064,26 +2064,12 @@ impl Processor {
         });
     }
 
-    /// Drain completed SAM encoder results. Non-blocking; returns an empty
-    /// `Vec` when nothing is ready. Caller writes embedding to BatchItem and
-    /// clears encoder_pending.
     pub(crate) fn pump_sam_encoder_results(&mut self) -> Vec<SamEncoderResult> {
-        let mut out = Vec::new();
-        while let Ok(r) = self.sam_encoder_rx.try_recv() {
-            out.push(r);
-        }
-        out
+        self.sam_encoder_rx.try_iter().collect()
     }
 
-    /// Drain completed SAM decoder results. Non-blocking; returns an empty
-    /// `Vec` when nothing is ready. Caller converts to MaskArtifact and
-    /// calls commit_selection_and_dispatch.
     pub(crate) fn pump_sam_decoder_results(&mut self) -> Vec<SamDecoderResult> {
-        let mut out = Vec::new();
-        while let Ok(r) = self.sam_decoder_rx.try_recv() {
-            out.push(r);
-        }
-        out
+        self.sam_decoder_rx.try_iter().collect()
     }
 }
 
