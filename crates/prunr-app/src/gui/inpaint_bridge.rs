@@ -37,6 +37,9 @@ fn idle_release_due(no_in_flight: bool, idle: Duration, keep_loaded: bool) -> bo
 /// starts swap-thrashing on either platform.
 const MEMORY_PRESSURE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// How long a released subprocess gets to exit before it is killed.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Parent → bridge messages.
 pub enum InpaintBridgeMsg {
     /// Dispatch one SD inpaint stroke. Image + mask are temp-file
@@ -155,9 +158,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             Ok(msg) => Some(msg),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let SubState::Ready(mut s) = std::mem::replace(&mut sub_state, SubState::Idle) {
-                    let _ = s.shutdown_with_timeout(Duration::from_secs(2));
-                }
+                shutdown_ready(&mut sub_state);
                 return;
             }
         };
@@ -169,9 +170,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     Ok(m) => m,
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        if let SubState::Ready(mut s) = std::mem::replace(&mut sub_state, SubState::Idle) {
-                            let _ = s.shutdown_with_timeout(Duration::from_secs(2));
-                        }
+                        shutdown_ready(&mut sub_state);
                         return;
                     }
                 },
@@ -259,10 +258,8 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
 
         if let SubState::Ready(s) = &mut sub_state {
             if idle_release_due(s.in_flight_items().is_empty(), last_used.elapsed(), keep_loaded) {
-                if let SubState::Ready(mut owned) = std::mem::replace(&mut sub_state, SubState::Idle) {
-                    let _ = owned.shutdown_with_timeout(Duration::from_secs(2));
-                    tracing::info!("inpaint subprocess released after idle window");
-                }
+                shutdown_ready(&mut sub_state);
+                tracing::info!("inpaint subprocess released after idle window");
             }
         }
     }
@@ -313,12 +310,7 @@ fn handle_cancel(
                 return;
             }
             *cancelled = true;
-            for (id, _gen) in inflight_gens.drain() {
-                let _ = res_tx.send(InpaintBridgeResult::Error {
-                    item_id: id,
-                    error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
-                });
-            }
+            fail_inflight(inflight_gens, res_tx, crate::subprocess::protocol::CANCELLED_ERR_MSG);
             tracing::info!("inpaint Cancel during spawn — pending result will be killed");
         }
         SubState::Ready(_) => {
@@ -350,23 +342,13 @@ fn handle_release(
             // killed: stay Spawning with `cancelled` set so the
             // arriving subprocess is killed, and drain inflight.
             *sub_state = SubState::Spawning { rx, pending: Vec::new(), cancelled: true };
-            for (id, _gen) in inflight_gens.drain() {
-                let _ = res_tx.send(InpaintBridgeResult::Error {
-                    item_id: id,
-                    error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
-                });
-            }
+            fail_inflight(inflight_gens, res_tx, crate::subprocess::protocol::CANCELLED_ERR_MSG);
             tracing::info!("inpaint Release during spawn — pending result will be killed");
         }
         SubState::Ready(mut s) => {
             s.kill();
             tracing::info!("inpaint subprocess released on model switch");
-            for (id, _gen) in inflight_gens.drain() {
-                let _ = res_tx.send(InpaintBridgeResult::Error {
-                    item_id: id,
-                    error: crate::subprocess::protocol::CANCELLED_ERR_MSG.into(),
-                });
-            }
+            fail_inflight(inflight_gens, res_tx, crate::subprocess::protocol::CANCELLED_ERR_MSG);
         }
     }
 }
@@ -470,11 +452,24 @@ fn kill_ready_and_drain(
         s.kill();
         tracing::info!("{log_msg}");
     }
-    for (id, _gen) in inflight_gens.drain() {
-        let _ = res_tx.send(InpaintBridgeResult::Error {
-            item_id: id,
-            error: error_msg.into(),
-        });
+    fail_inflight(inflight_gens, res_tx, error_msg);
+}
+
+/// End every in-flight stroke with `error`.
+fn fail_inflight(
+    inflight_gens: &mut HashMap<u64, u64>,
+    res_tx: &mpsc::Sender<InpaintBridgeResult>,
+    error: &'static str,
+) {
+    for (item_id, _gen) in inflight_gens.drain() {
+        let _ = res_tx.send(InpaintBridgeResult::Error { item_id, error: error.into() });
+    }
+}
+
+/// Shut a Ready subprocess down gracefully and go Idle.
+fn shutdown_ready(sub_state: &mut SubState) {
+    if let SubState::Ready(mut s) = std::mem::replace(sub_state, SubState::Idle) {
+        let _ = s.shutdown_with_timeout(RELEASE_TIMEOUT);
     }
 }
 
