@@ -276,6 +276,7 @@ impl PrunrApp {
             correction,
             faces,
             depth,
+            quick_photo: item.quick_photo.clone(),
             ..DispatchInputs::new(kind, version, original, item.settings)
         })
     }
@@ -371,6 +372,9 @@ impl PrunrApp {
                     // photo is made at full size before the frame shrinks.
                     if let Some(faced) = r.new_faced {
                         item.faced_photo = Some(faced);
+                    }
+                    if let Some(small) = r.new_quick_photo {
+                        item.quick_photo = Some(small);
                     }
                     if item.on_screen {
                         item.quick.expect(r.generation);
