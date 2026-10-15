@@ -776,7 +776,7 @@ pub(crate) struct Processor {
     /// `is_inpaint_in_flight` to show a progress overlay.
     inpaint_tx: mpsc::Sender<(u64, InpaintOutcome)>,
     inpaint_rx: mpsc::Receiver<(u64, InpaintOutcome)>,
-    inpaint_latest_gen: HashMap<u64, u64>,
+    inpaint_latest_generation: HashMap<u64, u64>,
     inpaint_pending: HashMap<u64, u32>,
     /// Per-item cancel flag for the in-flight inpaint stroke. The flag
     /// is checked between LaMa tiles and between SD UNet steps; when
@@ -892,7 +892,7 @@ impl Processor {
             seg_run: None,
             inpaint_tx,
             inpaint_rx,
-            inpaint_latest_gen: HashMap::new(),
+            inpaint_latest_generation: HashMap::new(),
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
             inpaint_runs: HashMap::new(),
@@ -1003,7 +1003,7 @@ impl Processor {
 
     #[cfg(test)]
     pub(crate) fn land_inpaint_scaled_for_test(&mut self, item_id: u64, rgba: image::RgbaImage, fill_scale: f32) {
-        let generation = *self.inpaint_latest_gen.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
+        let generation = *self.inpaint_latest_generation.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
         let _ = self.inpaint_tx.send((item_id, InpaintOutcome::Done { rgba, fill_scale, generation }));
     }
 
@@ -1072,9 +1072,9 @@ impl Processor {
         correction: std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: InpaintTuning,
     ) {
-        let generation = self.inpaint_latest_gen.entry(item_id).or_insert(0);
-        *generation += 1;
-        let gen = *generation;
+        let latest = self.inpaint_latest_generation.entry(item_id).or_insert(0);
+        *latest += 1;
+        let generation = *latest;
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
         // Replace any prior cancel flag + progress sink — the new
         // dispatch supersedes its predecessor anyway, so wiring fresh
@@ -1090,7 +1090,7 @@ impl Processor {
         self.inpaint_runs.insert(item_id, sink);
         if tuning.model.is_sd_family() {
             // The SD subprocess reports through the bridge to the run's sink.
-            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning, progress);
+            self.dispatch_inpaint_sd(item_id, generation, &image, &correction, &tuning, progress);
             return;
         }
         let tx = self.inpaint_tx.clone();
@@ -1107,7 +1107,7 @@ impl Processor {
             ), filled.scale));
             run.end();
             let outcome = match outcome {
-                Ok((rgba, fill_scale)) => InpaintOutcome::Done { rgba, fill_scale, generation: gen },
+                Ok((rgba, fill_scale)) => InpaintOutcome::Done { rgba, fill_scale, generation },
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
                     InpaintOutcome::Cancelled
@@ -1230,7 +1230,7 @@ impl Processor {
     fn dispatch_inpaint_sd(
         &mut self,
         item_id: u64,
-        gen: u64,
+        generation: u64,
         image: &std::sync::Arc<image::RgbaImage>,
         correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: &InpaintTuning,
@@ -1261,8 +1261,8 @@ impl Processor {
             let mask = tuning.fill_region(&correction, image.dimensions());
             let sd_req = sd_request(&tuning);
             let dir = crate::subprocess::protocol::ipc_temp_dir();
-            let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_gen(dir, item_id, gen);
-            let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_gen(dir, item_id, gen);
+            let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_generation(dir, item_id, generation);
+            let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_generation(dir, item_id, generation);
             let res: Result<(), String> = (|| {
                 let img_bytes = prunr_core::encode_rgba_png(&image)
                     .map_err(|e| format!("encode source: {e:?}"))?;
@@ -1279,7 +1279,7 @@ impl Processor {
             }
             // Esc landed during the encode — drop the work before the
             // bridge sees it. Temp files we just wrote are abandoned;
-            // the next dispatch's gen-bump renames over them.
+            // the next dispatch's generation-bump renames over them.
             if cancelled() {
                 let _ = std::fs::remove_file(&image_path);
                 let _ = std::fs::remove_file(&mask_path);
@@ -1287,7 +1287,7 @@ impl Processor {
                 return;
             }
             let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch {
-                item_id, gen, model_id: tuning.model, image_path, mask_path, sd_req,
+                item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
                 feather_px: tuning.feather_px,
                 sharpen: tuning.sharpen,
             });
@@ -1300,17 +1300,17 @@ impl Processor {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
                 InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
-                InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale } => {
+                InpaintBridgeResult::Done { item_id, generation, rgba_path, width, height, fill_scale } => {
                     let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
                             Ok(img) => {
                                 let rgba = img.to_rgba8();
                                 debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
-                                // Stamp with the dispatch's own gen — drain
+                                // Stamp with the dispatch's own generation — drain
                                 // drops it as stale if a fresher stroke
-                                // bumped `inpaint_latest_gen` while this
+                                // bumped `inpaint_latest_generation` while this
                                 // one was in the subprocess.
-                                InpaintOutcome::Done { rgba, fill_scale, generation: gen }
+                                InpaintOutcome::Done { rgba, fill_scale, generation }
                             }
                             Err(e) => InpaintOutcome::Failed(format!("decode SD result: {e}")),
                         },
@@ -1359,7 +1359,7 @@ impl Processor {
     /// Drain in-flight inpaint results.
     ///
     /// Returns `(committed_results, cancelled_item_ids, errors)`.
-    /// - `committed_results` only carries the latest-gen finished
+    /// - `committed_results` only carries the latest-generation finished
     ///   strokes (stale ones are silently dropped).
     /// - `cancelled_item_ids` lists items whose stroke was cancelled
     ///   by the user — the GUI surfaces a toast for each so the user
@@ -1392,7 +1392,7 @@ impl Processor {
                 InpaintOutcome::Cancelled => cancelled.push(item_id),
                 InpaintOutcome::Failed(msg) => errors.push((item_id, msg)),
                 InpaintOutcome::Done { rgba, fill_scale, generation } => {
-                    if self.inpaint_latest_gen.get(&item_id) == Some(&generation) {
+                    if self.inpaint_latest_generation.get(&item_id) == Some(&generation) {
                         tracing::info!(item_id, fill_scale, "erase landed");
                         out.push(LandedFill { item_id, rgba, fill_scale });
                     }
@@ -2587,7 +2587,7 @@ mod tests {
     #[test]
     fn drain_filters_stale_generations() {
         let mut p = fixture();
-        p.inpaint_latest_gen.insert(7, 2);
+        p.inpaint_latest_generation.insert(7, 2);
         p.inpaint_tx.send((7, InpaintOutcome::Done {
             rgba: image::RgbaImage::new(1, 1), fill_scale: 1.0, generation: 1,
         })).unwrap();
@@ -2595,8 +2595,8 @@ mod tests {
             rgba: image::RgbaImage::new(2, 2), fill_scale: 1.0, generation: 2,
         })).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert_eq!(drained.len(), 1, "stale gen=1 must be dropped");
-        assert_eq!(drained[0].rgba.dimensions(), (2, 2), "the gen=2 fill lands");
+        assert_eq!(drained.len(), 1, "stale generation=1 must be dropped");
+        assert_eq!(drained[0].rgba.dimensions(), (2, 2), "the generation=2 fill lands");
         assert!(cancelled.is_empty(), "no cancellation events expected");
         assert!(errors.is_empty(), "no dispatch errors expected");
     }
@@ -2604,7 +2604,7 @@ mod tests {
     #[test]
     fn drain_routes_cancelled_results_to_cancellation_list() {
         let mut p = fixture();
-        p.inpaint_latest_gen.insert(7, 5);
+        p.inpaint_latest_generation.insert(7, 5);
         p.inpaint_pending.insert(7, 1);
         p.inpaint_tx.send((7, InpaintOutcome::Cancelled)).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();

@@ -392,9 +392,9 @@ pub enum IpcKind {
     SpareEdge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,
-    /// Parent → inpaint worker: source PNG for a stroke (gen-suffixed).
+    /// Parent → inpaint worker: source PNG for a stroke (generation-suffixed).
     InpaintImg,
-    /// Parent → inpaint worker: mask PNG for a stroke (gen-suffixed).
+    /// Parent → inpaint worker: mask PNG for a stroke (generation-suffixed).
     InpaintMask,
     /// Inpaint worker → parent: composited RGBA PNG result.
     InpaintOut,
@@ -433,18 +433,18 @@ impl IpcKind {
         ipc_dir.join(format!("{}{id}.{}", self.prefix(), self.ext()))
     }
 
-    /// Build a path for a gen-suffixed inpaint file:
-    /// `<ipc>/<prefix><id>-<gen>.<ext>`. Only valid for `InpaintImg` /
+    /// Build a path for a generation-suffixed inpaint file:
+    /// `<ipc>/<prefix><id>-<generation>.<ext>`. Only valid for `InpaintImg` /
     /// `InpaintMask` (the inpaint worker rewrites these per stroke and
-    /// the gen suffix prevents stale-file races).
-    pub fn path_for_gen(self, ipc_dir: &std::path::Path, id: u64, gen: u64) -> std::path::PathBuf {
+    /// the generation suffix prevents stale-file races).
+    pub fn path_for_generation(self, ipc_dir: &std::path::Path, id: u64, generation: u64) -> std::path::PathBuf {
         // A full assert, not a debug one: a wrong variant would produce
         // e.g. `result_5-0.raw` in release, a name no reader expects.
         assert!(
             matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
-            "path_for_gen only valid for InpaintImg / InpaintMask; got {self:?}"
+            "path_for_generation only valid for InpaintImg / InpaintMask; got {self:?}"
         );
-        ipc_dir.join(format!("{}{id}-{gen}.{}", self.prefix(), self.ext()))
+        ipc_dir.join(format!("{}{id}-{generation}.{}", self.prefix(), self.ext()))
     }
 }
 
