@@ -62,73 +62,56 @@ pub struct ItemSettings {
 
     /// How the subject mask and edge mask combine in SubjectOutline mode.
     /// Ignored otherwise.
-    #[serde(default)]
     pub compose_mode: prunr_core::ComposeMode,
     /// Line colouring: solid (via `solid_line_color`) or a gradient.
-    #[serde(default)]
     pub line_style: prunr_core::LineStyle,
     /// RGB transformation applied to the masked subject before compose.
-    #[serde(default)]
     pub fill_style: prunr_core::FillStyle,
     /// Sticker outline and shadow around the cut-out.
-    #[serde(default)]
     pub decoration: prunr_core::Decoration,
     /// A picture made from the photo, shown behind the result.
-    #[serde(default)]
     pub bg_effect: prunr_core::BgEffect,
     /// Transform applied to the image before TEED inference. A change
     /// drops the edge tensor cache and reruns the detector at once (on the
     /// cached cut-out when there is one).
-    #[serde(default)]
     pub input_transform: prunr_core::InputTransform,
     /// Drives the CompositeOnly recipe diff when the user picks a different
     /// background image. `None` when no image bg is set.
     ///
     /// `NonZeroU64` niche saves 8 bytes vs `Option<u64>`. Hash=0 is treated
     /// as None (content_hash never yields 0 in practice).
-    #[serde(default)]
     pub bg_image_hash: Option<std::num::NonZeroU64>,
     /// How the background image is positioned/scaled inside the result frame.
     /// Default `Cover` matches CSS `background-size: cover`.
-    #[serde(default)]
     pub bg_image_fit: BgImageFit,
 
     /// User-facing output scale. Older presets that carried `upscale_scale: u32`
     /// silently drop the field via `#[serde(default)]` — they reload at
     /// `OutputScale::X4` (the no-op default matching the prior native upscale
     /// model behaviour).
-    #[serde(default)]
     pub output_scale: prunr_core::OutputScale,
     /// Pre-inference classical denoise blend strength, range [0.0, 1.0].
     /// 0.0 = no denoise (output bit-identical to the un-touched source).
-    #[serde(default)]
     pub pre_denoise: f32,
     /// Unsharp-mask strength applied after inference, range [-1.0, 1.0].
     /// Negative = blur, 0.0 = no-op, positive = sharpen.
-    #[serde(default = "default_sharpen")]
     pub sharpen: f32,
     /// Lerp weight: 1.0 = full AI upscale (default), 0.0 = pure bicubic.
     /// Default is 1.0 so a preset that omits this field reads as full AI —
     /// the no-op state where the upscale model's output passes through.
-    #[serde(default = "default_ai_blend")]
     pub ai_blend: f32,
     /// Reinhard Lab mean+stddev color match against source RGB.
-    #[serde(default)]
     pub color_match: bool,
     /// Restore faces: on or off, with which model and how strongly.
-    #[serde(default)]
     pub faces: FaceSettings,
     /// How much of the colorizer's predicted colour shows, in whole
     /// percent to fit the byte budget: 0 = grey, 100 = as predicted, up
     /// to `COLOR_STRENGTH_MAX_PCT`.
-    #[serde(default = "default_color_strength_pct")]
     pub color_strength_pct: u8,
     /// The Depth chip (No model): lens blur and haze from the photo's
     /// depth map, applied to the photo before lines and effects.
-    #[serde(default)]
     pub depth: prunr_core::depth::DepthLook,
     /// Sketch: lines lighten with distance, 0-100.
-    #[serde(default)]
     pub line_fade_pct: u8,
 }
 
@@ -185,10 +168,6 @@ impl FaceSettings {
     }
 }
 
-fn default_sharpen() -> f32 { prunr_core::DEFAULT_SHARPEN }
-fn default_ai_blend() -> f32 { 1.0 }
-fn default_color_strength_pct() -> u8 { 100 }
-
 impl Default for ItemSettings {
     fn default() -> Self {
         Self {
@@ -219,7 +198,7 @@ impl Default for ItemSettings {
             ai_blend: 1.0,
             color_match: false,
             faces: FaceSettings::default(),
-            color_strength_pct: default_color_strength_pct(),
+            color_strength_pct: 100,
             depth: prunr_core::depth::DepthLook::default(),
             line_fade_pct: 0,
         }
@@ -623,8 +602,9 @@ mod tests {
 
     #[test]
     fn serde_loads_old_preset_missing_edge_scale_as_fused() {
-        // Backwards-compat: older preset files lack edge_scale. `#[serde(default)]` on ItemSettings must fall back
-        // to `EdgeScale::Fused`.
+        // Backwards-compat: older preset files lack edge_scale.
+        // `#[serde(default)]` on ItemSettings must fall back to
+        // `EdgeScale::Fused`.
         let old_json = r#"{
             "gamma": 1.2,
             "contrast": 0.0,
@@ -835,7 +815,7 @@ mod tests {
     #[test]
     fn serde_loads_old_preset_missing_upscale_tuning_fields() {
         // An old preset missing the upscale-tuning fields must load with
-        // sensible defaults: pre_denoise=0, sharpen off (from default_sharpen()),
+        // sensible defaults: pre_denoise=0, sharpen at DEFAULT_SHARPEN,
         // ai_blend=1 (the critical one — zero here would disable AI output).
         let old_json = r#"{
             "gamma": 1.0,
