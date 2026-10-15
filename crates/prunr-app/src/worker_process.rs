@@ -267,7 +267,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
+        model, jobs, mask, cpu_only, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -278,7 +278,7 @@ pub fn run_worker() -> ! {
         std::process::exit(1);
     };
     tracing::info!(
-        ?model, jobs, force_cpu, ?line_mode, inpaint_only,
+        ?model, jobs, cpu_only, ?line_mode, inpaint_only,
         "worker: Init received, beginning init sequence",
     );
 
@@ -294,7 +294,7 @@ pub fn run_worker() -> ! {
         has_gpu,
         "worker: detect_active_provider returned",
     );
-    let cpu_only = force_cpu || !has_gpu;
+    let on_cpu = cpu_only || !has_gpu;
 
     // Inpaint-only subprocess: skip seg/edge engine creation entirely.
     // Inpaint sessions are built lazily by `process_inpaint_with` on
@@ -325,7 +325,7 @@ pub fn run_worker() -> ! {
 
     // Create segmentation engine pool
     let mut engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
-        match create_engine_pool(model, jobs, cpu_only) {
+        match create_engine_pool(model, jobs, on_cpu) {
             Ok(e) => e,
             Err(e) => {
                 let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -352,7 +352,7 @@ pub fn run_worker() -> ! {
 
     // Build rayon pool for parallel inference, sized for the engines a
     // later `Configure` may still build.
-    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &active_provider) };
+    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, on_cpu, &active_provider) };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
@@ -404,7 +404,7 @@ pub fn run_worker() -> ! {
                     }
                     if line_mode != LineMode::EdgesOnly && engines.is_empty() {
                         let started = std::time::Instant::now();
-                        engines = create_engine_pool(model, jobs, cpu_only).map_err(|e| format!("Engine pool failed: {e}"))?;
+                        engines = create_engine_pool(model, jobs, on_cpu).map_err(|e| format!("Engine pool failed: {e}"))?;
                         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: engine pool built on first use");
                     }
                     Ok(())

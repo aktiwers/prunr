@@ -368,7 +368,7 @@ impl PrunrApp {
         Some(super::worker::EngineSpec {
             model: settings.model.to_model_kind()?,
             jobs: settings.parallel_jobs,
-            force_cpu: settings.cpu_only(),
+            cpu_only: settings.cpu_only(),
         })
     }
 

@@ -91,16 +91,16 @@ impl SubprocessManager {
     /// Blocks until the child sends `Ready` or `InitError`.
     #[tracing::instrument(
         skip_all,
-        fields(model = ?model, jobs, force_cpu, line_mode = ?lines.mode),
+        fields(model = ?model, jobs, cpu_only, line_mode = ?lines.mode),
     )]
     pub fn spawn(
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
-        force_cpu: bool,
+        cpu_only: bool,
         lines: WorkerLines,
     ) -> Result<(Self, String), String> {
-        Self::spawn_inner(model, jobs, mask, force_cpu, lines, false)
+        Self::spawn_inner(model, jobs, mask, cpu_only, lines, false)
     }
 
     /// Spawn a SD-inpaint-only subprocess. The worker skips engine
@@ -121,7 +121,7 @@ impl SubprocessManager {
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
-        force_cpu: bool,
+        cpu_only: bool,
         lines: WorkerLines,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
@@ -152,7 +152,7 @@ impl SubprocessManager {
         // Send Init command — flush immediately so the child's blocking
         // `read_message` sees it without waiting for the buffer to fill.
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
-            model, jobs, mask, force_cpu, line_mode, edge,
+            model, jobs, mask, cpu_only, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
             line_fade_pct,
