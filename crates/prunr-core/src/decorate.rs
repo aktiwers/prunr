@@ -140,11 +140,7 @@ fn shadow_cover(alpha: &[u8], w: usize, h: usize, d: &Decoration) -> Vec<f32> {
     });
     let radius = (d.shadow_blur / 2.0).round() as u32;
     if radius > 0 {
-        let mut tmp = vec![0.0f32; cast.len()]; // reused as each pass's output
-        for _ in 0..3 {
-            crate::guided_filter::box_filter_into(&cast, w as u32, h as u32, radius, &mut tmp);
-            std::mem::swap(&mut cast, &mut tmp);
-        }
+        crate::guided_filter::box_blur3_into(&mut cast, w as u32, h as u32, radius, &mut Vec::new());
     }
     let opacity = d.shadow_opacity.clamp(0.0, 1.0);
     cast.par_iter_mut().for_each(|v| *v *= opacity);

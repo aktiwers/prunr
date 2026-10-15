@@ -663,9 +663,7 @@ fn gaussian(plane: &[f32], side: u32, sigma: f32) -> Vec<f32> {
     // Three box passes of radius r have a variance of r² + r ≈ sigma².
     let r = (((12.0 * sigma * sigma / 3.0 + 1.0).sqrt() - 1.0) / 2.0).round().max(1.0) as u32;
     let mut out = plane.to_vec();
-    for _ in 0..3 {
-        out = crate::guided_filter::box_filter(&out, side, side, r);
-    }
+    crate::guided_filter::box_blur3_into(&mut out, side, side, r, &mut Vec::new());
     out
 }
 

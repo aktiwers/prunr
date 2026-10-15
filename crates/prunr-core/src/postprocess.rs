@@ -705,7 +705,6 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
     let bh = bbox.h as usize;
     let bn = bw * bh;
     let mut buf = vec![0.0f32; bn];
-    let mut tmp = vec![0.0f32; bn];
     let raw = mask.as_raw();
     for by in 0..bh {
         let src_off = (bbox.y as usize + by) * raw_w + bbox.x as usize;
@@ -714,15 +713,13 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
             buf[dst_off + bx] = raw[src_off + bx] as f32;
         }
     }
-    crate::guided_filter::box_filter_into(&buf, bbox.w, bbox.h, radius, &mut tmp);
-    crate::guided_filter::box_filter_into(&tmp, bbox.w, bbox.h, radius, &mut buf);
-    crate::guided_filter::box_filter_into(&buf, bbox.w, bbox.h, radius, &mut tmp);
+    crate::guided_filter::box_blur3_into(&mut buf, bbox.w, bbox.h, radius, &mut Vec::new());
     let out = mask.as_mut();
     for by in 0..bh {
         let dst_off = (bbox.y as usize + by) * raw_w + bbox.x as usize;
         let src_off = by * bw;
         for bx in 0..bw {
-            out[dst_off + bx] = tmp[src_off + bx].clamp(0.0, 255.0).round() as u8;
+            out[dst_off + bx] = buf[src_off + bx].clamp(0.0, 255.0).round() as u8;
         }
     }
 }
