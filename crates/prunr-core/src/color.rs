@@ -146,6 +146,23 @@ pub fn parse_hex_rgba(digits: &str) -> Option<[u8; 4]> {
 mod tests {
     use super::*;
 
+    /// Every (a, b, t) in 0..=255: the shared lerp equals the per-channel
+    /// formula the line colours, Cross Process and gradient map each wrote
+    /// out before, and the line blend's former `weight == 255` copy.
+    #[test]
+    fn lerp_rgb_matches_the_former_inline_blends() {
+        let old = |a: u8, b: u8, t: u16| ((a as u16 * (255 - t) + b as u16 * t) / 255) as u8;
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for t in 0..=255u16 {
+                    let got = lerp_rgb([a, b, a], [b, a, 255 - b], t);
+                    assert_eq!(got, [old(a, b, t), old(b, a, t), old(a, 255 - b, t)], "{a} {b} {t}");
+                }
+                assert_eq!(lerp_rgb([a, b, a], [b, a, b], 255), [b, a, b]);
+            }
+        }
+    }
+
     #[test]
     fn hex_reads_six_or_eight_digits() {
         assert_eq!(parse_hex_rgba("ff8000"), Some([255, 128, 0, 255]));
