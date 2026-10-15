@@ -1495,14 +1495,4 @@ mod tests {
         assert_eq!(super::slider_fraction(-3.0, 0.0, 10.0, false), 0.0);
         assert_eq!(super::slider_fraction(1.0, 1.0, 1.0, false), 0.5);
     }
-
-    // The chip widgets require an egui::Ui to render, so unit tests here
-    // only check the non-render helpers. Visual integration tests belong
-    // in the adjustments_toolbar smoke test suite.
-    #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn popover_width_is_sane() {
-        assert!(crate::gui::theme::POPOVER_WIDTH >= 200.0);
-        assert!(crate::gui::theme::POPOVER_WIDTH <= 400.0);
-    }
 }

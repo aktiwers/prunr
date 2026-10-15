@@ -855,6 +855,13 @@ mod tests {
     }
 
     #[test]
+    fn output_scale_factor() {
+        assert_eq!(OutputScale::X2.factor(), 2);
+        assert_eq!(OutputScale::X3.factor(), 3);
+        assert_eq!(OutputScale::X4.factor(), 4);
+    }
+
+    #[test]
     fn output_scale_serde_roundtrip() {
         for variant in [OutputScale::X2, OutputScale::X3, OutputScale::X4] {
             let json = serde_json::to_string(&variant).unwrap();
