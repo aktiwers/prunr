@@ -1281,10 +1281,9 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
-                        if let Some(pos) = batch_idx {
-                            in_flight.remove(pos);
-                        }
+                        let ridx = orig_to_batch.get(&orig_idx).copied();
+                        // in_flight holds batch indices, each sent once a pass.
+                        in_flight.retain(|&i| Some(i) != ridx);
 
                         let result = std::fs::read(&result_path)
                             .ok()
@@ -1299,7 +1298,7 @@ fn run_batch_subprocess(
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
                         let _ = std::fs::remove_file(&result_path);
 
-                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
+                        if let Some(ridx) = ridx {
                             results[ridx] = Some(result);
                         }
 
@@ -1315,11 +1314,10 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageError { item_id, error } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
-                        if let Some(pos) = batch_idx {
-                            in_flight.remove(pos);
-                        }
-                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
+                        let ridx = orig_to_batch.get(&orig_idx).copied();
+                        // in_flight holds batch indices, each sent once a pass.
+                        in_flight.retain(|&i| Some(i) != ridx);
+                        if let Some(ridx) = ridx {
                             results[ridx] = Some(Err(CoreError::Model(error)));
                         }
                     }
