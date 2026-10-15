@@ -241,6 +241,7 @@ fn send_spare_scales(
     ipc: &std::path::Path,
     evt_tx: &mpsc::Sender<SubprocessEvent>,
 ) {
+    let started = std::time::Instant::now();
     let outcome = match engine.and_then(|e| spare.make(e)) {
         Some(Ok(res)) => write_edge_cache(IpcKind::SpareEdge.path_for(ipc, token), item_id, &res).map_or(SpareOutcome::Failed, SpareOutcome::Made),
         Some(Err(err)) => {
@@ -249,6 +250,12 @@ fn send_spare_scales(
         }
         None => SpareOutcome::Skipped,
     };
+    let made = match &outcome {
+        SpareOutcome::Made(file) => format!("{:?}", file.scales),
+        SpareOutcome::Skipped => "skipped".to_string(),
+        SpareOutcome::Failed => "failed".to_string(),
+    };
+    tracing::info!(item_id, token, %made, elapsed_ms = started.elapsed().as_millis() as u64, "worker: spare line scales sent");
     let _ = evt_tx.send(SubprocessEvent::SpareEdgeScales { item_id, token, outcome });
 }
 
