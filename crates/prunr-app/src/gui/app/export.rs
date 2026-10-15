@@ -348,11 +348,8 @@ fn spawn_save_single(
 ) {
     std::thread::spawn(move || {
         let depth = ExportDepth::default();
-        let mut msg = match format.encode(&one.bg.bake(&one.rgba, &depth)) {
-            Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(()) => "Saved".into(),
-                Err(e) => format!("Save failed: {e}"),
-            },
+        let mut msg = match write_composite(&path, &one.rgba, &one.bg, format, &depth) {
+            Ok(()) => "Saved".into(),
             Err(e) => format!("Save failed: {e}"),
         };
         let folder = path.parent().unwrap_or(Path::new("."));
@@ -362,6 +359,27 @@ fn spawn_save_single(
         }
         let _ = tx.send(msg);
     });
+}
+
+/// Bake `bg` behind `rgba`, encode as `format` and write it to `path`.
+fn write_composite(
+    path: &Path,
+    rgba: &Arc<image::RgbaImage>,
+    bg: &crate::gui::item::ExportBg,
+    format: prunr_core::ExportFormat,
+    measure: &ExportDepth,
+) -> Result<(), String> {
+    let bytes = format.encode(&bg.bake(rgba, measure)).map_err(|e| e.to_string())?;
+    std::fs::write(path, &bytes).map_err(|e| e.to_string())
+}
+
+/// The toast after a multi-file save.
+fn save_summary(saved: usize, failed: usize, noun: &str) -> String {
+    if failed > 0 {
+        format!("Saved {saved}, failed {failed}")
+    } else {
+        format!("Saved {saved} {noun}")
+    }
 }
 
 /// Write `depth` into `folder` when asked for; counts it as saved or failed.
@@ -408,12 +426,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
             }
             save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut saved, &mut failed);
         }
-        let msg = if failed > 0 {
-            format!("Saved {saved}, failed {failed}")
-        } else {
-            format!("Saved {saved} file(s)")
-        };
-        let _ = tx.send(msg);
+        let _ = tx.send(save_summary(saved, failed, "file(s)"));
     });
 }
 
@@ -444,19 +457,11 @@ fn spawn_save_batch(
                 failed += 1;
                 continue;
             };
-            match format.encode(&bg.bake(&rgba, &measure)) {
-                Ok(bytes) => match std::fs::write(&out_path, &bytes) {
-                    Ok(()) => saved += 1,
-                    Err(_) => failed += 1,
-                },
+            match write_composite(&out_path, &rgba, &bg, format, &measure) {
+                Ok(()) => saved += 1,
                 Err(_) => failed += 1,
             }
         }
-        let msg = if failed > 0 {
-            format!("Saved {saved}, failed {failed}")
-        } else {
-            format!("Saved {saved} image(s)")
-        };
-        let _ = tx.send(msg);
+        let _ = tx.send(save_summary(saved, failed, "image(s)"));
     });
 }
