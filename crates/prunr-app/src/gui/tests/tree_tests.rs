@@ -3,60 +3,12 @@
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
-use super::fixtures::push_test_item;
-use super::surface_tests::loaded;
+use super::harness::{
+    assert_all_controls_named, click, harness, harness_builder, loaded, loaded_with, names, new_app,
+    settle, tree,
+};
 use crate::gui::app::PrunrApp;
-use crate::gui::automation::tree::{readable_name, ControlNode};
-use crate::gui::item::BatchStatus;
 use crate::gui::views::settings::SettingsTab;
-
-pub(super) fn harness() -> Harness<'static, PrunrApp> {
-    harness_sized(egui::vec2(1400.0, 900.0))
-}
-
-pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
-    Harness::builder()
-        .with_size(size)
-        .build_eframe(|cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
-            PrunrApp::new_for_test()
-        })
-}
-
-pub(super) fn tree<S>(harness: &Harness<'_, S>) -> ControlNode {
-    ControlNode::from_node(&harness.kittest_state().root())
-}
-
-/// Runs a few frames so clicks, animations and repaint requests settle.
-/// `Harness::run` would stop at the first idle frame and panic on a
-/// spinner, which the batch list shows for any item still in flight.
-pub(super) fn settle(harness: &mut Harness<'_, PrunrApp>) {
-    harness.run_steps(4);
-}
-
-/// Clicks the control whose readable name is `name`, then lets it settle.
-pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
-    harness
-        .get_by(|n| n.label().as_deref().and_then(readable_name).as_deref() == Some(name))
-        .click();
-    settle(harness);
-}
-
-pub(super) fn names<S>(harness: &Harness<'_, S>) -> Vec<String> {
-    tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
-}
-
-/// Every control in the tree has a readable name. Fails with the list of
-/// nameless controls: an icon-only button, an unlabelled slider.
-pub(super) fn assert_all_controls_named<S>(harness: &Harness<'_, S>, surface: &str) {
-    let root = tree(harness);
-    let nameless: Vec<String> = root
-        .iter()
-        .filter(|n| n.is_control() && n.name.is_none())
-        .map(|n| format!("{:?} {:?} at {:?}", n.role, n.id, n.rect))
-        .collect();
-    assert!(nameless.is_empty(), "{surface}: controls without a readable name:\n{}", nameless.join("\n"));
-}
 
 #[test]
 fn empty_window_names_every_control() {
@@ -73,14 +25,7 @@ fn empty_window_names_every_control() {
 
 #[test]
 fn loaded_item_names_every_control() {
-    let mut harness = harness();
-    {
-        let app = harness.state_mut();
-        let item = push_test_item(app, 1);
-        item.status = BatchStatus::Done;
-        app.batch.select_item(0);
-    }
-    settle(&mut harness);
+    let harness = loaded();
     assert_all_controls_named(&harness, "loaded item");
     // A screen reader, and the control socket, pick an image by its name.
     assert!(names(&harness).iter().any(|n| n == "test1.png"), "the sidebar row is named after its file");
@@ -110,15 +55,7 @@ fn each_model_toolbar_shows_only_its_chips() {
         ("Magic Brush", &[Surface::Brushes]),
     ];
     for model in SettingsModel::ALL {
-        let mut harness = harness();
-        {
-            let app = harness.state_mut();
-            app.settings.model = model;
-            let item = push_test_item(app, 1);
-            item.status = BatchStatus::Done;
-            app.batch.select_item(0);
-        }
-        settle(&mut harness);
+        let harness = loaded_with(|app| app.settings.model = model);
         let names = names(&harness);
         for &(chip, surfaces) in chips {
             let expected = surfaces.iter().any(|&surface| shows(model, surface));
@@ -131,12 +68,7 @@ fn each_model_toolbar_shows_only_its_chips() {
 fn a_run_in_flight_names_its_cancel_button() {
     use crate::gui::dispatch_progress::DispatchProgress;
     use prunr_core::{ProgressUpdate, Step, TileRect};
-    let mut harness = harness();
-    {
-        let app = harness.state_mut();
-        let item = push_test_item(app, 1);
-        item.status = BatchStatus::Done;
-        app.batch.select_item(0);
+    let harness = loaded_with(|app| {
         let mut progress = DispatchProgress { inner: (1, 2), ..DispatchProgress::new(crate::gui::dispatch_progress::ProgressKind::Upscale, Step::Upscaling.label()) };
         progress.apply(&ProgressUpdate::Tiles(vec![
             TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 },
@@ -144,8 +76,7 @@ fn a_run_in_flight_names_its_cancel_button() {
         ]));
         progress.apply(&ProgressUpdate::Tile { index: 1, done: false });
         app.processor.show_progress_for_test(progress);
-    }
-    settle(&mut harness);
+    });
     assert_all_controls_named(&harness, "run in flight");
     let names = names(&harness);
     assert!(names.iter().any(|n| n == "Cancel"), "the capsule's Cancel is named: {names:?}");
@@ -269,13 +200,11 @@ fn mirror_sees_what_the_harness_sees() {
     use std::collections::BTreeSet;
     let mirror = crate::gui::automation::tree::Mirror::default();
     let plugin = mirror.clone();
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1400.0, 900.0))
-        .build_eframe(move |cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
-            cc.egui_ctx.add_plugin(plugin);
-            PrunrApp::new_for_test()
-        });
+    let mut harness = harness_builder().build_eframe(move |cc| {
+        let app = new_app(cc);
+        cc.egui_ctx.add_plugin(plugin);
+        app
+    });
     settle(&mut harness);
     let from_harness: BTreeSet<String> = names(&harness).into_iter().collect();
     let root = mirror.snapshot().expect("a frame ran");
@@ -357,15 +286,10 @@ fn control_socket_clicks_by_name_and_reports_state() {
 fn an_upscale_run_holds_the_chips_it_reads() {
     use crate::gui::settings::SettingsModel;
     for running in [false, true] {
-        let mut harness = harness();
-        {
-            let app = harness.state_mut();
+        let harness = loaded_with(|app| {
             app.settings.model = SettingsModel::RealEsrganUpscale;
-            push_test_item(app, 1).status = BatchStatus::Done;
-            app.batch.select_item(0);
             app.processor.set_upscale_in_flight_for_test(running);
-        }
-        settle(&mut harness);
+        });
         let tree = tree(&harness);
         for chip in ["Scale", "Refine", "Faces"] {
             let node = tree.iter().find(|n| n.name.as_deref() == Some(chip)).unwrap_or_else(|| panic!("{chip} shown"));
@@ -380,15 +304,10 @@ fn an_upscale_run_holds_the_chips_it_reads() {
 fn a_colorize_run_holds_its_strength_chip() {
     use crate::gui::settings::SettingsModel;
     for running in [false, true] {
-        let mut harness = harness();
-        {
-            let app = harness.state_mut();
+        let harness = loaded_with(|app| {
             app.settings.model = SettingsModel::ColorizeDdcolor;
-            push_test_item(app, 1).status = BatchStatus::Done;
-            app.batch.select_item(0);
             app.processor.set_colorize_in_flight_for_test(running);
-        }
-        settle(&mut harness);
+        });
         let tree = tree(&harness);
         let node = tree.iter().find(|n| n.name.as_deref() == Some("Strength")).expect("Strength shown");
         assert_eq!(node.disabled, running, "Strength while running: {running}");
@@ -421,15 +340,10 @@ fn quick_strips_name_every_control() {
 /// and Set focus waits for a click on the image.
 #[test]
 fn the_depth_chip_names_every_control() {
-    let mut h = harness();
-    {
-        let app = h.state_mut();
+    let mut h = loaded_with(|app| {
         app.settings.model = crate::gui::settings::SettingsModel::None;
         app.hardware_install_cache.depth = true;
-        push_test_item(app, 1).status = BatchStatus::Done;
-        app.batch.select_item(0);
-    }
-    settle(&mut h);
+    });
     click(&mut h, "Depth");
     for knob in ["Off", "Point", "Tilt-shift", "Amount", "Fog"] {
         assert!(names(&h).iter().any(|n| n == knob), "{knob} missing from the Depth strip");
@@ -449,7 +363,7 @@ fn the_depth_chip_names_every_control() {
 /// Sketch's full panel names Fade with distance.
 #[test]
 fn the_sketch_panel_names_fade_with_distance() {
-    let mut h = super::surface_tests::loaded();
+    let mut h = loaded();
     click(&mut h, "Sketch");
     click(&mut h, "Whole photo");
     click(&mut h, "All line settings");

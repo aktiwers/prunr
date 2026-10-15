@@ -4,23 +4,14 @@
 use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
-use super::tree_tests::{click, harness, settle};
+use super::harness::{
+    assert_all_controls_named, click, harness, harness_builder, loaded, names, new_app, settle, tree,
+};
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
 
 /// A point on the canvas, below any popover and left of the sidebar.
 const CANVAS_POINT: egui::Pos2 = egui::pos2(600.0, 820.0);
-
-pub(super) fn loaded() -> Harness<'static, PrunrApp> {
-    let mut h = harness();
-    {
-        let app = h.state_mut();
-        push_test_item(app, 1).status = BatchStatus::Done;
-        app.batch.select_item(0);
-    }
-    settle(&mut h);
-    h
-}
 
 fn pointer_to(h: &mut Harness<'_, PrunrApp>, pos: egui::Pos2) {
     h.input_mut().events.push(egui::Event::PointerMoved(pos));
@@ -114,7 +105,6 @@ fn escape_closes_the_flyout_and_keeps_the_selection() {
 
 #[test]
 fn the_tool_strip_follows_the_paint_brush() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip without a tool");
     h.state_mut().brush_state.enable();
@@ -137,7 +127,6 @@ fn the_tool_strip_follows_the_paint_brush() {
 /// would sit on top of the dialog, so it leaves while one is up.
 #[test]
 fn the_tool_strip_leaves_while_a_dialog_is_open() {
-    use super::tree_tests::names;
     let mut h = loaded();
     h.state_mut().brush_state.enable();
     settle(&mut h);
@@ -173,7 +162,6 @@ fn the_canvas_holds_still_while_a_file_dialog_is_up() {
 /// paints the region the erase fills.
 #[test]
 fn an_erasers_magic_brush_strip_has_the_region_knobs() {
-    use super::tree_tests::names;
     let mut h = loaded();
     h.state_mut().settings.model = crate::gui::settings::SettingsModel::Inpaint;
     h.state_mut().magic_brush_state.activate();
@@ -186,7 +174,6 @@ fn an_erasers_magic_brush_strip_has_the_region_knobs() {
 
 #[test]
 fn the_tool_strip_follows_the_magic_brush() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
@@ -210,7 +197,6 @@ fn the_tool_strip_follows_the_magic_brush() {
 /// Magic Brush's Depth switch trades Confidence for Range on the strip.
 #[test]
 fn the_magic_brush_strip_selects_by_depth() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     h.state_mut().hardware_install_cache.depth = true;
     h.state_mut().magic_brush_state.activate();
@@ -293,7 +279,6 @@ fn applying_a_preset_closes_the_popover() {
 
 #[test]
 fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     {
         let item = &mut h.state_mut().batch.items[0];
@@ -317,7 +302,6 @@ fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
 /// offer: its buttons are named, and Escape closes it as Not now.
 #[test]
 fn the_runtime_prompt_is_a_modal_that_escape_closes() {
-    use super::tree_tests::{assert_all_controls_named, names};
     use crate::runtime_install::RuntimeId;
     let mut h = loaded();
     for &rt in RuntimeId::OFFERED {
@@ -369,7 +353,6 @@ fn escape_closes_a_modal_before_touching_the_selection() {
 /// style (its color pickers) and each pre-filter (its steps).
 #[test]
 fn the_sketch_flyout_names_every_control_in_every_mode() {
-    use super::tree_tests::{assert_all_controls_named, names};
     use prunr_core::{InputTransform, LineMode, LineStyle};
     for mode in [LineMode::SubjectOutline, LineMode::EdgesOnly] {
         for (i, style) in LineStyle::ALL.iter().enumerate() {
@@ -393,7 +376,6 @@ fn the_sketch_flyout_names_every_control_in_every_mode() {
 /// The Background flyout names every control for each choice it can show.
 #[test]
 fn the_background_flyout_names_every_control_for_each_choice() {
-    use super::tree_tests::assert_all_controls_named;
     use prunr_core::BgEffect;
     type Choose = fn(&mut crate::gui::item::BatchItem);
     let set: [(&str, Choose); 5] = [
@@ -418,7 +400,6 @@ fn the_background_flyout_names_every_control_for_each_choice() {
 /// The Effect flyout names every control for each effect, "None" first.
 #[test]
 fn the_effect_flyout_names_every_control_for_each_effect() {
-    use super::tree_tests::{assert_all_controls_named, names};
     for style in prunr_core::FillStyle::ALL {
         let mut h = loaded();
         h.state_mut().batch.items[0].settings.fill_style = *style;
@@ -435,7 +416,6 @@ fn the_effect_flyout_names_every_control_for_each_effect() {
 /// The upscale row's Scale popover and Refine flyout name every control.
 #[test]
 fn the_upscale_surfaces_name_every_control() {
-    use super::tree_tests::{assert_all_controls_named, names};
     for (chip, expect) in [("Scale", "2\u{00d7}"), ("Refine", "Sharpen")] {
         let mut h = loaded();
         h.state_mut().settings.model = crate::gui::settings::SettingsModel::RealEsrganUpscale;
@@ -451,7 +431,6 @@ fn the_upscale_surfaces_name_every_control() {
 /// while the canvas is used.
 #[test]
 fn the_colorize_strength_flyout_names_its_control_and_stays_open() {
-    use super::tree_tests::assert_all_controls_named;
     let mut h = loaded();
     h.state_mut().settings.model = crate::gui::settings::SettingsModel::ColorizeDdcolor;
     settle(&mut h);
@@ -471,7 +450,6 @@ fn the_colorize_strength_flyout_names_its_control_and_stays_open() {
 /// every control, the prompts included.
 #[test]
 fn the_sd_eraser_surfaces_name_every_control() {
-    use super::tree_tests::{assert_all_controls_named, names};
     for (chip, expect) in [("Quality", "Fast"), ("Prompt", "Negative prompt"), ("Advanced", "Guidance")] {
         let mut h = loaded();
         h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
@@ -492,7 +470,7 @@ fn picking_a_quality_closes_its_popover() {
     h.state_mut().settings.brush.sd_scheduler = crate::gui::brush_state::SdScheduler::DpmPlusPlus2MKarras;
     settle(&mut h);
     click(&mut h, "Quality");
-    let quality = super::tree_tests::names(&h).into_iter().find(|n| n.starts_with("Quality") && n != "Quality").expect("the Quality row");
+    let quality = names(&h).into_iter().find(|n| n.starts_with("Quality") && n != "Quality").expect("the Quality row");
     click(&mut h, &quality);
     assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes it");
 }
@@ -519,8 +497,8 @@ fn save_options_name_their_controls_and_follow_the_model() {
         }
         settle(&mut h);
         click(&mut h, "Save options");
-        super::tree_tests::assert_all_controls_named(&h, "save options");
-        let names = super::tree_tests::names(&h);
+        assert_all_controls_named(&h, "save options");
+        let names = names(&h);
         assert_eq!(names.iter().any(|n| n == "Separate layers"), layers, "{model:?}");
         click(&mut h, "WebP");
         assert_eq!(h.state().settings.export_format, prunr_core::ExportFormat::Webp);
@@ -540,8 +518,8 @@ fn the_outline_and_shadow_flyout_names_every_control() {
     settle(&mut h);
     click(&mut h, "Outline & Shadow");
     click(&mut h, "All outline and shadow settings");
-    super::tree_tests::assert_all_controls_named(&h, "outline and shadow");
-    let names = super::tree_tests::names(&h);
+    assert_all_controls_named(&h, "outline and shadow");
+    let names = names(&h);
     for expected in ["Width", "Color", "No shadow", "Soft", "Drop", "Opacity", "Blur", "Distance"] {
         assert!(names.iter().any(|n| n.starts_with(expected)), "{expected} missing from {names:?}");
     }
@@ -556,10 +534,10 @@ fn the_sd_eraser_strip_offers_try_another() {
     settle(&mut h);
     h.state_mut().brush_state.enable();
     settle(&mut h);
-    let tree = super::tree_tests::tree(&h);
+    let tree = tree(&h);
     let node = tree.iter().find(|n| n.name.as_deref() == Some("Try another")).expect("Try another on the strip");
     assert!(node.disabled, "greyed before any fill");
-    super::tree_tests::assert_all_controls_named(&h, "SD eraser strip");
+    assert_all_controls_named(&h, "SD eraser strip");
 }
 
 /// The Model picker lists a model that is not downloaded with "Get" and
@@ -627,13 +605,7 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
     for status in [BatchStatus::Done, BatchStatus::Processing] {
         // egui takes the frame time off every wait it is asked for: at
         // the harness's default quarter second, each would read as none.
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(1400.0, 900.0))
-            .with_step_dt(1.0 / 60.0)
-            .build_eframe(|cc| {
-                egui_material_icons::initialize(&cc.egui_ctx);
-                PrunrApp::new_for_test()
-            });
+        let mut h = harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc));
         let photo = h.ctx.load_texture("photo", egui::ColorImage::filled([4, 4], egui::Color32::GRAY), Default::default());
         {
             let app = h.state_mut();
