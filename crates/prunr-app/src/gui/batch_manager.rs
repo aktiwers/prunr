@@ -266,44 +266,33 @@ impl BatchManager {
     /// if any are checked, else the currently-viewed item. Empty when the
     /// batch is empty.
     pub(crate) fn items_to_process(&self) -> Vec<u64> {
-        let checked: Vec<u64> = self.items.iter()
-            .filter(|i| i.selected)
-            .map(|i| i.id)
-            .collect();
-        if !checked.is_empty() {
-            return checked;
-        }
-        self.selected_idx_clamped()
-            .and_then(|idx| self.items.get(idx).map(|i| i.id))
-            .into_iter()
-            .collect()
+        self.targets(self.selected_idx_clamped()).map(|(_, i)| i.id).collect()
     }
 
-    /// Any item in the action target set satisfies `f`. Target set = checked
-    /// items if any, else the currently-viewed one — same rule as
-    /// `items_to_process`, expressed as a fold so callers (toolbar
-    /// Undo/Redo enablement) don't allocate an id vec just to test.
+    /// Any item in the action target set satisfies `f`, without
+    /// allocating (toolbar Undo/Redo enablement).
     pub(crate) fn any_target_can<F: FnMut(&BatchItem) -> bool>(&self, mut f: F) -> bool {
-        let has_selected = self.has_any_selected();
-        let current_id = self.selected_item().map(|b| b.id);
-        self.items.iter().any(|item| {
-            let is_target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            is_target && f(item)
-        })
+        self.targets(self.viewed_unclamped()).any(|(_, item)| f(item))
     }
 
-    /// Indices of items in the current dispatch target set — all
-    /// `selected == true` items when any are checked, or the single
-    /// currently-viewed item when none are. Mirrors the target-set rule
-    /// used by `items_to_process` and `any_target_can`.
+    /// Indices of the items in the action target set.
     pub(crate) fn targeted_indices(&self) -> Vec<usize> {
-        let has_selected = self.has_any_selected();
-        let current_id = self.selected_item().map(|b| b.id);
-        (0..self.items.len())
-            .filter(|&i| {
-                if has_selected { self.items[i].selected } else { Some(self.items[i].id) == current_id }
-            })
-            .collect()
+        self.targets(self.viewed_unclamped()).map(|(i, _)| i).collect()
+    }
+
+    /// The action target set, with indices: the ticked items when any are
+    /// ticked, else the one at `viewed`. Callers resolve `viewed`
+    /// themselves: Process clamps a stale index, Undo/Redo and the
+    /// targeted indices skip it.
+    fn targets(&self, viewed: Option<usize>) -> impl Iterator<Item = (usize, &BatchItem)> {
+        let ticked = self.has_any_selected();
+        self.items.iter().enumerate()
+            .filter(move |&(i, item)| if ticked { item.selected } else { Some(i) == viewed })
+    }
+
+    /// `selected_index` when it names an item.
+    fn viewed_unclamped(&self) -> Option<usize> {
+        self.selected_item().map(|_| self.selected_index)
     }
 
     /// Remove the item at `idx`; its undo files go with its timeline.
@@ -1339,6 +1328,40 @@ mod tests {
         bm.items.push(item_with_cache(42, 0));
         bm.selected_index = 99; // stale; clamped to 0
         assert_eq!(bm.items_to_process(), vec![42]);
+    }
+
+    /// The three target-set readers agree on ticked items and on the item
+    /// on screen; a stale index clamps for Process only, the other two
+    /// target nothing.
+    #[test]
+    fn every_target_reader_picks_the_same_items() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(10, 0));
+        bm.items.push(item_with_cache(20, 0));
+        bm.items.push(item_with_cache(30, 0));
+        bm.selected_index = 1;
+        assert_eq!(bm.items_to_process(), vec![20]);
+        assert_eq!(bm.targeted_indices(), vec![1]);
+        assert!(bm.any_target_can(|i| i.id == 20));
+        assert!(!bm.any_target_can(|i| i.id != 20));
+
+        bm.items[0].selected = true;
+        bm.items[2].selected = true;
+        assert_eq!(bm.items_to_process(), vec![10, 30]);
+        assert_eq!(bm.targeted_indices(), vec![0, 2]);
+        assert!(bm.any_target_can(|i| i.id == 30));
+        assert!(!bm.any_target_can(|i| i.id == 20));
+
+        bm.set_all_selected(false);
+        bm.selected_index = 99;
+        assert_eq!(bm.items_to_process(), vec![30]);
+        assert!(bm.targeted_indices().is_empty());
+        assert!(!bm.any_target_can(|_| true));
+
+        let empty = fixture();
+        assert!(empty.items_to_process().is_empty());
+        assert!(empty.targeted_indices().is_empty());
+        assert!(!empty.any_target_can(|_| true));
     }
 
     #[test]
