@@ -1688,8 +1688,8 @@ static DEV_SAM2_ENCODER: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
 static DEV_SAM2_DECODER: Held = Held::new(std::sync::Weak::new());
 
-#[cfg(feature = "dev-models")]
-fn dev_model_path(name: &str) -> std::path::PathBuf {
+#[cfg(any(feature = "dev-models", debug_assertions))]
+fn workspace_model_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models").join(name)
 }
 
@@ -1698,7 +1698,7 @@ fn dev_model_path(name: &str) -> std::path::PathBuf {
 /// (half the size), so the fallback is what lets tests run there.
 #[cfg(feature = "dev-models")]
 fn dev_model_bytes(name: &str) -> Vec<u8> {
-    dev_model_bytes_in(&dev_model_path(name))
+    dev_model_bytes_in(&workspace_model_path(name))
 }
 
 #[cfg(feature = "dev-models")]
@@ -1823,9 +1823,7 @@ fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
 
     #[cfg(debug_assertions)]
     {
-        let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models")
-            .join(&filename);
+        let dev_path = workspace_model_path(&filename);
         if dev_path.is_file() {
             return Some(dev_path);
         }
