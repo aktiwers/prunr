@@ -372,8 +372,7 @@ impl PrunrApp {
     fn redo_faces_blend(&mut self, idx: usize) {
         if self.batch.items[idx].kept_upscale().is_some() {
             let id = self.batch.items[idx].id;
-            self.processor.live_preview.mark_tweak(id, crate::gui::live_preview::PreviewKind::UpscaleTier2);
-            self.processor.live_preview.flush(id);
+            self.processor.live_preview.render_now(id, crate::gui::live_preview::PreviewKind::UpscaleTier2);
         } else {
             self.dispatch_brush_rerun(idx);
         }
@@ -472,10 +471,14 @@ impl PrunrApp {
         let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
         let has_result = item.status == BatchStatus::Done || role == ModelRole::Filters;
         if reads && has_result && shows(self.settings.model, Surface::Effect) {
-            let (id, kind) = (item.id, crate::gui::live_preview::PreviewKind::photo_rerun(item.settings.line_mode));
-            self.processor.live_preview.mark_tweak(id, kind);
-            self.processor.live_preview.flush(id);
+            self.rerun_photo(idx);
         }
+    }
+
+    fn rerun_photo(&mut self, idx: usize) {
+        let item = &self.batch.items[idx];
+        let kind = crate::gui::live_preview::PreviewKind::photo_rerun(item.settings.line_mode);
+        self.processor.live_preview.render_now(item.id, kind);
     }
 
     /// A depth feature was turned on without the depth model: say so and
@@ -497,9 +500,7 @@ impl PrunrApp {
         let item = &mut self.batch.items[idx];
         item.settings.depth.set_focus(fx, fy);
         item.commit(StepKind::Adjust);
-        let (id, kind) = (item.id, crate::gui::live_preview::PreviewKind::photo_rerun(item.settings.line_mode));
-        self.processor.live_preview.mark_tweak(id, kind);
-        self.processor.live_preview.flush(id);
+        self.rerun_photo(idx);
     }
 
     /// Restore faces: keep the shown image's faces found for its photo,
