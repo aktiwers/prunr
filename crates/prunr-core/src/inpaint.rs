@@ -183,7 +183,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
             for c in 0..3 {
                 let mut sum = 0.0;
                 for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
-                    let xi = (global_x as isize + k as isize - 2)
+                    let xi = (global_x as isize + k as isize - SHARPEN_MARGIN as isize)
                         .clamp(0, img_w as isize - 1) as usize;
                     sum += kv * src[(global_y * img_w + xi) * 4 + c] as f32;
                 }
@@ -216,7 +216,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                     // region by `SHARPEN_MARGIN`, so the clamped index
                     // points at the same source pixel a full-image
                     // variant's clamp would have hit.
-                    let by_kernel = (by as isize + k as isize - 2)
+                    let by_kernel = (by as isize + k as isize - SHARPEN_MARGIN as isize)
                         .clamp(0, bbox_h as isize - 1) as usize;
                     blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
