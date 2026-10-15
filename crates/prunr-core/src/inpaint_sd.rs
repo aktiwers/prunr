@@ -2368,14 +2368,7 @@ pub(crate) fn available_ram_bytes() -> Option<u64> {
 /// Current process RSS in MB. `None` when sysinfo can't read the process
 /// (sandboxed CI, exotic platforms). Used to instrument SD session
 /// load/drop where 4-6 GB swings are easy to hide in aggregate logs.
-///
-/// `pub(crate)` so the LaMa sweeper can emit RSS deltas in the same
-/// trace shape as SD's sweeper.
-pub(crate) fn process_rss_mb_pub() -> Option<u64> {
-    process_rss_mb()
-}
-
-fn process_rss_mb() -> Option<u64> {
+pub(crate) fn process_rss_mb() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
     with_system(|sys| {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
