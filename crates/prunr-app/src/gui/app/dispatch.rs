@@ -292,6 +292,7 @@ impl PrunrApp {
         let add_edge_work = self.batch.cached_tensor_work(&tiers.tier_add_edge);
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
+        self.update_first_look();
         if tiers.tier1.len() > 1 {
             self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
         } else {
@@ -349,7 +350,8 @@ impl PrunrApp {
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
-        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs, self.settings.cpu_only());
+        let first_look = self.processor.first_look.get().is_some_and(|id| tier1_ids.contains(&id));
+        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs, self.settings.cpu_only(), first_look);
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let batch = &mut self.batch;
         let (initial_items, additional_items_rx) =
@@ -424,10 +426,26 @@ impl PrunrApp {
                     line_mode: current_settings.line_mode,
                     edge: current_settings.edge_settings(),
                 },
+                first_look: self.processor.first_look.clone(),
             }),
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
+    }
+
+    /// Tell the worker which image on screen shows a first look at its
+    /// subject, as the view and the settings say now.
+    pub(super) fn update_first_look(&mut self) {
+        let shown = self.batch.selected_item();
+        let (settings, times) = (&self.settings, &self.processor.cut_times);
+        let item = crate::gui::first_look::first_look_for(
+            shown.map(|i| i.id),
+            settings.model.to_model_kind(),
+            shown.map_or(prunr_core::LineMode::Off, |i| i.settings.line_mode),
+            settings.animations,
+            |model| times.expected(model, settings.model_backend(model)),
+        );
+        self.processor.show_first_look(item);
     }
 
     /// Release an item's memory budget and greedily admit the next fitting items.
@@ -495,6 +513,37 @@ mod process_targets_tests {
         app.processor.queue_runs(vec![2, 1]);
         app.pump_inpaint_results(&ctx);
         assert_eq!(app.processor.next_queued_run(), None, "neither image had a region: both turns passed");
+    }
+
+    /// A batch tells the worker which image on screen shows a first look;
+    /// with animations off none does, the running batch's worker hears so
+    /// at once and the warm worker lets the first-look model go.
+    #[test]
+    fn animations_off_loads_no_first_look() {
+        use crate::gui::worker::WorkerMessage;
+        let mut app = two_images(SettingsModel::BiRefNetLite);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        // One image ticked: a batch of several sizes its admission by the
+        // provider, which loads the runtime a test app never loads.
+        let process = |app: &mut PrunrApp| {
+            let item = &mut app.batch.items[1];
+            item.selected = true;
+            item.status = crate::gui::item::BatchStatus::Pending;
+            app.process_items(|i| i.selected, Some(StepKind::Process));
+            match rx.try_recv() {
+                Ok(WorkerMessage::BatchProcess { config, .. }) => config.first_look,
+                _ => panic!("a batch is sent"),
+            }
+        };
+        let shown = process(&mut app);
+        assert_eq!(shown.get(), Some(1), "the image on screen: the batch's own image 2 never looks");
+
+        app.settings.animations = false;
+        app.update_first_look();
+        assert_eq!(shown.get(), None, "the running batch's worker hears first looks are off");
+        assert!(matches!(rx.try_recv(), Ok(WorkerMessage::FirstLookOff)), "the warm worker lets the model go");
+        assert_eq!(process(&mut app).get(), None, "a batch with animations off loads no first-look model");
     }
 
     /// Process gives every ticked image the shown image's settings before

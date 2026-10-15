@@ -1084,7 +1084,10 @@ impl eframe::App for PrunrApp {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
-        super::theme::apply_motion(ctx, self.settings.animations);
+        let motion_changed = super::theme::apply_motion(ctx, self.settings.animations);
+        if motion_changed || self.processor.batch_in_flight() {
+            self.update_first_look();
+        }
         // Held while the pointer stays down, so the press that dismissed a
         // popover is spent in full (see canvas.rs).
         let popup_open = super::theme::dismissable_popup_open(ctx);

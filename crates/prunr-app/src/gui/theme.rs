@@ -98,11 +98,13 @@ const ANIMATION_TIME: f32 = 1.0 / 12.0;
 const STILL_MOMENT: f32 = 5.7;
 
 /// Settings › Animations, carried as egui's animation time so egui's own
-/// fades and slides stop with ours.
-pub fn apply_motion(ctx: &egui::Context, on: bool) {
-    if motion(ctx) != on {
+/// fades and slides stop with ours. Returns whether it changed.
+pub fn apply_motion(ctx: &egui::Context, on: bool) -> bool {
+    let changed = motion(ctx) != on;
+    if changed {
         ctx.global_style_mut(|s| s.animation_time = if on { ANIMATION_TIME } else { 0.0 });
     }
+    changed
 }
 
 /// Decorative motion (reveals, glows, sweeps) is on.

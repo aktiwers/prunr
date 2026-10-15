@@ -330,6 +330,14 @@ impl Settings {
         prunr_core::engine::runs_on_host_cpu(self.effective_backend()) || self.active_backend.is_empty()
     }
 
+    /// The provider a session of `model` lands on: the one models run on,
+    /// or the CPU when that accelerator does not run this model.
+    pub fn model_backend(&self, model: prunr_core::ModelKind) -> &str {
+        let backend = self.effective_backend();
+        let accelerated = !backend.is_empty() && !backend.eq_ignore_ascii_case("CPU");
+        if accelerated && prunr_core::engine::model_runs_on(model.model_id(), backend) { backend } else { "CPU" }
+    }
+
     /// Smart default for parallel jobs based on backend and model. In
     /// filter-only mode (`SettingsModel::None`) the pipeline runs pure CPU
     /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
@@ -801,6 +809,20 @@ mod tests {
             s.active_backend = backend.into();
             s.processor = if cpu_only { ComputeMode::CpuOnly } else { ComputeMode::Auto };
             assert_eq!(s.runs_on_host_cpu(), host, "{backend} cpu_only={cpu_only}");
+        }
+    }
+
+    /// A model's runs are timed by the provider its session lands on: the
+    /// CPU under CPU only, with no accelerator, or when the accelerator
+    /// does not run the model (Silueta on OpenVINO).
+    #[test]
+    fn a_model_the_accelerator_does_not_run_lands_on_the_cpu() {
+        use prunr_core::ModelKind;
+        let mut s = Settings::default();
+        for (backend, cpu_only, model) in [("CPU", false, ModelKind::BiRefNetLite), ("", false, ModelKind::U2net), ("CUDA", true, ModelKind::BiRefNetLite), ("OpenVINO", false, ModelKind::Silueta)] {
+            s.active_backend = backend.into();
+            s.processor = if cpu_only { ComputeMode::CpuOnly } else { ComputeMode::Auto };
+            assert_eq!(s.model_backend(model), "CPU", "{model:?} on {backend} cpu_only={cpu_only}");
         }
     }
 

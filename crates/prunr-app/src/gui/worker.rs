@@ -6,6 +6,7 @@ use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
+pub(crate) use crate::subprocess::first_look::Shown;
 use prunr_core::IDLE_RELEASE as WARM_IDLE;
 
 /// Maximum time the subprocess may stay silent with in-flight work before we
@@ -287,11 +288,21 @@ pub struct RunSettings {
     pub edge: EdgeSettings,
 }
 
+impl RunSettings {
+    /// The settings a worker holds between batches: each batch sends its own.
+    fn neutral() -> Self {
+        Self { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default() }
+    }
+}
+
 /// A batch: the engines it needs and the settings it runs with.
 #[derive(Clone)]
 pub struct ProcessingConfig {
     pub engines: EngineSpec,
     pub run: RunSettings,
+    /// The image on screen, when its run would show a first look; the
+    /// worker learns of each change while the batch runs.
+    pub first_look: Shown,
 }
 
 pub(crate) enum WorkerMessage {
@@ -320,12 +331,18 @@ pub(crate) enum WorkerMessage {
     /// not fit it: a switch to a cut-out model, so its first Process
     /// skips the load.
     Warm(EngineSpec),
+    /// First looks went off (Settings › Animations, most often): the warm
+    /// worker lets its first-look model go.
+    FirstLookOff,
 }
 
 pub enum WorkerResult {
     Report {
         item_id: u64,
         update: prunr_core::ProgressUpdate,
+        /// When the bridge took it from the worker: the app may read it
+        /// frames later.
+        at: Instant,
     },
     BatchItemDone {
         item_id: u64,
@@ -399,6 +416,12 @@ pub(crate) fn spawn_worker(
                             w.release("model switch");
                         }
                     }
+                    WorkerMessage::FirstLookOff => {
+                        if let Some(w) = warm.as_mut() {
+                            let neutral = RunSettings::neutral();
+                            let _ = w.sub.send_configure(neutral.mask, neutral.line_mode, neutral.edge, None);
+                        }
+                    }
                     WorkerMessage::Warm(spec) => {
                         if warm.as_ref().is_some_and(|w| w.spec.reusable_by(&spec, &prunr_core::OrtEngine::detect_active_provider())) {
                             continue;
@@ -467,6 +490,8 @@ struct BatchRunState {
     completed: std::collections::HashSet<u64>,
     batch: u64,
     max_jobs: usize,
+    /// What the worker was last told of `config.first_look`.
+    told_first_look: Option<u64>,
 }
 
 impl BatchRunState {
@@ -487,6 +512,7 @@ impl BatchRunState {
             additional_rx,
             completed: std::collections::HashSet::new(),
             batch,
+            told_first_look: None,
         }
     }
 
@@ -640,6 +666,7 @@ fn emit_loading_status(
         let _ = res_tx.send(WorkerResult::Report {
             item_id: fid,
             update: prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel),
+            at: Instant::now(),
         });
         ctx.request_repaint();
     }
@@ -717,11 +744,7 @@ fn spawn_and_initial_burst(
             }
         },
     };
-    // A dead worker fails here too; the event loop reports it as a crash.
-    let run = &state.config.run;
-    if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge) {
-        tracing::warn!(%err, "worker did not take the batch's run settings");
-    }
+    configure(&mut sub, state);
 
     let mut sent = SentWork::default();
     let burst = state.max_jobs.min(total_pending);
@@ -743,6 +766,18 @@ fn spawn_and_initial_burst(
         }
     }
     Some(InitialBurst { sub, sent, engines })
+}
+
+/// Give the worker the batch's run settings and the image on screen whose
+/// run shows a first look. A dead worker fails here too; the event loop
+/// reports it as a crash.
+fn configure(sub: &mut SubprocessManager, state: &mut BatchRunState) {
+    let run = &state.config.run;
+    let shown = state.config.first_look.get();
+    if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge, shown) {
+        tracing::warn!(%err, "worker did not take the batch's run settings");
+    }
+    state.told_first_look = shown;
 }
 
 /// Drive one subprocess through its lifecycle — poll events, admit more work
@@ -770,6 +805,9 @@ fn run_event_loop(
         // Notify subprocess of newly cancelled in-flight items so it can drop
         // them at the next dispatch check instead of finishing the work.
         forward_item_cancels(sub, sent, cancels, &mut cancel_notified);
+        if state.config.first_look.get() != state.told_first_look {
+            configure(sub, state);
+        }
 
         // Real-crash check first so a segfault is reported as such rather
         // than masked by the watchdog firing on the same silence.
@@ -830,7 +868,7 @@ fn handle_subprocess_event(
 ) {
     match event {
         SubprocessEvent::Report { item_id, update } => {
-            let _ = res_tx.send(WorkerResult::Report { item_id, update });
+            let _ = res_tx.send(WorkerResult::Report { item_id, update, at: Instant::now() });
             ctx.request_repaint();
         }
         SubprocessEvent::ImageDone {
@@ -1218,9 +1256,9 @@ fn spawn_warm(
     ctx: &egui::Context,
 ) -> Option<WarmWorker> {
     let started = Instant::now();
-    // Neutral run settings: each batch sends its own with `Configure`.
-    let lines = WorkerLines::app(LineMode::Off, EdgeSettings::default());
-    match SubprocessManager::spawn(spec.model, spec.jobs, MaskSettings::default(), spec.force_cpu, lines) {
+    let neutral = RunSettings::neutral();
+    let lines = WorkerLines::app(neutral.line_mode, neutral.edge);
+    match SubprocessManager::spawn(spec.model, spec.jobs, neutral.mask, spec.force_cpu, lines) {
         Ok((sub, provider)) => {
             tracing::info!(stage = "prewarm", elapsed_ms = started.elapsed().as_millis(), model = ?spec.model, "subprocess cold-start");
             let _ = res_tx.send(WorkerResult::BackendReady(provider));
@@ -1360,7 +1398,8 @@ mod tests {
     fn a_batch_completion_names_its_batch() {
         let cfg = ProcessingConfig {
             engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, force_cpu: false },
-            run: RunSettings { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default() },
+            run: RunSettings::neutral(),
+            first_look: Shown::default(),
         };
         let bytes = Arc::new(Vec::new());
         let tier2 = CachedTensorWork {

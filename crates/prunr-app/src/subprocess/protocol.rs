@@ -153,6 +153,10 @@ pub enum SubprocessCommand {
         mask: MaskSettings,
         line_mode: LineMode,
         edge: EdgeSettings,
+        /// The image whose run reports a first look at the subject before
+        /// its own; `None` lets the first-look model go.
+        #[serde(default)]
+        first_look: Option<u64>,
     },
     /// Shut down gracefully.
     Shutdown,
@@ -591,6 +595,13 @@ mod tests {
             mask: MaskSettings { gamma: 1.4, ..MaskSettings::default() },
             line_mode: LineMode::SubjectOutline,
             edge: EdgeSettings { line_strength: 0.8, solid_line_color: None, edge_thickness: 2, edge_scale: prunr_core::EdgeScale::Fine, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
+            first_look: Some(12),
+        });
+        roundtrip(&SubprocessCommand::Configure {
+            mask: MaskSettings::default(),
+            line_mode: LineMode::Off,
+            edge: EdgeSettings::default(),
+            first_look: None,
         });
     }
 

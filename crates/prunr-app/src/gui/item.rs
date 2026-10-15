@@ -1493,6 +1493,7 @@ impl BatchItem {
     ) {
         self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None });
         self.tile_preview = None;
+        self.subject = None;
     }
 
     /// Whether a new step cut by `cutter` builds on the cut-out on screen:

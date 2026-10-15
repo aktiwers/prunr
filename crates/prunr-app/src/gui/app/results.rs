@@ -527,7 +527,10 @@ impl PrunrApp {
         for _ in 0..WORKER_POLL_PER_FRAME {
             let Ok(msg) = self.processor.worker_rx.try_recv() else { break };
             match msg {
-                WorkerResult::Report { item_id, update } => self.on_seg_report(item_id, update, ctx),
+                WorkerResult::Report { item_id, update, at } => {
+                    self.processor.cut_times.note(item_id, &update, at);
+                    self.on_seg_report(item_id, update, ctx);
+                }
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
@@ -559,8 +562,10 @@ impl PrunrApp {
         }
     }
 
-    /// Outline the subject a run has just found on the shown image, while
-    /// its edges are refined. A 128 px hint costs well under a millisecond.
+    /// Outline the subject a run has found on the shown image: the first
+    /// look's while the model works, then the model's own while the edges
+    /// are refined, in place of it without fading in again. A 128 px hint
+    /// costs well under a millisecond.
     fn show_subject(&mut self, item_id: u64, hint: &prunr_core::SubjectHint, ctx: &egui::Context) {
         if !self.settings.animations {
             return;
@@ -572,7 +577,8 @@ impl PrunrApp {
         let Some((image, order)) = crate::gui::views::effects::subject_glow(hint) else { return };
         let texture = ctx.load_texture(format!("subject-{item_id}"), image, egui::TextureOptions::LINEAR);
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
-            item.subject = Some(crate::gui::item::SubjectOutline { texture, shown_at: std::time::Instant::now(), order: order.into() });
+            let shown_at = item.subject.as_ref().map_or_else(std::time::Instant::now, |s| s.shown_at);
+            item.subject = Some(crate::gui::item::SubjectOutline { texture, shown_at, order: order.into() });
         }
         ctx.request_repaint();
     }
@@ -605,7 +611,10 @@ impl PrunrApp {
         edge_cache: Option<crate::gui::worker::EdgeTensorCache>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
-        let Some(recipe_snapshot) = self.take_dispatch_recipe(item_id) else { return };
+        let recipe_snapshot = self.take_dispatch_recipe(item_id);
+        let landed = recipe_snapshot.as_ref().zip(result.as_ref().ok()).map(|(r, pr)| (r.inference.model, pr.active_provider.as_str()));
+        self.processor.cut_times.ended(item_id, landed);
+        let Some(recipe_snapshot) = recipe_snapshot else { return };
 
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if e == crate::subprocess::protocol::CANCELLED_ERR_MSG) {
@@ -1951,5 +1960,106 @@ mod depth_tests {
         assert!(item.timeline.version() != version, "an undo step");
         assert!(!app.picking_depth_focus);
         assert!(app.processor.live_preview.is_pending_for(1));
+    }
+}
+
+#[cfg(test)]
+mod first_look_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use super::PrunrApp;
+    use crate::gui::item::{BatchStatus, Engine, Reveal};
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::timeline::StepKind;
+    use prunr_core::{ProgressUpdate, Step, SubjectHint};
+
+    /// A subject filling the left `cols` of an 8 × 8 hint.
+    fn subject(cols: usize) -> ProgressUpdate {
+        let coverage = (0..64).map(|i| if i % 8 < cols { 255 } else { 0 }).collect();
+        ProgressUpdate::Subject(SubjectHint { width: 8, height: 8, coverage })
+    }
+
+    /// Image 1 on screen and image 2 beside it, both cut by BiRefNet now.
+    fn two_images_cut() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        for id in [1, 2] {
+            let item = push_test_item(&mut app, id);
+            item.dimensions = (8, 8);
+            item.start_job(Some(StepKind::Process), Engine::Segment);
+            item.status = BatchStatus::Processing;
+        }
+        app.batch.select_item(0);
+        app
+    }
+
+    fn texture_of(app: &PrunrApp, idx: usize) -> Option<egui::TextureId> {
+        app.batch.items[idx].subject.as_ref().map(|s| s.texture.id())
+    }
+
+    /// The first look outlines the subject on the image on screen; the
+    /// model's own outline takes its place without fading in again; the
+    /// cut-out reveals from that outline, and the outline goes with the
+    /// reveal.
+    #[test]
+    fn the_real_result_replaces_the_first_look() {
+        let ctx = egui::Context::default();
+        let mut app = two_images_cut();
+        app.on_seg_report(1, ProgressUpdate::Step(Step::FindingSubject), &ctx);
+        app.on_seg_report(1, subject(2), &ctx);
+        let first = app.batch.items[0].subject.as_ref().map(|s| (s.texture.id(), s.shown_at)).expect("the first look shows");
+        app.on_seg_report(1, subject(5), &ctx);
+        let own = app.batch.items[0].subject.as_ref().expect("the model's own outline");
+        assert_ne!(own.texture.id(), first.0, "the model's outline replaces the first look's");
+        assert_eq!(own.shown_at, first.1, "in place, without fading in again");
+        let order = Arc::clone(&own.order);
+
+        let held = ctx.load_texture("held", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        app.batch.items[0].source_texture = Some(held);
+        let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(8, 8), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, 1, Ok(result), None, None);
+        let landed = ctx.load_texture("result", egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4]), Default::default());
+        app.batch.items[0].land_texture(landed, crate::gui::background_io::TexTarget::Result);
+        let item = &mut app.batch.items[0];
+        let Some(Reveal::Running(_, at, Some(reveal_order))) = &mut item.reveal else { panic!("the cut-out reveals from the outline") };
+        assert!(Arc::ptr_eq(reveal_order, &order), "from the model's own outline");
+        *at = at.checked_sub(Duration::from_secs(1)).expect("a second ago");
+        item.settle_reveal();
+        assert!(item.subject.is_none() && item.reveal.is_none(), "the outline goes when the reveal ends");
+    }
+
+    /// A first look that arrives for an image no longer on screen, whose
+    /// run was cancelled or has moved on, or with animations off, never
+    /// shows; a new run starts without the last one's outline.
+    #[test]
+    fn a_stale_first_look_is_dropped() {
+        let ctx = egui::Context::default();
+        let mut app = two_images_cut();
+        app.on_seg_report(2, subject(3), &ctx);
+        assert!(texture_of(&app, 1).is_none(), "image 2 is not on screen");
+
+        app.batch.items[0].selected = true;
+        app.handle_cancel_selected();
+        app.on_seg_report(1, subject(3), &ctx);
+        assert!(texture_of(&app, 0).is_none(), "its run was cancelled");
+
+        let mut app = two_images_cut();
+        app.batch.items[0].settings.gamma = 1.8;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.on_seg_report(1, subject(3), &ctx);
+        assert!(texture_of(&app, 0).is_none(), "the image moved on while it ran");
+
+        let mut app = two_images_cut();
+        app.settings.animations = false;
+        app.on_seg_report(1, subject(3), &ctx);
+        assert!(texture_of(&app, 0).is_none(), "animations off");
+
+        let mut app = two_images_cut();
+        app.on_seg_report(1, subject(3), &ctx);
+        assert!(texture_of(&app, 0).is_some());
+        app.batch.items[0].status = BatchStatus::Pending;
+        app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(texture_of(&app, 0).is_none(), "a new run starts without the last one's outline");
     }
 }
