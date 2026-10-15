@@ -196,10 +196,8 @@ pub(crate) fn render(
             let reason = state.processing.then_some("Wait for Colorize to finish, or cancel it.");
             chip::gated(ui, reason, |ui| render_color_strength_chip(ui, item_settings));
         }
-        if shows(model, Surface::SdChips) {
-            if super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
-                change.brush_settings_committed = true;
-            }
+        if shows(model, Surface::SdChips) && super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
+            change.brush_settings_committed = true;
         }
         if shows(model, Surface::RoremChips) && super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed) {
             change.brush_settings_committed = true;
