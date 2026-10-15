@@ -1122,33 +1122,19 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     // - Edge kind: reuse cached base if Some (mask settings stable during drag).
     // When newly built, `built_masked_base` propagates back for caching.
     let (masked_base, built_masked_base) = if is_subject_outline {
+        let fresh_base = || {
+            // invariant: is_subject_outline → seg_tensor is Some.
+            let seg = inputs.seg_tensor.as_ref().unwrap();
+            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
+                .map_or((None, None), |img| {
+                    let arc = Arc::new(img.to_rgba8());
+                    (Some(Arc::clone(&arc)), Some(arc))
+                })
+        };
         match inputs.kind {
-            PreviewKind::Mask => {
-                // invariant: is_subject_outline → seg_tensor is Some.
-                let seg = inputs.seg_tensor.as_ref().unwrap();
-                match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
-                    Some(img) => {
-                        let arc = Arc::new(img.to_rgba8());
-                        (Some(arc.clone()), Some(arc))
-                    }
-                    None => (None, None),
-                }
-            }
-            PreviewKind::Edge => {
-                if let Some(cached) = inputs.cached_masked_base.clone() {
-                    (Some(cached), None)
-                } else {
-                    // invariant: is_subject_outline → seg_tensor is Some.
-                    let seg = inputs.seg_tensor.as_ref().unwrap();
-                    match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref()) {
-                        Some(img) => {
-                            let arc = Arc::new(img.to_rgba8());
-                            (Some(arc.clone()), Some(arc))
-                        }
-                        None => (None, None),
-                    }
-                }
-            }
+            PreviewKind::Mask => fresh_base(),
+            PreviewKind::Edge => inputs.cached_masked_base.clone()
+                .map_or_else(fresh_base, |cached| (Some(cached), None)),
             PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
         }
     } else {
