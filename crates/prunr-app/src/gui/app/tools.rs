@@ -438,9 +438,17 @@ impl PrunrApp {
                     let existing = self.batch
                         .find_by_id(result.item_id)
                         .and_then(|i| i.selection_mask.clone());
+                    let started = std::time::Instant::now();
                     let final_mask = merge_stroke(existing, mask);
+                    let merged = started.elapsed();
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
                     self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
+                    tracing::debug!(
+                        item_id = result.item_id,
+                        merge_ms = merged.as_millis() as u64,
+                        commit_ms = (started.elapsed() - merged).as_millis() as u64,
+                        "SAM selection merged and committed on the UI thread"
+                    );
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
                         item.last_decode = item.selection_hash.map(|committed_hash| crate::gui::item::LastDecode {
                             output, mode: result.mode, committed_hash,
