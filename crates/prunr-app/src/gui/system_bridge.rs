@@ -70,14 +70,15 @@ impl SystemBridge {
         Self { clipboard: arboard::Clipboard::new().ok(), dialog: None, show: show_native }
     }
 
-    /// Ask for a file dialog starting in `start_dir`. Ignored while
-    /// another is asked for or up: one dialog at a time.
-    pub(crate) fn ask_dialog(&mut self, request: DialogRequest, start_dir: Option<PathBuf>) {
+    /// Ask for a file dialog starting in `start_dir`; `false` when it is
+    /// ignored because another is asked for or up: one dialog at a time.
+    pub(crate) fn ask_dialog(&mut self, request: DialogRequest, start_dir: Option<PathBuf>) -> bool {
         if let Some(open) = &self.dialog {
             tracing::debug!(?request, open = ?open.request, "a file dialog is already up; request ignored");
-            return;
+            return false;
         }
         self.dialog = Some(Dialog { request, start_dir, reply: None });
+        true
     }
 
     /// A file dialog is asked for or up.

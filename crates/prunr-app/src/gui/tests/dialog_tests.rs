@@ -182,15 +182,19 @@ fn cancel_does_nothing_and_frees_the_dialog() {
     assert!(!app.system.dialog_open());
 }
 
+/// A request while a dialog is up is not asked, and the user is told so
+/// rather than the click going nowhere.
 #[test]
 fn a_second_request_while_one_is_open_is_ignored() {
     let mut app = PrunrApp::new_for_test();
     done_item(&mut app, 1);
     app.batch.selected_index = 0;
     app.handle_pick_bg_image(0);
+    let toasts = app.toasts.len_for_test();
     app.handle_open_dialog();
     app.handle_save_selected();
     assert_eq!(asked(&app), Some(&DialogRequest::Background { item_id: 1 }));
+    assert_eq!(app.toasts.len_for_test(), toasts + 2, "each ignored click says why");
 
     let dir = tempfile::tempdir().unwrap();
     let picked = png_on_disk(dir.path(), "backdrop.png");

@@ -505,7 +505,9 @@ impl PrunrApp {
 
     /// Ask for a file dialog; every one starts in the last opened folder.
     fn ask_dialog(&mut self, request: DialogRequest) {
-        self.system.ask_dialog(request, self.last_open_dir.clone());
+        if !self.system.ask_dialog(request, self.last_open_dir.clone()) {
+            self.toasts.info("A file dialog is already open. Close it first.");
+        }
     }
 
     /// Resume the action whose file dialog the user answered.
