@@ -14,7 +14,13 @@ use std::time::{Duration, SystemTime};
 const HISTORY_SUBDIR: &str = "prunr-history";
 /// Age past which a loose file from a pre-per-process build is dropped.
 const STALE_AGE: Duration = Duration::from_secs(30 * 60);
-const ZSTD_LEVEL: i32 = 1; // fastest compression
+pub(super) const ZSTD_LEVEL: i32 = 1; // fastest compression
+
+/// The `w, h` little-endian header every undo payload starts with.
+pub(super) fn read_dims(header: &[u8; 8]) -> (u32, u32) {
+    let [w0, w1, w2, w3, h0, h1, h2, h3] = *header;
+    (u32::from_le_bytes([w0, w1, w2, w3]), u32::from_le_bytes([h0, h1, h2, h3]))
+}
 
 /// Compress an RgbaImage to a zstd buffer in RAM.
 pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<Vec<u8>> {
@@ -35,8 +41,7 @@ pub fn decompress_from_bytes(bytes: &[u8]) -> std::io::Result<image::RgbaImage> 
     let mut decoder = zstd::Decoder::new(bytes)?;
     let mut header = [0u8; 8];
     decoder.read_exact(&mut header)?;
-    let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-    let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    let (w, h) = read_dims(&header);
     // Pre-size: header carries `w, h` so we know the exact decompressed
     // size. Avoids ~25 doublings + a peak ~100 MB transient mid-grow at
     // 4 K (read_to_end starts at 0 and doubles).
