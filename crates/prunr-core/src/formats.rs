@@ -387,6 +387,11 @@ impl ExportFormat {
         self.extensions()[0]
     }
 
+    /// What follows the source stem in a result's file name: `.prunr.<ext>`.
+    pub fn result_suffix(self) -> String {
+        format!(".prunr.{}", self.extension())
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Png => "PNG",
@@ -880,5 +885,12 @@ mod tests {
         }
         assert_eq!(ExportFormat::from_path(std::path::Path::new("x.JPEG")), Some(ExportFormat::Jpeg));
         assert_eq!(ExportFormat::from_path(std::path::Path::new("x.tif")), None);
+    }
+
+    #[test]
+    fn a_result_suffix_tags_prunr_before_the_extension() {
+        assert_eq!(ExportFormat::Png.result_suffix(), ".prunr.png");
+        assert_eq!(ExportFormat::Jpeg.result_suffix(), ".prunr.jpg");
+        assert_eq!(ExportFormat::Webp.result_suffix(), ".prunr.webp");
     }
 }

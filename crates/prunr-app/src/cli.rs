@@ -904,7 +904,7 @@ fn output_path_with_suffix(
 /// Single mode with -o file.png: use that path directly.
 /// No -o: write alongside input as {input_dir}/{stem}.prunr.png.
 fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
-    output_path_with_suffix(input, output, is_batch, ".prunr.png")
+    output_path_with_suffix(input, output, is_batch, &prunr_core::ExportFormat::Png.result_suffix())
 }
 
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
