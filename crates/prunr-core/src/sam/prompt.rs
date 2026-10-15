@@ -54,13 +54,7 @@ pub fn build_click_prompt(
     source_w: u32,
     source_h: u32,
 ) -> SamPrompt {
-    let (nx, ny) = normalize(x_pixel, y_pixel, source_w, source_h);
-    SamPrompt {
-        point_coords: vec![nx, ny, 0.0, 0.0], // real point + padding at (0,0)
-        point_labels: vec![1.0, -1.0],        // fg + padding
-        mask_input: empty_mask_input(),
-        has_mask_input: 0.0,
-    }
+    foreground_prompt(&[(x_pixel, y_pixel)], source_w, source_h)
 }
 
 /// Multi-point stroke prompt. Decimates to at most MAX_STROKE_POINTS evenly-
@@ -76,30 +70,28 @@ pub fn build_stroke_prompt(
     if points.is_empty() {
         return Err(PromptError::EmptyStroke);
     }
+    Ok(foreground_prompt(&decimate(points, MAX_STROKE_POINTS), source_w, source_h))
+}
 
-    let decimated = decimate(points, MAX_STROKE_POINTS);
-    let n = decimated.len();
-    // +1 padding slot appended after all real points
+/// `points` as foreground hints, then one padding point at (0,0) with
+/// label -1.0.
+fn foreground_prompt(points: &[(f32, f32)], source_w: u32, source_h: u32) -> SamPrompt {
+    let n = points.len();
     let mut point_coords = Vec::with_capacity((n + 1) * 2);
     let mut point_labels = Vec::with_capacity(n + 1);
-
-    for (x, y) in &decimated {
-        let (nx, ny) = normalize(*x, *y, source_w, source_h);
-        point_coords.push(nx);
-        point_coords.push(ny);
+    for &(x, y) in points {
+        let (nx, ny) = normalize(x, y, source_w, source_h);
+        point_coords.extend([nx, ny]);
         point_labels.push(1.0f32);
     }
-    // Padding slot
-    point_coords.push(0.0);
-    point_coords.push(0.0);
+    point_coords.extend([0.0, 0.0]);
     point_labels.push(-1.0);
-
-    Ok(SamPrompt {
+    SamPrompt {
         point_coords,
         point_labels,
         mask_input: empty_mask_input(),
         has_mask_input: 0.0,
-    })
+    }
 }
 
 /// Uniform stride decimation: pick `cap` evenly-spaced samples from input.
