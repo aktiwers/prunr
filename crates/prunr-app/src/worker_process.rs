@@ -243,15 +243,15 @@ fn send_spare_scales(
     ipc: &std::path::Path,
     evt_tx: &mpsc::Sender<SubprocessEvent>,
 ) {
-    let edge_cache = match engine.and_then(|e| spare.make(e)) {
-        Some(Ok(res)) => write_edge_cache(ipc, IpcKind::SpareEdge, item_id, &res),
+    let outcome = match engine.and_then(|e| spare.make(e)) {
+        Some(Ok(res)) => write_edge_cache(ipc, IpcKind::SpareEdge, item_id, &res).map_or(SpareOutcome::Failed, SpareOutcome::Made),
         Some(Err(err)) => {
             tracing::warn!(item_id, %err, "spare line scales failed");
-            None
+            SpareOutcome::Failed
         }
-        None => None,
+        None => SpareOutcome::Skipped,
     };
-    let _ = evt_tx.send(SubprocessEvent::SpareEdgeScales { item_id, token, edge_cache });
+    let _ = evt_tx.send(SubprocessEvent::SpareEdgeScales { item_id, token, outcome });
 }
 
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).

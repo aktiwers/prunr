@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
-use crate::subprocess::protocol::{EdgeCacheFile, SubprocessEvent, CANCELLED_ERR_MSG};
+use crate::subprocess::protocol::{EdgeCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
 pub(crate) use crate::subprocess::first_look::Shown;
 use prunr_core::IDLE_RELEASE as WARM_IDLE;
@@ -377,6 +377,16 @@ pub(crate) enum WorkerMessage {
     FirstLookOff,
 }
 
+/// What reaches the app of a run's spare line scales.
+pub enum SpareLanding {
+    Made(CompressedEdgeTensors),
+    /// Not made on purpose (a cancel, a shutdown, the image left the
+    /// screen): nothing runs in their place.
+    Skipped,
+    /// The worker failed to make them, or died first.
+    Failed,
+}
+
 pub enum WorkerResult {
     Report {
         item_id: u64,
@@ -395,9 +405,8 @@ pub enum WorkerResult {
         edge_cache: Option<EdgeTensorCache>,
     },
     /// The line scales a run left for after its result, under the token
-    /// its `BatchItemDone`'s edge cache named; `None` when they will not
-    /// come.
-    SpareEdgeScales { item_id: u64, token: u64, tensors: Option<CompressedEdgeTensors> },
+    /// its `BatchItemDone`'s edge cache named.
+    SpareEdgeScales { item_id: u64, token: u64, landing: SpareLanding },
     /// The image a chained cut starts from, built as it was sent.
     ChainStart { item_id: u64, image: Arc<image::RgbaImage> },
     /// Batch `batch` is over.
@@ -613,12 +622,13 @@ impl SentWork {
             .chain(self.add_edge_ids.iter().copied())
     }
 
-    /// The worker will not send the spare scales still owed (it crashed
-    /// or was cancelled): the app hears they will not come, so a scale
-    /// switch waiting for them runs the lines instead.
-    fn abandon_spares(&mut self, res_tx: &mpsc::Sender<WorkerResult>) {
+    /// The worker will not send the spare scales still owed: the app
+    /// hears they will not come, `failed` (a crash) or skipped (a
+    /// cancel), so a scale switch waiting for them stops waiting.
+    fn abandon_spares(&mut self, failed: bool, res_tx: &mpsc::Sender<WorkerResult>) {
         for (item_id, token) in self.spares.drain(..) {
-            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, tensors: None });
+            let landing = if failed { SpareLanding::Failed } else { SpareLanding::Skipped };
+            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, landing });
         }
     }
 }
@@ -863,7 +873,7 @@ fn run_event_loop(
 
     while !subprocess_finished {
         if cancels.is_global_cancelled() {
-            sent.abandon_spares(res_tx);
+            sent.abandon_spares(false, res_tx);
             cancel_subprocess(sub, res_tx, ctx);
             return EventLoopOutcome::Cancelled;
         }
@@ -973,10 +983,16 @@ fn handle_subprocess_event(
             });
             ctx.request_repaint();
         }
-        SubprocessEvent::SpareEdgeScales { item_id, token, edge_cache } => {
+        SubprocessEvent::SpareEdgeScales { item_id, token, outcome } => {
             sent.spares.retain(|&owed| owed != (item_id, token));
-            let tensors = read_edge_tensor_cache(edge_cache.as_ref()).and_then(CompressedEdgeTensors::from_raw);
-            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, tensors });
+            let landing = match outcome {
+                SpareOutcome::Made(file) => read_edge_tensor_cache(Some(&file))
+                    .and_then(CompressedEdgeTensors::from_raw)
+                    .map_or(SpareLanding::Failed, SpareLanding::Made),
+                SpareOutcome::Skipped => SpareLanding::Skipped,
+                SpareOutcome::Failed => SpareLanding::Failed,
+            };
+            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, landing });
             ctx.request_repaint();
         }
         SubprocessEvent::RssUpdate { .. } | SubprocessEvent::Finished => {}
@@ -1200,7 +1216,7 @@ fn handle_crash_and_retry(
     // Tier 2 + AddEdge can't be re-queued — their tensor data is owned by the
     // IPC temp file, already cleaned up. Parent errors the item so a follow-up
     // Process runs the full pipeline.
-    sent.abandon_spares(res_tx);
+    sent.abandon_spares(true, res_tx);
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
@@ -1429,14 +1445,18 @@ mod tests {
         sent.spares.push((5, 50));
         assert_eq!(sent.len(), 2);
         assert_eq!(sent.ids().count(), 0, "no cancel goes to a spare pass");
-        let (tx, rx) = std::sync::mpsc::channel();
-        sent.abandon_spares(&tx);
+        let told = |failed: bool, sent: &mut SentWork| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            sent.abandon_spares(failed, &tx);
+            rx.try_iter().map(|r| match r {
+                WorkerResult::SpareEdgeScales { item_id, token, landing } => (item_id, token, matches!(landing, super::SpareLanding::Failed)),
+                _ => panic!("only spare-scale results"),
+            }).collect::<Vec<_>>()
+        };
+        assert_eq!(told(false, &mut sent), vec![(4, 40, false), (5, 50, false)], "a cancel skips them");
         assert!(sent.is_empty());
-        let told: Vec<(u64, u64, bool)> = rx.try_iter().map(|r| match r {
-            WorkerResult::SpareEdgeScales { item_id, token, tensors } => (item_id, token, tensors.is_some()),
-            _ => panic!("only spare-scale results"),
-        }).collect();
-        assert_eq!(told, vec![(4, 40, false), (5, 50, false)]);
+        sent.spares.push((6, 60));
+        assert_eq!(told(true, &mut sent), vec![(6, 60, true)], "a crash failed them");
     }
 
     /// A file of some scales lands those scales and leaves the others
