@@ -169,6 +169,9 @@ pub struct EdgeTensorCache {
     pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
+    /// The token of the worker's pass that makes the scales the run left
+    /// for after its result.
+    pub spare: Option<u64>,
 }
 
 /// Zstd-compressed multi-scale TEED cache: every scale the run made,
@@ -180,6 +183,8 @@ pub struct CompressedEdgeTensors {
     tensors: [Option<std::sync::Arc<[u8]>>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
+    /// The pass still to fill the scales this run left for later.
+    spare: Option<u64>,
 }
 
 impl CompressedEdgeTensors {
@@ -197,7 +202,30 @@ impl CompressedEdgeTensors {
             return None;
         }
         let tensors = parts.try_into().ok()?;
-        Some(Self { tensors, height: raw.height, width: raw.width })
+        Some(Self { tensors, height: raw.height, width: raw.width, spare: raw.spare })
+    }
+
+    /// Whether the worker still makes the scales this run left for later.
+    pub fn awaits_spare(&self) -> bool {
+        self.spare.is_some()
+    }
+
+    /// Fill the scales the run left for later from `spare`, when this is
+    /// still the cache that run made (`token`); `None`: they will not
+    /// come. Returns whether the token matched.
+    pub fn land_spare(&mut self, token: u64, spare: Option<Self>) -> bool {
+        if self.spare != Some(token) {
+            return false;
+        }
+        self.spare = None;
+        if let Some(spare) = spare.filter(|s| (s.height, s.width) == (self.height, self.width)) {
+            for (slot, made) in self.tensors.iter_mut().zip(spare.tensors) {
+                if slot.is_none() {
+                    *slot = made;
+                }
+            }
+        }
+        true
     }
 
     /// Whether the cache holds every one of `scales`.
@@ -313,6 +341,9 @@ pub struct ProcessingConfig {
     /// The image on screen, when its run would show a first look; the
     /// worker learns of each change while the batch runs.
     pub first_look: Shown,
+    /// The image on screen: its Sketch runs make the line scales they do
+    /// not draw after their result. Kept current like `first_look`.
+    pub on_screen: Shown,
 }
 
 pub(crate) enum WorkerMessage {
@@ -363,6 +394,10 @@ pub enum WorkerResult {
         /// Only populated when the run used edge detection.
         edge_cache: Option<EdgeTensorCache>,
     },
+    /// The line scales a run left for after its result, under the token
+    /// its `BatchItemDone`'s edge cache named; `None` when they will not
+    /// come.
+    SpareEdgeScales { item_id: u64, token: u64, tensors: Option<CompressedEdgeTensors> },
     /// The image a chained cut starts from, built as it was sent.
     ChainStart { item_id: u64, image: Arc<image::RgbaImage> },
     /// Batch `batch` is over.
@@ -429,7 +464,7 @@ pub(crate) fn spawn_worker(
                     WorkerMessage::FirstLookOff => {
                         if let Some(w) = warm.as_mut() {
                             let neutral = RunSettings::neutral();
-                            let _ = w.sub.send_configure(neutral.mask, neutral.line_mode, neutral.edge, None);
+                            let _ = w.sub.send_configure(neutral.mask, neutral.line_mode, neutral.edge, None, None);
                         }
                     }
                     WorkerMessage::Warm(spec) => {
@@ -500,8 +535,10 @@ struct BatchRunState {
     completed: std::collections::HashSet<u64>,
     batch: u64,
     max_jobs: usize,
-    /// What the worker was last told of `config.first_look`.
+    /// What the worker was last told of `config.first_look` and
+    /// `config.on_screen`.
     told_first_look: Option<u64>,
+    told_on_screen: Option<u64>,
 }
 
 impl BatchRunState {
@@ -523,6 +560,7 @@ impl BatchRunState {
             completed: std::collections::HashSet::new(),
             batch,
             told_first_look: None,
+            told_on_screen: None,
         }
     }
 
@@ -546,11 +584,15 @@ struct SentWork {
     items: Vec<WorkItem>,
     tier2_ids: Vec<u64>,
     add_edge_ids: Vec<u64>,
+    /// Images whose result landed and whose spare line scales, under
+    /// this token, are still to come. They keep the batch open: the
+    /// worker is busy with them.
+    spares: Vec<(u64, u64)>,
 }
 
 impl SentWork {
     fn len(&self) -> usize {
-        self.items.len() + self.tier2_ids.len() + self.add_edge_ids.len()
+        self.items.len() + self.tier2_ids.len() + self.add_edge_ids.len() + self.spares.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -567,6 +609,16 @@ impl SentWork {
         self.items.iter().map(|(id, _, _)| *id)
             .chain(self.tier2_ids.iter().copied())
             .chain(self.add_edge_ids.iter().copied())
+            .chain(self.spares.iter().map(|(id, _)| *id))
+    }
+
+    /// The worker will not send the spare scales still owed (it crashed
+    /// or was cancelled): the app hears they will not come, so a scale
+    /// switch waiting for them runs the lines instead.
+    fn abandon_spares(&mut self, res_tx: &mpsc::Sender<WorkerResult>) {
+        for (item_id, token) in self.spares.drain(..) {
+            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, tensors: None });
+        }
     }
 }
 
@@ -784,10 +836,12 @@ fn spawn_and_initial_burst(
 fn configure(sub: &mut SubprocessManager, state: &mut BatchRunState) {
     let run = &state.config.run;
     let shown = state.config.first_look.get();
-    if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge, shown) {
+    let on_screen = state.config.on_screen.get();
+    if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge, shown, on_screen) {
         tracing::warn!(%err, "worker did not take the batch's run settings");
     }
     state.told_first_look = shown;
+    state.told_on_screen = on_screen;
 }
 
 /// Drive one subprocess through its lifecycle — poll events, admit more work
@@ -808,6 +862,7 @@ fn run_event_loop(
 
     while !subprocess_finished {
         if cancels.is_global_cancelled() {
+            sent.abandon_spares(res_tx);
             cancel_subprocess(sub, res_tx, ctx);
             return EventLoopOutcome::Cancelled;
         }
@@ -815,7 +870,7 @@ fn run_event_loop(
         // Notify subprocess of newly cancelled in-flight items so it can drop
         // them at the next dispatch check instead of finishing the work.
         forward_item_cancels(sub, sent, cancels, &mut cancel_notified);
-        if state.config.first_look.get() != state.told_first_look {
+        if state.config.first_look.get() != state.told_first_look || state.config.on_screen.get() != state.told_on_screen {
             configure(sub, state);
         }
 
@@ -884,16 +939,20 @@ fn handle_subprocess_event(
         SubprocessEvent::ImageDone {
             item_id, result_path, width, height, active_provider,
             tensor_cache_path, tensor_cache_height, tensor_cache_width,
-            edge_cache: edge_cache_file,
+            edge_cache: edge_cache_file, spare_scales,
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
             let tensor_cache = read_tensor_cache(
                 tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.engines.model,
             );
-            let edge_cache = read_edge_tensor_cache(edge_cache_file.as_ref());
+            let edge_cache = read_edge_tensor_cache(edge_cache_file.as_ref())
+                .map(|cache| EdgeTensorCache { spare: spare_scales, ..cache });
 
             state.completed.insert(item_id);
             sent.forget(item_id);
+            if let Some(token) = spare_scales {
+                sent.spares.push((item_id, token));
+            }
 
             let _ = res_tx.send(WorkerResult::BatchItemDone {
                 item_id, result, tensor_cache, edge_cache,
@@ -911,6 +970,12 @@ fn handle_subprocess_event(
                 tensor_cache: None,
                 edge_cache: None,
             });
+            ctx.request_repaint();
+        }
+        SubprocessEvent::SpareEdgeScales { item_id, token, edge_cache } => {
+            sent.spares.retain(|&owed| owed != (item_id, token));
+            let tensors = read_edge_tensor_cache(edge_cache.as_ref()).and_then(CompressedEdgeTensors::from_raw);
+            let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, tensors });
             ctx.request_repaint();
         }
         SubprocessEvent::RssUpdate { .. } | SubprocessEvent::Finished => {}
@@ -1003,7 +1068,7 @@ fn read_edge_tensor_cache(file: Option<&EdgeCacheFile>) -> Option<EdgeTensorCach
         rest = tail;
         tensors[scale as usize] = crate::subprocess::ipc::le_bytes_to_f32s(chunk);
     }
-    Some(EdgeTensorCache { tensors, height: file.height, width: file.width })
+    Some(EdgeTensorCache { tensors, height: file.height, width: file.width, spare: None })
 }
 
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
@@ -1125,7 +1190,7 @@ fn cancel_subprocess(
 /// `false` after emitting terminal errors + `BatchComplete`).
 fn handle_crash_and_retry(
     state: &mut BatchRunState,
-    sent: SentWork,
+    mut sent: SentWork,
     crash_reason: String,
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -1134,6 +1199,7 @@ fn handle_crash_and_retry(
     // Tier 2 + AddEdge can't be re-queued — their tensor data is owned by the
     // IPC temp file, already cleaned up. Parent errors the item so a follow-up
     // Process runs the full pipeline.
+    sent.abandon_spares(res_tx);
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
@@ -1350,6 +1416,27 @@ mod tests {
         assert_eq!(idle_after_run(ModelKind::U2net), WARM_IDLE);
     }
 
+    /// Owed spare scales keep the batch open and take cancels; a worker
+    /// that will not send them (cancel, crash) tells the app they will
+    /// not come, each under its own token.
+    #[test]
+    fn owed_spare_scales_hold_the_batch_and_are_abandoned_with_the_worker() {
+        use super::SentWork;
+        let mut sent = SentWork::default();
+        sent.spares.push((4, 40));
+        sent.spares.push((5, 50));
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.ids().collect::<Vec<_>>(), vec![4, 5]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        sent.abandon_spares(&tx);
+        assert!(sent.is_empty());
+        let told: Vec<(u64, u64, bool)> = rx.try_iter().map(|r| match r {
+            WorkerResult::SpareEdgeScales { item_id, token, tensors } => (item_id, token, tensors.is_some()),
+            _ => panic!("only spare-scale results"),
+        }).collect();
+        assert_eq!(told, vec![(4, 40, false), (5, 50, false)]);
+    }
+
     /// A file of some scales lands those scales and leaves the others
     /// missing; a file whose size disagrees with its scales lands nothing.
     #[test]
@@ -1438,6 +1525,7 @@ mod tests {
             engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, force_cpu: false },
             run: RunSettings::neutral(),
             first_look: Shown::default(),
+            on_screen: Shown::default(),
         };
         let bytes = Arc::new(Vec::new());
         let tier2 = CachedTensorWork {

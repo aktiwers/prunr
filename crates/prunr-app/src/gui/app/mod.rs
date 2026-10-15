@@ -1086,7 +1086,7 @@ impl eframe::App for PrunrApp {
         super::views::shortcuts::install(ctx, Arc::clone(&self.bindings));
         let motion_changed = super::theme::apply_motion(ctx, self.settings.animations);
         if motion_changed || self.processor.batch_in_flight() {
-            self.update_first_look();
+            self.update_on_screen();
         }
         // Held while the pointer stays down, so the press that dismissed a
         // popover is spent in full (see canvas.rs).

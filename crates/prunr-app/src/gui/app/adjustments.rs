@@ -307,7 +307,7 @@ impl PrunrApp {
             dispatch = dispatch.max(preset_dispatch);
         }
         let previews_lines = matches!(dispatch, knob_catalog::DispatchKind::LivePreviewEdge | knob_catalog::DispatchKind::LivePreviewMask);
-        if previews_lines && item.lacks_drawn_scales() {
+        if previews_lines && item.lines_need_a_run() {
             dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
         dispatch
@@ -344,34 +344,37 @@ mod release_tests {
     }
 
     /// A scale switch previews from the kept lines when they hold the
-    /// scale, and runs the line detector again when they lack it.
+    /// scale or the worker is still making it, and runs the line detector
+    /// again when they lack it.
     #[test]
     fn a_scale_the_kept_lines_lack_runs_the_lines_again() {
         use crate::gui::knob_catalog::DispatchKind;
         use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache};
         use prunr_core::{EdgeScale, LineMode};
-        let kept = |scales: &[EdgeScale]| {
+        let kept = |scales: &[EdgeScale], spare: Option<u64>| {
             let tensors = EdgeScale::ALL.map(|s| {
                 let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
                 if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
             });
-            CompressedEdgeTensors::from_raw(EdgeTensorCache { tensors, height: 2, width: 2 })
+            CompressedEdgeTensors::from_raw(EdgeTensorCache { tensors, height: 2, width: 2, spare })
         };
         let switch = DispatchKind::LivePreviewEdge;
         let change = super::adjustments_toolbar::ToolbarChange { auto_dispatch: switch, ..Default::default() };
-        for (line_mode, held, want) in [
-            (LineMode::SubjectOutline, &EdgeScale::ALL[..], switch),
-            (LineMode::SubjectOutline, &[EdgeScale::Bold, EdgeScale::Fused][..], DispatchKind::SubprocessAddEdge),
-            (LineMode::EdgesOnly, &[EdgeScale::Bold, EdgeScale::Fused][..], DispatchKind::SubprocessAddEdge),
-            (LineMode::EdgesOnly, &[EdgeScale::Fine][..], switch),
+        let drawn = &[EdgeScale::Bold, EdgeScale::Fused][..];
+        for (line_mode, held, spare, want) in [
+            (LineMode::SubjectOutline, &EdgeScale::ALL[..], None, switch),
+            (LineMode::SubjectOutline, drawn, None, DispatchKind::SubprocessAddEdge),
+            (LineMode::SubjectOutline, drawn, Some(9), switch),
+            (LineMode::EdgesOnly, drawn, None, DispatchKind::SubprocessAddEdge),
+            (LineMode::EdgesOnly, &[EdgeScale::Fine][..], None, switch),
         ] {
             let mut app = PrunrApp::new_for_test();
             push_test_item(&mut app, 1);
             let item = &mut app.batch.items[0];
             item.settings.line_mode = line_mode;
             item.settings.edge_scale = EdgeScale::Fine;
-            item.cached_edge_tensors = kept(held);
-            assert_eq!(app.resolve_auto_dispatch(0, &change), want, "{line_mode:?} holding {held:?}");
+            item.cached_edge_tensors = kept(held, spare);
+            assert_eq!(app.resolve_auto_dispatch(0, &change), want, "{line_mode:?} holding {held:?}, spare {spare:?}");
         }
     }
 }

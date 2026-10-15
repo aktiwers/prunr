@@ -292,7 +292,7 @@ impl PrunrApp {
         let add_edge_work = self.batch.cached_tensor_work(&tiers.tier_add_edge);
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
-        self.update_first_look();
+        self.update_on_screen();
         if tiers.tier1.len() > 1 {
             self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
         } else {
@@ -427,16 +427,19 @@ impl PrunrApp {
                     edge: current_settings.edge_settings(),
                 },
                 first_look: self.processor.first_look.clone(),
+                on_screen: self.processor.on_screen.clone(),
             }),
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
     }
 
-    /// Tell the worker which image on screen shows a first look at its
-    /// subject, as the view and the settings say now.
-    pub(super) fn update_first_look(&mut self) {
+    /// Tell the worker which image is on screen, and whether its run
+    /// shows a first look at its subject, as the view and the settings
+    /// say now.
+    pub(super) fn update_on_screen(&mut self) {
         let shown = self.batch.selected_item();
+        self.processor.on_screen.set(shown.map(|i| i.id));
         let (settings, times) = (&self.settings, &self.processor.cut_times);
         let item = crate::gui::first_look::first_look_for(
             shown.map(|i| i.id),
@@ -540,7 +543,7 @@ mod process_targets_tests {
         assert_eq!(shown.get(), Some(1), "the image on screen: the batch's own image 2 never looks");
 
         app.settings.animations = false;
-        app.update_first_look();
+        app.update_on_screen();
         assert_eq!(shown.get(), None, "the running batch's worker hears first looks are off");
         assert!(matches!(rx.try_recv(), Ok(WorkerMessage::FirstLookOff)), "the warm worker lets the model go");
         assert_eq!(process(&mut app).get(), None, "a batch with animations off loads no first-look model");
