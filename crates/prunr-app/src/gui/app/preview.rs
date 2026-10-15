@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::gui::item::{BatchItem, BatchStatus, Engine, KeptRunTier};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::background_io::TexTarget;
+use crate::gui::live_preview::PreviewKind;
 use super::{PrunrApp, BUSY_PILL_AFTER};
 
 impl PrunrApp {
@@ -54,7 +55,6 @@ impl PrunrApp {
     /// full batch would do per-frame work for items the user isn't
     /// editing for no current benefit.
     pub(crate) fn recipe_drift_tripwire(&mut self) {
-        use crate::gui::live_preview::PreviewKind;
         // Only a cut-out or the filters apply the mask settings; firing a
         // preview over an erase or an upscale would clobber it with the
         // source through `run_preview`'s no-tensor fallback.
@@ -151,7 +151,7 @@ impl PrunrApp {
     pub(crate) fn build_preview_inputs(
         items: &mut [BatchItem],
         id: u64,
-        kind: crate::gui::live_preview::PreviewKind,
+        kind: PreviewKind,
         is_filter_only: bool,
         style: crate::gui::background_io::SelectionStyle,
         action: crate::gui::brush_state::CutoutAction,
@@ -336,7 +336,6 @@ impl PrunrApp {
         ctx: &egui::Context,
         results: Vec<crate::gui::live_preview::PreviewResult>,
     ) {
-        use crate::gui::live_preview::PreviewKind;
         let handles = self.batch.bg_io.tex_prep_handles();
         // A result the image still wants restarts the quiet-work clock; a
         // stale one changes nothing on screen.
@@ -473,18 +472,20 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Whether the image at `idx` changed only in Refine's after-the-model
-    /// knobs since its upscale, so its kept run can be re-finished.
-    pub(super) fn wants_upscale_tier2(&self, idx: usize) -> bool {
-        let model = self.settings.model.dispatch_model_kind();
-        self.batch.items.get(idx).zip(model).is_some_and(|(item, model)| model.is_upscale() && item.kept_run_tier(model) == KeptRunTier::Refinish)
-    }
-
-    /// Whether the image at `idx` changed only in Strength since its
-    /// colorize, so its kept run can be re-rendered.
-    pub(super) fn wants_colorize_tier2(&self, idx: usize) -> bool {
-        self.settings.model.is_colorize()
-            && self.batch.items.get(idx).is_some_and(|item| item.kept_run_tier(crate::gui::settings::COLORIZER) == KeptRunTier::Refinish)
+    /// How the image at `idx` re-finishes its kept run, when it changed
+    /// only in what follows the model since that run: Refine's knobs
+    /// after an upscale, Strength after a colorize.
+    pub(super) fn wants_kept_run_refinish(&self, idx: usize) -> Option<PreviewKind> {
+        let model = self.settings.model.dispatch_model_kind()?;
+        let kind = if model.is_upscale() {
+            PreviewKind::UpscaleTier2
+        } else if self.settings.model.is_colorize() {
+            PreviewKind::ColorizeTier2
+        } else {
+            return None;
+        };
+        let item = self.batch.items.get(idx)?;
+        (item.kept_run_tier(model) == KeptRunTier::Refinish).then_some(kind)
     }
 }
 

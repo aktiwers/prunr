@@ -1519,18 +1519,19 @@ mod timeline_contract_tests {
     #[test]
     fn refine_knobs_refinish_the_upscale() {
         use crate::gui::item::UpscaleCache;
+        use crate::gui::live_preview::PreviewKind;
         let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
         let item = &mut app.batch.items[0];
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
         item.settings.sharpen = 0.4;
-        assert!(!app.wants_upscale_tier2(0), "no kept run yet");
+        assert_eq!(app.wants_kept_run_refinish(0), None, "no kept run yet");
 
         let img = Arc::new(image::RgbaImage::new(4, 4));
         app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
         app.batch.items[0].land_upscale(UpscaleCache::new(img.clone(), img, None));
-        assert!(app.wants_upscale_tier2(0), "a Sharpen change re-finishes the kept run");
+        assert_eq!(app.wants_kept_run_refinish(0), Some(PreviewKind::UpscaleTier2), "a Sharpen change re-finishes the kept run");
         app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
-        assert!(!app.wants_upscale_tier2(0), "a Scale change needs a new run");
+        assert_eq!(app.wants_kept_run_refinish(0), None, "a Scale change needs a new run");
     }
 
     /// A Refine preview re-finishes the kept upscale run: it needs neither

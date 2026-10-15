@@ -213,14 +213,7 @@ impl PrunrApp {
         // whatever the Live preview setting. Checked only on a change (or
         // a slider's release), not every frame.
         let changed = self.batch.items[idx].settings != settings_before;
-        let kept_run_kind = if self.wants_upscale_tier2(idx) {
-            Some(PreviewKind::UpscaleTier2)
-        } else if self.wants_colorize_tier2(idx) {
-            Some(PreviewKind::ColorizeTier2)
-        } else {
-            None
-        };
-        if let Some(kind) = kept_run_kind.filter(|_| changed || toolbar_change.commit) {
+        if let Some(kind) = self.wants_kept_run_refinish(idx).filter(|_| changed || toolbar_change.commit) {
             self.processor.live_preview.mark_tweak(item_id, kind);
             queued = true;
         }
