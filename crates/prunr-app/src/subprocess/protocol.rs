@@ -474,7 +474,9 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
 
 /// File-name prefixes owned by the inpaint subprocess.
 pub const INPAINT_PREFIXES: &[&str] = &[
-    "inpaint-",
+    IpcKind::InpaintImg.prefix(),
+    IpcKind::InpaintMask.prefix(),
+    IpcKind::InpaintOut.prefix(),
 ];
 
 /// File-name prefixes the CLI parent owns *across* worker crashes.
