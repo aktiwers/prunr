@@ -167,8 +167,9 @@ impl PrunrApp {
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
     /// On Linux: a one-time fallback toast, no files written (winit and the
     /// drag crate conflict on Linux).
-    #[allow(unused_variables)]
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = frame;
         if !crate::gui::drag_export::DRAG_OUT_SUPPORTED {
             if !self.drag_export.linux_notified {
                 self.drag_export.linux_notified = true;
