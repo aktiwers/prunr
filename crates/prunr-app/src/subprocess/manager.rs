@@ -13,6 +13,18 @@ use crate::gui::settings::LineMode;
 use super::protocol::*;
 use super::ipc::{write_message, flush_writer, read_message};
 
+/// One SD inpaint stroke for `send_inpaint`: the image and mask PNGs the
+/// worker decodes, and its post-process tuning.
+pub struct InpaintJob {
+    pub item_id: u64,
+    pub model_id: prunr_models::ModelId,
+    pub image_path: std::path::PathBuf,
+    pub mask_path: std::path::PathBuf,
+    pub sd_req: Option<prunr_core::inpaint_sd::SdInpaintRequest>,
+    pub feather_px: f32,
+    pub sharpen: f32,
+}
+
 /// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
 /// don't carry three parallel args.
 pub struct TensorView<'a> {
@@ -378,21 +390,11 @@ impl SubprocessManager {
     }
 
     /// Send an `Inpaint` command. Caller writes image + mask to PNG
-    /// files (worker decodes); this method just forwards the paths +
-    /// model_id + sd_req + post-process tuning. Returns immediately —
-    /// completion comes back via `InpaintDone` / `InpaintError` events
-    /// through `poll_events`.
-    #[allow(clippy::too_many_arguments)] // args mirror the IPC variant fields
-    pub fn send_inpaint(
-        &mut self,
-        item_id: u64,
-        model_id: prunr_models::ModelId,
-        image_path: std::path::PathBuf,
-        mask_path: std::path::PathBuf,
-        sd_req: Option<prunr_core::inpaint_sd::SdInpaintRequest>,
-        feather_px: f32,
-        sharpen: f32,
-    ) -> Result<(), String> {
+    /// files (worker decodes); this method just forwards the job.
+    /// Returns immediately — completion comes back via `InpaintDone` /
+    /// `InpaintError` events through `poll_events`.
+    pub fn send_inpaint(&mut self, job: InpaintJob) -> Result<(), String> {
+        let InpaintJob { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } = job;
         self.send_cmd(&SubprocessCommand::Inpaint {
             item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen,
         }).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
