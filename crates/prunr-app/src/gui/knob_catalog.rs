@@ -841,20 +841,6 @@ mod tests {
             line_mode: Lm::SubjectOutline,
             ..Default::default()
         };
-        let ordered = |t: prunr_core::RequiredTier| -> u8 {
-            use prunr_core::RequiredTier::*;
-            match t {
-                Skip => 0,
-                CompositeOnly => 1,
-                UpscaleTier2 => 2,
-                ColorizeTier2 => 3,
-                UpscaleRerun => 4,
-                EdgeRerun => 5,
-                MaskRerun => 6,
-                AddEdgeInference => 7,
-                FullPipeline => 8,
-            }
-        };
         for knob in StaticKnob::ALL {
             if matches!(knob, StaticKnob::Model) {
                 continue;
@@ -874,7 +860,7 @@ mod tests {
                 cat_spec.cache_impact, impact_from_diff,
             );
             assert!(
-                ordered(cat_spec.tier) >= ordered(tier_from_resolve),
+                cat_spec.tier >= tier_from_resolve,
                 "knob {knob:?}: catalog tier {:?} < resolve_tier {:?}",
                 cat_spec.tier,
                 tier_from_resolve,
