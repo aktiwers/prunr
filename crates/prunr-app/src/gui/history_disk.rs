@@ -3,8 +3,8 @@
 //! in the platform cache dir (`~/.cache/prunr/...` on Linux, avoiding a
 //! tmpfs `/tmp`), one directory per process.
 //!
-//! Lifecycle mirrors `drag_export.rs`: dead sessions' dirs are swept at
-//! start, this session's files on graceful exit.
+//! Dead sessions' dirs are swept at start, this session's files on
+//! graceful exit.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -14,14 +14,13 @@ use std::time::{Duration, SystemTime};
 const HISTORY_SUBDIR: &str = "prunr-history";
 /// Age past which a loose file from a pre-per-process build is dropped.
 const STALE_AGE: Duration = Duration::from_secs(30 * 60);
-const ZSTD_LEVEL: i32 = 1; // fastest compression, ~3:1 on RGBA data
+const ZSTD_LEVEL: i32 = 1; // fastest compression
 
 /// Compress an RgbaImage to a zstd buffer in RAM.
 pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<Vec<u8>> {
     let (w, h) = (rgba.width(), rgba.height());
-    // zstd-level-1 on natural-image RGBA hits ~2:1 in practice (the
-    // earlier `/3` was optimistic). Right-sizing avoids 1–2 reallocs
-    // mid-encode on 4 K images.
+    // zstd-level-1 on natural-image RGBA hits ~2:1 in practice.
+    // Right-sizing avoids 1–2 reallocs mid-encode on 4 K images.
     let mut raw = Vec::with_capacity(8 + rgba.as_raw().len() / 2 + 64);
     let mut encoder = zstd::Encoder::new(&mut raw, ZSTD_LEVEL)?;
     encoder.write_all(&w.to_le_bytes())?;
@@ -68,7 +67,7 @@ fn history_root() -> PathBuf {
 
 /// This process's history directory, `prunr-history/{pid}/`, created on
 /// first use. Per process, so two running instances never share, sweep
-/// or overwrite each other's files (names are only item id and sequence).
+/// or overwrite each other's files (names are only a per-process sequence).
 fn cache_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {

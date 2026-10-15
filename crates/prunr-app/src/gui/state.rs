@@ -5,7 +5,7 @@ pub enum AppState {
     /// No image loaded. Show drop zone.
     #[default]
     Empty,
-    /// Image loaded, ready for processing. Stores original image bytes.
+    /// Image loaded, ready for processing.
     Loaded,
     /// Inference running on worker thread.
     Processing,
