@@ -1302,6 +1302,11 @@ pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
     REGISTRY.iter().find(|d| d.id == id)
 }
 
+/// The model's name as the user sees it, "Model" without a registry row.
+pub fn display_name(id: ModelId) -> &'static str {
+    descriptor(id).map_or("Model", |d| d.display_name)
+}
+
 /// Identifies the downloaded files of a model by their checksums, so a
 /// fixed or re-exported download (whose version string may not move)
 /// is told apart from the one before it. `None` for models built into
@@ -1414,7 +1419,7 @@ pub fn resolve_part_bytes(
 /// Single source of truth for the "go download it" guidance — referenced
 /// by both `engine.rs` and `inpaint.rs` so the wording stays consistent.
 pub fn not_installed_error(id: ModelId) -> String {
-    let name = descriptor(id).map_or("Model", |d| d.display_name);
+    let name = display_name(id);
     format!("{name} is not installed. Open the Model Store from the model dropdown to download it.")
 }
 
@@ -1783,6 +1788,7 @@ mod tests {
         // half-finished addition that compiles but has no metadata.
         for &id in ModelId::ALL {
             assert!(descriptor(id).is_some(), "ModelId::{id:?} missing from REGISTRY");
+            assert_eq!(display_name(id), descriptor(id).unwrap().display_name);
         }
 
         // Exhaustiveness fence: adding a variant to `ModelId` without
