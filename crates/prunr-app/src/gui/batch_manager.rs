@@ -1560,7 +1560,7 @@ mod tests {
         bm.items[1].status = BatchStatus::Processing;
         let agree = |bm: &BatchManager| {
             bm.any_selected_with_status(BatchStatus::Processing)
-                == !bm.selected_ids_with_status(BatchStatus::Processing).is_empty()
+                != bm.selected_ids_with_status(BatchStatus::Processing).is_empty()
         };
         assert!(!bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm));
         bm.items[0].selected = true;
