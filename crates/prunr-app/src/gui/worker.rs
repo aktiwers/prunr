@@ -1006,8 +1006,12 @@ fn handle_subprocess_event(
             let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, landing });
             ctx.request_repaint();
         }
-        SubprocessEvent::RssUpdate { .. } | SubprocessEvent::Finished => {}
-        _ => {}
+        SubprocessEvent::Ready { .. }
+        | SubprocessEvent::InpaintDone { .. }
+        | SubprocessEvent::InpaintError { .. }
+        | SubprocessEvent::RssUpdate { .. }
+        | SubprocessEvent::Finished
+        | SubprocessEvent::InitError { .. } => {}
     }
 }
 
