@@ -159,95 +159,28 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!(app.magic_brush_state.rethreshold_in_flight, "flipping Remove specks retunes the last stroke");
 }
 
-// ── Segmentation → the re-cut fires at once ─────────────────────────────────
-
+/// A stroke committed under each active model: segmentation re-cuts at
+/// once; the eraser, upscale and colorize wait for the user's Process, and
+/// with no model nothing runs.
 #[test]
-fn bg_removal_fires_rerun_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::BiRefNetLite);
-
-    let item = push_test_item(&mut app, 1);
-    item.dimensions = (64, 64);
-    give_cutout(item);
-    let item_id = 1u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        app.processor.live_preview.is_pending_for(item_id),
-        "a stroke on a background-removal model must queue the re-cut"
-    );
-}
-
-// ── Inpaint → no auto-dispatch ───────────────────────────────────────────────
-
-#[test]
-fn inpaint_does_not_auto_dispatch_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::Inpaint);
-
-    let item = push_test_item(&mut app, 3);
-    item.dimensions = (64, 64);
-    let item_id = 3u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Inpaint must not auto-dispatch on stroke commit — user clicks Process"
-    );
-}
-
-// ── Upscale → no auto-dispatch ───────────────────────────────────────────────
-
-#[test]
-fn upscale_does_not_auto_dispatch_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::RealEsrganUpscale);
-
-    let item = push_test_item(&mut app, 4);
-    item.dimensions = (64, 64);
-    let item_id = 4u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Upscale must not auto-dispatch on stroke commit"
-    );
-}
-
-#[test]
-fn colorize_does_not_auto_dispatch_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::ColorizeDdcolor);
-    let item = push_test_item(&mut app, 4);
-    item.dimensions = (64, 64);
-    app.batch.commit_selection(4, make_mask(64, 64), StepKind::Stroke);
-    app.apply_selection_to_active_model(4);
-    assert!(!app.processor.live_preview.is_pending_for(4), "Colorize must not auto-dispatch on stroke commit");
-}
-
-// ── No model → no auto-dispatch ──────────────────────────────────────────────
-
-#[test]
-fn no_model_loaded_does_not_dispatch() {
-    let mut app = app_with_model(SettingsModel::None);
-
-    let item = push_test_item(&mut app, 5);
-    item.dimensions = (64, 64);
-    let item_id = 5u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "No-model mode must not dispatch on stroke commit"
-    );
+fn a_selection_commit_recuts_only_under_a_segmentation_model() {
+    for (model, has_cutout, recuts) in [
+        (SettingsModel::BiRefNetLite, true, true),
+        (SettingsModel::Inpaint, false, false),
+        (SettingsModel::RealEsrganUpscale, false, false),
+        (SettingsModel::ColorizeDdcolor, false, false),
+        (SettingsModel::None, false, false),
+    ] {
+        let mut app = app_with_model(model);
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (64, 64);
+        if has_cutout {
+            give_cutout(item);
+        }
+        app.batch.commit_selection(1, make_mask(64, 64), StepKind::Stroke);
+        app.apply_selection_to_active_model(1);
+        assert_eq!(app.processor.live_preview.is_pending_for(1), recuts, "{model:?}");
+    }
 }
 
 // ── Regression: Paint Brush BG-removal immediate-feedback ────────────────────
