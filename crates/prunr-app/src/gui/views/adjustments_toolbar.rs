@@ -176,7 +176,7 @@ pub(crate) fn render(
         line_mode: item_settings.line_mode,
     };
     let mask_active = knob_catalog::knob_enabled(StaticKnob::Gamma.requirement(), knob_ctx);
-    let fill_style_active = knob_catalog::knob_enabled(StaticKnob::FillStyle.requirement(), knob_ctx);
+    let effect_active = knob_catalog::knob_enabled(StaticKnob::SubjectEffect.requirement(), knob_ctx);
     let bg_active = knob_catalog::knob_enabled(StaticKnob::BgColor.requirement(), knob_ctx);
 
     // The row goes compact (chips show their icon only) when its full
@@ -214,10 +214,10 @@ pub(crate) fn render(
         if shows(model, Surface::Effect) {
             // Fill works without a mask (filter-only mode); only Full sketch
             // has no subject to fill.
-            let fill_reason = (!fill_style_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
+            let fill_reason = (!effect_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
             chip::gated(ui, fill_reason, |ui| {
-                let changed = super::effect_chip::render(ui, &mut item_settings.fill_style);
-                aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
+                let changed = super::effect_chip::render(ui, &mut item_settings.effect);
+                aggregate_bool(changed, StaticKnob::SubjectEffect, &mut change);
             });
         }
         if shows(model, Surface::Faces) {

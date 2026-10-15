@@ -66,7 +66,8 @@ pub struct ItemSettings {
     /// Line colouring: solid (via `solid_line_color`) or a gradient.
     pub line_style: prunr_core::LineStyle,
     /// RGB transformation applied to the masked subject before compose.
-    pub fill_style: prunr_core::FillStyle,
+    #[serde(rename = "fill_style")]
+    pub effect: prunr_core::SubjectEffect,
     /// Sticker outline and shadow around the cut-out.
     pub decoration: prunr_core::Decoration,
     /// A picture made from the photo, shown behind the result.
@@ -186,7 +187,7 @@ impl Default for ItemSettings {
             bg: None,
             compose_mode: prunr_core::ComposeMode::default(),
             line_style: prunr_core::LineStyle::default(),
-            fill_style: prunr_core::FillStyle::default(),
+            effect: prunr_core::SubjectEffect::default(),
             decoration: prunr_core::Decoration::default(),
             bg_effect: prunr_core::BgEffect::default(),
             input_transform: prunr_core::InputTransform::default(),
@@ -254,7 +255,7 @@ impl ItemSettings {
             guided_radius: px(self.guided_radius),
             feather: self.feather * scale,
             edge_thickness: px(self.edge_thickness),
-            fill_style: self.fill_style.at_scale(scale),
+            effect: self.effect.at_scale(scale),
             decoration: self.decoration.at_scale(scale),
             ..*self
         }
@@ -312,7 +313,7 @@ impl ItemSettings {
             guided_radius: self.guided_radius as u32,
             guided_epsilon: self.guided_epsilon,
             feather: self.feather,
-            fill_style: self.fill_style,
+            effect: self.effect,
             decoration: self.decoration,
         }
     }
@@ -460,6 +461,23 @@ pub(crate) fn migrate_old_item_settings(value: &mut serde_json::Value) {
 mod tests {
     use super::*;
 
+    /// Saved settings, presets and older builds keep the effect under
+    /// `fill_style`: a file written before the field was called `effect`
+    /// loads the same, and what is written now reads in an older build.
+    #[test]
+    fn the_effect_keeps_its_saved_key() {
+        let saved = serde_json::json!({
+            "gamma": 1.2,
+            "fill_style": { "duotone": { "dark": [10, 10, 40], "light": [240, 240, 200] } },
+        });
+        let s: ItemSettings = serde_json::from_value(saved.clone()).unwrap();
+        let duotone = prunr_core::SubjectEffect::Duotone { dark: [10, 10, 40], light: [240, 240, 200] };
+        assert_eq!(s, ItemSettings { gamma: 1.2, effect: duotone, ..ItemSettings::default() });
+        let written = serde_json::to_value(s).unwrap();
+        assert_eq!(written["fill_style"], saved["fill_style"]);
+        assert!(written.get("effect").is_none(), "no new key on disk");
+    }
+
     /// What is behind a result is one choice. Settings saved while the
     /// fields could hold several read an effect first, then an image,
     /// then a colour, and the recipe records only that one.
@@ -508,7 +526,7 @@ mod tests {
         let mut swapped = serde_json::json!({ "item_settings": { "fill_style": { "channel_swap": { "variant": "grb" } } } });
         migrate_old_item_settings(&mut swapped);
         let s: ItemSettings = serde_json::from_value(swapped["item_settings"].clone()).unwrap();
-        assert_eq!(s.fill_style, prunr_core::FillStyle::None, "a retired effect loads as none");
+        assert_eq!(s.effect, prunr_core::SubjectEffect::None, "a retired effect loads as none");
 
         let mut v1 = serde_json::json!({ "gamma": 1.0, "threshold": 0.5 });
         migrate_old_item_settings(&mut v1);
@@ -532,7 +550,7 @@ mod tests {
 
     #[test]
     fn size_under_cache_line_budget() {
-        // Budget is sized to absorb incremental FillStyle / LineStyle growth.
+        // Budget is sized to absorb incremental SubjectEffect / LineStyle growth.
         // It sits around two cache lines. Still Copy-friendly; the cost is one extra cache
         // miss on cold access, never on the per-pixel hot path. Bump in
         // coarse steps to avoid a churn of test-only commits.
@@ -553,14 +571,14 @@ mod tests {
     fn pixel_knobs_scale_with_the_image() {
         let s = ItemSettings {
             edge_shift: -12.0, guided_radius: 8, feather: 6.0, edge_thickness: 1, gamma: 1.5,
-            fill_style: prunr_core::FillStyle::Pixelate { block_size: 12 },
+            effect: prunr_core::SubjectEffect::Pixelate { block_size: 12 },
             decoration: prunr_core::Decoration { outline_width: 9.0, ..Default::default() },
             ..ItemSettings::default()
         };
         let q = s.at_scale(1.0 / 3.0);
         assert_eq!((q.edge_shift, q.guided_radius, q.feather), (-4.0, 3, 2.0));
         assert_eq!(q.edge_thickness, 1, "a line that was drawn stays drawn");
-        assert_eq!(q.fill_style, prunr_core::FillStyle::Pixelate { block_size: 4 });
+        assert_eq!(q.effect, prunr_core::SubjectEffect::Pixelate { block_size: 4 });
         assert_eq!(q.decoration.outline_width, 3.0);
         assert_eq!(q.gamma, s.gamma, "what isn't in pixels stays");
         assert_eq!(ItemSettings { edge_thickness: 0, ..s }.at_scale(0.5).edge_thickness, 0);
@@ -653,7 +671,7 @@ mod tests {
             bg: Some([100, 150, 200, 240]),
             compose_mode: prunr_core::ComposeMode::Ghost,
             line_style: prunr_core::LineStyle::GradientY { top: [255, 0, 0], bottom: [0, 0, 255] },
-            fill_style: prunr_core::FillStyle::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
+            effect: prunr_core::SubjectEffect::Duotone { dark: [10, 10, 40], light: [240, 240, 200] },
             decoration: prunr_core::Decoration {
                 outline_width: 6.0, outline_color: [1, 2, 3], shadow: prunr_core::ShadowKind::Drop,
                 shadow_opacity: 0.3, shadow_blur: 9.0, shadow_distance: 4.0,

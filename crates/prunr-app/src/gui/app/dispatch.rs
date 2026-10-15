@@ -309,7 +309,7 @@ impl PrunrApp {
             item.status = BatchStatus::Processing;
             item.start_cut(step, Cutter::NoModel);
             let input = item.job_run_image();
-            self.batch.request_filter_only(id, &source, input, settings.fill_style);
+            self.batch.request_filter_only(id, &source, input, settings.effect);
         }
     }
 

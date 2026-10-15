@@ -452,7 +452,7 @@ impl BatchManager {
         });
     }
 
-    /// Filter-only Process: load + decode + `apply_fill_style` on a background
+    /// Filter-only Process: load + decode + `apply_subject_effect` on a background
     /// thread, deliver the result via `bg_io.filter_only_rx`. Keeps the UI
     /// thread free on large batches that the inline path used to freeze.
     pub(crate) fn request_filter_only(
@@ -460,7 +460,7 @@ impl BatchManager {
         item_id: u64,
         source: &ImageSource,
         base: Option<super::worker::RunImage>,
-        fill_style: prunr_core::FillStyle,
+        effect: prunr_core::SubjectEffect,
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
         let source = source.clone();
@@ -474,7 +474,7 @@ impl BatchManager {
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
                 let mut rgba = match start {
                     // No effect: the pass is its start, without a copy.
-                    Some(start) if fill_style == prunr_core::FillStyle::None => return Ok(start),
+                    Some(start) if effect == prunr_core::SubjectEffect::None => return Ok(start),
                     Some(start) => Arc::unwrap_or_clone(start),
                     None => {
                         let bytes = load()?;
@@ -484,7 +484,7 @@ impl BatchManager {
                         original.into_rgba8()
                     }
                 };
-                prunr_core::apply_fill_style(&mut rgba, fill_style);
+                prunr_core::apply_subject_effect(&mut rgba, effect);
                 Ok(Arc::new(rgba))
             })();
             let _ = tx.send((item_id, result, chain_start));
@@ -1389,17 +1389,17 @@ mod tests {
     }
 
     /// Filter-only Process must be off the UI thread — decodes + applies
-    /// the fill style on a background thread; UI learns via `filter_only_rx`.
+    /// the subject effect on a background thread; UI learns via `filter_only_rx`.
     #[test]
     fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
-        bm.request_filter_only(7, &source, None, prunr_core::FillStyle::default());
+        bm.request_filter_only(7, &source, None, prunr_core::SubjectEffect::default());
 
         let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 7);
-        let rgba = result.expect("default FillStyle on a 1x1 source must succeed");
+        let rgba = result.expect("default SubjectEffect on a 1x1 source must succeed");
         assert_eq!(rgba.dimensions(), (1, 1));
     }
 
@@ -1412,7 +1412,7 @@ mod tests {
         let source = ImageSource::Path(std::path::PathBuf::from(
             "/nonexistent/prunr-test-missing.png"
         ));
-        bm.request_filter_only(11, &source, None, prunr_core::FillStyle::default());
+        bm.request_filter_only(11, &source, None, prunr_core::SubjectEffect::default());
 
         let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");

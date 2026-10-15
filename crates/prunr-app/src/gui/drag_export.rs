@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use image::DynamicImage;
-use prunr_core::{FillStyle, MaskSettings};
+use prunr_core::{SubjectEffect, MaskSettings};
 
 use super::item::{BatchItem, ExportDepth, ImageSource};
 use super::item_settings::ItemSettings;
@@ -257,7 +257,7 @@ fn render_layer(
             // shadow. The other mask knobs stay, so the guided-filter,
             // feather and edge-shift refinements survive.
             let mask = MaskSettings {
-                fill_style: FillStyle::None,
+                effect: SubjectEffect::None,
                 decoration: prunr_core::Decoration::default(),
                 ..job.settings.mask_settings()
             };

@@ -40,7 +40,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, opts: &Postpro
     let mut rgba = original.to_rgba8();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     apply_mask_inplace(&mut rgba, &mask);
-    apply_fill_style(&mut rgba, opts.mask_settings.fill_style);
+    apply_subject_effect(&mut rgba, opts.mask_settings.effect);
     crate::decorate::apply_decoration(&mut rgba, &opts.mask_settings.decoration);
     rgba
 }
@@ -319,25 +319,25 @@ where
 /// Transform the RGB channels of `rgba` according to `style`. Alpha is
 /// preserved. Spatial variants (`Pixelate`) allocate a scratch copy of the
 /// buffer so reads don't race writes; per-pixel variants mutate in place.
-pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
-    use crate::types::FillStyle;
+pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEffect) {
+    use crate::types::SubjectEffect;
     match style {
-        FillStyle::None => {}
-        FillStyle::Desaturate => {
+        SubjectEffect::None => {}
+        SubjectEffect::Desaturate => {
             apply_pixelwise(rgba, |p| {
                 let y = luma_u8(p[0], p[1], p[2]);
                 p[0] = y; p[1] = y; p[2] = y;
             });
         }
-        FillStyle::Invert => {
+        SubjectEffect::Invert => {
             apply_pixelwise(rgba, |p| {
                 p[0] = 255 - p[0];
                 p[1] = 255 - p[1];
                 p[2] = 255 - p[2];
             });
         }
-        FillStyle::Duotone { dark, light } => gradient_map(rgba, &[dark, light]),
-        FillStyle::Sepia => {
+        SubjectEffect::Duotone { dark, light } => gradient_map(rgba, &[dark, light]),
+        SubjectEffect::Sepia => {
             apply_pixelwise(rgba, |p| {
                 let (r, g, b) = (p[0] as u32, p[1] as u32, p[2] as u32);
                 // Standard sepia coefficients (scaled ×1000 for integer math).
@@ -346,14 +346,14 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 p[2] = ((r * 272 + g * 534 + b * 131) / 1000).min(255) as u8;
             });
         }
-        FillStyle::Threshold { level } => {
+        SubjectEffect::Threshold { level } => {
             apply_pixelwise(rgba, |p| {
                 let y = luma_u8(p[0], p[1], p[2]);
                 let v = if y >= level { 255 } else { 0 };
                 p[0] = v; p[1] = v; p[2] = v;
             });
         }
-        FillStyle::Posterize { levels } => {
+        SubjectEffect::Posterize { levels } => {
             let n = posterize_steps(levels);
             apply_pixelwise(rgba, |p| {
                 for v in p.iter_mut().take(3) {
@@ -361,7 +361,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             });
         }
-        FillStyle::Solarize { pivot } => {
+        SubjectEffect::Solarize { pivot } => {
             apply_pixelwise(rgba, |p| {
                 for v in p.iter_mut().take(3) {
                     if *v >= pivot {
@@ -370,7 +370,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             });
         }
-        FillStyle::HueShift { degrees } => {
+        SubjectEffect::HueShift { degrees } => {
             apply_pixelwise(rgba, |p| {
                 let (h, s, v) = rgb_to_hsv(p[0], p[1], p[2]);
                 let new_h = (h as i32 + degrees as i32).rem_euclid(360) as u16;
@@ -378,7 +378,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 p[0] = r; p[1] = g; p[2] = b;
             });
         }
-        FillStyle::Saturate { percent } => {
+        SubjectEffect::Saturate { percent } => {
             // Move each channel toward/away from luma by `percent / 100`.
             // percent=0 → grayscale, 100 → unchanged, >100 → punchy.
             let factor = percent.min(300) as i32;
@@ -391,7 +391,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             });
         }
-        FillStyle::ColorSplash { keep_hue, tolerance } => {
+        SubjectEffect::ColorSplash { keep_hue, tolerance } => {
             let keep = (keep_hue % 360) as i32;
             let tol = tolerance.min(180) as i32;
             apply_pixelwise(rgba, |p| {
@@ -403,7 +403,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             });
         }
-        FillStyle::Pixelate { block_size } => {
+        SubjectEffect::Pixelate { block_size } => {
             if block_size < 2 { return; }
             let (w, h) = rgba.dimensions();
             // Sample one pixel per block (top-left corner) into a small
@@ -434,7 +434,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 }
             });
         }
-        FillStyle::CrossProcess { shadow, highlight } => {
+        SubjectEffect::CrossProcess { shadow, highlight } => {
             // Split-tone by luma: pixels below 128 bend toward `shadow`,
             // above bend toward `highlight`. Preserves midtones, lifts
             // shadows + warms highlights (or whatever the user picked).
@@ -450,7 +450,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 p[..3].copy_from_slice(&rgb);
             });
         }
-        FillStyle::Halftone { dot_spacing } => {
+        SubjectEffect::Halftone { dot_spacing } => {
             let spacing = dot_spacing.clamp(2, 32) as i32;
             let (w, h) = rgba.dimensions();
             let half = spacing / 2;
@@ -480,7 +480,7 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                 rgba.as_mut().chunks_mut(row_stride).enumerate().for_each(process_row);
             }
         }
-        FillStyle::GradientMap { stops } => gradient_map(rgba, &stops),
+        SubjectEffect::GradientMap { stops } => gradient_map(rgba, &stops),
     }
 }
 
@@ -536,7 +536,7 @@ pub fn effect_backdrop(
         BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(source, radius.clamp(1, 64) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
-            apply_fill_style(&mut img, crate::types::FillStyle::Desaturate);
+            apply_subject_effect(&mut img, crate::types::SubjectEffect::Desaturate);
             img
         }
         BgEffect::LensBlur { amount_pct } => {
@@ -1032,9 +1032,9 @@ mod tests {
     fn halftone_uniform_input_is_cell_invariant() {
         let spacing = 8u32;
         let mut img = image::RgbaImage::from_pixel(32, 32, image::Rgba([100, 100, 100, 255]));
-        apply_fill_style(
+        apply_subject_effect(
             &mut img,
-            crate::types::FillStyle::Halftone { dot_spacing: spacing },
+            crate::types::SubjectEffect::Halftone { dot_spacing: spacing },
         );
         // Rows 0, 8, 16, 24 all have dy = -half from their cell centre.
         for &probe_y in &[spacing, spacing * 2, spacing * 3] {
@@ -1050,18 +1050,18 @@ mod tests {
     }
 
     /// Filter-only mode (`SettingsModel::None` + `LineMode::Off`) routes
-    /// through `apply_fill_style` directly on the source RGB. The toolbar
-    /// chip claims every `FillStyle::ALL` variant produces a different
+    /// through `apply_subject_effect` directly on the source RGB. The toolbar
+    /// chip claims every `SubjectEffect::ALL` variant produces a different
     /// output; without a test that's an unverified assertion. Run each
     /// variant on a colourful 4×4 patch and assert:
     ///
-    /// - `FillStyle::None` is bit-exact identity (no-op contract).
+    /// - `SubjectEffect::None` is bit-exact identity (no-op contract).
     /// - Every other variant differs from the input (variant did something).
     /// - All non-None variants produce pairwise-distinct outputs (no two
     ///   variants accidentally collapse to the same bytes).
     #[test]
-    fn fill_style_all_variants_produce_distinct_output() {
-        use crate::types::FillStyle;
+    fn subject_effect_all_variants_produce_distinct_output() {
+        use crate::types::SubjectEffect;
 
         // 4×4 patch covering primaries + grays so every channel-touching
         // variant has substrate to differ on.
@@ -1076,22 +1076,22 @@ mod tests {
             src.put_pixel((i % 4) as u32, (i / 4) as u32, image::Rgba(*px));
         }
 
-        let mut outputs: Vec<(String, image::RgbaImage)> = FillStyle::ALL.iter()
+        let mut outputs: Vec<(String, image::RgbaImage)> = SubjectEffect::ALL.iter()
             .map(|style| {
                 let mut img = src.clone();
-                apply_fill_style(&mut img, *style);
+                apply_subject_effect(&mut img, *style);
                 (style.name().to_string(), img)
             })
             .collect();
 
         // None is identity.
         let none_idx = outputs.iter().position(|(n, _)| n == "None")
-            .expect("FillStyle::None must be in ALL");
-        assert_eq!(outputs[none_idx].1, src, "FillStyle::None must be bit-exact identity");
+            .expect("SubjectEffect::None must be in ALL");
+        assert_eq!(outputs[none_idx].1, src, "SubjectEffect::None must be bit-exact identity");
 
         // Every other variant differs from input.
         for (name, img) in outputs.iter().filter(|(n, _)| n != "None") {
-            assert_ne!(img, &src, "FillStyle::{name} produced bit-exact-identity output (variant is dead)");
+            assert_ne!(img, &src, "SubjectEffect::{name} produced bit-exact-identity output (variant is dead)");
         }
 
         // No two variants produce the same output.
@@ -1100,7 +1100,7 @@ mod tests {
             for j in (i + 1)..outputs.len() {
                 assert_ne!(
                     outputs[i].1, outputs[j].1,
-                    "FillStyle::{} and FillStyle::{} collapse to identical bytes",
+                    "SubjectEffect::{} and SubjectEffect::{} collapse to identical bytes",
                     outputs[i].0, outputs[j].0,
                 );
             }
@@ -1120,7 +1120,7 @@ mod tests {
             }
         }
         let pre = img.clone();
-        apply_fill_style(&mut img, crate::types::FillStyle::Pixelate { block_size: 8 });
+        apply_subject_effect(&mut img, crate::types::SubjectEffect::Pixelate { block_size: 8 });
         // Sanity: corner blocks sampled at (0,0), (8,0), (16,0), etc.
         // Top-left block (0..8, 0..8) all same colour as pre[(0,0)].
         let expected_tl = pre.get_pixel(0, 0).0;
