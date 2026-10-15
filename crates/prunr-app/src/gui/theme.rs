@@ -480,8 +480,9 @@ pub const SIDEBAR_WIDTH: f32 = 170.0;
 pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
-// === Settings Dialog ===
-pub const SETTINGS_DIALOG_WIDTH: f32 = 600.0;
+// === Modals ===
+/// Width of a standard modal.
+pub const STANDARD_MODAL_WIDTH: f32 = 600.0;
 /// The glass panel's colour at full cover, for a modal page of text.
 pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);
 /// Settings: its sidebar and the page beside it.
