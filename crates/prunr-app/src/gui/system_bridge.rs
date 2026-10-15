@@ -135,6 +135,11 @@ impl SystemBridge {
         Self { show: |_, _, _, _| None, ..Self::new() }
     }
 
+    /// As on a machine with no platform clipboard.
+    pub(crate) fn drop_clipboard_for_test(&mut self) {
+        self.clipboard = None;
+    }
+
     /// The dialog asked for, and the folder it starts in.
     pub(crate) fn asked_for_test(&self) -> Option<(&DialogRequest, Option<&Path>)> {
         self.dialog.as_ref().map(|d| (&d.request, d.start_dir.as_deref()))

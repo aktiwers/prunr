@@ -322,10 +322,10 @@ impl PrunrApp {
             if let Some(msg) = multi_hint {
                 self.toasts.info(msg);
             } else {
-                self.set_temporary_status("Copied to clipboard");
+                self.status_success("Copied to clipboard");
             }
         } else {
-            self.set_temporary_status("Could not copy to clipboard. Try saving instead.");
+            self.status_error("Could not copy to clipboard. Try saving instead.");
         }
     }
 }
@@ -345,20 +345,21 @@ fn spawn_save_single(
     path: PathBuf,
     one: SaveOne,
     format: prunr_core::ExportFormat,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Result<String, String>>,
 ) {
     std::thread::spawn(move || {
         let depth = ExportDepth::default();
-        let mut msg = match write_composite(&path, &one.rgba, &one.bg, format, &depth) {
-            Ok(()) => "Saved".into(),
-            Err(e) => format!("Save failed: {e}"),
+        let mut outcome = match write_composite(&path, &one.rgba, &one.bg, format, &depth) {
+            Ok(()) => Ok("Saved".to_string()),
+            Err(e) => Err(format!("Save failed: {e}")),
         };
         let folder = path.parent().unwrap_or(Path::new("."));
         if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
-            msg = format!("{msg}; depth map failed: {e}");
+            let msg = outcome.unwrap_or_else(|failed| failed);
+            outcome = Err(format!("{msg}; depth map failed: {e}"));
         }
-        let _ = tx.send(msg);
+        let _ = tx.send(outcome);
     });
 }
 
@@ -374,12 +375,12 @@ fn write_composite(
     std::fs::write(path, &bytes).map_err(|e| e.to_string())
 }
 
-/// The toast after a multi-file save.
-fn save_summary(saved: usize, failed: usize, noun: &str) -> String {
+/// The toast after a multi-file save; an error when any file failed.
+fn save_summary(saved: usize, failed: usize, noun: &str) -> Result<String, String> {
     if failed > 0 {
-        format!("Saved {saved}, failed {failed}")
+        Err(format!("Saved {saved}, failed {failed}"))
     } else {
-        format!("Saved {saved} {noun}")
+        Ok(format!("Saved {saved} {noun}"))
     }
 }
 
@@ -405,7 +406,7 @@ struct LayerSave {
 
 /// Render and write each image's layers into `folder` on a background
 /// thread (the composite where an image has none); report the counts.
-fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<String>) {
+fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<Result<String, String>>) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
         let mut failed = 0usize;
@@ -445,7 +446,7 @@ fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<BatchSave>,
     format: prunr_core::ExportFormat,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Result<String, String>>,
 ) {
     std::thread::spawn(move || {
         let mut saved = 0usize;
@@ -465,4 +466,95 @@ fn spawn_save_batch(
         }
         let _ = tx.send(save_summary(saved, failed, "image(s)"));
     });
+}
+
+/// Each status and save message keeps its toast kind: success for what
+/// worked, error for what did not.
+#[cfg(test)]
+mod toast_kind_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use crate::gui::item::BatchStatus;
+    use crate::gui::tests::fixtures::push_test_item;
+    use super::PrunrApp;
+
+    fn done_item(app: &mut PrunrApp, id: u64) {
+        let item = push_test_item(app, id);
+        item.status = BatchStatus::Done;
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))));
+    }
+
+    /// The toast a save thread's answer turns into, once it lands.
+    fn save_toast(app: &mut PrunrApp) -> (&'static str, String) {
+        let before = app.toasts.len_for_test();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.drain_background_channels(&egui::Context::default());
+            if app.toasts.len_for_test() > before {
+                let (level, caption) = app.toasts.last_for_test().expect("a toast");
+                return (level, caption.to_string());
+            }
+            assert!(Instant::now() < deadline, "the save never answered");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn an_image_that_will_not_load_is_an_error() {
+        let mut app = PrunrApp::new_for_test();
+        app.handle_open_path("/nonexistent/prunr-test/missing.png".into());
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not load image")));
+        app.handle_open_bytes(vec![1, 2, 3], "junk".into());
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not load image")));
+    }
+
+    #[test]
+    fn a_copy_says_whether_the_clipboard_took_it() {
+        let mut app = PrunrApp::new_for_test();
+        let rgba = image::RgbaImage::new(2, 2);
+        let took = app.system.copy_image(&rgba);
+        app.finish_copy(&rgba, None);
+        let expected = if took {
+            ("success", "Copied to clipboard")
+        } else {
+            ("error", "Could not copy to clipboard. Try saving instead.")
+        };
+        assert_eq!(app.toasts.last_for_test(), Some(expected));
+
+        app.system.drop_clipboard_for_test();
+        app.finish_copy(&rgba, None);
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not copy to clipboard. Try saving instead.")));
+    }
+
+    #[test]
+    fn a_single_save_is_a_success_or_an_error() {
+        let mut app = PrunrApp::new_for_test();
+        done_item(&mut app, 1);
+        let dir = tempfile::tempdir().unwrap();
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("out.png"));
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("missing/out.png"));
+        let (level, caption) = save_toast(&mut app);
+        assert_eq!(level, "error");
+        assert!(caption.starts_with("Save failed: "), "{caption}");
+    }
+
+    #[test]
+    fn a_save_of_several_is_an_error_when_any_failed() {
+        let mut app = PrunrApp::new_for_test();
+        done_item(&mut app, 1);
+        done_item(&mut app, 2);
+        let dir = tempfile::tempdir().unwrap();
+        app.on_save_selected_picked(&[1, 2], dir.path().to_path_buf());
+        assert_eq!(save_toast(&mut app), ("success", "Saved 2 image(s)".to_string()));
+        app.on_save_selected_picked(&[1, 2], dir.path().join("missing"));
+        assert_eq!(save_toast(&mut app), ("error", "Saved 0, failed 2".to_string()));
+
+        app.on_save_layers_picked(&[1], dir.path().to_path_buf());
+        assert_eq!(save_toast(&mut app), ("success", "Saved 1 file(s)".to_string()));
+        app.on_save_layers_picked(&[1], dir.path().join("missing"));
+        assert_eq!(save_toast(&mut app), ("error", "Saved 0, failed 1".to_string()));
+    }
 }

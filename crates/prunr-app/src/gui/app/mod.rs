@@ -479,14 +479,16 @@ impl PrunrApp {
         app
     }
 
-    fn set_temporary_status(&mut self, text: impl Into<String>) {
-        let msg: String = text.into();
-        if msg.contains("fail") || msg.contains("Could not") || msg.contains("not available") {
-            self.toasts.error(msg.clone());
-        } else {
-            self.toasts.success(msg.clone());
-        }
-        self.status.set_temporary(&msg);
+    /// A success toast, echoed on the status line for a while.
+    fn status_success(&mut self, text: &str) {
+        self.toasts.success(text);
+        self.status.set_temporary(text);
+    }
+
+    /// An error toast, echoed on the status line for a while.
+    fn status_error(&mut self, text: &str) {
+        self.toasts.error(text);
+        self.status.set_temporary(text);
     }
 
     /// Pick a background picture for the image at `idx`. It loads off the

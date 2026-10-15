@@ -37,7 +37,7 @@ impl PrunrApp {
 
     pub fn handle_open_path(&mut self, path: PathBuf) {
         let Some(dims) = probe_dims_path(&path) else {
-            self.set_temporary_status("Could not load image");
+            self.status_error("Could not load image");
             return;
         };
         let filename = display_name(&path, "image");
@@ -47,7 +47,7 @@ impl PrunrApp {
     /// Open an image from raw bytes; an empty name reads as "image".
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
         let Some(dims) = probe_dims_bytes(&bytes) else {
-            self.set_temporary_status("Could not load image");
+            self.status_error("Could not load image");
             return;
         };
         let name = if name.is_empty() { "image".into() } else { name };

@@ -109,9 +109,10 @@ pub struct BackgroundIO {
     /// Pre-decoded source images for instant canvas switching
     pub decode_tx: mpsc::Sender<DecodeResult>,
     pub decode_rx: mpsc::Receiver<DecodeResult>,
-    /// Save completion notifications
-    pub save_done_tx: mpsc::Sender<String>,
-    pub save_done_rx: mpsc::Receiver<String>,
+    /// A finished save's toast text: `Ok` when everything was written,
+    /// `Err` when anything failed.
+    pub save_done_tx: mpsc::Sender<Result<String, String>>,
+    pub save_done_rx: mpsc::Receiver<Result<String, String>>,
     /// A copy whose background was baked off the UI thread, for the
     /// clipboard, with the note to show once copied.
     pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,

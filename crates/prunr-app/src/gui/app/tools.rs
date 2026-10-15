@@ -135,7 +135,7 @@ impl PrunrApp {
                 SelectionAction::Cut => {
                     if let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) {
                         self.system.copy_image(&selected);
-                        self.set_temporary_status("Selection cut to clipboard");
+                        self.status_success("Selection cut to clipboard");
                     }
                     Some(CutoutAction::Erase)
                 }
@@ -161,7 +161,7 @@ impl PrunrApp {
             SelectionAction::Copy => {
                 let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) else { return };
                 self.system.copy_image(&selected);
-                self.set_temporary_status("Selection copied to clipboard");
+                self.status_success("Selection copied to clipboard");
             }
             SelectionAction::Cut => {
                 let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
@@ -169,7 +169,7 @@ impl PrunrApp {
                     self.system.copy_image(&selected);
                 }
                 self.apply_selection_cut(idx, &mask, &base, ctx);
-                self.set_temporary_status("Selection cut to clipboard");
+                self.status_success("Selection cut to clipboard");
             }
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
@@ -580,6 +580,33 @@ mod selection_action_tests {
         let item = &app.batch.items[0];
         assert!(item.result_rgba.as_ref().unwrap().pixels().all(|px| px.0[3] == 0));
         assert_eq!(item.timeline.undo_steps(), 1, "Cut is exactly one step");
+    }
+
+    /// Copy and Cut report with a success toast, on a plain result and on
+    /// a cut-out.
+    #[test]
+    fn copy_and_cut_report_success() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        for cutout in [false, true] {
+            for (action, text) in [
+                (SelectionAction::Copy, "Selection copied to clipboard"),
+                (SelectionAction::Cut, "Selection cut to clipboard"),
+            ] {
+                let mut app = super::PrunrApp::new_for_test();
+                let mut item = make_item_done();
+                item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+                if cutout {
+                    item.cached_tensor = CompressedTensor::from_raw(TensorCache {
+                        data: vec![10.0; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta,
+                    });
+                }
+                app.batch.items.push(item);
+                assert_eq!(app.batch.items[0].corrects_cutout(app.settings.model), cutout);
+                app.handle_selection_action(0, action, &egui::Context::default());
+                assert_eq!(app.toasts.last_for_test(), Some(("success", text)), "cut-out {cutout}");
+            }
+        }
     }
 
     /// Invert: coverage complement, signed by the active brush mode.
