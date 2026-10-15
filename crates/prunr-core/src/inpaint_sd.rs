@@ -246,8 +246,7 @@ pub enum SdRamFit {
     Refused,
 }
 
-pub fn sd_ram_fit(free_mb: u64, margin_mb: u64) -> SdRamFit {
-    let id = prunr_models::ModelId::SdV15InpaintFp16;
+pub fn sd_ram_fit(id: prunr_models::ModelId, free_mb: u64, margin_mb: u64) -> SdRamFit {
     if free_mb < ram_need_mb(id, margin_mb, false, false) {
         SdRamFit::Refused
     } else if free_mb < ram_need_mb(id, margin_mb, false, true) {
@@ -3796,18 +3795,20 @@ mod tests {
     /// tall crop.
     #[test]
     fn sd_ram_fit_matches_the_run_time_gate() {
-        let id = prunr_models::ModelId::SdV15InpaintFp16;
+        use prunr_models::ModelId;
         let margin = 2048;
-        let base = ram_need_mb(id, margin, false, false);
-        for free in [base - 1, base, base + SD_TALL_CROP_EXTRA_MB - 1, base + SD_TALL_CROP_EXTRA_MB] {
-            let mut t = plan_tuning(false, margin);
-            let gate = fit_ram(id, &mut t, free, false);
-            let expected = match (gate.is_ok(), t.tall_crop) {
-                (false, _) => SdRamFit::Refused,
-                (true, false) => SdRamFit::TilesOnly,
-                (true, true) => SdRamFit::Full,
-            };
-            assert_eq!(sd_ram_fit(free, margin), expected, "free {free} MB");
+        for id in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16, ModelId::RoremFp16] {
+            let base = ram_need_mb(id, margin, false, false);
+            for free in [base - 1, base, base + SD_TALL_CROP_EXTRA_MB - 1, base + SD_TALL_CROP_EXTRA_MB] {
+                let mut t = plan_tuning(false, margin);
+                let gate = fit_ram(id, &mut t, free, false);
+                let expected = match (gate.is_ok(), t.tall_crop) {
+                    (false, _) => SdRamFit::Refused,
+                    (true, false) => SdRamFit::TilesOnly,
+                    (true, true) => SdRamFit::Full,
+                };
+                assert_eq!(sd_ram_fit(id, free, margin), expected, "{id:?}, free {free} MB");
+            }
         }
     }
 
@@ -3822,7 +3823,7 @@ mod tests {
             let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
             assert!(fit_ram(id, &mut t, 16_500, false).is_ok(), "{id:?} runs with 16.5 GB free");
         }
-        assert_eq!(sd_ram_fit(12_147, SD_DEFAULT_MARGIN_MB), SdRamFit::Refused);
+        assert_eq!(sd_ram_fit(prunr_models::ModelId::SdV15InpaintFp16, 12_147, SD_DEFAULT_MARGIN_MB), SdRamFit::Refused);
     }
 
     /// "CPU only" reaches the SD parts through the bundle key, so a
