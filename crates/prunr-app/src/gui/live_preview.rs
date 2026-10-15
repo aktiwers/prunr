@@ -141,8 +141,8 @@ pub struct PreviewResult {
     /// `apply_completed_previews` to route kind-specific side-effects
     /// (e.g. advancing `applied_recipe.upscale` for UpscaleTier2 results).
     pub kind: PreviewKind,
-    /// Generation counter — used to discard results from stale dispatches
-    /// that completed after a newer tweak cancelled them.
+    /// Generation counter — used to discard results from dispatches a
+    /// newer one superseded.
     pub generation: u64,
     /// The item's timeline version at dispatch: the result lands only on
     /// the state it was computed for.
@@ -288,7 +288,8 @@ struct Owed {
     latest_tweak_at: Instant,
 }
 
-/// State for an in-flight dispatch. Used to cancel when a new tweak arrives.
+/// State for an in-flight dispatch. Its cancel token fires on `cancel` /
+/// `cancel_all` only.
 struct InFlight {
     cancel: Arc<AtomicBool>,
     generation: u64,
@@ -878,15 +879,6 @@ pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
     })
 }
 
-/// Actually run the preview. Runs on a rayon worker thread. Returns the RGBA
-/// plus, for Edge kind, the resized pre-dilation mask so the parent can cache
-/// it (tied to the dispatch's line_strength).
-///
-/// Respects the user's full mask settings, including `refine_edges`. The
-/// guided filter stage adds ~50-150ms on 4K when enabled, so drag cadence
-/// slows accordingly — but the user opted into that cost when they toggled
-/// Refine Edges on, and without running the filter the three refine knobs
-/// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
 /// What `run_preview` produces. The built planes and `built_masked_base`
 /// hold only what this dispatch constructed, so the parent caches them —
 /// reused inputs pass through empty to avoid re-publishing.
@@ -907,6 +899,13 @@ impl RunOutput {
     }
 }
 
+/// Runs on a rayon worker thread.
+///
+/// Respects the user's full mask settings, including `refine_edges`. The
+/// guided filter stage adds ~50-150ms on 4K when enabled, so drag cadence
+/// slows accordingly — but the user opted into that cost when they toggled
+/// Refine Edges on, and without running the filter the three refine knobs
+/// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
 fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::empty(); }
 
