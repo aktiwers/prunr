@@ -525,16 +525,23 @@ pub(crate) struct FacePreview {
 /// (`set_partial`).
 fn paint_tile(slot: &mut Option<egui::TextureHandle>, ctx: &egui::Context, name: &str, tile: &prunr_core::TilePreview) {
     let full = [tile.full_width as usize, tile.full_height as usize];
-    let texture = match slot {
-        Some(t) if t.size() == full => t,
-        slot => slot.insert(ctx.load_texture(
-            name,
-            egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
-            egui::TextureOptions::LINEAR,
-        )),
-    };
+    let at = [tile.x as usize, tile.y as usize];
     let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
-    texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
+    match slot {
+        Some(t) if t.size() == full => t.set_partial(at, image, egui::TextureOptions::LINEAR),
+        // A tile that is the whole preview (the photo laid under an erase)
+        // is the texture: one upload, not a blank one and the tile.
+        slot if at == [0, 0] && image.size == full => {
+            *slot = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR));
+        }
+        slot => slot
+            .insert(ctx.load_texture(
+                name,
+                egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
+                egui::TextureOptions::LINEAR,
+            ))
+            .set_partial(at, image, egui::TextureOptions::LINEAR),
+    }
 }
 
 /// The faces outlined on an image: those found and redrawn, or those a
@@ -2365,6 +2372,29 @@ mod tests {
             item.start_job(None, engine);
             assert!(item.is_running(), "{engine:?} runs from its start");
         }
+    }
+
+    /// A tile that is the whole preview becomes the texture in one upload;
+    /// a part lands in a blank texture of the preview's size, and a later
+    /// tile updates only its part.
+    #[test]
+    fn a_whole_preview_tile_is_one_upload() {
+        let ctx = egui::Context::default();
+        let tile = |x: u32, y: u32, w: u32, h: u32| prunr_core::TilePreview {
+            x, y, width: w, height: h, full_width: 4, full_height: 3, rgba: vec![9; (w * h * 4) as usize],
+        };
+        let uploads = |texture: &Option<egui::TextureHandle>| {
+            let id = texture.as_ref().expect("a texture").id();
+            ctx.tex_manager().write().take_delta().set.into_iter().filter(|(t, _)| *t == id).map(|(_, d)| d.pos).collect::<Vec<_>>()
+        };
+        let mut whole = None;
+        paint_tile(&mut whole, &ctx, "whole", &tile(0, 0, 4, 3));
+        assert_eq!(uploads(&whole), [None], "the tile is the texture");
+        paint_tile(&mut whole, &ctx, "whole", &tile(1, 1, 2, 2));
+        assert_eq!(uploads(&whole), [Some([1, 1])], "a later tile updates its part");
+        let mut part = None;
+        paint_tile(&mut part, &ctx, "part", &tile(1, 1, 2, 2));
+        assert_eq!(uploads(&part), [None, Some([1, 1])], "a first part lands in a blank preview");
     }
 
     #[test]
