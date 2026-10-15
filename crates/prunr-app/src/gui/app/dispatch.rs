@@ -214,10 +214,11 @@ impl PrunrApp {
             rorem_steps: bs.rorem_steps,
             sd_seed: seed,
             use_taesd: bs.sd_use_taesd_effective(),
-            sd_tuning: crate::gui::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
+            sd_tuning: prunr_core::inpaint_sd::plan_tuning(
                 self.settings.keep_sd_loaded,
                 self.settings.sd_memory.margin_mb(),
-            )),
+            )
+            .with_env_overrides(),
             cpu_only: self.settings.cpu_only(),
         }
     }
