@@ -32,6 +32,7 @@ use rayon::prelude::*;
 
 use crate::guided_filter::{box_filter, box_filter_into};
 use crate::inpaint::{mask_bbox, Bbox};
+use crate::math::SendMutPtr;
 
 /// Default ring width for [`color_match_inpainted`] (pixels). Tuned for
 /// 1024-class inpaint output; on much-larger sources, the visible band
@@ -335,13 +336,6 @@ fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
     });
 }
 
-#[derive(Clone, Copy)]
-struct SendMutPtr(*mut u8);
-// SAFETY: callers must partition writes so no two parallel iterations
-// touch the same byte; see `composite_channel`'s row-disjoint partition.
-unsafe impl Send for SendMutPtr {}
-unsafe impl Sync for SendMutPtr {}
-
 // Per-channel inner kernel — args are the math context the row-parallel
 // loop closes over. Splitting into a struct adds a borrow-lifetime story
 // for what is fundamentally a leaf math helper.
@@ -390,10 +384,7 @@ fn composite_channel(
                 *p = blended.clamp(0.0, 255.0) as u8;
             }
         }
-        // Force whole-struct capture of `dp` (Rust 2021 disjoint capture
-        // would otherwise grab `dp.0: *mut u8` alone, which isn't Sync;
-        // the unsafe Send/Sync impls live on `SendMutPtr`, not on the
-        // raw pointer field). Same pattern as `guided_filter::box_filter`.
+        // Capture `dp` whole: its raw-pointer field alone is not Sync.
         let _ = &dp;
     });
 }
