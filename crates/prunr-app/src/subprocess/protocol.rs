@@ -220,6 +220,17 @@ pub struct EdgeCacheFile {
     pub scales: Vec<prunr_core::EdgeScale>,
 }
 
+/// What became of a run's spare line scales.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SpareOutcome {
+    Made(EdgeCacheFile),
+    /// Not made on purpose: the image left the screen, a cancel, a
+    /// shutdown. Nothing should run in their place.
+    Skipped,
+    /// The detector or the file write failed.
+    Failed,
+}
+
 /// Child → Parent events (sent over child's stdout).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
@@ -256,12 +267,11 @@ pub enum SubprocessEvent {
         spare_scales: Option<u64>,
     },
     /// The line scales a run left for after its `ImageDone`, under the
-    /// token that event named; `None` when they were skipped (the image
-    /// left the screen, a cancel, a shutdown) or failed.
+    /// token that event named.
     SpareEdgeScales {
         item_id: u64,
         token: u64,
-        edge_cache: Option<EdgeCacheFile>,
+        outcome: SpareOutcome,
     },
     /// Image processing failed (non-fatal).
     ImageError {
@@ -700,11 +710,12 @@ mod tests {
 
     #[test]
     fn event_spare_edge_scales_roundtrip() {
-        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 77, edge_cache: None });
+        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 77, outcome: SpareOutcome::Skipped });
+        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 78, outcome: SpareOutcome::Failed });
         roundtrip(&SubprocessEvent::SpareEdgeScales {
             item_id: 6,
             token: (1 << 32) | 3,
-            edge_cache: Some(EdgeCacheFile {
+            outcome: SpareOutcome::Made(EdgeCacheFile {
                 path: PathBuf::from("/tmp/spare_edge_6.raw"),
                 height: 480,
                 width: 640,
