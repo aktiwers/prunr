@@ -622,15 +622,7 @@ fn flatten_on_white(rgba: &RgbaImage) -> image::RgbImage {
     let (dst_stride, src_stride) = (w as usize * 3, w as usize * 4);
     rgb.par_chunks_mut(dst_stride.max(1)).zip(rgba.par_chunks(src_stride.max(1))).for_each(|(dst, src)| {
         for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(4)) {
-            let a = s[3] as f32 / 255.0;
-            if a < 1.0 {
-                let inv_a = 1.0 - a;
-                for (dc, &sc) in d.iter_mut().zip(&s[..3]) {
-                    *dc = (sc as f32 * a + 255.0 * inv_a) as u8;
-                }
-            } else {
-                d.copy_from_slice(&s[..3]);
-            }
+            d.copy_from_slice(&crate::formats::blend_over(s, [255; 3]));
         }
     });
     rgb
@@ -660,6 +652,21 @@ fn to_tensor(resized: &image::RgbImage) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flatten_on_white_matches_its_former_formula() {
+        let px: Vec<u8> = (0..=255u8).flat_map(|a| [a, 255 - a, 37, a]).collect();
+        let rgba = RgbaImage::from_raw(256, 1, px).unwrap();
+        for (d, s) in flatten_on_white(&rgba).pixels().zip(rgba.pixels()) {
+            let a = s.0[3] as f32 / 255.0;
+            let want: [u8; 3] = if a < 1.0 {
+                std::array::from_fn(|c| (s.0[c] as f32 * a + 255.0 * (1.0 - a)) as u8)
+            } else {
+                [s.0[0], s.0[1], s.0[2]]
+            };
+            assert_eq!(d.0, want, "alpha {}", s.0[3]);
+        }
+    }
 
     /// A scale is asked for with the ones its run makes anyway: Bold and
     /// Fused share a run, Fine has its own.

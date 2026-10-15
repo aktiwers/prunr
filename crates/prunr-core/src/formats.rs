@@ -252,7 +252,7 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
 }
 
 /// One straight-alpha RGBA pixel composited over `bg`.
-fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
     let a = px[3] as f32 / 255.0;
     let inv = 1.0 - a;
     std::array::from_fn(|c| (px[c] as f32 * a + bg[c] as f32 * inv) as u8)
