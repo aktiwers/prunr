@@ -15,13 +15,40 @@ use crate::gui::timeline::StepKind;
 
 use super::fixtures::push_test_item;
 use crate::gui::item::BatchItem;
+use crate::gui::live_preview::{DispatchInputs, PreviewKind};
 use crate::gui::worker::{CompressedTensor, TensorCache};
 
 /// A segmentation result exists for the item: the correction has a tensor
 /// to apply to.
 fn give_tensor(item: &mut BatchItem) {
-    let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta };
+    give_tensor_of(item, prunr_core::ModelKind::Silueta);
+}
+
+/// An 8×8 segmentation tensor made by `model`.
+fn give_tensor_of(item: &mut BatchItem, model: prunr_core::ModelKind) {
+    let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model };
     item.set_cached_tensor(CompressedTensor::from_raw(cache));
+}
+
+/// An 8×8 opaque grey image of value `v`.
+fn px(v: u8) -> image::RgbaImage {
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]))
+}
+
+/// The live preview's mask inputs for `id`, at the app's current selection
+/// style and cut-out action.
+fn preview_inputs(app: &mut PrunrApp, id: u64, filter_only: bool) -> Option<DispatchInputs> {
+    let style = app.selection_style();
+    let action = app.settings.brush.cutout_action;
+    PrunrApp::build_preview_inputs(&mut app.batch.items, id, PreviewKind::Mask, filter_only, style, action)
+}
+
+/// A second stroke on the first item: its bottom-right cell joins the
+/// selection.
+fn add_corner_stroke(app: &mut PrunrApp) {
+    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
+    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
 }
 
 /// A processed item: the cut-out is on screen and its tensor is cached.
@@ -35,17 +62,14 @@ fn give_cutout(item: &mut BatchItem) {
 /// tensor drops it.
 #[test]
 fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
-    use crate::gui::live_preview::PreviewKind;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 3);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_cutout(item);
-    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
-        .expect("inputs").seg_tensor.expect("tensor");
-    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
-        .expect("inputs").seg_tensor.expect("tensor");
+    let first = preview_inputs(&mut app, 3, false).expect("inputs").seg_tensor.expect("tensor");
+    let second = preview_inputs(&mut app, 3, false).expect("inputs").seg_tensor.expect("tensor");
     assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
     let item = app.batch.find_by_id_mut(3).unwrap();
     item.set_cached_tensor(None);
@@ -327,7 +351,6 @@ fn a_stroke_undo_brings_the_stored_result_back() {
 fn a_process_run_with_a_kept_selection_undoes_in_order() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
@@ -390,10 +413,9 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
 /// another step) never lands: its result is for a state no longer shown.
 #[test]
 fn a_recut_for_a_state_left_behind_never_lands() {
-    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use crate::gui::live_preview::PreviewResult;
     use std::sync::Arc;
     let ctx = egui::Context::default();
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 8);
     item.dimensions = (8, 8);
@@ -403,8 +425,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     item.commit(StepKind::Process);
     give_tensor(item);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
-    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style, app.settings.brush.cutout_action) }
-        .expect("the stroke's re-cut starts");
+    let inputs = preview_inputs(&mut app, 8, false).expect("the stroke's re-cut starts");
 
     app.handle_undo(&ctx);
     let landed = PreviewResult { version: inputs.version, ..PreviewResult::mask_for_test(8, std::sync::Arc::new(px(9))) };
@@ -422,7 +443,6 @@ fn switching_images_keeps_every_undo_step() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
@@ -554,16 +574,12 @@ fn switching_the_action_recuts_every_selection() {
 /// result parked in the timeline, no texture, no decompressed tensor.
 #[test]
 fn a_recut_landing_off_screen_keeps_the_image_parked() {
-    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use crate::gui::live_preview::PreviewResult;
     use std::sync::Arc;
     let ctx = egui::Context::default();
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 3);
-    let style = app.selection_style();
-    let action = app.settings.brush.cutout_action;
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style, action)
-        .expect("the re-cut starts");
+    let inputs = preview_inputs(&mut app, 3, false).expect("the re-cut starts");
     assert!(app.batch.items[0].volatile_seg_tensor.is_some());
     app.batch.items[0].set_on_screen(false);
     let landed = PreviewResult { version: inputs.version, ..PreviewResult::mask_for_test(3, Arc::new(px(9))) };
@@ -660,9 +676,7 @@ fn undo_onto_a_selection_reapplies_the_current_action() {
     let mut app = app_with_model(SettingsModel::Silueta);
     app.settings.brush.cutout_action = CutoutAction::Erase;
     cutout_with_selection(&mut app, 11);
-    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
-    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
-    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
+    add_corner_stroke(&mut app);
     app.settings.brush.cutout_action = CutoutAction::Restore;
 
     app.handle_undo(&egui::Context::default());
@@ -677,15 +691,12 @@ fn undo_onto_a_selection_reapplies_the_current_action() {
 fn undo_onto_another_models_step_does_not_recut_it() {
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 12);
-    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
-    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
-    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
+    add_corner_stroke(&mut app);
     app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::U2net));
     app.batch.items[0].commit(StepKind::Process);
     app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta));
     // The tensor stays U2net's, as after reprocessing with another model.
-    let cache = crate::gui::worker::TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::U2net };
-    app.batch.items[0].set_cached_tensor(crate::gui::worker::CompressedTensor::from_raw(cache));
+    give_tensor_of(&mut app.batch.items[0], prunr_core::ModelKind::U2net);
     app.handle_undo(&egui::Context::default());
     assert!(!app.processor.live_preview.is_pending_for(12));
 }
@@ -726,7 +737,7 @@ fn a_model_switch_keeps_the_shown_cutout_correctable() {
 #[test]
 fn the_cached_segmentation_recuts_only_the_step_it_cut() {
     use crate::gui::item::{Cutter, Engine};
-    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use crate::gui::live_preview::PreviewResult;
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let blank = || Arc::new(image::RgbaImage::new(8, 8));
@@ -744,10 +755,7 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
     item.finish_job();
     assert!(item.hot_seg_tensor().is_none(), "No model's pass is not re-cut");
 
-    let style = app.selection_style();
-    let action = app.settings.brush.cutout_action;
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 4, PreviewKind::Mask, true, style, action)
-        .expect("the pass re-renders");
+    let inputs = preview_inputs(&mut app, 4, true).expect("the pass re-renders");
     assert!(inputs.seg_tensor.is_none());
     let landed = PreviewResult { version: inputs.version, start: inputs.start.clone(), ..PreviewResult::mask_for_test(4, blank()) };
     app.apply_completed_previews(&ctx, vec![landed]);
