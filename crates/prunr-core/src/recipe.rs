@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn the_subject_effect_keeps_its_saved_key() {
         let recipe = MaskRecipe::from(&crate::MaskSettings { effect: SubjectEffect::Sepia, ..Default::default() });
-        let mut json = serde_json::to_value(&recipe).unwrap();
+        let mut json = serde_json::to_value(recipe).unwrap();
         assert_eq!(json["fill_style"], "sepia");
         assert!(json.get("effect").is_none());
         json["fill_style"] = serde_json::json!("invert");
