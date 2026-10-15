@@ -64,7 +64,7 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
 /// Tier 2: mask postprocessing settings (gamma, contrast, edge refinement).
 /// Uses `f32::to_bits()` for exact float comparison.
 /// All fields are `Copy` types (u32, bool, enums), so `MaskRecipe: Copy`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MaskRecipe {
     gamma_bits: u32,
     contrast_bits: u32,
@@ -121,35 +121,6 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             fill_style: m.fill_style,
             decoration_bits: DecorationBits::from(&m.decoration),
         }
-    }
-}
-
-impl PartialEq for MaskRecipe {
-    fn eq(&self, other: &Self) -> bool {
-        self.gamma_bits == other.gamma_bits
-            && self.contrast_bits == other.contrast_bits
-            && self.edge_shift_bits == other.edge_shift_bits
-            && self.refine_edges == other.refine_edges
-            && self.guided_radius == other.guided_radius
-            && self.guided_epsilon_bits == other.guided_epsilon_bits
-            && self.feather_bits == other.feather_bits
-            && self.fill_style == other.fill_style
-            && self.decoration_bits == other.decoration_bits
-    }
-}
-impl Eq for MaskRecipe {}
-
-impl std::hash::Hash for MaskRecipe {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.gamma_bits.hash(state);
-        self.contrast_bits.hash(state);
-        self.edge_shift_bits.hash(state);
-        self.refine_edges.hash(state);
-        self.guided_radius.hash(state);
-        self.guided_epsilon_bits.hash(state);
-        self.feather_bits.hash(state);
-        self.fill_style.hash(state);
-        self.decoration_bits.hash(state);
     }
 }
 
