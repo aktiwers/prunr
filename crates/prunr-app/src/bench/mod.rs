@@ -53,15 +53,9 @@ impl Family {
     /// `None` for a model without a GPU path (lines, Magic Brush, faces)
     /// and for TAESD, which runs inside a Stable Diffusion erase.
     pub fn of(id: ModelId) -> Option<Self> {
-        match prunr_models::descriptor(id)?.category {
-            ModelCategory::Segmentation => Some(Self::Segmentation),
-            ModelCategory::Upscale => Some(Self::Upscale),
-            ModelCategory::Colorize => Some(Self::Colorize),
-            ModelCategory::Depth => Some(Self::Depth),
-            ModelCategory::Inpaint if id.is_sd_family() => Some(Self::Diffusion),
-            ModelCategory::Inpaint if id == ModelId::TaesdFp16 => None,
-            ModelCategory::Inpaint => Some(Self::Eraser),
-            ModelCategory::EdgeDetection | ModelCategory::Selection | ModelCategory::Face => None,
+        match Placement::of(id)? {
+            Placement::Family(family) => Some(family),
+            Placement::CpuByDesign | Placement::InsideDiffusion => None,
         }
     }
 
@@ -91,11 +85,32 @@ impl Family {
     pub const ALL: [Family; 6] = [Self::Segmentation, Self::Upscale, Self::Colorize, Self::Depth, Self::Eraser, Self::Diffusion];
 }
 
-/// Models whose sessions the app builds on the CPU provider alone.
+/// Where a model sits in the bench, from one match over its category.
+enum Placement {
+    Family(Family),
+    /// The app builds its sessions on the CPU provider alone.
+    CpuByDesign,
+    /// TAESD, run only as part of a Stable Diffusion erase.
+    InsideDiffusion,
+}
+
+impl Placement {
+    fn of(id: ModelId) -> Option<Self> {
+        Some(match prunr_models::descriptor(id)?.category {
+            ModelCategory::Segmentation => Self::Family(Family::Segmentation),
+            ModelCategory::Upscale => Self::Family(Family::Upscale),
+            ModelCategory::Colorize => Self::Family(Family::Colorize),
+            ModelCategory::Depth => Self::Family(Family::Depth),
+            ModelCategory::Inpaint if id.is_sd_family() => Self::Family(Family::Diffusion),
+            ModelCategory::Inpaint if id == ModelId::TaesdFp16 => Self::InsideDiffusion,
+            ModelCategory::Inpaint => Self::Family(Family::Eraser),
+            ModelCategory::EdgeDetection | ModelCategory::Selection | ModelCategory::Face => Self::CpuByDesign,
+        })
+    }
+}
+
 fn cpu_by_design(id: ModelId) -> bool {
-    prunr_models::descriptor(id).is_some_and(|d| {
-        matches!(d.category, ModelCategory::EdgeDetection | ModelCategory::Selection | ModelCategory::Face)
-    })
+    matches!(Placement::of(id), Some(Placement::CpuByDesign))
 }
 
 fn in_catalog(id: ModelId) -> bool {
