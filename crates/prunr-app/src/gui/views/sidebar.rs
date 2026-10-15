@@ -419,7 +419,7 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
         theme::THUMBNAIL_ROUNDING,
         Stroke::new(
             2.0,
-            Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, border_alpha),
+            Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), border_alpha),
         ),
         egui::StrokeKind::Inside,
     );

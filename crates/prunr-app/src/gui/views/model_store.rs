@@ -169,7 +169,6 @@ const BAR_HEIGHT: f32 = 4.0;
 const READY_FILL: Color32 = Color32::from_rgba_premultiplied(13, 25, 13, 31);
 const READY_TEXT: Color32 = Color32::from_rgb(0x9f, 0xe0, 0x9f);
 const FAILED_TEXT: Color32 = Color32::from_rgb(0xd8, 0x8e, 0x8e);
-const ADVISORY_TEXT: Color32 = Color32::from_rgb(0xe1, 0xb3, 0x4e);
 
 /// Filter tabs in display order; `None` is "All".
 const FILTERS: [super::chip::Choice<Option<ModelCategory>>; 8] = [
@@ -251,7 +250,7 @@ fn render_card(
             }
             ui.add(egui::Label::new(RichText::new(desc.description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY.gamma_multiply(0.8))).wrap());
             if let Some(msg) = advisory {
-                ui.label(RichText::new(msg).size(theme::FONT_SIZE_SECONDARY).color(ADVISORY_TEXT));
+                ui.label(RichText::new(msg).size(theme::FONT_SIZE_SECONDARY).color(theme::ADVISORY_TEXT));
             }
             if open {
                 card_details(ui, desc, state);
@@ -307,7 +306,7 @@ fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (
         DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY),
         DownloadState::Failed { .. } if !prunr_models::is_available(desc.id) => ("Download failed".into(), FAILED_TEXT),
         _ => match size {
-            Some(s) => (s, if advisory { ADVISORY_TEXT } else { theme::TEXT_SECONDARY }),
+            Some(s) => (s, if advisory { theme::ADVISORY_TEXT } else { theme::TEXT_SECONDARY }),
             None => ("Built-in".into(), theme::TEXT_SECONDARY),
         },
     }

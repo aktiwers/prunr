@@ -485,7 +485,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             let (color, fit) = match sd_ram_fit(id, avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
                 SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
                 SdRamFit::TilesOnly => (
-                    Color32::from_rgb(0xe1, 0xb3, 0x4e),
+                    theme::ADVISORY_TEXT,
                     "runs, but tall regions are filled in tiles. Close other apps for one pass",
                 ),
                 SdRamFit::Refused => (
