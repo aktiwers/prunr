@@ -123,6 +123,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Sliders' value boxes keep their width as the number changes, so the strip no longer jumps while you drag; the Mask panel opened from its strip no longer grows to the right each time a value widens; flyouts stay more opaque (70 %) while a slider is held.
 - A model whose half-precision copy failed on the accelerator (U2Net on OpenVINO) never tried the accelerator again, not even with its full-precision weights, and ran on the processor from then on. It now falls back to the full-precision weights on the same accelerator, and only the copy that failed is skipped next time.
 - Settings › Hardware said "none detected" for the graphics on every Windows machine. It now finds the graphics card and the built-in graphics, and tells a virtual machine's or remote desktop's stand-in from a real one.
 - When a graphics card could not be used (no driver, a remote desktop, a virtual machine), the work quietly ran on the processor while the status bar still named the card. It now falls back to the processor openly and says "CPU".
