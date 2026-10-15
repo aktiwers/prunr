@@ -187,7 +187,7 @@ pub const SD_TALL_CROP_EXTRA_MB: u64 = 3_072;
 /// stroke, because only there is a kept bundle visible as loaded; the
 /// GUI's own view would count a kept 16 GB bundle twice.
 pub fn plan_tuning(keep_loaded: bool, margin_mb: u64) -> SdTuning {
-    SdTuning { keep_loaded, ov_device: None, tall_crop: true, margin_mb, cpu_only: false, mem: SdMemPlan::default() }
+    SdTuning { keep_loaded, tall_crop: true, margin_mb, ..Default::default() }
 }
 
 impl SdTuning {
@@ -207,6 +207,10 @@ impl SdTuning {
             },
             ..self
         }
+    }
+
+    fn session_key(&self) -> SdSessionKey {
+        SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only, mem: self.mem }
     }
 }
 
@@ -259,12 +263,6 @@ fn resident(id: prunr_models::ModelId) -> bool {
         .any(|((cached, _), e)| *cached == id && matches!(e.value.get(), Some(Ok(_))))
 }
 
-impl SdTuning {
-    fn session_key(&self) -> SdSessionKey {
-        SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only, mem: self.mem }
-    }
-}
-
 /// What a built session bundle depends on besides the model. Shapes are
 /// not part of it: the OpenVINO sessions are built dynamic, so one
 /// bundle serves tiles and tall crops alike.
@@ -280,9 +278,7 @@ impl SdSessionKey {
     fn gpu_eps(&self) -> &'static [EpKind] {
         crate::engine::gpu_eps_for(self.cpu_only)
     }
-}
 
-impl SdSessionKey {
     /// A device override is bench-only (see `SdTuning::ov_device`).
     fn records_ep_failures(&self) -> bool {
         self.ov_device.is_none()
