@@ -35,7 +35,7 @@ use super::presets::{
     model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
 };
 use super::settings::{DEFAULT_PRESET_MODEL, PRUNR_PRESET};
-use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
+use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
@@ -304,7 +304,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.7,
             edge_thickness: 2,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 4 },
+            effect: SubjectEffect::Posterize { levels: 4 },
             gamma: 1.3,
             ..base
         }),
@@ -314,7 +314,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.8,
             edge_thickness: 0,
             solid_line_color: None,
-            fill_style: FillStyle::Desaturate,
+            effect: SubjectEffect::Desaturate,
             gamma: 1.1,
             ..base
         }),
@@ -324,7 +324,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 3,
             line_style: LineStyle::Rainbow { cycles: 2 },
-            fill_style: FillStyle::Saturate { percent: 220 },
+            effect: SubjectEffect::Saturate { percent: 220 },
             ..base
         }),
         ("Sepia", ItemSettings {
@@ -333,7 +333,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 1,
             solid_line_color: Some([70, 45, 20]),
-            fill_style: FillStyle::Sepia,
+            effect: SubjectEffect::Sepia,
             ..base
         }),
         ("Duotone Poster", ItemSettings {
@@ -342,7 +342,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 2,
             solid_line_color: Some([10, 10, 40]),
-            fill_style: FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+            effect: SubjectEffect::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
             ..base
         }),
         ("X-Ray", ItemSettings {
@@ -351,7 +351,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.8,
             edge_thickness: 1,
             solid_line_color: Some([200, 230, 255]),
-            fill_style: FillStyle::Invert,
+            effect: SubjectEffect::Invert,
             bg: Some([0, 0, 30, 255]),
             ..base
         }),
@@ -361,7 +361,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.65,
             edge_thickness: 3,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 3 },
+            effect: SubjectEffect::Posterize { levels: 3 },
             gamma: 1.4,
             ..base
         }),
@@ -371,7 +371,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.55,
             edge_thickness: 1,
             solid_line_color: Some([230, 230, 235]),
-            fill_style: FillStyle::Desaturate,
+            effect: SubjectEffect::Desaturate,
             ..base
         }),
         ("Sunset Lines", ItemSettings {
@@ -391,7 +391,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.5,
             edge_thickness: 2,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Pixelate { block_size: 10 },
+            effect: SubjectEffect::Pixelate { block_size: 10 },
             ..base
         }),
     ]

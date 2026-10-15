@@ -1146,12 +1146,12 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
         PreviewKind::Mask => {
             if !is_subject_outline {
                 // Filter-only path: no seg tensor available (model=None, or
-                // item not yet processed). Apply fill_style directly to the
+                // item not yet processed). Apply effect directly to the
                 // raw source so the user sees the filter effect without
                 // running inference.
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
                     let mut rgba = inputs.original.to_rgba8();
-                    prunr_core::apply_fill_style(&mut rgba, inputs.settings.fill_style);
+                    prunr_core::apply_subject_effect(&mut rgba, inputs.settings.effect);
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).

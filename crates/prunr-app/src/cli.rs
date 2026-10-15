@@ -126,8 +126,8 @@ pub struct Cli {
     /// desaturate, invert, duotone, sepia, threshold, posterize, solarize,
     /// hue-shift, saturate, color-splash, pixelate, cross-process,
     /// halftone or gradient-map.
-    #[arg(long, value_name = "NAME", value_parser = str::parse::<prunr_core::FillStyle>)]
-    pub effect: Option<prunr_core::FillStyle>,
+    #[arg(long, value_name = "NAME", value_parser = str::parse::<prunr_core::SubjectEffect>)]
+    pub effect: Option<prunr_core::SubjectEffect>,
 
     /// Fill transparent background with a copy of the photo: `blur`
     /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
@@ -545,7 +545,7 @@ impl Cli {
             refine_edges: self.refine_edges,
             guided_radius: self.edge_width.clamp(1, 64),
             feather: self.feather.max(0.0),
-            fill_style: self.effect.unwrap_or_default(),
+            effect: self.effect.unwrap_or_default(),
             decoration: self.decoration(),
             ..Default::default()
         }

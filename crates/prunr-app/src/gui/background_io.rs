@@ -121,7 +121,7 @@ pub struct BackgroundIO {
     pub tex_prep_tx: mpsc::Sender<TexPrepMsg>,
     pub tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
     /// Filter-only (model=None) Process results — keeps the UI thread free
-    /// while load + decode + `apply_fill_style` runs per item.
+    /// while load + decode + `apply_subject_effect` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
     /// Off-thread RGBA decode + ColorImage build for a per-item bg

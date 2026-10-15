@@ -1,7 +1,7 @@
 //! Bit-exact regression suite for the postprocess pipeline.
 //!
 //! The contract: refactors of `postprocess.rs` / `guided_filter.rs` /
-//! `inpaint_blend.rs` / `apply_mask` / `apply_fill_style` / `apply_bg_effect`
+//! `inpaint_blend.rs` / `apply_mask` / `apply_subject_effect` / `apply_bg_effect`
 //! that are claimed math-neutral must produce byte-identical output for a
 //! frozen tensor input. Any deviation fails the test with the first mismatching
 //! pixel coordinate. Math-changing refactors regenerate `expected.png` via

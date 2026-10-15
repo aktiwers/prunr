@@ -5,7 +5,7 @@
 //! tier needs to re-run (or if processing can be skipped entirely).
 
 use serde::{Serialize, Deserialize};
-use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, FillStyle, BgEffect, InputTransform};
+use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, SubjectEffect, BgEffect, InputTransform};
 
 /// Tier 1: settings that require AI model inference.
 ///
@@ -73,7 +73,8 @@ pub struct MaskRecipe {
     guided_radius: u32,
     guided_epsilon_bits: u32,
     feather_bits: u32,
-    pub fill_style: FillStyle,
+    #[serde(rename = "fill_style")]
+    pub effect: SubjectEffect,
     #[serde(default)]
     decoration_bits: DecorationBits,
 }
@@ -118,7 +119,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             guided_radius: m.guided_radius,
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
             feather_bits: m.feather.to_bits(),
-            fill_style: m.fill_style,
+            effect: m.effect,
             decoration_bits: DecorationBits::from(&m.decoration),
         }
     }
@@ -371,6 +372,26 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Golden recipe JSON and sidecars name the subject effect
+    /// `fill_style`; the recipe reads and writes that key.
+    #[test]
+    fn the_subject_effect_keeps_its_saved_key() {
+        let recipe = MaskRecipe::from(&crate::MaskSettings { effect: SubjectEffect::Sepia, ..Default::default() });
+        let mut json = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(json["fill_style"], "sepia");
+        assert!(json.get("effect").is_none());
+        json["fill_style"] = serde_json::json!("invert");
+        let read: MaskRecipe = serde_json::from_value(json).unwrap();
+        assert_eq!(read.effect, SubjectEffect::Invert);
+
+        let settings = crate::MaskSettings { effect: SubjectEffect::Sepia, ..Default::default() };
+        let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["fill_style"], "sepia");
+        assert!(json.get("effect").is_none());
+        let read: crate::MaskSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(read.effect, SubjectEffect::Sepia);
+    }
 
     /// Build a MaskRecipe for tests — other MaskSettings fields default.
     fn mask(gamma: f32, contrast: f32, edge_shift: f32, refine: bool) -> MaskRecipe {

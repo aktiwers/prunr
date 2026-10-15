@@ -175,7 +175,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 |---|---|---|
 | `ComposeMode` | How subject α and edge α combine (Subject outline mode) | EdgeRerun |
 | `LineStyle` | Edge colouring (solid, gradients, rainbow, noise, DualScale, …) | EdgeRerun |
-| `FillStyle` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
+| `SubjectEffect` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
 | `BgEffect` | Source-derived backdrop baked into transparent areas | MaskRerun |
 | `InputTransform` | Transform of TEED's input | AddEdgeInference |
 

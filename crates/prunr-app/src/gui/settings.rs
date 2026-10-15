@@ -553,7 +553,7 @@ pub enum SettingsModel {
     U2net,
     BiRefNetLite,
     /// "Filter-only" mode — no segmentation inference. The pipeline bypasses
-    /// the seg stage entirely and just applies fill_style / bg_effect to the
+    /// the seg stage entirely and just applies effect / bg_effect to the
     /// source. TEED still runs if `line_mode == EdgesOnly` (edges don't
     /// need the seg model); SubjectOutline is invalid without a seg model
     /// and gets greyed out in the UI.
