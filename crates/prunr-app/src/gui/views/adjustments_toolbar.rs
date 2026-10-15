@@ -360,6 +360,7 @@ pub(crate) fn render(
 const LINES_PANEL_WIDTH: f32 = 460.0;
 const FILTER_COUNT: usize = prunr_core::InputTransform::ALL.len();
 const STYLE_COUNT: usize = prunr_core::LineStyle::ALL.len();
+const COMPOSE_COUNT: usize = prunr_core::ComposeMode::ALL.len();
 
 /// Which of `all` has `value`'s variant, whatever its parameters.
 fn variant_index<T>(all: &[T], value: &T) -> usize {
@@ -636,10 +637,10 @@ fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     hint(ui, "Lines lighten the farther away they are. Uses the depth model.");
 
     if s.line_mode == LineMode::SubjectOutline {
-        let compositions = [
-            ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
-            ComposeMode::Ghost,
-        ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
+        let compositions: [_; COMPOSE_COUNT] = std::array::from_fn(|i| {
+            let c = ComposeMode::ALL[i];
+            chip::Choice { value: c, name: c.name(), description: compose_description(c), enabled: true }
+        });
         let changed = chip::dropdown(ui, "Composition", &compositions, &mut s.compose_mode);
         aggregate_bool(changed, StaticKnob::ComposeMode, change);
         // Lines in the photo's own colors vanish on a filled subject.
@@ -742,16 +743,6 @@ fn line_color(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     if !matches!(s.line_style, LineStyle::Solid) {
         let changed = line_style_params(ui, &mut s.line_style);
         aggregate_bool(changed, StaticKnob::LineStyle, change);
-    }
-}
-
-fn compose_label(mode: prunr_core::ComposeMode) -> &'static str {
-    use prunr_core::ComposeMode;
-    match mode {
-        ComposeMode::LinesOnly => "Lines only",
-        ComposeMode::SubjectFilled => "Subject filled",
-        ComposeMode::Engraving => "Engraving",
-        ComposeMode::Ghost => "Ghost",
     }
 }
 
