@@ -1721,12 +1721,7 @@ fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     let tokens = clip_tokenize("");
     let t = Tensor::from_array(tokens)
         .map_err(|e| format!("{label}: smoke input: {e}"))?;
-    let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
-        .ok_or_else(|| format!("{label}: no inputs"))?;
-    s.run(inputs![name.as_str() => &t])
-        .map_err(|e| format!("{label}: smoke run: {e}"))?;
-    Ok(())
+    smoke_run_single(s, label, &t)
 }
 
 fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
@@ -1740,10 +1735,15 @@ fn smoke_test_vae_decoder(s: &mut Session, label: &str) -> Result<(), String> {
 fn smoke_test_vae(s: &mut Session, label: &str, shape: (usize, usize, usize, usize)) -> Result<(), String> {
     let t = tensor_in(Array4::<f32>::zeros(shape), input_is_f32(s, 0))
         .map_err(|e| format!("{label}: smoke input: {e}"))?;
-    let inputs = s.inputs();
-    let name = inputs.first().map(|i| i.name().to_string())
-        .ok_or_else(|| format!("{label}: no inputs"))?;
-    s.run(inputs![name.as_str() => &t])
+    smoke_run_single(s, label, &t)
+}
+
+fn smoke_run_single<T>(s: &mut Session, label: &str, input: &ort::value::Value<T>) -> Result<(), String>
+where
+    T: ort::value::ValueTypeMarker,
+{
+    let name = take_first_input(s, label)?;
+    s.run(inputs![name.as_str() => input])
         .map_err(|e| format!("{label}: smoke run: {e}"))?;
     Ok(())
 }
@@ -1786,13 +1786,7 @@ fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
     } else {
         Tensor::from_array(Array3::<f16>::zeros((1, CLIP_SEQ_LEN, 768))).map(|t| t.into_dyn())
     }.map_err(|e| format!("{label}: smoke conditioning: {e}"))?;
-    let inputs = s.inputs();
-    if inputs.len() < 3 {
-        return Err(format!("{label}: smoke needs ≥3 inputs, got {}", inputs.len()));
-    }
-    let n0 = inputs[0].name().to_string();
-    let n1 = inputs[1].name().to_string();
-    let n2 = inputs[2].name().to_string();
+    let [n0, n1, n2] = take_three_inputs(s, label)?;
     s.run(inputs![
         n0.as_str() => &lat_t,
         n1.as_str() => &ts_t,
