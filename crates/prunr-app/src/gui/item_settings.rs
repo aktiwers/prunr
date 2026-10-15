@@ -522,6 +522,8 @@ mod tests {
         assert_eq!(s.contrast, 0.0);
         assert_eq!(s.edge_shift, 0.0);
         assert!(!s.refine_edges);
+        assert_eq!(s.guided_radius, 8);
+        assert_eq!(s.edge_thickness, 0);
         assert_eq!(s.line_mode, LineMode::Off);
         assert_eq!(s.line_strength, 0.5);
         assert!(s.solid_line_color.is_none());
@@ -712,23 +714,6 @@ mod tests {
         assert_eq!(r.upscale.model, None);
     }
 
-
-    #[test]
-    fn output_scale_replaces_upscale_scale_default() {
-        assert_eq!(ItemSettings::default().output_scale, prunr_core::OutputScale::X4);
-    }
-
-    #[test]
-    fn edge_thickness_shrunk_to_u8() {
-        assert_eq!(std::mem::size_of::<u8>(), 1);
-        assert_eq!(ItemSettings::default().edge_thickness, 0u8);
-    }
-
-    #[test]
-    fn guided_radius_shrunk_to_u8() {
-        assert_eq!(std::mem::size_of::<u8>(), 1);
-        assert_eq!(ItemSettings::default().guided_radius, 8u8);
-    }
 
     #[test]
     fn current_recipe_passes_output_scale_through() {
