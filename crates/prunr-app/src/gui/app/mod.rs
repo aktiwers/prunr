@@ -31,6 +31,10 @@ const BUSY_PILL_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 /// How often the frame loop looks for a file dialog's answer.
 const DIALOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How often the frame loop wakes itself while async work is in flight.
+/// The poll stops on its own once the work drains.
+const ASYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The model a No-model recipe is built and diffed with. Any seg model
 /// would do, since No model never runs one, but every site that builds or
 /// diffs a recipe must pick the same one or `applied_recipe` reads as drift.
@@ -1119,7 +1123,7 @@ impl eframe::App for PrunrApp {
             self.busy_since = None;
         }
         if self.prewrite_drag_files() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(ASYNC_POLL);
         }
         self.update_window_title(ctx);
         self.status.tick();
@@ -1141,10 +1145,9 @@ impl eframe::App for PrunrApp {
         // is supposed to wake egui, but some compositors (notably Wayland)
         // drop thread-initiated wake-ups when the window is idle, leaving the
         // canvas stuck on the old image until a mouse event fires. Polling
-        // from the UI thread is reliable; it costs one frame per 50ms while
-        // async work is in flight, then self-extinguishes.
+        // from the UI thread is reliable.
         if self.batch.has_pending_work() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(ASYNC_POLL);
         }
     }
 

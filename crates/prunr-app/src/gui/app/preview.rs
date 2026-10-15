@@ -152,10 +152,9 @@ impl PrunrApp {
             item.quick.settle(live.works_on(item.id));
         }
 
-        // Covers the worker-running / not-yet-drained window. Same
-        // self-extinguishing 50ms poll as the tex_pending loop in `logic()`.
+        // Covers the worker-running / not-yet-drained window.
         if self.processor.live_preview.has_in_flight() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(super::ASYNC_POLL);
         }
     }
 
