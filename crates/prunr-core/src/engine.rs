@@ -24,7 +24,7 @@ pub trait InferenceEngine: Send + Sync {
 /// only exists on macOS, DirectML on Windows, CUDA + OpenVINO on
 /// non-macOS targets. `Display` mirrors the historic string names so
 /// log output and the persistent `ep_compat.json` cache keys stay
-/// stable across this refactor.
+/// stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum EpKind {
     #[cfg(not(target_os = "macos"))]
@@ -623,10 +623,10 @@ impl OrtEngine {
     /// Detect the runtime provider (cached — runs once per process).
     ///
     /// This is a best-effort *startup guess* for the UI label before any
-    /// subprocess is spawned. Windows/Linux probe `nvidia-smi` for CUDA;
-    /// macOS always returns CoreML. The real EP is stamped onto each
-    /// `OrtEngine` at session creation and propagated through the subprocess
-    /// `Ready` event, so the UI corrects itself if this guess was wrong.
+    /// subprocess is spawned: the first GPU provider the loaded runtime
+    /// offers, else the CPU. The real EP is stamped onto each `OrtEngine`
+    /// at session creation and propagated through the subprocess `Ready`
+    /// event, so the UI corrects itself if this guess was wrong.
     pub fn detect_active_provider() -> String {
         static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         CACHED.get_or_init(|| {
@@ -681,9 +681,8 @@ pub(crate) fn directml_active() -> bool {
 }
 
 impl OrtEngine {
-    /// Lock the underlying ORT Session for inference.
-    /// Used by pipeline.rs — not part of the public trait API.
-    /// ORT requires &mut Session for run(); Mutex provides interior mutability.
+    /// Lock the underlying ORT Session for inference. Not part of the
+    /// public trait API. ORT requires &mut Session for run(); Mutex provides interior mutability.
     pub(crate) fn with_session<T, F>(&self, f: F) -> Result<T, CoreError>
     where
         F: FnOnce(&mut Session) -> Result<T, CoreError>,
@@ -735,8 +734,7 @@ impl OrtEngine {
 
         // CPU output memory works for every EP we register today: CPU,
         // CUDA, CoreML, DirectML, OpenVINO. ORT inserts the device→host
-        // copy before writing here. If a future GPU-resident postprocess
-        // path lands, switch to the EP's native device.
+        // copy before writing here.
         let mem_info = MemoryInfo::new(
             AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput,
         ).map_err(|e| CoreError::Inference(format!("MemoryInfo: {e}")))?;
