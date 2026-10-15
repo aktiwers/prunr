@@ -648,7 +648,7 @@ impl PrunrApp {
         if succeeded {
             item.hold_for_reveal();
         }
-        let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot, is_selected);
+        let backend_update = item.apply_tier_result(result, tensor_cache, edge_cache, recipe_snapshot);
         if succeeded {
             item.finish_job();
         } else {
