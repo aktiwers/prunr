@@ -234,7 +234,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // before they need them. Active modifier tints to ACCENT; the rest stays
     // TEXT_SECONDARY.
     if app.magic_brush_state.is_active() || app.brush_state.is_enabled() {
-        let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+        let (shift, alt) = modifier_state(ui);
         let base_color = theme::TEXT_SECONDARY;
         let active_color = theme::ACCENT;
         let pos = egui::pos2(
@@ -260,25 +260,39 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 }
 
-/// The held modifier's glyph below-right of the pointer, the macOS
-/// modifier-indicator convention.
-fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, glyph: &str) {
+/// Whether Shift and the subtract modifier are held.
+fn modifier_state(ui: &egui::Ui) -> (bool, bool) {
+    ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)))
+}
+
+/// The held modifier's glyph (+ for Shift, − for subtract) below-right of
+/// the pointer, the macOS modifier-indicator convention.
+fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, (shift, subtract): (bool, bool)) {
+    if !(shift || subtract) {
+        return;
+    }
+    let glyph = if shift { "+" } else { "\u{2212}" };
     let Some(p) = ui.ctx().input(|i| i.pointer.hover_pos()).filter(|p| canvas_rect.contains(*p)) else { return };
     ui.painter().text(p + egui::vec2(12.0, 12.0), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(14.0), theme::ACCENT);
+}
+
+/// The item a brush acts on and where its image sits on the canvas;
+/// `None` with no item, or none with a texture to paint over yet.
+fn brush_target(app: &PrunrApp, canvas_rect: Rect) -> Option<(usize, Rect)> {
+    let item = app.batch.selected_item()?;
+    if item.result_texture.is_none() && item.source_texture.is_none() {
+        return None;
+    }
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    Some((app.batch.selected_idx_clamped()?, img_rect))
 }
 
 /// Run the brush overlay (cursor + pointer events) and commit any
 /// finished stroke onto the active item.
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
-    let Some(item) = app.batch.selected_item() else { return };
-    if item.result_texture.is_none() && item.source_texture.is_none() {
-        return;
-    }
-    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-
-    let Some(idx) = app.batch.selected_idx_clamped() else { return };
-    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+    let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
+    let (shift, subtract) = modifier_state(ui);
     let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
     let stamp = if selection_strokes {
         let mut stamp = app.settings.brush.stamp();
@@ -291,10 +305,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         let item = &app.batch.items[idx];
         brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, stamp, item, img_rect)
     };
-    if shift || subtract {
-        let glyph = if shift { "+" } else { "\u{2212}" };
-        draw_modifier_glyph(ui, canvas_rect, glyph);
-    }
+    draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
@@ -338,14 +349,7 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
 /// trail rendering during drag (via `brush_overlay::draw_trail_for`),
 /// and the modifier glyph (+ / −) at the cursor when Shift / Alt is held.
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
-
-    let Some(item) = app.batch.selected_item() else { return };
-    if item.result_texture.is_none() && item.source_texture.is_none() {
-        return;
-    }
-    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-
-    let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
     let item = &app.batch.items[idx];
     let item_id = item.id;
     let (source_w, source_h) = item.dimensions;
@@ -366,11 +370,9 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     super::brush_overlay::draw_trail_for(ui, look, look.shape, app.magic_brush_state.active_trail.stamps());
     super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
-    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+    let (shift, subtract) = modifier_state(ui);
     let mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
-    if shift || subtract {
-        draw_modifier_glyph(ui, canvas_rect, if shift { "+" } else { "\u{2212}" });
-    }
+    draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
 
     let screen_to_src = |pos: egui::Pos2| source_point(pos, img_rect, (source_w, source_h));
 
