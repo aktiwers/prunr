@@ -45,7 +45,7 @@ pub use types::{
 pub use pipeline::{process_image, process_image_from_decoded, process_image_unchecked, process_image_with_mask, infer_only, infer_after_first_look};
 pub use postprocess::{tensor_to_mask, tensor_to_mask_from_flat, apply_mask, postprocess_from_flat, PostprocessOpts};
 pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
-pub use formats::{ExportFormat, load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png, encode_rgba_png_into, rgba_view, encode_gray_png, apply_background_color, apply_background_image};
+pub use formats::{ExportFormat, load_image_from_path, load_image_from_bytes, check_large_image, downscale_image, encode_rgba_png, encode_rgba_png_into, rgba_view, encode_gray_png, encode_gray_png_into, apply_background_color, apply_background_image};
 pub use edge::{EdgeEngine, EdgeInferenceResult, EdgeInput, scales_from_same_runs, EDGE_SCALE_COUNT, edge_scale_dims, tensor_to_edge_mask, edge_plane, thickened_edges, compose_edges_styled, compose_edges_dual_styled, compose_subject_outline, compose_whole_photo, outline_subject};
 pub use types::{ComposeMode, LineStyle, FillStyle, BgEffect, BgImageFit, InputTransform, Decoration, ShadowKind};
 pub use edge::apply_input_transform;
