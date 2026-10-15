@@ -250,64 +250,134 @@ fn coreml_provider(cache_dir: Option<&std::path::Path>) -> ort::ep::CoreML {
 pub(crate) enum Miss {
     /// The provider could not be set up: says nothing about the model.
     Unusable(String),
-    /// The session failed to build. `from_cache`: it loaded a cached
-    /// optimized graph, which is then the suspect.
-    Failed { error: String, from_cache: bool },
+    /// The session failed to build or to run. `suspect_cache`: the cached
+    /// optimized graph it loaded, which is then the suspect and is deleted
+    /// instead of the failure being held against the provider.
+    Failed { error: String, suspect_cache: Option<PathBuf> },
+}
+
+/// Why the ladder passes a provider over without trying it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// The registry declares the model incompatible with it.
+    Declared,
+    /// It failed these weights of the model on an earlier run; skipped
+    /// until `prunr --clear-ep-cache`.
+    FailedBefore,
+}
+
+impl Skip {
+    fn text(self, ep: EpKind) -> String {
+        match self {
+            Skip::Declared => format!("{ep} is declared incompatible"),
+            Skip::FailedBefore => format!("{ep} failed this model before"),
+        }
+    }
+}
+
+/// Whether, and why, the ladder passes `ep` over for these weights.
+fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
+    if !prunr_models::is_ep_compatible(model, ep.as_str()) {
+        Some(Skip::Declared)
+    } else if crate::ep_compat::is_known_failure(ep, model, weights) {
+        Some(Skip::FailedBefore)
+    } else {
+        None
+    }
+}
+
+/// What a walk down the ladder met: each provider that failed, with its
+/// error, in order, and each it passed over without a try.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Walk {
+    pub(crate) failed: Vec<String>,
+    skipped: Vec<String>,
+}
+
+impl Walk {
+    /// Why the walk landed nowhere, in one line.
+    pub(crate) fn reason(&self) -> String {
+        if !self.failed.is_empty() {
+            self.failed.join("; ")
+        } else if !self.skipped.is_empty() {
+            format!("no GPU provider to try: {}", self.skipped.join(", "))
+        } else {
+            "No GPU EPs available on this platform".to_string()
+        }
+    }
 }
 
 /// Each provider in `eps` with `weights` until `commit` builds a session,
 /// returned with the failures on the way (`SessionPick::failed`). Pairs
 /// declared or known to fail are skipped; a new failure is recorded
-/// against these weights only, so FP16 failing never bars FP32.
+/// against these weights only, so FP16 failing never bars FP32. `prefix`
+/// leads each log line ("LaMa: ").
 pub(crate) fn walk_ladder<S>(
+    prefix: &str,
     model: prunr_models::ModelId,
     weights: Weights,
     eps: &[EpKind],
     mut commit: impl FnMut(EpKind) -> Result<S, Miss>,
-) -> Result<(S, EpKind, Vec<String>), String> {
-    let mut failed = Vec::new();
-    let mut skipped = Vec::new();
+) -> Result<(S, EpKind, Vec<String>), Walk> {
+    let mut walk = Walk::default();
     for &ep in eps {
-        if !prunr_models::is_ep_compatible(model, ep.as_str()) {
-            tracing::debug!(?model, ep = %ep, "EP statically incompatible; skipping");
-            skipped.push(format!("{ep} is declared incompatible"));
-            continue;
-        }
-        if crate::ep_compat::is_known_failure(ep, model, weights) {
-            tracing::debug!(?model, ?weights, ep = %ep, "EP cached as incompatible; skipping");
-            skipped.push(format!("{ep} failed this model before"));
+        if let Some(skip) = skip_reason(model, weights, ep) {
+            tracing::debug!(?model, ?weights, ep = %ep, ?skip, "{prefix}EP skipped");
+            walk.skipped.push(skip.text(ep));
             continue;
         }
         match commit(ep) {
-            Ok(session) => return Ok((session, ep, failed)),
+            Ok(session) => return Ok((session, ep, walk.failed)),
             Err(Miss::Unusable(error)) => {
-                tracing::warn!(?model, ep = %ep, %error, "GPU EP unusable — trying next EP");
-                failed.push(error);
+                tracing::warn!(?model, ep = %ep, %error, "{prefix}GPU EP unusable — trying next EP");
+                walk.failed.push(error);
             }
-            Err(Miss::Failed { error, from_cache }) => {
-                tracing::warn!(?model, ?weights, ep = %ep, %error, "GPU session creation failed — trying next EP");
-                handle_commit_failure(
-                    from_cache, ep, model, weights,
-                    || crate::cache::optimized_model_path(model, ep.as_str()),
-                    &error,
-                );
-                failed.push(error);
+            Err(Miss::Failed { error, suspect_cache }) => {
+                tracing::warn!(?model, ?weights, ep = %ep, %error, "{prefix}GPU session failed — trying next EP");
+                match suspect_cache {
+                    Some(path) => clear_suspect_cache(&path),
+                    None => crate::ep_compat::record_failure(ep, model, weights, &error),
+                }
+                walk.failed.push(error);
             }
         }
     }
-    Err(if !failed.is_empty() {
-        failed.join("; ")
-    } else if !skipped.is_empty() {
-        format!("no GPU provider to try: {}", skipped.join(", "))
-    } else {
-        "No GPU EPs available on this platform".to_string()
-    })
+    Err(walk)
 }
 
 /// The GPU providers the loaded runtime offers, in the order a session
 /// tries them.
 pub fn gpu_provider_names() -> Vec<&'static str> {
     available_gpu_eps().iter().map(EpKind::as_str).collect()
+}
+
+/// The lighter copy of `id`'s weights a session tries before its own,
+/// when one is on disk: FP16 on a GPU, INT8 on the CPU. Never on macOS,
+/// where CoreML converts to FP16 itself.
+fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool) -> Option<Weights> {
+    if cfg!(target_os = "macos") {
+        None
+    } else if cpu_only {
+        prunr_models::has_int8_variant(id).then_some(Weights::Int8)
+    } else {
+        prunr_models::has_fp16_variant(id).then_some(Weights::Fp16)
+    }
+}
+
+/// Why a GPU session of `model` passes `ep` over for every weights it
+/// tries (`None`: it tries `ep`).
+fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
+    let mut why = None;
+    for weights in [lighter_weights(model, false), Some(Weights::Fp32)].into_iter().flatten() {
+        why = Some(skip_reason(model, weights, ep)?);
+    }
+    why
+}
+
+/// Each GPU provider the loaded runtime offers, in ladder order, with why
+/// a session of `model` would pass it over (`None`: it would try it).
+pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
+    available_gpu_eps().iter().map(|&ep| (ep.as_str(), gpu_skip(model, ep))).collect()
 }
 
 /// The weights file a session loaded: the model's own (FP32 for
@@ -496,18 +566,13 @@ impl OrtEngine {
     /// Try to load an optimized model variant from the filesystem.
     /// Returns None if no variant is available (falls back to embedded FP32).
     fn optimized_variant_bytes(model: ModelKind, cpu_only: bool) -> Option<(Vec<u8>, Weights)> {
-        #[cfg(target_os = "macos")]
-        { return None; } // macOS uses FP32 — CoreML does its own FP16 conversion
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let id: prunr_models::ModelId = model.into();
-            if cpu_only {
-                prunr_models::model_int8_bytes(id).map(|b| (b, Weights::Int8))
-            } else {
-                prunr_models::model_fp16_bytes(id).map(|b| (b, Weights::Fp16))
-            }
-        }
+        let id: prunr_models::ModelId = model.into();
+        let weights = lighter_weights(id, cpu_only)?;
+        let bytes = match weights {
+            Weights::Int8 => prunr_models::model_int8_bytes(id),
+            Weights::Fp16 | Weights::Fp32 => prunr_models::model_fp16_bytes(id),
+        }?;
+        Some((bytes, weights))
     }
 
     fn build_session(model_bytes: &[u8], weights: Weights, intra_threads: usize, model: ModelKind, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
@@ -541,7 +606,7 @@ impl OrtEngine {
         // reached — exactly the DirectML AbiCustomRegistry failure seen in the
         // wild). Fall through on error; the caller retries with cpu_only=true
         // if all GPU EPs fail.
-        let (session, ep, failed) = walk_ladder(model_id, weights, available_gpu_eps(), |ep| {
+        let (session, ep, failed) = walk_ladder("", model_id, weights, available_gpu_eps(), |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
@@ -556,12 +621,12 @@ impl OrtEngine {
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
-                from_cache: matches!(bytes_owner, Cow::Owned(_)),
+                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep),
             })?;
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
             Ok(session)
-        }).map_err(CoreError::Inference)?;
+        }).map_err(|walk| CoreError::Inference(walk.reason()))?;
         Ok(Self {
             session: Mutex::new(session),
             pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
@@ -612,15 +677,10 @@ pub fn runs_on_host_cpu(provider: &str) -> bool {
 /// failed there on an earlier run. A model it does not run falls back to
 /// the CPU by design.
 pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
-    if !prunr_models::is_ep_compatible(model, provider) {
-        return false;
+    match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
+        Some(&ep) => gpu_skip(model, ep).is_none(),
+        None => prunr_models::is_ep_compatible(model, provider),
     }
-    let Some(&ep) = available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) else {
-        return true;
-    };
-    let fp16_tried = cfg!(not(target_os = "macos")) && prunr_models::has_fp16_variant(model);
-    !crate::ep_compat::is_known_failure(ep, model, Weights::Fp32)
-        || (fp16_tried && !crate::ep_compat::is_known_failure(ep, model, Weights::Fp16))
 }
 
 /// Whether DirectML is the active GPU provider on this platform.
@@ -723,41 +783,24 @@ impl InferenceEngine for OrtEngine {
     }
 }
 
-/// Delete a suspect cache file. `NotFound` is silent — concurrent
-/// processes legitimately race on the same path.
-pub(crate) fn clear_suspect_cache(cache_path: Option<&std::path::Path>) {
-    let Some(p) = cache_path else { return };
-    match std::fs::remove_file(p) {
-        Ok(()) => tracing::warn!(cache = %p.display(),
+/// Delete a cached optimized graph a session failed on (stale, or a
+/// malformed artifact), so the next build rebuilds it from source.
+/// `NotFound` is silent — concurrent processes legitimately race on the
+/// same path.
+fn clear_suspect_cache(path: &std::path::Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::warn!(cache = %path.display(),
             "deleted suspect cache file after commit failure"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(cache = %p.display(), %e,
+        Err(e) => tracing::warn!(cache = %path.display(), %e,
             "failed to delete suspect cache file"),
     }
 }
 
-/// Route a session-commit failure based on whether the load came from
-/// cache. Cached load → cache file is the suspect (stale optimized
-/// graph, malformed spike artifact); delete the file so the next
-/// session build hits a cache miss and rebuilds from source.
-/// Non-cached load → the EP itself failed for this model; record it
-/// in `ep_compat` so future runs skip the doomed attempt.
-///
-/// `cache_path_fn` is a closure so the path-resolution allocation
-/// only fires on the cached branch.
-pub(crate) fn handle_commit_failure(
-    was_cached: bool,
-    ep: EpKind,
-    id: prunr_models::ModelId,
-    weights: Weights,
-    cache_path_fn: impl FnOnce() -> Option<PathBuf>,
-    error: &str,
-) {
-    if was_cached {
-        clear_suspect_cache(cache_path_fn().as_deref());
-    } else {
-        crate::ep_compat::record_failure(ep, id, weights, error);
-    }
+/// The cached optimized graph a session loaded, when `hit` (an
+/// `apply_ort_graph_cache` hit comes back as owned bytes).
+pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep: EpKind) -> Option<PathBuf> {
+    hit.then(|| crate::cache::optimized_model_path(model, ep.as_str())).flatten()
 }
 
 /// Per-(model, EP) ORT-graph-optimization cache. On hit returns the
@@ -821,27 +864,26 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("optimized.onnx");
         std::fs::write(&path, b"stale").unwrap();
-        clear_suspect_cache(Some(&path));
+        clear_suspect_cache(&path);
         assert!(!path.exists(), "existing file must be removed");
-        // NotFound + None must be silent no-ops — concurrent deletions
-        // are expected, and a panic here would abort the whole session
-        // build instead of letting it rebuild from source.
-        clear_suspect_cache(Some(&path));
-        clear_suspect_cache(None);
+        // NotFound must be a silent no-op — concurrent deletions are
+        // expected, and a panic here would abort the whole session build
+        // instead of letting it rebuild from source.
+        clear_suspect_cache(&path);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Boundary contract: when `was_cached=true`, the cache file is
-    /// deleted AND `ep_compat::record_failure` is NOT called. This is
-    /// A malformed compiled.onnx from the EPContext path would otherwise
-    /// trigger `record_failure` and persistently disable OpenVINO for SD,
-    /// until `ep_compat.json` was removed by hand.
+    /// Boundary contract: a session that failed on a cached optimized
+    /// graph deletes the graph and does NOT record the provider as
+    /// failing the model. A malformed compiled.onnx from the EPContext
+    /// path would otherwise persistently disable OpenVINO for SD, until
+    /// `ep_compat.json` was removed by hand.
     ///
     /// Uses `(EpKind::Cuda, ModelId::TaesdFp16)` to dodge other tests
     /// that touch `ep_compat` under the parallel runner.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn handle_commit_failure_skips_record_failure_when_cached() {
+    fn a_failure_on_a_cached_graph_deletes_it_instead_of_recording_the_provider() {
         use prunr_models::ModelId;
         let id = ModelId::TaesdFp16;
         let ep = EpKind::Cuda;
@@ -850,16 +892,15 @@ mod tests {
         std::fs::write(&cache_file, b"stale").unwrap();
         let initial = crate::ep_compat::is_known_failure(ep, id, Weights::Fp32);
 
-        handle_commit_failure(
-            true, ep, id, Weights::Fp32,
-            || crate::cache::optimized_model_path(id, ep.as_str()),
-            "test cache failure",
-        );
+        let walk = walk_ladder("", id, Weights::Fp32, &[ep], |_| {
+            Err::<(), _>(Miss::Failed { error: "test cache failure".into(), suspect_cache: Some(cache_file.clone()) })
+        });
 
+        assert_eq!(walk.map_err(|w| w.failed), Err(vec!["test cache failure".to_string()]));
         assert!(!cache_file.exists(), "cache file must be deleted");
         assert_eq!(
             crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), initial,
-            "record_failure must NOT fire on was_cached=true",
+            "a failure on a cached graph must not be recorded",
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -917,14 +958,14 @@ mod tests {
             move |ep: EpKind| {
                 tried.borrow_mut().push((ep, weights));
                 if weights == Weights::Fp16 {
-                    Err(Miss::Failed { error: "tensor(float16) is invalid".into(), from_cache: false })
+                    Err(Miss::Failed { error: "tensor(float16) is invalid".into(), suspect_cache: None })
                 } else {
                     Ok("session")
                 }
             }
         };
-        assert!(walk_ladder(model, Weights::Fp16, &[ep], commit_fp16_fails(Weights::Fp16)).is_err());
-        let picked = walk_ladder(model, Weights::Fp32, &[ep], commit_fp16_fails(Weights::Fp32));
+        assert!(walk_ladder("", model, Weights::Fp16, &[ep], commit_fp16_fails(Weights::Fp16)).is_err());
+        let picked = walk_ladder("", model, Weights::Fp32, &[ep], commit_fp16_fails(Weights::Fp32));
         assert_eq!(picked, Ok(("session", ep, Vec::new())), "FP32 ran on the provider FP16 failed on");
         assert_eq!(*tried.borrow(), [(ep, Weights::Fp16), (ep, Weights::Fp32)]);
         assert!(crate::ep_compat::is_known_failure(ep, model, Weights::Fp16), "the FP16 failure is remembered");
@@ -959,9 +1000,23 @@ mod tests {
         #[cfg(target_os = "macos")]
         let ep = EpKind::CoreMl;
         let model = ModelId::FourXNmkdSiaxCx;
-        let walk = walk_ladder(model, Weights::Fp32, &[ep], |_| Err::<(), _>(Miss::Unusable("no DirectX 12 device".into())));
-        assert_eq!(walk, Err("no DirectX 12 device".to_string()));
+        let walk = walk_ladder("", model, Weights::Fp32, &[ep], |_| Err::<(), _>(Miss::Unusable("no DirectX 12 device".into())));
+        assert_eq!(walk.map_err(|w| w.reason()), Err("no DirectX 12 device".to_string()));
         assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "the machine's lack, not the model's");
+    }
+
+    /// A provider is passed over when declared incompatible or failed
+    /// before, without a try; the walk says so when it tried none.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_walk_that_tries_no_provider_says_why() {
+        use prunr_models::ModelId;
+        let model = ModelId::Silueta;
+        let declared = walk_ladder("", model, Weights::Fp32, &[EpKind::OpenVino], |_| -> Result<(), Miss> { panic!("tried a declared pair") });
+        assert_eq!(declared.map_err(|w| w.reason()), Err("no GPU provider to try: OpenVINO is declared incompatible".to_string()));
+        let none = walk_ladder("", model, Weights::Fp32, &[], |_| -> Result<(), Miss> { unreachable!() });
+        assert_eq!(none.map_err(|w| w.reason()), Err("No GPU EPs available on this platform".to_string()));
+        assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::Declared));
     }
 
     // Integration tests require dev-models feature and downloaded models.

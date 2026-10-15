@@ -1806,6 +1806,11 @@ pub fn has_fp16_variant(id: ModelId) -> bool {
     variant_path(id, "fp16").is_some()
 }
 
+/// Whether the INT8 copy of `id` is on disk, without reading it.
+pub fn has_int8_variant(id: ModelId) -> bool {
+    variant_path(id, "int8").is_some()
+}
+
 fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
     std::fs::read(variant_path(id, suffix)?).ok()
 }

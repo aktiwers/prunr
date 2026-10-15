@@ -12,7 +12,7 @@ use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::{apply_ort_graph_cache, EpSite, SessionPick, Weights};
+use crate::engine::{apply_ort_graph_cache, cached_graph, EpKind, EpSite, Miss, SessionPick, Weights};
 use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
 
@@ -604,9 +604,6 @@ impl LamaSession {
             .unwrap_or(4)
             .max(1);
 
-        // Try GPU EPs first; fall back to CPU on any failure. Mirrors
-        // `OrtEngine`'s one-EP-at-a-time ladder so a crashing EP can't
-        // abort the whole session creation. Logs which EP won.
         let (session, pick) = build_lama_session(id, bytes, threads, cpu_only)?;
 
         let inputs = session.inputs().iter()
@@ -688,88 +685,48 @@ fn build_lama_session(
     threads: usize,
     cpu_only: bool,
 ) -> Result<(Session, SessionPick), String> {
-    let gpu_eps = crate::engine::gpu_eps_for(cpu_only);
-    let mut failed: Vec<String> = Vec::new();
+    lama_ladder(id, bytes, crate::engine::gpu_eps_for(cpu_only), threads, || base_builder(threads))
+}
 
-    for &ep in gpu_eps {
-        // Static catalog + dynamic cache, same as engine.rs.
-        if !prunr_models::is_ep_compatible(id, ep.as_str()) {
-            tracing::debug!(?id, ep = %ep, "LaMa: EP statically incompatible; skipping");
-            continue;
-        }
-        if crate::ep_compat::is_known_failure(ep, id, Weights::Fp32) {
-            tracing::debug!(?id, ep = %ep, "LaMa: EP cached as incompatible; skipping");
-            continue;
-        }
+/// `build_lama_session` over `eps`, each session started from `builder`.
+fn lama_ladder(
+    id: prunr_models::ModelId,
+    bytes: &[u8],
+    eps: &[EpKind],
+    threads: usize,
+    builder: impl Fn() -> Result<ort::session::builder::SessionBuilder, String>,
+) -> Result<(Session, SessionPick), String> {
+    let landed = crate::engine::walk_ladder("LaMa: ", id, Weights::Fp32, eps, |ep| {
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match base_builder(threads) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: builder init failed");
-                continue;
-            }
-        };
+        let builder = builder().map_err(Miss::Unusable)?;
         let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
             apply_ort_graph_cache(builder, bytes, id, ep.as_str())
         } else {
             (builder, Cow::Borrowed(bytes))
         };
         let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-        let registered = builder.with_execution_providers([
-            ep.provider(id, EpSite::Fill { threads }),
-        ]);
-        let mut built = match registered {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: register EP failed");
-                failed.push(format!("ORT register {ep} EP failed: {e}"));
-                continue;
-            }
-        };
+        let mut built = builder
+            .with_execution_providers([ep.provider(id, EpSite::Fill { threads })])
+            .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep) };
         let started = Instant::now();
-        let mut session = match built.commit_from_memory(&bytes_owner) {
-            Ok(s) => {
-                tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
-                coverage.report(id, None);
-                s
-            }
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
-                crate::engine::handle_commit_failure(
-                    matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id, Weights::Fp32,
-                    || crate::cache::optimized_model_path(id, ep.as_str()),
-                    &format!("{e}"),
-                );
-                failed.push(format!("ORT session creation failed ({ep}): {e}"));
-                continue;
-            }
-        };
-        match smoke_test_session(&mut session) {
-            Ok(()) => {
-                tracing::info!(ep = %ep, "LaMa: GPU session validated");
-                return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) }));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    ep = %ep, %e,
-                    "LaMa: GPU session smoke test failed — falling back to next EP/CPU",
-                );
-                crate::engine::handle_commit_failure(
-                    matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id, Weights::Fp32,
-                    || crate::cache::optimized_model_path(id, ep.as_str()),
-                    &e,
-                );
-                failed.push(format!("{ep} test run failed: {e}"));
-            }
-        }
-    }
+        let mut session = built
+            .commit_from_memory(&bytes_owner)
+            .map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
+        tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+        coverage.report(id, None);
+        smoke_test_session(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+        tracing::info!(ep = %ep, "LaMa: GPU session validated");
+        Ok(session)
+    });
+    let failed = match landed {
+        Ok((session, ep, failed)) => return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) })),
+        Err(walk) => walk.failed,
+    };
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = base_builder(threads)?;
-    let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder, bytes, id, "CPU");
+    let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder()?, bytes, id, "CPU");
     let started = Instant::now();
     let session = builder
         .commit_from_memory(&cpu_bytes)
@@ -1414,6 +1371,31 @@ mod tests {
         let result = process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32)
             .expect("empty mask is no-op");
         assert_eq!(result.as_raw(), img.as_raw());
+    }
+
+    /// A provider whose session cannot even be started is named in the
+    /// pick, as the engine's ladder names it, and is not held against the
+    /// model; the CPU then takes the session.
+    #[test]
+    fn a_builder_that_cannot_start_on_a_provider_is_in_the_pick() {
+        use prunr_models::ModelId;
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let Some(bytes) = prunr_models::resolve_bytes(ModelId::Silueta) else { return };
+        #[cfg(not(target_os = "macos"))]
+        let ep = EpKind::Cuda;
+        #[cfg(target_os = "macos")]
+        let ep = EpKind::CoreMl;
+        let id = ModelId::Migan;
+        let calls = std::cell::Cell::new(0);
+        let builder = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { Err("LaMa: no builder here".to_string()) } else { base_builder(1) }
+        };
+        let (_, pick) = lama_ladder(id, &bytes, &[ep], 1, builder).expect("the CPU takes the session");
+        assert_eq!((pick.provider.as_str(), pick.failed.as_slice()), ("CPU", ["LaMa: no builder here".to_string()].as_slice()));
+        assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), "the machine's lack, not the model's");
     }
 
     #[test]
