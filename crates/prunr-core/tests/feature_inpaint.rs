@@ -1,7 +1,6 @@
-//! Each inpaint model runs end-to-end on a representative
-//! mask. Skip-on-missing-model mirrors `golden_e2e`'s ORT skip — these
-//! models are OnDemand, so a clean dev box won't have them until the
-//! user runs the Model Store.
+//! Each inpaint model runs end-to-end on a representative mask. These
+//! models are OnDemand, so a clean dev box skips them until the Model
+//! Store has downloaded them.
 //!
 //! Per-model invariants:
 //! - Output dimensions match input.
@@ -11,9 +10,6 @@
 //! - Unmasked region pixels EQUAL the source (proves identity preservation
 //!   outside the mask — `process_inpaint` blends the inpaint result back
 //!   onto the original at every non-mask pixel).
-//!
-//! SD-family models are deferred — too slow for routine CI; gated behind
-//! `--ignored` via separate slow-test infrastructure.
 
 mod test_common;
 
