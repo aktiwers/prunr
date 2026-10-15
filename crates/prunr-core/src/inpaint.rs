@@ -1024,9 +1024,9 @@ where
     // in the OVERLAP band; each contributes a smoothstep-weighted
     // sample, normalized at the end. Bbox-sized — see fn docs.
     let mut weight_acc: Vec<f32> = vec![0.0; bbox_n];
-    // Accumulator for the weighted RGBA in f32 — blended in linear
-    // space, quantised back to u8 at the end.
-    let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; bbox_n];
+    // Weighted RGB in f32, quantised back to u8 at the end. No alpha:
+    // the resolve keeps the photo's.
+    let mut color_acc: Vec<[f32; 3]> = vec![[0.0; 3]; bbox_n];
 
     // Only tiles that touch the mask run; they are the tile map's layout.
     let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect();
@@ -1158,7 +1158,7 @@ pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<
 }
 
 fn accumulate_tile(
-    color_acc: &mut [[f32; 4]],
+    color_acc: &mut [[f32; 3]],
     weight_acc: &mut [f32],
     tile: &RgbaImage,
     placement: &TilePlacement,
@@ -1204,7 +1204,6 @@ fn accumulate_tile(
             acc[0] += tile_raw[p_off]     as f32 * w;
             acc[1] += tile_raw[p_off + 1] as f32 * w;
             acc[2] += tile_raw[p_off + 2] as f32 * w;
-            acc[3] += tile_raw[p_off + 3] as f32 * w;
             weight_acc[dst_idx] += w;
         }
     }
