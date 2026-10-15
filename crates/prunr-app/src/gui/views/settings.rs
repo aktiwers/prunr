@@ -188,7 +188,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
 
 fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionIntent> {
     match app.settings_tab {
-        SettingsTab::Performance => { render_page_performance(ui, &mut app.settings); None }
+        SettingsTab::Performance => { render_page_performance(ui, &mut app.settings, app.hardware_install_cache.has_sd_eraser()); None }
         SettingsTab::Hardware => {
             let hw_ctx = HardwareSectionContext {
                 offered: RuntimeId::OFFERED,
@@ -399,7 +399,7 @@ fn models_running_several_on_cpu() -> &'static str {
     })
 }
 
-fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
+fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_installed: bool) {
     use crate::gui::settings::{ComputeMode, SdMemoryGuard};
     use super::chip::Choice;
     group_heading(ui, "Processing");
@@ -412,11 +412,19 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings) {
             rows.row("Processor", "Auto runs each model on the accelerator when it supports one.", |ui| {
                 super::chip::choice_buttons(ui, &[
                     Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
-                    Choice { value: ComputeMode::CpuOnly, name: "CPU only", description: "Every model on the CPU. The Stable Diffusion eraser needs the accelerator", enabled: true },
+                    Choice {
+                        value: ComputeMode::CpuOnly,
+                        name: "CPU only",
+                        description: if sd_installed { "Every model on the CPU. The Stable Diffusion eraser needs the accelerator" } else { "Every model on the CPU" },
+                        enabled: true,
+                    },
                 ], &mut settings.processor);
             });
         }
     });
+    if !sd_installed {
+        return;
+    }
     group_heading(ui, "Stable Diffusion eraser");
     group(ui, |rows| {
         rows.row("Keep it loaded", "Faster repeated erases. Holds about 16 GB of RAM while the app is open.", |ui| {
@@ -465,6 +473,10 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
 
         // The same rule as the gate an erase passes, with the user's margin.
         use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
+        if !ctx.installs.has_sd_eraser() {
+            ui.add_space(4.0);
+            return;
+        }
         let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
             SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "SD 1.5: enough memory free"),
             SdRamFit::TilesOnly => (
