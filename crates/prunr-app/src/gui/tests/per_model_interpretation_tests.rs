@@ -763,7 +763,7 @@ fn undo_onto_another_models_step_does_not_recut_it() {
 #[test]
 fn a_model_switch_keeps_the_shown_cutout_correctable() {
     use crate::gui::brush_state::CutoutAction;
-    use crate::gui::tests::tree_tests::{click, harness, settle};
+    use crate::gui::tests::harness::{click, harness, settle};
     let mut h = harness();
     {
         let app = h.state_mut();

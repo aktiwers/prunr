@@ -8,7 +8,7 @@ use std::time::Duration;
 use image::GenericImageView;
 
 use super::fixtures::push_test_item;
-use super::tree_tests::{click, harness, settle};
+use super::harness::{click, harness, settle};
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
 use crate::gui::system_bridge::DialogRequest;

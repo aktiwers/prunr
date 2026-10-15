@@ -3,7 +3,7 @@
 //! controls overlap and none runs past the window's right edge.
 
 use super::fixtures::push_test_item;
-use super::tree_tests::{click, harness_sized, names, settle, tree};
+use super::harness::{click, harness_sized, names, settle, tree};
 use crate::gui::item::BatchStatus;
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme::MIN_WINDOW_SIZE;
