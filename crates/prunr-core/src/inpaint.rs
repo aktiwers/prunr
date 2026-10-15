@@ -731,15 +731,15 @@ fn lama_ladder(
     };
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
-    crate::cache::gc_stale_for_model(id, "CPU");
-    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, "CPU", Weights::Fp32);
+    crate::cache::gc_stale_for_model(id, crate::engine::CPU_NAME);
+    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, crate::engine::CPU_NAME, Weights::Fp32);
     let started = Instant::now();
     let session = builder
         .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
     if let Some(draft) = draft { draft.publish(); }
-    tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
-    Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
+    tracing::info!(?id, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+    Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
 }
 
 /// Run one inference with zero-padded inputs to validate that the
