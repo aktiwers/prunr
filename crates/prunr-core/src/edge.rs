@@ -97,32 +97,41 @@ impl EdgeEngine {
 
     /// The `scales` asked for; the rest stay empty. Bold and Fused share
     /// one run at 640×480, Fine is its own run at 1280×960.
+    pub fn infer_scales(&self, original: &DynamicImage, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
+        self.infer_input(&EdgeInput::new(original, scales), scales)
+    }
+
+    /// The `scales` asked for from a photo already resized for them; the
+    /// rest stay empty. A scale `input` was not resized for is an error.
     ///
     /// Peak working set (f32, ORT activations measured separately):
     ///
-    /// | run       | input  | outputs (4 planes) | kept planes |
-    /// |-----------|--------|--------------------|-------------|
-    /// | 640×480   | 3.7 MB | 4.9 MB             | 2.5 MB      |
-    /// | 1280×960  | 15 MB  | 20 MB              | 4.9 MB      |
+    /// | run       | resized RGB | input  | outputs (4 planes) | kept planes |
+    /// |-----------|-------------|--------|--------------------|-------------|
+    /// | 640×480   | 0.9 MB      | 3.7 MB | 4.9 MB             | 2.5 MB      |
+    /// | 1280×960  | 3.7 MB      | 15 MB  | 20 MB              | 4.9 MB      |
     ///
     /// Both runs' inputs are built before the session lock is taken, so
-    /// with several images in flight one image's resize never holds up
-    /// another's run. The runs go one after the other, each run's input
-    /// and outputs dropped before the next, so the peak is the 1280×960
-    /// run plus the 2.5 MB already kept and the 3.7 MB base input waiting
-    /// for it. While the inputs are built, an input that is not 8-bit RGB
-    /// costs one full-size RGB copy (W×H×3 bytes), flattened onto white
-    /// when it has alpha. A whole Sketch on a 20 MP photo peaks at about
-    /// 0.9 GB resident in the CLI (DexiNed: 1.4 GB).
-    pub fn infer_scales(&self, original: &DynamicImage, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
+    /// with several images in flight one image's conversion never holds
+    /// up another's run. The runs go one after the other, each run's
+    /// input and outputs dropped before the next, so the peak is the
+    /// 1280×960 run plus the 2.5 MB already kept, the 3.7 MB base input
+    /// waiting for it and the resized photo the caller keeps. A whole
+    /// Sketch on a 20 MP photo peaks at about 0.9 GB resident in the CLI
+    /// (DexiNed: 1.4 GB).
+    pub fn infer_input(&self, input: &EdgeInput, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
         let wants = |s: EdgeScale| scales.contains(&s);
         let (fine_h, fine_w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
-        let (base_input, fine_input) = {
-            let rgb = opaque_rgb(original);
-            (
-                (wants(EdgeScale::Bold) || wants(EdgeScale::Fused)).then(|| preprocess(&rgb, BASE_W, BASE_H)),
-                wants(EdgeScale::Fine).then(|| preprocess(&rgb, fine_w, fine_h)),
-            )
+        let unprepared = |run: &str| CoreError::Inference(format!("Edge input was not resized for the {run} run"));
+        let base_input = if wants(EdgeScale::Bold) || wants(EdgeScale::Fused) {
+            Some(to_tensor(input.base.as_ref().ok_or_else(|| unprepared("640×480"))?))
+        } else {
+            None
+        };
+        let fine_input = if wants(EdgeScale::Fine) {
+            Some(to_tensor(input.fine.as_ref().ok_or_else(|| unprepared("1280×960"))?))
+        } else {
+            None
         };
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -143,7 +152,43 @@ impl EdgeEngine {
     }
 }
 
-/// Run the ONNX session once on a `preprocess`ed input.
+/// A photo resized for the detector runs that make some scales: what a
+/// caller keeps to run the other scales later without the full-size
+/// photo. While it is built, an input that is not 8-bit RGB costs one
+/// full-size RGB copy (W×H×3 bytes), flattened onto white when it has
+/// alpha.
+pub struct EdgeInput {
+    base: Option<image::RgbImage>,
+    fine: Option<image::RgbImage>,
+}
+
+impl EdgeInput {
+    pub fn new(original: &DynamicImage, scales: &[EdgeScale]) -> Self {
+        let wants = |s: EdgeScale| scales.contains(&s);
+        let (fine_h, fine_w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
+        let rgb = opaque_rgb(original);
+        let resize = |w, h| crate::formats::resize_rgb_image_lanczos3(&rgb, w, h);
+        Self {
+            base: (wants(EdgeScale::Bold) || wants(EdgeScale::Fused)).then(|| resize(BASE_W, BASE_H)),
+            fine: wants(EdgeScale::Fine).then(|| resize(fine_w, fine_h)),
+        }
+    }
+}
+
+/// Every scale the detector runs that make `scales` make: Bold and Fused
+/// come out of the same run, so asking for one costs the other nothing.
+pub fn scales_from_same_runs(scales: &[EdgeScale]) -> &'static [EdgeScale] {
+    let fine = scales.contains(&EdgeScale::Fine);
+    let base = scales.contains(&EdgeScale::Bold) || scales.contains(&EdgeScale::Fused);
+    match (fine, base) {
+        (true, true) => &EdgeScale::ALL,
+        (true, false) => &[EdgeScale::Fine],
+        (false, true) => &[EdgeScale::Bold, EdgeScale::Fused],
+        (false, false) => &[],
+    }
+}
+
+/// Run the ONNX session once on a `to_tensor` input.
 fn run_inference(
     session: &mut Session,
     input_array: Array4<f32>,
@@ -610,12 +655,11 @@ fn flatten_on_white(rgba: &RgbaImage) -> image::RgbImage {
     rgb
 }
 
-/// Resize to `w` × `h`, BGR float32, subtract mean (no /255).
-fn preprocess(source: &image::RgbImage, w: u32, h: u32) -> Array4<f32> {
-    let resized = crate::formats::resize_rgb_image_lanczos3(source, w, h);
+/// An already resized photo as BGR float32, mean subtracted (no /255).
+fn to_tensor(resized: &image::RgbImage) -> Array4<f32> {
     let raw = resized.as_raw();
-    let h = h as usize;
-    let w = w as usize;
+    let h = resized.height() as usize;
+    let w = resized.width() as usize;
 
     // Skip the zero-fill; the loop writes every element of all three planes.
     let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, h, w));
@@ -635,6 +679,30 @@ fn preprocess(source: &image::RgbImage, w: u32, h: u32) -> Array4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scale is asked for with the ones its run makes anyway: Bold and
+    /// Fused share a run, Fine has its own.
+    #[test]
+    fn scales_come_with_the_ones_their_run_makes() {
+        use EdgeScale::{Bold, Fine, Fused};
+        assert_eq!(scales_from_same_runs(&[Fused]), &[Bold, Fused]);
+        assert_eq!(scales_from_same_runs(&[Bold]), &[Bold, Fused]);
+        assert_eq!(scales_from_same_runs(&[Fine]), &[Fine]);
+        assert_eq!(scales_from_same_runs(&[Fine, Bold]), &EdgeScale::ALL);
+        assert!(scales_from_same_runs(&[]).is_empty());
+    }
+
+    /// A kept input holds only the runs it was resized for.
+    #[test]
+    fn an_edge_input_is_resized_only_for_the_runs_asked() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(300, 200, Rgb([90, 90, 90])));
+        let base = EdgeInput::new(&img, &[EdgeScale::Fused]);
+        assert_eq!(base.base.as_ref().map(|i| i.dimensions()), Some((BASE_W, BASE_H)));
+        assert!(base.fine.is_none());
+        let fine = EdgeInput::new(&img, &[EdgeScale::Fine]);
+        assert!(fine.base.is_none());
+        assert_eq!(fine.fine.as_ref().map(|i| i.dimensions()), Some((BASE_W * 2, BASE_H * 2)));
+    }
 
     /// The detector sees a 640×480 copy, so Smooth must soften that copy
     /// alike on a large photo and a small one.
