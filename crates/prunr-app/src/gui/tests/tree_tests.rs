@@ -171,17 +171,20 @@ fn the_hardware_page_names_every_runtime_control() {
     use crate::gui::hardware_cache::HardwareInstallCache;
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::RuntimeId;
+    use crate::runtime_install::RuntimeChoice;
     let mut both = HardwareInstallCache::all_installed();
-    both.preferred_runtime = Some(RuntimeId::OpenVino);
-    let installing = Some((RuntimeId::DirectMl, "Downloading 40% (10/25 MB)".to_string()));
+    both.preferred_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
+    let mut built_in_only = HardwareInstallCache::default();
+    built_in_only.built_in_gpu = true;
+    let installing = Some((RuntimeId::OpenVino, "Downloading 40% (32/80 MB)".to_string()));
     let shapes = [
-        ("both installed", both, None, vec!["Uninstall DirectML Runtime", "Uninstall OpenVINO Runtime", "DirectML", "OpenVINO"]),
-        ("DirectML installing", HardwareInstallCache::default(), installing, vec!["Cancel", "Install OpenVINO Runtime"]),
-        ("none installed", HardwareInstallCache::default(), None, vec!["Install DirectML Runtime", "Install OpenVINO Runtime"]),
+        ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
+        ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
+        ("none installed", HardwareInstallCache::default(), None, vec!["Install OpenVINO Runtime"]),
     ];
     for (shape, installs, installing, expected) in shapes {
         let ctx = HardwareSectionContext {
-            offered: &RuntimeId::ALL,
+            offered: RuntimeId::OFFERED,
             installs,
             installing,
             active_provider: "DirectML".into(),
@@ -194,8 +197,8 @@ fn the_hardware_page_names_every_runtime_control() {
         for name in expected {
             assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
         }
-        let choice_shown = present.iter().any(|n| n == "DirectML");
-        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two installed");
+        let choice_shown = present.iter().any(|n| n == "Built in");
+        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
     }
 }
 

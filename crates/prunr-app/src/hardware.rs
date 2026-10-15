@@ -71,34 +71,11 @@ impl HardwareProfile {
         self.suits_directml
     }
 
-    /// The one runtime the first-launch prompt and Settings recommend.
-    /// A graphics card that suits DirectML outranks an Intel iGPU beside it.
+    /// The runtime download the first-launch prompt and Settings
+    /// recommend. A graphics card that suits DirectML needs none, since
+    /// DirectML is built in, even with an Intel iGPU beside it.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
-        use crate::runtime_install::RuntimeId;
-        if self.recommends_directml() {
-            Some(RuntimeId::DirectMl)
-        } else if self.recommends_openvino() {
-            Some(RuntimeId::OpenVino)
-        } else {
-            None
-        }
-    }
-
-    /// A hardware GPU was found: a software adapter (a VM's or remote
-    /// desktop's) counts as none.
-    pub fn has_hardware_gpu(&self) -> bool {
-        self.dgpu.is_some() || self.igpu.is_some()
-    }
-
-    /// The accelerator to name before any session reports one. A DirectML
-    /// runtime says it has DirectML on any Windows machine, a VM's
-    /// included; without a hardware GPU its sessions run on the CPU.
-    pub fn startup_provider(&self, detected: String) -> String {
-        if !self.has_hardware_gpu() && detected.eq_ignore_ascii_case(prunr_core::engine::DIRECTML_NAME) {
-            "CPU".to_string()
-        } else {
-            detected
-        }
+        (!self.recommends_directml() && self.recommends_openvino()).then_some(crate::runtime_install::RuntimeId::OpenVino)
     }
 
     /// AMD discrete GPU only. APU iGPUs excluded — ROCm/MIGraphX
@@ -614,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_recommendation_prefers_directml_over_an_intel_igpu() {
+    fn a_graphics_card_needs_no_download_and_an_intel_igpu_alone_gets_openvino() {
         use crate::runtime_install::RuntimeId;
         let mut p = HardwareProfile {
             cpu_vendor: CpuVendor::Intel,
@@ -627,28 +604,11 @@ mod tests {
         assert_eq!(p.recommended_runtime(), Some(RuntimeId::OpenVino));
         p.dgpu = Some(GpuVendor::Nvidia);
         p.suits_directml = true;
-        assert_eq!(p.recommended_runtime(), Some(RuntimeId::DirectMl));
+        assert_eq!(p.recommended_runtime(), None, "DirectML is built in");
         p.dgpu = None;
         p.igpu = None;
         p.suits_directml = false;
         assert_eq!(p.recommended_runtime(), None);
-        assert!(!p.has_hardware_gpu());
-    }
-
-    #[test]
-    fn directml_is_named_at_startup_only_with_a_hardware_gpu() {
-        let mut p = HardwareProfile {
-            cpu_vendor: CpuVendor::Amd,
-            cpu_brand: "AMD EPYC".into(),
-            dgpu: None,
-            igpu: None,
-            suits_directml: false,
-            os: "windows", arch: "x86_64",
-        };
-        assert_eq!(p.startup_provider("DirectML".into()), "CPU", "a VM's software adapter");
-        assert_eq!(p.startup_provider("OpenVINO".into()), "OpenVINO");
-        p.dgpu = Some(GpuVendor::Amd);
-        assert_eq!(p.startup_provider("DirectML".into()), "DirectML");
     }
 
     #[test]

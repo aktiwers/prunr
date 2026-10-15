@@ -40,8 +40,6 @@ pub(crate) enum EpKind {
 /// OpenVINO's provider name, defined on every platform so code that
 /// reads a provider string needs no per-platform branch.
 pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
-/// DirectML's provider name, on every platform for the same reason.
-pub const DIRECTML_NAME: &str = "DirectML";
 
 impl EpKind {
     /// Stable display string used by logs, the active-provider label,
@@ -57,7 +55,7 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => "CoreML",
             #[cfg(windows)]
-            EpKind::DirectMl => DIRECTML_NAME,
+            EpKind::DirectMl => "DirectML",
         }
     }
 }
@@ -83,6 +81,10 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     CACHED.get_or_init(|| {
         use ort::ep::ExecutionProvider;
         let mut eps: Vec<EpKind> = Vec::new();
+        // ort panics on any call before the runtime is loaded.
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return eps;
+        }
         #[cfg(target_os = "macos")]
         {
             if ort::ep::CoreML::default()
@@ -96,12 +98,35 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
                 .is_available().unwrap_or(false) { eps.push(EpKind::Cuda); }
             #[cfg(windows)]
             if ort::ep::DirectML::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::DirectMl); }
+                .is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
         }
         let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
         tracing::info!(eps = ?eps_str, "Available GPU execution providers");
         eps
     }).as_slice()
+}
+
+/// Whether DirectML can start a device here. The DirectML runtime, which
+/// Windows ships built in, lists DirectML on every machine; registering
+/// it is what creates the device, and that fails without a DirectX 12
+/// GPU (a VM, a remote desktop), where sessions then run on the CPU of
+/// the same runtime and the label says so.
+#[cfg(windows)]
+fn directml_starts() -> bool {
+    let started = crate::ort_runtime::session_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|b| b.with_execution_providers([directml_provider()]).map(drop).map_err(|e| e.to_string()));
+    if let Err(e) = &started {
+        tracing::info!(%e, "DirectML cannot start a device; sessions run on the CPU");
+    }
+    started.is_ok()
+}
+
+/// No device id: DXCore's high-performance order picks the discrete card
+/// on a hybrid laptop, where DXGI's index 0 is usually the integrated one.
+#[cfg(windows)]
+fn directml_provider() -> ExecutionProviderDispatch {
+    ort::ep::DirectML::default().build().error_on_failure()
 }
 
 /// The GPU providers a session may try: none when the user chose
@@ -159,11 +184,8 @@ impl EpKind {
                 }
                 p.build()
             }
-            // No device id: DXCore's high-performance order picks the
-            // discrete card on a hybrid laptop, where DXGI's index 0 is
-            // usually the integrated one.
             #[cfg(windows)]
-            EpKind::DirectMl => ort::ep::DirectML::default().build(),
+            EpKind::DirectMl => directml_provider(),
             // NOT using `with_cache_dir`: retested against SD UNet on
             // ort=2.0.0-rc.12 + openvino-1.24.1, Intel HD 530. Cold and
             // warm session-commit elapsed are identical within noise
@@ -901,6 +923,22 @@ mod tests {
         assert!(pick.failed.is_empty(), "{:?}", pick.failed);
         assert_ne!(pick.weights, Weights::Fp16);
         assert_eq!(engine.model_kind(), ModelKind::Silueta);
+    }
+
+    /// A provider that cannot start on this machine (DirectML without a
+    /// DirectX 12 GPU) is passed over without a cache record, and the walk
+    /// fails, so the engine builds its CPU session from the same runtime.
+    #[test]
+    fn a_provider_that_cannot_start_is_not_held_against_the_model() {
+        use prunr_models::ModelId;
+        #[cfg(not(target_os = "macos"))]
+        let ep = EpKind::OpenVino;
+        #[cfg(target_os = "macos")]
+        let ep = EpKind::CoreMl;
+        let model = ModelId::FourXNmkdSiaxCx;
+        let walk = walk_ladder(model, Weights::Fp32, &[ep], |_| Err::<(), _>(Miss::Unusable("no DirectX 12 device".into())));
+        assert_eq!(walk, Err("no DirectX 12 device".to_string()));
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "the machine's lack, not the model's");
     }
 
     // Integration tests require dev-models feature and downloaded models.
