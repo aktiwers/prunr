@@ -2219,4 +2219,24 @@ mod spare_scales_tests {
         assert_eq!(app.batch.items[0].status, BatchStatus::Done, "a background image waits for Process");
         assert!(app.batch.items[0].lines_need_a_run());
     }
+
+    /// While a picked scale is still being made, no photo preview renders
+    /// (a Mask one would draw the subject without lines); it waits and
+    /// renders once the scale lands.
+    #[test]
+    fn a_photo_preview_waits_for_an_owed_scale() {
+        use crate::gui::live_preview::PreviewKind;
+        let mut app = waiting_for_fine();
+        app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
+        let (style, action) = (app.selection_style(), app.settings.brush.cutout_action);
+        for kind in [PreviewKind::Mask, PreviewKind::Edge] {
+            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, false, style, action);
+            assert!(inputs.is_none(), "{kind:?} waits for Fine");
+        }
+        app.on_spare_edge_scales(1, 5, lines(&[Fine], None));
+        for kind in [PreviewKind::Mask, PreviewKind::Edge] {
+            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, false, style, action);
+            assert!(inputs.is_some_and(|i| i.edge_tensor.is_some()), "{kind:?} renders with Fine once it lands");
+        }
+    }
 }
