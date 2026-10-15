@@ -69,7 +69,7 @@ impl SettingsTab {
 /// Read-only snapshot of runtime-install state passed into the Hardware
 /// page so its renderer doesn't need a `&mut PrunrApp`.
 pub(crate) struct HardwareSectionContext {
-    /// The runtimes this platform offers, `RuntimeId::OFFERED`.
+    /// The runtimes this platform offers to download.
     pub offered: &'static [RuntimeId],
     pub installs: HardwareInstallCache,
     /// The runtime being installed, with its progress line.
