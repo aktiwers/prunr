@@ -44,10 +44,10 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         } else {
             match app_state {
                 AppState::Empty | AppState::Loaded => {
-                    if app.status.is_temporary {
+                    if app.status.is_temporary() {
                         app.status.text.clone()
                     } else {
-                        "Ready".to_string()
+                        crate::gui::status_state::READY.to_string()
                     }
                 }
                 AppState::Processing => {

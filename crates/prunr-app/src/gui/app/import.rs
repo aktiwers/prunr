@@ -29,7 +29,7 @@ impl PrunrApp {
             }
         }
 
-        self.status.text = "Ready".to_string();
+        self.status.text = crate::gui::status_state::READY.to_string();
         self.canvas_switch_id += 1;
         self.zoom_state.reset();
         self.show_original = false;
