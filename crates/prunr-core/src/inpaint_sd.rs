@@ -7,11 +7,13 @@
 //! final latent; composite back through mask.
 //!
 //! Dispatch wraps the per-tile pipeline:
-//! - Mask connected components are isolated so disjoint strokes don't
-//!   widen the bbox.
-//! - Each component ≤ 512×512 hits the smart-crop fast path
+//! - Mask pieces within `REGION_GAP` of each other group into one
+//!   region (`mask_regions`); distant strokes stay separate so they
+//!   don't widen the bbox.
+//! - A region that fits one crop (512², or up to `SD_CROP_MAX` on its
+//!   long side with the tall crop) hits the smart-crop fast path
 //!   (`compute_sd_crop`).
-//! - Components > 512×512 split into overlapping 512×512 tiles with
+//! - Larger regions split into overlapping 512×512 tiles with
 //!   linear-alpha seam blending (`tile_bbox` + `blend_tile`).
 //!
 //! Safety guards on CPU-class hardware:
@@ -78,13 +80,6 @@ fn sd_spec(id: prunr_models::ModelId) -> prunr_models::SdSpec {
     id.sd_spec().expect("the SD pipeline runs SD-family models only")
 }
 
-/// Minimum free RAM (bytes) required before we'll load the SD bundle.
-/// The 4 ONNX files total ~2 GB on disk; ORT graph optimization roughly
-/// doubles that during load (~4 GB resident), UNet activations on a
-/// 512×512 tile add 2-4 GB transient, and OpenVINO graph compilation
-/// pre-allocates its own iGPU-shared buffer (which on integrated GPUs
-/// IS RAM). Threshold lives in `ModelDescriptor.working_set_mb` so the
-/// gate scales when a new SD variant ships with a different footprint.
 /// CLIP-ViT-L/14 token sequence length used by SD 1.5.
 const CLIP_SEQ_LEN: usize = 77;
 /// CLIP-ViT-L/14 BOS / EOS / pad ids — same value for EOS and pad in
@@ -92,21 +87,19 @@ const CLIP_SEQ_LEN: usize = 77;
 const CLIP_BOS: i64 = 49406;
 const CLIP_EOS: i64 = 49407;
 
-/// Inputs to one SD inpaint call. Constructable today with default
-/// fields for empty-prompt unconditional inpaint; future surfaces (text
-/// prompts, CFG, seeded variations) just set the relevant fields.
-/// Serde-derived so this struct can also ride `SubprocessCommand::Inpaint`
+/// Inputs to one SD inpaint call; the defaults are an empty-prompt
+/// unconditional inpaint. Serde-derived so this struct can also ride `SubprocessCommand::Inpaint`
 /// without a wire mirror.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SdInpaintRequest {
-    /// Empty string ⇒ unconditional generation (v1 only path).
+    /// Empty string ⇒ unconditional generation.
     pub prompt: String,
     /// Empty ⇒ no negative conditioning.
     pub negative_prompt: String,
     /// 20 is the SD 1.5 sweet spot at default scheduler.
     pub num_inference_steps: u32,
-    /// 1.0 ⇒ no classifier-free guidance (v1 only path).
-    /// 7.5 is the typical text-prompt setting once CFG is wired.
+    /// ≤ 1.0 ⇒ no classifier-free guidance; 7.5 is the typical
+    /// text-prompt setting.
     pub guidance_scale: f32,
     /// `None` ⇒ random seed each call.
     pub seed: Option<u64>,
@@ -116,9 +109,7 @@ pub struct SdInpaintRequest {
     /// bundle is installed; if the bundle isn't installed yet, the
     /// dispatcher silently falls back to standard VAE.
     pub use_taesd: bool,
-    /// Which scheduler runs the denoise loop. Replaces the legacy
-    /// `use_lcm_scheduler: bool`. Worker constructs the right
-    /// `Scheduler` variant from this kind.
+    /// Which scheduler runs the denoise loop.
     #[serde(default)]
     pub scheduler: SchedulerKind,
     /// How the pipeline runs for this stroke; see `plan_tuning`.
@@ -348,8 +339,8 @@ pub fn process_inpaint(
     ).map(|f| f.rgba)
 }
 
-/// Full-knob entry. The `inpaint::process_inpaint` shim calls this with
-/// defaults; future text-prompt + CFG surfaces wire through here.
+/// Full-knob entry; the `inpaint::process_inpaint` shim calls this with
+/// defaults.
 /// See `inpaint::process_inpaint_with` for the progress contract.
 pub fn process_inpaint_with(
     image: &RgbaImage,
@@ -395,10 +386,8 @@ pub fn process_inpaint_with(
     // the last reference goes and the ORT bundle is freed.
     let _release_guard = ReleaseOnDrop(id);
     let run_started = Instant::now();
-    // VAE backend selection: TAESD when fast mode is on AND the bundle
-    // is installed (the request flag carries that decision from
-    // dispatch). Until the TAESD artifact ships, get() errors and we
-    // silently fall back to standard VAE — same graceful pattern as LCM.
+    // TAESD when the request asks for it and it is installed, else the
+    // standard VAE.
     let taesd = if req.use_taesd && sd_spec(id).latent.takes_taesd() { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
@@ -1907,9 +1896,7 @@ pub(crate) enum VaeBackend<'a> {
 }
 
 /// VAE-encode the masked-image variant directly from source + mask,
-/// skipping the intermediate RGBA clone the old
-/// `mask_image_for_vae` → `image_to_minus1_plus1` chain built (~1 MB
-/// at 512×512).
+/// without an intermediate masked RGBA copy.
 fn vae_encode_masked(
     backend: &VaeBackend,
     image: &RgbaImage,
@@ -2015,7 +2002,7 @@ fn unet_step(
 /// falls back to sequential `unet_step` × 2 (and remembers to skip
 /// future batched attempts on this session).
 ///
-/// Output shape: (2, 4, 64, 64). Row 0 = cond noise pred, row 1 = uncond.
+/// Output shape: (2, 4, lh, lw). Row 0 = cond noise pred, row 1 = uncond.
 fn unet_step_batched(
     bundle: &SdSession,
     latent_9ch_f16: &Array4<f16>,
@@ -2050,10 +2037,10 @@ fn unet_step_batched(
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
 //
-// The SD 1.5 FP16 export uses f16 inputs and outputs throughout. We do
-// scheduler/composite/mask math in f32 (cheap conversion, full precision
-// for short loops) and only narrow at the tensor handoff. A future
-// `inpaint_sd_fp32` variant could skip these helpers entirely.
+// The FP16 exports take f16 inputs and outputs (a VAE exported in f32
+// is read through `SdSession::vae_f32`). We do scheduler/composite/mask
+// math in f32 (cheap conversion, full precision for short loops) and
+// only narrow at the tensor handoff.
 
 fn f32_to_f16_3d(arr: &Array3<f32>) -> Array3<f16> {
     arr.mapv(f16::from_f32)
@@ -2236,7 +2223,7 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
 }
 
 /// Concatenate the three UNet inputs along the channel axis:
-/// [latent (4ch) | mask (1ch) | masked_latent (4ch)] → (1, 9, 64, 64).
+/// [latent (4ch) | mask (1ch) | masked_latent (4ch)] → (1, 9, lh, lw).
 /// f16 variant lives next to the loop site since two of the three inputs
 /// are loop-invariant — we pre-convert them once and pay only the latent
 /// concat per step.
@@ -2250,7 +2237,7 @@ fn concat_inpaint_input_f16(
         mask_lat.view(),
         masked_lat.view(),
     ])
-    .expect("concat: shapes pre-validated to (1, *, 64, 64)")
+    .expect("concat: shapes pre-validated to (1, *, lh, lw)")
 }
 
 /// Initial gaussian noise: LCM and DPM++ hold the latent in α-space, so
@@ -2303,8 +2290,7 @@ fn paste(out: &mut RgbaImage, painted: &RgbaImage, mask: &GrayImage, (ax, ay, aw
 
 /// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
 /// Takes `ArrayView4` so callers can pass batched-UNet slices directly
-/// without two `.to_owned()` allocations per CFG step (~128 KB × 20
-/// timesteps of churn previously). Output is built in logical row-
+/// without two `.to_owned()` allocations per CFG step. Output is built in logical row-
 /// major order via `iter()`, which is correct for non-contiguous
 /// input views (e.g. axis-0 slices of a batched output).
 fn cfg_blend(
@@ -2319,7 +2305,7 @@ fn cfg_blend(
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
-/// Scheduler step dispatched from `run_one_tile`, writing the new latent
+/// Scheduler step dispatched from `denoise`, writing the new latent
 /// state into `out`.
 // `step_idx` is only meaningful to the DPM++ multistep arm, but the
 // dispatch is shared. Threading it through a `StepCtx` struct would
@@ -2356,13 +2342,6 @@ fn step_array_into(
     }
 }
 
-/// If the cropped input is smaller than SD_TILE on either axis (image
-/// edge case), pad to 512×512 with zero-fill (top-left aligned). The
-/// smart-crop dispatcher guarantees max dim is SD_TILE.
-///
-/// Returns `Cow::Borrowed` on the fast path (already-tile-sized input,
-/// the common case for small strokes) — saves the ~1 MB image clone +
-/// ~256 KB mask clone the previous version always did.
 /// `image` zero-padded to `w × h` (borrowed when it already is).
 fn pad_to<P>(image: &image::ImageBuffer<P, Vec<P::Subpixel>>, w: u32, h: u32) -> std::borrow::Cow<'_, image::ImageBuffer<P, Vec<P::Subpixel>>>
 where
@@ -2379,10 +2358,6 @@ where
 
 // ── Safety guards ───────────────────────────────────────────────────────
 
-/// Cross-platform available-RAM probe. Returns `None` only when sysinfo
-/// can't read the system (CI containers without /proc, exotic platforms);
-/// callers in that case skip the guard rather than fail-closed since
-/// "we couldn't query" doesn't imply "memory is low".
 /// Shared `sysinfo::System` cache for `available_ram_bytes` and
 /// `process_rss_mb`. Two callers, one cell — `refresh_*` calls on
 /// disjoint fields don't conflict.
@@ -2394,6 +2369,10 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
     f(&mut sys)
 }
 
+/// Cross-platform available-RAM probe. Returns `None` only when sysinfo
+/// can't read the system (CI containers without /proc, exotic platforms);
+/// callers in that case skip the guard rather than fail-closed since
+/// "we couldn't query" doesn't imply "memory is low".
 pub(crate) fn available_ram_bytes() -> Option<u64> {
     let avail = with_system(|sys| {
         sys.refresh_memory();
@@ -2846,9 +2825,7 @@ fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
     t.round() as i64
 }
 
-/// IPC-portable scheduler kind. Replaces the historical
-/// `use_lcm_scheduler: bool` on `SdInpaintRequest` so we can carry
-/// 5 scheduler choices through to the worker.
+/// IPC-portable scheduler kind; the worker builds the `Scheduler` from it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SchedulerKind {
     #[default]
