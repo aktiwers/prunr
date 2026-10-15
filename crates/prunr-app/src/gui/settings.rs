@@ -55,9 +55,9 @@ pub struct Settings {
     /// filesystem store at load time; not written to settings.json on save —
     /// each preset lives as its own file in `~/.config/prunr/presets/` so
     /// users can share them by dropping JSON files into the folder.
-    /// The `default` + `skip_serializing` pair lets older builds that
-    /// embedded presets in settings.json still deserialize cleanly (the
-    /// load path migrates them out on first run).
+    /// The `default` + `skip_serializing` pair lets settings.json files
+    /// from builds that embedded presets still load; those embedded
+    /// presets are dropped.
     #[serde(default, skip_serializing)]
     pub(crate) presets: HashMap<String, super::presets::PresetFile>,
     /// Which preset new imports inherit, and what Reset All Knobs restores.
@@ -188,8 +188,7 @@ impl Settings {
     ///
     /// Presets come from the filesystem store (`~/.config/prunr/presets/`),
     /// one JSON file per preset — shareable by dropping a file into the
-    /// folder. Anything still in settings.json from older builds gets
-    /// migrated to files on this load and then cleared from the JSON.
+    /// folder.
     ///
     /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
     /// into a "Previous defaults" preset file on first load.
@@ -237,11 +236,6 @@ impl Settings {
             || value.get("apply_bg_color").is_some()
             || value.get("line_mode").is_some();
         const LEGACY_PRESET: &str = "Previous defaults";
-        // Pre-existing presets (from this load path or the embedded-in-
-        // settings.json migration of yore) are now PresetFile-shaped, so
-        // skip_serializing drops them from this binary's settings.json
-        // and this branch only fires for the first launch after a real
-        // v1 → v2 settings.json upgrade.
         if is_v1 && !settings.presets.contains_key(LEGACY_PRESET) {
             let legacy_item = migrate_v1_item_settings(&value);
             if legacy_item != ItemSettings::default() {
@@ -255,11 +249,6 @@ impl Settings {
             }
         }
 
-        // Embedded-presets-in-settings.json migration (from a pre-2025
-        // build) is no longer reachable: the field is now
-        // HashMap<String, PresetFile> and any old embedded payload
-        // serde-defaults to empty. Users on that vintage hit `load_all`
-        // below for their actual preset files.
         let mut loaded = super::presets_fs::load_all();
         // Preserve the freshly-migrated "Previous defaults" entry above
         // (load_all picks it up too if save succeeded, but be defensive).
@@ -885,8 +874,7 @@ mod tests {
     }
 
     /// Whole-shape snapshot of `Settings::default()`. The individual
-    /// helper tests (`progress_style_default_is_modal`,
-    /// `default_preset_is_prunr`, …) each pin one field — a new
+    /// helper tests (`default_preset_is_prunr`, …) each pin one field — a new
     /// field that lands without a default-aware test slips through.
     /// This pins the entire surface so a `parallel_jobs: 0` regression
     /// has to break this test on the way out.

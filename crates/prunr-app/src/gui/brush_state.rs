@@ -239,12 +239,6 @@ impl BrushSettings {
         Self { inpaint_sharpen, ..Self::default() }
     }
 
-    /// Reset the brush popover's slider knobs (radius / hardness /
-    /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
-    /// the values carried by `source`. Leaves `strength` and `mode`
-    /// alone — those carry user intent across reset (the Add/Subtract
-    /// toggle and seg-mode strength) — and SD-tuning fields are owned
-    /// by the SD chip popover.
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
     /// subtracts for the stroke's duration; otherwise it adds on a
     /// `cutout` (the switch there says what the selection does) and
@@ -319,6 +313,12 @@ impl BrushSettings {
         self.sd_guidance_scale = self.sd_guidance_scale.clamp(*guidance.start(), *guidance.end());
     }
 
+    /// Reset the brush popover's slider knobs (radius / hardness /
+    /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
+    /// the values carried by `source`. Leaves `strength` and `mode`
+    /// alone — those carry user intent across reset (the Add/Subtract
+    /// toggle and seg-mode strength) — and SD-tuning fields are owned
+    /// by the SD chip popover.
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
         self.radius = source.radius;
         self.hardness = source.hardness;

@@ -18,9 +18,9 @@
 //! - Never rename a field without also adding a `#[serde(alias = "old_name")]`.
 //! - Never change a field's type in a way that breaks existing JSON
 //!   (e.g. `u8` → enum). If you must, bump a format version and add a
-//!   migration path in `load_all`.
+//!   migration path in `parse_preset_value`.
 //!
-//! The `loads_old_preset_with_unknown_fields` and
+//! The `loads_preset_with_unknown_fields` and
 //! `loads_empty_preset_as_defaults` tests at the bottom of this file are
 //! the tripwires — if you add a field without `#[serde(default)]`, they
 //! will fail and tell you what's missing.
@@ -124,8 +124,7 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
 /// file is untouched until the user explicitly re-saves it. v2 files
 /// deserialize directly.
 ///
-/// Called once at startup from `Settings::load` (before the first frame) and
-/// once per preset delete to refresh the in-memory map. Not on the render path.
+/// Called once at startup from `Settings::load`, before the first frame.
 pub(crate) fn load_all() -> HashMap<String, PresetFile> {
     let Some(dir) = presets_dir() else { return HashMap::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
