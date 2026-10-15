@@ -382,6 +382,13 @@ impl Settings {
         self.resolve_preset(&self.default_preset, scheduler)
     }
 
+    /// Apply preset `name` to `item` and to the brush.
+    pub(crate) fn apply_preset(&mut self, name: &str, item: &mut ItemSettings) {
+        let resolved = self.resolve_preset(name, None);
+        *item = resolved.item_settings;
+        self.brush = resolved.brush;
+    }
+
     /// Take the new model's tuning from the active preset after the model
     /// dropdown flips: the eraser's region knobs and the Stable Diffusion
     /// settings. What the user set for the brush itself (size, hardness,

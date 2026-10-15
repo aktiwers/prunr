@@ -132,9 +132,7 @@ pub(crate) fn render(
                         .clicked()
                     {
                         // Applying sets what Reset to this preset would.
-                        let resolved = settings.resolve_preset(&name, None);
-                        *current_item = resolved.item_settings;
-                        settings.brush = resolved.brush;
+                        settings.apply_preset(&name, current_item);
                         applied = Some(name.clone());
                         egui::Popup::close_id(ui.ctx(), pop_id);
                     }
