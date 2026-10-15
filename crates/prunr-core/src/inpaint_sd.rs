@@ -2234,15 +2234,14 @@ fn concat_inpaint_input_f16(
 /// Initial gaussian noise: LCM and DPM++ hold the latent in α-space, so
 /// it starts as plain N(0, 1).
 fn sample_initial_noise(rng: &mut ChaCha8Rng, lw: usize, lh: usize) -> Array4<f32> {
-    let dist = StandardNormal;
-    let n = 4 * lw * lh;
-    let mut buf = Vec::with_capacity(n);
-    for _ in 0..n {
-        let v: f32 = dist.sample(rng);
-        buf.push(v);
-    }
-    Array4::from_shape_vec((1, 4, lh, lw), buf)
+    Array4::from_shape_vec((1, 4, lh, lw), gaussian(rng, 4 * lw * lh))
         .expect("shape pre-computed; buf length matches")
+}
+
+/// `n` N(0, 1) draws from `rng`, in order: every draw of a denoise goes
+/// through here so a seed reproduces the same fill.
+fn gaussian(rng: &mut ChaCha8Rng, n: usize) -> Vec<f32> {
+    (0..n).map(|_| StandardNormal.sample(rng)).collect()
 }
 
 /// Composite painted output back onto source: source-byte-identical
@@ -2320,9 +2319,7 @@ fn step_array(
                 // step. Sample from the same seeded RNG that drove the
                 // initial latent so the whole denoise stays
                 // reproducible from `seed`.
-                let dist = StandardNormal;
-                let noise: Vec<f32> = (0..latent.len()).map(|_| dist.sample(rng)).collect();
-                s.step_at(latent, noise_pred, t, t_prev, &noise)
+                s.step_at(latent, noise_pred, t, t_prev, &gaussian(rng, latent.len()))
             }
         }
         Scheduler::DpmPp2M(s) => s.step(latent, noise_pred, step_idx),
