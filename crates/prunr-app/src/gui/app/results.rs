@@ -102,16 +102,16 @@ impl PrunrApp {
         if pictures.is_empty() {
             return;
         }
+        use crate::gui::processor::PictureFrom;
+        use prunr_core::ProgressUpdate;
         let face_stage = self.face_stage();
-        for (item_id, picture) in pictures {
-            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            match picture {
-                // A tile is part of the result the item awaits.
-                prunr_core::ProgressUpdate::TilePreview(tile) if item.job_is_current() => item.paint_tile_preview(ctx, &tile),
-                // A face search is no job: its faces land while the item
-                // still wants the search.
-                prunr_core::ProgressUpdate::TilePreview(tile) => item.paint_face_preview(ctx, &tile, face_stage),
-                prunr_core::ProgressUpdate::Faces(places) => item.keep_found_faces(places, face_stage),
+        for picture in pictures {
+            let Some(item) = self.batch.find_by_id_mut(picture.item_id) else { continue };
+            match (picture.from, picture.update) {
+                // A stale run's result is dropped: its tiles with it.
+                (PictureFrom::Run, ProgressUpdate::TilePreview(tile)) if item.job_is_current() => item.paint_tile_preview(ctx, &tile),
+                (PictureFrom::FaceSearch, ProgressUpdate::TilePreview(tile)) => item.paint_face_preview(ctx, &tile, face_stage),
+                (PictureFrom::FaceSearch, ProgressUpdate::Faces(places)) => item.keep_found_faces(places, face_stage),
                 _ => {}
             }
         }
@@ -1001,7 +1001,8 @@ mod faces_tests {
     /// A search's pictures arrive for the image.
     fn arrive(app: &mut super::PrunrApp, ctx: &egui::Context, pictures: impl IntoIterator<Item = prunr_core::ProgressUpdate>) {
         for picture in pictures {
-            app.processor.picture_sender().send((1, picture)).expect("the pump's end is open");
+            let picture = crate::gui::processor::RunPicture { item_id: 1, from: crate::gui::processor::PictureFrom::FaceSearch, update: picture };
+            app.processor.picture_sender().send(picture).expect("the pump's end is open");
         }
         app.pump_run_pictures(ctx);
     }
@@ -1009,6 +1010,39 @@ mod faces_tests {
     /// A redrawn face, as a search sends it.
     fn face_tile() -> prunr_core::ProgressUpdate {
         prunr_core::ProgressUpdate::TilePreview(prunr_core::TilePreview { x: 2, y: 2, width: 2, height: 2, full_width: 8, full_height: 8, rgba: vec![200; 16] })
+    }
+
+    /// A run's tiles and a face search's redrawn faces each land on their
+    /// own preview, whatever the other is doing: a run made stale by a
+    /// Faces change paints nothing over the image, and a search under way
+    /// while a run is awaited paints nothing into the run's preview.
+    #[test]
+    fn a_runs_tiles_and_a_searchs_faces_land_on_their_own_previews() {
+        use crate::gui::dispatch_progress::{DispatchProgress, DispatchProgressSlot, ProgressKind};
+        use crate::gui::item::Engine;
+        use crate::gui::processor::PictureSink;
+        use crate::gui::timeline::StepKind;
+        use prunr_core::ProgressSink;
+        let ctx = egui::Context::default();
+        let (mut app, source) = app_with_faces_on();
+        searching(&mut app, &source);
+        let slot = DispatchProgressSlot::new();
+        let run = PictureSink::of_run(1, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), app.processor.picture_sender());
+        let search = PictureSink::of_face_search(1, None, || true, app.processor.picture_sender());
+
+        app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+        search.report(face_tile());
+        app.pump_run_pictures(&ctx);
+        assert!(app.batch.items[0].tile_preview.is_none(), "a face is no tile of the run");
+        assert!(app.batch.items[0].face_preview_texture().is_some());
+
+        app.batch.items[0].face_preview = None;
+        app.batch.items[0].commit(StepKind::Adjust);
+        assert!(!app.batch.items[0].job_is_current());
+        run.report(face_tile());
+        app.pump_run_pictures(&ctx);
+        assert!(app.batch.items[0].face_preview_texture().is_none(), "a stale run's tile is no face");
+        assert!(app.batch.items[0].tile_preview.is_none(), "nor lands for a result that will be dropped");
     }
 
     /// The faces a search finds are outlined (and counted) as soon as it
@@ -1386,7 +1420,8 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
         let send = |app: &PrunrApp, item_id: u64, x: u32| {
             let tile = TilePreview { x, y: 0, width: 1, height: 2, full_width: 3, full_height: 2, rgba: vec![200; 8] };
-            app.processor.picture_sender().send((item_id, ProgressUpdate::TilePreview(tile))).unwrap();
+            let picture = crate::gui::processor::RunPicture { item_id, from: crate::gui::processor::PictureFrom::Run, update: ProgressUpdate::TilePreview(tile) };
+            app.processor.picture_sender().send(picture).unwrap();
         };
         send(&app, 1, 0);
         app.pump_run_pictures(&ctx);
