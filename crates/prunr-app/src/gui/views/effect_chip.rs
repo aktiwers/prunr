@@ -56,7 +56,7 @@ pub(super) fn render(ui: &mut Ui, style: &mut FillStyle) -> bool {
                     }
                 }
             });
-            if !matches!(style, FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia) {
+            if has_knobs(style) {
                 chip::panel_section(ui, style.name(), None);
                 changed |= params(ui, style, false);
             }
@@ -83,9 +83,16 @@ fn look_tile(ui: &mut Ui, style: &mut FillStyle, index: usize, size: egui::Vec2,
     false
 }
 
+fn has_knobs(style: &FillStyle) -> bool {
+    !matches!(style, FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia)
+}
+
 /// The picked look's knobs. On the strip only the main one, and none for
 /// a look set by colours.
 fn params(ui: &mut Ui, style: &mut FillStyle, quick: bool) -> bool {
+    if !has_knobs(style) {
+        return false;
+    }
     let mut changed = false;
     match style {
         FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia => {}
