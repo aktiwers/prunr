@@ -96,7 +96,7 @@ pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: Mod
             tensor.get(ty * tensor_w + tx).copied().unwrap_or(0.0)
         })
         .collect();
-    let (lo, hi) = samples.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let (lo, hi, _) = crate::math::slice_stats(&samples);
     let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
     let coverage = samples.iter().map(|&v| (norm.apply(v) * 255.0) as u8).collect();
     SubjectHint { width: w as u32, height: h as u32, coverage }
