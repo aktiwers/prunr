@@ -36,15 +36,6 @@ impl Toasts {
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
         self.0.error(wrap(&caption.into()))
     }
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn basic(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.basic(wrap(&caption.into()))
-    }
-
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn dismiss_all_toasts(&mut self) {
-        self.0.dismiss_all_toasts()
-    }
 
     #[cfg(test)]
     pub fn len_for_test(&self) -> usize {
