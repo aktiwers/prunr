@@ -372,8 +372,7 @@ fn download_attempt(
     let partial = partial_path(dest);
 
     // Tear down any leftover partial from a previous aborted attempt so
-    // the writer starts fresh. (Resuming via Range requests would be
-    // nicer but it's a v2 polish.)
+    // the writer starts fresh.
     let _ = std::fs::remove_file(&partial);
 
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)

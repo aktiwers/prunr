@@ -3,7 +3,7 @@
 //! Each `PRUNR_*` var is consulted by `apply_to_item_settings` whenever a
 //! new `BatchItem` is created, so a harness can preconfigure the knob state
 //! without driving sliders through xdotool (which is unreliable under
-//! Xephyr's coord-space mismatch — see task #83).
+//! Xephyr's coord-space mismatch).
 //!
 //! Production users never touch these — unset env vars are no-ops.
 
@@ -43,10 +43,7 @@ fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
     std::env::var(var).ok()?.trim().parse().ok()
 }
 
-/// `planned` with the SD overrides applied (scripts/sd_bench.sh):
-/// `PRUNR_SD_KEEP_LOADED`, `PRUNR_SD_TALL_CROP`, `PRUNR_SD_OV_DEVICE`, and
-/// the session memory knobs `PRUNR_SD_MEM_PATTERN`, `PRUNR_SD_DEV_INIT`
-/// and `PRUNR_SD_THREADS`.
+/// `planned` with the `PRUNR_SD_*` overrides applied.
 pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpaint_sd::SdTuning {
     planned.with_env_overrides()
 }
@@ -101,7 +98,6 @@ fn read_bg_effect(var: &str) -> Option<BgEffect> {
     match s.trim().to_ascii_lowercase().as_str() {
         "none" => Some(BgEffect::None),
         "desaturated" | "desaturated_source" => Some(BgEffect::DesaturatedSource),
-        // BlurredSource{radius} not exposed — needs a parameter; defer.
         _ => None,
     }
 }

@@ -1,15 +1,12 @@
 //! Per-image processing settings.
 //!
 //! Each `BatchItem` owns an `ItemSettings`. The toolbar binds to the current
-//! image's settings; tweaking a knob updates only that image. `AppSettings`
-//! holds app-wide config (parallel jobs, history depth, hotkeys, presets).
+//! image's settings; tweaking a knob updates only that image. `Settings`
+//! holds app-wide config (parallel jobs, hotkeys, presets).
 //!
 //! `ItemSettings` is `Copy` and contains no heap allocations — diffing and
 //! snapshotting are branchless and free. Building a `ProcessingRecipe` from
 //! an `ItemSettings` is a trivial field copy.
-//!
-//! Target size: under 40 bytes to fit in a single cache line alongside the
-//! BatchItem's lightweight metadata fields.
 
 use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale, BgImageFit};
 use serde::{Deserialize, Serialize};
@@ -64,8 +61,7 @@ pub struct ItemSettings {
     pub bg: Option<[u8; 4]>,
 
     /// How the subject mask and edge mask combine in SubjectOutline mode.
-    /// Ignored otherwise. Serde-defaulted for backwards compat with presets
-    /// saved before this field existed.
+    /// Ignored otherwise.
     #[serde(default)]
     pub compose_mode: prunr_core::ComposeMode,
     /// Line colouring: solid (via `solid_line_color`) or a gradient.
@@ -355,16 +351,16 @@ impl ItemSettings {
         }
     }
 
-    /// Build a `ProcessingRecipe` snapshot for tier routing.
-    /// Pins mask fields to defaults in modes that skip segmentation so unrelated
-    /// knob changes don't trigger reprocessing when the mask isn't used.
-    ///
-    /// `model` is app-global, not per-item — the caller provides it.
     /// What Refine applies after the upscale model.
     pub fn upscale_refine(&self) -> prunr_core::upscale::Refine {
         prunr_core::upscale::Refine { sharpen: self.sharpen, sharpen_sigma: self.output_scale.sharpen_sigma(), ai_blend: self.ai_blend, color_match: self.color_match }
     }
 
+    /// Build a `ProcessingRecipe` snapshot for tier routing.
+    /// Pins mask fields to defaults in modes that skip segmentation so unrelated
+    /// knob changes don't trigger reprocessing when the mask isn't used.
+    ///
+    /// `model` is app-global, not per-item — the caller provides it.
     pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;
@@ -627,8 +623,7 @@ mod tests {
 
     #[test]
     fn serde_loads_old_preset_missing_edge_scale_as_fused() {
-        // Backwards-compat: preset files written before Task 5 lack
-        // edge_scale. `#[serde(default)]` on ItemSettings must fall back
+        // Backwards-compat: older preset files lack edge_scale. `#[serde(default)]` on ItemSettings must fall back
         // to `EdgeScale::Fused`.
         let old_json = r#"{
             "gamma": 1.2,
