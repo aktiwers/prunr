@@ -42,75 +42,62 @@ pub struct BrushSettings {
     /// Practical sweet spot: 0.3-0.7. Pinned to BrushSettings (global)
     /// rather than ItemSettings since it's a render preference, not
     /// per-image content.
+    // Load-bearing: a file without the field loads as f32's 0.0, not
+    // `Default`'s 0.6.
     #[serde(default)]
     pub inpaint_sharpen: f32,
     /// Eraser-only: pixels of soft blend at the painted-region boundary.
     /// Hides the LaMa↔source seam by gradually mixing the model's output
     /// toward source within `feather_px` of the mask edge.
-    #[serde(default = "default_feather")]
     pub inpaint_feather: f32,
     /// Eraser-only: dilate (>0) or erode (<0) the painted mask before
     /// inference. Small dilation gives LaMa more context for cleaner
     /// fills; erosion preserves more original detail at the boundary.
-    #[serde(default = "default_grow")]
     pub inpaint_grow: f32,
     /// Eraser: how large a hole is filled (see `FillScale`).
-    #[serde(default)]
     pub inpaint_fill_scale: prunr_core::inpaint::FillScale,
     /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.
-    #[serde(default, deserialize_with = "own_prompt")]
+    #[serde(deserialize_with = "own_prompt")]
     pub sd_prompt: String,
     /// SD-only: negative prompt — content to push *away* from.
     /// Defaults to the standard SD-1.5 anti-failure-mode list (text,
     /// watermark, blur, etc.) which suppresses the most common
     /// artifacts on weakly-conditioned regions.
-    #[serde(default = "default_sd_negative_prompt")]
     pub sd_negative_prompt: String,
     /// SD-only: classifier-free guidance scale. 1.0 = no CFG (cond pass
     /// only). 7.5 is the typical SD-1.5 prompt strength. >1 doubles UNet
     /// cost per step (cond + uncond passes blended).
-    #[serde(default = "default_cfg")]
     pub sd_guidance_scale: f32,
     /// SD-only: the quality (sampler); Fast is the default.
-    #[serde(default)]
     pub sd_scheduler: SdScheduler,
     /// SD-only: number of denoise steps, within `SdScheduler::steps_range`.
-    #[serde(default = "default_sd_steps")]
     pub sd_steps: u32,
     /// RORem only: its denoise steps, within `ROREM_STEPS_RANGE`.
-    #[serde(default = "default_rorem_steps")]
     pub rorem_steps: u32,
     /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
     /// random per stroke (the historical behavior).
-    #[serde(default)]
     pub sd_seed: Option<u64>,
     /// SD-only: TAESD fast VAE preference. `None` = auto (on when
     /// the TAESD bundle is installed). `Some(false)` = explicit
     /// opt-out. `Some(true)` = explicit opt-in (still gated by
     /// install at dispatch time). Orthogonal to scheduler — works
     /// with both standard SD and LCM checkpoints.
-    #[serde(default)]
     pub sd_use_taesd: Option<bool>,
     /// Shared selection knob: edge feather in pixels, 0 = sharp. Applied to
     /// what the overlay shows and to what Delete / Copy / Cut act on.
-    #[serde(default)]
     pub edge_feather: f32,
     /// Magic Brush only: the probability a pixel must reach to be
     /// selected (0.5 is the model's decision boundary). Lives in shared
     /// BrushSettings like the other per-tool knobs.
-    #[serde(default = "default_magic_confidence_threshold")]
     pub magic_confidence_threshold: f32,
     /// Magic Brush only: drop specks and fill pinholes in what the model
     /// returns.
-    #[serde(default = "default_magic_remove_specks")]
     pub magic_remove_specks: bool,
     /// Magic Brush only: a click selects everything at about the clicked
     /// depth (the depth map) instead of the clicked object (SAM).
-    #[serde(default)]
     pub magic_depth: bool,
     /// How far in nearness (0-1) from the clicked depth a Depth click
     /// reaches.
-    #[serde(default = "default_magic_depth_range")]
     pub magic_depth_range: f32,
 }
 
@@ -536,6 +523,87 @@ impl BrushState {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
+    /// What a saved brush with no fields at all loads as. Every value is
+    /// spelled out, so a change to `Default` or to a field's serde default
+    /// shows up here: note `inpaint_sharpen` loads as 0.0, not Default's 0.6.
+    fn loaded_from_nothing() -> super::BrushSettings {
+        use super::*;
+        BrushSettings {
+            radius: 24.0,
+            hardness: 0.7,
+            strength: 1.0,
+            mode: BrushMode::Add,
+            cutout_action: CutoutAction::Restore,
+            shape: BrushShape::Circle,
+            inpaint_sharpen: 0.0,
+            inpaint_feather: 4.0,
+            inpaint_grow: 2.0,
+            inpaint_fill_scale: prunr_core::inpaint::FillScale::Auto,
+            sd_prompt: String::new(),
+            sd_negative_prompt: DEFAULT_SD_NEGATIVE_PROMPT.to_string(),
+            sd_guidance_scale: 1.5,
+            sd_scheduler: SdScheduler::Lcm,
+            sd_steps: 8,
+            rorem_steps: 4,
+            sd_seed: None,
+            sd_use_taesd: None,
+            edge_feather: 0.0,
+            magic_confidence_threshold: 0.5,
+            magic_remove_specks: true,
+            magic_depth: false,
+            magic_depth_range: 0.08,
+        }
+    }
+
+    /// Saved brush settings load the same whatever they leave out: an
+    /// empty object, and an object missing any one field, which takes its
+    /// value from `loaded_from_nothing` while the rest keep theirs.
+    #[test]
+    fn every_missing_brush_field_loads_as_before() {
+        use super::*;
+        let empty: BrushSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, loaded_from_nothing());
+
+        let probe = BrushSettings {
+            radius: 50.0,
+            hardness: 0.3,
+            strength: 0.5,
+            mode: BrushMode::Subtract,
+            cutout_action: CutoutAction::Erase,
+            shape: BrushShape::Square,
+            inpaint_sharpen: 0.9,
+            inpaint_feather: 7.0,
+            inpaint_grow: -3.0,
+            inpaint_fill_scale: prunr_core::inpaint::FillScale::Half,
+            sd_prompt: "mine".into(),
+            sd_negative_prompt: "neg".into(),
+            sd_guidance_scale: 6.0,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            sd_steps: 20,
+            rorem_steps: 6,
+            sd_seed: Some(7),
+            sd_use_taesd: Some(false),
+            edge_feather: 3.0,
+            magic_confidence_threshold: 0.7,
+            magic_remove_specks: false,
+            magic_depth: true,
+            magic_depth_range: 0.2,
+        };
+        let full = serde_json::to_value(&probe).unwrap();
+        let nothing = serde_json::to_value(loaded_from_nothing()).unwrap();
+        let fields = full.as_object().unwrap();
+        assert_eq!(fields.len(), 23, "a new field joins this test");
+        for key in fields.keys() {
+            assert_ne!(full[key], nothing[key], "{key}: the probe must differ from the default");
+            let mut partial = full.clone();
+            partial.as_object_mut().unwrap().remove(key);
+            let loaded: BrushSettings = serde_json::from_value(partial).unwrap();
+            let mut expected = full.clone();
+            expected[key] = nothing[key].clone();
+            assert_eq!(serde_json::to_value(&loaded).unwrap(), expected, "missing {key}");
+        }
+    }
+
     #[test]
     fn modifiers_override_the_chosen_mode_for_a_stroke() {
         let mut b = super::BrushSettings::default();
