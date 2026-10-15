@@ -56,26 +56,27 @@ const D65_X: f32 = 0.950_489;
 const D65_Y: f32 = 1.000_000;
 const D65_Z: f32 = 1.088_84;
 
+const LAB_DELTA: f32 = 6.0 / 29.0;
+const LAB_OFFSET: f32 = 4.0 / 29.0;
+
 #[inline(always)]
 fn lab_f(t: f32) -> f32 {
     // CIE standard cube-root nonlinearity
-    const DELTA: f32 = 6.0 / 29.0;
-    const DELTA3: f32 = DELTA * DELTA * DELTA;           // ≈ 0.008856
-    const INV3DELTA2: f32 = 1.0 / (3.0 * DELTA * DELTA); // ≈ 7.787
+    const DELTA3: f32 = LAB_DELTA * LAB_DELTA * LAB_DELTA;           // ≈ 0.008856
+    const INV3DELTA2: f32 = 1.0 / (3.0 * LAB_DELTA * LAB_DELTA); // ≈ 7.787
     if t > DELTA3 {
         t.cbrt()
     } else {
-        INV3DELTA2 * t + (4.0 / 29.0)
+        INV3DELTA2 * t + LAB_OFFSET
     }
 }
 
 #[inline(always)]
 fn lab_f_inv(t: f32) -> f32 {
-    const DELTA: f32 = 6.0 / 29.0;
-    if t > DELTA {
+    if t > LAB_DELTA {
         t * t * t
     } else {
-        3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+        3.0 * LAB_DELTA * LAB_DELTA * (t - LAB_OFFSET)
     }
 }
 
