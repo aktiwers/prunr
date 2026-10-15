@@ -157,7 +157,7 @@ impl PrunrApp {
                         tracing::info!(item_id, "upscale result applied");
                     }
                 }
-                Err(err) => self.end_unlanded_run(item_id, "Upscale", err),
+                Err(err) => self.end_unlanded_run(item_id, Engine::Upscale, err),
             }
         }
         self.dispatch_next_queued_run();
@@ -179,7 +179,7 @@ impl PrunrApp {
                         tracing::info!(item_id, "colorize result applied");
                     }
                 }
-                Err(err) => self.end_unlanded_run(item_id, "Colorize", err),
+                Err(err) => self.end_unlanded_run(item_id, Engine::Colorize, err),
             }
         }
         self.dispatch_next_queued_run();
@@ -250,11 +250,12 @@ impl PrunrApp {
 
     /// An upscale or colorize ended without a result: its item stops
     /// waiting, and a toast says whether it was cancelled or failed.
-    fn end_unlanded_run(&mut self, item_id: u64, run: &str, err: prunr_core::CoreError) {
+    fn end_unlanded_run(&mut self, item_id: u64, engine: Engine, err: prunr_core::CoreError) {
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.job = None;
             item.tile_preview = None;
         }
+        let run = engine.label();
         if matches!(err, prunr_core::CoreError::Cancelled) {
             tracing::info!(item_id, run, "run cancelled by user");
             self.toasts.info(format!("{run} cancelled"));
@@ -1512,6 +1513,16 @@ mod timeline_contract_tests {
         assert!(preview_size(&app, 1).is_some());
         erase(&mut app, 2);
         assert!(app.batch.items[1].tile_preview.is_none(), "a new erase starts clear");
+    }
+
+    /// A run that gives nothing says which run and how it ended.
+    #[test]
+    fn an_unlanded_run_names_itself_in_its_toast() {
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        app.end_unlanded_run(1, Engine::Upscale, prunr_core::CoreError::Cancelled);
+        assert_eq!(app.toasts.last_for_test(), Some(("info", "Upscale cancelled")));
+        app.end_unlanded_run(1, Engine::Colorize, prunr_core::CoreError::Inference("no memory".into()));
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Colorize failed: Inference error: no memory")));
     }
 
     /// Refine's after-the-model knobs re-finish the kept upscale; a Scale
