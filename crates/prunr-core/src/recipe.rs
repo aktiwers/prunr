@@ -262,7 +262,8 @@ pub struct ProcessingRecipe {
 }
 
 /// What processing tier is needed to go from old settings to new settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Variants are declared cheapest first, so `Ord` is the cost order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RequiredTier {
     /// Nothing changed — skip entirely.
     Skip,
@@ -271,17 +272,17 @@ pub enum RequiredTier {
     /// Only Tier-2 upscale fields (sharpen / ai_blend / color_match)
     /// changed — re-finish the kept upscale run; no re-inference needed.
     UpscaleTier2,
-    /// Only the upscale recipe changed (Tier-1 fields) — re-composite then
-    /// re-upscale; no mask or inference work needed.
-    UpscaleRerun,
     /// Only the colorize strength changed — re-render from the kept
     /// colour prediction; no re-inference needed. A colorizer change is a
     /// model change, so FullPipeline.
     ColorizeTier2,
-    /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
-    MaskRerun,
+    /// Only the upscale recipe changed (Tier-1 fields) — re-composite then
+    /// re-upscale; no mask or inference work needed.
+    UpscaleRerun,
     /// Edge settings changed — re-threshold cached TEED tensor (~20-100ms).
     EdgeRerun,
+    /// Mask settings changed — re-run postprocess from cached segmentation tensor (~200ms).
+    MaskRerun,
     /// Turning edge detection on while the segmentation side is unchanged.
     /// Reuse the cached seg tensor, run only TEED on the masked image,
     /// compose (~TEED inference time, no seg re-inference).
@@ -303,9 +304,8 @@ fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
 
 /// Determine what processing tier is needed when changing from old to new recipe.
 ///
-/// Cost ordering (cheapest → most expensive), matching the `ordered()` table
-/// in `knob_catalog.rs` and the top-down "most-expensive-wins" checks below:
-/// Skip < CompositeOnly < UpscaleTier2 < ColorizeTier2 < UpscaleRerun < EdgeRerun < MaskRerun < AddEdgeInference < FullPipeline.
+/// The checks below run top-down, most expensive first; the first that
+/// matches wins.
 pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredTier {
     if old == new {
         return RequiredTier::Skip;
