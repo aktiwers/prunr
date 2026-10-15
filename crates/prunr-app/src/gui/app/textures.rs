@@ -163,8 +163,9 @@ impl PrunrApp {
             if let Some(rgba) = self.batch.items[idx].result_rgba.clone() {
                 let switch = self.result_switch_id;
                 self.batch.items[idx].result_tex_pending = true;
+                let target = self.batch.items[idx].request_result_texture(false);
                 Self::spawn_tex_prep(
-                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), TexTarget::Result,
+                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), target,
                     self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }

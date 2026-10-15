@@ -461,9 +461,10 @@ impl PrunrApp {
                 );
                 if item.on_screen {
                     let switch = self.result_switch_id;
+                    let target = item.request_result_texture(true);
                     Self::spawn_tex_prep(
                         Arc::clone(&new_rgba), item.id, Self::tex_name("result", item.id, Some(switch)),
-                        TexTarget::LiveResult, handles.clone(), ctx.clone(),
+                        target, handles.clone(), ctx.clone(),
                     );
                     item.quick.supersede();
                 } else {
@@ -717,7 +718,7 @@ mod landing_tests {
             assert_ne!(item.applied_recipe, recipe, "{kind:?}: made with the settings it rendered");
             assert!(item.thumb_pending && item.result_tex_pending, "{kind:?}: its thumbnail and texture follow");
             assert!(item.quick.texture().is_some(), "{kind:?}: the frame stays until that texture lands");
-            assert_eq!(land_next_texture(&mut app, &ctx), TexTarget::LiveResult);
+            assert!(matches!(land_next_texture(&mut app, &ctx), TexTarget::LiveResult(_)), "{kind:?}");
             assert!(app.batch.items[0].quick.texture().is_none(), "{kind:?}: then goes");
         }
     }

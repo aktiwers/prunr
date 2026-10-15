@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::gui::item::{BatchItem, BatchStatus, Engine};
 use crate::gui::knob_catalog::{shows, Surface};
-use crate::gui::background_io::TexTarget;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::WorkerResult;
 use super::PrunrApp;
@@ -87,8 +86,9 @@ impl PrunrApp {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         item.show_result(Arc::clone(&rgba));
         let source = item.source.clone();
+        let target = item.request_result_texture(false);
         Self::spawn_tex_prep(
-            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), TexTarget::Result, handles, ctx.clone(),
+            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
         );
         self.batch.request_thumbnail(item_id, &source, Some(&rgba));
         ctx.request_repaint();
@@ -184,10 +184,11 @@ impl PrunrApp {
         item.show_run_result(Arc::clone(&shown), recipe);
         keep(item);
         let source = item.source.clone();
+        let target = item.request_result_texture(false);
         Self::spawn_tex_prep(
             Arc::clone(&shown), item_id,
             Self::tex_name(tex_kind, item_id, Some(self.result_switch_id)),
-            TexTarget::Result, self.batch.bg_io.tex_prep_handles(), ctx.clone(),
+            target, self.batch.bg_io.tex_prep_handles(), ctx.clone(),
         );
         self.batch.request_thumbnail(item_id, &source, Some(&shown));
         true
@@ -1108,7 +1109,6 @@ mod faces_tests {
     /// with them blended in is on screen.
     #[test]
     fn the_blended_result_replaces_the_face_previews() {
-        use crate::gui::background_io::TexTarget;
         use crate::gui::item::Engine;
         let ctx = egui::Context::default();
         let (mut app, source) = app_with_faces_on();
@@ -1122,11 +1122,13 @@ mod faces_tests {
 
         let texture = || ctx.load_texture("result", egui::ColorImage::new([8, 8], vec![egui::Color32::BLACK; 64]), egui::TextureOptions::LINEAR);
         let item = &mut app.batch.items[0];
-        item.land_texture(texture(), TexTarget::LiveResult);
+        let target = item.request_result_texture(true);
+        item.land_texture(texture(), target);
         assert!(item.face_preview_texture().is_some(), "a result without the faces leaves them shown");
         item.settle_faced(Engine::Segment, true);
         assert!(item.face_preview_texture().is_some(), "until its texture lands");
-        item.land_texture(texture(), TexTarget::LiveResult);
+        let target = item.request_result_texture(true);
+        item.land_texture(texture(), target);
         assert!(item.face_preview_texture().is_none(), "the blended result shows them now");
     }
 
@@ -2188,7 +2190,8 @@ mod first_look_tests {
         let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(8, 8), active_provider: "CPU".into() };
         app.answer_for_test(&ctx, 1, Ok(result));
         let landed = ctx.load_texture("result", egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4]), Default::default());
-        app.batch.items[0].land_texture(landed, crate::gui::background_io::TexTarget::Result);
+        let target = app.batch.items[0].request_result_texture(false);
+        app.batch.items[0].land_texture(landed, target);
         let item = &mut app.batch.items[0];
         let Some(Reveal::Running(_, at, Some(reveal_order))) = &mut item.reveal else { panic!("the cut-out reveals from the outline") };
         assert!(Arc::ptr_eq(reveal_order, &order), "from the model's own outline");
