@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::item::{BatchItem, ImageSource};
-use crate::gui::system_bridge::DialogRequest;
+use crate::gui::system_bridge::{DialogRequest, OPEN_EXTENSIONS};
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -276,14 +276,8 @@ fn expand_dropped_paths(input: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
     (out, any_empty_dir)
 }
 
-/// Lower-case extension match for the file types `prunr_core::load_image_*`
-/// can decode (raster) plus SVG (rasterized via resvg).
 fn is_supported_image_ext(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "svg")
-    )
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| OPEN_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
