@@ -547,6 +547,10 @@ impl prunr_core::ProgressSink for PictureSink {
             }
         }
     }
+
+    fn wants_previews(&self) -> bool {
+        (self.current)()
+    }
 }
 
 /// Result delivered from a background upscale thread back to the main thread.
@@ -2423,9 +2427,12 @@ mod tests {
         no_pill.report(tile());
         assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(6, tile())]);
+        let previews = no_pill.clone().into_progress();
+        assert!(previews.preview_edge().is_some());
         open.store(false, Ordering::Release);
         no_pill.report(tile());
         assert!(rx.try_recv().is_err(), "its own check stops its pictures");
+        assert_eq!(previews.preview_edge(), None, "and stops a run making them");
         second.report(tile());
         assert_eq!(rx.try_iter().count(), 1);
     }
