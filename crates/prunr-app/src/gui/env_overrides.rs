@@ -43,11 +43,6 @@ fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
     std::env::var(var).ok()?.trim().parse().ok()
 }
 
-/// `planned` with the `PRUNR_SD_*` overrides applied.
-pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpaint_sd::SdTuning {
-    planned.with_env_overrides()
-}
-
 fn read_bool(var: &str) -> Option<bool> {
     let s = std::env::var(var).ok()?;
     match s.trim().to_ascii_lowercase().as_str() {

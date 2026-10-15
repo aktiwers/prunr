@@ -576,10 +576,11 @@ fn diffusion_tuning(id: ModelId, cpu_only: bool) -> crate::gui::processor::Inpai
         sd_steps: quality.steps,
         rorem_steps: brush.rorem_steps,
         sd_seed: Some(SEED),
-        sd_tuning: crate::gui::env_overrides::sd_tuning(prunr_core::inpaint_sd::plan_tuning(
+        sd_tuning: prunr_core::inpaint_sd::plan_tuning(
             true,
             prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB,
-        )),
+        )
+        .with_env_overrides(),
         cpu_only,
         ..Default::default()
     }
