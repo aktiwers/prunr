@@ -129,6 +129,17 @@ pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     out
 }
 
+/// Three box passes of `radius` over `buf`, close to a Gaussian; the
+/// result is left in `buf`. `scratch` is grown to `buf`'s length and
+/// reused as each pass's output.
+pub(crate) fn box_blur3_into(buf: &mut Vec<f32>, w: u32, h: u32, radius: u32, scratch: &mut Vec<f32>) {
+    scratch.resize(buf.len(), 0.0);
+    for _ in 0..3 {
+        box_filter_into(buf, w, h, radius, scratch);
+        std::mem::swap(buf, scratch);
+    }
+}
+
 /// Buffer-reusing variant: writes the filtered result into `dst` (which
 /// must equal `src.len()`). One `src`-sized scratch holds the row sums.
 ///
@@ -269,6 +280,16 @@ mod tests {
         let (min, max) = result.pixels().map(|p| p[0])
             .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
         assert!(max - min <= 1, "flat input produced spread {min}..={max}");
+    }
+
+    #[test]
+    fn box_blur3_is_three_box_passes() {
+        let (w, h) = (23u32, 17u32);
+        let data: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 251) as f32).collect();
+        let want = box_filter(&box_filter(&box_filter(&data, w, h, 2), w, h, 2), w, h, 2);
+        let (mut buf, mut scratch) = (data, Vec::new());
+        box_blur3_into(&mut buf, w, h, 2, &mut scratch);
+        assert_eq!(buf, want);
     }
 
     #[test]
