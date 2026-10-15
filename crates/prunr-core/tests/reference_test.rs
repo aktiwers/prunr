@@ -19,6 +19,8 @@ use prunr_core::{
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
 use test_common::{skip_if_model_missing, skip_if_no_ort};
+#[cfg(feature = "dev-models")]
+use test_common::{changed_in, rect_mask};
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
@@ -374,16 +376,11 @@ fn test_inpaint_smoke() {
     let img = dyn_img.into_rgba8();
     let (w, h) = img.dimensions();
 
-    // Synthesise a 32×32 mask patch in the centre of the image.
-    let mut mask = image::GrayImage::new(w, h);
-    let cx = w / 2;
-    let cy = h / 2;
-    let r = 16u32;
-    for y in cy.saturating_sub(r)..(cy + r).min(h) {
-        for x in cx.saturating_sub(r)..(cx + r).min(w) {
-            mask.put_pixel(x, y, image::Luma([255]));
-        }
-    }
+    // A 32×32 patch in the centre of the image.
+    let (cx, cy, r) = (w / 2, h / 2, 16u32);
+    let (x0, y0) = (cx.saturating_sub(r), cy.saturating_sub(r));
+    let (rw, rh) = (cx + r - x0, cy + r - y0);
+    let mask = rect_mask(w, h, x0, y0, rw, rh);
 
     let result = prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32)
         .expect("process_inpaint failed");
@@ -401,17 +398,8 @@ fn test_inpaint_smoke() {
         }
     }
 
-    // Inside the mask: at least one pixel must differ from the source.
-    let mut any_changed = false;
-    for y in cy.saturating_sub(r)..(cy + r).min(h) {
-        for x in cx.saturating_sub(r)..(cx + r).min(w) {
-            if mask.get_pixel(x, y).0[0] != 0
-                && result.get_pixel(x, y) != img.get_pixel(x, y) {
-                any_changed = true;
-                break;
-            }
-        }
-        if any_changed { break; }
-    }
-    assert!(any_changed, "no masked pixel was changed — LaMa returned source unchanged");
+    assert!(
+        changed_in(&result, &img, x0, y0, rw, rh) > 0,
+        "no masked pixel was changed — LaMa returned source unchanged",
+    );
 }

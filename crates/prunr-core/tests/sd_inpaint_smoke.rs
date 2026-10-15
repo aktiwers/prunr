@@ -12,10 +12,10 @@
 
 mod test_common;
 
-use image::{GrayImage, Luma, Rgba, RgbaImage};
+use image::{GrayImage, Rgba, RgbaImage};
 use prunr_core::inpaint_blend;
 use prunr_core::inpaint_sd::{self, SdInpaintRequest};
-use test_common::{skip_if_model_missing, skip_if_no_ort};
+use test_common::{changed_in, rect_mask, skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn sd_inpaint_modifies_painted_region() {
@@ -29,12 +29,7 @@ fn sd_inpaint_modifies_painted_region() {
     let h: u32 = 512;
     let mut image = RgbaImage::new(w, h);
     for p in image.pixels_mut() { *p = Rgba([40, 80, 200, 255]); }
-    let mut mask = GrayImage::new(w, h);
-    for y in 192..320 {
-        for x in 192..320 {
-            mask.put_pixel(x, y, Luma([255]));
-        }
-    }
+    let mask = rect_mask(w, h, 192, 192, 128, 128);
 
     let req = SdInpaintRequest {
         num_inference_steps: 20,
@@ -53,16 +48,7 @@ fn sd_inpaint_modifies_painted_region() {
 
     assert_eq!(result.dimensions(), image.dimensions());
 
-    let mut diffs = 0u32;
-    for y in 192..320 {
-        for x in 192..320 {
-            let src = image.get_pixel(x, y);
-            let dst = result.get_pixel(x, y);
-            if src.0 != dst.0 {
-                diffs += 1;
-            }
-        }
-    }
+    let diffs = changed_in(&image, &result, 192, 192, 128, 128);
     let total = 128 * 128;
     eprintln!("SD inpaint: {diffs}/{total} masked pixels differ from source");
     eprintln!("Sample painted pixel at (256,256): {:?} → {:?}",
@@ -119,12 +105,7 @@ fn sd_step_previews() {
         let stripe = if (x / 40 + y / 40) % 2 == 0 { 40 } else { 0 };
         Rgba([(60 + x / 6) as u8, (90 + y / 8) as u8 + stripe, 120, 255])
     });
-    let mut mask = GrayImage::new(w, h);
-    for y in 260..440 {
-        for x in 380..520 {
-            mask.put_pixel(x, y, Luma([255]));
-        }
-    }
+    let mask = rect_mask(w, h, 380, 260, 140, 180);
     // One kept session for every run, so the runs differ only in their
     // previews.
     let req = SdInpaintRequest {
@@ -223,13 +204,7 @@ fn sd_bench() {
         let (rw, rh) = std::env::var("PRUNR_SD_BENCH_REGION").ok()
             .and_then(|v| { let (a, b) = v.split_once('x')?; Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)) })
             .unwrap_or((328, 607));
-        let mut mask = GrayImage::new(w, h);
-        let (x0, y0) = ((w - rw) / 2, (h - rh) / 2);
-        for y in y0..y0 + rh {
-            for x in x0..x0 + rw {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
+        let mask = rect_mask(w, h, (w - rw) / 2, (h - rh) / 2, rw, rh);
         pairs.push(("synthetic".into(), image, mask));
     }
     // `PRUNR_SD_BENCH_STEPS=2,4,8`, `PRUNR_SD_BENCH_SEED=7,8` and
