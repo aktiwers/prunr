@@ -228,7 +228,7 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
         return img;
     }
     let (nw, nh) = fit_long_side(w, h, max_dim);
-    DynamicImage::ImageRgba8(resize_rgba(&img.to_rgba8(), nw, nh, ResizeFilter::Lanczos3))
+    DynamicImage::ImageRgba8(resize_to_rgba(&img, nw, nh, ResizeFilter::Lanczos3))
 }
 
 /// Alpha-blend an RGBA image onto a solid background color, making all pixels fully opaque.
@@ -465,6 +465,27 @@ mod tests {
         let rgba = image::DynamicImage::ImageRgb8(rgb.clone()).to_rgba8();
         let filter = super::ResizeFilter::Lanczos3;
         assert_eq!(super::resize_to_rgba(&image::DynamicImage::ImageRgb8(rgb), 23, 14, filter), super::resize_rgba(&rgba, 23, 14, filter));
+    }
+
+    /// `downscale_image` resampling each source in its own layout gives the
+    /// same bytes as converting it to RGBA first: noise photos of every
+    /// pixel type it meets, at several sizes and ratios.
+    #[test]
+    fn downscale_in_the_source_layout_matches_the_rgba_copy() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let mut noise = |n: usize| -> Vec<u8> { (0..n).map(|_| rng.random()).collect() };
+        for (w, h, max) in [(1000, 700, 300), (517, 911, 256), (64, 48, 63), (4100, 30, 4096)] {
+            let rgb = image::RgbImage::from_raw(w, h, noise((w * h * 3) as usize)).unwrap();
+            let rgba = image::RgbaImage::from_raw(w, h, noise((w * h * 4) as usize)).unwrap();
+            let luma = image::GrayImage::from_raw(w, h, noise((w * h) as usize)).unwrap();
+            for img in [image::DynamicImage::ImageRgb8(rgb), image::DynamicImage::ImageRgba8(rgba), image::DynamicImage::ImageLuma8(luma)] {
+                let (nw, nh) = super::fit_long_side(w, h, max);
+                let old = super::resize_rgba(&img.to_rgba8(), nw, nh, super::ResizeFilter::Lanczos3);
+                let new = super::resize_to_rgba(&img, nw, nh, super::ResizeFilter::Lanczos3);
+                assert!(old == new, "{:?} {w}x{h} -> {nw}x{nh}", img.color());
+            }
+        }
     }
 
     #[test]
