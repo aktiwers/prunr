@@ -1791,21 +1791,15 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
 }
 
 fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
-    // `name` is the filename stem the variant file uses on disk. Seg
-    // models use their snake_case stable_name (matches the dev-models
-    // workflow that drops `{stable_name}_fp16.onnx` into the models
-    // dir). RRDB upscale variants use the OnDemand `filename`'s stem
-    // verbatim because the GitHub release artifacts (downloaded by
-    // the fetcher's `fp16` companion) keep the capitalized
-    // human-facing form (e.g. `RealESRGAN_x4plus_fp16.onnx`).
+    // Seg variants are dropped into the models dir by hand as
+    // `{stable_name}_fp16.onnx`; RRDB fp16 companions are downloaded
+    // under the release artifact's name, the main file's stem.
     let name = match id {
-        ModelId::Silueta => "silueta",
-        ModelId::U2net => "u2net",
-        ModelId::BiRefNetLite => "birefnet_lite",
-        ModelId::RealEsrganX4Plus => "RealESRGAN_x4plus",
-        ModelId::RealEsrganX2Plus => "RealESRGAN_x2plus",
-        ModelId::FourXNmkdSiaxCx => "4x-NMKD-Siax-CX",
-        ModelId::FourXNmkdSuperscale => "4x-NMKD-Superscale",
+        ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite => id.stable_name(),
+        ModelId::RealEsrganX4Plus
+        | ModelId::RealEsrganX2Plus
+        | ModelId::FourXNmkdSiaxCx
+        | ModelId::FourXNmkdSuperscale => on_demand_stem(id)?,
         // Nomos8k's published .onnx is already fp16; SAM 2 is
         // MultiPartOnDemand with no fp16 sibling.
         ModelId::Nomos8kSchatL
@@ -1856,6 +1850,11 @@ fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+fn on_demand_stem(id: ModelId) -> Option<&'static str> {
+    let ModelSource::OnDemand { filename, .. } = descriptor(id)?.source else { return None };
+    filename.strip_suffix(".onnx")
 }
 
 #[cfg(all(test, feature = "dev-models"))]
@@ -2517,6 +2516,24 @@ mod tests {
                 "{id:?} fp16 size {} MB not roughly half of fp32 {} MB",
                 variant.size_mb, main_size
             );
+        }
+    }
+
+    /// The fetcher saves the fp16 companion under its registry filename;
+    /// `variant_path` must look for that same name.
+    #[test]
+    fn rrdb_fp16_lookup_name_is_the_downloaded_companion() {
+        for id in [
+            ModelId::RealEsrganX4Plus,
+            ModelId::RealEsrganX2Plus,
+            ModelId::FourXNmkdSiaxCx,
+            ModelId::FourXNmkdSuperscale,
+        ] {
+            let Some(ModelSource::OnDemand { fp16: Some(variant), .. }) = descriptor(id).map(|d| d.source) else {
+                panic!("{id:?} must be OnDemand with an fp16 companion")
+            };
+            let stem = on_demand_stem(id).expect("filename ends in .onnx");
+            assert_eq!(format!("{stem}_fp16.onnx"), variant.filename, "{id:?}");
         }
     }
 
