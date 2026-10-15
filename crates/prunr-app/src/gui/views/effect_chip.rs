@@ -6,7 +6,7 @@ use egui::{Color32, Ui};
 use egui_material_icons::icons::ICON_FORMAT_PAINT;
 use prunr_core::FillStyle;
 
-use super::chip;
+use super::{chip, variant_index};
 use super::effects::paint_rounded_mesh;
 
 const PANEL_WIDTH: f32 = 460.0;
@@ -19,7 +19,7 @@ const QUICK: [usize; 5] = [0, 1, 3, 11, 5];
 
 /// Returns true when the effect or one of its knobs changed.
 pub(super) fn render(ui: &mut Ui, style: &mut FillStyle) -> bool {
-    let picked = picked_index(style);
+    let picked = variant_index(FillStyle::ALL, style);
     let group = chip::GroupChip {
         id_salt: "fill_style",
         icon: ICON_FORMAT_PAINT.codepoint,
@@ -65,17 +65,10 @@ pub(super) fn render(ui: &mut Ui, style: &mut FillStyle) -> bool {
     changed
 }
 
-fn picked_index(style: &FillStyle) -> usize {
-    FillStyle::ALL
-        .iter()
-        .position(|o| std::mem::discriminant(o) == std::mem::discriminant(style))
-        .unwrap_or(0)
-}
-
 /// One look's tile; picking it sets the look with its default knobs.
 fn look_tile(ui: &mut Ui, style: &mut FillStyle, index: usize, size: egui::Vec2, caption: bool) -> bool {
     let option = &FillStyle::ALL[index];
-    let selected = picked_index(style) == index;
+    let selected = variant_index(FillStyle::ALL, style) == index;
     // The picked look shows its own colours; the rest show their defaults.
     let shown = if selected { *style } else { *option };
     let resp = chip::swatch_tile(ui, option.name(), selected, size, caption, |painter, rect| {
