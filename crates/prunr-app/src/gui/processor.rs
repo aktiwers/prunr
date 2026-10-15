@@ -188,7 +188,7 @@ fn cached_warm_engine(
 
 /// Cached engine for `key`, constructing and caching one when absent.
 /// The lock is released during construction so the GUI thread's
-/// `release_upscale_engine` never waits on a session build.
+/// `release_all_sessions` never waits on a session build.
 fn ensure_warm_engine(
     slot: &WarmEngine,
     key: WarmEngineKey,
@@ -200,6 +200,10 @@ fn ensure_warm_engine(
     let fresh = Arc::new(prunr_core::OrtEngine::for_model(key.kind.into(), intra_threads, key.cpu_only)?);
     *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
+}
+
+fn release_warm_engine(slot: &WarmEngine) {
+    *lock_warm_engine(slot) = None;
 }
 
 /// Images waiting for the whole-image run slot, and how far the queue is.
@@ -259,7 +263,7 @@ impl<R> RunSlot<R> {
     }
 
     fn release_engine(&self) {
-        *lock_warm_engine(&self.warm) = None;
+        release_warm_engine(&self.warm);
     }
 }
 
@@ -1220,9 +1224,9 @@ impl Processor {
     /// Processor change.
     pub(crate) fn release_all_sessions(&mut self) {
         prunr_core::inpaint::release_all();
-        self.release_upscale_engine();
+        self.upscale.release_engine();
         self.colorize.release_engine();
-        *lock_warm_engine(&self.depth.warm) = None;
+        release_warm_engine(&self.depth.warm);
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -1234,15 +1238,6 @@ impl Processor {
         cpu_only: bool,
     ) -> Option<Arc<prunr_core::OrtEngine>> {
         cached_warm_engine(&self.upscale.warm, WarmEngineKey { kind: model_kind, cpu_only })
-    }
-
-    /// Drops the cached upscale engine. Call on:
-    /// - User switches to any model (model dropdown swap — even
-    ///   upscale→upscale; `ensure_upscale_engine` evicts on ModelKind
-    ///   mismatch, so this is the switch-away-from-upscale case).
-    /// - Hardware settings change.
-    pub(crate) fn release_upscale_engine(&mut self) {
-        self.upscale.release_engine();
     }
 
     /// Test-only accessor for injecting or inspecting the warm-engine slot.
@@ -3282,10 +3277,10 @@ mod warm_cache_tests {
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
             Some((WarmEngineKey { kind: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
-        p.release_upscale_engine();
+        p.upscale.release_engine();
         assert!(
             p.warm_upscale_engine_for_test().is_none(),
-            "release_upscale_engine must clear the slot"
+            "releasing the upscale engine must clear the slot"
         );
     }
 }
