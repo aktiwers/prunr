@@ -181,7 +181,12 @@ pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
 /// Write a preset to disk. Overwrites any existing file of the same name.
 /// "Prunr" is rejected — that name is synthetic and cannot be persisted.
 pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
+    write_preset(&writable_path(name)?, values)
+}
+
+/// `preset_path` as an error: "Prunr" is reserved, else the config dir is missing.
+fn writable_path(name: &str) -> std::io::Result<PathBuf> {
+    preset_path(name).ok_or_else(|| {
         if name.eq_ignore_ascii_case(PRUNR_PRESET) {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -190,8 +195,11 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
         } else {
             std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
         }
-    })?;
-    let json = serde_json::to_string_pretty(values)
+    })
+}
+
+fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, json)
 }
@@ -209,15 +217,7 @@ fn merge_into(
 /// `PresetFile`, or `PresetFile::default()` when the path is absent.
 fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
     match std::fs::read(path) {
-        Ok(data) => {
-            let value: serde_json::Value = serde_json::from_slice(&data)
-                .unwrap_or(serde_json::Value::Null);
-            if value.is_null() {
-                Ok(PresetFile::default())
-            } else {
-                Ok(parse_preset_value(value).unwrap_or_default())
-            }
-        }
+        Ok(data) => Ok(serde_json::from_slice(&data).ok().and_then(parse_preset_value).unwrap_or_default()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PresetFile::default()),
         Err(e) => Err(e),
     }
@@ -238,37 +238,20 @@ pub(crate) fn save_merged(
     model_id: prunr_models::ModelId,
     model_preset: ModelPreset,
 ) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
-        if name.eq_ignore_ascii_case(PRUNR_PRESET) {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "\"Prunr\" is a reserved preset name",
-            )
-        } else {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
-        }
-    })?;
-    let mut file = load_existing_for_merge(&path)?;
-    merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)
+    merge_save_at(&writable_path(name)?, model_id, model_preset)
 }
 
-#[cfg(test)]
-fn save_merged_to_path(
+fn merge_save_at(
     path: &std::path::Path,
     model_id: prunr_models::ModelId,
     model_preset: ModelPreset,
 ) -> std::io::Result<()> {
     let mut file = load_existing_for_merge(path)?;
     merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(path, json)
+    write_preset(path, &file)
 }
 
 /// Remove a preset's file. Silent no-op if the file doesn't exist — caller
@@ -654,7 +637,7 @@ mod tests {
     // Overwriting a preset on (active_model, active_scheduler) must
     // touch ONLY that model's entry and ONLY that scheduler's bundle.
     // Other models and other scheduler bundles round-trip bytewise.
-    // Tests use `save_merged_to_path` so they don't write to the
+    // Tests use `merge_save_at` so they don't write to the
     // user's real presets dir.
 
     #[test]
@@ -686,7 +669,7 @@ mod tests {
             brush: BrushSettings::default(),
             sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
         };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
+        merge_save_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let silueta_back = reloaded
@@ -750,7 +733,7 @@ mod tests {
             schedulers: new_schedulers,
         };
         let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
+        merge_save_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded
@@ -789,7 +772,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        save_merged_to_path(&path, ModelId::Silueta, mp.clone()).unwrap();
+        merge_save_at(&path, ModelId::Silueta, mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -820,7 +803,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        save_merged_to_path(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
+        merge_save_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -880,7 +863,7 @@ mod tests {
             brush: brush_split,
             sd,
         };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
+        merge_save_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded
