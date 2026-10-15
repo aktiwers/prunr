@@ -560,7 +560,7 @@ impl OrtEngine {
         if eps.is_empty() {
             crate::cache::gc_stale_for_model(model_id, "CPU");
             let builder = Self::builder_with_base(intra_threads, level)?;
-            let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
+            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
             let started = Instant::now();
             let session = builder
                 .with_execution_providers([
@@ -571,6 +571,7 @@ impl OrtEngine {
                 .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
                 .commit_from_memory(&bytes)
                 .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
+            if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
                 session: Mutex::new(session),
@@ -588,10 +589,10 @@ impl OrtEngine {
         let (session, ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
-            let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
+            let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
                 apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str())
             } else {
-                (builder, Cow::Borrowed(model_bytes))
+                (builder, Cow::Borrowed(model_bytes), None)
             };
             let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
             let mut built = builder
@@ -602,6 +603,7 @@ impl OrtEngine {
                 error: format!("ORT session creation failed ({ep}): {e}"),
                 suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep),
             })?;
+            if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
             Ok(session)
@@ -792,14 +794,14 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     model_bytes: &'a [u8],
     model_id: prunr_models::ModelId,
     ep_name: &str,
-) -> (ort::session::builder::SessionBuilder, Cow<'a, [u8]>) {
+) -> (ort::session::builder::SessionBuilder, Cow<'a, [u8]>, Option<crate::cache::GraphDraft>) {
     let Some(path) = crate::cache::optimized_model_path(model_id, ep_name) else {
-        return (builder, Cow::Borrowed(model_bytes));
+        return (builder, Cow::Borrowed(model_bytes), None);
     };
     match std::fs::read(&path) {
         Ok(cached) => {
             tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
-            return (builder, Cow::Owned(cached));
+            return (builder, Cow::Owned(cached), None);
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
@@ -808,16 +810,17 @@ pub(crate) fn apply_ort_graph_cache<'a>(
         }
     }
     if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
-        return (builder, Cow::Borrowed(model_bytes));
+        return (builder, Cow::Borrowed(model_bytes), None);
     }
-    match builder.with_optimized_model_path(&path) {
+    let draft = crate::cache::GraphDraft::for_path(&path);
+    match builder.with_optimized_model_path(draft.draft()) {
         Ok(builder) => {
             tracing::debug!(?model_id, ep = %ep_name, path = %path.display(), "cache miss (writing optimized graph)");
-            (builder, Cow::Borrowed(model_bytes))
+            (builder, Cow::Borrowed(model_bytes), Some(draft))
         }
         Err(e) => {
             tracing::warn!(?model_id, ep = %ep_name, %e, "with_optimized_model_path failed; cache disabled for this build");
-            (e.recover(), Cow::Borrowed(model_bytes))
+            (e.recover(), Cow::Borrowed(model_bytes), None)
         }
     }
 }
@@ -1002,6 +1005,27 @@ mod tests {
             "the same line, known before any weights are read",
         );
         assert_eq!(Walk::without_a_try(ModelId::U2net, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");
+    }
+
+    /// Sessions of one model built at once all build: none reads the
+    /// optimized graph another is still writing, and the graph cached
+    /// after them loads.
+    #[test]
+    fn sessions_built_at_once_never_read_a_half_written_graph() {
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let build = || OrtEngine::build_with(ModelKind::Silueta, 1, &[], false, GraphOptimizationLevel::Level3).map(|_| ());
+        let results: Vec<_> = std::thread::scope(|s| {
+            // Staggered: later builds start while the first writes.
+            let handles: Vec<_> = (0..12u64).map(|i| s.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(i * 15));
+                build()
+            })).collect();
+            handles.into_iter().map(|h| h.join().expect("no panic")).collect()
+        });
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert!(build().is_ok(), "the cached graph loads");
     }
 
     /// A GPU session on a machine without a GPU provider lands on the CPU,

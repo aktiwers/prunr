@@ -716,10 +716,10 @@ fn lama_ladder(
     let landed = crate::engine::walk_ladder("LaMa: ", id, Weights::Fp32, eps, |ep| {
         crate::cache::gc_stale_for_model(id, ep.as_str());
         let builder = builder().map_err(Miss::Unusable)?;
-        let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
+        let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
             apply_ort_graph_cache(builder, bytes, id, ep.as_str())
         } else {
-            (builder, Cow::Borrowed(bytes))
+            (builder, Cow::Borrowed(bytes), None)
         };
         let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
         let mut built = builder
@@ -733,6 +733,7 @@ fn lama_ladder(
         tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
         coverage.report(id, None);
         smoke_test_session(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+        if let Some(draft) = draft { draft.publish(); }
         tracing::info!(ep = %ep, "LaMa: GPU session validated");
         Ok(session)
     });
@@ -743,11 +744,12 @@ fn lama_ladder(
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
     crate::cache::gc_stale_for_model(id, "CPU");
-    let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder()?, bytes, id, "CPU");
+    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, "CPU");
     let started = Instant::now();
     let session = builder
         .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
+    if let Some(draft) = draft { draft.publish(); }
     tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
     Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
 }
