@@ -498,6 +498,60 @@ pub(crate) struct FoundFaces {
     pub(crate) stopped: bool,
 }
 
+/// A face search under way: of which photo, with which model, and the
+/// faces it has found while it redraws them, with when it found them.
+pub(crate) struct PendingFaces {
+    pub(crate) photo: FacePhoto,
+    pub(crate) model: prunr_models::ModelId,
+    pub(crate) found: Option<(Arc<[prunr_core::face::FacePlace]>, std::time::Instant)>,
+}
+
+/// The faces a search has redrawn, each laid over the image as it is
+/// done (straight-alpha patches, clear round each face), kept until the
+/// image with them blended in is on screen.
+pub(crate) struct FacePreview {
+    /// The search it shows: of which photo, with which model.
+    photo: FacePhoto,
+    model: prunr_models::ModelId,
+    /// Made on the first face.
+    texture: Option<egui::TextureHandle>,
+    /// A result with these faces blended in has been applied: the preview
+    /// goes when its texture lands.
+    blended: bool,
+}
+
+/// Paint `tile` into its square of the preview in `slot`, made on the
+/// first tile (or anew when the size changes). Only the tile is uploaded
+/// (`set_partial`).
+fn paint_tile(slot: &mut Option<egui::TextureHandle>, ctx: &egui::Context, name: &str, tile: &prunr_core::TilePreview) {
+    let full = [tile.full_width as usize, tile.full_height as usize];
+    let texture = match slot {
+        Some(t) if t.size() == full => t,
+        slot => slot.insert(ctx.load_texture(
+            name,
+            egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
+            egui::TextureOptions::LINEAR,
+        )),
+    };
+    let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+    texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
+}
+
+/// The faces outlined on an image: those found and redrawn, or those a
+/// search under way has found so far.
+pub(crate) struct OutlinedFaces<'a> {
+    found: &'a [prunr_core::face::FacePlace],
+    redrawn: &'a [prunr_core::face::RestoredFace],
+    /// When they were found, for their arrival.
+    pub(crate) found_at: std::time::Instant,
+}
+
+impl<'a> OutlinedFaces<'a> {
+    pub(crate) fn places(&self) -> impl Iterator<Item = &'a prunr_core::face::FacePlace> + Clone {
+        self.found.iter().chain(self.redrawn.iter().map(prunr_core::face::RestoredFace::place))
+    }
+}
+
 /// Where `BatchItem::warm_steps` holds the step an undo goes back to and
 /// the one a redo goes to.
 pub(crate) const BACK: usize = 0;
@@ -541,8 +595,9 @@ pub(crate) struct BatchItem {
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
     pub(crate) subject: Option<SubjectOutline>,
-    /// The upscale under way's finished tiles, small, each in its square
-    /// of a preview of the whole image.
+    /// The run under way's finished tiles, small, each in its square of a
+    /// preview of the whole image: an upscale's, or an erase's over the
+    /// photo it started from.
     pub(crate) tile_preview: Option<egui::TextureHandle>,
     /// The images of the steps an undo and a redo go to (`BACK`, `AHEAD`),
     /// unpacked off the UI thread and held so they stay unpacked: either
@@ -554,8 +609,9 @@ pub(crate) struct BatchItem {
     /// The faces found for Restore faces, and the photo and model they
     /// were found with; a few MB per face.
     pub(crate) found_faces: Option<FoundFaces>,
-    /// A face search under way: for which photo, with which model.
-    pub(crate) faces_pending: Option<(FacePhoto, prunr_models::ModelId)>,
+    pub(crate) faces_pending: Option<PendingFaces>,
+    /// The faces a search has redrawn so far, laid over the image.
+    pub(crate) face_preview: Option<FacePreview>,
     /// The photo with the found faces blended in, as a preview built it,
     /// so other knobs' previews reuse it. One image of RAM while Restore
     /// faces is on.
@@ -914,6 +970,13 @@ impl BatchItem {
         self.last_decode = None;
     }
 
+    /// True while a model works on this image: a cut-out the worker has
+    /// taken, or an upscale, colorize or erase, which start their job only
+    /// when they run (a queued cut-out holds its job while it waits).
+    pub(crate) fn is_running(&self) -> bool {
+        self.status == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
+    }
+
     /// True while a run, a decode, a texture or a thumbnail is still to land.
     pub(crate) fn is_busy(&self) -> bool {
         self.status == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
@@ -1049,8 +1112,80 @@ impl BatchItem {
         }
     }
 
-    /// An upscale has landed: its finished-tile preview, the whole image
-    /// by now, is shown until the result's texture lands and the result
+    /// Paint a finished tile into its square of the run's preview, made
+    /// on the run's first tile (or anew when the size changes). Only the
+    /// tile is uploaded (`set_partial`).
+    pub(crate) fn paint_tile_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview) {
+        paint_tile(&mut self.tile_preview, ctx, &format!("tile-preview-{}", self.id), tile);
+    }
+
+    /// A face search of `photo` with `model` starts; what an earlier one
+    /// showed goes.
+    pub(crate) fn begin_face_search(&mut self, photo: FacePhoto, model: prunr_models::ModelId) {
+        self.faces_pending = Some(PendingFaces { photo, model, found: None });
+        self.face_preview = None;
+    }
+
+    /// The search under way has found `places`: kept to outline while it
+    /// redraws them, when it is a search this image still wants.
+    pub(crate) fn keep_found_faces(&mut self, places: Vec<prunr_core::face::FacePlace>, stage: FaceStage) {
+        if !self.faces_pending.as_ref().is_some_and(|p| self.wants_faces(&p.photo, p.model, stage)) {
+            return;
+        }
+        if let Some(pending) = self.faces_pending.as_mut() {
+            pending.found = Some((places.into(), std::time::Instant::now()));
+        }
+    }
+
+    /// The search whose redrawn faces the image may show over itself: the
+    /// one under way, or else the one that has just found faces for the
+    /// photo shown; either while the image still wants it.
+    fn previewed_search(&self, stage: FaceStage) -> Option<(FacePhoto, prunr_models::ModelId)> {
+        if let Some(p) = &self.faces_pending {
+            return self.wants_faces(&p.photo, p.model, stage).then(|| (p.photo.clone(), p.model));
+        }
+        let (photo, model) = (self.face_photo(stage)?, self.settings.faces.wanted()?);
+        self.found_for(&photo, model).filter(|f| !f.failed && !f.faces.is_empty()).map(|_| (photo, model))
+    }
+
+    /// A face the search has redrawn, laid in its place over the image,
+    /// when the search is one the image still wants. A face that comes
+    /// in the frame its search lands counts too.
+    pub(crate) fn paint_face_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview, stage: FaceStage) {
+        let Some((photo, model)) = self.previewed_search(stage).filter(|_| self.on_screen) else { return };
+        let preview = match &mut self.face_preview {
+            Some(p) if p.model == model && p.photo.same(&photo) => p,
+            slot => slot.insert(FacePreview { photo, model, texture: None, blended: false }),
+        };
+        paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile);
+    }
+
+    /// The faces' preview, while there is one to lay over the image.
+    pub(crate) fn face_preview_texture(&self) -> Option<&egui::TextureHandle> {
+        self.face_preview.as_ref()?.texture.as_ref()
+    }
+
+    /// Drop the faces' preview once the image no longer wants the search
+    /// it shows (another photo or model, Restore faces off, a search that
+    /// found none, failed or stopped).
+    pub(crate) fn settle_face_preview(&mut self, stage: FaceStage) {
+        let Some(preview) = &self.face_preview else { return };
+        let keep = self.previewed_search(stage).is_some_and(|(photo, model)| preview.model == model && preview.photo.same(&photo));
+        if !keep {
+            self.face_preview = None;
+        }
+    }
+
+    /// A result with the found faces blended in has been applied: the
+    /// preview goes once that result is on screen.
+    fn faces_blended_in(&mut self) {
+        if let Some(preview) = self.face_preview.as_mut() {
+            preview.blended = true;
+        }
+    }
+
+    /// A run has landed: its finished-tile preview, the whole image by
+    /// now, is shown until the result's texture lands and the result
     /// reveals over it. Without one, the shown image is held as usual.
     pub(crate) fn hold_tile_preview_for_reveal(&mut self) {
         match self.tile_preview.take() {
@@ -1080,10 +1215,10 @@ impl BatchItem {
         self.thumb_pending = true;
     }
 
-    /// Show `rgba` as the result: what is on screen is held to reveal it
-    /// over, and a waiting image is done.
+    /// Show `rgba` as the result: what is on screen, or the run's tile
+    /// preview, is held to reveal it over, and a waiting image is done.
     pub(crate) fn show_result(&mut self, rgba: Arc<image::RgbaImage>) {
-        self.hold_for_reveal();
+        self.hold_tile_preview_for_reveal();
         self.unpark_result();
         self.take_result(rgba);
         if self.status == BatchStatus::Pending {
@@ -1113,6 +1248,10 @@ impl BatchItem {
             self.result_tex_pending = false;
             if target == TexTarget::Result {
                 self.start_reveal();
+            }
+            // The faces it laid over the image are in the image now.
+            if self.face_preview.as_ref().is_some_and(|p| p.blended) {
+                self.face_preview = None;
             }
             tracing::info!(item_id = self.id, kind = "result", "texture uploaded");
         }
@@ -1210,8 +1349,12 @@ impl BatchItem {
     /// for the photo and model it still wants: how many, or why the
     /// search failed. `None`: a search for something else, dropped.
     pub(crate) fn keep_faces(&mut self, landed: super::processor::FacesResult, stage: FaceStage) -> Option<Result<usize, String>> {
+        // Outlined since the search found them: they do not arrive again.
+        let mut found_at = std::time::Instant::now();
         if self.pending_for(&landed.photo, landed.model) {
-            self.faces_pending = None;
+            if let Some((_, at)) = self.faces_pending.take().and_then(|p| p.found) {
+                found_at = at;
+            }
         }
         if !self.wants_faces(&landed.photo, landed.model, stage) {
             return None;
@@ -1223,7 +1366,7 @@ impl BatchItem {
             }
             Err(err) => (Vec::new(), Err(err)),
         };
-        self.found_faces = Some(FoundFaces { photo: landed.photo, found_at: std::time::Instant::now(), model: landed.model, faces: Arc::new(faces), failed: outcome.is_err(), stopped: landed.stopped });
+        self.found_faces = Some(FoundFaces { photo: landed.photo, found_at, model: landed.model, faces: Arc::new(faces), failed: outcome.is_err(), stopped: landed.stopped });
         self.faces_changed();
         Some(outcome)
     }
@@ -1432,6 +1575,7 @@ impl BatchItem {
         self.job = None;
         self.reveal = None;
         self.subject = None;
+        self.tile_preview = None;
         let has_result = self.result_rgba.is_some() || self.result_parked();
         self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
@@ -1461,6 +1605,9 @@ impl BatchItem {
     pub(crate) fn settle_faced(&mut self, engine: Engine, blended: bool) {
         let faced = blended || self.start_faced(engine);
         self.timeline.current_mut().faced = faced;
+        if blended {
+            self.faces_blended_in();
+        }
     }
 
     fn start_faced(&self, engine: Engine) -> bool {
@@ -1615,7 +1762,19 @@ impl BatchItem {
 
     /// Whether a search of `photo` with `model` is under way.
     pub(crate) fn pending_for(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> bool {
-        self.faces_pending.as_ref().is_some_and(|(p, m)| *m == model && p.same(photo))
+        self.faces_pending.as_ref().is_some_and(|p| p.model == model && p.photo.same(photo))
+    }
+
+    /// The faces outlined on the image at `stage`: found for its photo, or
+    /// found so far by the search of it under way.
+    pub(crate) fn outlined_faces(&self, stage: FaceStage) -> Option<OutlinedFaces<'_>> {
+        let photo = self.face_photo(stage)?;
+        let model = self.settings.faces.wanted()?;
+        if let Some(found) = self.found_for(&photo, model) {
+            return Some(OutlinedFaces { found: &[], redrawn: &found.faces, found_at: found.found_at });
+        }
+        let (places, found_at) = self.faces_pending.as_ref().filter(|_| self.pending_for(&photo, model))?.found.as_ref()?;
+        Some(OutlinedFaces { found: places, redrawn: &[], found_at: *found_at })
     }
 
     /// Whether the image wants faces from `photo` with `model`: Restore
@@ -1663,6 +1822,18 @@ impl BatchItem {
     /// RGBA would otherwise be deep-cloned (tens of MB at 4K) per run.
     pub(crate) fn run_input_or_source(&self, engine: Engine) -> super::processor::RunInput {
         self.run_input(engine).map_or_else(|| self.original_run_input(), super::processor::RunInput::Decoded)
+    }
+
+    /// Where the faces are in the original photo, when a Faces search has
+    /// found them there already, so a depth run need not look again.
+    pub(crate) fn faces_found_in_original(&self) -> Option<Vec<prunr_core::face::FacePlace>> {
+        let source = self.source_rgba.as_ref()?;
+        let original = |photo: &FacePhoto| matches!(photo, FacePhoto::Source(s) if Arc::ptr_eq(s, source));
+        if let Some(found) = self.found_faces.as_ref().filter(|f| !f.failed && original(&f.photo)) {
+            return Some(found.faces.iter().map(|f| *f.place()).collect());
+        }
+        let pending = self.faces_pending.as_ref().filter(|p| original(&p.photo))?;
+        pending.found.as_ref().map(|(places, _)| places.to_vec())
     }
 
     /// The decoded original, else the source for the run's thread to
@@ -1999,6 +2170,7 @@ impl BatchItem {
             found_faces: None,
             faces_pending: None,
             faced_photo: None,
+            face_preview: None,
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
@@ -2178,6 +2350,22 @@ mod tests {
     /// A landed upscale reveals over its finished-tile preview, which
     /// stays on screen until the result's texture lands; a new run never
     /// shows the last run's tiles.
+    #[test]
+    fn an_image_is_running_while_a_model_works_on_it() {
+        let mut item = fixture_item(1);
+        assert!(!item.is_running());
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(!item.is_running(), "a queued cut-out waits");
+        item.status = BatchStatus::Processing;
+        assert!(item.is_running(), "the worker has taken it");
+        for engine in [Engine::Upscale, Engine::Colorize, Engine::Erase] {
+            let mut item = fixture_item(2);
+            item.status = BatchStatus::Done;
+            item.start_job(None, engine);
+            assert!(item.is_running(), "{engine:?} runs from its start");
+        }
+    }
+
     #[test]
     fn an_upscale_reveals_over_its_tile_preview() {
         let ctx = egui::Context::default();
@@ -2611,6 +2799,64 @@ mod tests {
         assert!(weak.upgrade().is_none(), "the cache does not keep the old result alive");
         item.refresh_lens_focus();
         assert_ne!(item.backdrop_key(), near, "the subject at another depth is another focus");
+    }
+
+    /// The lens backdrop's focus is measured with the faces the depth map
+    /// knows: the same map with a face found focuses (and keys) anew.
+    #[test]
+    fn a_lens_backdrop_focuses_on_the_faces_its_depth_map_knows() {
+        use prunr_core::depth::DepthMap;
+        let mut item = fixture_item(1);
+        item.settings.bg_effect = prunr_core::BgEffect::LensBlur { amount_pct: 50 };
+        let raw: Vec<f32> = (0..100).map(|y| y as f32).collect();
+        item.depth = Some(Arc::new(DepthMap::from_raw(1, 100, raw.clone())));
+        item.refresh_lens_focus();
+        let (faceless, key) = (item.lens_focus.as_ref().map(|f| f.value), item.backdrop_key());
+        let face = prunr_core::face::Face {
+            score: 0.9,
+            bbox: [0.0, 20.0, 100.0, 40.0],
+            landmarks: [[30.0, 25.0], [70.0, 25.0], [50.0, 30.0], [35.0, 36.0], [65.0, 36.0]],
+        };
+        let faced = DepthMap::from_raw(1, 100, raw).with_faces(&[prunr_core::face::FacePlace::of(&face, [100, 100])]);
+        item.depth = Some(Arc::new(faced));
+        item.refresh_lens_focus();
+        let focus = item.lens_focus.as_ref().map(|f| f.value);
+        assert!(focus.is_some_and(|f| (f - 0.3).abs() < 0.02) && focus != faceless, "the face, not the nearest tenth: {focus:?} {faceless:?}");
+        assert_ne!(item.backdrop_key(), key);
+    }
+
+    /// A depth run takes the faces a Faces search found in the original
+    /// photo instead of looking again; none from another photo, or from
+    /// a search that failed.
+    #[test]
+    fn a_depth_run_reuses_the_faces_found_in_the_original() {
+        let mut item = fixture_item(1);
+        let source = Arc::new(image::RgbaImage::new(100, 100));
+        item.source_rgba = Some(Arc::clone(&source));
+        let face = prunr_core::face::Face {
+            score: 0.9,
+            bbox: [10.0, 10.0, 60.0, 70.0],
+            landmarks: [[25.0, 30.0], [45.0, 30.0], [35.0, 40.0], [27.0, 52.0], [43.0, 52.0]],
+        };
+        let place = prunr_core::face::FacePlace::of(&face, [100, 100]);
+        assert_eq!(item.faces_found_in_original(), None, "nothing searched");
+
+        item.begin_face_search(FacePhoto::Source(Arc::clone(&source)), prunr_models::ModelId::FaceGfpgan);
+        assert_eq!(item.faces_found_in_original(), None, "searching, nothing found yet");
+        if let Some(pending) = item.faces_pending.as_mut() {
+            pending.found = Some((vec![place].into(), std::time::Instant::now()));
+        }
+        assert_eq!(item.faces_found_in_original(), Some(vec![place]), "found, still redrawing");
+
+        let restored = Arc::new(vec![prunr_core::face::RestoredFace::unchanged_for_test(place)]);
+        let found = |photo, failed| FoundFaces { photo, found_at: std::time::Instant::now(), model: prunr_models::ModelId::FaceGfpgan, faces: Arc::clone(&restored), failed, stopped: false };
+        item.faces_pending = None;
+        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), false));
+        assert_eq!(item.faces_found_in_original(), Some(vec![place]));
+        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), true));
+        assert_eq!(item.faces_found_in_original(), None, "a failed search");
+        item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
+        assert_eq!(item.faces_found_in_original(), None, "another photo");
     }
 
     /// An image whose file is gone when its run would start fails there,

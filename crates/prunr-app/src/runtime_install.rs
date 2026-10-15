@@ -51,6 +51,10 @@ pub enum RuntimeId {
 }
 
 impl RuntimeId {
+    /// The runtimes Settings › Hardware offers to download. DirectML is
+    /// not one: Windows ships it built in.
+    pub const OFFERED: &'static [RuntimeId] = &[Self::OpenVino];
+
     fn pypi_package(self) -> &'static str {
         match self { Self::OpenVino => "onnxruntime-openvino" }
     }
@@ -81,6 +85,17 @@ impl RuntimeId {
         match self { Self::OpenVino => "OpenVINO Runtime" }
     }
 
+    /// Settings › Hardware's note when the hardware suits this runtime.
+    pub fn recommendation(self) -> &'static str {
+        match self {
+            Self::OpenVino => "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
+        }
+    }
+
+    pub fn uninstall_label(self) -> &'static str {
+        match self { Self::OpenVino => "Uninstall OpenVINO Runtime" }
+    }
+
     pub fn approx_download_mb(self) -> u32 {
         match self { Self::OpenVino => 80 }
     }
@@ -109,6 +124,74 @@ impl RuntimeId {
     pub fn settings_key(self) -> &'static str {
         match self { Self::OpenVino => "OpenVino" }
     }
+}
+
+/// Which runtime every process loads: the one built into the app (the
+/// DirectML build on Windows) or a Runtime Store install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeChoice {
+    BuiltIn,
+    Store(RuntimeId),
+}
+
+impl RuntimeChoice {
+    /// Every choice Settings can show, in its order.
+    pub const ALL: [RuntimeChoice; 2] = [Self::BuiltIn, Self::Store(RuntimeId::OpenVino)];
+
+    /// The choice the store's preference file names, when it names one.
+    pub fn preferred() -> Option<Self> {
+        Self::from_preference(&prunr_core::ort_runtime::preferred_runtime()?)
+    }
+
+    fn from_preference(value: &str) -> Option<Self> {
+        if value == prunr_core::ort_runtime::PREFER_BUILT_IN {
+            return Some(Self::BuiltIn);
+        }
+        RuntimeId::OFFERED.iter().copied().find(|rt| rt.install_subdir() == value).map(Self::Store)
+    }
+
+    fn preference(self) -> String {
+        match self {
+            Self::BuiltIn => prunr_core::ort_runtime::PREFER_BUILT_IN.to_string(),
+            Self::Store(rt) => rt.install_subdir(),
+        }
+    }
+
+    /// The runtime this process loaded, once it has.
+    pub fn loaded() -> Option<Self> {
+        use prunr_core::ort_runtime::{loaded_dylib, loaded_source, DylibSource};
+        match loaded_source()? {
+            DylibSource::Bundled => Some(Self::BuiltIn),
+            DylibSource::RuntimeStore => {
+                let dir = loaded_dylib()?.parent()?;
+                RuntimeId::OFFERED.iter().copied().find(|rt| dir.ends_with(rt.install_subdir())).map(Self::Store)
+            }
+            DylibSource::EnvVar => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "Built in",
+            Self::Store(RuntimeId::OpenVino) => "OpenVINO",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "DirectML: any DirectX 12 graphics card, else the processor",
+            Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
+        }
+    }
+}
+
+/// Make `choice` the runtime every process loads from its next start.
+pub fn prefer(choice: RuntimeChoice) -> Result<(), String> {
+    let value = choice.preference();
+    if let RuntimeChoice::Store(_) = choice {
+        ri::validate_subdir(&value).map_err(|e| format!("install_subdir invariant broken: {e}"))?;
+    }
+    prunr_core::ort_runtime::set_preferred_runtime(&value)
 }
 
 /// Started install handle: progress receiver + cancel flag. Caller
@@ -153,7 +236,9 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
                 .to_string()
         );
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+    prunr_core::ort_runtime::forget_preferred_runtime(&runtime.install_subdir());
+    Ok(())
 }
 
 fn run_install(
@@ -182,6 +267,10 @@ fn run_install(
 
     let _ = tx.send(InstallEvent::Extracting);
     let install_dir = prepare_and_extract(&bytes, rt)?;
+    // The runtime just installed is the one the user wants next start.
+    if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
+        tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
+    }
 
     let _ = tx.send(InstallEvent::Done { install_dir });
     Ok(())
@@ -215,4 +304,26 @@ fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("create install dir: {e}"))?;
     ri::extract_wheel(bytes, &target_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The preference file round-trips every choice, and the built-in
+    /// value can never name an install dir.
+    #[test]
+    fn every_runtime_choice_round_trips_through_the_preference_file() {
+        for choice in RuntimeChoice::ALL {
+            assert_eq!(RuntimeChoice::from_preference(&choice.preference()), Some(choice));
+        }
+        assert!(ri::validate_subdir(prunr_core::ort_runtime::PREFER_BUILT_IN).is_ok());
+        assert!(RuntimeId::OFFERED.iter().all(|rt| rt.install_subdir() != prunr_core::ort_runtime::PREFER_BUILT_IN));
+        assert_eq!(RuntimeChoice::from_preference("onnxruntime-1.24.1-linux-x64"), None, "a store entry Settings does not offer");
+    }
+
+    #[test]
+    fn directml_is_built_in_and_not_offered_for_download() {
+        assert_eq!(RuntimeId::OFFERED, &[RuntimeId::OpenVino]);
+    }
 }

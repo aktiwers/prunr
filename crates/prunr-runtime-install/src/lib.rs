@@ -391,19 +391,21 @@ mod tests {
     /// would silently ship mismatched bundled-CPU vs runtime-store
     /// runtimes (release) or run e2e tests against a stale runtime
     /// (ci). This test reads both YAMLs and asserts every
-    /// `install-runtime onnxruntime <ver>` invocation matches the const.
+    /// `install-runtime onnxruntime[-directml] <ver>` invocation matches
+    /// the const.
     /// Counts each file's occurrences too — drift in just one of two
     /// release.yml call sites would be silently accepted by a plain
     /// `contains` check.
     #[test]
     fn yaml_pins_match_const() {
-        // (path, expected occurrence count)
-        let cases: &[(&str, usize)] = &[
-            ("/../../.github/workflows/release.yml", 2), // Linux + macOS staging, Windows staging
-            ("/../../.github/workflows/ci.yml",      2), // Linux install before tests, macOS smoke test
+        // (path, package, expected occurrence count)
+        let cases: &[(&str, &str, usize)] = &[
+            ("/../../.github/workflows/release.yml", "onnxruntime", 1),          // Linux + macOS staging
+            ("/../../.github/workflows/release.yml", "onnxruntime-directml", 1), // Windows staging
+            ("/../../.github/workflows/ci.yml", "onnxruntime", 2),               // Linux install before tests, macOS smoke test
         ];
-        let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
-        for (rel, expected) in cases {
+        for (rel, package, expected) in cases {
+            let needle = format!("install-runtime {package} {PINNED_ORT_VERSION}");
             let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
             let yml = std::fs::read_to_string(&abs)
                 .unwrap_or_else(|e| panic!("read {abs}: {e}"));
@@ -611,6 +613,36 @@ mod tests {
             repackage_target_filename("onnxruntime/capi/libonnxruntime.dylib").as_deref(),
             Some("libonnxruntime.dylib"),
         );
+    }
+
+    /// The Windows release ships the DirectML runtime as its default:
+    /// both DLLs staged from the DirectML wheel, side by side in
+    /// `<exe>/runtime/` in the zip and in the installer.
+    #[test]
+    fn release_yml_ships_the_directml_runtime_on_windows() {
+        let abs = format!("{}/../../.github/workflows/release.yml", env!("CARGO_MANIFEST_DIR"));
+        let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
+        for line in [
+            format!("cargo xtask install-runtime onnxruntime-directml {PINNED_ORT_VERSION} --stage-to runtime-stage"),
+            "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/".to_string(),
+            "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/".to_string(),
+            "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+            "Source: \"runtime-stage\\DirectML.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+        ] {
+            assert!(yml.contains(&line), "release.yml no longer has `{line}`");
+        }
+    }
+
+    /// The DirectML wheel's `onnxruntime.dll` delay-loads `DirectML.dll`
+    /// from its own folder; without it there the system's older copy loads.
+    #[test]
+    fn repackage_keeps_the_directml_dll_beside_the_runtime() {
+        for name in ["DirectML.dll", "onnxruntime.dll"] {
+            assert_eq!(
+                repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(),
+                Some(name),
+            );
+        }
     }
 
     #[test]

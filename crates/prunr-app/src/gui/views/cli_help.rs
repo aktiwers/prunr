@@ -265,6 +265,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--doctor", "Print hardware, runtime, model and path facts, then exit");
                             opt_row(ui, "--clear-ep-cache", "Forget which accelerators failed which models (after a driver update)");
                             opt_row(ui, "--debug", "Verbose tracing (use when reporting bugs)");
+                            opt_row(ui, "bench", "Time each model on the CPU and the GPU, check they agree, write prunr-bench.md");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -277,6 +278,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Quiet mode for scripting");
                     example_row(ui, toasts, "prunr --debug photo.jpg 2> prunr.log",
                         "Capture diagnostic log for bug reports");
+                    example_row(ui, toasts, "prunr bench --models silueta,migan --runs 5",
+                        "Check two models on the GPU against the CPU");
                 }
 
                 _ => {}

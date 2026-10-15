@@ -23,7 +23,7 @@ pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
         })
 }
 
-pub(super) fn tree(harness: &Harness<'_, PrunrApp>) -> ControlNode {
+pub(super) fn tree<S>(harness: &Harness<'_, S>) -> ControlNode {
     ControlNode::from_node(&harness.kittest_state().root())
 }
 
@@ -42,13 +42,13 @@ pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
     settle(harness);
 }
 
-pub(super) fn names(harness: &Harness<'_, PrunrApp>) -> Vec<String> {
+pub(super) fn names<S>(harness: &Harness<'_, S>) -> Vec<String> {
     tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
 }
 
 /// Every control in the tree has a readable name. Fails with the list of
 /// nameless controls: an icon-only button, an unlabelled slider.
-pub(super) fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
+pub(super) fn assert_all_controls_named<S>(harness: &Harness<'_, S>, surface: &str) {
     let root = tree(harness);
     let nameless: Vec<String> = root
         .iter()
@@ -163,6 +163,45 @@ fn settings_tabs_name_every_control() {
     }
 }
 
+/// Settings › Hardware as Windows shows it, which offers both runtimes:
+/// every runtime row and the runtime choice are named. The page is drawn
+/// on its own because the app reads this machine's platform and store.
+#[test]
+fn the_hardware_page_names_every_runtime_control() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    use crate::runtime_install::RuntimeChoice;
+    let mut both = HardwareInstallCache::all_installed();
+    both.preferred_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
+    let mut built_in_only = HardwareInstallCache::default();
+    built_in_only.built_in_gpu = true;
+    let installing = Some((RuntimeId::OpenVino, "Downloading 40% (32/80 MB)".to_string()));
+    let shapes = [
+        ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
+        ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
+        ("none installed", HardwareInstallCache::default(), None, vec!["Install OpenVINO Runtime"]),
+    ];
+    for (shape, installs, installing, expected) in shapes {
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing,
+            active_provider: "DirectML".into(),
+            sd_margin_mb: 2048,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in expected {
+            assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
+        }
+        let choice_shown = present.iter().any(|n| n == "Built in");
+        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
+    }
+}
+
 #[test]
 fn settings_opens_from_its_toolbar_button() {
     let mut harness = harness();
@@ -171,6 +210,15 @@ fn settings_opens_from_its_toolbar_button() {
     click(&mut harness, "Settings");
     assert!(harness.state().show_settings);
     assert!(names(&harness).iter().any(|n| n == "Editing"), "{:?}", names(&harness));
+}
+
+#[test]
+fn the_model_store_opens_from_its_toolbar_button() {
+    let mut harness = harness();
+    settle(&mut harness);
+    assert!(harness.state().model_store.is_none());
+    click(&mut harness, "Model Store");
+    assert_eq!(harness.state().model_store.map(|r| r.filter), Some(None), "the whole store, no category picked");
 }
 
 #[test]

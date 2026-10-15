@@ -41,6 +41,8 @@ on Ubuntu 22.04+ / Fedora 40+ / openSUSE Tumbleweed.
 | Installer | [prunr-windows-x86_64-setup.exe](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64-setup.exe) |
 | Portable | [zip](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64.zip) |
 
+GPU acceleration is built in: both downloads ship the DirectML runtime, which runs the models on any DirectX 12 graphics card (NVIDIA, AMD, Intel) and on the processor when there is none. Windows 10 1903 or later.
+
 All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/prunr/releases)
 
 ## Features
@@ -116,6 +118,7 @@ Common flags:
 | `--debug` | Verbose diagnostics for bug reports |
 | `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
 | `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
+| `bench` | Time every installed model on the CPU and on the GPU path, compare their outputs, write `prunr-bench.md` + `.json`; `--models a,b`, `--runs N`, `--image PATH`, `--heavy`, `--out PATH` |
 
 `prunr --help` for the full list. Magic Brush and the generative erasers are GUI features; the CLI covers background removal, lines, mask-driven erasing with LaMa, upscaling, colorizing and depth maps. On-demand models download in the app's Model Store.
 
@@ -153,7 +156,7 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 |---|---|---|---|
 | CUDA | NVIDIA GPU | yes (Linux/Windows) | Auto when `nvidia-smi` is present |
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
-| DirectML | Any GPU on Windows | yes (Windows) | Vendor-agnostic |
+| DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download; falls back to the CPU without a GPU |
 | **OpenVINO** | **Intel CPU/iGPU/NPU** | **on-demand** | Settings → Hardware → Install (~80 MB) |
 | CPU | Always | yes (everywhere) | Automatic fallback |
 
@@ -162,6 +165,8 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 **Per-model EP compatibility** is declared in the model registry (`incompatible_eps` field). Models that don't load on a specific EP — e.g. Silueta's ONNX has graph cycles that OpenVINO rejects — skip that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs. Wipe the cache with `prunr --clear-ep-cache` after installing new drivers or upgrading OpenVINO.
 
 The active backend is shown in the status bar. For diagnostics, run `prunr --doctor` to dump the full hardware profile, runtime status, model availability, and resolution chain — pasteable directly into bug reports.
+
+To check acceleration model by model, run `prunr bench`. Each installed model runs on the CPU and through the backend the app would pick; the report names the backend each one landed on (and why another was passed over), times the session build, first run and steady runs, and flags a model whose GPU output differs from the CPU's.
 
 ## Build from Source
 
@@ -182,6 +187,7 @@ cargo xtask install-runtime onnxruntime-openvino <version>
 # Diagnostic
 target/release/prunr --doctor                     # hardware + runtime status dump
 target/release/prunr --clear-ep-cache             # reset EP compatibility cache
+target/release/prunr bench                        # CPU vs GPU path, per model
 ```
 
 The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is resolved at startup from (in order):
@@ -190,7 +196,7 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 2. User Runtime Store: `~/.local/share/prunr/runtimes/<id>/libonnxruntime.so`
 3. Bundled fallback: `<exe>/runtime/libonnxruntime.so`
 
-Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux and Windows get the CPU-only runtime in `<exe>/runtime/`; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
+Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime[-directml] <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux artifacts (tar.gz / AppImage / .deb / .rpm) get the CPU-only runtime in `<exe>/runtime/`; Windows artifacts (.zip / installer) the DirectML build (`onnxruntime.dll` + `DirectML.dll`), which wins over a store install unless Settings › Hardware › Runtime picks the store one; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 

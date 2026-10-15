@@ -150,6 +150,25 @@ fn the_tool_strip_leaves_while_a_dialog_is_open() {
     assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is back once the dialog closes");
 }
 
+/// A native file dialog is a separate window the app keeps drawing
+/// under; the canvas holds still until the user answers it.
+#[test]
+fn the_canvas_holds_still_while_a_file_dialog_is_up() {
+    let mut h = loaded();
+    click(&mut h, "Open");
+    assert!(h.state().system.dialog_open(), "Open asked for a dialog");
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    assert!(!h.state().zoom_state.is_panning, "no pan under the dialog");
+    press(&mut h, CANVAS_POINT, false);
+    h.state_mut().system.answer_for_test(None);
+    settle(&mut h);
+    assert!(!h.state().system.dialog_open(), "a cancel closes it");
+    press(&mut h, CANVAS_POINT, true);
+    assert!(h.state().zoom_state.is_panning, "the canvas pans again");
+    press(&mut h, CANVAS_POINT, false);
+}
+
 /// Under an eraser both brushes carry the region knobs, since either
 /// paints the region the erase fills.
 #[test]
@@ -292,6 +311,28 @@ fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
     settle(&mut h);
     assert!(!names(&h).iter().any(|x| x == "Close window"), "Escape closed the dialog");
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
+}
+
+/// The first-launch runtime prompt is a modal for each runtime it can
+/// offer: its buttons are named, and Escape closes it as Not now.
+#[test]
+fn the_runtime_prompt_is_a_modal_that_escape_closes() {
+    use super::tree_tests::{assert_all_controls_named, names};
+    use crate::runtime_install::RuntimeId;
+    let mut h = loaded();
+    for &rt in RuntimeId::OFFERED {
+        h.state_mut().runtime_prompt = Some(rt);
+        settle(&mut h);
+        let present = names(&h);
+        for n in [rt.install_button_label(), "Not now", "Open Settings"] {
+            assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+        }
+        assert_all_controls_named(&h, rt.display_name());
+        h.key_press(egui::Key::Escape);
+        settle(&mut h);
+        assert!(h.state().runtime_prompt.is_none(), "Escape closed the {rt:?} prompt");
+        assert!(h.state().settings.is_runtime_prompt_snoozed(rt), "as Not now");
+    }
 }
 
 /// The save dialog opens ready for a name: text typed at once goes into

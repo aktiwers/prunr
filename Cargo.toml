@@ -89,6 +89,8 @@ clap = { version = "4.5", features = ["derive"] }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 indicatif = "0.17"
 rfd = "0.15"
+# Waits on rfd's async file dialogs off the UI thread.
+pollster = "0.4"
 dirs = "6"
 sysinfo = "0.37"
 memory-stats = "1"

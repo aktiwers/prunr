@@ -32,8 +32,6 @@ const FACE_SEARCH_STOPPED: &str = "Face search stopped";
 
 impl PrunrApp {
     pub(super) fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
-        // Bridge → inpaint_rx fan-in must run before the drain.
-        self.processor.pump_inpaint_subprocess();
         let (results, cancelled, errors) = self.processor.drain_inpaint_results();
         // A cancelled or failed erase records nothing; the painted region
         // stays for another try.
@@ -96,30 +94,26 @@ impl PrunrApp {
         ctx.request_repaint();
     }
 
-    /// Paint each finished upscale tile into its square of the item's
-    /// preview texture, made on the run's first tile. Only the tile is
-    /// uploaded (`set_partial`).
-    pub(super) fn pump_upscale_previews(&mut self, ctx: &egui::Context) {
-        let tiles = self.processor.pump_upscale_previews();
-        if tiles.is_empty() {
+    /// Land each run's pictures on their item, one kind per arm. Whether a
+    /// run's pictures may still land is its `PictureSink`'s call; here
+    /// the item has only to exist.
+    pub(super) fn pump_run_pictures(&mut self, ctx: &egui::Context) {
+        let pictures = self.processor.pump_pictures();
+        if pictures.is_empty() {
             return;
         }
-        for (item_id, tile) in tiles {
+        let face_stage = self.face_stage();
+        for (item_id, picture) in pictures {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if !item.job_is_current() {
-                continue;
+            match picture {
+                // A tile is part of the result the item awaits.
+                prunr_core::ProgressUpdate::TilePreview(tile) if item.job_is_current() => item.paint_tile_preview(ctx, &tile),
+                // A face search is no job: its faces land while the item
+                // still wants the search.
+                prunr_core::ProgressUpdate::TilePreview(tile) => item.paint_face_preview(ctx, &tile, face_stage),
+                prunr_core::ProgressUpdate::Faces(places) => item.keep_found_faces(places, face_stage),
+                _ => {}
             }
-            let full = [tile.full_width as usize, tile.full_height as usize];
-            let texture = match &mut item.tile_preview {
-                Some(t) if t.size() == full => t,
-                slot => slot.insert(ctx.load_texture(
-                    format!("tile-preview-{item_id}"),
-                    egui::ColorImage::new(full, vec![egui::Color32::TRANSPARENT; full[0] * full[1]]),
-                    egui::TextureOptions::LINEAR,
-                )),
-            };
-            let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
-            texture.set_partial([tile.x as usize, tile.y as usize], image, egui::TextureOptions::LINEAR);
         }
         ctx.request_repaint();
     }
@@ -305,7 +299,10 @@ impl PrunrApp {
         let Some(idx) = self.batch.index_of(landed.item_id) else { return };
         let (item_id, stopped) = (landed.item_id, landed.stopped);
         let stage = self.face_stage();
-        match self.batch.items[idx].keep_faces(landed, stage) {
+        let kept = self.batch.items[idx].keep_faces(landed, stage);
+        // Faces that will not be blended in leave the image as it was.
+        self.batch.items[idx].settle_face_preview(stage);
+        match kept {
             None => return,
             Some(Ok(0)) => self.set_temporary_status("No faces found"),
             Some(Ok(_)) => {}
@@ -345,7 +342,10 @@ impl PrunrApp {
         if item.faces_already_restored(stage) {
             return Some(FaceSearch::RestoredEarlier);
         }
-        let found = item.found_for(&item.face_photo(stage)?, item.settings.faces.wanted()?)?;
+        let Some(found) = item.found_for(&item.face_photo(stage)?, item.settings.faces.wanted()?) else {
+            // A search under way counts the faces it has found while it redraws them.
+            return item.outlined_faces(stage).map(|f| FaceSearch::Found(f.places().count()));
+        };
         Some(match (found.stopped, found.failed) {
             (true, _) => FaceSearch::Stopped,
             (false, true) => FaceSearch::Failed,
@@ -418,9 +418,15 @@ impl PrunrApp {
         if !item.needs_depth_run() {
             return;
         }
-        let input = item.original_run_input();
+        let job = crate::gui::processor::DepthJob {
+            item_id: item.id,
+            epoch: item.depth_run.epoch,
+            input: item.original_run_input(),
+            cpu_only,
+            faces: item.faces_found_in_original(),
+        };
         item.depth_run.pending = true;
-        self.processor.dispatch_depth(item.id, item.depth_run.epoch, input, cpu_only);
+        self.processor.dispatch_depth(job);
     }
 
     /// Depth maps: keep what lands and re-render what reads it; measure
@@ -502,16 +508,18 @@ impl PrunrApp {
             self.land_faces(landed);
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let stage = self.face_stage();
+        self.batch.items[idx].settle_face_preview(stage);
         let item = &self.batch.items[idx];
         let installed = self.hardware_install_cache.has_face_model(item.settings.faces.model);
         if !item.settings.faces.on || !installed || !self.shows_face_result(idx) {
             return;
         }
-        let Some(photo) = item.face_photo(self.face_stage()) else { return };
+        let Some(photo) = item.face_photo(stage) else { return };
         if let Some(model) = item.faces_to_find(&photo) {
-            let id = item.id;
-            self.batch.items[idx].faces_pending = Some((photo.clone(), model));
-            self.processor.dispatch_find_faces(id, photo, model);
+            let (id, blend) = (item.id, item.settings.faces.blend());
+            self.batch.items[idx].begin_face_search(photo.clone(), model);
+            self.processor.dispatch_find_faces(id, photo, model, blend);
         }
     }
 
@@ -931,6 +939,123 @@ mod faces_tests {
         FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::clone(photo)), model: model.id(), result: Ok(Vec::new()), stopped: false }
     }
 
+    /// Two faces as a search reports them in the 8 × 8 test photo.
+    fn two_places() -> Vec<prunr_core::face::FacePlace> {
+        let face = |x: f32| prunr_core::face::Face { score: 0.9, bbox: [0.0; 4], landmarks: [[x + 1.0, 3.0], [x + 3.0, 3.0], [x + 2.0, 4.0], [x + 1.2, 5.0], [x + 2.8, 5.0]] };
+        [face(0.0), face(4.0)].iter().map(|f| prunr_core::face::FacePlace::of(f, [8, 8])).collect()
+    }
+
+    /// The faces of `places` found and redrawn.
+    fn restored(places: &[prunr_core::face::FacePlace]) -> FacesResult {
+        let faces = places.iter().map(|p| prunr_core::face::RestoredFace::unchanged_for_test(*p)).collect();
+        FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::new(image::RgbaImage::new(1, 1))), model: FaceModel::Gfpgan.id(), result: Ok(faces), stopped: false }
+    }
+
+    /// The on-screen image starts a search of its photo.
+    fn searching(app: &mut super::PrunrApp, source: &Arc<image::RgbaImage>) {
+        let item = &mut app.batch.items[0];
+        item.on_screen = true;
+        item.begin_face_search(FacePhoto::Source(Arc::clone(source)), FaceModel::Gfpgan.id());
+    }
+
+    /// A search's pictures arrive for the image.
+    fn arrive(app: &mut super::PrunrApp, ctx: &egui::Context, pictures: impl IntoIterator<Item = prunr_core::ProgressUpdate>) {
+        for picture in pictures {
+            app.processor.picture_sender().send((1, picture)).expect("the pump's end is open");
+        }
+        app.pump_run_pictures(ctx);
+    }
+
+    /// A redrawn face, as a search sends it.
+    fn face_tile() -> prunr_core::ProgressUpdate {
+        prunr_core::ProgressUpdate::TilePreview(prunr_core::TilePreview { x: 2, y: 2, width: 2, height: 2, full_width: 8, full_height: 8, rgba: vec![200; 16] })
+    }
+
+    /// The faces a search finds are outlined (and counted) as soon as it
+    /// finds them, before any is redrawn; when it lands they stay put
+    /// rather than arrive a second time.
+    #[test]
+    fn found_faces_are_outlined_while_they_are_redrawn() {
+        use crate::gui::item::FaceStage;
+        use crate::gui::views::faces_chip::FaceSearch;
+        let ctx = egui::Context::default();
+        let (mut app, source) = app_with_faces_on();
+        arrive(&mut app, &ctx, [prunr_core::ProgressUpdate::Faces(two_places())]);
+        assert!(app.batch.items[0].outlined_faces(FaceStage::Photo).is_none(), "no search, nothing outlined");
+
+        searching(&mut app, &source);
+        arrive(&mut app, &ctx, [prunr_core::ProgressUpdate::Faces(two_places())]);
+        let item = &app.batch.items[0];
+        let found = item.outlined_faces(FaceStage::Photo).expect("outlined while the search redraws them");
+        assert_eq!(found.places().copied().collect::<Vec<_>>(), two_places());
+        let found_at = found.found_at;
+        assert!(matches!(super::PrunrApp::face_search(item, FaceStage::Photo), Some(FaceSearch::Found(2))));
+
+        let mut result = restored(&two_places());
+        result.photo = FacePhoto::Source(Arc::clone(&source));
+        app.land_faces(result);
+        let found = app.batch.items[0].outlined_faces(FaceStage::Photo).expect("the faces found");
+        assert_eq!(found.places().count(), 2);
+        assert_eq!(found.found_at, found_at, "found once, arriving once");
+    }
+
+    /// Each redrawn face lands on the image while the image still wants
+    /// the search: not before one starts, nor once it wants another, nor
+    /// after the search stops.
+    #[test]
+    fn a_face_preview_lands_for_the_search_under_way_only() {
+        use crate::gui::item::FaceStage;
+        let ctx = egui::Context::default();
+        let (mut app, source) = app_with_faces_on();
+        app.batch.items[0].on_screen = true;
+        arrive(&mut app, &ctx, [face_tile()]);
+        assert!(app.batch.items[0].face_preview_texture().is_none(), "no search, nothing shown");
+
+        searching(&mut app, &source);
+        arrive(&mut app, &ctx, [face_tile()]);
+        assert_eq!(app.batch.items[0].face_preview_texture().map(|t| t.size()), Some([8, 8]), "over the whole image, made on the first face");
+
+        app.batch.items[0].settings.faces.model = FaceModel::RestoreFormerPp;
+        app.batch.items[0].settle_face_preview(FaceStage::Photo);
+        arrive(&mut app, &ctx, [face_tile()]);
+        assert!(app.batch.items[0].face_preview_texture().is_none(), "the image wants another model's faces");
+
+        app.batch.items[0].settings.faces.model = FaceModel::Gfpgan;
+        searching(&mut app, &source);
+        arrive(&mut app, &ctx, [face_tile()]);
+        app.land_faces(FacesResult { result: Err("cancelled".into()), stopped: true, ..landed(&source, FaceModel::Gfpgan) });
+        assert!(app.batch.items[0].face_preview_texture().is_none(), "a stopped search blends nothing in");
+        arrive(&mut app, &ctx, [face_tile()]);
+        assert!(app.batch.items[0].face_preview_texture().is_none());
+    }
+
+    /// The redrawn faces stay over the image after their search lands,
+    /// the last one too if it comes in the same frame, until the image
+    /// with them blended in is on screen.
+    #[test]
+    fn the_blended_result_replaces_the_face_previews() {
+        use crate::gui::background_io::TexTarget;
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let (mut app, source) = app_with_faces_on();
+        searching(&mut app, &source);
+        arrive(&mut app, &ctx, [face_tile()]);
+        let mut result = restored(&two_places());
+        result.photo = FacePhoto::Source(Arc::clone(&source));
+        app.land_faces(result);
+        arrive(&mut app, &ctx, [face_tile()]);
+        assert!(app.batch.items[0].face_preview_texture().is_some(), "shown until the faces are in the image");
+
+        let texture = || ctx.load_texture("result", egui::ColorImage::new([8, 8], vec![egui::Color32::BLACK; 64]), egui::TextureOptions::LINEAR);
+        let item = &mut app.batch.items[0];
+        item.land_texture(texture(), TexTarget::LiveResult);
+        assert!(item.face_preview_texture().is_some(), "a result without the faces leaves them shown");
+        item.settle_faced(Engine::Segment, true);
+        assert!(item.face_preview_texture().is_some(), "until its texture lands");
+        item.land_texture(texture(), TexTarget::LiveResult);
+        assert!(item.face_preview_texture().is_none(), "the blended result shows them now");
+    }
+
     /// Faces count only for the photo and model they were found with:
     /// another model or photo needs a search, and off needs nothing.
     #[test]
@@ -1209,6 +1334,78 @@ mod timeline_contract_tests {
 
         app.land_bg_image(load(false, Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
         assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
+    }
+
+    /// A run's finished tile lands in its square of its item's preview
+    /// while the item awaits a run; one for an item that awaits nothing,
+    /// or that is gone, is dropped.
+    #[test]
+    fn a_runs_tiles_land_on_the_item_that_awaits_it() {
+        use prunr_core::{ProgressUpdate, TilePreview};
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        let send = |app: &PrunrApp, item_id: u64, x: u32| {
+            let tile = TilePreview { x, y: 0, width: 1, height: 2, full_width: 3, full_height: 2, rgba: vec![200; 8] };
+            app.processor.picture_sender().send((item_id, ProgressUpdate::TilePreview(tile))).unwrap();
+        };
+        send(&app, 1, 0);
+        app.pump_run_pictures(&ctx);
+        assert!(app.batch.items[0].tile_preview.is_none(), "nothing awaited, nothing shown");
+
+        app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+        send(&app, 1, 2);
+        send(&app, 99, 0);
+        app.pump_run_pictures(&ctx);
+        assert_eq!(app.batch.items[0].tile_preview.as_ref().map(|t| t.size()), Some([3, 2]), "the whole image's preview, made on the first tile");
+    }
+
+    /// An erase's tiles, reported the way the SD bridge reports them, land
+    /// on its image's preview while its run is the one shown, and the
+    /// fill reveals over them. A run another took the pill from sends
+    /// nothing more; an erase that ends without a fill drops its tiles,
+    /// and a new one starts clear.
+    #[test]
+    fn an_erases_tiles_show_until_its_fill_reveals_over_them() {
+        use prunr_core::{ProgressUpdate, TilePreview};
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        let second = push_test_item(&mut app, 2);
+        second.dimensions = (4, 4);
+        second.source_rgba = Some(px(0));
+        let tile = |full_width| ProgressUpdate::TilePreview(TilePreview { x: 0, y: 0, width: 1, height: 2, full_width, full_height: 2, rgba: vec![200; 8] });
+        let erase = |app: &mut PrunrApp, item_id: u64| {
+            app.commit_selection_and_dispatch(item_id, mask(), StepKind::Stroke);
+            let idx = app.batch.index_of(item_id).unwrap();
+            assert!(app.dispatch_inpaint_for_item(idx));
+        };
+        let preview_size = |app: &PrunrApp, idx: usize| app.batch.items[idx].tile_preview.as_ref().map(|t| t.size());
+
+        erase(&mut app, 1);
+        app.processor.report_inpaint(1, tile(3));
+        app.pump_run_pictures(&ctx);
+        assert_eq!(preview_size(&app, 0), Some([3, 2]), "the tile lands on the image's preview");
+        let preview = app.batch.items[0].tile_preview.as_ref().map(|t| t.id());
+
+        erase(&mut app, 2);
+        app.processor.report_inpaint(1, tile(5));
+        app.processor.report_inpaint(2, tile(4));
+        app.pump_run_pictures(&ctx);
+        assert_eq!(preview_size(&app, 0), Some([3, 2]), "a run another replaced shows nothing more");
+        assert_eq!(preview_size(&app, 1), Some([4, 2]));
+
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.fail_inpaint_for_test(2, "failed");
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(app.batch.items[0].held_texture().map(|t| t.id()), preview, "the fill reveals over its tiles");
+        assert!(app.batch.items[0].tile_preview.is_none());
+        assert!(app.batch.items[1].tile_preview.is_none(), "an erase without a fill drops its tiles");
+
+        erase(&mut app, 2);
+        app.processor.report_inpaint(2, tile(4));
+        app.pump_run_pictures(&ctx);
+        assert!(preview_size(&app, 1).is_some());
+        erase(&mut app, 2);
+        assert!(app.batch.items[1].tile_preview.is_none(), "a new erase starts clear");
     }
 
     /// Refine's after-the-model knobs re-finish the kept upscale; a Scale
