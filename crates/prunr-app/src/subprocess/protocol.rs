@@ -392,9 +392,9 @@ pub enum IpcKind {
     Result,
     /// Seg worker → parent: TEED multi-scale edge tensor cache.
     Edge,
-    /// Seg worker → parent: the line scales a run made after its result.
-    /// Its own kind, so it never overwrites an `Edge` file the parent is
-    /// still reading.
+    /// Seg worker → parent: the line scales a run made after its result,
+    /// named by the pass's token rather than the image, so no other
+    /// file of the image (or a later run's) ever shares its path.
     SpareEdge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,

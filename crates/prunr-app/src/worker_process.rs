@@ -191,11 +191,10 @@ fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), S
     Ok(())
 }
 
-/// The detector's planes the run made, written to a file of `kind`;
-/// `None` when it made none or the write failed.
+/// The detector's planes the run made, written to `path`; `None` when
+/// it made none or the write failed.
 fn write_edge_cache(
-    ipc: &std::path::Path,
-    kind: IpcKind,
+    path: std::path::PathBuf,
     item_id: u64,
     res: &prunr_core::EdgeInferenceResult,
 ) -> Option<EdgeCacheFile> {
@@ -205,7 +204,6 @@ fn write_edge_cache(
     if scales.is_empty() {
         return None;
     }
-    let path = kind.path_for(ipc, item_id);
     match write_edge_tensors(&path, res) {
         Ok(()) => Some(EdgeCacheFile { path, height: res.height, width: res.width, scales }),
         Err(err) => {
@@ -244,7 +242,7 @@ fn send_spare_scales(
     evt_tx: &mpsc::Sender<SubprocessEvent>,
 ) {
     let outcome = match engine.and_then(|e| spare.make(e)) {
-        Some(Ok(res)) => write_edge_cache(ipc, IpcKind::SpareEdge, item_id, &res).map_or(SpareOutcome::Failed, SpareOutcome::Made),
+        Some(Ok(res)) => write_edge_cache(IpcKind::SpareEdge.path_for(ipc, token), item_id, &res).map_or(SpareOutcome::Failed, SpareOutcome::Made),
         Some(Err(err)) => {
             tracing::warn!(item_id, %err, "spare line scales failed");
             SpareOutcome::Failed
@@ -743,7 +741,7 @@ pub fn run_worker() -> ! {
                             };
 
                             let edge_cache = edge_tensor_for_cache.as_ref()
-                                .and_then(|res| write_edge_cache(&ipc, IpcKind::Edge, item_id, res));
+                                .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
                             let spare_scales = (edge_cache.is_some() && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token);
 
                             // Write result RGBA to temp file
@@ -964,7 +962,7 @@ pub fn run_worker() -> ! {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
-                            let edge_cache = write_edge_cache(&ipc, IpcKind::Edge, item_id, &edge_res);
+                            let edge_cache = write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, &edge_res);
                             let spare_scales = (edge_cache.is_some() && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token);
 
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
