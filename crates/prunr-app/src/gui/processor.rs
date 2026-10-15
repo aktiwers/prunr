@@ -2477,7 +2477,7 @@ mod tests {
         let mut p = fixture();
         let _batch = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject"));
         // Not a face model: the search fails at once, without loading anything.
-        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default());
+        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Original(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let landed = loop {
             if let Some(r) = p.pump_faces_results().pop() { break r; }
