@@ -319,6 +319,14 @@ jobs:
             }
           }
 
+      # The staged runtime must load under our ort version, carry
+      # DirectML and run a model. The session runs on the CPU (the runner
+      # has no GPU), so DirectML.dll itself is never loaded here.
+      - name: Smoke-test the shipped runtime (Windows)
+        if: matrix.name == 'windows-x86_64'
+        timeout-minutes: 15
+        run: cargo xtask probe-load-dynamic runtime-stage/onnxruntime.dll --require-ep DmlExecutionProvider
+
       - name: Package Windows zip
         if: matrix.name == 'windows-x86_64'
         shell: pwsh
