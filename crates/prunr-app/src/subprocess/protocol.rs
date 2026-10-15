@@ -365,9 +365,7 @@ fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
     }
 }
 
-/// Every IPC temp-file kind. One source of truth for the prefix +
-/// extension contract previously triplicated across 13 `format!` sites
-/// + the prefix tables + the drift-catcher test.
+/// Every IPC temp-file kind: its file-name prefix and extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpcKind {
     /// Parent → seg worker: encoded source bytes.
@@ -440,9 +438,8 @@ impl IpcKind {
     /// `InpaintMask` (the inpaint worker rewrites these per stroke and
     /// the gen suffix prevents stale-file races).
     pub fn path_for_gen(self, ipc_dir: &std::path::Path, id: u64, gen: u64) -> std::path::PathBuf {
-        // `debug_assert!` was insufficient — release builds would silently
-        // produce e.g. `result_5-0.raw` for the wrong variant, breaking
-        // path disambiguation in the IPC temp dir.
+        // A full assert, not a debug one: a wrong variant would produce
+        // e.g. `result_5-0.raw` in release, a name no reader expects.
         assert!(
             matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
             "path_for_gen only valid for InpaintImg / InpaintMask; got {self:?}"
@@ -879,7 +876,7 @@ mod tests {
         }
         for f in &cli {
             assert!(dir.join(f).exists(),
-                "CLI-persistent file {f} must survive a seg-scoped cleanup (B-CLI-1)");
+                "CLI-persistent file {f} must survive a seg-scoped cleanup");
         }
     }
 
@@ -946,7 +943,7 @@ mod tests {
     /// are the CLI parent's pre-staged retry inputs. Wiping them mid-
     /// batch on a worker crash made the CLI re-send paths to files it
     /// had just deleted, which surfaced as "Insufficient memory"
-    /// errors whose actual cause was self-inflicted (B-CLI-1).
+    /// errors whose actual cause was self-inflicted.
     #[test]
     fn seg_pipeline_cleanup_preserves_cli_persistent_temps() {
         let dir = std::env::temp_dir().join(format!(
