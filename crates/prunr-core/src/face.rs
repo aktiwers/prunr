@@ -101,13 +101,7 @@ impl FacePlace {
     /// The photo pixels a blend with `hair` can change, as (x, y, w, h):
     /// where the soft face mask reaches, clipped to the photo.
     fn reach(&self, hair: bool) -> Option<(u32, u32, u32, u32)> {
-        let [u0, v0, u1, v1] = face_mask(hair).reach;
-        let back = self.to_crop.inverse();
-        let corners = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]].map(|p| back.apply(p));
-        let [w, h] = self.photo_size;
-        let lo = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MAX, f32::min).floor().max(0.0) as u32).min(max);
-        let hi = |i: usize, max: u32| ((corners.iter().map(|p| p[i]).fold(f32::MIN, f32::max).ceil() + 1.0).max(0.0) as u32).min(max);
-        let (x0, y0, x1, y1) = (lo(0, w), lo(1, h), hi(0, w), hi(1, h));
+        let [x0, y0, x1, y1] = photo_span(&self.to_crop.inverse(), face_mask(hair).reach, self.photo_size, 1.0);
         (x1 > x0 && y1 > y0).then(|| (x0, y0, x1 - x0, y1 - y0))
     }
 }
@@ -128,19 +122,13 @@ pub struct RestoredFace {
 impl RestoredFace {
     fn new(place: FacePlace, original: RgbImage, restored: RgbImage) -> Self {
         let mask = &face_mask(false).weights;
-        let planes = |img: &RgbImage| -> [Vec<f32>; 3] { std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect()) };
-        let original_planes = planes(&original);
-        let restored_planes = colour_matched(planes(&restored), &original_planes, mask);
-        let low = |p: &[Vec<f32>; 3]| -> [Vec<f32>; 3] { std::array::from_fn(|c| gaussian(&p[c], FACE_SIZE, DETAIL_SIGMA)) };
-        let image = |p: &[Vec<f32>; 3]| RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
-            let i = (y * FACE_SIZE + x) as usize;
-            Rgb(std::array::from_fn(|c| p[c][i].round().clamp(0.0, 255.0) as u8))
-        });
+        let original_planes = crop_planes(&original);
+        let restored_planes = colour_matched(crop_planes(&restored), &original_planes, mask);
         Self {
             place,
-            original_low: image(&low(&original_planes)),
-            restored_low: image(&low(&restored_planes)),
-            restored: image(&restored_planes),
+            original_low: crop_image(&shading(&original_planes)),
+            restored_low: crop_image(&shading(&restored_planes)),
+            restored: crop_image(&restored_planes),
             original,
         }
     }
@@ -705,15 +693,10 @@ impl<'a> Base<'a> {
     /// the face's mean colour keeps it matched.
     fn retaken(face: &RestoredFace, image: &RgbaImage) -> Self {
         let original = warp_to_crop(image, &face.place.to_crop);
-        let planes: [Vec<f32>; 3] = std::array::from_fn(|c| original.pixels().map(|p| f32::from(p[c])).collect());
-        let low: [Vec<f32>; 3] = std::array::from_fn(|c| gaussian(&planes[c], FACE_SIZE, DETAIL_SIGMA));
-        let original_low = RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
-            let i = (y * FACE_SIZE + x) as usize;
-            Rgb(std::array::from_fn(|c| low[c][i].round().clamp(0.0, 255.0) as u8))
-        });
+        let original_low = crop_image(&shading(&crop_planes(&original)));
         let mask = &face_mask(false).weights;
-        let weight = mask.iter().sum::<f32>().max(f32::EPSILON);
-        let mean = |img: &RgbImage, c: usize| img.pixels().zip(mask).map(|(p, m)| f32::from(p[c]) * m).sum::<f32>() / weight;
+        let weight = mask_weight(mask);
+        let mean = |img: &RgbImage, c: usize| masked_mean(img.pixels().map(|p| f32::from(p[c])), mask, weight);
         let shift = std::array::from_fn(|c| mean(&original, c) - mean(&face.original, c));
         Self { original: std::borrow::Cow::Owned(original), original_low: std::borrow::Cow::Owned(original_low), shift }
     }
@@ -726,6 +709,43 @@ impl<'a> Base<'a> {
 /// invented edges measure as sharp as real detail.
 fn detail_reach(face: &RestoredFace) -> f32 {
     face.place.to_crop.scale().clamp(0.25, 1.0)
+}
+
+/// A crop's channels as f32 planes.
+fn crop_planes(img: &RgbImage) -> [Vec<f32>; 3] {
+    std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect())
+}
+
+/// f32 planes back to a crop, rounded and clamped.
+fn crop_image(planes: &[Vec<f32>; 3]) -> RgbImage {
+    RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
+        let i = (y * FACE_SIZE + x) as usize;
+        Rgb(std::array::from_fn(|c| planes[c][i].round().clamp(0.0, 255.0) as u8))
+    })
+}
+
+/// A crop's shading layer: each plane low-passed below the detail scale.
+fn shading(planes: &[Vec<f32>; 3]) -> [Vec<f32>; 3] {
+    std::array::from_fn(|c| gaussian(&planes[c], FACE_SIZE, DETAIL_SIGMA))
+}
+
+/// The divisor for `masked_mean` over `mask`.
+fn mask_weight(mask: &[f32]) -> f32 {
+    mask.iter().sum::<f32>().max(f32::EPSILON)
+}
+
+fn masked_mean(values: impl Iterator<Item = f32>, mask: &[f32], weight: f32) -> f32 {
+    values.zip(mask).map(|(v, m)| v * m).sum::<f32>() / weight
+}
+
+/// The photo pixels, as (x0, y0, x1, y1) clipped to `size`, covered by the
+/// crop rectangle `[u0, v0, u1, v1]` taken through `to_photo`; `pad` is
+/// added past the far edge.
+fn photo_span(to_photo: &Similarity, [u0, v0, u1, v1]: [f32; 4], [w, h]: [u32; 2], pad: f32) -> [u32; 4] {
+    let corners = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]].map(|p| to_photo.apply(p));
+    let lo = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MAX, f32::min).floor().max(0.0) as u32).min(max);
+    let hi = |i: usize, max: u32| ((corners.iter().map(|p| p[i]).fold(f32::MIN, f32::max).ceil() + pad).max(0.0) as u32).min(max);
+    [lo(0, w), lo(1, h), hi(0, w), hi(1, h)]
 }
 
 /// `restored` shifted to the original's mean brightness and colour over
@@ -746,8 +766,8 @@ fn colour_matched(restored: [Vec<f32>; 3], original: &[Vec<f32>; 3], mask: &[f32
         }).collect())
     };
     let (r_ycc, o_ycc) = (to_ycc(&restored), to_ycc(original));
-    let weight: f32 = mask.iter().sum::<f32>().max(f32::EPSILON);
-    let mean = |plane: &[f32]| plane.iter().zip(mask).map(|(v, m)| v * m).sum::<f32>() / weight;
+    let weight = mask_weight(mask);
+    let mean = |plane: &[f32]| masked_mean(plane.iter().copied(), mask, weight);
     let matched: [Vec<f32>; 3] = std::array::from_fn(|c| {
         let shift = mean(&o_ycc[c]) - mean(&r_ycc[c]);
         r_ycc[c].iter().map(|v| v + shift).collect()
@@ -765,13 +785,10 @@ fn colour_matched(restored: [Vec<f32>; 3], original: &[Vec<f32>; 3], mask: &[f32
 /// Paste the blended crop into `out` through the face mask, over the
 /// photo pixels the crop covers. Alpha is left as it was.
 fn paste(out: &mut RgbaImage, face: &RestoredFace, blended: &[Vec<f32>; 3], mask: &[f32]) {
-    let to_photo = face.place.to_crop.inverse();
-    let corners = [[0.0, 0.0], [FACE_SIZE as f32, 0.0], [0.0, FACE_SIZE as f32], [FACE_SIZE as f32, FACE_SIZE as f32]].map(|p| to_photo.apply(p));
-    let (w, h) = out.dimensions();
-    let lo = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MAX, f32::min).floor().max(0.0) as u32).min(max);
-    let hi = |i: usize, max: u32| (corners.iter().map(|p| p[i]).fold(f32::MIN, f32::max).ceil().max(0.0) as u32).min(max);
-    for y in lo(1, h)..hi(1, h) {
-        for x in lo(0, w)..hi(0, w) {
+    let side = FACE_SIZE as f32;
+    let [x0, y0, x1, y1] = photo_span(&face.place.to_crop.inverse(), [0.0, 0.0, side, side], [out.width(), out.height()], 0.0);
+    for y in y0..y1 {
+        for x in x0..x1 {
             let [u, v] = face.place.to_crop.apply([x as f32, y as f32]);
             if !in_crop(u, v) {
                 continue;
