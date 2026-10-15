@@ -208,10 +208,9 @@ impl LayerJob {
         LayerKind::ALL.iter()
             .copied()
             .filter_map(|kind| {
-                let bytes = match render_layer(self, kind, &src, seg.as_ref(), depth)? {
-                    LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png(&rgba).ok()?,
-                    LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray).ok()?,
-                };
+                let layer = render_layer(self, kind, &src, seg.as_ref(), depth)?;
+                let mut bytes = Vec::with_capacity(layer.raw_len() / 2);
+                layer.encode_into(&mut bytes).ok()?;
                 Some((make_layer_filename(&self.filename, kind), bytes))
             })
             .collect()
@@ -303,6 +302,23 @@ enum LayerOutput {
     Gray(image::GrayImage),
 }
 
+impl LayerOutput {
+    fn raw_len(&self) -> usize {
+        match self {
+            Self::Rgba(rgba) => rgba.as_raw().len(),
+            Self::Gray(gray) => gray.as_raw().len(),
+        }
+    }
+
+    /// The layer as a PNG, streamed into `w`.
+    fn encode_into(&self, w: impl std::io::Write) -> Result<(), prunr_core::CoreError> {
+        match self {
+            Self::Rgba(rgba) => prunr_core::encode_rgba_png_into(rgba, w),
+            Self::Gray(gray) => prunr_core::encode_gray_png_into(gray, w),
+        }
+    }
+}
+
 fn write_layer(
     job: &LayerJob,
     kind: LayerKind,
@@ -312,14 +328,7 @@ fn write_layer(
 ) -> std::io::Result<Option<PathBuf>> {
     let Some(layer) = render_layer(job, kind, src, seg, depth) else { return Ok(None) };
     let path = item_dir(job.item_id).join(make_layer_filename(&job.filename, kind));
-    write_atomically(&path, |w| match layer {
-        LayerOutput::Rgba(rgba) => prunr_core::encode_rgba_png_into(&rgba, w),
-        // No streaming variant for Gray yet — encode_gray_png allocates
-        // a small Vec (mask is single-channel, ~12 MB at 4 K vs ~50 MB
-        // RGBA). Acceptable for this layer's traffic.
-        LayerOutput::Gray(gray) => prunr_core::encode_gray_png(&gray)
-            .and_then(|bytes| std::io::Write::write_all(w, &bytes).map_err(prunr_core::CoreError::Io)),
-    })?;
+    write_atomically(&path, |w| layer.encode_into(w))?;
     Ok(Some(path))
 }
 
