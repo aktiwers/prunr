@@ -433,14 +433,10 @@ mod tests {
         BrushSettings { radius, ..BrushSettings::default() }
     }
 
-    fn item_with(gamma: f32) -> ItemSettings {
-        ItemSettings { gamma, ..ItemSettings::default() }
-    }
-
     #[test]
     fn resolve_full_entry_returns_preset_values() {
         let mp = ModelPreset {
-            item_settings: item_with(2.5),
+            item_settings: crate::gui::item_settings::item_with_gamma(2.5),
             brush: brush_with(80.0),
             sd: None,
         };
