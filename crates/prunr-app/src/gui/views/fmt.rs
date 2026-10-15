@@ -3,12 +3,12 @@
 //! px and EV, none before %, an explicit sign where direction matters, and
 //! no Greek prefixes.
 
-/// "Off" below `off_below`, otherwise `f(v)`.
 /// "1 image", "3 images".
 pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// "Off" below `off_below`, otherwise `f(v)`.
 pub fn off_or(v: f32, off_below: f32, f: impl FnOnce(f32) -> String) -> String {
     if v.abs() < off_below { "Off".to_string() } else { f(v) }
 }

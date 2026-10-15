@@ -254,10 +254,6 @@ pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<
     })
 }
 
-/// Names a control for the accessibility tree, which is what the test
-/// harness and the control socket find widgets by. Icon-only buttons
-/// have no readable name of their own; the tooltip title is it. Free
-/// when the tree is off.
 /// A destructive button that needs two clicks: the first arms it (it then
 /// reads `armed_text`), the second returns true. Arming is held under
 /// `scope`, so arming another `key` disarms this one, and the caller
@@ -276,6 +272,10 @@ pub(super) fn confirm_button(ui: &mut Ui, scope: egui::Id, key: &str, idle: Rich
     clicked && armed
 }
 
+/// Names a control for the accessibility tree, which is what the test
+/// harness and the control socket find widgets by. Icon-only buttons
+/// have no readable name of their own; the tooltip title is it. Free
+/// when the tree is off.
 pub(super) fn named(resp: Response, name: &str) -> Response {
     resp.ctx.accesskit_node_builder(resp.id, |node| node.set_label(name));
     resp
@@ -403,7 +403,6 @@ fn scrubbing_in(ui: &Ui) -> bool {
     origin.is_some_and(|o| ctx.layer_id_at(o) == Some(ui.layer_id()))
 }
 
-/// Float slider row with the log scale and formatter float knobs need.
 /// A percent stored as `u8`, shown and dragged as 0–100 %.
 pub fn slider_row_pct(ui: &mut Ui, label: &str, pct: &mut u8, format: impl Fn(f32) -> String) -> ChipChange {
     let mut v = f32::from(*pct) / 100.0;
@@ -414,6 +413,7 @@ pub fn slider_row_pct(ui: &mut Ui, label: &str, pct: &mut u8, format: impl Fn(f3
     change
 }
 
+/// Float slider row with the log scale and formatter float knobs need.
 pub fn slider_row_f32(
     ui: &mut Ui,
     label: &str,
@@ -614,10 +614,10 @@ fn row_wash(resp: &Response, selected: bool) -> Color32 {
     }
 }
 
-/// The picked row's check, `inset` from its right edge.
 /// The picked row's check mark size.
 const ROW_CHECK_SIZE: f32 = 16.0;
 
+/// The picked row's check, `inset` from its right edge.
 fn paint_row_check(painter: &egui::Painter, rect: egui::Rect, inset: f32) {
     painter.text(egui::pos2(rect.right() - inset, rect.center().y), egui::Align2::RIGHT_CENTER, ICON_CHECK.codepoint,
         egui::FontId::proportional(ROW_CHECK_SIZE), theme::ACCENT_RING);
@@ -849,9 +849,6 @@ impl GroupChip<'_> {
     }
 }
 
-/// Render a group chip. `body` receives `reset == true` on the frame the
-/// group's Reset was clicked, before any of its rows render. Returns the
-/// body's value while the popover is open.
 /// The popup a group chip opens.
 fn group_chip_id(id_salt: &str) -> egui::Id {
     egui::Id::new(("group_chip", id_salt))
@@ -862,6 +859,9 @@ pub(super) fn group_chip_open(ctx: &egui::Context, id_salt: &str) -> bool {
     egui::Popup::is_id_open(ctx, group_chip_id(id_salt))
 }
 
+/// Render a group chip. `body` receives `reset == true` on the frame the
+/// group's Reset was clicked, before any of its rows render. Returns the
+/// body's value while the popover is open.
 pub(super) fn group_chip<R>(
     ui: &mut Ui,
     g: GroupChip<'_>,
