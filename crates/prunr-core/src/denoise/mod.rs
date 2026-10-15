@@ -144,22 +144,9 @@ pub(crate) fn bilateral_filter_channel(
         .for_each(|(y, row_out)| {
             let src_row = &src[y * width..(y + 1) * width];
             for x in 0..width {
-                let center = src_row[x] as f32;
-                let center_norm = center / 255.0;
-                let mut weighted_sum = 0.0f32;
-                let mut weight_sum = 0.0f32;
-                for (ki, &sp_w) in spatial_kernel.iter().enumerate() {
-                    let sx = (x as isize + ki as isize - radius as isize)
-                        .clamp(0, width as isize - 1) as usize;
-                    let neighbor = src_row[sx] as f32;
-                    let diff = center_norm - neighbor / 255.0;
-                    let range_w = (-(diff * diff) / range_sigma2).exp();
-                    let w = sp_w * range_w;
-                    weighted_sum += neighbor * w;
-                    weight_sum += w;
-                }
-                let denom = weight_sum.max(1e-6);
-                row_out[x] = weighted_sum / denom;
+                row_out[x] = bilateral_tap(src_row[x] as f32, &spatial_kernel, range_sigma2, |d| {
+                    src_row[(x as isize + d).clamp(0, width as isize - 1) as usize] as f32
+                });
             }
         });
 
@@ -168,27 +155,34 @@ pub(crate) fn bilateral_filter_channel(
         .enumerate()
         .for_each(|(y, row_out)| {
             for x in 0..width {
-                let center = h_pass[y * width + x];
-                let center_norm = center / 255.0;
-                let mut weighted_sum = 0.0f32;
-                let mut weight_sum = 0.0f32;
-                for (ki, &sp_w) in spatial_kernel.iter().enumerate() {
-                    let sy = (y as isize + ki as isize - radius as isize)
-                        .clamp(0, height as isize - 1) as usize;
-                    let neighbor = h_pass[sy * width + x];
-                    let diff = center_norm - neighbor / 255.0;
-                    let range_w = (-(diff * diff) / range_sigma2).exp();
-                    let w = sp_w * range_w;
-                    weighted_sum += neighbor * w;
-                    weight_sum += w;
-                }
-                let denom = weight_sum.max(1e-6);
-                let filtered = weighted_sum / denom;
+                let filtered = bilateral_tap(h_pass[y * width + x], &spatial_kernel, range_sigma2, |d| {
+                    h_pass[(y as isize + d).clamp(0, height as isize - 1) as usize * width + x]
+                });
                 row_out[x] = filtered.clamp(0.0, 255.0) as u8;
             }
         });
 
     out
+}
+
+/// One output sample of the bilateral pass: `kernel` (centred, odd
+/// length) weighted by intensity closeness to `center`. `neighbour(d)`
+/// is the value `d` taps from the centre, border-clamped by the caller.
+#[inline]
+fn bilateral_tap(center: f32, kernel: &[f32], range_sigma2: f32, neighbour: impl Fn(isize) -> f32) -> f32 {
+    let radius = (kernel.len() / 2) as isize;
+    let center_norm = center / 255.0;
+    let mut weighted_sum = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    for (ki, &sp_w) in kernel.iter().enumerate() {
+        let neighbor = neighbour(ki as isize - radius);
+        let diff = center_norm - neighbor / 255.0;
+        let range_w = (-(diff * diff) / range_sigma2).exp();
+        let w = sp_w * range_w;
+        weighted_sum += neighbor * w;
+        weight_sum += w;
+    }
+    weighted_sum / weight_sum.max(1e-6)
 }
 
 /// Apply classical denoise to the RGB channels of `img`. Alpha is copied
@@ -294,6 +288,41 @@ mod tests {
         for &v in &out {
             assert_eq!(v, 128, "constant input should produce constant output");
         }
+    }
+
+    /// The separable passes, written out tap by tap as a reference.
+    #[test]
+    fn bilateral_filter_channel_matches_a_tap_by_tap_reference() {
+        let (w, h, sigma, range) = (19usize, 13usize, 1.5f32, 0.1f32);
+        let src: Vec<u8> = (0..w * h).map(|i| ((i * 97 + i / 7 * 31) % 256) as u8).collect();
+        let r = (2.0 * sigma).ceil() as isize;
+        let kernel: Vec<f32> = (-r..=r).map(|d| (-0.5 * (d * d) as f32 / (sigma * sigma)).exp()).collect();
+        let rs2 = 2.0 * range * range;
+        let tap = |center: f32, at: &dyn Fn(isize) -> f32| {
+            let (mut ws, mut wsum) = (0.0f32, 0.0f32);
+            for (k, &sp) in kernel.iter().enumerate() {
+                let n = at(k as isize - r);
+                let diff = center / 255.0 - n / 255.0;
+                let wt = sp * (-(diff * diff) / rs2).exp();
+                ws += n * wt;
+                wsum += wt;
+            }
+            ws / wsum.max(1e-6)
+        };
+        let clamp = |v: isize, len: usize| v.clamp(0, len as isize - 1) as usize;
+        let hp: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                tap(src[i] as f32, &|d| src[y * w + clamp(x as isize + d, w)] as f32)
+            })
+            .collect();
+        let want: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                tap(hp[i], &|d| hp[clamp(y as isize + d, h) * w + x]).clamp(0.0, 255.0) as u8
+            })
+            .collect();
+        assert_eq!(bilateral_filter_channel(&src, w, h, sigma, range), want);
     }
 
     #[test]
