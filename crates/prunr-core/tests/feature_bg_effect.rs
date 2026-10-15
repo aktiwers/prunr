@@ -2,8 +2,7 @@
 //! its transparency, and the effect's picture of the photo fills it when
 //! composed behind, as export does.
 //!
-//! NOT a pixel-bit-exact gate (that's `golden_e2e`). Skip-on-missing-ORT
-//! mirrors `golden_e2e`'s pattern.
+//! Not a pixel-bit-exact gate.
 
 mod test_common;
 
