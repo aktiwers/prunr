@@ -334,8 +334,12 @@ fn build_bg_layer(
 /// immediately `fs::write` the bytes anyway. Saves 5–30 MB transient
 /// per encode at 4 K. Sink is flushed by the caller.
 pub fn encode_rgba_png_into<W: std::io::Write>(img: &RgbaImage, w: W) -> Result<(), CoreError> {
-    let encoder = PngEncoder::new_with_quality(w, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+    write_fast_png(w, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+}
+
+fn write_fast_png<W: std::io::Write>(w: W, bytes: &[u8], width: u32, height: u32, ty: image::ExtendedColorType) -> Result<(), CoreError> {
+    PngEncoder::new_with_quality(w, CompressionType::Fast, PngFilter::Sub)
+        .write_image(bytes, width, height, ty)
         .map_err(CoreError::from)
 }
 
@@ -424,9 +428,7 @@ fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
 /// Encode a GrayImage (L8) as PNG bytes with fast compression.
 pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
-    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
-        .map_err(CoreError::from)?;
+    write_fast_png(&mut buf, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)?;
     Ok(buf)
 }
 
@@ -434,9 +436,7 @@ pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
 pub fn encode_gray16_png(img: &image::ImageBuffer<image::Luma<u16>, Vec<u16>>) -> Result<Vec<u8>, CoreError> {
     use image::EncodableLayout;
     let mut buf = Vec::with_capacity(img.as_raw().len());
-    let encoder = PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, PngFilter::Sub);
-    encoder.write_image(img.as_raw().as_bytes(), img.width(), img.height(), image::ExtendedColorType::L16)
-        .map_err(CoreError::from)?;
+    write_fast_png(&mut buf, img.as_raw().as_bytes(), img.width(), img.height(), image::ExtendedColorType::L16)?;
     Ok(buf)
 }
 
