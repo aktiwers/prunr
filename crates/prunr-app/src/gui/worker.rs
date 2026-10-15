@@ -774,8 +774,7 @@ fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
 }
 
 /// What the initial dispatch burst sent to the freshly-spawned (or
-/// pre-warmed) subprocess. Replaces a 4-tuple alias whose meaning was
-/// pinned only by a comment.
+/// pre-warmed) subprocess.
 struct InitialBurst {
     sub: SubprocessManager,
     sent: SentWork,
@@ -1352,7 +1351,7 @@ fn finalize_or_continue(
     true
 }
 
-/// Boot a worker with `cfg`'s model before any Process asks for it: at
+/// Boot a worker with `spec`'s model before any Process asks for it: at
 /// start-up and on a switch to a cut-out model. Blocks the bridge thread
 /// for the load; a Process sent meanwhile waits for it, as it would for
 /// its own.
