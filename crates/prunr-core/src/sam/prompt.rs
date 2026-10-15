@@ -1,6 +1,5 @@
-//! SAM 2 decoder prompt construction. Click + Stroke interactions
-//! with Shift (add) + Alt (subtract) modifiers. All coordinate
-//! normalization runs through `normalize` — source-pixel coords are
+//! SAM 2 decoder prompt construction for clicks and strokes. All
+//! coordinate normalization runs through `normalize` — source-pixel coords are
 //! mapped to 0..SAM_ENCODER_INPUT space; screen-pixel or raw click coords
 //! must NOT reach the decoder, the resulting mask would be off-by-scale.
 
@@ -48,8 +47,7 @@ fn normalize(x_pixel: f32, y_pixel: f32, source_w: u32, source_h: u32) -> (f32, 
 }
 
 /// Single-point click prompt. Foreground hint with one padding slot
-/// to satisfy SAM 2's even-N convention. Caller applies the resulting
-/// MaskArtifact directly (replaces current selection).
+/// to satisfy SAM 2's even-N convention.
 pub fn build_click_prompt(
     x_pixel: f32,
     y_pixel: f32,
@@ -67,8 +65,7 @@ pub fn build_click_prompt(
 
 /// Multi-point stroke prompt. Decimates to at most MAX_STROKE_POINTS evenly-
 /// spaced samples, all foreground. Always appends one padding point at (0,0)
-/// with label -1.0 for SAM 2 robustness. Caller applies the resulting
-/// MaskArtifact directly (replaces current selection).
+/// with label -1.0 for SAM 2 robustness.
 ///
 /// Returns `Err(PromptError::EmptyStroke)` for zero-length input.
 pub fn build_stroke_prompt(
