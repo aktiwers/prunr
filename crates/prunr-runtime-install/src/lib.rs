@@ -278,7 +278,7 @@ fn download_wheel_attempt(
     let mut last_pct: u64 = u64::MAX;
     loop {
         if hooks.cancel.load(Ordering::Relaxed) {
-            return Err(DlError::fatal("cancelled"));
+            return Err(DlError::cancelled());
         }
         let n = match response.read(&mut chunk) {
             Ok(n) => n,
