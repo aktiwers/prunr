@@ -214,7 +214,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         }
 
         // Magic Brush click/stroke input. Suppressed during encoder run (silently —
-        // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
+        // clicks while encoder_pending are ignored without a toast).
         if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
             handle_magic_brush_input(ui, app, canvas_rect);
         }
@@ -232,7 +232,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Bottom-left modifier hint — shown whenever Magic Brush is the active
     // tool (regardless of encoder state) so users discover Shift / Alt
     // before they need them. Active modifier tints to ACCENT; the rest stays
-    // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
+    // TEXT_SECONDARY.
     if app.magic_brush_state.is_active() || app.brush_state.is_enabled() {
         let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
         let base_color = theme::TEXT_SECONDARY;
@@ -268,10 +268,7 @@ fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, glyph: &str) {
 }
 
 /// Run the brush overlay (cursor + pointer events) and commit any
-/// finished stroke onto the active item. Pan is suppressed in this mode
-/// — `render_done`'s pan logic already runs with `is_panning = false`
-/// because brush mode disables the press tracking via the `canvas_gets_input`
-/// gate.
+/// finished stroke onto the active item.
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
     let Some(item) = app.batch.selected_item() else { return };
@@ -333,7 +330,7 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
 
 /// Handle Magic Brush pointer events (click + drag-stroke) on the canvas.
 /// Suppressed when encoder is pending — clicks during "Preparing..." are
-/// silently ignored (per 33-UI-SPEC). Dispatches a SAM decoder job on
+/// silently ignored. Dispatches a SAM decoder job on
 /// every click or completed stroke; modifier keys control mask combination.
 ///
 /// Also owns the per-frame visual feedback for the tool: crosshair cursor
@@ -764,8 +761,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // Selection overlay — same call as `render_done`. Required here too
         // because Magic Brush authors selections directly on the source
         // image, before any Process click; without this the action bar
-        // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
-        // Visualization — Render gating".
+        // shows but the user sees no mask.
         if let Some(it) = app.batch.selected_item() {
             draw_face_preview(ui, it, img_rect);
             draw_selection(ui, app, it, img_rect);

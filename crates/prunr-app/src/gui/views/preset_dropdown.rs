@@ -5,12 +5,12 @@
 //! and the naming dialog state) + `&mut ItemSettings` (the current image's
 //! settings — source of a Save, target of an Apply).
 //!
-//! Returns `true` when the current item's settings changed (Apply), so the
-//! caller can invalidate textures / reset cached tensors.
+//! Returns the applied preset's name (Apply), so the caller can record it
+//! on the item.
 //!
-//! The "Save preset" naming dialog lives on `AppSettings.preset_name_buffer`
-//! (a transient field, `#[serde(skip)]`). It opens on "Save current as..." and
-//! closes when the user confirms or cancels.
+//! The "Save preset" naming dialog's text lives in `PresetUi.save_dialog`.
+//! It opens on "Save current as..." and closes when the user confirms or
+//! cancels.
 
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
@@ -79,6 +79,8 @@ pub(crate) struct PresetUi<'a> {
 /// preset (click on a row, or Save that swaps in the new name), so the caller
 /// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
 /// non-apply interactions (saves, deletes, star toggles).
+// Legacy `toggle_popup` / `popup_below_widget` wiring: the Preset chip
+// opens like the chip popovers but draws no open-chip outline.
 #[allow(deprecated)]
 pub(crate) fn render(
     ui: &mut Ui,

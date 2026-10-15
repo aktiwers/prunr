@@ -198,7 +198,7 @@ pub(super) fn paint_falloff_square(
 }
 
 /// Square icon-only button with an active/inactive visual state. Used by
-/// the toolbar's Reset / Brush toggles and any future single-icon pill.
+/// the toolbar's Reset / Brush toggles.
 ///
 /// `icon` is `&str` rather than `char` even though every caller passes a
 /// single Unicode code point — `egui::RichText::new` doesn't accept
@@ -295,8 +295,8 @@ pub(super) fn reset_button(ui: &mut Ui, label: &str, enabled: bool) -> Response 
 }
 
 /// Wire a popup to a chip button. Handles toggle-on-click.
-/// Uses the legacy `popup_below_widget` API; egui's newer `Popup::` builder
-/// is a future cleanup. Deprecation is isolated to this helper.
+/// Uses the legacy `popup_below_widget` API; the deprecation is isolated
+/// to this helper.
 #[allow(deprecated)]
 pub(super) fn popup_for(
     ui: &mut Ui,

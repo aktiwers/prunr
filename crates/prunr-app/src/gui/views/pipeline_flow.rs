@@ -1,6 +1,6 @@
 //! F3 modal: the processing order of each mode, one tab per pipeline,
 //! with a one-line explanation per step so the user can predict how a
-//! knob change cascades. Step names match the toolbar rows.
+//! knob change cascades.
 
 use egui::RichText;
 use egui_material_icons::icons::*;
