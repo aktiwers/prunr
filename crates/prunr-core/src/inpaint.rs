@@ -899,11 +899,9 @@ fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
 
-/// Source rect (in image pixels) for one inpaint tile + the same rect
-/// in the destination buffer (always identical here, but the type
-/// makes future repositioning explicit).
+/// One planned inpaint tile: its rect in image pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TilePlacement {
+pub(crate) struct TilePlacement {
     pub x: u32,
     pub y: u32,
     pub w: u32,
