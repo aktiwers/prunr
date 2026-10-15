@@ -351,17 +351,26 @@ impl MaskArtifact {
 
     /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
     pub fn bounds(&self) -> Option<CellRect> {
+        if self.is_blank() {
+            return None;
+        }
+        self.bounds_where(|v| v != 0)
+    }
+
+    /// The bounding rectangle of the cells `pred` accepts; `None` when it
+    /// accepts none.
+    pub fn bounds_where(&self, pred: impl Fn(i8) -> bool + Sync) -> Option<CellRect> {
         let w = self.width as usize;
-        if self.is_blank() || w == 0 {
+        if w == 0 {
             return None;
         }
         self.data
             .par_chunks(w)
             .enumerate()
             .filter_map(|(y, row)| {
-                let x0 = row.iter().position(|&v| v != 0)? as u32;
-                // the row has a non-zero cell, found just above
-                let x1 = row.iter().rposition(|&v| v != 0).unwrap_or(0) as u32;
+                let x0 = row.iter().position(|&v| pred(v))? as u32;
+                // the row has an accepted cell, found just above
+                let x1 = row.iter().rposition(|&v| pred(v)).unwrap_or(0) as u32;
                 Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
             })
             .reduce_with(CellRect::union)
