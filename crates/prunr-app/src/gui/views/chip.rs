@@ -320,9 +320,6 @@ pub(super) fn popup_for(
     );
 }
 
-/// Opacity of a flyout while one of its sliders is held.
-const GHOST_OPACITY: f32 = 0.35;
-
 /// A popover for knobs that change the image live. It stays open while
 /// the user works on the canvas: its chip, Escape or another chip closes
 /// it, never a click elsewhere. While one of its sliders is held it fades
@@ -357,7 +354,7 @@ fn show_flyout(id: egui::Id, chip: &Response, popup: egui::Popup<'_>, body: impl
         .show(|ui| {
             theme::register_flyout(ui.ctx(), id);
             if scrubbing_in(ui) {
-                ui.set_opacity(GHOST_OPACITY);
+                ui.set_opacity(theme::SCRUB_OPACITY);
             }
             body(ui);
         });
