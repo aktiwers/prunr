@@ -10,6 +10,16 @@ mod models;
 use models::MODELS;
 
 const XTASK_USER_AGENT: &str = "prunr-xtask/0.1";
+/// Where fetch-models keeps the `.onnx` files and their `.zst` siblings,
+/// relative to the workspace root.
+const MODELS_DIR: &str = "models";
+/// Download tries per model: the first plus two retries.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// The `.onnx.zst` that `prunr-models` embeds for `onnx_path`.
+fn zst_sibling(onnx_path: &Path) -> PathBuf {
+    onnx_path.with_extension("onnx.zst")
+}
 
 /// Copy `src` to where the app downloads `id` (the registry-versioned
 /// filename in the user data dir), so the production OnDemand path
@@ -190,9 +200,9 @@ impl std::fmt::Display for FetchError {
 /// 4xx fails immediately.
 fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec<u8>> {
     let cancel = Arc::new(AtomicBool::new(false));
-    retry_with_backoff(&cancel, 3, 1000, |attempt| {
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, 1000, |attempt| {
         if attempt > 0 {
-            println!("  retry {attempt}/2");
+            println!("  retry {attempt}/{}", DOWNLOAD_ATTEMPTS - 1);
         }
         let mut response = client
             .get(url)
@@ -217,11 +227,11 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
 }
 
 fn fetch_models() -> anyhow::Result<()> {
-    std::fs::create_dir_all("models")?;
+    std::fs::create_dir_all(MODELS_DIR)?;
     let client = prunr_runtime_install::http_client(XTASK_USER_AGENT)?;
 
     for spec in MODELS {
-        let dest = std::path::Path::new("models").join(spec.name);
+        let dest = Path::new(MODELS_DIR).join(spec.name);
 
         if dest.exists() {
             println!("{}: exists, verifying checksum...", spec.name);
@@ -274,9 +284,9 @@ fn fetch_models() -> anyhow::Result<()> {
     // Belt-and-braces for the case where someone fetched models with an older
     // xtask and the .zst step never ran.
     for spec in MODELS {
-        let dest = std::path::Path::new("models").join(spec.name);
+        let dest = Path::new(MODELS_DIR).join(spec.name);
         if !dest.exists() { continue; }
-        let zst_path = dest.with_extension("onnx.zst");
+        let zst_path = zst_sibling(&dest);
         let needs = match (dest.metadata(), zst_path.metadata()) {
             (Ok(_), Err(_)) => true,
             (Ok(o), Ok(z)) => o.modified().ok() > z.modified().ok(),
@@ -295,7 +305,7 @@ fn fetch_models() -> anyhow::Result<()> {
 /// zstd level 19 — matches the existing `.onnx.zst` artefacts that
 /// `prunr-models` embeds via `include_bytes!`.
 fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let zst_path = onnx_path.with_extension("onnx.zst");
+    let zst_path = zst_sibling(onnx_path);
     let compressed = zstd::bulk::compress(bytes, 19)?;
     let onnx_mb = bytes.len() as f64 / 1024.0 / 1024.0;
     let zst_mb = compressed.len() as f64 / 1024.0 / 1024.0;
