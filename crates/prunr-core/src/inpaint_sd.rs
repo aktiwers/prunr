@@ -1022,7 +1022,7 @@ fn known_cells(image: &RgbaImage, mask: &GrayImage, (lw, lh): (usize, usize)) ->
             let p = image.get_pixel(x, y);
             sum.iter_mut().zip(p.0).for_each(|(s, v)| *s += f32::from(v));
         }
-        Some(sum.map(|s| s / 64.0 / 127.5 - 1.0))
+        Some(sum.map(|s| byte_to_unit(s / 64.0)))
     }).collect()
 }
 
@@ -2091,10 +2091,9 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
     let plane = w_us * h_us;
     let raw = image.as_raw();
     let m = mask.map(|m| m.as_raw());
-    // Match the byte-128 path's bit pattern: same f32 division as the
-    // unmasked branch, just on a constant input. Hardcoding `0.0`
-    // would diverge by ~0.00392.
-    let v_fill = (128.0_f32 / 127.5) - 1.0;
+    // The byte-128 grey through the same conversion as the unmasked
+    // branch. Hardcoding `0.0` would diverge by ~0.00392.
+    let v_fill = byte_to_unit(128.0);
     for y in 0..h_us {
         let src_row = y * w_us * 4;
         let dst_row = y * w_us;
@@ -2102,9 +2101,9 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
         for x in 0..w_us {
             let dst = dst_row + x;
             let src = src_row + x * 4;
-            let r = (raw[src]     as f32 / 127.5) - 1.0;
-            let g = (raw[src + 1] as f32 / 127.5) - 1.0;
-            let b = (raw[src + 2] as f32 / 127.5) - 1.0;
+            let r = byte_to_unit(f32::from(raw[src]));
+            let g = byte_to_unit(f32::from(raw[src + 1]));
+            let b = byte_to_unit(f32::from(raw[src + 2]));
             if let Some(m) = m {
                 // Binary cliff: mask > 127 → fully grey (inpaint
                 // region), else original. The SD-1.5 inpaint UNet was
@@ -2166,6 +2165,12 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
 #[inline]
 fn unit_to_byte(v: f32) -> u8 {
     ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
+}
+
+/// A byte (or a mean of bytes) as the [-1, 1] the VAE reads.
+#[inline]
+fn byte_to_unit(v: f32) -> f32 {
+    v / 127.5 - 1.0
 }
 
 /// Mask → latent space (1, 1, h/8, w/8) f32 in [0, 1].
