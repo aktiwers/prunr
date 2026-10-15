@@ -51,6 +51,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Settings mentions the Stable Diffusion eraser (its memory check, Keep it loaded, the memory guard, the CPU-only warning) only once an SD eraser is installed.
 - **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.24.1), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.
 - Copy selection and Cut put only the selected area on the clipboard, cropped to its edges; they put a full-size image with everything else clear.
 - Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.

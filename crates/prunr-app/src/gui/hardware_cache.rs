@@ -85,6 +85,12 @@ impl HardwareInstallCache {
     pub fn has_model(&self, model: crate::gui::settings::SettingsModel) -> bool {
         self.models & (1 << model.index()) != 0
     }
+
+    /// A Stable Diffusion eraser is installed: SD 1.5 (either quality) or RORem.
+    pub fn has_sd_eraser(&self) -> bool {
+        use crate::gui::settings::SettingsModel;
+        self.has_model(SettingsModel::SdInpaint) || self.has_model(SettingsModel::RoremInpaint) || self.lcm_bundle
+    }
 }
 
 const _: () = assert!(crate::gui::settings::SettingsModel::ALL.len() <= 32, "one bit per model in HardwareInstallCache::models");
