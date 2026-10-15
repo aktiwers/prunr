@@ -467,15 +467,27 @@ impl std::fmt::Display for ComposeMode {
     }
 }
 
+/// A display name in CLI form: lowercase, words joined by `-`.
+fn cli_name(display: &str) -> String {
+    display.to_ascii_lowercase().replace(' ', "-")
+}
+
+/// The entry of `all` whose display name matches `s` in CLI form, so any
+/// case and `-` or a space between words; else an error naming them all.
+fn parse_cli_name<T: Copy>(s: &str, all: &[T], name: impl Fn(T) -> &'static str) -> Result<T, String> {
+    let wanted = cli_name(s);
+    all.iter().copied().find(|&t| cli_name(name(t)) == wanted).ok_or_else(|| {
+        let names: Vec<String> = all.iter().map(|&t| cli_name(name(t))).collect();
+        format!("'{s}' is not one of {}", names.join(", "))
+    })
+}
+
 /// Accepts the display name in any case, with `-` or a space between
 /// words: `lines-only`, `Subject filled`.
 impl std::str::FromStr for ComposeMode {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let wanted = s.replace('-', " ");
-        Self::ALL.iter().copied().find(|m| m.to_string().eq_ignore_ascii_case(&wanted)).ok_or_else(|| {
-            format!("'{s}' is not one of lines-only, subject-filled, engraving, ghost")
-        })
+        parse_cli_name(s, Self::ALL, Self::name)
     }
 }
 
@@ -798,11 +810,7 @@ impl std::fmt::Display for FillStyle {
 impl std::str::FromStr for FillStyle {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let cli = |name: &str| name.to_ascii_lowercase().replace(' ', "-");
-        Self::ALL.iter().copied().find(|f| cli(f.name()) == cli(s)).ok_or_else(|| {
-            let names: Vec<String> = Self::ALL.iter().map(|f| cli(f.name())).collect();
-            format!("'{s}' is not one of {}", names.join(", "))
-        })
+        parse_cli_name(s, Self::ALL, |f| f.name())
     }
 }
 
@@ -903,11 +911,15 @@ mod tests {
     fn compose_mode_parses_every_display_name_in_cli_form() {
         use std::str::FromStr;
         for mode in ComposeMode::ALL {
-            let cli = mode.to_string().to_ascii_lowercase().replace(' ', "-");
-            assert_eq!(ComposeMode::from_str(&cli), Ok(*mode));
+            assert_eq!(ComposeMode::from_str(&cli_name(mode.name())), Ok(*mode));
         }
         assert_eq!(ComposeMode::from_str("Subject filled"), Ok(ComposeMode::SubjectFilled));
-        assert!(ComposeMode::from_str("inverse-mask").is_err(), "retired");
+        assert_eq!(ComposeMode::from_str("LINES only"), Ok(ComposeMode::LinesOnly));
+        assert_eq!(
+            ComposeMode::from_str("inverse-mask"),
+            Err("'inverse-mask' is not one of lines-only, subject-filled, engraving, ghost".to_string()),
+            "retired",
+        );
     }
 
     /// Stretch and Center are retired: saved settings load as the nearest
@@ -916,7 +928,7 @@ mod tests {
     fn every_effect_parses_from_its_cli_name() {
         use std::str::FromStr;
         for style in FillStyle::ALL {
-            let cli = style.name().to_ascii_lowercase().replace(' ', "-");
+            let cli = cli_name(style.name());
             assert_eq!(FillStyle::from_str(&cli), Ok(*style), "{cli}");
         }
         assert_eq!(FillStyle::from_str("Color splash").map(|f| f.name()), Ok("Color splash"));
