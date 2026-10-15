@@ -1188,11 +1188,11 @@ impl Processor {
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
     }
 
-    /// Drop every cached model session: the in-process LaMa, upscale and
-    /// colorize ones, and both workers'. On a model switch or a Processor
-    /// change.
+    /// Drop every cached model session: the in-process eraser, upscale
+    /// and colorize ones, and both workers'. On a model switch or a
+    /// Processor change.
     pub(crate) fn release_all_sessions(&mut self) {
-        prunr_core::inpaint::release_all_lama_sessions();
+        prunr_core::inpaint::release_all();
         self.release_upscale_engine();
         self.colorize.release_engine();
         *lock_warm_engine(&self.depth.warm) = None;
