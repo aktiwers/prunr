@@ -151,7 +151,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let img_rect = match app_state {
         AppState::Empty => {
-            render_empty(ui, app);
+            render_empty(ui);
             None
         }
         AppState::Loaded => render_loaded(ui, app),
@@ -550,7 +550,7 @@ fn tip_text(ctx: &egui::Context) -> Arc<TipText> {
     }
 }
 
-fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
+fn render_empty(ui: &mut egui::Ui) {
     let avail = ui.available_size();
     let is_hovered = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
     let canvas_rect = ui.available_rect_before_wrap();
