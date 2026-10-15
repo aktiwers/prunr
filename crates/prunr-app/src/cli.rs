@@ -510,6 +510,15 @@ fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
     Ok((width, color))
 }
 
+/// A colour flag's value: `None` when the flag is absent, `Err` (after
+/// telling the user, with `example`) when it is not 6-digit hex.
+fn flag_color(flag: &str, value: Option<&str>, example: &str) -> Result<Option<[u8; 3]>, ()> {
+    let Some(s) = value else { return Ok(None) };
+    parse_hex_color(s).map(Some).ok_or_else(|| {
+        eprintln!("error: {flag}: '{s}' is not a 6-digit hex color (e.g. {example})");
+    })
+}
+
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
     if s.len() != 6 { return None; }
@@ -1056,26 +1065,8 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     // Distinguish "flag absent" from "flag set to garbage" (e.g. a
     // typo'd `--line-color "ff00aa "` with a trailing space) so
     // automation scripts can detect the failure.
-    let solid_line_color = match args.line_color.as_deref() {
-        Some(s) => match parse_hex_color(s) {
-            Some(c) => Some(c),
-            None => {
-                eprintln!("error: --line-color: '{s}' is not a 6-digit hex color (e.g. ff00aa)");
-                return 1;
-            }
-        },
-        None => None,
-    };
-    let bg_color = match args.bg_color.as_deref() {
-        Some(s) => match parse_hex_color(s) {
-            Some(c) => Some(c),
-            None => {
-                eprintln!("error: --bg-color: '{s}' is not a 6-digit hex color (e.g. ffffff)");
-                return 1;
-            }
-        },
-        None => None,
-    };
+    let Ok(solid_line_color) = flag_color("--line-color", args.line_color.as_deref(), "ff00aa") else { return 1 };
+    let Ok(bg_color) = flag_color("--bg-color", args.bg_color.as_deref(), "ffffff") else { return 1 };
     // The app's rule: an effect wins over an image, an image over a colour.
     let backdrop = match (args.bg_effect, bg_image, bg_color) {
         (Some(effect), _, _) => CliBackdrop::Effect(effect, depth),
@@ -1561,6 +1552,13 @@ impl ReportFiles {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    #[test]
+    fn a_colour_flag_is_absent_hex_or_refused() {
+        assert_eq!(super::flag_color("--bg-color", None, "ffffff"), Ok(None));
+        assert_eq!(super::flag_color("--bg-color", Some("#ff00aa"), "ffffff"), Ok(Some([255, 0, 170])));
+        assert_eq!(super::flag_color("--bg-color", Some("ff00aa "), "ffffff"), Err(()));
+    }
 
     /// Every run that prints borrows the terminal on Windows, where a
     /// release build has none of its own; `--doctor` and
