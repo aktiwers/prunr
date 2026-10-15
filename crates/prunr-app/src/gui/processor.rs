@@ -31,7 +31,11 @@ use super::worker::{EngineSpec, WorkerMessage, WorkerResult, WorkItem};
 
 #[derive(Clone)]
 pub struct CancelRegistry {
-    global: Arc<AtomicBool>,
+    /// How many times Cancel All was pressed. A handle is cancelled when
+    /// it moved past `since`, so a later dispatch's reset never takes back
+    /// a Cancel All the running batch has not seen yet.
+    global: Arc<AtomicU64>,
+    since: u64,
     // Short-circuit for the common zero-cancel case: `is_cancelled` skips the
     // mutex entirely unless some per-item entry has been requested.
     has_per_item: Arc<AtomicBool>,
@@ -41,14 +45,15 @@ pub struct CancelRegistry {
 impl CancelRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            global: Arc::new(AtomicBool::new(false)),
+            global: Arc::new(AtomicU64::new(0)),
+            since: 0,
             has_per_item: Arc::new(AtomicBool::new(false)),
             per_item: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub(crate) fn is_global_cancelled(&self) -> bool {
-        self.global.load(Ordering::Acquire)
+        self.global.load(Ordering::Acquire) != self.since
     }
 
     pub(crate) fn is_cancelled(&self, item_id: u64) -> bool {
@@ -63,7 +68,7 @@ impl CancelRegistry {
     }
 
     pub(crate) fn request_global_cancel(&self) {
-        self.global.store(true, Ordering::Release);
+        self.global.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn request_item_cancel(&self, item_id: u64) {
@@ -74,8 +79,11 @@ impl CancelRegistry {
         self.has_per_item.store(true, Ordering::Release);
     }
 
-    pub(crate) fn reset(&self) {
-        self.global.store(false, Ordering::Release);
+    /// A fresh start for the next dispatch: Cancel Alls before now no
+    /// longer count for this handle (or its clones made after), while a
+    /// batch already holding a clone still sees them.
+    pub(crate) fn reset(&mut self) {
+        self.since = self.global.load(Ordering::Acquire);
         let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.clear();
         self.has_per_item.store(false, Ordering::Release);
@@ -2849,9 +2857,25 @@ mod tests {
         assert!(!r.is_cancelled(7), "per-item cancel must not leak to other ids");
     }
 
+    /// Cancel All, then Process before the running batch looked: the new
+    /// dispatch's reset must not take the cancel back from that batch.
+    #[test]
+    fn a_reset_never_takes_back_a_cancel_all_a_running_batch_has_not_seen() {
+        let mut r = CancelRegistry::new();
+        let running = r.clone();
+        r.request_global_cancel();
+        r.reset();
+        assert!(running.is_global_cancelled(), "the running batch still sees its Cancel All");
+        assert!(!r.is_global_cancelled(), "the next dispatch starts clean");
+        let next = r.clone();
+        assert!(!next.is_cancelled(3));
+        r.request_global_cancel();
+        assert!(next.is_global_cancelled(), "and a later Cancel All reaches it");
+    }
+
     #[test]
     fn cancel_registry_reset_clears_all_flags() {
-        let r = CancelRegistry::new();
+        let mut r = CancelRegistry::new();
         r.request_global_cancel();
         r.request_item_cancel(42);
         r.reset();
