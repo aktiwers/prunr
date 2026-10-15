@@ -579,6 +579,16 @@ impl BatchRunState {
         WorkerResult::BatchComplete { batch: self.batch }
     }
 
+    fn item_failed(&self, item_id: u64, error: String) -> WorkerResult {
+        WorkerResult::BatchItemDone {
+            batch: self.batch,
+            item_id,
+            result: Err(error),
+            tensor_cache: None,
+            edge_cache: None,
+        }
+    }
+
     fn nothing_pending(&self) -> bool {
         self.pending.is_empty() && self.pending_tier2.is_empty() && self.pending_add_edge.is_empty()
     }
@@ -984,13 +994,7 @@ fn handle_subprocess_event(
         SubprocessEvent::ImageError { item_id, error } => {
             state.completed.insert(item_id);
             sent.forget(item_id);
-            let _ = res_tx.send(WorkerResult::BatchItemDone {
-                batch: state.batch,
-                item_id,
-                result: Err(error),
-                tensor_cache: None,
-                edge_cache: None,
-            });
+            let _ = res_tx.send(state.item_failed(item_id, error));
             ctx.request_repaint();
         }
         SubprocessEvent::SpareEdgeScales { item_id, token, outcome } => {
@@ -1191,13 +1195,7 @@ fn report_cancelled(
     ctx: &egui::Context,
 ) {
     state.completed.insert(item_id);
-    let _ = res_tx.send(WorkerResult::BatchItemDone {
-        batch: state.batch,
-        item_id,
-        result: Err(CANCELLED_ERR_MSG.to_string()),
-        tensor_cache: None,
-        edge_cache: None,
-    });
+    let _ = res_tx.send(state.item_failed(item_id, CANCELLED_ERR_MSG.to_string()));
     ctx.request_repaint();
 }
 
@@ -1234,13 +1232,7 @@ fn handle_crash_and_retry(
     sent.abandon_spares(true, res_tx);
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
-            let _ = res_tx.send(WorkerResult::BatchItemDone {
-                batch: state.batch,
-                item_id: tid,
-                result: Err(crash_reason.clone()),
-                tensor_cache: None,
-                edge_cache: None,
-            });
+            let _ = res_tx.send(state.item_failed(tid, crash_reason.clone()));
         }
     }
 
@@ -1292,32 +1284,12 @@ fn emit_pending_errors(
 ) {
     for (id, _, _) in &state.pending {
         if !state.completed.contains(id) {
-            let _ = res_tx.send(WorkerResult::BatchItemDone {
-                batch: state.batch,
-                item_id: *id,
-                result: Err(err_msg.to_string()),
-                tensor_cache: None,
-                edge_cache: None,
-            });
+            let _ = res_tx.send(state.item_failed(*id, err_msg.to_string()));
         }
     }
-    for t2 in &state.pending_tier2 {
-        let _ = res_tx.send(WorkerResult::BatchItemDone {
-            batch: state.batch,
-            item_id: t2.item_id,
-            result: Err(err_msg.to_string()),
-            tensor_cache: None,
-            edge_cache: None,
-        });
-    }
-    for ae in &state.pending_add_edge {
-        let _ = res_tx.send(WorkerResult::BatchItemDone {
-            batch: state.batch,
-            item_id: ae.item_id,
-            result: Err(err_msg.to_string()),
-            tensor_cache: None,
-            edge_cache: None,
-        });
+    // Cached-tensor work is errored whether or not it completed.
+    for work in state.pending_tier2.iter().chain(&state.pending_add_edge) {
+        let _ = res_tx.send(state.item_failed(work.item_id, err_msg.to_string()));
     }
 }
 
