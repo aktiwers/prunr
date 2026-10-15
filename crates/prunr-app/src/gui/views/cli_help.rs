@@ -7,6 +7,24 @@ use super::{kv_row, section_heading};
 /// Room kept under the scrolling page for the "Press F2 to close" line.
 const FOOTER_HEIGHT: f32 = 28.0;
 
+#[derive(Clone, Copy)]
+enum CliTab { QuickStart, Sketch, Mask, Eraser, Upscale, Advanced }
+
+impl CliTab {
+    const ALL: [Self; 6] = [Self::QuickStart, Self::Sketch, Self::Mask, Self::Eraser, Self::Upscale, Self::Advanced];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::QuickStart => "Quick start",
+            Self::Sketch => "Sketch",
+            Self::Mask => "Mask",
+            Self::Eraser => "Eraser",
+            Self::Upscale => "Upscale",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
 /// Returns true if the modal should close.
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::bare_modal_window(
@@ -15,22 +33,17 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
         |ui| super::chip::modal_page(ui, "Command-line reference", "", |ui| {
             theme::apply_modal_visuals(ui);
 
-            // Tab state
-            let tab_id = egui::Id::new("cli_help_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
-
-            super::chip::tab_strip(ui, &["Quick start", "Sketch", "Mask", "Eraser", "Upscale", "Advanced"], &mut tab);
+            let labels = CliTab::ALL.map(CliTab::label);
+            let picked = super::chip::remembered_tab_strip(ui, egui::Id::new("cli_help_tab"), &labels);
+            let tab = CliTab::ALL.get(picked).copied().unwrap_or(CliTab::QuickStart);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
-
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
 
             // A short window: the page scrolls above its footer line.
             let page_height = (ui.available_height() - FOOTER_HEIGHT).max(0.0);
             egui::ScrollArea::vertical().max_height(page_height).auto_shrink([false, false]).show(ui, |ui| {
             match tab {
-                // ── Quick Start ──
-                0 => {
+                CliTab::QuickStart => {
                     section_heading(ui, "Quick start");
                     example_row(ui, toasts, "prunr photo.jpg",
                         "Remove background, save as photo.prunr.png");
@@ -64,8 +77,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "White background instead of transparent");
                 }
 
-                // ── Sketch ──
-                1 => {
+                CliTab::Sketch => {
                     section_heading(ui, "Line Extraction");
                     hint(ui, "Trace edges and outlines with the line-detection model.");
                     hint(ui, "Great for logos, graffiti, and illustrations.");
@@ -110,8 +122,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Bold, abstracted outlines");
                 }
 
-                // ── Mask ──
-                2 => {
+                CliTab::Mask => {
                     section_heading(ui, "Mask Tuning");
                     hint(ui, "Fine-tune how the background removal mask is generated.");
                     hint(ui, "These flags work with all models.");
@@ -149,8 +160,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Trim 3px fringe around subject");
                 }
 
-                // ── Eraser ──
-                3 => {
+                CliTab::Eraser => {
                     section_heading(ui, "Object Removal (Eraser)");
                     hint(ui, "Paint over an unwanted object and let the eraser fill it in.");
                     hint(ui, "Pass a binary mask (white = remove here, black = keep).");
@@ -175,8 +185,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Custom output path");
                 }
 
-                // ── Upscale ──
-                4 => {
+                CliTab::Upscale => {
                     section_heading(ui, "Upscale");
                     hint(ui, "Enlarge a photo with an upscale model, refine it, and restore faces.");
                     hint(ui, "Models download in the app's Model Store.");
@@ -230,8 +239,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Save landscape-depth.png only");
                 }
 
-                // ── Advanced ──
-                5 => {
+                CliTab::Advanced => {
                     section_heading(ui, "Models");
 
                     egui::Grid::new("cli_models_grid")
@@ -281,8 +289,6 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     example_row(ui, toasts, "prunr bench --models silueta,migan --runs 5",
                         "Check two models on the GPU against the CPU");
                 }
-
-                _ => {}
             }
             });
 

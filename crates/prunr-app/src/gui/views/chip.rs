@@ -788,6 +788,15 @@ pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
     });
 }
 
+/// A `tab_strip` whose pick is kept under `id` from frame to frame.
+/// Returns the picked tab's index.
+pub(super) fn remembered_tab_strip(ui: &mut Ui, id: egui::Id, labels: &[&str]) -> usize {
+    let mut tab = ui.data(|d| d.get_temp(id).unwrap_or(0));
+    tab_strip(ui, labels, &mut tab);
+    ui.data_mut(|d| d.insert_temp(id, tab));
+    tab
+}
+
 /// Visual weight of a text button. Process is the only `Primary` on the
 /// toolbar; modals use `Primary` for their one confirming action,
 /// `Secondary` for the rest and `Destructive` for anything that deletes.
