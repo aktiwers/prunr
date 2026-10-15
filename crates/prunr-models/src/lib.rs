@@ -64,12 +64,15 @@ pub enum ModelId {
     /// authoring. Encoder cached on BatchItem; decoder runs per
     /// click/stroke.
     Sam21HieraSmall,
-    /// GFPGAN v1.4 face restorer with the YuNet face detector. Two-part
-    /// OnDemand bundle; Apache-2.0 (restorer) + MIT (detector).
+    /// GFPGAN v1.4 face restorer. OnDemand bundle; Apache-2.0. Faces are
+    /// found by the bundled `YuNet`.
     FaceGfpgan,
-    /// RestoreFormer++ face restorer with the YuNet face detector. Same
-    /// input and output as `FaceGfpgan`; Apache-2.0 + MIT.
+    /// RestoreFormer++ face restorer. Same input and output as
+    /// `FaceGfpgan`; Apache-2.0.
     FaceRestoreFormerPp,
+    /// YuNet face detector (OpenCV Zoo). Bundled; finds the faces Restore
+    /// faces redraws and Auto focus aims at. MIT.
+    YuNet,
     /// RORem: SDXL inpainting fine-tuned for object removal, with its
     /// 4-step LCM LoRA fused in and the fixed removal prompt baked into
     /// the UNet (no text encoder). Runs through the SD pipeline.
@@ -95,10 +98,10 @@ impl ModelId {
     /// What the SD pipeline needs to know about an SD-family bundle;
     /// `None` for every other model.
     pub fn sd_spec(&self) -> Option<SdSpec> {
-        const SD15: SdSpec = SdSpec { vae_scale: 0.18215, cpu_output_correct: false, takes_taesd: true, lean_sessions: false };
+        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false };
         match self {
             ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 => Some(SD15),
-            ModelId::RoremFp16 => Some(SdSpec { vae_scale: 0.13025, cpu_output_correct: true, takes_taesd: false, lean_sessions: true }),
+            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true }),
             _ => None,
         }
     }
@@ -126,6 +129,7 @@ impl ModelId {
         ModelId::Sam21HieraSmall,
         ModelId::FaceGfpgan,
         ModelId::FaceRestoreFormerPp,
+        ModelId::YuNet,
         ModelId::RoremFp16,
         ModelId::DdcolorTiny,
         ModelId::DepthAnythingV2Small,
@@ -158,6 +162,7 @@ impl ModelId {
             ModelId::Sam21HieraSmall => "sam2_1_hiera_small",
             ModelId::FaceGfpgan => "face_gfpgan",
             ModelId::FaceRestoreFormerPp => "face_restoreformer_pp",
+            ModelId::YuNet => "yunet",
             ModelId::RoremFp16 => "rorem_fp16",
             ModelId::DdcolorTiny => "ddcolor_tiny",
             ModelId::DepthAnythingV2Small => "depth_anything_v2_small",
@@ -930,7 +935,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
         display_name: "4xNomos8kSCHAT-L",
-        description: "Photo-tuned HAT-L super-resolution (fp16). Higher quality, slower than Real-ESRGAN; slow on CPU EP.",
+        description: "Photo-tuned HAT-L super-resolution. The most detailed upscaler and the slowest: about a minute for a small photo without a graphics card.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
@@ -1226,10 +1231,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                     sha256: "0e063e4071211196ec76e9da82f0495e2d4f56e2d9ebcd63c776dbcef60cd087",
                     size_bytes: 340_345_497,
                 },
-                YUNET_PART,
             ],
             license: LicenseInfo {
-                author: "Tencent ARC (GFPGAN); OpenCV (YuNet, MIT)",
+                author: "Tencent ARC (GFPGAN)",
                 license: "Apache 2.0",
                 license_url: "https://github.com/TencentARC/GFPGAN/blob/master/LICENSE",
                 source_url: "https://github.com/TencentARC/GFPGAN",
@@ -1261,10 +1265,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                     sha256: "67c7fbdf69bd7223f5f42875421fbba71a2124117a66be6a5c450969c293c4e1",
                     size_bytes: 295_248_883,
                 },
-                YUNET_PART,
             ],
             license: LicenseInfo {
-                author: "Zhouxia Wang et al. (RestoreFormer++); OpenCV (YuNet, MIT)",
+                author: "Zhouxia Wang et al. (RestoreFormer++)",
                 license: "Apache 2.0",
                 license_url: "https://github.com/wzhouxiff/RestoreFormerPlusPlus/blob/main/LICENSE",
                 source_url: "https://github.com/wzhouxiff/RestoreFormerPlusPlus",
@@ -1281,16 +1284,34 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
+    // Built in, so faces are found on every install, with or without a
+    // face model. Face model folders installed while each carried its
+    // own copy keep that file, unread; Remove deletes it with the folder.
+    ModelDescriptor {
+        id: ModelId::YuNet,
+        display_name: "Face finder (YuNet)",
+        description: "Finds the faces Restore faces redraws and Auto focus aims at.",
+        category: ModelCategory::Face,
+        source: ModelSource::Bundled {
+            license: LicenseInfo {
+                author: "Shiqi Yu et al. (libfacedetection), via OpenCV Zoo",
+                license: "MIT",
+                license_url: "https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/LICENSE",
+                source_url: "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+            },
+        },
+        version: "2026may",
+        gpu: GpuRequirement::None,
+        incompatible_eps: &[],
+        // A 230 KB model at no more than 1280 px: its input is 20 MB.
+        working_set_mb: 64,
+        parallel_jobs_pay_on_cpu: false,
+        tile_size_multiple: None,
+        recommended_tile: None,
+        attribution_required: false,
+        upscale: None,
+    },
 ];
-
-/// The face detector both face models ship with, pinned to its commit.
-const YUNET_PART: ModelPart = ModelPart {
-    key: "detector",
-    filename: "face_detection_yunet_2026may.onnx",
-    url: "https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
-    sha256: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
-    size_bytes: 229_738,
-};
 
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
     REGISTRY.iter().find(|d| d.id == id)
@@ -1508,18 +1529,38 @@ pub fn keeps_weights_apart(id: ModelId) -> bool {
 /// See `ModelId::sd_spec`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SdSpec {
-    /// Diffusers' `vae.config.scaling_factor`: SD 1.5's VAE or SDXL's.
-    pub vae_scale: f32,
+    pub latent: SdLatent,
     /// The ORT CPU EP's output is right. SD 1.5's FP16 bundles come out
     /// as text-like artifacts on it, so they need a GPU EP; RORem's
     /// matches its PyTorch reference.
     pub cpu_output_correct: bool,
-    /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
-    pub takes_taesd: bool,
     /// Sessions run without ORT's memory-pattern planning. Measured on
     /// RORem (prunr-export/rorem_mem): 15 GB peak instead of 21.7 at the
     /// same speed. SD 1.5 is unmeasured, so it keeps ORT's default.
     pub lean_sessions: bool,
+}
+
+/// The latent space an SD-family model denoises in, named by the VAE
+/// that encodes and decodes it. RORem is SDXL-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdLatent {
+    Sd15,
+    Sdxl,
+}
+
+impl SdLatent {
+    /// Diffusers' `vae.config.scaling_factor`.
+    pub fn vae_scale(self) -> f32 {
+        match self {
+            Self::Sd15 => 0.18215,
+            Self::Sdxl => 0.13025,
+        }
+    }
+
+    /// TAESD can stand in for the VAE: it decodes SD 1.5's latents only.
+    pub fn takes_taesd(self) -> bool {
+        self == Self::Sd15
+    }
 }
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:
@@ -1556,6 +1597,7 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
         ModelId::Silueta => silueta_bytes(),
         ModelId::BiRefNetLite => birefnet_lite_bytes(),
         ModelId::Teed => teed_bytes(),
+        ModelId::YuNet => yunet_bytes(),
         ModelId::U2net
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
@@ -1591,6 +1633,8 @@ static BIREFNET_LITE_ZST: &[u8] = include_bytes!("../../../models/birefnet_lite.
 #[cfg(not(feature = "dev-models"))]
 static TEED_ZST: &[u8] = include_bytes!("../../../models/teed.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
+static YUNET_ZST: &[u8] = include_bytes!("../../../models/face_detection_yunet_2026may.onnx.zst");
+#[cfg(not(feature = "dev-models"))]
 static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.encoder.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
 static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.decoder.onnx.zst");
@@ -1601,6 +1645,8 @@ static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
 static TEED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(not(feature = "dev-models"))]
+static YUNET_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
 static SAM2_ENCODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(not(feature = "dev-models"))]
@@ -1631,6 +1677,14 @@ pub fn teed_bytes() -> &'static [u8] {
 }
 
 #[cfg(not(feature = "dev-models"))]
+pub fn yunet_bytes() -> &'static [u8] {
+    YUNET_CACHE.get_or_init(|| {
+        zstd::bulk::decompress(YUNET_ZST, 1024 * 1024)
+            .expect("failed to decompress embedded YuNet model")
+    })
+}
+
+#[cfg(not(feature = "dev-models"))]
 pub fn sam2_encoder_bytes() -> &'static [u8] {
     SAM2_ENCODER_CACHE.get_or_init(|| {
         zstd::bulk::decompress(SAM2_ENCODER_ZST, 200 * 1024 * 1024)
@@ -1652,6 +1706,8 @@ static DEV_SILUETA: OnceLock<Vec<u8>> = OnceLock::new();
 static DEV_BIREFNET: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_TEED: OnceLock<Vec<u8>> = OnceLock::new();
+#[cfg(feature = "dev-models")]
+static DEV_YUNET: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
 static DEV_SAM2_ENCODER: OnceLock<Vec<u8>> = OnceLock::new();
 #[cfg(feature = "dev-models")]
@@ -1702,6 +1758,11 @@ pub fn teed_bytes() -> &'static [u8] {
 }
 
 #[cfg(feature = "dev-models")]
+pub fn yunet_bytes() -> &'static [u8] {
+    DEV_YUNET.get_or_init(|| dev_model_bytes("face_detection_yunet_2026may.onnx"))
+}
+
+#[cfg(feature = "dev-models")]
 pub fn sam2_encoder_bytes() -> &'static [u8] {
     DEV_SAM2_ENCODER.get_or_init(|| dev_model_bytes("sam2.1_hiera_small.encoder.onnx"))
 }
@@ -1740,7 +1801,16 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "int8")
 }
 
+/// Whether the half-precision copy of `id` is on disk, without reading it.
+pub fn has_fp16_variant(id: ModelId) -> bool {
+    variant_path(id, "fp16").is_some()
+}
+
 fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
+    std::fs::read(variant_path(id, suffix)?).ok()
+}
+
+fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
     // `name` is the filename stem the variant file uses on disk. Seg
     // models use their snake_case stable_name (matches the dev-models
     // workflow that drops `{stable_name}_fp16.onnx` into the models
@@ -1770,6 +1840,7 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         | ModelId::Sam21HieraSmall
         | ModelId::FaceGfpgan
         | ModelId::FaceRestoreFormerPp
+        | ModelId::YuNet
         | ModelId::RoremFp16
         | ModelId::DdcolorTiny
         | ModelId::DepthAnythingV2Small => return None,
@@ -1781,23 +1852,25 @@ fn load_variant(id: ModelId, suffix: &str) -> Option<Vec<u8>> {
         let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../models")
             .join(&filename);
-        if let Ok(bytes) = std::fs::read(&dev_path) {
-            return Some(bytes);
+        if dev_path.is_file() {
+            return Some(dev_path);
         }
     }
 
     // OnDemand-installed sibling: fetcher writes both fp32 and fp16
     // siblings into on_demand_dir() when `OnDemand.fp16` is set.
     if let Some(dir) = on_demand_dir() {
-        if let Ok(bytes) = std::fs::read(dir.join(&filename)) {
-            return Some(bytes);
+        let path = dir.join(&filename);
+        if path.is_file() {
+            return Some(path);
         }
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            if let Ok(bytes) = std::fs::read(dir.join("models").join(&filename)) {
-                return Some(bytes);
+            let path = dir.join("models").join(&filename);
+            if path.is_file() {
+                return Some(path);
             }
         }
     }
@@ -1834,6 +1907,7 @@ mod tests {
         let _: fn() -> &'static [u8] = silueta_bytes;
         let _: fn() -> &'static [u8] = birefnet_lite_bytes;
         let _: fn() -> &'static [u8] = teed_bytes;
+        let _: fn() -> &'static [u8] = yunet_bytes;
     }
 
     #[test]
@@ -1872,10 +1946,23 @@ mod tests {
                 | ModelId::Sam21HieraSmall
                 | ModelId::FaceGfpgan
                 | ModelId::FaceRestoreFormerPp
+                | ModelId::YuNet
                 | ModelId::RoremFp16
                 | ModelId::DdcolorTiny
                 | ModelId::DepthAnythingV2Small => {}
             }
+        }
+    }
+
+    /// Faces are found by the built-in YuNet, so a face model downloads
+    /// only its restorer, and an install that also holds the detector it
+    /// once downloaded is complete as it is.
+    #[test]
+    fn faces_are_found_by_the_built_in_finder() {
+        assert!(descriptor(ModelId::YuNet).is_some_and(|d| d.source.is_bundled() && d.category == ModelCategory::Face));
+        for id in [ModelId::FaceGfpgan, ModelId::FaceRestoreFormerPp] {
+            let Some(ModelSource::MultiPartOnDemand { parts, .. }) = descriptor(id).map(|d| d.source) else { panic!("{id:?} is a download") };
+            assert_eq!(parts.iter().map(|p| p.key).collect::<Vec<_>>(), ["restorer"], "{id:?}");
         }
     }
 
@@ -1999,6 +2086,16 @@ mod tests {
         assert!(!ModelId::BiRefNetLite.is_sd_family());
         assert!(!ModelId::Teed.is_sd_family());
         assert!(!ModelId::TaesdFp16.is_sd_family());
+    }
+
+    #[test]
+    fn rorem_denoises_sdxl_latents_and_only_sd15_takes_taesd() {
+        let latent = |id: ModelId| id.sd_spec().map(|s| s.latent);
+        assert_eq!(latent(ModelId::SdV15InpaintFp16), Some(SdLatent::Sd15));
+        assert_eq!(latent(ModelId::SdV15LcmInpaintFp16), Some(SdLatent::Sd15));
+        assert_eq!(latent(ModelId::RoremFp16), Some(SdLatent::Sdxl));
+        assert_eq!((SdLatent::Sd15.vae_scale(), SdLatent::Sdxl.vae_scale()), (0.18215, 0.13025));
+        assert!(SdLatent::Sd15.takes_taesd() && !SdLatent::Sdxl.takes_taesd());
     }
 
     #[test]

@@ -336,8 +336,9 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// (the runtime store, hot-loaded by `ort_runtime::resolve_dylib_path`).
 ///
 /// `--stage-to <DIR>`: extract directly into `<DIR>/` instead of the
-/// runtime store. CI release packaging uses this to bundle the CPU
-/// runtime next to the binary, satisfying `bundled_dylib`'s
+/// runtime store. CI release packaging uses this to bundle the default
+/// runtime next to the binary (the CPU build on Linux, the DirectML
+/// build with its DirectML.dll on Windows), satisfying `bundled_dylib`'s
 /// `<exe>/runtime/libonnxruntime.{so,dylib,dll}` lookup. Path-safety
 /// guard (refuse to wipe a path whose parent isn't `runtimes`) does
 /// NOT apply when staging — caller picks the path.
@@ -349,6 +350,7 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Examples:
 ///   cargo xtask install-runtime onnxruntime-openvino 1.24.1
 ///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
+///   cargo xtask install-runtime onnxruntime-directml 1.24.1 --stage-to runtime-stage
 ///
 /// Skips Python bindings (`onnxruntime_pybind11_state.cpython-*.so`,
 /// `*.py` sources) since prunr links via Rust ort. Strips the version

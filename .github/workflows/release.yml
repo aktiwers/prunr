@@ -292,26 +292,31 @@ jobs:
             prunr-macos-aarch64.tar.gz
 
       # ── Windows: .zip + .exe installer ──
-      # Same load-dynamic story as Linux: stage the CPU runtime via
-      # xtask, place it at <exe>/runtime/onnxruntime.dll so the
-      # `bundled_dylib` lookup picks it up.
+      # Same load-dynamic story as Linux, but the staged runtime is the
+      # DirectML build (`onnxruntime-directml`): it runs the models on any
+      # DirectX 12 GPU and on the CPU without one. Its onnxruntime.dll
+      # delay-loads DirectML.dll from its own folder, so both go to
+      # <exe>/runtime/, where `bundled_dylib` finds the first and
+      # `ort_runtime::init` preloads the second.
       - name: Cache runtime-stage (Windows)
         id: cache-runtime-windows
         if: matrix.name == 'windows-x86_64'
         uses: actions/cache@v4
         with:
           path: runtime-stage
-          key: runtime-stage-windows-${{ hashFiles('crates/prunr-runtime-install/src/lib.rs') }}
+          key: runtime-stage-windows-directml-${{ hashFiles('crates/prunr-runtime-install/src/lib.rs') }}
 
-      - name: Stage CPU runtime (Windows)
+      - name: Stage DirectML runtime (Windows)
         if: matrix.name == 'windows-x86_64' && steps.cache-runtime-windows.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
-          if (-not (Test-Path "runtime-stage/onnxruntime.dll")) {
-            Write-Error "::error::onnxruntime.dll not found in runtime-stage/ — xtask layout drift"
-            Get-ChildItem runtime-stage/
-            exit 1
+          cargo xtask install-runtime onnxruntime-directml 1.24.1 --stage-to runtime-stage
+          foreach ($dll in "onnxruntime.dll", "DirectML.dll") {
+            if (-not (Test-Path "runtime-stage/$dll")) {
+              Write-Error "::error::$dll not found in runtime-stage/ — xtask layout drift"
+              Get-ChildItem runtime-stage/
+              exit 1
+            }
           }
 
       - name: Package Windows zip
@@ -321,6 +326,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/runtime
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
           Copy-Item "runtime-stage/onnxruntime.dll" dist/runtime/
+          Copy-Item "runtime-stage/DirectML.dll" dist/runtime/
           Compress-Archive -Path "dist/*" -DestinationPath "prunr-windows-x86_64.zip"
 
       - name: Package Windows installer (Inno Setup)
@@ -354,6 +360,7 @@ jobs:
           [Files]
           Source: "target\${{ matrix.target }}\release\${{ matrix.binary }}"; DestDir: "{app}"; Flags: ignoreversion
           Source: "runtime-stage\onnxruntime.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion
+          Source: "runtime-stage\DirectML.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion
 
           [Icons]
           Name: "{group}\Prunr"; Filename: "{app}\prunr.exe"; IconFilename: "{app}\prunr.exe"

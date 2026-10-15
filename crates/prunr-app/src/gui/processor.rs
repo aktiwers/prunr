@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use prunr_core::ProcessingRecipe;
@@ -395,11 +395,14 @@ pub(crate) struct DepthResult {
 }
 
 /// One photo to measure, queued for the depth thread.
-struct DepthJob {
-    item_id: u64,
-    epoch: u64,
-    input: RunInput,
-    cpu_only: bool,
+pub(crate) struct DepthJob {
+    pub(crate) item_id: u64,
+    pub(crate) epoch: u64,
+    pub(crate) input: RunInput,
+    pub(crate) cpu_only: bool,
+    /// The faces a Faces search already found in this photo; `None`: the
+    /// depth thread finds them.
+    pub(crate) faces: Option<Vec<prunr_core::face::FacePlace>>,
 }
 
 /// The depth thread's queue and its warm engine. One thread measures the
@@ -417,26 +420,30 @@ impl DepthQueue {
         let warm: WarmEngine = Arc::new(Mutex::new(None));
         let engine_slot = Arc::clone(&warm);
         std::thread::spawn(move || {
+            let mut faces = prunr_core::face::LazyFaceFinder::default();
             for job in job_rx {
-                let result = measure_depth(&engine_slot, &progress, job.input, job.cpu_only);
+                let (item_id, epoch) = (job.item_id, job.epoch);
+                let result = measure_depth(&engine_slot, &progress, job, &mut faces);
                 if let Err(err) = &result {
-                    tracing::warn!(item_id = job.item_id, %err, "depth run failed");
+                    tracing::warn!(item_id, %err, "depth run failed");
                 }
-                let _ = done_tx.send(DepthResult { item_id: job.item_id, epoch: job.epoch, result });
+                let _ = done_tx.send(DepthResult { item_id, epoch, result });
             }
         });
         Self { jobs, done, warm }
     }
 }
 
-/// Measure one photo on the warm engine. The capsule shows it only when
-/// nothing else is showing, since it cannot be cancelled.
+/// Measure one photo on the warm engine, with the faces in it for Auto
+/// focus. The capsule shows it only when nothing else is showing, since
+/// it cannot be cancelled.
 fn measure_depth(
     engine_slot: &WarmEngine,
     slot: &super::dispatch_progress::DispatchProgressSlot,
-    input: RunInput,
-    cpu_only: bool,
+    job: DepthJob,
+    finder: &mut prunr_core::face::LazyFaceFinder,
 ) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
+    let DepthJob { input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     if !admitted(descriptor) {
@@ -454,7 +461,9 @@ fn measure_depth(
     let result = input.load()
         .and_then(|photo| {
             let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads, level)?;
-            prunr_core::depth::estimate_depth(&engine, &photo, &progress)
+            let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
+            let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
+            Ok(map.with_faces(&faces))
         })
         .map(Arc::new)
         .map_err(|e| e.to_string());
@@ -464,27 +473,80 @@ fn measure_depth(
     result
 }
 
-/// The longer side of the preview an upscale shows while it runs: about a
-/// canvas at most, so the preview costs a few MB whatever the output size.
-const UPSCALE_PREVIEW_EDGE: u32 = 1536;
-
-/// An upscale's listener: finished-tile previews go to the canvas's
-/// channel, everything else to the progress pill.
-struct UpscaleSink {
-    run: super::dispatch_progress::RunSink,
-    item_id: u64,
-    previews: mpsc::Sender<(u64, prunr_core::TilePreview)>,
+/// Lay the photo an erase starts from under its tiles' previews, so the
+/// preview is the whole image filling in and the result reveals over it.
+/// One resample of the photo to the preview's size, off the UI thread;
+/// the preview holds at most `TILE_PREVIEW_EDGE`² RGBA (9 MB).
+fn preview_the_photo(progress: &prunr_core::Progress, photo: &image::RgbaImage) {
+    let size = photo.dimensions();
+    progress.tile_preview((0, 0, size.0, size.1), size, |w, h| {
+        if (w, h) == size {
+            photo.as_raw().clone()
+        } else {
+            prunr_core::formats::resize_rgba(photo, w, h, prunr_core::formats::ResizeFilter::Lanczos3).into_raw()
+        }
+    });
 }
 
-impl prunr_core::ProgressSink for UpscaleSink {
+/// A picture a run made for its item (a finished tile, …), on its way
+/// to the canvas.
+pub(crate) type RunPicture = (u64, prunr_core::ProgressUpdate);
+
+/// A run's listener: its pictures go to the canvas while the run says
+/// they may still land; its steps and counts go to the progress pill,
+/// when it has one.
+#[derive(Clone)]
+pub(crate) struct PictureSink {
+    item_id: u64,
+    pill: Option<super::dispatch_progress::RunSink>,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+    pictures: mpsc::Sender<RunPicture>,
+}
+
+impl PictureSink {
+    /// Pictures for `item_id` land while `current` holds. Without a
+    /// `pill` (another run shows on it) steps and counts go nowhere.
+    pub(crate) fn new(
+        item_id: u64,
+        pill: Option<super::dispatch_progress::RunSink>,
+        current: impl Fn() -> bool + Send + Sync + 'static,
+        pictures: mpsc::Sender<RunPicture>,
+    ) -> Self {
+        Self { item_id, pill, current: Arc::new(current), pictures }
+    }
+
+    /// A run on the pill: its pictures land while it is the run shown.
+    pub(crate) fn of_run(item_id: u64, run: super::dispatch_progress::RunSink, pictures: mpsc::Sender<RunPicture>) -> Self {
+        let shown = run.clone();
+        Self::new(item_id, Some(run), move || shown.current(), pictures)
+    }
+
+    /// The run is over: the pill clears unless a newer run took it.
+    pub(crate) fn end(&self) {
+        if let Some(run) = &self.pill {
+            run.end();
+        }
+    }
+
+    /// A progress handle reporting here that asks for tile previews.
+    pub(crate) fn into_progress(self) -> prunr_core::Progress {
+        prunr_core::Progress::new(Arc::new(self)).with_tile_previews(crate::subprocess::protocol::TILE_PREVIEW_EDGE)
+    }
+}
+
+impl prunr_core::ProgressSink for PictureSink {
     fn report(&self, update: prunr_core::ProgressUpdate) {
         match update {
-            prunr_core::ProgressUpdate::TilePreview(tile) => {
-                if self.run.current() {
-                    let _ = self.previews.send((self.item_id, tile));
+            update @ (prunr_core::ProgressUpdate::TilePreview(_) | prunr_core::ProgressUpdate::Faces(_)) => {
+                if (self.current)() {
+                    let _ = self.pictures.send((self.item_id, update));
                 }
             }
-            update => self.run.report(update),
+            update => {
+                if let Some(run) = &self.pill {
+                    run.report(update);
+                }
+            }
         }
     }
 }
@@ -717,8 +779,8 @@ pub(crate) struct Processor {
     /// drain path ignores the result. Cancel button + Esc key both
     /// flip the flag for the currently-selected item.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// The progress run each in-flight eraser stroke reports to.
-    inpaint_runs: HashMap<u64, super::dispatch_progress::RunSink>,
+    /// The run each in-flight eraser stroke reports to.
+    inpaint_runs: HashMap<u64, PictureSink>,
     /// Channels to the dedicated SD-inpaint subprocess bridge thread.
     /// LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path; only
     /// SD-family dispatches go through these. Bridge spawns the
@@ -750,9 +812,9 @@ pub(crate) struct Processor {
     /// pass). First dispatch (which already requires ORT) initializes
     /// the slot; cancel before any dispatch is a no-op.
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
-    /// Each finished upscale tile, small, for the canvas to show in place.
-    upscale_preview_tx: mpsc::Sender<(u64, prunr_core::TilePreview)>,
-    upscale_preview_rx: mpsc::Receiver<(u64, prunr_core::TilePreview)>,
+    /// The pictures runs make for their items (`PictureSink`).
+    picture_tx: mpsc::Sender<RunPicture>,
+    picture_rx: mpsc::Receiver<RunPicture>,
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
@@ -779,6 +841,9 @@ pub(crate) struct Processor {
     faces_rx: mpsc::Receiver<FacesResult>,
     /// The latest face search's stop flag, for Cancel and Esc.
     faces_stop: Mutex<Arc<AtomicBool>>,
+    /// The latest face search's number: an earlier search's pictures are
+    /// dropped.
+    faces_latest: Arc<AtomicU64>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -795,7 +860,7 @@ impl Processor {
     ) -> Self {
         let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
-        let (upscale_preview_tx, upscale_preview_rx) = mpsc::channel();
+        let (picture_tx, picture_rx) = mpsc::channel();
         let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
         let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
         let (faces_tx, faces_rx) = mpsc::channel();
@@ -822,8 +887,8 @@ impl Processor {
             upscale: RunSlot::new(),
             run_queue: Mutex::new(RunQueue::default()),
             upscale_run_options: std::sync::OnceLock::new(),
-            upscale_preview_tx,
-            upscale_preview_rx,
+            picture_tx,
+            picture_rx,
             dispatch_progress,
             colorize: RunSlot::new(),
             sam_encoder_tx,
@@ -835,6 +900,7 @@ impl Processor {
             faces_tx,
             faces_rx,
             faces_stop: Mutex::default(),
+            faces_latest: Arc::default(),
             depth,
             seg_warm_due: None,
         }
@@ -884,10 +950,10 @@ impl Processor {
         });
     }
 
-    /// Queue `item_id`'s photo for a depth map; it lands through
-    /// `pump_depth_results`, tagged with `epoch`.
-    pub(crate) fn dispatch_depth(&self, item_id: u64, epoch: u64, input: RunInput, cpu_only: bool) {
-        let _ = self.depth.jobs.send(DepthJob { item_id, epoch, input, cpu_only });
+    /// Queue a photo for a depth map; it lands through
+    /// `pump_depth_results`, tagged with the job's epoch.
+    pub(crate) fn dispatch_depth(&self, job: DepthJob) {
+        let _ = self.depth.jobs.send(job);
     }
 
     pub(crate) fn pump_depth_results(&mut self) -> Vec<DepthResult> {
@@ -1001,16 +1067,19 @@ impl Processor {
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint);
-        let (progress, run) = self.dispatch_progress.progress_for(initial, cancel.clone());
+        let run = self.dispatch_progress.begin(initial);
+        let sink = PictureSink::of_run(item_id, run.clone(), self.picture_sender());
+        let progress = sink.clone().into_progress().with_cancel(cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
-        self.inpaint_runs.insert(item_id, run.clone());
+        self.inpaint_runs.insert(item_id, sink);
         if tuning.backend.is_sd_family() {
-            // The SD subprocess reports through the bridge to `run`.
-            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning);
+            // The SD subprocess reports through the bridge to the run's sink.
+            self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning, progress);
             return;
         }
         let tx = self.inpaint_tx.clone();
         self.spawn_model(move || {
+            preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN.
             let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.backend, tuning.cpu_only, tuning.fill_scale, &progress);
@@ -1146,6 +1215,7 @@ impl Processor {
         image: &std::sync::Arc<image::RgbaImage>,
         correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: &InpaintTuning,
+        progress: prunr_core::Progress,
     ) {
         // PNG-encode + temp-file write is 150-300 ms per stroke at 4K
         // — moving it onto rayon keeps the egui frame loop responsive
@@ -1167,6 +1237,8 @@ impl Processor {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
             };
             if cancelled() { send_cancelled(); return; }
+            // Before the dispatch, so it lands under the worker's previews.
+            preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             let sd_req = sd_request(&tuning);
             let dir = crate::subprocess::protocol::ipc_temp_dir();
@@ -1208,11 +1280,7 @@ impl Processor {
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
-                InpaintBridgeResult::Report { item_id, update } => {
-                    if let Some(run) = self.inpaint_runs.get(&item_id) {
-                        prunr_core::ProgressSink::report(run, update);
-                    }
-                }
+                InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale } => {
                     let outcome = match super::worker::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
@@ -1254,10 +1322,18 @@ impl Processor {
         }
     }
 
+    /// An SD stroke's report reaches its run as an in-process one's does:
+    /// a picture to the canvas, the rest to the pill.
+    pub(crate) fn report_inpaint(&self, item_id: u64, update: prunr_core::ProgressUpdate) {
+        if let Some(sink) = self.inpaint_runs.get(&item_id) {
+            prunr_core::ProgressSink::report(sink, update);
+        }
+    }
+
     /// The SD stroke's run is over: clear the progress it showed.
     fn end_inpaint_run(&self, item_id: u64) {
-        if let Some(run) = self.inpaint_runs.get(&item_id) {
-            run.end();
+        if let Some(sink) = self.inpaint_runs.get(&item_id) {
+            sink.end();
         }
     }
 
@@ -1537,10 +1613,9 @@ impl Processor {
         // `upscale::tiling::upscale_tiled` (cancel flag) and in
         // `is_upscale_in_flight` (active flag).
         let done = self.upscale.begin(run.clone());
-        let sink = UpscaleSink { run, item_id, previews: self.upscale_preview_tx.clone() };
-        let progress = prunr_core::Progress::new(Arc::new(sink))
-            .with_cancel(Arc::clone(&self.upscale.cancel))
-            .with_tile_previews(UPSCALE_PREVIEW_EDGE);
+        let progress = PictureSink::of_run(item_id, run, self.picture_sender())
+            .into_progress()
+            .with_cancel(Arc::clone(&self.upscale.cancel));
 
         let engine_slot = Arc::clone(&self.upscale.warm);
         // Shared with the GUI thread's `cancel_upscale()` — terminating
@@ -1624,9 +1699,14 @@ impl Processor {
         tracing::debug!(terminate_ok, "upscale cancel requested");
     }
 
-    /// Drain the finished-tile previews of the upscale under way.
-    pub(crate) fn pump_upscale_previews(&mut self) -> Vec<(u64, prunr_core::TilePreview)> {
-        self.upscale_preview_rx.try_iter().collect()
+    /// Where a `PictureSink` sends its run's pictures.
+    pub(crate) fn picture_sender(&self) -> mpsc::Sender<RunPicture> {
+        self.picture_tx.clone()
+    }
+
+    /// Drain the pictures runs have made since the last frame, oldest first.
+    pub(crate) fn pump_pictures(&mut self) -> Vec<RunPicture> {
+        self.picture_rx.try_iter().collect()
     }
 
     /// Drain completed upscale results from the background thread.
@@ -1802,24 +1882,25 @@ impl Processor {
     }
 
     /// Find and redraw the faces in `photo` with `model` on a thread; the
-    /// capsule shows it. The photo is unpacked there, never here.
-    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId) {
+    /// capsule shows it, and the image the faces as they are found and
+    /// redrawn, each blended in at `blend`. The photo is unpacked there,
+    /// never here.
+    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend) {
         let tx = self.faces_tx.clone();
-        let stop = self.begin_faces_search();
+        let (stop, current) = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
-        let (progress, run) = if self.dispatch_progress.read().is_none() {
-            let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label());
-            let (progress, run) = self.dispatch_progress.progress_for(initial, Arc::clone(&stop));
-            (progress, Some(run))
-        } else {
-            (prunr_core::Progress::none().with_cancel(Arc::clone(&stop)), None)
-        };
+        let run = self.dispatch_progress.read().is_none().then(|| {
+            self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()))
+        });
+        let progress = PictureSink::new(item_id, run.clone(), current, self.picture_sender())
+            .into_progress()
+            .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
             let search = std::panic::AssertUnwindSafe(|| {
                 photo.load()
                     .ok_or_else(|| "the photo is no longer there".to_string())
-                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, &progress).map_err(|e| e.to_string()))
+                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, blend, &progress).map_err(|e| e.to_string()))
             });
             let result = std::panic::catch_unwind(search).unwrap_or_else(|_| Err("the face model stopped unexpectedly".to_string()));
             if let Some(run) = run {
@@ -1830,12 +1911,15 @@ impl Processor {
         });
     }
 
-    /// A stop flag for the face search starting now; Cancel and Esc reach
-    /// the latest one.
-    fn begin_faces_search(&self) -> Arc<AtomicBool> {
+    /// A stop flag for the face search starting now, which Cancel and Esc
+    /// reach, and whether its pictures may still land: while it is the
+    /// latest search and not stopped.
+    fn begin_faces_search(&self) -> (Arc<AtomicBool>, impl Fn() -> bool + Send + Sync + 'static) {
         let stop = Arc::new(AtomicBool::new(false));
         *self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&stop);
-        stop
+        let search = self.faces_latest.fetch_add(1, Ordering::AcqRel) + 1;
+        let (latest, stopped) = (Arc::clone(&self.faces_latest), Arc::clone(&stop));
+        (stop, move || latest.load(Ordering::Acquire) == search && !stopped.load(Ordering::Acquire))
     }
 
     /// Stop the face search under way; it ends after the face it is on.
@@ -2092,7 +2176,7 @@ fn run_sam_decoder_inline(
 
 /// The SD pipeline's request for an erase under `tuning`; `None` for an
 /// eraser outside the SD family.
-fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
+pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
     use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
     let base = SdInpaintRequest {
         seed: tuning.sd_seed,
@@ -2242,6 +2326,64 @@ mod tests {
     use super::*;
     use prunr_models::ModelId;
 
+    /// An erase lays the photo it starts from under its tiles: the whole
+    /// photo as one picture, at the preview's size, as it is when it fits.
+    #[test]
+    fn an_erase_lays_its_photo_under_its_tiles() {
+        use prunr_core::progress::RecordingSink;
+        use prunr_core::{Progress, ProgressUpdate};
+        let sink = Arc::new(RecordingSink::default());
+        let progress = Progress::new(sink.clone()).with_tile_previews(crate::subprocess::protocol::TILE_PREVIEW_EDGE);
+        let small = image::RgbaImage::from_fn(30, 20, |x, y| image::Rgba([x as u8, y as u8, 7, 200]));
+        preview_the_photo(&progress, &image::RgbaImage::from_pixel(3072, 1000, image::Rgba([10, 20, 30, 255])));
+        preview_the_photo(&progress, &small);
+        let pictures: Vec<_> = sink.updates().into_iter().map(|u| match u {
+            ProgressUpdate::TilePreview(p) => p,
+            u => panic!("{u:?}"),
+        }).collect();
+        assert_eq!((pictures[0].x, pictures[0].y, pictures[0].width, pictures[0].height, pictures[0].full_width, pictures[0].full_height), (0, 0, 1536, 500, 1536, 500));
+        assert!(pictures[0].rgba.chunks(4).all(|p| p == [10, 20, 30, 255]));
+        assert_eq!((pictures[1].width, pictures[1].height, pictures[1].full_width), (30, 20, 30));
+        assert_eq!(pictures[1].rgba, small.into_raw(), "a photo that fits is laid as it is");
+    }
+
+    /// A run's pictures reach the canvas's channel while the run says
+    /// they may land, and its steps reach the pill; a run another has
+    /// replaced sends neither; a run without the pill still sends its
+    /// pictures but leaves the pill to the run that has it.
+    #[test]
+    fn a_picture_sink_sends_pictures_while_its_run_is_current() {
+        use super::super::dispatch_progress::{DispatchProgress, DispatchProgressSlot, ProgressKind};
+        use prunr_core::{ProgressSink, ProgressUpdate, Step, TilePreview};
+        let tile = || ProgressUpdate::TilePreview(TilePreview { x: 0, y: 0, width: 1, height: 1, full_width: 1, full_height: 1, rgba: vec![9; 4] });
+        let slot = DispatchProgressSlot::new();
+        let (tx, rx) = mpsc::channel();
+        let first = PictureSink::of_run(4, slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Loading")), tx.clone());
+        first.report(tile());
+        first.report(ProgressUpdate::Step(Step::Erasing));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(4, tile())]);
+        assert_eq!(slot.read().map(|p| p.step_label), Some(Step::Erasing.label().into()));
+
+        let second = PictureSink::of_run(5, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), tx.clone());
+        first.report(tile());
+        first.report(ProgressUpdate::Step(Step::Blending));
+        assert!(rx.try_recv().is_err(), "a replaced run's pictures are dropped");
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()));
+
+        let open = std::sync::Arc::new(AtomicBool::new(true));
+        let flag = open.clone();
+        let no_pill = PictureSink::new(6, None, move || flag.load(Ordering::Acquire), tx);
+        no_pill.report(ProgressUpdate::Step(Step::Finishing));
+        no_pill.report(tile());
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(6, tile())]);
+        open.store(false, Ordering::Release);
+        no_pill.report(tile());
+        assert!(rx.try_recv().is_err(), "its own check stops its pictures");
+        second.report(tile());
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
     /// Picking a cut-out model loads it once it has stayed picked a second:
     /// a quick second pick replaces the first, a run under way drops it
     /// (its own worker stays warm), and a release clears it.
@@ -2283,15 +2425,37 @@ mod tests {
     // ── is_upscale_in_flight + admission_check ─────────────────────────────
 
     /// Cancel reaches the face search under way, and a new search starts
-    /// with a flag of its own.
+    /// with a flag of its own. A search's pictures land while it is the
+    /// latest and not stopped.
     #[test]
     fn cancel_stops_the_latest_face_search() {
         let p = fixture();
-        let first = p.begin_faces_search();
+        let (first, first_current) = p.begin_faces_search();
+        assert!(first_current());
         p.cancel_faces();
         assert!(first.load(Ordering::Acquire));
-        let next = p.begin_faces_search();
+        assert!(!first_current(), "a stopped search's pictures are dropped");
+        let (next, next_current) = p.begin_faces_search();
         assert!(!next.load(Ordering::Acquire), "a new search is not born cancelled");
+        assert!(next_current());
+        let (_, newest_current) = p.begin_faces_search();
+        assert!(!next_current() && newest_current(), "an earlier search's pictures are dropped");
+    }
+
+    /// A face search's pictures (the faces found, each one redrawn) reach
+    /// the canvas's channel while it is the latest search, with no pill
+    /// of its own when another run has it.
+    #[test]
+    fn a_face_searchs_pictures_flow_while_it_is_the_latest() {
+        use prunr_core::{ProgressSink, ProgressUpdate};
+        let p = fixture();
+        let (_, current) = p.begin_faces_search();
+        let sink = PictureSink::new(3, None, current, p.picture_sender());
+        sink.report(ProgressUpdate::Faces(Vec::new()));
+        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![(3, ProgressUpdate::Faces(Vec::new()))]);
+        let _next = p.begin_faces_search();
+        sink.report(ProgressUpdate::Faces(Vec::new()));
+        assert!(p.picture_rx.try_recv().is_err(), "a newer search took over");
     }
 
     #[test]
@@ -2318,7 +2482,7 @@ mod tests {
         let mut p = fixture();
         let _batch = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject"));
         // Not a face model: the search fails at once, without loading anything.
-        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta);
+        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let landed = loop {
             if let Some(r) = p.pump_faces_results().pop() { break r; }
