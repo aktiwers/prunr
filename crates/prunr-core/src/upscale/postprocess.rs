@@ -99,6 +99,9 @@ pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     });
 }
 
+/// Pixels per partial sum in `LabStats::of`.
+const STATS_CHUNK_PIXELS: usize = 64 * 1024;
+
 /// Mean and population standard deviation of an image's L, a and b.
 struct LabStats {
     mean: [f32; 3],
@@ -108,14 +111,19 @@ struct LabStats {
 impl LabStats {
     fn of(img: &RgbaImage) -> Self {
         use rayon::prelude::*;
+        // Fixed chunks merged in order: rayon's own splits follow thread
+        // scheduling, and a different merge order could move a pixel on a
+        // rounding edge by a level between two runs of the same image.
         let moments = img.as_raw()
-            .par_chunks_exact(4)
-            .fold(Moments::default, |mut m, px| {
+            .par_chunks(STATS_CHUNK_PIXELS * 4)
+            .map(|chunk| chunk.chunks_exact(4).fold(Moments::default(), |mut m, px| {
                 let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
                 m.push([l, a, b]);
                 m
-            })
-            .reduce(Moments::default, Moments::merge);
+            }))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .fold(Moments::default(), Moments::merge);
         Self {
             mean: moments.mean.map(|v| v as f32),
             std: std::array::from_fn(|i| if moments.n == 0.0 { 0.0 } else { (moments.m2[i] / moments.n).sqrt() as f32 }),
@@ -391,6 +399,19 @@ mod tests {
     }
 
     // ── apply_color_match ────────────────────────────────────────────────
+
+    /// The same images give the same pixels on every run, whatever
+    /// threads the statistics were split over.
+    #[test]
+    fn apply_color_match_is_the_same_on_every_run() {
+        let source = RgbaImage::from_fn(700, 500, |x, y| image::Rgba([(x % 200) as u8 + 30, (y % 180) as u8 + 40, ((x * y) % 97) as u8 + 100, 255]));
+        let target = RgbaImage::from_fn(900, 700, |x, y| image::Rgba([((x + y) % 256) as u8, (x % 180) as u8, (y % 220) as u8 + 20, 255]));
+        let run = || { let mut t = target.clone(); apply_color_match(&mut t, &source); t };
+        let first = run();
+        for _ in 0..8 {
+            assert!(run() == first, "a run differs from the first");
+        }
+    }
 
     /// The parallel transfer is the two-pass serial one it replaced, to
     /// within one level from summation order.
