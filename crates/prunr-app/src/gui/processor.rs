@@ -1996,10 +1996,18 @@ impl Processor {
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
             let (w, h) = req.source_dims;
+            let started = std::time::Instant::now();
             let result = ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
+                    let decoded = started.elapsed();
                     let mask = prunr_core::sam::decode_to_mask_artifact(&out, w, h, req.reading, req.mode);
+                    tracing::debug!(
+                        item_id = req.item_id,
+                        decoder_ms = decoded.as_millis() as u64,
+                        mask_ms = (started.elapsed() - decoded).as_millis() as u64,
+                        "SAM decoder ran"
+                    );
                     DecodedSelection::Fresh { mask, output: Arc::new(out) }
                 });
             let _ = tx.send(SamDecoderResult {
