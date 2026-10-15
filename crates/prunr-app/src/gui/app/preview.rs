@@ -74,7 +74,7 @@ impl PrunrApp {
         }
         // The mask as the run applies it: pinned to the defaults where the
         // run uses none (Sketch on Full), so its settings never drift.
-        let model = self.settings.model.to_model_kind().unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
         let current = item.settings.current_recipe(model).mask;
         if applied.mask == current {
             self.last_drift_check = Some((id, current_settings));

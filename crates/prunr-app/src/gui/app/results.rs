@@ -693,7 +693,7 @@ impl PrunrApp {
     /// Answer `item_id` from a batch just sent with its own settings.
     #[cfg(test)]
     pub(crate) fn answer_for_test(&mut self, ctx: &egui::Context, item_id: u64, result: Result<prunr_core::ProcessResult, String>) {
-        let model = self.settings.model.to_model_kind().unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
         let Some(recipe) = self.batch.find_by_id(item_id).map(|i| i.settings.current_recipe(model)) else { return };
         let batch = self.processor.track_dispatch(recipe, [item_id]);
         self.on_batch_item_done(ctx, batch, item_id, result, None, None);
