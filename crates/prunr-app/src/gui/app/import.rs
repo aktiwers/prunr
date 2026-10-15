@@ -87,8 +87,8 @@ impl PrunrApp {
     }
 
     pub fn remove_selected(&mut self) {
-        let count = self.batch.selected_count();
-        self.batch.items.retain(|item| !item.selected);
+        let count = self.batch.ticked_count();
+        self.batch.items.retain(|item| !item.ticked);
         self.sync_after_batch_change();
         if count > 0 {
             self.toasts.info(format!("Removed {count} image(s)"));

@@ -648,7 +648,7 @@ pub(crate) struct BatchItem {
     /// The run (Process, erase, upscale) whose result this item awaits.
     pub(crate) job: Option<Job>,
     pub(crate) status: BatchStatus,
-    pub(crate) selected: bool,
+    pub(crate) ticked: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
     pub(crate) settings: super::item_settings::ItemSettings,
     /// The recipe that produced the current result_rgba. None if never processed.
@@ -2237,7 +2237,7 @@ impl BatchItem {
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
             status: BatchStatus::Pending,
-            selected: false,
+            ticked: false,
             settings,
             applied_recipe: None,
             cached_tensor: None,

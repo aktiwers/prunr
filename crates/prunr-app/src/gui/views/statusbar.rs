@@ -105,8 +105,8 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             // selection. Sits in the statusbar center (between the left
             // status text and the right metadata) — only visible when the
             // progress bar isn't occupying that slot.
-            let selected_count = app.batch.selected_count();
-            if selected_count >= 2 {
+            let ticked_count = app.batch.ticked_count();
+            if ticked_count >= 2 {
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
                     RichText::new(

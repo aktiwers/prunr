@@ -97,8 +97,8 @@ const TICK_SIZE: f32 = 22.0;
 /// Select-all checkbox + "N/M" selected counter.
 fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let count = app.batch.items.len();
-    let all_selected = app.batch.all_selected();
-    let mut select_all = all_selected;
+    let all_ticked = app.batch.all_ticked();
+    let mut select_all = all_ticked;
     ui.horizontal(|ui| {
         ui.spacing_mut().icon_width = TICK_SIZE;
         ui.spacing_mut().icon_spacing = 8.0;
@@ -111,14 +111,14 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
             )
             .changed()
         {
-            app.batch.set_all_selected(select_all);
+            app.batch.set_all_ticked(select_all);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Always show "N/M" for consistency — "0/4" reads as "0 of 4
             // selected" rather than the ambiguous "4" when nothing's checked.
-            let selected = app.batch.selected_count();
+            let ticked = app.batch.ticked_count();
             ui.label(
-                RichText::new(format!("{selected}/{count}"))
+                RichText::new(format!("{ticked}/{count}"))
                     .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
@@ -360,14 +360,14 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
 
     let resp = row_control(
         ui, cb_rect, egui::Id::new(("sidebar_tick", item.id)),
-        || egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.selected, format!("Tick {}", item.filename)),
+        || egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.ticked, format!("Tick {}", item.filename)),
     );
     let (cb_hovered, cb_clicked) = (resp.hovered(), resp.clicked());
     if cb_clicked {
-        item.selected = !item.selected;
+        item.ticked = !item.ticked;
     }
 
-    let cb_bg = if item.selected {
+    let cb_bg = if item.ticked {
         theme::ACCENT
     } else if cb_hovered {
         theme::WIDGET_INACTIVE_BG
@@ -381,7 +381,7 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
         Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_SECONDARY),
         egui::StrokeKind::Outside,
     );
-    if item.selected {
+    if item.ticked {
         ui.painter().text(
             cb_center,
             egui::Align2::CENTER_CENTER,
@@ -546,7 +546,7 @@ fn paint_hover_circle_btn(
 
 /// If this row is being dragged AND the pointer has crossed outside the
 /// sidebar's dead-zone, queue an OS-level drag of the item (or the whole
-/// checkbox-selected group). Skips items still processing.
+/// ticked group). Skips items still processing.
 fn detect_drag_escape(
     ui: &egui::Ui,
     app: &mut PrunrApp,

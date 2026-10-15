@@ -133,7 +133,7 @@ fn save_layers_answer_writes_into_the_picked_folder() {
     let mut app = PrunrApp::new_for_test();
     app.settings.export_split_layers = true;
     assert!(app.saves_layers(), "the default model cuts out a subject");
-    done_item(&mut app, 1).selected = true;
+    done_item(&mut app, 1).ticked = true;
     app.handle_save_selected();
     assert_eq!(asked(&app), Some(&DialogRequest::SaveLayers { targets: vec![1] }));
 
@@ -148,8 +148,8 @@ fn save_layers_answer_writes_into_the_picked_folder() {
 #[test]
 fn save_selected_answer_writes_each_into_the_picked_folder() {
     let mut app = PrunrApp::new_for_test();
-    done_item(&mut app, 1).selected = true;
-    done_item(&mut app, 2).selected = true;
+    done_item(&mut app, 1).ticked = true;
+    done_item(&mut app, 2).ticked = true;
     done_item(&mut app, 3);
     app.handle_save_selected();
     assert_eq!(asked(&app), Some(&DialogRequest::SaveSelected { targets: vec![1, 2] }));

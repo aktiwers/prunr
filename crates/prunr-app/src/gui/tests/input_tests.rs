@@ -18,10 +18,10 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     use super::fixtures::push_test_item;
 
     let mut app = PrunrApp::new_for_test();
-    // Seed batch: id 1 selected+processing, id 2 selected+done, id 3 unselected+processing.
-    for (id, selected, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
+    // Seed batch: id 1 ticked+processing, id 2 ticked+done, id 3 unticked+processing.
+    for (id, ticked, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
         let item = push_test_item(&mut app, id);
-        item.selected = selected;
+        item.ticked = ticked;
         item.status = status;
     }
 

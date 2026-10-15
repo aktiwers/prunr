@@ -1382,9 +1382,9 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         push_test_item(&mut app, 2);
         app.batch.select_item(1);
-        app.batch.items[0].selected = true;
+        app.batch.items[0].ticked = true;
         assert!(app.can_save_intent(), "the ticked image is done");
-        app.batch.items[0].selected = false;
+        app.batch.items[0].ticked = false;
         assert!(!app.can_save_intent(), "nothing finished to save");
     }
 
@@ -1828,14 +1828,14 @@ mod timeline_contract_tests {
                 item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
                 item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
                 item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), Arc::clone(&first));
-                item.selected = true;
+                item.ticked = true;
             }
             app.batch.items[1].set_on_screen(false);
             let before = app.batch.items[1].settings;
             let steps_before = app.batch.items[1].timeline.undo_steps();
             edit(&mut app.batch.items[0].settings);
             app.batch.items[0].commit(StepKind::Adjust);
-            app.process_items(|i| i.selected, Some(StepKind::Process));
+            app.process_items(|i| i.ticked, Some(StepKind::Process));
             assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "{what}: the ticked image reruns");
 
             let rerun = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 90, 90, 255])), active_provider: String::new() };
@@ -1872,14 +1872,14 @@ mod timeline_contract_tests {
             item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
             item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
             item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), px(1));
-            item.selected = true;
+            item.ticked = true;
             app.batch.select_item(0);
             let (tx, rx) = std::sync::mpsc::channel();
             app.processor.worker_tx = tx;
             let process = |app: &mut PrunrApp, feather: f32| {
                 app.batch.items[0].settings.feather = feather;
                 app.batch.items[0].commit(StepKind::Adjust);
-                app.process_items(|i| i.selected, Some(StepKind::Process));
+                app.process_items(|i| i.ticked, Some(StepKind::Process));
                 match rx.try_recv() {
                     Ok(crate::gui::worker::WorkerMessage::BatchProcess { batch, .. }) => batch,
                     _ => panic!("{what}: a batch is sent"),
@@ -2251,7 +2251,7 @@ mod first_look_tests {
         app.on_seg_report(2, subject(3), &ctx);
         assert!(texture_of(&app, 1).is_none(), "image 2 is not on screen");
 
-        app.batch.items[0].selected = true;
+        app.batch.items[0].ticked = true;
         app.handle_cancel_selected();
         app.on_seg_report(1, subject(3), &ctx);
         assert!(texture_of(&app, 0).is_none(), "its run was cancelled");
