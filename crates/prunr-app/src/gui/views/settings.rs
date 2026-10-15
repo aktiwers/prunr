@@ -87,6 +87,7 @@ pub(crate) enum HardwareSectionIntent {
     Uninstall(RuntimeId),
     PreferRuntime(RuntimeChoice),
     ClearCompiledCache,
+    ForgetGpuFailures,
 }
 
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -182,6 +183,13 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
                 tracing::info!(bytes, "cleared compiled-model cache");
             });
             app.toasts.info("Clearing compiled-model cache…");
+        }
+        HardwareSectionIntent::ForgetGpuFailures => {
+            std::thread::spawn(|| {
+                let entries = prunr_core::ep_compat::clear();
+                tracing::info!(entries, "forgot recorded GPU failures");
+            });
+            app.toasts.info("Every model will try the graphics card again");
         }
     }
 }
@@ -524,6 +532,15 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             |ui| {
                 if button(ui, ButtonKind::Secondary, "Clear").clicked() {
                     intent = Some(HardwareSectionIntent::ClearCompiledCache);
+                }
+            },
+        );
+        rows.row(
+            "GPU failures",
+            "A model that failed on the graphics card runs on the processor until the graphics driver or Prunr changes. Forget them to try the graphics card again.",
+            |ui| {
+                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget GPU failures").clicked() {
+                    intent = Some(HardwareSectionIntent::ForgetGpuFailures);
                 }
             },
         );

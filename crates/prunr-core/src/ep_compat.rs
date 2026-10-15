@@ -12,20 +12,55 @@
 //! on subsequent runs.
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
-//! Versioned by `CARGO_PKG_VERSION` — when the app updates, the cache
-//! invalidates because the loaded ORT may have new EP capabilities. A
-//! downloaded model's entry also names its files' checksums, so a new
-//! download of it is tried again.
+//! Scoped to what a failure says something about: the app version, the
+//! loaded runtime build and the graphics drivers ([`set_drivers`]). Any
+//! of them changing starts the list afresh. A downloaded model's entry
+//! also names its files' checksums, so a new download of it is tried
+//! again. A failure the device had, not the model (out of memory, a
+//! device removed or hung), is never recorded.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{EpKind, Weights};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static DRIVERS: OnceLock<String> = OnceLock::new();
+
+/// Names the graphics drivers this process runs on, so a failure
+/// recorded under one driver is tried again under the next. Call it
+/// before the first session; later calls are ignored.
+pub fn set_drivers(identity: String) {
+    let _ = DRIVERS.set(identity);
+}
+
+/// What a recorded failure holds for: this app version, runtime build
+/// and drivers.
+fn scope() -> String {
+    scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str))
+}
+
+fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
+    format!("{APP_VERSION} ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
+}
+
+/// Error text of a failure the device had rather than the model: memory
+/// ran out, or the GPU was removed, hung or reset (DXGI 887A0005-7, as
+/// DirectML reports them). The next session may well succeed.
+fn is_transient(error: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate",
+        "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
+        "has been suspended", "will not respond to more commands",
+    ];
+    let error = error.to_ascii_lowercase();
+    MARKS.iter().any(|m| error.contains(m))
+}
 
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
@@ -67,60 +102,112 @@ fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Opt
     }
 }
 
-fn cache() -> &'static Mutex<HashMap<String, String>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(load_from_disk()))
+/// The failures as last read or written, and the file's stamp then.
+#[derive(Default)]
+struct Store {
+    failures: HashMap<String, String>,
+    stamp: Option<(SystemTime, u64)>,
 }
 
-fn load_from_disk() -> HashMap<String, String> {
-    let Some(path) = cache_path() else { return HashMap::new() };
-    let Ok(data) = std::fs::read_to_string(&path) else { return HashMap::new() };
-    let Ok(file) = serde_json::from_str::<CacheFile>(&data) else { return HashMap::new() };
-    if file.version != APP_VERSION { return HashMap::new(); }
-    file.failures
+fn cache() -> &'static Mutex<Store> {
+    static CACHE: OnceLock<Mutex<Store>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut store = Store::default();
+        if let Some(path) = cache_path() {
+            store.stamp = stamp(&path);
+            store.failures = load_from(&path, &scope()).unwrap_or_default();
+        }
+        Mutex::new(store)
+    })
 }
 
-fn save_to_disk(map: &HashMap<String, String>) {
-    let Some(path) = cache_path() else { return };
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The failures in the file at `path` recorded under `scope`; empty for
+/// another scope, `None` when the file cannot be read.
+fn load_from(path: &Path, scope: &str) -> Option<HashMap<String, String>> {
+    let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(if file.version == scope { file.failures } else { HashMap::new() })
+}
+
+/// Written whole and renamed into place, so another process reading it
+/// never sees half a file.
+fn save_to(path: &Path, scope: &str, failures: &HashMap<String, String>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile {
-        version: APP_VERSION.to_string(),
-        failures: map.clone(),
-    };
-    if let Ok(json) = serde_json::to_string_pretty(&file) {
-        let _ = std::fs::write(&path, json);
+    let file = CacheFile { version: scope.to_string(), failures: failures.clone() };
+    let Ok(json) = serde_json::to_string_pretty(&file) else { return };
+    let draft = path.with_extension(format!("json.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
+        tracing::warn!(%e, path = %path.display(), "could not save the EP failure list");
+        let _ = std::fs::remove_file(&draft);
+    }
+}
+
+fn save(store: &mut Store) {
+    let Some(path) = cache_path() else { return };
+    save_to(&path, &scope(), &store.failures);
+    store.stamp = stamp(&path);
+}
+
+/// Take in what another process wrote since this one last read the
+/// file: a worker sees the list Settings reset, and does not write the
+/// failures it held back over it. Session builds call it, never a frame.
+pub(crate) fn refresh() {
+    let Some(path) = cache_path() else { return };
+    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.refresh_from(&path, &scope());
+}
+
+impl Store {
+    fn refresh_from(&mut self, path: &Path, scope: &str) {
+        let now = stamp(path);
+        if now.is_none() || now == self.stamp {
+            return;
+        }
+        if let Some(failures) = load_from(path, scope) {
+            self.failures = failures;
+            self.stamp = now;
+        }
     }
 }
 
 /// True when these weights of the model are on the EP's persistent skip
 /// list. Cheap: in-memory hashmap lookup behind a Mutex.
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
-    let map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    map.contains_key(&key(ep, model, weights))
+    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.failures.contains_key(&key(ep, model, weights))
 }
 
 /// Idempotent — re-recording the same combo is a no-op (no extra disk
-/// writes). Best-effort persistence; a failed write is logged but not
-/// fatal — next session will re-discover the failure.
+/// writes). A transient failure is logged and not recorded.
+/// Best-effort persistence; a failed write is logged but not fatal —
+/// next session will re-discover the failure.
 pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, error: &str) {
+    if is_transient(error) {
+        tracing::info!(%ep, ?model, ?weights, %error, "EP failure looks transient; not recorded");
+        return;
+    }
     let k = key(ep, model, weights);
-    let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if map.contains_key(&k) { return; }
+    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if store.failures.contains_key(&k) { return; }
     tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
-    map.insert(k, error.to_string());
-    save_to_disk(&map);
+    store.failures.insert(k, error.to_string());
+    save(&mut store);
 }
 
-/// Wipe the cache — used by `prunr --clear-ep-cache` and the future
-/// Settings → Hardware "Reset" button. Returns the number of entries
-/// removed for the caller's confirmation message.
+/// Wipe the cache — used by `prunr --clear-ep-cache` and Settings ›
+/// Hardware. Returns the number of entries removed for the caller's
+/// confirmation message.
 pub fn clear() -> usize {
-    let mut map = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let n = map.len();
-    map.clear();
-    save_to_disk(&map);
+    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let n = store.failures.len();
+    store.failures.clear();
+    save(&mut store);
     n
 }
 
@@ -184,6 +271,74 @@ mod tests {
             "OpenVINO::U2net/fp16@0000000000005ca0",
             "OpenVINO::U2net/int8@0000000000005ca0",
         ]);
+    }
+
+    /// Out of memory or a lost device says nothing about the model; each
+    /// way ORT, CUDA and DirectML word them is let through, and a real
+    /// incompatibility is not.
+    #[test]
+    fn a_device_failure_is_transient_and_a_model_failure_is_not() {
+        for transient in [
+            "ORT session creation failed (CUDA): CUDA failure 2: out of memory",
+            "ORT session creation failed (DirectML): ... 887A0005 The GPU device instance has been suspended.",
+            "DirectML test run failed: ... 887A0006 The GPU will not respond to more commands",
+            "ORT session creation failed (DirectML): HRESULT 0x8007000E",
+            "Failed to allocate memory for requested buffer of size 1073741824",
+            "bad allocation",
+        ] {
+            assert!(is_transient(transient), "{transient}");
+        }
+        for lasting in [
+            "ORT session creation failed (OpenVINO): Graph contains cycles",
+            "tensor(float16) is invalid",
+            "DirectML test run failed: output is NaN",
+        ] {
+            assert!(!is_transient(lasting), "{lasting}");
+        }
+    }
+
+    /// A failure holds only for the app version, runtime build and
+    /// drivers it happened under: a driver update or another runtime
+    /// tries the provider again.
+    #[test]
+    fn a_failure_is_forgotten_under_other_drivers_or_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ep_compat.json");
+        let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
+        let failures = HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]);
+        save_to(&path, &then, &failures);
+        assert_eq!(load_from(&path, &then), Some(failures));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(HashMap::new()));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(HashMap::new()));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
+    }
+
+    /// The list Settings resets in the GUI process reaches a worker that
+    /// had read it earlier, before the worker builds its next session.
+    #[test]
+    fn a_reset_by_another_process_is_seen_on_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ep_compat.json");
+        let failures = HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]);
+        save_to(&path, "scope", &failures);
+        let mut worker = Store { failures, stamp: stamp(&path) };
+        worker.refresh_from(&path, "scope");
+        assert_eq!(worker.failures.len(), 1, "an unchanged file keeps the list");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        save_to(&path, "scope", &HashMap::new());
+        worker.refresh_from(&path, "scope");
+        assert!(worker.failures.is_empty(), "the other process's reset is taken in");
+    }
+
+    #[test]
+    fn a_transient_failure_is_not_recorded() {
+        let model = prunr_models::ModelId::RealEsrganX2Plus;
+        #[cfg(not(target_os = "macos"))]
+        let ep = EpKind::OpenVino;
+        #[cfg(target_os = "macos")]
+        let ep = EpKind::CoreMl;
+        record_failure(ep, model, Weights::Fp16, "CUDA failure 2: out of memory");
+        assert!(!is_known_failure(ep, model, Weights::Fp16));
     }
 
     #[test]

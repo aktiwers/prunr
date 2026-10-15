@@ -55,6 +55,8 @@ fn main() {
         std::process::exit(0);
     }
 
+    prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
+
     if cli.clear_ep_cache {
         let n = prunr_core::ep_compat::clear();
         println!("Cleared {n} cached EP failure entr{}", if n == 1 { "y" } else { "ies" });
