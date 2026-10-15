@@ -1268,9 +1268,8 @@ pub(super) fn render_model_dropdown(
     change: &mut ToolbarChange,
 ) {
     let prev_model = app_settings.model;
-    // Always enabled (except mid-processing) so the user can flip to
-    // `No model` from any mode — previously gated on mask_active, which
-    // made the dropdown unreachable in EdgesOnly.
+    // Enabled in every mode (except mid-processing), Whole-photo lines
+    // included, so the user can always flip to `No model`.
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
         let info = model_info(app_settings.model);

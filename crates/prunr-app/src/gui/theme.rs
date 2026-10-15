@@ -389,7 +389,7 @@ pub const DROP_HOVER_BORDER: Color32 = ACCENT;
 /// Drop zone border default
 pub const DROP_BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 64);
 
-// === Spacing (from UI-SPEC, multiples of 4) ===
+// === Spacing (multiples of 4) ===
 
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
@@ -407,10 +407,10 @@ pub const BUTTON_ROUNDING: f32 = PILL_RADIUS as f32;
 pub const DROP_ZONE_ROUNDING: f32 = 8.0;
 pub const DROP_ZONE_BORDER_WIDTH: f32 = 2.0;
 
-/// Toolbar button height (Open, Settings, Process, Preset dropdown, Undo/Redo icons).
+/// Toolbar button height (Open, Settings, Process, Undo/Redo icons).
 pub const BTN_HEIGHT: f32 = 32.0;
-/// Chip / compact-button height on the adjustments rows, modal +/– steppers,
-/// and the CLI help tab strip.
+/// Chip / compact-button height on the adjustments rows and the CLI help
+/// tab strip.
 pub const CHIP_HEIGHT: f32 = 28.0;
 /// A key slot in Settings › Hotkeys, wide enough for "Ctrl+Shift+F12".
 pub const HOTKEY_SLOT_WIDTH: f32 = 110.0;
@@ -426,8 +426,7 @@ pub const ICON_SIZE_BUTTON: f32 = 20.0;
 /// Smaller icon glyph size — secondary-action buttons like reset-all.
 pub const ICON_SIZE_SMALL: f32 = 18.0;
 
-/// Modal widget inactive fill / hover-border gray (+/– steppers, cli tab
-/// inactive bg, app-wide hovered widget border).
+/// Inactive widget fill and the app-wide hovered widget border.
 pub const WIDGET_INACTIVE_BG: Color32 = Color32::from_rgb(0x50, 0x50, 0x50);
 /// Modal widget hover fill — one step brighter than inactive.
 pub const WIDGET_HOVER_BG: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);

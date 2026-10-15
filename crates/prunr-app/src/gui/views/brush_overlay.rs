@@ -1,10 +1,10 @@
 //! Canvas-side brush input + cursor render.
 //!
-//! Called from `canvas::render_done` when `brush_state.is_enabled()` and
-//! the result/source texture is showing. Owns:
+//! Called from the canvas when `brush_state.is_enabled()` and the
+//! result/source texture is showing. Owns:
 //! - the soft circle cursor
 //! - left-press/drag/release pointer wiring → BrushState
-//! - on commit: write the new correction onto the active BatchItem.
+//! - on release: hand the finished stroke back as `BrushAction::Committed`.
 //!
 //! Does NOT own coordinate math beyond the screen→model transform
 //! (canvas owns `compute_img_rect` and zoom/pan).
