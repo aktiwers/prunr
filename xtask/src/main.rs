@@ -315,8 +315,7 @@ fn fetch_models() -> anyhow::Result<()> {
 }
 
 /// zstd level 19 — matches the existing `.onnx.zst` artefacts that
-/// `prunr-models` embeds via `include_bytes!`. Skips if the existing
-/// `.zst` already matches (cheap mtime check via fetch_models).
+/// `prunr-models` embeds via `include_bytes!`.
 fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let zst_path = onnx_path.with_extension("onnx.zst");
     let compressed = zstd::bulk::compress(bytes, 19)?;
