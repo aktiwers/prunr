@@ -28,15 +28,16 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
         return src.clone();
     }
     // reused as the result, pixel by pixel after reading its blur value
+    use rayon::prelude::*;
     let mut out = crate::blur::blur_rgba(src, sigma.max(0.3));
-    for (o, p) in out.pixels_mut().zip(src.pixels()) {
+    out.as_mut().par_chunks_exact_mut(4).zip(src.as_raw().par_chunks_exact(4)).for_each(|(o, p)| {
         for c in 0..3 {
-            let (v, bv) = (p.0[c] as f32, o.0[c] as f32);
+            let (v, bv) = (p[c] as f32, o[c] as f32);
             let mixed = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
-            o.0[c] = mixed.round().clamp(0.0, 255.0) as u8;
+            o[c] = mixed.round().clamp(0.0, 255.0) as u8;
         }
-        o.0[3] = p.0[3];
-    }
+        o[3] = p[3];
+    });
     out
 }
 
@@ -59,18 +60,13 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
     if (w - 1.0).abs() < f32::EPSILON {
         return;
     }
-    let n = (img.width() * img.height()) as usize;
-    let n = n.min((bicubic_source.width() * bicubic_source.height()) as usize);
-    let src_raw = bicubic_source.as_raw();
-    let raw = img.as_mut();
-    for i in 0..n {
+    use rayon::prelude::*;
+    img.as_mut().par_chunks_exact_mut(4).zip(bicubic_source.as_raw().par_chunks_exact(4)).for_each(|(px, src)| {
         for c in 0..3usize {
-            let ai = raw[i * 4 + c] as f32;
-            let src = src_raw[i * 4 + c] as f32;
-            raw[i * 4 + c] = (ai * w + src * (1.0 - w)).clamp(0.0, 255.0) as u8;
+            px[c] = (px[c] as f32 * w + src[c] as f32 * (1.0 - w)).clamp(0.0, 255.0) as u8;
         }
         // channel 3 (alpha): from the AI input unchanged
-    }
+    });
 }
 
 /// Reinhard Lab-space mean+stddev color transfer. Snaps `target`'s
@@ -83,71 +79,83 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
 /// Variance guard: `stddev.max(1e-6)` before division. Without
 /// this, a uniform-color source (stddev = 0) produces NaN pixels.
 ///
-/// Alpha unchanged.
+/// Alpha unchanged. Rows run in parallel and the statistics are folded
+/// as they go, so no Lab copy of either image is kept: no working set
+/// beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
-    let src_n = (source.width() * source.height()) as usize;
-    let mut src_l = Vec::with_capacity(src_n);
-    let mut src_a = Vec::with_capacity(src_n);
-    let mut src_b = Vec::with_capacity(src_n);
+    use rayon::prelude::*;
+    let s = LabStats::of(source);
+    let t = LabStats::of(target);
+    let scale = |i: usize| s.std[i] / t.std[i].max(1e-6);
+    let (kl, ka, kb) = (scale(0), scale(1), scale(2));
+    target.as_mut().par_chunks_exact_mut(4).for_each(|px| {
+        let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
+        let (ro, go, bo) = lab_to_srgb(
+            (l - t.mean[0]) * kl + s.mean[0],
+            (a - t.mean[1]) * ka + s.mean[1],
+            (b - t.mean[2]) * kb + s.mean[2],
+        );
+        px[..3].copy_from_slice(&[ro, go, bo]);
+    });
+}
 
-    let src_raw = source.as_raw();
-    for i in 0..src_n {
-        let (l, a, b) = srgb_to_lab(src_raw[i * 4], src_raw[i * 4 + 1], src_raw[i * 4 + 2]);
-        src_l.push(l);
-        src_a.push(a);
-        src_b.push(b);
-    }
+/// Mean and population standard deviation of an image's L, a and b.
+struct LabStats {
+    mean: [f32; 3],
+    std: [f32; 3],
+}
 
-    let (s_mean_l, s_std_l) = mean_std(&src_l);
-    let (s_mean_a, s_std_a) = mean_std(&src_a);
-    let (s_mean_b, s_std_b) = mean_std(&src_b);
-    // free ~3 × src_n × 4 bytes before allocating the target Lab buffers
-    drop(src_l);
-    drop(src_a);
-    drop(src_b);
-
-    let tgt_n = (target.width() * target.height()) as usize;
-    let mut tgt_l = Vec::with_capacity(tgt_n);
-    let mut tgt_a_ch = Vec::with_capacity(tgt_n);
-    let mut tgt_b_ch = Vec::with_capacity(tgt_n);
-
-    let tgt_raw_ro = target.as_raw();
-    for i in 0..tgt_n {
-        let (l, a, b) = srgb_to_lab(tgt_raw_ro[i * 4], tgt_raw_ro[i * 4 + 1], tgt_raw_ro[i * 4 + 2]);
-        tgt_l.push(l);
-        tgt_a_ch.push(a);
-        tgt_b_ch.push(b);
-    }
-
-    let (t_mean_l, t_std_l) = mean_std(&tgt_l);
-    let (t_mean_a, t_std_a) = mean_std(&tgt_a_ch);
-    let (t_mean_b, t_std_b) = mean_std(&tgt_b_ch);
-
-    let raw = target.as_mut();
-    for i in 0..tgt_n {
-        let l_new = (tgt_l[i] - t_mean_l) * (s_std_l / t_std_l.max(1e-6)) + s_mean_l;
-        let a_new = (tgt_a_ch[i] - t_mean_a) * (s_std_a / t_std_a.max(1e-6)) + s_mean_a;
-        let b_new = (tgt_b_ch[i] - t_mean_b) * (s_std_b / t_std_b.max(1e-6)) + s_mean_b;
-        let (ro, go, bo) = lab_to_srgb(l_new, a_new, b_new);
-        raw[i * 4] = ro;
-        raw[i * 4 + 1] = go;
-        raw[i * 4 + 2] = bo;
-        // raw[i * 4 + 3]: alpha unchanged
+impl LabStats {
+    fn of(img: &RgbaImage) -> Self {
+        use rayon::prelude::*;
+        let moments = img.as_raw()
+            .par_chunks_exact(4)
+            .fold(Moments::default, |mut m, px| {
+                let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
+                m.push([l, a, b]);
+                m
+            })
+            .reduce(Moments::default, Moments::merge);
+        Self {
+            mean: moments.mean.map(|v| v as f32),
+            std: std::array::from_fn(|i| if moments.n == 0.0 { 0.0 } else { (moments.m2[i] / moments.n).sqrt() as f32 }),
+        }
     }
 }
 
-/// Compute mean and population standard deviation of a slice.
-fn mean_std(vals: &[f32]) -> (f32, f32) {
-    if vals.is_empty() {
-        return (0.0, 0.0);
+/// Running count, mean and sum of squared deviations per channel
+/// (Welford), mergeable across threads (Chan et al.): as exact as the
+/// two-pass mean then variance, in one pass.
+#[derive(Default, Clone, Copy)]
+struct Moments {
+    n: f64,
+    mean: [f64; 3],
+    m2: [f64; 3],
+}
+
+impl Moments {
+    fn push(&mut self, v: [f32; 3]) {
+        self.n += 1.0;
+        for i in 0..3 {
+            let d = f64::from(v[i]) - self.mean[i];
+            self.mean[i] += d / self.n;
+            self.m2[i] += d * (f64::from(v[i]) - self.mean[i]);
+        }
     }
-    let n = vals.len() as f64;
-    let mean = vals.iter().map(|&v| v as f64).sum::<f64>() / n;
-    let variance = vals.iter().map(|&v| {
-        let d = v as f64 - mean;
-        d * d
-    }).sum::<f64>() / n;
-    (mean as f32, variance.sqrt() as f32)
+
+    fn merge(a: Self, b: Self) -> Self {
+        let n = a.n + b.n;
+        if n == 0.0 {
+            return a;
+        }
+        let mut out = Self { n, ..a };
+        for i in 0..3 {
+            let d = b.mean[i] - a.mean[i];
+            out.mean[i] = a.mean[i] + d * b.n / n;
+            out.m2[i] = a.m2[i] + b.m2[i] + d * d * a.n * b.n / n;
+        }
+        out
+    }
 }
 
 /// What Refine applies after the model: Sharpen, AI blend toward the
@@ -383,6 +391,39 @@ mod tests {
     }
 
     // ── apply_color_match ────────────────────────────────────────────────
+
+    /// The parallel transfer is the two-pass serial one it replaced, to
+    /// within one level from summation order.
+    #[test]
+    fn apply_color_match_is_the_serial_two_pass_transfer() {
+        fn serial(target: &mut RgbaImage, source: &RgbaImage) {
+            let lab = |img: &RgbaImage| img.pixels().map(|p| srgb_to_lab(p.0[0], p.0[1], p.0[2])).collect::<Vec<_>>();
+            let stats = |v: &[(f32, f32, f32)], f: fn(&(f32, f32, f32)) -> f32| {
+                let n = v.len() as f64;
+                let mean = v.iter().map(|p| f(p) as f64).sum::<f64>() / n;
+                let var = v.iter().map(|p| (f(p) as f64 - mean).powi(2)).sum::<f64>() / n;
+                (mean as f32, var.sqrt() as f32)
+            };
+            let (s, t) = (lab(source), lab(target));
+            let ch: [fn(&(f32, f32, f32)) -> f32; 3] = [|p| p.0, |p| p.1, |p| p.2];
+            let (ss, ts) = (ch.map(|f| stats(&s, f)), ch.map(|f| stats(&t, f)));
+            for (px, l) in target.pixels_mut().zip(&t) {
+                let v = [l.0, l.1, l.2];
+                let m: [f32; 3] = std::array::from_fn(|i| (v[i] - ts[i].0) * (ss[i].1 / ts[i].1.max(1e-6)) + ss[i].0);
+                let (r, g, b) = lab_to_srgb(m[0], m[1], m[2]);
+                px.0[..3].copy_from_slice(&[r, g, b]);
+            }
+        }
+        let source = RgbaImage::from_fn(300, 200, |x, y| image::Rgba([(x % 200) as u8 + 30, (y + 40) as u8, ((x * y) % 97) as u8 + 100, 255]));
+        let target = RgbaImage::from_fn(640, 480, |x, y| image::Rgba([((x + y) % 256) as u8, (x % 180) as u8, (y % 220) as u8 + 20, (x % 256) as u8]));
+        let (mut want, mut got) = (target.clone(), target.clone());
+        serial(&mut want, &source);
+        apply_color_match(&mut got, &source);
+        let worst = want.as_raw().iter().zip(got.as_raw()).map(|(a, b)| a.abs_diff(*b)).max();
+        assert!(worst <= Some(1), "worst channel difference {worst:?}");
+        assert!(got.pixels().zip(target.pixels()).all(|(a, b)| a.0[3] == b.0[3]), "alpha unchanged");
+    }
+
 
     #[test]
     fn apply_color_match_uniform_source_no_nan() {

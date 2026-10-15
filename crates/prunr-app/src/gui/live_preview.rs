@@ -1841,6 +1841,33 @@ mod tests {
         assert!(Arc::ptr_eq(&same, &tiny) && built.is_none(), "a small photo is its own quick frame");
     }
 
+    /// What a kept upscale or colorize run costs per drag frame at 24 MP.
+    #[test]
+    #[ignore]
+    fn kept_run_frame_timing() {
+        let photo = |w, h| image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255]));
+        let raw = Arc::new(photo(6000, 4000));
+        let input = photo(1500, 1000);
+        for knobs in [
+            prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false },
+            prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.6, color_match: true },
+        ] {
+            let mut reference = None;
+            for _ in 0..3 {
+                let t = Instant::now();
+                let (_, r) = prunr_core::upscale::refine(&raw, &input, reference.take(), &knobs);
+                println!("upscale refine {knobs:?}: {:?}", t.elapsed());
+                reference = r;
+            }
+        }
+        let plane = vec![0.1f32; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize];
+        for _ in 0..3 {
+            let t = Instant::now();
+            let _ = prunr_core::colorize::colorized(&raw, &plane, 0.8);
+            println!("colorize 24 MP: {:?}", t.elapsed());
+        }
+    }
+
     /// What a 24 MP cut-out costs per drag frame, quick and settled.
     /// `cargo test --profile profiling -p prunr-app --lib quick_frame_timing -- --ignored --nocapture`
     #[test]
