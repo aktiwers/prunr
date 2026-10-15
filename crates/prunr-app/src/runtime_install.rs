@@ -15,9 +15,7 @@ pub const USER_AGENT: &str = concat!("prunr/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone)]
 pub enum InstallEvent {
-    /// Pre-download work (PyPI metadata query, post-download SHA verify).
-    /// Rendered as a single "Preparing…" state since both legs are
-    /// sub-second and flicker as distinct UI labels.
+    /// Pre-download work: the PyPI metadata query.
     Preparing,
     Downloading { bytes_so_far: u64, total_bytes: u64 },
     Extracting,
@@ -111,9 +109,7 @@ impl RuntimeId {
         match self { Self::OpenVino => "Uninstall OpenVINO Runtime" }
     }
 
-    /// Pre-baked first-launch prompt body. Static-str instead of a
-    /// per-frame `format!` so the modal doesn't churn ~300 B per
-    /// repaint while the user reads the prompt.
+    /// The first-launch prompt's body.
     pub fn first_launch_prompt_body(self) -> &'static str {
         match self {
             Self::OpenVino => "We detected hardware that can use OpenVINO Runtime. \
@@ -122,10 +118,7 @@ impl RuntimeId {
         }
     }
 
-    /// Pre-baked install-button label for the prompt. Mirrors
-    /// `first_launch_prompt_body` — the variant count is small enough
-    /// to enumerate, and the `display_name` interpolation is the only
-    /// reason this needed a per-frame `format!` before.
+    /// The first-launch prompt's install-button label.
     pub fn install_button_label(self) -> &'static str {
         match self { Self::OpenVino => "Install OpenVINO Runtime" }
     }
@@ -267,10 +260,8 @@ fn run_install(
     };
     let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel };
     // SHA verification is folded into `download_wheel`'s retry loop —
-    // bytes are already verified when this returns Ok. The Preparing
-    // event is the lifecycle marker; no separate verify call needed.
+    // bytes are already verified when this returns Ok.
     let bytes = ri::download_wheel(&wheel, &mut hooks)?;
-    let _ = tx.send(InstallEvent::Preparing);
 
     let _ = tx.send(InstallEvent::Extracting);
     let install_dir = prepare_and_extract(&bytes, rt)?;
