@@ -162,7 +162,7 @@ fn run_upscale_native(
     let input_name = knobs.input_name;
     // Probe the actual loaded session's input dtype. The REGISTRY's
     // `knobs.is_fp16` flag describes the MAIN ONNX URL; when the engine
-    // promoted to an fp16 sibling via `optimized_variant_bytes`, the
+    // loaded the fp16 sibling on a GPU, the
     // graph expects fp16 inputs even though the REGISTRY knob still
     // reads false. Without this probe the dispatch would feed fp32
     // tensors into an fp16 graph and ORT errors with "Unexpected input

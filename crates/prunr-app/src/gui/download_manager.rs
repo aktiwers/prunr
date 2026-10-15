@@ -215,10 +215,8 @@ impl DownloadManager {
                 };
                 if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &on_verifying) {
                     // fp16 companion failed: keep the main fp32 install
-                    // and surface a non-fatal warning. The engine falls
-                    // back to fp32 automatically (see
-                    // `engine.rs::optimized_variant_bytes` -> None ->
-                    // FP32 path).
+                    // and surface a non-fatal warning. Without the fp16
+                    // file on disk the engine loads the fp32 weights.
                     tracing::warn!(
                         ?id,
                         error = %e.message,

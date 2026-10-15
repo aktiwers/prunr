@@ -219,9 +219,8 @@ pub struct LicenseInfo {
 
 /// Optional fp16 (or other optimized) companion download for an
 /// `OnDemand` entry. When `Some`, the fetcher pulls this alongside the
-/// main fp32 file, placing both as siblings in the user data dir. The
-/// engine's `optimized_variant_bytes` path then transparently picks the
-/// fp16 sibling on GPU EPs that benefit from it.
+/// main fp32 file, placing both as siblings in the user data dir; a GPU
+/// session then tries the fp16 sibling first.
 #[derive(Debug, Clone, Copy)]
 pub struct OnDemandVariant {
     pub filename: &'static str,
