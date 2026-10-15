@@ -1211,7 +1211,7 @@ impl PrunrApp {
             "{} loaded",
             crate::gui::views::model_name(self.settings.model),
         ));
-        // Every model switch reclaims RAM from every backend the user
+        // Every model switch reclaims RAM from every model the user
         // is no longer using, whatever the direction.
         self.processor.release_all_sessions();
         self.prewarm_in_process_eraser();

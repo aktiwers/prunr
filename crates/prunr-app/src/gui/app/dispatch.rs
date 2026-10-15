@@ -165,10 +165,10 @@ impl PrunrApp {
             tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
             return false;
         };
-        let raw_backend = self.erase_backend();
-        let seed = raw_backend.is_sd_family()
+        let picked_model = self.eraser_model();
+        let seed = picked_model.is_sd_family()
             .then(|| self.settings.brush.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
-        tracing::info!(item_id, ?raw_backend, ?seed, "inpaint stroke committed; dispatching");
+        tracing::info!(item_id, ?picked_model, ?seed, "inpaint stroke committed; dispatching");
         let tuning = self.erase_tuning(seed);
         self.processor.dispatch_inpaint(item_id, source, selection, tuning);
         self.batch.items[idx].start_erase(seed);
@@ -176,7 +176,7 @@ impl PrunrApp {
     }
 
     /// The eraser model the Model picker names (LaMa without one).
-    fn erase_backend(&self) -> prunr_models::ModelId {
+    fn eraser_model(&self) -> prunr_models::ModelId {
         self.settings.model.to_model_id().unwrap_or(prunr_models::ModelId::LaMaFp32)
     }
 
@@ -184,11 +184,11 @@ impl PrunrApp {
     /// generated one.
     pub(super) fn erase_tuning(&mut self, seed: Option<u64>) -> crate::gui::processor::InpaintTuning {
         self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
-        let raw_backend = self.erase_backend();
-        let backend = if self.settings.lcm_routing_active(raw_backend) {
+        let picked_model = self.eraser_model();
+        let model = if self.settings.lcm_routing_active(picked_model) {
             prunr_models::ModelId::SdV15LcmInpaintFp16
         } else {
-            raw_backend
+            picked_model
         };
         let bs = &self.settings.brush;
         crate::gui::processor::InpaintTuning {
@@ -196,7 +196,7 @@ impl PrunrApp {
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
             fill_scale: bs.inpaint_fill_scale,
-            backend,
+            model,
             sd_prompt: bs.sd_prompt_for_run(),
             sd_negative_prompt: bs.sd_negative_prompt.clone(),
             sd_guidance_scale: bs.sd_guidance_scale,
