@@ -185,6 +185,7 @@ impl PrunrApp {
         // Seg live-preview is meaningless in inpaint mode — no seg tensor
         // to rerun, and the no-tensor fallback would overwrite result_rgba.
         let seg_preview_active = !self.settings.model.is_inpaint();
+        let mut queued = false;
         match dispatch {
             DispatchKind::None => {}
             DispatchKind::Render => {}
@@ -192,23 +193,13 @@ impl PrunrApp {
                 if seg_preview_active {
                     let kind = PreviewKind::photo_rerun(self.batch.items[idx].settings.line_mode);
                     self.processor.live_preview.mark_tweak(item_id, kind);
-                    if toolbar_change.commit {
-                        self.processor.live_preview.flush(item_id);
-                        ctx.request_repaint();
-                    } else {
-                        ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
-                    }
+                    queued = true;
                 }
             }
             DispatchKind::LivePreviewEdge => {
                 if seg_preview_active {
                     self.processor.live_preview.mark_tweak(item_id, PreviewKind::Edge);
-                    if toolbar_change.commit {
-                        self.processor.live_preview.flush(item_id);
-                        ctx.request_repaint();
-                    } else {
-                        ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
-                    }
+                    queued = true;
                 }
             }
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
@@ -231,12 +222,15 @@ impl PrunrApp {
         };
         if let Some(kind) = kept_run_kind.filter(|_| changed || toolbar_change.commit) {
             self.processor.live_preview.mark_tweak(item_id, kind);
-            if toolbar_change.commit {
-                self.processor.live_preview.flush(item_id);
-                ctx.request_repaint();
-            } else {
-                ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
-            }
+            queued = true;
+        }
+        // A release settles the drag's render at once, also when the
+        // release frame left the value as it was and queued nothing.
+        if toolbar_change.commit {
+            self.processor.live_preview.flush(item_id);
+            ctx.request_repaint();
+        } else if queued {
+            ctx.request_repaint_after(crate::gui::live_preview::DEBOUNCE);
         }
 
         if toolbar_change.render_repaint {
@@ -323,4 +317,25 @@ fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
     egui::Panel::top("adjustments_toolbar")
         .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)
         .frame(egui::Frame { inner_margin: margin, ..frame })
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::PrunrApp;
+    use crate::gui::live_preview::PreviewKind;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    /// A slider's release settles the drag's owed render at once, also
+    /// when the release frame left the value as it was.
+    #[test]
+    fn a_release_settles_the_drag_when_the_value_did_not_change() {
+        let mut app = PrunrApp::new_for_test();
+        push_test_item(&mut app, 1);
+        app.batch.select_item(0);
+        app.processor.live_preview.owe_for_test(1, PreviewKind::Mask);
+        let before = app.batch.items[0].settings;
+        let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..Default::default() };
+        app.apply_toolbar_change(&egui::Context::default(), release, before);
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
+    }
 }
