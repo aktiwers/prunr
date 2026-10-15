@@ -566,10 +566,7 @@ impl Drop for SubprocessManager {
 /// `RssUpdate` events so the pause/resume bands track sibling
 /// subprocesses' allocations.
 fn current_rss_thresholds() -> (u64, u64) {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_memory();
-    let available = sys.available_memory();
+    let available = crate::hardware::available_ram_bytes_now();
     let limit = (available as f64 * 0.80) as u64;
     let resume = (limit as f64 * 0.70) as u64;
     (limit, resume)
