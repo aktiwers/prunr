@@ -492,7 +492,6 @@ pub fn label(action: Action) -> &'static str {
     row(action).label
 }
 
-/// Returns true if the modal should close.
 /// The mouse gestures, for the Hotkeys tab's list below the keys.
 pub fn gestures() -> &'static [(&'static str, &'static str)] {
     GESTURES
