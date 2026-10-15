@@ -457,8 +457,8 @@ fn measure_depth(
     }
     let (progress, run) = if slot.read().is_none() {
         let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label());
-        let (progress, run) = slot.progress_for(initial, Arc::new(AtomicBool::new(false)));
-        (progress, Some(run))
+        let run = slot.begin(initial);
+        (prunr_core::Progress::new(Arc::new(run.clone())), Some(run))
     } else {
         (prunr_core::Progress::none(), None)
     };
