@@ -111,9 +111,7 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
             )
             .changed()
         {
-            for item in &mut app.batch.items {
-                item.selected = select_all;
-            }
+            app.batch.set_all_selected(select_all);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Always show "N/M" for consistency — "0/4" reads as "0 of 4

@@ -159,8 +159,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
 
             let is_batch_processing = app.batch.status_counts().processing > 0;
-            let selected_processing = app.batch.items.iter()
-                .any(|i| i.selected && i.status == BatchStatus::Processing);
+            let selected_processing = app.batch.any_selected_with_status(BatchStatus::Processing);
 
             if is_batch_processing {
                 let partial = selected_processing;
