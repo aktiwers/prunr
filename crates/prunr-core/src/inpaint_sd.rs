@@ -909,7 +909,8 @@ fn run_one_tile(
             (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
         }
     };
-    let mut previews = StepPreviews::new(image, mask, (lw, lh), bundle.latent, progress);
+    let taesd = progress.preview_edge().and_then(|_| TaesdSession::get().ok());
+    let mut previews = StepPreviews::new(image, mask, (lw, lh), bundle.latent, taesd, progress);
     let show = |x0: &[f32]| {
         if let Some(p) = previews.as_mut() {
             p.show(x0, progress);
@@ -1061,6 +1062,9 @@ fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::S
     crate::formats::resize_rgba(&small, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
 }
 
+/// The one latent size the installed TAESD decoder takes: a 512 px tile.
+const TAESD_LATENT: (usize, usize) = ((SD_TILE / 8) as usize, (SD_TILE / 8) as usize);
+
 /// A tile's step previews: the crop with each step's estimate inside its
 /// mask, as the final paste puts it, written into one copy of the crop
 /// the tile keeps, and sent for the mask's box and the preview pixels
@@ -1074,12 +1078,17 @@ struct StepPreviews<'a> {
     known: Vec<Option<[f32; 3]>>,
     latent: (usize, usize),
     space: prunr_models::SdLatent,
+    /// Decodes each step's estimate as the finished picture will look
+    /// (~0.5 s a step on a CPU against a 7-11 s step) when installed, the
+    /// latents are SD 1.5's and the crop is the decoder's one square
+    /// tile; the instant colour estimate otherwise (a tall crop, RORem).
+    taesd: Option<Arc<TaesdSession>>,
 }
 
 impl<'a> StepPreviews<'a> {
     /// `None` when nobody asked for previews, or the paste replaces no
     /// pixel of the crop.
-    fn new(image: &RgbaImage, mask: &'a GrayImage, latent: (usize, usize), space: prunr_models::SdLatent, progress: &crate::progress::Progress) -> Option<Self> {
+    fn new(image: &RgbaImage, mask: &'a GrayImage, latent: (usize, usize), space: prunr_models::SdLatent, taesd: Option<Arc<TaesdSession>>, progress: &crate::progress::Progress) -> Option<Self> {
         progress.preview_edge()?;
         let hole = crate::inpaint::mask_bbox(mask, IN_HOLE + 1, 0)?;
         Some(Self {
@@ -1089,13 +1098,27 @@ impl<'a> StepPreviews<'a> {
             known: known_cells(image, mask, latent),
             latent,
             space,
+            taesd: taesd.filter(|_| space.takes_taesd() && latent == TAESD_LATENT),
         })
+    }
+
+    /// The picture `x0` makes: decoded by TAESD when there is one (a
+    /// failed decode falls back to the estimate), else estimated.
+    fn picture(&self, x0: &[f32]) -> RgbaImage {
+        let (lw, lh) = self.latent;
+        let decoded = self.taesd.as_ref().and_then(|t| {
+            let latent = ndarray::Array4::from_shape_vec((1, 4, lh, lw), x0.to_vec()).ok()?;
+            vae_decode(&VaeBackend::Taesd(t), &latent)
+                .map_err(|err| tracing::debug!(%err, "TAESD step preview failed; estimating"))
+                .ok()
+        });
+        decoded.unwrap_or_else(|| estimate_picture(x0, self.latent, self.space, &self.known))
     }
 
     fn show(&mut self, x0: &[f32], progress: &crate::progress::Progress) {
         let (w, h) = self.filled.dimensions();
         progress.tile_preview_part((0, 0, w, h), (w, h), self.hole, |size, part| {
-            let estimate = estimate_picture(x0, self.latent, self.space, &self.known);
+            let estimate = self.picture(x0);
             paste(&mut self.filled, &estimate, self.mask, self.hole);
             crate::formats::preview_rgba(Cow::Borrowed(&self.filled), size, part)
         });
@@ -3120,6 +3143,29 @@ mod tests {
         crate::formats::preview_rgba(Cow::Owned(composite(image, painted, mask, w, h)), size, (0, 0, size.0, size.1))
     }
 
+    /// With TAESD installed an SD 1.5 step shows the decoded picture, at
+    /// the crop's size; RORem's latents keep the estimate.
+    #[test]
+    fn a_step_preview_is_decoded_by_taesd_when_installed() {
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let Ok(taesd) = TaesdSession::get() else { return };
+        let image = RgbaImage::from_pixel(512, 512, Rgba([90, 120, 150, 255]));
+        let mask = GrayImage::from_fn(512, 512, |x, _| Luma([if x > 40 { 255 } else { 0 }]));
+        let x0: Vec<f32> = (0..4 * 64 * 64).map(|i| (i % 23) as f32 / 23.0 - 0.5).collect();
+        let progress = crate::progress::Progress::new(Arc::new(crate::progress::RecordingSink::default())).with_tile_previews(128);
+        let estimate = |space| estimate_picture(&x0, (64, 64), space, &known_cells(&image, &mask, (64, 64)));
+        let sd15 = StepPreviews::new(&image, &mask, (64, 64), prunr_models::SdLatent::Sd15, Some(Arc::clone(&taesd)), &progress).expect("a hole");
+        let decoded = sd15.picture(&x0);
+        assert_eq!(decoded.dimensions(), (512, 512), "the crop's size");
+        assert_ne!(decoded, estimate(prunr_models::SdLatent::Sd15), "decoded, not estimated");
+        let tall = StepPreviews::new(&image, &mask, (64, 96), prunr_models::SdLatent::Sd15, Some(Arc::clone(&taesd)), &progress).expect("a hole");
+        assert!(tall.taesd.is_none(), "a tall crop is not the decoder's tile");
+        let sdxl = StepPreviews::new(&image, &mask, (64, 64), prunr_models::SdLatent::Sdxl, Some(taesd), &progress).expect("a hole");
+        assert_eq!(sdxl.picture(&x0), estimate(prunr_models::SdLatent::Sdxl), "SD 1.5's decoder never reads SDXL latents");
+    }
+
     /// A step's preview is sent for the hole and the preview pixels the
     /// resample reaches from it: the same pixels the whole crop's preview
     /// has there, and every pixel where that preview differs from the
@@ -3138,7 +3184,7 @@ mod tests {
         for edge in [120, 50] {
             let sink = Arc::new(RecordingSink::default());
             let progress = Progress::new(sink.clone()).with_tile_previews(edge);
-            let mut previews = StepPreviews::new(&image, &mask, (lw, lh), space, &progress).expect("a hole to preview");
+            let mut previews = StepPreviews::new(&image, &mask, (lw, lh), space, None, &progress).expect("a hole to preview");
             previews.show(&x0, &progress);
             let updates = sink.updates();
             let [ProgressUpdate::TilePreview(part)] = updates.as_slice() else { panic!("{updates:?}") };
@@ -3158,8 +3204,8 @@ mod tests {
             assert!(part.width < size.0 && part.height < size.1, "edge {edge}: less than the whole crop");
         }
         let listening = Progress::new(Arc::new(RecordingSink::default())).with_tile_previews(64);
-        assert!(StepPreviews::new(&image, &GrayImage::from_pixel(120, 80, Luma([100])), (lw, lh), space, &listening).is_none());
-        assert!(StepPreviews::new(&image, &mask, (lw, lh), space, &crate::progress::Progress::none()).is_none());
+        assert!(StepPreviews::new(&image, &GrayImage::from_pixel(120, 80, Luma([100])), (lw, lh), space, None, &listening).is_none());
+        assert!(StepPreviews::new(&image, &mask, (lw, lh), space, None, &crate::progress::Progress::none()).is_none());
     }
 
     /// Driven with a stand-in UNet, the real step loop shows each step's
@@ -3177,7 +3223,7 @@ mod tests {
                 let mut rng = ChaCha8Rng::seed_from_u64(7);
                 let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
                 let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
-                let mut previews = StepPreviews::new(&image, &mask, (8, 8), prunr_models::SdLatent::Sd15, progress);
+                let mut previews = StepPreviews::new(&image, &mask, (8, 8), prunr_models::SdLatent::Sd15, None, progress);
                 let show = |x0: &[f32]| {
                     if let Some(p) = previews.as_mut() {
                         p.show(x0, progress);
