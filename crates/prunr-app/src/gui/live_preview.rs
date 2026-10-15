@@ -694,11 +694,17 @@ impl DispatchInputs {
     }
 
     /// Whether a drag's in-between frame of this render is a quick one:
-    /// a cut-out or lines of a photo larger than a quick frame. A kept
-    /// upscale or colorize run re-finishes at full size every frame.
+    /// one of an image larger than a quick frame. An upscale with restored
+    /// faces re-finishes at full size: the faces go back where the model's
+    /// output has them.
     pub(crate) fn can_be_quick(&self) -> bool {
-        matches!(self.kind, PreviewKind::Mask | PreviewKind::Edge)
-            && self.original.width().max(self.original.height()) > QUICK_FRAME_SIDE
+        let (w, h) = match self.kind {
+            PreviewKind::Mask | PreviewKind::Edge => (self.original.width(), self.original.height()),
+            PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
+            PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
+            PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
+        };
+        w.max(h) > QUICK_FRAME_SIDE
     }
 }
 
@@ -895,6 +901,14 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_tier2_knobs is None");
             return RunOutput::empty();
         };
+        if inputs.quick {
+            // Sharpen's radius is in output pixels; the plain enlargement
+            // is made at the frame's size and not kept.
+            let raw = Arc::new(quick_rgba(&upscale.raw));
+            let knobs = prunr_core::upscale::Refine { sharpen_sigma: knobs.sharpen_sigma * raw.width() as f32 / upscale.raw.width() as f32, ..knobs };
+            let (shown, _) = prunr_core::upscale::refine(&raw, &upscale.input, None, &knobs);
+            return RunOutput { rgba: Some(shown), ..RunOutput::empty() };
+        }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
         let (shown, reference) = finish_upscale(&upscale.raw, &upscale.input, upscale.reference, &knobs, faces);
@@ -906,7 +920,13 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             tracing::debug!(event = "colorize_tier2_run_abort", reason = "no colorize run kept");
             return RunOutput::empty();
         };
-        return RunOutput { rgba: Some(Arc::new(run.render(inputs.settings.color_strength()))), ..RunOutput::empty() };
+        let strength = inputs.settings.color_strength();
+        let shown = if inputs.quick {
+            prunr_core::colorize::colorized(&quick_rgba(&run.input), &run.plane, strength)
+        } else {
+            run.render(strength)
+        };
+        return RunOutput { rgba: Some(Arc::new(shown)), ..RunOutput::empty() };
     }
 
     // Faces go into the photo before the mask, the effect and the lines.
@@ -966,6 +986,13 @@ impl QuickPhoto {
         let built = (!Arc::ptr_eq(&small, photo)).then(|| QuickPhoto { from: Arc::downgrade(photo), small: Arc::clone(&small) });
         (small, built)
     }
+}
+
+/// `img` no larger than a quick frame.
+fn quick_rgba(img: &RgbaImage) -> RgbaImage {
+    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+    let (qw, qh) = fit_long_side(img.width(), img.height(), QUICK_FRAME_SIDE);
+    resize_rgba(img, qw, qh, ResizeFilter::Bilinear)
 }
 
 /// `photo` no larger than a quick frame.
@@ -1794,8 +1821,9 @@ mod tests {
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
     }
 
-    /// A quick frame is made at `QUICK_FRAME_SIDE`, whatever full-size
-    /// planes earlier renders kept; a settled render stays full size.
+    /// A quick frame of every kind is made at `QUICK_FRAME_SIDE`, whatever
+    /// full-size planes earlier renders kept; a settled render stays full
+    /// size.
     #[test]
     fn a_quick_frame_is_made_small_and_a_settled_render_full_size() {
         use crate::gui::item_settings::ItemSettings;
@@ -1818,8 +1846,34 @@ mod tests {
             let settled = run_preview(inputs(false), &AtomicBool::new(false)).rgba.expect("rendered");
             assert_eq!(settled.dimensions(), (w, h), "{kind:?}");
         }
-        let upscale = DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), settings);
-        assert!(!upscale.can_be_quick(), "a kept run re-finishes at full size");
+        let big = Arc::new(RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 150, 255])));
+        let knobs = prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.5, color_match: true };
+        let upscale = |quick: bool| DispatchInputs {
+            quick,
+            upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&big), Arc::new(RgbaImage::new(w / 4, h / 4)), None)),
+            upscale_tier2_knobs: Some(knobs),
+            ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), settings)
+        };
+        let colorize = |quick: bool| DispatchInputs {
+            quick,
+            colorize: Some(crate::gui::item::ColorizeCache::new(
+                Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]),
+                Arc::clone(&big),
+            )),
+            ..DispatchInputs::new(PreviewKind::ColorizeTier2, 0, Arc::clone(&photo), settings)
+        };
+        for (kind, inputs) in [("upscale", &upscale as &dyn Fn(bool) -> DispatchInputs), ("colorize", &colorize)] {
+            assert!(inputs(false).can_be_quick(), "{kind}");
+            let quick = run_preview(inputs(true), &AtomicBool::new(false)).rgba.expect("rendered");
+            assert_eq!(quick.dimensions(), (QUICK_FRAME_SIDE, 300), "{kind}");
+            let settled = run_preview(inputs(false), &AtomicBool::new(false)).rgba.expect("rendered");
+            assert_eq!(settled.dimensions(), (w, h), "{kind}");
+        }
+        let faced = DispatchInputs {
+            faces: Some(FacesInput { key: FacedKey { faces: Arc::new(Vec::new()), blend: Default::default() }, faced: None }),
+            ..upscale(false)
+        };
+        assert!(!faced.can_be_quick(), "an upscale with restored faces re-finishes at full size");
     }
 
     /// A drag's quick frames shrink the photo once: the next frame reuses
@@ -1865,6 +1919,28 @@ mod tests {
             let t = Instant::now();
             let _ = prunr_core::colorize::colorized(&raw, &plane, 0.8);
             println!("colorize 24 MP: {:?}", t.elapsed());
+        }
+        use crate::gui::item_settings::ItemSettings;
+        let input = Arc::new(input);
+        let colorize = Arc::new(plane);
+        for _ in 0..3 {
+            for (label, inputs) in [
+                ("upscale quick", DispatchInputs {
+                    quick: true,
+                    upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None)),
+                    upscale_tier2_knobs: Some(prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.6, color_match: true }),
+                    ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
+                }),
+                ("colorize quick", DispatchInputs {
+                    quick: true,
+                    colorize: Some(crate::gui::item::ColorizeCache::new(Arc::clone(&colorize), Arc::clone(&raw))),
+                    ..DispatchInputs::new(PreviewKind::ColorizeTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
+                }),
+            ] {
+                let t = Instant::now();
+                let _ = run_preview(inputs, &AtomicBool::new(false));
+                println!("{label}: {:?}", t.elapsed());
+            }
         }
     }
 
