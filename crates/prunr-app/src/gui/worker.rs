@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
-use crate::subprocess::protocol::{SubprocessEvent, CANCELLED_ERR_MSG};
+use crate::subprocess::protocol::{EdgeCacheFile, SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
 pub(crate) use crate::subprocess::first_look::Shown;
 use prunr_core::IDLE_RELEASE as WARM_IDLE;
@@ -162,45 +162,55 @@ impl CompressedTensor {
 }
 
 /// Raw multi-scale TEED output for IPC transfer. `tensors` is indexed by
-/// [`EdgeScale`] as `usize`; `height` × `width` is the base size, a
-/// scale's own size is `prunr_core::edge_scale_dims`.
+/// [`EdgeScale`] as `usize`, a scale the run did not make left empty;
+/// `height` × `width` is the base size, a scale's own size is
+/// `prunr_core::edge_scale_dims`.
 pub struct EdgeTensorCache {
     pub tensors: [Vec<f32>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
 }
 
-/// Zstd-compressed multi-scale TEED cache. Every scale is kept and
-/// compressed in parallel here, so scale switching in live preview is a
-/// tensor lookup (one decompress, no re-inference).
+/// Zstd-compressed multi-scale TEED cache: every scale the run made,
+/// so a switch between them in live preview is a tensor lookup (one
+/// decompress, no re-inference). A scale it lacks needs a new run.
 /// Cloning shares the bytes.
 #[derive(Clone)]
 pub struct CompressedEdgeTensors {
-    tensors: [std::sync::Arc<[u8]>; EDGE_SCALE_COUNT],
+    tensors: [Option<std::sync::Arc<[u8]>>; EDGE_SCALE_COUNT],
     pub height: u32,
     pub width: u32,
 }
 
 impl CompressedEdgeTensors {
-    /// Compress every scale's tensor with zstd level 1, in parallel via rayon.
-    /// Runs off the UI thread (called from the BG-IO / subprocess-event path).
-    /// Returns None if any compression fails.
+    /// Compress every scale the run made with zstd level 1, in parallel
+    /// via rayon. Returns None when it made none or a compression fails.
     pub fn from_raw(raw: EdgeTensorCache) -> Option<Self> {
         use rayon::prelude::*;
-        let parts: Vec<Vec<u8>> = raw.tensors.par_iter().map(|t| {
-            zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(t), 1)
-                .ok().unwrap_or_default()
-        }).collect();
-        if parts.iter().any(|p| p.is_empty()) { return None; }
-        let tensors: [Vec<u8>; EDGE_SCALE_COUNT] = parts.try_into().ok()?;
-        Some(Self { tensors: tensors.map(Into::into), height: raw.height, width: raw.width })
+        let parts: Vec<Option<std::sync::Arc<[u8]>>> = raw.tensors.par_iter().map(|t| {
+            if t.is_empty() {
+                return Ok(None);
+            }
+            zstd::encode_all(crate::subprocess::ipc::f32s_as_le_bytes(t), 1).map(|c| Some(c.into()))
+        }).collect::<std::io::Result<_>>().ok()?;
+        if parts.iter().all(Option::is_none) {
+            return None;
+        }
+        let tensors = parts.try_into().ok()?;
+        Some(Self { tensors, height: raw.height, width: raw.width })
     }
 
-    /// Decompress one scale's tensor. Called per-dispatch in the hot path,
-    /// so wrap the result in `Arc<Vec<f32>>` + a scale discriminator at the
-    /// call site (BatchItem::volatile_edge_tensor) to amortise across a drag.
+    /// Whether the cache holds every one of `scales`.
+    pub fn has_all(&self, scales: &[EdgeScale]) -> bool {
+        scales.iter().all(|&s| self.tensors[s as usize].is_some())
+    }
+
+    /// Decompress one scale's tensor; `None` when the cache lacks it.
+    /// Called per-dispatch in the hot path, so wrap the result in
+    /// `Arc<Vec<f32>>` + a scale discriminator at the call site
+    /// (BatchItem::volatile_edge_tensor) to amortise across a drag.
     pub fn decompress(&self, scale: EdgeScale) -> Option<Vec<f32>> {
-        let bytes = zstd::decode_all(&*self.tensors[scale as usize]).ok()?;
+        let bytes = zstd::decode_all(&**self.tensors[scale as usize].as_ref()?).ok()?;
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
@@ -221,7 +231,7 @@ impl CompressedEdgeTensors {
 
     /// Total compressed bytes across every scale (for budget tracking).
     pub fn compressed_size(&self) -> usize {
-        self.tensors.iter().map(|t| t.len()).sum()
+        self.tensors.iter().flatten().map(|t| t.len()).sum()
     }
 }
 
@@ -874,15 +884,13 @@ fn handle_subprocess_event(
         SubprocessEvent::ImageDone {
             item_id, result_path, width, height, active_provider,
             tensor_cache_path, tensor_cache_height, tensor_cache_width,
-            edge_cache_path, edge_cache_height, edge_cache_width,
+            edge_cache: edge_cache_file,
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
             let tensor_cache = read_tensor_cache(
                 tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.engines.model,
             );
-            let edge_cache = read_edge_tensor_cache(
-                edge_cache_path.as_ref(), edge_cache_height, edge_cache_width,
-            );
+            let edge_cache = read_edge_tensor_cache(edge_cache_file.as_ref());
 
             state.completed.insert(item_id);
             sent.forget(item_id);
@@ -968,23 +976,17 @@ fn read_tensor_cache(
     Some(TensorCache { data, height: h, width: w, model })
 }
 
-/// Read the TEED multi-scale cache. Child concatenates every scale's
-/// tensor into one file in `EdgeScale` order; parent splits it by each
-/// scale's size.
-fn read_edge_tensor_cache(
-    path: Option<&std::path::PathBuf>,
-    height: Option<u32>,
-    width: Option<u32>,
-) -> Option<EdgeTensorCache> {
-    let h = height?;
-    let w = width?;
-    let raw_bytes = read_and_delete(path?)?;
+/// Read the TEED planes the worker wrote, split by each listed scale's
+/// size; the scales it did not write stay empty.
+fn read_edge_tensor_cache(file: Option<&EdgeCacheFile>) -> Option<EdgeTensorCache> {
+    let file = file?;
+    let raw_bytes = read_and_delete(&file.path)?;
 
     let scale_bytes = |scale: EdgeScale| {
-        let (sh, sw) = prunr_core::edge_scale_dims(scale, h, w);
+        let (sh, sw) = prunr_core::edge_scale_dims(scale, file.height, file.width);
         (sh as usize) * (sw as usize) * std::mem::size_of::<f32>()
     };
-    let expected: usize = EdgeScale::ALL.iter().map(|&s| scale_bytes(s)).sum();
+    let expected: usize = file.scales.iter().map(|&s| scale_bytes(s)).sum();
     if raw_bytes.len() != expected {
         tracing::error!(
             got = raw_bytes.len(),
@@ -994,13 +996,14 @@ fn read_edge_tensor_cache(
         return None;
     }
 
+    let mut tensors: [Vec<f32>; EDGE_SCALE_COUNT] = Default::default();
     let mut rest = raw_bytes.as_slice();
-    let tensors = EdgeScale::ALL.map(|scale| {
+    for &scale in &file.scales {
         let (chunk, tail) = rest.split_at(scale_bytes(scale));
         rest = tail;
-        crate::subprocess::ipc::le_bytes_to_f32s(chunk)
-    });
-    Some(EdgeTensorCache { tensors, height: h, width: w })
+        tensors[scale as usize] = crate::subprocess::ipc::le_bytes_to_f32s(chunk);
+    }
+    Some(EdgeTensorCache { tensors, height: file.height, width: file.width })
 }
 
 /// After an ImageDone, pull one more item into the subprocess if RSS allows.
@@ -1345,6 +1348,41 @@ mod tests {
         assert_eq!(idle_after_run(ModelKind::BiRefNetLite), WARM_IDLE_AFTER_HEAVY_RUN);
         assert_eq!(idle_after_run(ModelKind::Silueta), WARM_IDLE);
         assert_eq!(idle_after_run(ModelKind::U2net), WARM_IDLE);
+    }
+
+    /// A file of some scales lands those scales and leaves the others
+    /// missing; a file whose size disagrees with its scales lands nothing.
+    #[test]
+    fn an_edge_cache_of_some_scales_lands_only_those() {
+        use super::{read_edge_tensor_cache, CompressedEdgeTensors, EdgeCacheFile};
+        use prunr_core::EdgeScale::{Bold, Fine, Fused};
+        let dir = tempfile::tempdir().unwrap();
+        let (h, w) = (2u32, 3u32);
+        let plane = |v: f32, s: prunr_core::EdgeScale| {
+            let (sh, sw) = prunr_core::edge_scale_dims(s, h, w);
+            vec![v; (sh * sw) as usize]
+        };
+        let write = |name: &str, planes: &[Vec<f32>]| {
+            let path = dir.path().join(name);
+            let bytes: Vec<u8> = planes.iter().flat_map(|p| crate::subprocess::ipc::f32s_as_le_bytes(p).to_vec()).collect();
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+
+        let path = write("drawn.raw", &[plane(0.25, Bold), plane(0.75, Fused)]);
+        let file = EdgeCacheFile { path: path.clone(), height: h, width: w, scales: vec![Bold, Fused] };
+        let raw = read_edge_tensor_cache(Some(&file)).expect("the drawn scales land");
+        assert!(!path.exists(), "read and deleted");
+        assert!(raw.tensors[Fine as usize].is_empty());
+        let cache = CompressedEdgeTensors::from_raw(raw).expect("compresses");
+        assert!(cache.has_all(&[Bold, Fused]) && !cache.has_all(&[Fine]));
+        assert_eq!(cache.decompress(Fused), Some(plane(0.75, Fused)));
+        assert_eq!(cache.decompress(Bold), Some(plane(0.25, Bold)));
+        assert_eq!(cache.decompress(Fine), None);
+
+        let short = write("short.raw", &[plane(0.5, Bold)]);
+        let file = EdgeCacheFile { path: short, height: h, width: w, scales: vec![Bold, Fused] };
+        assert!(read_edge_tensor_cache(Some(&file)).is_none());
     }
 
 

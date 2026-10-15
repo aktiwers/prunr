@@ -189,6 +189,18 @@ pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) 
     prunr_core::Progress::new(std::sync::Arc::new(IpcProgress { item_id, tx }))
 }
 
+/// The line detector's planes (f32 probabilities, pre-threshold) a
+/// worker wrote for an image: `scales`' planes one after another in that
+/// order, each at its own size, `edge_scale_dims` of the base `height` ×
+/// `width`. A run may write only some scales.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EdgeCacheFile {
+    pub path: std::path::PathBuf,
+    pub height: u32,
+    pub width: u32,
+    pub scales: Vec<prunr_core::EdgeScale>,
+}
+
 /// Child → Parent events (sent over child's stdout).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
@@ -215,16 +227,10 @@ pub enum SubprocessEvent {
         tensor_cache_path: Option<std::path::PathBuf>,
         tensor_cache_height: Option<u32>,
         tensor_cache_width: Option<u32>,
-        /// Path to cached TEED edge planes (f32 probabilities, pre-threshold).
-        /// Parent compresses and stores for Tier 2 edge reruns on line_strength tweaks.
-        /// Only present when the run used TEED (EdgesOnly or SubjectOutline modes).
+        /// The line detector's planes, for Tier 2 edge reruns. Only
+        /// present when the run used TEED (EdgesOnly or SubjectOutline).
         #[serde(default)]
-        edge_cache_path: Option<std::path::PathBuf>,
-        /// Base plane size; each scale's own size is `edge_scale_dims`.
-        #[serde(default)]
-        edge_cache_height: Option<u32>,
-        #[serde(default)]
-        edge_cache_width: Option<u32>,
+        edge_cache: Option<EdgeCacheFile>,
     },
     /// Image processing failed (non-fatal).
     ImageError {
@@ -630,9 +636,7 @@ mod tests {
             tensor_cache_path: Some(PathBuf::from("/tmp/tensor.bin")),
             tensor_cache_height: Some(320),
             tensor_cache_width: Some(320),
-            edge_cache_path: None,
-            edge_cache_height: None,
-            edge_cache_width: None,
+            edge_cache: None,
         });
         roundtrip(&SubprocessEvent::ImageDone {
             item_id: 12,
@@ -643,9 +647,12 @@ mod tests {
             tensor_cache_path: None,
             tensor_cache_height: None,
             tensor_cache_width: None,
-            edge_cache_path: Some(PathBuf::from("/tmp/edge.bin")),
-            edge_cache_height: Some(480),
-            edge_cache_width: Some(640),
+            edge_cache: Some(EdgeCacheFile {
+                path: PathBuf::from("/tmp/edge.bin"),
+                height: 480,
+                width: 640,
+                scales: vec![prunr_core::EdgeScale::Bold, prunr_core::EdgeScale::Fused],
+            }),
         });
     }
 
@@ -985,7 +992,7 @@ mod tests {
     // ── serde(default) field roundtrip tests ────────────────────────────────
     //
     // `#[serde(default)]` fields — `inpaint_only`, `feather_px`, `sharpen`,
-    // `edge_cache_*` — are pinned here to document their expected defaults
+    // `edge_cache` — are pinned here to document their expected defaults
     // and catch accidental value drift. Bincode is a positional format; it
     // does NOT support "missing trailing field → default" across a wire
     // boundary (it returns `UnexpectedEnd` on a short payload). These tests
@@ -1062,39 +1069,6 @@ mod tests {
             sd_req: None,
             feather_px: 8.5,
             sharpen: 0.4,
-        });
-    }
-
-    /// `ImageDone.edge_cache_*` fields default to `None`. Roundtrip the
-    /// all-None case (no TEED run) and the all-Some case so a default
-    /// drift from `None` to some garbage path is caught immediately.
-    #[test]
-    fn event_image_done_edge_cache_fields_roundtrip_none_and_some() {
-        roundtrip(&SubprocessEvent::ImageDone {
-            item_id: 3,
-            result_path: PathBuf::from("/tmp/result.raw"),
-            width: 800,
-            height: 600,
-            active_provider: "CPU".into(),
-            tensor_cache_path: None,
-            tensor_cache_height: None,
-            tensor_cache_width: None,
-            edge_cache_path: None,
-            edge_cache_height: None,
-            edge_cache_width: None,
-        });
-        roundtrip(&SubprocessEvent::ImageDone {
-            item_id: 4,
-            result_path: PathBuf::from("/tmp/result2.raw"),
-            width: 1920,
-            height: 1080,
-            active_provider: "CPU".into(),
-            tensor_cache_path: None,
-            tensor_cache_height: None,
-            tensor_cache_width: None,
-            edge_cache_path: Some(PathBuf::from("/tmp/edge.raw")),
-            edge_cache_height: Some(1080),
-            edge_cache_width: Some(1920),
         });
     }
 }
