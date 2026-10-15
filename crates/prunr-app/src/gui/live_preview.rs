@@ -357,7 +357,7 @@ impl LivePreview {
             })
             .or_insert_with(|| Pending { armed_at: now, latest_tweak_at: now, kind, settled: false });
         tracing::debug!(
-            event = "upscale_tier2_mark_tweak",
+            event = "live_preview_mark_tweak",
             item_id,
             ?kind,
             is_new_entry = is_new,
@@ -458,7 +458,7 @@ impl LivePreview {
                 None => continue,
             };
             tracing::debug!(
-                event = "upscale_tier2_tick_ready",
+                event = "live_preview_tick_ready",
                 item_id = id,
                 ?kind,
                 in_flight_count = self.in_flight.len(),
@@ -466,7 +466,7 @@ impl LivePreview {
             );
             let Some(mut inputs) = snapshot(id, kind) else {
                 tracing::debug!(
-                    event = "upscale_tier2_tick_no_snapshot",
+                    event = "live_preview_tick_no_snapshot",
                     item_id = id,
                     ?kind,
                     "tick: snapshot returned None — dispatch skipped, will retry"
