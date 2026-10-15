@@ -172,30 +172,44 @@ const FAILED_TEXT: Color32 = Color32::from_rgb(0xd8, 0x8e, 0x8e);
 
 /// Filter tabs in display order; `None` is "All".
 const FILTERS: [super::chip::Choice<Option<ModelCategory>>; 8] = [
-    filter(None, "All"),
-    filter(Some(ModelCategory::Segmentation), "Background"),
-    filter(Some(ModelCategory::EdgeDetection), "Sketch"),
-    filter(Some(ModelCategory::Inpaint), "Eraser"),
-    filter(Some(ModelCategory::Upscale), "Upscale"),
-    filter(Some(ModelCategory::Face), "Faces"),
-    filter(Some(ModelCategory::Colorize), "Colorize"),
-    filter(Some(ModelCategory::Depth), "Depth"),
+    super::chip::Choice { value: None, name: "All", description: "", enabled: true },
+    filter(ModelCategory::Segmentation),
+    filter(ModelCategory::EdgeDetection),
+    filter(ModelCategory::Inpaint),
+    filter(ModelCategory::Upscale),
+    filter(ModelCategory::Face),
+    filter(ModelCategory::Colorize),
+    filter(ModelCategory::Depth),
 ];
 
-const fn filter(value: Option<ModelCategory>, name: &'static str) -> super::chip::Choice<Option<ModelCategory>> {
-    super::chip::Choice { value, name, description: "", enabled: true }
+const fn filter(c: ModelCategory) -> super::chip::Choice<Option<ModelCategory>> {
+    super::chip::Choice { value: Some(c), name: category_name(c), description: "", enabled: true }
 }
 
-fn category_label(c: ModelCategory) -> (&'static str, &'static str) {
+/// A category's name on its filter tab and its cards.
+const fn category_name(c: ModelCategory) -> &'static str {
     match c {
-        ModelCategory::Segmentation => (ICON_CONTENT_CUT.codepoint, "Background"),
-        ModelCategory::EdgeDetection => (ICON_DRAW.codepoint, "Sketch"),
-        ModelCategory::Inpaint => (ICON_BRUSH.codepoint, "Eraser"),
-        ModelCategory::Upscale => (ICON_ARROW_UPWARD.codepoint, "Upscale"),
-        ModelCategory::Selection => (ICON_AUTO_AWESOME.codepoint, "Selection"),
-        ModelCategory::Face => (ICON_FACE.codepoint, "Faces"),
-        ModelCategory::Colorize => (ICON_PALETTE.codepoint, "Colorize"),
-        ModelCategory::Depth => (ICON_LANDSCAPE.codepoint, "Depth"),
+        ModelCategory::Segmentation => "Background",
+        ModelCategory::EdgeDetection => "Sketch",
+        ModelCategory::Inpaint => "Eraser",
+        ModelCategory::Upscale => "Upscale",
+        ModelCategory::Selection => "Selection",
+        ModelCategory::Face => "Faces",
+        ModelCategory::Colorize => "Colorize",
+        ModelCategory::Depth => "Depth",
+    }
+}
+
+fn category_icon(c: ModelCategory) -> &'static str {
+    match c {
+        ModelCategory::Segmentation => ICON_CONTENT_CUT.codepoint,
+        ModelCategory::EdgeDetection => ICON_DRAW.codepoint,
+        ModelCategory::Inpaint => ICON_BRUSH.codepoint,
+        ModelCategory::Upscale => ICON_ARROW_UPWARD.codepoint,
+        ModelCategory::Selection => ICON_AUTO_AWESOME.codepoint,
+        ModelCategory::Face => ICON_FACE.codepoint,
+        ModelCategory::Colorize => ICON_PALETTE.codepoint,
+        ModelCategory::Depth => ICON_LANDSCAPE.codepoint,
     }
 }
 
@@ -228,7 +242,7 @@ fn render_card(
             ui.set_width(size.x - 2.0 * CARD_PADDING);
             let open_id = ui.id().with(("store_card", desc.id));
             let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
-            let (icon, tag) = category_label(desc.category);
+            let (icon, tag) = (category_icon(desc.category), category_name(desc.category));
             let top = ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 18.0, theme::ACCENT_BRIGHT.gamma_multiply(0.18));
