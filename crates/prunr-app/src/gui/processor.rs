@@ -477,15 +477,29 @@ fn preview_the_photo(progress: &prunr_core::Progress, photo: &image::RgbaImage) 
     });
 }
 
+/// What made a picture: each lands on its own preview, whatever state
+/// the item is in when it arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PictureFrom {
+    /// The run the item awaits (a cut, an upscale, an erase, …).
+    Run,
+    FaceSearch,
+}
+
 /// A picture a run made for its item (a finished tile, …), on its way
 /// to the canvas.
-pub(crate) type RunPicture = (u64, prunr_core::ProgressUpdate);
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RunPicture {
+    pub item_id: u64,
+    pub from: PictureFrom,
+    pub update: prunr_core::ProgressUpdate,
+}
 
-/// Where a tile picture lands: its item and its rectangle on a preview
-/// of that size. `None` for any other picture.
-fn tile_place((item_id, picture): &RunPicture) -> Option<(u64, [u32; 6])> {
-    match picture {
-        prunr_core::ProgressUpdate::TilePreview(t) => Some((*item_id, [t.x, t.y, t.width, t.height, t.full_width, t.full_height])),
+/// Where a tile picture lands: its item, maker and rectangle on a
+/// preview of that size. `None` for any other picture.
+fn tile_place(picture: &RunPicture) -> Option<(u64, PictureFrom, [u32; 6])> {
+    match &picture.update {
+        prunr_core::ProgressUpdate::TilePreview(t) => Some((picture.item_id, picture.from, [t.x, t.y, t.width, t.height, t.full_width, t.full_height])),
         _ => None,
     }
 }
@@ -496,27 +510,29 @@ fn tile_place((item_id, picture): &RunPicture) -> Option<(u64, [u32; 6])> {
 #[derive(Clone)]
 pub(crate) struct PictureSink {
     item_id: u64,
+    from: PictureFrom,
     pill: Option<super::dispatch_progress::RunSink>,
     current: Arc<dyn Fn() -> bool + Send + Sync>,
     pictures: mpsc::Sender<RunPicture>,
 }
 
 impl PictureSink {
-    /// Pictures for `item_id` land while `current` holds. Without a
-    /// `pill` (another run shows on it) steps and counts go nowhere.
-    pub(crate) fn new(
+    /// A face search: its pictures for `item_id` land while `current`
+    /// holds. Without a `pill` (another run shows on it) steps and counts
+    /// go nowhere.
+    pub(crate) fn of_face_search(
         item_id: u64,
         pill: Option<super::dispatch_progress::RunSink>,
         current: impl Fn() -> bool + Send + Sync + 'static,
         pictures: mpsc::Sender<RunPicture>,
     ) -> Self {
-        Self { item_id, pill, current: Arc::new(current), pictures }
+        Self { item_id, from: PictureFrom::FaceSearch, pill, current: Arc::new(current), pictures }
     }
 
     /// A run on the pill: its pictures land while it is the run shown.
     pub(crate) fn of_run(item_id: u64, run: super::dispatch_progress::RunSink, pictures: mpsc::Sender<RunPicture>) -> Self {
         let shown = run.clone();
-        Self::new(item_id, Some(run), move || shown.current(), pictures)
+        Self { item_id, from: PictureFrom::Run, pill: Some(run), current: Arc::new(move || shown.current()), pictures }
     }
 
     /// The run is over: the pill clears unless a newer run took it.
@@ -537,7 +553,7 @@ impl prunr_core::ProgressSink for PictureSink {
         match update {
             update @ (prunr_core::ProgressUpdate::TilePreview(_) | prunr_core::ProgressUpdate::Faces(_)) => {
                 if (self.current)() {
-                    let _ = self.pictures.send((self.item_id, update));
+                    let _ = self.pictures.send(RunPicture { item_id: self.item_id, from: self.from, update });
                 }
             }
             update => {
@@ -1937,7 +1953,7 @@ impl Processor {
         let run = self.dispatch_progress.read().is_none().then(|| {
             self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()))
         });
-        let progress = PictureSink::new(item_id, run.clone(), current, self.picture_sender())
+        let progress = PictureSink::of_face_search(item_id, run.clone(), current, self.picture_sender())
             .into_progress()
             .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
@@ -2406,14 +2422,16 @@ mod tests {
     fn a_tile_painted_twice_before_a_frame_lands_once() {
         use prunr_core::{ProgressUpdate, TilePreview};
         let tile = |x: u32, v: u8| ProgressUpdate::TilePreview(TilePreview { x, y: 0, width: 2, height: 2, full_width: 8, full_height: 8, rgba: vec![v; 16] });
+        let run = |item_id, update| RunPicture { item_id, from: PictureFrom::Run, update };
+        let face = |item_id, update| RunPicture { item_id, from: PictureFrom::FaceSearch, update };
         let mut p = fixture();
         let tx = p.picture_sender();
-        for picture in [(1, tile(0, 1)), (1, tile(4, 2)), (2, tile(0, 3)), (1, ProgressUpdate::Faces(Vec::new())), (1, tile(0, 4))] {
+        for picture in [run(1, tile(0, 1)), run(1, tile(4, 2)), run(2, tile(0, 3)), face(1, tile(0, 5)), face(1, ProgressUpdate::Faces(Vec::new())), run(1, tile(0, 4))] {
             tx.send(picture).expect("the processor holds the receiver");
         }
         assert_eq!(
             p.pump_pictures(),
-            vec![(1, tile(4, 2)), (2, tile(0, 3)), (1, ProgressUpdate::Faces(Vec::new())), (1, tile(0, 4))],
+            vec![run(1, tile(4, 2)), run(2, tile(0, 3)), face(1, tile(0, 5)), face(1, ProgressUpdate::Faces(Vec::new())), run(1, tile(0, 4))],
         );
         assert!(p.pump_pictures().is_empty());
     }
@@ -2432,7 +2450,8 @@ mod tests {
         let first = PictureSink::of_run(4, slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Loading")), tx.clone());
         first.report(tile());
         first.report(ProgressUpdate::Step(Step::Erasing));
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(4, tile())]);
+        let run = |item_id| RunPicture { item_id, from: PictureFrom::Run, update: tile() };
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![run(4)]);
         assert_eq!(slot.read().map(|p| p.step_label), Some(Step::Erasing.label().into()));
 
         let second = PictureSink::of_run(5, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), tx.clone());
@@ -2443,11 +2462,11 @@ mod tests {
 
         let open = std::sync::Arc::new(AtomicBool::new(true));
         let flag = open.clone();
-        let no_pill = PictureSink::new(6, None, move || flag.load(Ordering::Acquire), tx);
+        let no_pill = PictureSink::of_face_search(6, None, move || flag.load(Ordering::Acquire), tx);
         no_pill.report(ProgressUpdate::Step(Step::Finishing));
         no_pill.report(tile());
         assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![(6, tile())]);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![RunPicture { item_id: 6, from: PictureFrom::FaceSearch, update: tile() }]);
         let previews = no_pill.clone().into_progress();
         assert!(previews.preview_edge().is_some());
         open.store(false, Ordering::Release);
@@ -2524,9 +2543,9 @@ mod tests {
         use prunr_core::{ProgressSink, ProgressUpdate};
         let p = fixture();
         let (_, current) = p.begin_faces_search();
-        let sink = PictureSink::new(3, None, current, p.picture_sender());
+        let sink = PictureSink::of_face_search(3, None, current, p.picture_sender());
         sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![(3, ProgressUpdate::Faces(Vec::new()))]);
+        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![RunPicture { item_id: 3, from: PictureFrom::FaceSearch, update: ProgressUpdate::Faces(Vec::new()) }]);
         let _next = p.begin_faces_search();
         sink.report(ProgressUpdate::Faces(Vec::new()));
         assert!(p.picture_rx.try_recv().is_err(), "a newer search took over");
