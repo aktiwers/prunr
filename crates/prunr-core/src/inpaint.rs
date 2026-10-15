@@ -51,13 +51,15 @@ impl Bbox {
 }
 
 /// Eagerly initialise the inpaint session for `id` in the background so
-/// the first stroke doesn't pay the ~5-10s session-build latency.
-/// Idempotent — repeated calls for the same id are no-ops.
+/// the first stroke doesn't pay its build: ~5-10 s for LaMa, 10-30 s for
+/// the four sessions of a Stable Diffusion bundle (built at the default
+/// tuning). Idempotent — repeated calls for the same id are no-ops.
 pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreError> {
     if id.is_sd_family() {
-        return crate::inpaint_sd::prewarm(id);
+        crate::inpaint_sd::load_bundle(id, &crate::inpaint_sd::SdTuning::default()).map(drop)
+    } else {
+        load_lama(id, cpu_only).map(drop)
     }
-    LamaSession::get(id, cpu_only).map(|_| ())
 }
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
@@ -503,14 +505,19 @@ fn lama_cache() -> &'static Mutex<LamaCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Drop every cached LaMa session immediately. In-flight callers keep
-/// their own `Arc<LamaSession>` so the cache clear is safe; once the
-/// dispatch finishes, the last Arc goes away and the ORT session
-/// frees. Called by the GUI when the user switches inpaint models —
-/// keeping the previous backend cached for 5 min after they've
-/// committed to a different tool wastes ~700 MB–2 GB on the model
-/// they're no longer using.
-pub fn release_all_lama_sessions() {
+/// Drop every cached eraser session, LaMa-class and Stable Diffusion,
+/// kept ones too. In-flight callers keep their own `Arc` of the session,
+/// so the clear is safe; once the dispatch finishes, the last Arc goes
+/// and the ORT session frees. Called by the GUI when the user switches
+/// models — keeping the previous backend cached for 5 min after they've
+/// committed to a different tool wastes ~700 MB–2 GB (LaMa) or ~16 GB
+/// (SD) on a model they're no longer using.
+pub fn release_all() {
+    release_lama_sessions();
+    crate::inpaint_sd::release_all();
+}
+
+fn release_lama_sessions() {
     let cache = lama_cache();
     let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dropped = guard.len();

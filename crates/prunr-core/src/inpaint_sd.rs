@@ -820,12 +820,6 @@ fn padded_dims(w: u32, h: u32) -> (u32, u32) {
     (up(w), up(h))
 }
 
-/// Eagerly initialise the SD session so the first stroke doesn't pay
-/// the cumulative ~10-30s session-build latency for 4 ONNX files.
-pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
-    SdSession::get(id, &SdSessionKey::default(), false).map(|_| ())
-}
-
 // ── Per-tile pipeline ───────────────────────────────────────────────────
 
 fn run_one_tile(
@@ -1343,7 +1337,7 @@ pub fn load_bundle(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Vec<(
 }
 
 /// Release every loaded bundle, kept ones too.
-pub fn release_all() {
+pub(crate) fn release_all() {
     sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
 }
 
