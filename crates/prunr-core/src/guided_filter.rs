@@ -318,8 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_box_filter_matches_sequential() {
-        // Generate a non-trivial image and verify parallel results match
+    fn box_filter_stays_within_input_range() {
         let w = 200u32;
         let h = 150u32;
         let n = (w * h) as usize;
@@ -360,11 +359,8 @@ mod tests {
         out
     }
 
-    /// Pins the interior fast-path against brute-force reference on a grid
-    /// big enough to exercise all three lookup regions (left margin, interior,
-    /// right margin) AND all three row regions (top margin, interior, bottom
-    /// margin). 16×16 + r=2 gives x_start=3, x_end=14 — interior is 11×11
-    /// pixels of fast path, surrounded by 2-wide margin in every direction.
+    /// Against the brute-force reference on a grid where windows are
+    /// clipped at every border and a 12×12 interior is not clipped at all.
     #[test]
     fn test_box_filter_interior_fast_path_matches_brute_force() {
         let (w, h, r) = (16u32, 16u32, 2u32);
@@ -380,9 +376,8 @@ mod tests {
         }
     }
 
-    /// Same brute-force check on a wider image so the column-chunked
-    /// vertical prefix sum (COL_CHUNK = 32) walks a full chunk plus a
-    /// partial chunk in the same pass.
+    /// Same brute-force check on a wider-than-tall image with a larger
+    /// radius, so the row and column windows clip differently.
     #[test]
     fn test_box_filter_chunked_vertical_pass_matches_brute_force() {
         let (w, h, r) = (48u32, 24u32, 3u32);
