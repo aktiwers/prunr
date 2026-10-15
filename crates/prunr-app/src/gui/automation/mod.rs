@@ -129,7 +129,6 @@ pub struct Automation {
     /// Input, one batch per frame, handed to `raw_input_hook`.
     frames: std::collections::VecDeque<InputFrame>,
     deferred: Vec<Deferred>,
-    /// Where a `Hold` left the pointer, until `Release`.
     /// Where the pointer is held, and the modifiers held with it.
     held_at: Option<(egui::Pos2, Option<egui::Modifiers>)>,
 }
