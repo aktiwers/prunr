@@ -72,7 +72,7 @@ pub struct BrushSettings {
     #[serde(default = "default_cfg")]
     pub sd_guidance_scale: f32,
     /// SD-only: the quality (sampler); Fast is the default.
-    #[serde(default = "default_sd_scheduler")]
+    #[serde(default)]
     pub sd_scheduler: SdScheduler,
     /// SD-only: number of denoise steps, within `SdScheduler::steps_range`.
     #[serde(default = "default_sd_steps")]
@@ -116,9 +116,10 @@ pub struct BrushSettings {
 
 /// The SD eraser's quality: which sampler runs the fill. Wired into
 /// `SdInpaintRequest` at dispatch time.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SdScheduler {
     /// Fast: the LCM-distilled model, a few steps.
+    #[default]
     Lcm,
     /// Quality: DPM-Solver++ 2M with Karras spacing on the full model.
     /// Settings saved with the retired DDIM, UniPC or Euler-A load as this.
@@ -180,7 +181,7 @@ fn default_magic_depth_range() -> f32 { DEPTH_RANGE_DEFAULT }
 /// The Range slider's span and starting point for a Depth click.
 pub const DEPTH_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.3;
 const DEPTH_RANGE_DEFAULT: f32 = 0.08;
-fn default_cfg() -> f32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).guidance_scale }
+fn default_cfg() -> f32 { crate::gui::presets::SdSchedulerBundle::default().guidance_scale }
 
 /// Defaults for SD eraser prompts. Style-agnostic — works whether the
 /// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
@@ -201,10 +202,9 @@ pub(crate) fn own_prompt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Strin
     let prompt = String::deserialize(d)?;
     Ok(if prompt == DEFAULT_SD_PROMPT { String::new() } else { prompt })
 }
-fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
+pub(crate) fn default_sd_negative_prompt() -> String { DEFAULT_SD_NEGATIVE_PROMPT.to_string() }
 
-fn default_sd_scheduler() -> SdScheduler { SdScheduler::Lcm }
-fn default_sd_steps() -> u32 { crate::gui::presets::SdSchedulerBundle::default_for(default_sd_scheduler()).steps }
+fn default_sd_steps() -> u32 { crate::gui::presets::SdSchedulerBundle::default().steps }
 fn default_rorem_steps() -> u32 { prunr_core::inpaint_sd::ROREM_STEPS }
 /// The steps RORem's chip offers around the 4 it was distilled for.
 pub const ROREM_STEPS_RANGE: std::ops::RangeInclusive<u32> = 2..=8;
@@ -343,7 +343,7 @@ impl Default for BrushSettings {
             sd_prompt: String::new(),
             sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
-            sd_scheduler: default_sd_scheduler(),
+            sd_scheduler: SdScheduler::default(),
             sd_steps: default_sd_steps(),
             rorem_steps: default_rorem_steps(),
             sd_seed: None,

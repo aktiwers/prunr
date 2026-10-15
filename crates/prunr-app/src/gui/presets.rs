@@ -98,13 +98,12 @@ pub(crate) struct SdPreset {
 
 impl Default for SdPreset {
     fn default() -> Self {
-        use super::brush_state::DEFAULT_SD_NEGATIVE_PROMPT;
         Self {
             prompt: String::new(),
-            negative_prompt: DEFAULT_SD_NEGATIVE_PROMPT.to_string(),
+            negative_prompt: super::brush_state::default_sd_negative_prompt(),
             use_taesd: None,
             seed: None,
-            active_scheduler: SdScheduler::Lcm,
+            active_scheduler: SdScheduler::default(),
             schedulers: HashMap::new(),
         }
     }
@@ -119,7 +118,7 @@ pub(crate) struct SdSchedulerBundle {
 
 impl Default for SdSchedulerBundle {
     fn default() -> Self {
-        Self::default_for(SdScheduler::Lcm)
+        Self::default_for(SdScheduler::default())
     }
 }
 
