@@ -458,13 +458,6 @@ pub const ROW_ROUNDING: f32 = 12.0;
 pub const MODAL_PAGE_MARGIN: egui::Margin = egui::Margin::same(24);
 pub const FONT_SIZE_HEADING: f32 = 16.0;
 
-// === Overlay ===
-
-/// Overlay background: #1a1a1a at 95% alpha
-pub const OVERLAY_BG: Color32 = Color32::from_rgba_premultiplied(0x3a, 0x3a, 0x3a, 0xf8);
-/// Overlay border: #ffffff20 (white 12.5%)
-pub const OVERLAY_BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 32);
-
 // === Checkerboard ===
 
 /// Checkerboard square size in pixels
@@ -486,9 +479,6 @@ pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);
 pub const SETTINGS_MODAL_SIZE: [f32; 2] = [860.0, 600.0];
 
 pub const CLI_HELP_DIALOG_HEIGHT: f32 = 700.0;
-/// Vertical space the settings modal reserves at the bottom for its
-/// footer (Reset / Auto-saved row + separator).
-pub const MODAL_FOOTER_RESERVED: f32 = 56.0;
 
 /// Hint text for settings modal (readable on dark overlay)
 pub const TEXT_HINT: Color32 = Color32::from_rgb(0xb8, 0xb8, 0xb8);

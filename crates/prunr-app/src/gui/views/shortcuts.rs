@@ -150,9 +150,6 @@ fn foreign_modifier_held(m: &egui::Modifiers) -> bool {
     m.alt || (m.ctrl && !m.command)
 }
 
-impl Chord {
-}
-
 impl Mods {
     fn command(self) -> bool {
         matches!(self, Mods::Command | Mods::CommandShift)

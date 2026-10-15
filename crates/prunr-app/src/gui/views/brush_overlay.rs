@@ -205,7 +205,6 @@ pub(crate) fn draw_trail_for(
             }
         }
     }
-    let _ = solid;
 }
 
 pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
