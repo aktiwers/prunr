@@ -575,14 +575,12 @@ fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &
         for x in 0..tile.w {
             let alpha_x = edge_alpha(x, tile.w, tile.feather_left, tile.feather_right);
             let a = alpha_x.min(alpha_y);
+            let src = ((y * pw + x) * 4) as usize;
+            let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
             if a >= 1.0 {
                 // Full replace — copy source bytes, skip the lerp.
-                let src = ((y * pw + x) * 4) as usize;
-                let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
                 raw_canvas[dst..dst + 4].copy_from_slice(&raw_painted[src..src + 4]);
             } else {
-                let src = ((y * pw + x) * 4) as usize;
-                let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
                 let inv = 1.0 - a;
                 for k in 0..3 {
                     let canv = raw_canvas[dst + k] as f32;
@@ -2107,23 +2105,17 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
             let r = byte_to_unit(f32::from(raw[src]));
             let g = byte_to_unit(f32::from(raw[src + 1]));
             let b = byte_to_unit(f32::from(raw[src + 2]));
-            if let Some(m) = m {
-                // Binary cliff: mask > 127 → fully grey (inpaint
-                // region), else original. The SD-1.5 inpaint UNet was
-                // trained on binary-zeroed masked-image latents — a
-                // partial-alpha blend would put grey-tinted pixels at
-                // the boundary, which the model treats literally and
-                // outputs as a grey ghost. Composite-time softness is
-                // handled by inpaint_feather, not here.
-                if m[mask_row + x] > IN_HOLE {
-                    buf[dst]             = v_fill;
-                    buf[plane + dst]     = v_fill;
-                    buf[plane * 2 + dst] = v_fill;
-                } else {
-                    buf[dst]             = r;
-                    buf[plane + dst]     = g;
-                    buf[plane * 2 + dst] = b;
-                }
+            // Binary cliff: mask > IN_HOLE → fully grey (inpaint
+            // region), else original. The SD-1.5 inpaint UNet was
+            // trained on binary-zeroed masked-image latents — a
+            // partial-alpha blend would put grey-tinted pixels at
+            // the boundary, which the model treats literally and
+            // outputs as a grey ghost. Composite-time softness is
+            // handled by inpaint_feather, not here.
+            if m.is_some_and(|m| m[mask_row + x] > IN_HOLE) {
+                buf[dst]             = v_fill;
+                buf[plane + dst]     = v_fill;
+                buf[plane * 2 + dst] = v_fill;
             } else {
                 buf[dst]             = r;
                 buf[plane + dst]     = g;
@@ -2695,29 +2687,22 @@ impl DpmPp2MScheduler {
         // Diffusers' `lower_order_final=True` (default) forces first-order on
         // the last step because the per-step sigma drop is largest there and
         // the D1 correction can overshoot. We mirror that guard here.
-        let next: Vec<f32> = if step_idx + 1 < self.num_inference {
-            if let Some(m1) = self.prev_model_output.as_ref() {
-                let sigma_s1 = self.sigmas[step_idx - 1];
-                let lambda_s1 = sigma_to_lambda(sigma_s1);
-                let r0 = (lambda_s0 - lambda_s1) / h;
-                let inv_r0 = 1.0 / r0;
+        let second_order_prev = self.prev_model_output.as_ref().filter(|_| step_idx + 1 < self.num_inference);
+        let next: Vec<f32> = if let Some(m1) = second_order_prev {
+            let sigma_s1 = self.sigmas[step_idx - 1];
+            let lambda_s1 = sigma_to_lambda(sigma_s1);
+            let r0 = (lambda_s0 - lambda_s1) / h;
+            let inv_r0 = 1.0 / r0;
 
-                latent.iter()
-                    .zip(m0.iter())
-                    .zip(m1.iter())
-                    .map(|((&l, &md0), &md1)| {
-                        let d1 = inv_r0 * (md0 - md1);
-                        ratio * l - coef * md0 - 0.5 * coef * d1
-                    })
-                    .collect()
-            } else {
-                latent.iter()
-                    .zip(m0.iter())
-                    .map(|(&l, &md0)| ratio * l - coef * md0)
-                    .collect()
-            }
+            latent.iter()
+                .zip(m0.iter())
+                .zip(m1.iter())
+                .map(|((&l, &md0), &md1)| {
+                    let d1 = inv_r0 * (md0 - md1);
+                    ratio * l - coef * md0 - 0.5 * coef * d1
+                })
+                .collect()
         } else {
-            // Terminal step: first-order regardless of prev_model_output.
             latent.iter()
                 .zip(m0.iter())
                 .map(|(&l, &md0)| ratio * l - coef * md0)
