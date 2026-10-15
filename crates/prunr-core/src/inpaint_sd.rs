@@ -1070,11 +1070,7 @@ fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::S
 /// at `width × height` for its preview.
 fn crop_preview(image: &RgbaImage, mask: &GrayImage, painted: &RgbaImage, width: u32, height: u32) -> Vec<u8> {
     let (w, h) = image.dimensions();
-    let filled = composite(image, painted, mask, w, h);
-    if (width, height) == (w, h) {
-        return filled.into_raw();
-    }
-    crate::formats::resize_rgba(&filled, width, height, crate::formats::ResizeFilter::Lanczos3).into_raw()
+    crate::formats::preview_rgba(Cow::Owned(composite(image, painted, mask, w, h)), width, height)
 }
 
 /// Stage clock for one tile's log line.
