@@ -525,7 +525,7 @@ fn release_lama_sessions() {
     if dropped > 0 {
         tracing::info!(
             dropped,
-            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+            rss_mb = crate::inpaint_sd::process_rss_mb(),
             "LaMa: cache cleared on model switch",
         );
     }
@@ -551,7 +551,7 @@ fn ensure_lama_sweeper_running() {
                         tracing::info!(
                             dropped,
                             idle_secs = crate::IDLE_RELEASE.as_secs(),
-                            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+                            rss_mb = crate::inpaint_sd::process_rss_mb(),
                             "LaMa: background sweeper released idle session(s)",
                         );
                     }
@@ -587,7 +587,7 @@ impl LamaSession {
                 tracing::info!(
                     dropped,
                     idle_secs = crate::IDLE_RELEASE.as_secs(),
-                    rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+                    rss_mb = crate::inpaint_sd::process_rss_mb(),
                     "LaMa: released idle session(s)",
                 );
             }
@@ -677,7 +677,7 @@ impl LamaSession {
 impl Drop for LamaSession {
     fn drop(&mut self) {
         tracing::info!(
-            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+            rss_mb = crate::inpaint_sd::process_rss_mb(),
             "LaMa session dropped (idle release or process exit)",
         );
     }
