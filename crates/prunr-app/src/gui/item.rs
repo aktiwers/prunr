@@ -1467,6 +1467,7 @@ impl BatchItem {
         self.applied_preset = shown.applied_preset;
         self.status = if self.result_rgba.is_some() { BatchStatus::Done } else { BatchStatus::Pending };
         self.job = None;
+        self.tile_preview = None;
         self.reset_result_caches();
         if self.result_rgba.is_none() {
             // Back to the original: the source is already on the GPU.
@@ -2447,6 +2448,20 @@ mod tests {
         item.tile_preview = Some(preview);
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         assert!(item.tile_preview.is_none(), "a new run starts clear");
+    }
+
+    /// An undo during a run drops the run's tiles with the run: the pill
+    /// shows nothing of it while its cancel completes.
+    #[test]
+    fn an_undo_drops_the_runs_tile_preview() {
+        let ctx = egui::Context::default();
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.commit(StepKind::Process);
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.tile_preview = Some(ctx.load_texture("preview", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default()));
+        assert!(item.undo_step().is_some());
+        assert!(item.tile_preview.is_none());
     }
 
     /// The step an undo goes back to is kept unpacked, so undo never waits
