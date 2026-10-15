@@ -543,15 +543,16 @@ impl OrtEngine {
     }
 
     /// `id`'s `weights` as a session loads them; `None` when a lighter
-    /// copy has gone from disk. Bundled weights are zero-copy; a download
-    /// missing its own weights is the "not installed" error.
-    fn weights_bytes(id: prunr_models::ModelId, weights: Weights) -> Result<Option<Cow<'static, [u8]>>, CoreError> {
+    /// copy has gone from disk. Bundled weights are shared with every
+    /// session building at the time; a download missing its own weights
+    /// is the "not installed" error.
+    fn weights_bytes(id: prunr_models::ModelId, weights: Weights) -> Result<Option<std::sync::Arc<Vec<u8>>>, CoreError> {
         Ok(match weights {
             Weights::Fp32 => Some(
                 prunr_models::resolve_bytes(id).ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?,
             ),
-            Weights::Fp16 => prunr_models::model_fp16_bytes(id).map(Cow::Owned),
-            Weights::Int8 => prunr_models::model_int8_bytes(id).map(Cow::Owned),
+            Weights::Fp16 => prunr_models::model_fp16_bytes(id).map(std::sync::Arc::new),
+            Weights::Int8 => prunr_models::model_int8_bytes(id).map(std::sync::Arc::new),
         })
     }
 

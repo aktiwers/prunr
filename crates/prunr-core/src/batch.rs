@@ -61,6 +61,9 @@ pub fn create_engine_pool(
     // when DirectML is the active provider.
     let serial = pool_size <= 1 || crate::engine::directml_active();
 
+    // Held for the whole pool: a bundled model unpacks once for every
+    // engine, built in parallel or one after another, and is freed after.
+    let _weights = prunr_models::resolve_bytes(model.into());
     let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
     if serial {
         (0..pool_size).map(build).collect()
