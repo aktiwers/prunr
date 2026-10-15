@@ -539,12 +539,11 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let installed = ctx.installs.has_runtime(rt);
     let installing_this = ctx.installing.as_ref().filter(|(r, _)| *r == rt);
     let status = match installing_this {
-        Some((_, progress)) => progress.clone(),
-        None if installed => "Installed.".to_string(),
-        None if recommended => format!("Not installed ({} MB). {}", rt.approx_download_mb(), rt.recommendation()),
-        None => format!("Not installed ({} MB).", rt.approx_download_mb()),
+        Some((_, progress)) => progress.as_str(),
+        None if installed => "Installed.",
+        None => rt.not_installed(recommended),
     };
-    rows.row(rt.display_name(), &status, |ui| {
+    rows.row(rt.display_name(), status, |ui| {
         if installing_this.is_some() {
             if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                 *intent = Some(HardwareSectionIntent::CancelInstall);
