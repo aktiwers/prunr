@@ -980,7 +980,7 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// anyway — the bbox crop is bit-exact with the full-image variant.
 ///
 /// Asked for previews, each finished tile goes out as its fill over the
-/// photo (`fill_preview`), made in the tile's photo crop, which the loop
+/// photo (`tile_fill_preview`), made in the tile's photo crop, which the loop
 /// holds anyway, for the part of the tile the mask's box reaches; the
 /// photo the listener shows under the previews holds the rest. The result
 /// is the same either way. Extra per tile (the resample, then the part
@@ -1043,7 +1043,7 @@ where
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
         let rect = (tile.x, tile.y, tile.w, tile.h);
-        progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| fill_preview(tile_rgba, &painted, &tile_mask, size, part));
+        progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| tile_fill_preview(tile_rgba, &painted, &tile_mask, size, part));
         progress.inner(i as u32 + 1, total, Unit::Tile);
         progress.tile(i as u32, true);
     }
@@ -1090,7 +1090,7 @@ where
 /// the fill where the mask is set (the rule the final composite follows),
 /// the photo elsewhere, the photo's alpha throughout. Fills `photo` in
 /// place.
-fn fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, size: (u32, u32), part: (u32, u32, u32, u32)) -> Vec<u8> {
+fn tile_fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, size: (u32, u32), part: (u32, u32, u32, u32)) -> Vec<u8> {
     for ((p, f), m) in photo.pixels_mut().zip(painted.pixels()).zip(mask.pixels()) {
         if m.0[0] != 0 {
             p.0[..3].copy_from_slice(&f.0[..3]);
@@ -1315,7 +1315,7 @@ mod tests {
             let tile_mask = image::imageops::crop_imm(&mask, t.x, t.y, t.w, t.h).to_image();
             let whole_sink = std::sync::Arc::new(RecordingSink::default());
             let whole_progress = previewed(&Progress::new(whole_sink.clone()));
-            whole_progress.tile_preview(rect, (w, h), |pw, ph| fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask), &tile_mask, (pw, ph), (0, 0, pw, ph)));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| tile_fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask), &tile_mask, (pw, ph), (0, 0, pw, ph)));
             whole_progress.tile_preview(rect, (w, h), |pw, ph| crate::formats::preview_rgba(Cow::Borrowed(&tile_rgba), (pw, ph), (0, 0, pw, ph)));
             let updates = whole_sink.updates();
             let [ProgressUpdate::TilePreview(whole), ProgressUpdate::TilePreview(photo)] = updates.as_slice() else { panic!("{updates:?}") };
