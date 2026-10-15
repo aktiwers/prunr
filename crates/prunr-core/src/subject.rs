@@ -52,16 +52,12 @@ pub fn first_look_engine(pool_size: usize) -> Result<OrtEngine, CoreError> {
 /// | 12 MP  | 36 MB    |
 /// | 24 MP  | 72 MB    |
 pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> Result<(), CoreError> {
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     let started = std::time::Instant::now();
     let model = look.model_kind();
     progress.step(Step::FindingSubject);
     let hint = look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))?;
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     progress.subject(|| hint);
     tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "first look reported");
     Ok(())
