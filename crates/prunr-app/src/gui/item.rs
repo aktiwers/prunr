@@ -213,6 +213,11 @@ pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
     h.finish()
 }
 
+/// The error an image shows when its source can't be read.
+pub(crate) fn load_failed(e: impl std::fmt::Display) -> String {
+    format!("Failed to load: {e}")
+}
+
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
 #[derive(Clone)]
 pub(crate) enum ImageSource {
@@ -1926,7 +1931,7 @@ impl BatchItem {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.job = None;
-                self.status = BatchStatus::Error(format!("Failed to load: {e}"));
+                self.status = BatchStatus::Error(load_failed(e));
                 return None;
             }
         };
