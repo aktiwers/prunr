@@ -249,7 +249,9 @@ pub(crate) fn render(
             });
         }
         if shows(model, Surface::Faces) {
-            render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
+            chip::gated(ui, super::upscale_toolbar::upscale_run_lock(model, state.processing), |ui| {
+                render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
+            });
         }
         if shows(model, Surface::Depth) {
             render_depth_chip(ui, item_settings, &state, &mut change);

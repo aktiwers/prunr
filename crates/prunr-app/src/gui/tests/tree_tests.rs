@@ -344,10 +344,10 @@ fn control_socket_clicks_by_name_and_reports_state() {
     assert_eq!(missing["ok"], false);
 }
 
-/// While an upscale runs, Scale and Refine can't be touched: a change
-/// would make the landing run stale and throw it away.
+/// While an upscale runs, Scale, Refine and Faces can't be touched: a
+/// change would make the landing run stale and throw it away.
 #[test]
-fn an_upscale_run_holds_its_scale_and_refine_chips() {
+fn an_upscale_run_holds_the_chips_it_reads() {
     use crate::gui::settings::SettingsModel;
     for running in [false, true] {
         let mut harness = harness();
@@ -360,7 +360,7 @@ fn an_upscale_run_holds_its_scale_and_refine_chips() {
         }
         settle(&mut harness);
         let tree = tree(&harness);
-        for chip in ["Scale", "Refine"] {
+        for chip in ["Scale", "Refine", "Faces"] {
             let node = tree.iter().find(|n| n.name.as_deref() == Some(chip)).unwrap_or_else(|| panic!("{chip} shown"));
             assert_eq!(node.disabled, running, "{chip} while running: {running}");
         }
