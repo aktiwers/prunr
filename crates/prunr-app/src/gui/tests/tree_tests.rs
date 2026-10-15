@@ -202,6 +202,28 @@ fn the_hardware_page_names_every_runtime_control() {
     }
 }
 
+/// Settings speaks of the Stable Diffusion eraser only once one is
+/// installed: its RAM check, its keep-loaded switch and memory guard,
+/// and the CPU-only warning that it needs the accelerator.
+#[test]
+fn stable_diffusion_settings_show_only_with_an_sd_eraser_installed() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    let mut harness = harness();
+    for (installs, shown) in [(HardwareInstallCache::default(), false), (HardwareInstallCache::all_installed(), true)] {
+        let app = harness.state_mut();
+        app.hardware_install_cache = installs;
+        app.show_settings = true;
+        app.settings_tab = SettingsTab::Performance;
+        settle(&mut harness);
+        let switch = names(&harness).iter().any(|n| n == "Keep the Stable Diffusion eraser loaded");
+        assert_eq!(switch, shown, "Performance: the keep-loaded switch");
+        harness.state_mut().settings_tab = SettingsTab::Hardware;
+        settle(&mut harness);
+        let ram_line = harness.query_all_by(|n| n.value().is_some_and(|v| v.starts_with("SD 1.5")) || n.label().is_some_and(|l| l.starts_with("SD 1.5"))).next().is_some();
+        assert_eq!(ram_line, shown, "Hardware: the SD 1.5 memory line");
+    }
+}
+
 #[test]
 fn settings_opens_from_its_toolbar_button() {
     let mut harness = harness();
