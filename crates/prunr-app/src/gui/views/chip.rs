@@ -936,7 +936,9 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
             if expanded {
                 ui.add_space(10.0);
                 theme::panel_frame().show(ui, |ui| {
-                    ui.set_min_width(g.width);
+                    // Exactly its width: a right-aligned row takes all it
+                    // is offered, so a minimum would only ever grow.
+                    ui.set_width(g.width);
                     let reset = panel_header(ui, g.label, header, !g.tuned);
                     panel_rows(ui, |ui| body(ui, Part::Full { reset }));
                 });

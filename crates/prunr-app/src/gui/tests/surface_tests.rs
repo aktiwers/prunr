@@ -649,3 +649,22 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
         assert!(delay >= std::time::Duration::from_millis(15), "{status:?}: the next frame is asked for {delay:?} ahead");
     }
 }
+
+/// A strip's full panel keeps its width while its values change: Mask's
+/// ends in a right-aligned row, which takes all the room it is given,
+/// and the panel only had a minimum width, so every wider value pushed
+/// it further right and it never came back.
+#[test]
+fn a_strip_s_full_panel_keeps_its_width() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = loaded();
+    click(&mut h, "Mask");
+    click(&mut h, "All mask settings");
+    let right = |h: &Harness<'_, PrunrApp>| h.get_by_label("Contrast").rect().right();
+    let first = right(&h);
+    for shift in [-20.0, 0.0, -20.0, 0.0] {
+        h.state_mut().batch.items[0].settings.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(shift);
+        h.run_steps(5);
+    }
+    assert_eq!(right(&h), first, "the panel's sliders end where they did");
+}
