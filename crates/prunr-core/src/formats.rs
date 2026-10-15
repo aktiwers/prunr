@@ -52,15 +52,42 @@ pub fn resize_to_rgba(img: &DynamicImage, dst_width: u32, dst_height: u32, filte
     }
 }
 
-/// `img` as a progress preview's `width × height` straight RGBA: its own
-/// pixels at its own size (an owned image is handed over without a copy),
-/// else Lanczos3-resampled.
-pub fn preview_rgba(img: std::borrow::Cow<'_, RgbaImage>, width: u32, height: u32) -> Vec<u8> {
-    if img.dimensions() == (width, height) {
-        img.into_owned().into_raw()
-    } else {
-        resize_rgba(&img, width, height, ResizeFilter::Lanczos3).into_raw()
+/// `part` (x, y, w, h) of `img` as a progress preview's `width × height`
+/// straight RGBA: its own pixels at its own size (an owned image asked for
+/// whole is handed over without a copy), else Lanczos3-resampled whole and
+/// cut, so a part is the same pixels as that place of the whole preview.
+pub fn preview_rgba(img: std::borrow::Cow<'_, RgbaImage>, (width, height): (u32, u32), part: (u32, u32, u32, u32)) -> Vec<u8> {
+    let whole = part == (0, 0, width, height);
+    let cut = |full: &RgbaImage| image::imageops::crop_imm(full, part.0, part.1, part.2, part.3).to_image().into_raw();
+    match (img.dimensions() == (width, height), whole) {
+        (true, true) => img.into_owned().into_raw(),
+        (true, false) => cut(&img),
+        (false, true) => resize_rgba(&img, width, height, ResizeFilter::Lanczos3).into_raw(),
+        (false, false) => cut(&resize_rgba(&img, width, height, ResizeFilter::Lanczos3)),
     }
+}
+
+/// How far from a sample Lanczos3 weighs source pixels, in source pixels
+/// when enlarging and in output pixels when shrinking.
+const LANCZOS3_SUPPORT: f64 = 3.0;
+
+/// Along one side of `span` source pixels previewed at `out` pixels by
+/// `preview_rgba`: the preview pixels a change to `[at, at + len)` can
+/// reach, as (start, length). The change itself when nothing is
+/// resampled; otherwise every pixel whose Lanczos3 window touches it, a
+/// pixel to spare on each side. Never empty.
+pub fn preview_reach(at: u32, len: u32, span: u32, out: u32) -> (u32, u32) {
+    let last = out.saturating_sub(1);
+    if span == out {
+        let start = at.min(last);
+        return (start, len.clamp(1, out - start));
+    }
+    let scale = f64::from(span) / f64::from(out.max(1));
+    let radius = LANCZOS3_SUPPORT * scale.max(1.0);
+    let start = ((f64::from(at) - radius) / scale - 0.5).floor().max(0.0) as u32;
+    let end = ((f64::from(at + len) + radius) / scale - 0.5).ceil().min(f64::from(out)) as u32;
+    let start = start.min(last);
+    (start, end.max(start + 1) - start)
 }
 
 /// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call
@@ -662,16 +689,54 @@ mod tests {
     }
 
     /// A preview at the image's own size is its pixels; any other size is
-    /// the Lanczos3 resample, borrowed or owned alike.
+    /// the Lanczos3 resample, borrowed or owned alike; a part is that
+    /// place of the whole.
     #[test]
     fn a_preview_is_the_image_at_its_size_or_its_lanczos3_resample() {
         use std::borrow::Cow;
         let img = RgbaImage::from_fn(40, 30, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, ((x + y) * 3) as u8, 255 - x as u8]));
-        assert_eq!(preview_rgba(Cow::Borrowed(&img), 40, 30), img.as_raw().clone());
-        assert_eq!(preview_rgba(Cow::Owned(img.clone()), 40, 30), img.as_raw().clone());
+        let cut = |raw: Vec<u8>, w: u32, h: u32, part: (u32, u32, u32, u32)| {
+            image::imageops::crop_imm(&RgbaImage::from_raw(w, h, raw).unwrap(), part.0, part.1, part.2, part.3).to_image().into_raw()
+        };
+        assert_eq!(preview_rgba(Cow::Borrowed(&img), (40, 30), (0, 0, 40, 30)), img.as_raw().clone());
+        assert_eq!(preview_rgba(Cow::Owned(img.clone()), (40, 30), (0, 0, 40, 30)), img.as_raw().clone());
+        assert_eq!(preview_rgba(Cow::Borrowed(&img), (40, 30), (3, 4, 10, 7)), cut(img.as_raw().clone(), 40, 30, (3, 4, 10, 7)));
         let resampled = resize_rgba(&img, 17, 13, ResizeFilter::Lanczos3).into_raw();
-        assert_eq!(preview_rgba(Cow::Borrowed(&img), 17, 13), resampled);
-        assert_eq!(preview_rgba(Cow::Owned(img), 17, 13), resampled);
+        assert_eq!(preview_rgba(Cow::Borrowed(&img), (17, 13), (0, 0, 17, 13)), resampled);
+        assert_eq!(preview_rgba(Cow::Owned(img.clone()), (17, 13), (0, 0, 17, 13)), resampled);
+        assert_eq!(preview_rgba(Cow::Owned(img), (17, 13), (2, 1, 9, 5)), cut(resampled, 17, 13, (2, 1, 9, 5)));
+    }
+
+    /// Changing a block of an image changes its preview only within the
+    /// reach: every preview pixel that differs lies inside it, shrunk or
+    /// enlarged, and an unscaled preview's reach is the block itself.
+    #[test]
+    fn a_change_reaches_only_the_preview_pixels_its_reach_names() {
+        use std::borrow::Cow;
+        let base = RgbaImage::from_fn(120, 90, |x, y| image::Rgba([(x * 2) as u8, (y * 3) as u8, ((x ^ y) * 5) as u8, 255]));
+        let (bx, by, bw, bh) = (37, 21, 19, 11);
+        let mut changed = base.clone();
+        for y in by..by + bh {
+            for x in bx..bx + bw {
+                changed.put_pixel(x, y, image::Rgba([255, 0, 255, 255]));
+            }
+        }
+        for (w, h) in [(120, 90), (47, 35), (13, 10), (200, 150)] {
+            let (px, pw) = preview_reach(bx, bw, 120, w);
+            let (py, ph) = preview_reach(by, bh, 90, h);
+            let before = preview_rgba(Cow::Borrowed(&base), (w, h), (0, 0, w, h));
+            let after = preview_rgba(Cow::Borrowed(&changed), (w, h), (0, 0, w, h));
+            for (i, (a, b)) in before.chunks(4).zip(after.chunks(4)).enumerate() {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                if a != b {
+                    assert!((px..px + pw).contains(&x) && (py..py + ph).contains(&y), "{w}×{h}: ({x}, {y}) changed outside the reach");
+                }
+            }
+            if (w, h) == (120, 90) {
+                assert_eq!((px, py, pw, ph), (bx, by, bw, bh), "unscaled, the reach is the change");
+            }
+        }
+        assert_eq!(preview_reach(0, 1, 100, 1), (0, 1), "never empty, never past the side");
     }
 
     #[test]

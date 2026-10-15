@@ -749,7 +749,7 @@ fn push_if_unvisited(
 ) {
     let lidx = map.local_idx(x, y);
     let gidx = map.global_idx(x, y);
-    if !visited[lidx] && raw[gidx] > 127 {
+    if !visited[lidx] && raw[gidx] > IN_HOLE {
         visited[lidx] = true;
         queue.push_back((x, y));
     }
@@ -916,11 +916,12 @@ fn run_one_tile(
             (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
         }
     };
-    let known = progress.preview_edge().map_or_else(Vec::new, |_| known_cells(image, mask, (lw, lh)));
-    let show = |x0: &[f32]| progress.tile_preview((0, 0, w, h), (w, h), |width, height| {
-        let estimate = estimate_picture(x0, (lw, lh), bundle.latent, &known);
-        crop_preview(image, mask, &estimate, width, height)
-    });
+    let mut previews = StepPreviews::new(image, mask, (lw, lh), bundle.latent, progress);
+    let show = |x0: &[f32]| {
+        if let Some(p) = previews.as_mut() {
+            p.show(x0, progress);
+        }
+    };
     let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show)?;
 
     let unet_ms = timer.lap();
@@ -957,7 +958,7 @@ fn denoise(
     rng: &mut ChaCha8Rng,
     progress: &crate::progress::Progress,
     mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
-    show: impl Fn(&[f32]),
+    mut show: impl FnMut(&[f32]),
 ) -> Result<Vec<f32>, CoreError> {
     use crate::progress::{Step, Unit};
     let timesteps = scheduler.timesteps().to_vec();
@@ -1039,12 +1040,13 @@ fn known_cells(image: &RgbaImage, mask: &GrayImage, (lw, lh): (usize, usize)) ->
 /// of a photo they put blue ~30 levels high, and the shift brings a flat
 /// colour's hole within 3 levels. Not TAESD even when it is the run's
 /// VAE: its decode of a 512² crop took 1.06 s on an i7-6700, no small
-/// part of a step; this and `crop_preview` took 45-100 ms in a debug
-/// build.
+/// part of a step; this and the composite and resample of a step's
+/// preview took 45-100 ms in a debug build.
 ///
 /// Peak per step with previews on, all at latent or crop scale (`x0`
-/// and the cells, this picture, the crop composited; the preview is at
-/// most the crop):
+/// and the cells, this picture, the crop the tile keeps composited
+/// (`StepPreviews`); the resample and the part sent are each at most
+/// the crop):
 ///
 /// | Crop      | x0, cells | Picture | Composite | Total   |
 /// |-----------|-----------|---------|-----------|---------|
@@ -1066,11 +1068,45 @@ fn estimate_picture(x0: &[f32], (lw, lh): (usize, usize), space: prunr_models::S
     crate::formats::resize_rgba(&small, lw as u32 * 8, lh as u32 * 8, crate::formats::ResizeFilter::Bilinear)
 }
 
-/// The crop with `painted` inside its mask, as the final paste puts it,
-/// at `width × height` for its preview.
-fn crop_preview(image: &RgbaImage, mask: &GrayImage, painted: &RgbaImage, width: u32, height: u32) -> Vec<u8> {
-    let (w, h) = image.dimensions();
-    crate::formats::preview_rgba(Cow::Owned(composite(image, painted, mask, w, h)), width, height)
+/// A tile's step previews: the crop with each step's estimate inside its
+/// mask, as the final paste puts it, written into one copy of the crop
+/// the tile keeps, and sent for the mask's box and the preview pixels
+/// the resample reaches from it; the photo the listener shows under the
+/// previews holds the rest.
+struct StepPreviews<'a> {
+    mask: &'a GrayImage,
+    filled: RgbaImage,
+    /// The box round the pixels the paste replaces (x, y, w, h).
+    hole: (u32, u32, u32, u32),
+    known: Vec<Option<[f32; 3]>>,
+    latent: (usize, usize),
+    space: prunr_models::SdLatent,
+}
+
+impl<'a> StepPreviews<'a> {
+    /// `None` when nobody asked for previews, or the paste replaces no
+    /// pixel of the crop.
+    fn new(image: &RgbaImage, mask: &'a GrayImage, latent: (usize, usize), space: prunr_models::SdLatent, progress: &crate::progress::Progress) -> Option<Self> {
+        progress.preview_edge()?;
+        let hole = crate::inpaint::mask_bbox(mask, IN_HOLE + 1, 0)?;
+        Some(Self {
+            mask,
+            filled: image.clone(),
+            hole: (hole.x, hole.y, hole.w, hole.h),
+            known: known_cells(image, mask, latent),
+            latent,
+            space,
+        })
+    }
+
+    fn show(&mut self, x0: &[f32], progress: &crate::progress::Progress) {
+        let (w, h) = self.filled.dimensions();
+        progress.tile_preview_part((0, 0, w, h), (w, h), self.hole, |size, part| {
+            let estimate = estimate_picture(x0, self.latent, self.space, &self.known);
+            paste(&mut self.filled, &estimate, self.mask, self.hole);
+            crate::formats::preview_rgba(Cow::Borrowed(&self.filled), size, part)
+        });
+    }
 }
 
 /// Stage clock for one tile's log line.
@@ -2087,7 +2123,7 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
                 // the boundary, which the model treats literally and
                 // outputs as a grey ghost. Composite-time softness is
                 // handled by inpaint_feather, not here.
-                if m[mask_row + x] > 127 {
+                if m[mask_row + x] > IN_HOLE {
                     buf[dst]             = v_fill;
                     buf[plane + dst]     = v_fill;
                     buf[plane * 2 + dst] = v_fill;
@@ -2215,15 +2251,27 @@ fn sample_initial_noise(rng: &mut ChaCha8Rng, lw: usize, lh: usize) -> Array4<f3
 /// outside the mask (no VAE round-trip drift), painted bytes inside.
 fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, h: u32) -> RgbaImage {
     let mut out = source.clone();
+    paste(&mut out, painted, mask, (0, 0, w, h));
+    out
+}
+
+/// A mask value above this is part of the hole SD fills: the regions it
+/// crops round, what it encodes as grey, what the paste replaces.
+const IN_HOLE: u8 = 127;
+
+/// `painted`'s RGB over `out` in the hole, within `area` (x, y, w, h);
+/// `painted` may be larger (the padded crop), read from its top-left.
+fn paste(out: &mut RgbaImage, painted: &RgbaImage, mask: &GrayImage, (ax, ay, aw, ah): (u32, u32, u32, u32)) {
+    let w = out.width() as usize;
     let dst = out.as_mut();
     let pnt = painted.as_raw();
     let m = mask.as_raw();
     let painted_w = painted.width() as usize;
-    for y in 0..h as usize {
-        for x in 0..w as usize {
-            let i = y * w as usize + x;
+    for y in ay as usize..(ay + ah) as usize {
+        for x in ax as usize..(ax + aw) as usize {
+            let i = y * w + x;
             if i >= m.len() { continue; }
-            if m[i] > 127 {
+            if m[i] > IN_HOLE {
                 let pi = (y * painted_w + x) * 4;
                 dst[i * 4]     = pnt[pi];
                 dst[i * 4 + 1] = pnt[pi + 1];
@@ -2231,7 +2279,6 @@ fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, 
             }
         }
     }
-    out
 }
 
 /// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
@@ -3034,19 +3081,72 @@ mod tests {
         assert_eq!(cells[2], None, "past the crop's edge");
     }
 
-    /// A step's preview changes the crop only inside its mask, reading
-    /// the top-left of the padded picture as the final paste does.
+    /// The paste replaces the crop's pixels only inside its mask, reading
+    /// the top-left of the padded picture; pasting within the hole's box
+    /// alone gives the same crop.
     #[test]
-    fn a_step_preview_changes_only_the_masked_pixels() {
+    fn the_paste_changes_only_the_masked_pixels() {
         let image = RgbaImage::from_fn(60, 44, |x, y| Rgba([x as u8, y as u8, 200, 255 - x as u8]));
         let mask = GrayImage::from_fn(60, 44, |x, y| Luma([if (10..30).contains(&x) && (5..20).contains(&y) { 255 } else { 0 }]));
         let painted = RgbaImage::from_pixel(64, 48, Rgba([1, 2, 3, 255]));
-        let out = crop_preview(&image, &mask, &painted, 60, 44);
-        for ((i, src), m) in image.pixels().enumerate().zip(mask.pixels()) {
-            let want = if m[0] > 127 { [1, 2, 3, src[3]] } else { src.0 };
-            assert_eq!(out[i * 4..i * 4 + 4], want, "pixel {i}");
+        let out = composite(&image, &painted, &mask, 60, 44);
+        for ((src, got), m) in image.pixels().zip(out.pixels()).zip(mask.pixels()) {
+            let want = if m[0] > IN_HOLE { [1, 2, 3, src[3]] } else { src.0 };
+            assert_eq!(got.0, want);
         }
-        assert_eq!(crop_preview(&image, &mask, &painted, 30, 22).len(), 30 * 22 * 4, "resampled to the preview's size");
+        let hole = crate::inpaint::mask_bbox(&mask, IN_HOLE + 1, 0).expect("a hole");
+        let mut boxed = image.clone();
+        paste(&mut boxed, &painted, &mask, (hole.x, hole.y, hole.w, hole.h));
+        assert_eq!(boxed, out);
+    }
+
+    /// The whole crop's step preview, as it was sent before only the
+    /// hole's part went: what a part is held to.
+    fn whole_crop_preview(image: &RgbaImage, mask: &GrayImage, painted: &RgbaImage, size: (u32, u32)) -> Vec<u8> {
+        let (w, h) = image.dimensions();
+        crate::formats::preview_rgba(Cow::Owned(composite(image, painted, mask, w, h)), size, (0, 0, size.0, size.1))
+    }
+
+    /// A step's preview is sent for the hole and the preview pixels the
+    /// resample reaches from it: the same pixels the whole crop's preview
+    /// has there, and every pixel where that preview differs from the
+    /// crop's own is inside, unscaled or shrunk. A crop the paste leaves
+    /// alone, or nobody listening, makes none.
+    #[test]
+    fn a_step_preview_sends_the_part_of_the_crop_the_hole_reaches() {
+        use crate::progress::{Progress, ProgressUpdate, RecordingSink};
+        let image = RgbaImage::from_fn(120, 80, |x, y| Rgba([x as u8, (y * 3) as u8, 200, 255 - x as u8]));
+        let mask = GrayImage::from_fn(120, 80, |x, y| {
+            Luma([if (40..70).contains(&x) && (20..45).contains(&y) { 255 } else if x == 10 { 100 } else { 0 }])
+        });
+        let (lw, lh) = (16, 16);
+        let x0: Vec<f32> = (0..4 * lw * lh).map(|i| (i % 23) as f32 / 23.0 - 0.5).collect();
+        let space = prunr_models::SdLatent::Sd15;
+        for edge in [120, 50] {
+            let sink = Arc::new(RecordingSink::default());
+            let progress = Progress::new(sink.clone()).with_tile_previews(edge);
+            let mut previews = StepPreviews::new(&image, &mask, (lw, lh), space, &progress).expect("a hole to preview");
+            previews.show(&x0, &progress);
+            let updates = sink.updates();
+            let [ProgressUpdate::TilePreview(part)] = updates.as_slice() else { panic!("{updates:?}") };
+            let size = (part.full_width, part.full_height);
+            let estimate = estimate_picture(&x0, (lw, lh), space, &known_cells(&image, &mask, (lw, lh)));
+            let whole = whole_crop_preview(&image, &mask, &estimate, size);
+            let own = crate::formats::preview_rgba(Cow::Borrowed(&image), size, (0, 0, size.0, size.1));
+            for (y, x) in (0..size.1).flat_map(|y| (0..size.0).map(move |x| (y, x))) {
+                let i = ((y * size.0 + x) * 4) as usize;
+                if (part.x..part.x + part.width).contains(&x) && (part.y..part.y + part.height).contains(&y) {
+                    let j = (((y - part.y) * part.width + x - part.x) * 4) as usize;
+                    assert_eq!(part.rgba[j..j + 4], whole[i..i + 4], "edge {edge}: ({x}, {y}) as the whole crop's preview has it");
+                } else {
+                    assert_eq!(whole[i..i + 4], own[i..i + 4], "edge {edge}: ({x}, {y}) changes outside the part");
+                }
+            }
+            assert!(part.width < size.0 && part.height < size.1, "edge {edge}: less than the whole crop");
+        }
+        let listening = Progress::new(Arc::new(RecordingSink::default())).with_tile_previews(64);
+        assert!(StepPreviews::new(&image, &GrayImage::from_pixel(120, 80, Luma([100])), (lw, lh), space, &listening).is_none());
+        assert!(StepPreviews::new(&image, &mask, (lw, lh), space, &crate::progress::Progress::none()).is_none());
     }
 
     /// Driven with a stand-in UNet, the real step loop shows each step's
@@ -3058,16 +3158,18 @@ mod tests {
         use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
         let image = RgbaImage::from_fn(64, 64, |x, y| Rgba([(x * 4) as u8, (y * 4) as u8, 90, 255]));
         let mask = GrayImage::from_fn(64, 64, |x, y| Luma([if (16..48).contains(&x) && (16..48).contains(&y) { 255 } else { 0 }]));
-        let known = known_cells(&image, &mask, (8, 8));
         for (kind, steps) in [(SchedulerKind::Lcm, 4), (SchedulerKind::DpmPp2MKarras, 6)] {
             let run = |progress: &Progress| {
                 let mut scheduler = Scheduler::new_sd15(kind, steps);
                 let mut rng = ChaCha8Rng::seed_from_u64(7);
                 let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
                 let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
-                let show = |x0: &[f32]| progress.tile_preview((0, 0, 64, 64), (64, 64), |w, h| {
-                    crop_preview(&image, &mask, &estimate_picture(x0, (8, 8), prunr_models::SdLatent::Sd15, &known), w, h)
-                });
+                let mut previews = StepPreviews::new(&image, &mask, (8, 8), prunr_models::SdLatent::Sd15, progress);
+                let show = |x0: &[f32]| {
+                    if let Some(p) = previews.as_mut() {
+                        p.show(x0, progress);
+                    }
+                };
                 denoise(&mut scheduler, noise, &mut rng, progress, predict, show).expect("denoise")
             };
             let sink = Arc::new(RecordingSink::default());
@@ -3091,10 +3193,10 @@ mod tests {
             assert_eq!(updates[0], ProgressUpdate::Step(ProgressStep::Denoising));
             for u in &updates {
                 let ProgressUpdate::TilePreview(p) = u else { continue };
-                assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (0, 0, 64, 64, 64, 64));
-                let changed = image.pixels().zip(mask.pixels()).zip(p.rgba.chunks(4)).filter(|((src, m), got)| {
-                    assert!(m[0] > 127 || *got == src.0.as_slice(), "outside the mask the source stays");
-                    m[0] > 127 && *got != src.0.as_slice()
+                assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (16, 16, 32, 32, 64, 64), "the hole, at its place");
+                let changed = p.rgba.chunks(4).enumerate().filter(|(i, got)| {
+                    let (x, y) = (p.x + *i as u32 % p.width, p.y + *i as u32 / p.width);
+                    *got != image.get_pixel(x, y).0.as_slice()
                 }).count();
                 assert!(changed > 0, "{kind:?}: the estimate shows inside the mask");
             }
