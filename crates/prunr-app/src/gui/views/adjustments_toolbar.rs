@@ -1188,9 +1188,7 @@ pub(super) fn render_reset_preset_cluster(
     );
     if reset_resp.clicked() {
         let reset_target = app_settings.default_preset.clone();
-        let resolved = app_settings.resolve_active_preset(None);
-        *item_settings = resolved.item_settings;
-        app_settings.brush = resolved.brush;
+        app_settings.apply_preset(&reset_target, item_settings);
         *presets.applied = reset_target;
         change.brush_settings_committed = true;
         mark_preset_apply(change);
