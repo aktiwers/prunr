@@ -142,7 +142,7 @@ pub(crate) const MODELS: &[ModelSpec] = &[
     // SAM 2.1 Hiera Small — bundled (MultiPartBundled) so each file ships
     // as a zstd-compressed `include_bytes!` blob in the release binary.
     // Two rows share the same ModelId because the model is a single
-    // logical entry with two parts; `ondemand_target` returns None for
+    // logical entry with two parts; `download_path` is None for
     // MultiPartBundled, so xtask fetches + compresses but does not mirror
     // to the user data dir. Exported from Meta's checkpoint with
     // vietanhdev/samexporter (opset 17), mirrored on models-v1.
