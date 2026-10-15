@@ -523,6 +523,7 @@ impl Cli {
     /// Whether this run writes to the terminal it was started from. A
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
+    #[cfg_attr(not(windows), allow(dead_code))] // only Windows borrows a console; the tests check the rule everywhere
     pub fn writes_to_terminal(&self) -> bool {
         self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
     }

@@ -28,27 +28,23 @@ fn main() {
     //                            subprocess stderr is unreliable).
     // The bench's report carries every provider failure; the warnings
     // the ladder logs for them would bury its progress lines.
-    if cli.command.is_some() && !cli.debug && std::env::var_os("RUST_LOG").is_none() {
+    let level = if cli.debug { Some("prunr=debug") } else { cli.command.is_some().then_some("prunr=error") };
+    if let Some(level) = level.filter(|_| std::env::var_os("RUST_LOG").is_none()) {
         // SAFETY: single-threaded at this point in main.
-        unsafe { std::env::set_var("RUST_LOG", "prunr=error"); }
+        unsafe { std::env::set_var("RUST_LOG", level); }
     }
-    if cli.debug {
+    if cli.debug && std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
+        let log_path = std::env::temp_dir().join("prunr-debug.log");
         // SAFETY: single-threaded at this point in main.
-        if std::env::var_os("RUST_LOG").is_none() {
-            unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
-        }
-        if std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
-            let log_path = std::env::temp_dir().join("prunr-debug.log");
-            unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
-        }
+        unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
     }
 
     // Attach the parent console BEFORE init_tracing so the stderr writer
     // captures a valid handle. The previous order inverted these, causing
     // parent stderr to work by luck and worker stderr (via Stdio::inherit)
     // to silently drop on Windows windows_subsystem=windows builds.
+    #[cfg(windows)]
     if cli.writes_to_terminal() {
-        #[cfg(windows)]
         attach_parent_console();
     }
 
