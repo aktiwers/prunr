@@ -659,7 +659,7 @@ fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
 }
 
 /// Find the bounding box of every disjoint painted region in `mask`
-/// (4-connectivity, threshold > 127). Each returned bbox is the tight
+/// (4-connectivity, values above `IN_HOLE`). Each returned bbox is the tight
 /// rectangle around one connected component — disjoint strokes get
 /// individual bboxes so the SD dispatcher can run smart-crop on each
 /// instead of one giant bbox spanning unpainted gap.
@@ -671,7 +671,7 @@ fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
 pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     let (w, _h) = mask.dimensions();
     let raw = mask.as_raw();
-    let Some(outer) = crate::inpaint::mask_bbox(mask, 128, 0) else {
+    let Some(outer) = crate::inpaint::mask_bbox(mask, IN_HOLE + 1, 0) else {
         return Vec::new();
     };
     let map = BboxMap { bbox_x: outer.x, bbox_y: outer.y, image_w: w, bbox_w: outer.w };
@@ -684,7 +684,7 @@ pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
     for sy in outer.y..ymax {
         for sx in outer.x..xmax {
             let lidx = map.local_idx(sx, sy);
-            if visited[lidx] || raw[map.global_idx(sx, sy)] <= 127 {
+            if visited[lidx] || raw[map.global_idx(sx, sy)] <= IN_HOLE {
                 continue;
             }
             visited[lidx] = true;
