@@ -327,11 +327,11 @@ impl PrunrApp {
         self.batch.items[idx].settle_face_preview(stage);
         match kept {
             None => return,
-            Some(Ok(0)) => self.set_temporary_status("No faces found"),
+            Some(Ok(0)) => self.status_success("No faces found"),
             Some(Ok(_)) => {}
             Some(Err(_)) if stopped => {
                 tracing::info!(item_id, "face search stopped");
-                self.set_temporary_status(FACE_SEARCH_STOPPED);
+                self.status_success(FACE_SEARCH_STOPPED);
             }
             Some(Err(err)) => {
                 tracing::warn!(item_id, %err, "face restore failed");
@@ -906,12 +906,11 @@ impl PrunrApp {
             self.finish_copy(&rgba, hint);
         }
         // Drain save completion notifications
-        while let Ok(msg) = self.batch.bg_io.save_done_rx.try_recv() {
-            if msg.contains("fail") {
-                self.toasts.error(msg);
-            } else {
-                self.toasts.success(msg);
-            }
+        while let Ok(outcome) = self.batch.bg_io.save_done_rx.try_recv() {
+            match outcome {
+                Ok(msg) => self.toasts.success(msg),
+                Err(msg) => self.toasts.error(msg),
+            };
         }
 
         landed |= self.pump_thumbnail_results(ctx);
@@ -1176,6 +1175,13 @@ mod faces_tests {
     /// Faces that land for the photo shown are kept and blended in; a
     /// search for a model no longer chosen is dropped.
     #[test]
+    fn a_search_that_finds_no_faces_says_so() {
+        let (mut app, source) = app_with_faces_on();
+        app.land_faces(landed(&source, FaceModel::Gfpgan));
+        assert_eq!(app.toasts.last_for_test(), Some(("success", "No faces found")));
+    }
+
+    #[test]
     fn landed_faces_are_kept_only_when_still_wanted() {
         let (mut app, source) = app_with_faces_on();
         app.land_faces(landed(&source, FaceModel::RestoreFormerPp));
@@ -1236,6 +1242,7 @@ mod faces_tests {
         let (mut app, source) = app_with_faces_on();
         app.land_faces(FacesResult { result: Err("cancelled".into()), stopped: true, ..landed(&source, FaceModel::Gfpgan) });
         assert_eq!(app.status.text, super::FACE_SEARCH_STOPPED, "a status line, not a failure toast");
+        assert_eq!(app.toasts.last_for_test(), Some(("success", super::FACE_SEARCH_STOPPED)));
         let photo = app.batch.items[0].face_photo(FaceStage::Photo).expect("the source");
         assert!(app.batch.items[0].faces_to_find(&photo).is_none(), "not restarted on the next frame");
         assert!(matches!(super::PrunrApp::face_search(&app.batch.items[0], FaceStage::Photo), Some(FaceSearch::Stopped)));
