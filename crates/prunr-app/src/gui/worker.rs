@@ -838,8 +838,8 @@ fn spawn_and_initial_burst(
     let burst = state.max_jobs.min(total_pending);
     let mut sent_count = 0;
     while sent_count < burst {
-        if try_send_tier2(&mut sub, &mut state.pending_tier2, &mut sent.tier2_ids)
-            || try_send_add_edge(&mut sub, &mut state.pending_add_edge, &mut sent.add_edge_ids)
+        if try_send_cached(&mut sub, &mut state.pending_tier2, &mut sent.tier2_ids, SubprocessManager::send_repostprocess)
+            || try_send_cached(&mut sub, &mut state.pending_add_edge, &mut sent.add_edge_ids, SubprocessManager::send_add_edge_inference)
         {
             sent_count += 1;
         } else if let Some(item) = state.pending.pop_front() {
@@ -1120,10 +1120,10 @@ fn admit_next_item(
     if sub.should_pause_admission() {
         return;
     }
-    if try_send_tier2(sub, &mut state.pending_tier2, &mut sent.tier2_ids) {
+    if try_send_cached(sub, &mut state.pending_tier2, &mut sent.tier2_ids, SubprocessManager::send_repostprocess) {
         return;
     }
-    if try_send_add_edge(sub, &mut state.pending_add_edge, &mut sent.add_edge_ids) {
+    if try_send_cached(sub, &mut state.pending_add_edge, &mut sent.add_edge_ids, SubprocessManager::send_add_edge_inference) {
         return;
     }
     if let Some(item) = state.pending.pop_front() {
@@ -1392,53 +1392,27 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
     sub.send_image(*item_id, bytes, chain_input)
 }
 
-/// Try to send a Tier 2 item to the subprocess. Returns true if sent.
-fn try_send_tier2(
-    sub: &mut SubprocessManager,
-    pending_tier2: &mut VecDeque<CachedTensorWork>,
-    sent_tier2_ids: &mut Vec<u64>,
-) -> bool {
-    if let Some(t2) = pending_tier2.pop_front() {
-        let tid = t2.item_id;
-        if sub.send_repostprocess(
-            t2.item_id,
-            &crate::subprocess::manager::TensorView {
-                data: &t2.tensor_data,
-                height: t2.tensor_height,
-                width: t2.tensor_width,
-            },
-            t2.model, &t2.original_bytes, t2.mask,
-        ).is_ok() {
-            sent_tier2_ids.push(tid);
-            return true;
-        }
-        pending_tier2.push_front(t2);
-    }
-    false
-}
+type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &[u8], MaskSettings) -> Result<(), String>;
 
-/// Try to send an AddEdgeInference item to the subprocess. Returns true if sent.
-fn try_send_add_edge(
+/// Send the next cached-tensor job with `send`; one that fails goes back
+/// to the front. Returns true if sent.
+fn try_send_cached(
     sub: &mut SubprocessManager,
-    pending_add_edge: &mut VecDeque<CachedTensorWork>,
-    sent_add_edge_ids: &mut Vec<u64>,
+    pending: &mut VecDeque<CachedTensorWork>,
+    sent_ids: &mut Vec<u64>,
+    send: SendCached,
 ) -> bool {
-    if let Some(ae) = pending_add_edge.pop_front() {
-        let tid = ae.item_id;
-        if sub.send_add_edge_inference(
-            ae.item_id,
-            &crate::subprocess::manager::TensorView {
-                data: &ae.tensor_data,
-                height: ae.tensor_height,
-                width: ae.tensor_width,
-            },
-            ae.model, &ae.original_bytes, ae.mask,
-        ).is_ok() {
-            sent_add_edge_ids.push(tid);
-            return true;
-        }
-        pending_add_edge.push_front(ae);
+    let Some(work) = pending.pop_front() else { return false };
+    let tensor = crate::subprocess::manager::TensorView {
+        data: &work.tensor_data,
+        height: work.tensor_height,
+        width: work.tensor_width,
+    };
+    if send(sub, work.item_id, &tensor, work.model, &work.original_bytes, work.mask).is_ok() {
+        sent_ids.push(work.item_id);
+        return true;
     }
+    pending.push_front(work);
     false
 }
 
