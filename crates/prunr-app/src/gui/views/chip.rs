@@ -126,10 +126,37 @@ fn chip_face(ui: &mut Ui, text: String, accent: bool) -> Response {
     })
 }
 
-/// Solid inner + concentric soft-falloff strokes following the same
-/// smoothstep curve as `paint_circle`. Shared by the canvas trail and
-/// the popover preview so the on-screen brush always matches what
-/// `paint_circle` will write into the mask.
+/// A soft brush stamp's look: the solid core (its radius and colour, when
+/// it is big enough to draw) and the falloff rings around it as
+/// `(distance from centre, stroke)`, following the same smoothstep curve
+/// as `paint_circle`.
+fn falloff(
+    outer: f32,
+    hardness: f32,
+    color: egui::Color32,
+    base_alpha: u8,
+    steps: u32,
+) -> (Option<(f32, egui::Color32)>, impl Iterator<Item = (f32, egui::Stroke)>) {
+    use prunr_core::math::smoothstep;
+    let inner = outer * hardness.clamp(0.0, 1.0);
+    let core = (inner >= 0.5)
+        .then(|| (inner, egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha)));
+    let span = (outer - inner).max(0.001);
+    let rings = (0..steps).filter_map(move |i| {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let dist = inner + span * t;
+        let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
+        let a = (base_alpha as f32 * intensity) as u8;
+        if a == 0 { return None; }
+        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
+        Some((dist, egui::Stroke::new(span / steps as f32 * 1.4, stroke_color)))
+    });
+    (core, rings)
+}
+
+/// Solid inner + concentric soft-falloff strokes. Shared by the canvas
+/// trail and the popover preview so the on-screen brush always matches
+/// what `paint_circle` will write into the mask.
 pub(super) fn paint_falloff_circle(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -139,21 +166,11 @@ pub(super) fn paint_falloff_circle(
     base_alpha: u8,
     steps: u32,
 ) {
-    use prunr_core::math::smoothstep;
-    let inner = outer * hardness.clamp(0.0, 1.0);
-    if inner >= 0.5 {
-        let solid = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
+    let (core, rings) = falloff(outer, hardness, color, base_alpha, steps);
+    if let Some((inner, solid)) = core {
         painter.circle_filled(center, inner, solid);
     }
-    let span = (outer - inner).max(0.001);
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let dist = inner + span * t;
-        let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
-        let a = (base_alpha as f32 * intensity) as u8;
-        if a == 0 { continue; }
-        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
-        let stroke = egui::Stroke::new(span / steps as f32 * 1.4, stroke_color);
+    for (dist, stroke) in rings {
         painter.circle_stroke(center, dist, stroke);
     }
 }
@@ -169,31 +186,13 @@ pub(super) fn paint_falloff_square(
     base_alpha: u8,
     steps: u32,
 ) {
-    use prunr_core::math::smoothstep;
-    let inner = outer * hardness.clamp(0.0, 1.0);
-    if inner >= 0.5 {
-        let solid = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), base_alpha);
-        painter.rect_filled(
-            egui::Rect::from_center_size(center, egui::vec2(inner * 2.0, inner * 2.0)),
-            0.0,
-            solid,
-        );
+    let square = |half: f32| egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
+    let (core, rings) = falloff(outer, hardness, color, base_alpha, steps);
+    if let Some((inner, solid)) = core {
+        painter.rect_filled(square(inner), 0.0, solid);
     }
-    let span = (outer - inner).max(0.001);
-    for i in 0..steps {
-        let t = (i as f32 + 0.5) / steps as f32;
-        let dist = inner + span * t;
-        let intensity = if span < 0.5 { 0.0 } else { smoothstep(1.0 - t) };
-        let a = (base_alpha as f32 * intensity) as u8;
-        if a == 0 { continue; }
-        let stroke_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
-        let stroke = egui::Stroke::new(span / steps as f32 * 1.4, stroke_color);
-        painter.rect_stroke(
-            egui::Rect::from_center_size(center, egui::vec2(dist * 2.0, dist * 2.0)),
-            0.0,
-            stroke,
-            egui::StrokeKind::Outside,
-        );
+    for (dist, stroke) in rings {
+        painter.rect_stroke(square(dist), 0.0, stroke, egui::StrokeKind::Outside);
     }
 }
 
