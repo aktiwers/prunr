@@ -94,9 +94,8 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
     }
 }
 
-/// Pins the cache-key contract: identical correction → identical result.
-/// A cache keyed by the correction would miss or go stale if this drifts;
-/// the cache misses or stales — both failure modes caught by byte equality.
+/// Pins the cache-key contract: identical correction → identical result,
+/// or a cache keyed by the correction would miss or go stale.
 #[test]
 fn brush_correction_is_deterministic_across_runs() {
     if skip_if_no_ort("brush_correction_deterministic") { return; }

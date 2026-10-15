@@ -28,8 +28,7 @@ fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyl
 }
 
 /// `LineMode::Off` runs the segmentation pipeline only — no TEED
-/// inference. Already covered by golden_e2e + bg_effect; this test pins
-/// "no error, dimensions match" for the LineMode::Off branch directly.
+/// inference. Pins "no error, dimensions match" for that branch.
 #[test]
 fn line_mode_off_runs_seg_only() {
     if skip_if_no_ort("line_mode_off") { return; }
