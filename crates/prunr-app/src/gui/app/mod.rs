@@ -1153,9 +1153,9 @@ impl eframe::App for PrunrApp {
 
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Dispatch any debounced previews + apply completed ones before we
-        // render. tick() returns a hint of how long until the next scheduled
-        // dispatch so we can schedule a repaint accordingly.
+        // Land finished work, then the live previews it may have queued,
+        // before rendering, so this frame shows the newest results.
+        self.pump_results(ui.ctx());
         self.pump_live_preview(ui.ctx());
 
         let panel_frame = egui::Frame {
