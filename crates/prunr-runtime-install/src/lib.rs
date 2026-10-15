@@ -1,10 +1,7 @@
 //! Shared host-detection + PyPI-wheel install logic for ORT runtimes.
 //!
 //! Used by `xtask install-runtime` (build-side CLI) and the GUI Settings →
-//! Hardware → Install button. Before this crate, both sites independently
-//! implemented `host_rid`, wheel-name token mapping, SHA256 verification,
-//! and wheel repackaging — divergence on the next OpenVINO release would
-//! have silently installed wrong files in one path.
+//! Hardware → Install button.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -209,7 +206,7 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
 }
 
 /// Implemented by error types whose values distinguish transient
-/// (network blip, 5xx) from fatal (4xx, sha mismatch, user cancel).
+/// errors from fatal ones; each implementor decides which is which.
 /// `retry_with_backoff` consults `is_retryable` to decide between retry
 /// and fail-fast; on cancel during the backoff sleep it constructs a
 /// fresh value via `cancelled()` so each error type picks its own
