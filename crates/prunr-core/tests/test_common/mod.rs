@@ -8,6 +8,8 @@
 
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Returns Ok(()) when ORT is loaded and ready for `OrtEngine::new_*`.
 pub fn ensure_ort_initialized() -> Result<(), String> {
@@ -25,6 +27,61 @@ pub fn skip_if_no_ort(label: &str) -> bool {
         return true;
     }
     false
+}
+
+// ---------- golden harness driver (shared by both golden tiers) ----------
+
+fn list_fixture_dirs(root: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .map(|it| {
+            it.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fixture dirs under the committed root, then the local root, sorted.
+/// Panics naming both roots when there are none.
+pub fn golden_fixtures(tier: &str, committed_root: &Path, local_root: &Path) -> Vec<PathBuf> {
+    let mut fixtures = list_fixture_dirs(committed_root);
+    if local_root.is_dir() {
+        fixtures.extend(list_fixture_dirs(local_root));
+    }
+    fixtures.sort();
+
+    if fixtures.is_empty() {
+        panic!(
+            "no {tier} fixtures under {} or {}.\n\
+             Run with BOOTSTRAP_GOLDEN=1 to generate canary fixtures.",
+            committed_root.display(),
+            local_root.display(),
+        );
+    }
+    fixtures
+}
+
+/// Runs every fixture, then panics listing each `[id] error` together.
+pub fn assert_golden_fixtures(
+    tier: &str,
+    fixtures: &[PathBuf],
+    mut run: impl FnMut(&Path) -> Result<(), String>,
+) {
+    let failures: Vec<String> = fixtures
+        .iter()
+        .filter_map(|fixture| {
+            run(fixture).err().map(|e| {
+                // read_dir entries always have a final component
+                let id = fixture.file_name().unwrap().to_string_lossy();
+                format!("[{id}] {e}")
+            })
+        })
+        .collect();
+
+    if !failures.is_empty() {
+        panic!("{tier} golden mismatches:\n{}", failures.join("\n"));
+    }
 }
 
 // ---------- synthetic fixture catalog (shared by both golden harnesses) ----------

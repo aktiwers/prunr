@@ -45,7 +45,10 @@ use prunr_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::{Path, PathBuf}};
-use test_common::{ensure_ort_initialized, render_synthetic_source, synthetic_specs};
+use test_common::{
+    assert_golden_fixtures, ensure_ort_initialized, golden_fixtures, render_synthetic_source,
+    synthetic_specs,
+};
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/postprocess";
 const FIXTURE_ROOT_LOCAL: &str = "tests/golden_data_local/postprocess";
@@ -79,44 +82,9 @@ fn golden_postprocess() {
         bootstrap_local_real_fixtures(&local_root);
     }
 
-    let mut fixtures = Vec::new();
-    fixtures.extend(list_fixtures(&committed_root));
-    if local_root.is_dir() {
-        fixtures.extend(list_fixtures(&local_root));
-    }
-    fixtures.sort();
+    let fixtures = golden_fixtures("postprocess", &committed_root, &local_root);
 
-    if fixtures.is_empty() {
-        panic!(
-            "no postprocess fixtures under {} or {}.\n\
-             Run with BOOTSTRAP_GOLDEN=1 to generate canary fixtures.",
-            committed_root.display(),
-            local_root.display(),
-        );
-    }
-
-    let mut failures = Vec::new();
-    for fixture in &fixtures {
-        if let Err(e) = run_fixture(fixture, update) {
-            let id = fixture.file_name().unwrap().to_string_lossy().into_owned();
-            failures.push(format!("[{id}] {e}"));
-        }
-    }
-
-    if !failures.is_empty() {
-        panic!("postprocess golden mismatches:\n{}", failures.join("\n"));
-    }
-}
-
-fn list_fixtures(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
-        .map(|it| {
-            it.filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default()
+    assert_golden_fixtures("postprocess", &fixtures, |f| run_fixture(f, update));
 }
 
 fn run_fixture(dir: &Path, update: bool) -> Result<(), String> {
@@ -198,6 +166,23 @@ fn bytes_to_f32s_le(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Writes a Silueta `tensor.bin` of shape `[1, 1, h, w]` plus its
+/// `sidecar.json` into `dir`.
+fn write_tensor_fixture(dir: &Path, tensor: &[f32], h: usize, w: usize) {
+    fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(tensor)).expect("write tensor.bin");
+
+    let sidecar = Sidecar {
+        shape: [1, 1, h, w],
+        model: ModelKind::Silueta,
+        mask_settings: MaskSettings::default(),
+    };
+    fs::write(
+        dir.join("sidecar.json"),
+        serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
+    )
+    .expect("write sidecar.json");
+}
+
 fn f32s_to_bytes_le(data: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() * 4);
     for &v in data {
@@ -256,19 +241,7 @@ fn bootstrap_circle_silueta_basic(root: &Path) {
             tensor[(y * w + x) as usize] = v;
         }
     }
-    fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor))
-        .expect("write tensor.bin");
-
-    let sidecar = Sidecar {
-        shape: [1, 1, h as usize, w as usize],
-        model: ModelKind::Silueta,
-        mask_settings: MaskSettings::default(),
-    };
-    fs::write(
-        dir.join("sidecar.json"),
-        serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
-    )
-    .expect("write sidecar.json");
+    write_tensor_fixture(&dir, &tensor, h as usize, w as usize);
 
     eprintln!("bootstrapped fixture: {}", dir.display());
 }
@@ -289,19 +262,7 @@ fn bootstrap_synthetic_postprocess_fixtures(root: &Path) {
         img.save(dir.join("source.png")).expect("write source.png");
 
         let tensor = synthesize_circle_tensor(SYNTH_TENSOR_W, SYNTH_TENSOR_H);
-        fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&tensor))
-            .expect("write tensor.bin");
-
-        let sidecar = Sidecar {
-            shape: [1, 1, SYNTH_TENSOR_H, SYNTH_TENSOR_W],
-            model: ModelKind::Silueta,
-            mask_settings: MaskSettings::default(),
-        };
-        fs::write(
-            dir.join("sidecar.json"),
-            serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
-        )
-        .expect("write sidecar.json");
+        write_tensor_fixture(&dir, &tensor, SYNTH_TENSOR_H, SYNTH_TENSOR_W);
 
         eprintln!("bootstrapped synthetic postprocess fixture: {}", dir.display());
     }
@@ -387,19 +348,12 @@ fn bootstrap_local_real_fixtures(root: &Path) {
             }
         };
 
-        fs::write(dir.join("tensor.bin"), f32s_to_bytes_le(&result.tensor_data))
-            .expect("write tensor.bin");
-
-        let sidecar = Sidecar {
-            shape: [1, 1, result.tensor_height, result.tensor_width],
-            model: ModelKind::Silueta,
-            mask_settings: MaskSettings::default(),
-        };
-        fs::write(
-            dir.join("sidecar.json"),
-            serde_json::to_vec_pretty(&sidecar).expect("serialize sidecar"),
-        )
-        .expect("write sidecar.json");
+        write_tensor_fixture(
+            &dir,
+            &result.tensor_data,
+            result.tensor_height,
+            result.tensor_width,
+        );
 
         eprintln!("bootstrapped local real fixture: {}", dir.display());
     }
