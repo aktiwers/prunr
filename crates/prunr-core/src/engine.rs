@@ -295,6 +295,13 @@ pub(crate) struct Walk {
 }
 
 impl Walk {
+    /// The walk for `weights` when it would try none of `eps`: each one's
+    /// skip. `None` when it would try one.
+    fn without_a_try(model: prunr_models::ModelId, weights: Weights, eps: &[EpKind]) -> Option<Self> {
+        let skipped = eps.iter().map(|&ep| skip_reason(model, weights, ep).map(|s| s.text(ep))).collect::<Option<_>>()?;
+        Some(Self { failed: Vec::new(), skipped })
+    }
+
     /// Why the walk landed nowhere, in one line.
     pub(crate) fn reason(&self) -> String {
         if !self.failed.is_empty() {
@@ -415,6 +422,12 @@ impl SessionPick {
     pub(crate) fn on(provider: &str) -> Self {
         Self { provider: provider.to_string(), ..Default::default() }
     }
+
+    /// `earlier` failures go ahead of this pick's own.
+    fn put_first(&mut self, mut earlier: Vec<String>) {
+        earlier.append(&mut self.failed);
+        self.failed = earlier;
+    }
 }
 
 /// ORT-backed inference engine. Holds one Session per model selection.
@@ -456,65 +469,59 @@ impl OrtEngine {
     }
 
     /// Core session-creation path shared by `new`, `new_cpu_only`, and
-    /// `for_model`. Tries optimized variant (FP16/INT8) first; falls back
-    /// to FP32 on failure. When `cpu_only=false`, also falls back to
-    /// CPU-only if the GPU EP crashes at init.
+    /// `for_model`: the GPU providers unless `cpu_only`, then the CPU.
     fn new_with_fallback_and_level(
         model: ModelKind,
         intra_threads: usize,
         cpu_only: bool,
         level: GraphOptimizationLevel,
     ) -> Result<Self, CoreError> {
+        Self::build_with(model, intra_threads, gpu_eps_for(cpu_only), cpu_only, level)
+    }
+
+    /// Each weights a session tries in turn (its lighter copy, when on
+    /// disk, then its own) on the providers in `eps`, or on the CPU when
+    /// `cpu_only` (`eps` is then empty); a GPU session that fails every
+    /// weights retries on the CPU, which tries its own lighter copy (INT8)
+    /// first. Weights no provider in `eps` would try are never read: on a
+    /// machine without a GPU provider a session goes to the CPU without a
+    /// read.
+    fn build_with(
+        model: ModelKind,
+        intra_threads: usize,
+        eps: &[EpKind],
+        cpu_only: bool,
+        level: GraphOptimizationLevel,
+    ) -> Result<Self, CoreError> {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
+        let id: prunr_models::ModelId = model.into();
         let mut failed = Vec::new();
-        // Check if an optimized variant exists (loaded from filesystem, so Vec<u8>).
-        if let Some((optimized, weights)) = Self::optimized_variant_bytes(model, cpu_only) {
-            tracing::debug!(?model, variant_bytes = optimized.len(), "OrtEngine trying optimized variant");
-            match Self::build_session(&optimized, weights, intra_threads, model, cpu_only, level) {
-                Ok(engine) => {
-                    tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (optimized variant)");
+        for weights in [lighter_weights(id, cpu_only), Some(Weights::Fp32)].into_iter().flatten() {
+            if let Some(walk) = (!cpu_only).then(|| Walk::without_a_try(id, weights, eps)).flatten() {
+                failed.push(format!("{} weights: {}", weights.label(), CoreError::Inference(walk.reason())));
+                continue;
+            }
+            let Some(bytes) = Self::weights_bytes(id, weights)? else {
+                tracing::debug!(?model, ?weights, "lighter weights gone from disk — skipping them");
+                continue;
+            };
+            match Self::build_session(&bytes, weights, intra_threads, model, eps, level) {
+                Ok(mut engine) => {
+                    tracing::info!(?model, ?weights, provider = %engine.pick.provider, "OrtEngine ready");
+                    engine.pick.put_first(failed);
                     return Ok(engine);
                 }
+                Err(e) if cpu_only && weights == Weights::Fp32 => return Err(e),
                 Err(e) => {
-                    tracing::warn!(?model, error = %e, "optimized variant failed — falling back to FP32");
+                    tracing::warn!(?model, ?weights, error = %e, "session failed — trying the next weights");
                     failed.push(format!("{} weights: {e}", weights.label()));
                 }
             }
-        } else {
-            tracing::debug!(?model, "no optimized variant on disk — using embedded FP32");
         }
-        // Fall back to the FP32 model bytes. Bundled models are zero-copy
-        // (`Cow::Borrowed`); on-demand models load from the user data dir
-        // (`Cow::Owned`) and surface a clear "not installed" error here
-        // when the file is missing.
-        let id: prunr_models::ModelId = model.into();
-        let fp32 = prunr_models::resolve_bytes(id)
-            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        match Self::build_session(&fp32, Weights::Fp32, intra_threads, model, cpu_only, level) {
-            Ok(mut engine) => {
-                tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (FP32)");
-                failed.append(&mut engine.pick.failed);
-                engine.pick.failed = failed;
-                Ok(engine)
-            }
-            Err(e) if !cpu_only => {
-                tracing::warn!(?model, error = %e, "GPU session creation failed — retrying CPU-only");
-                failed.push(format!("FP32 weights: {e}"));
-                // Recurse so the cpu_only=true path also tries its
-                // CPU-targeted optimized variant (INT8) before falling
-                // back to FP32. Otherwise the GPU-fail-then-CPU path
-                // ends up on FP32 even when an INT8 variant is on disk.
-                let mut engine = Self::new_with_fallback_and_level(model, intra_threads, true, level)?;
-                tracing::info!(
-                    ?model, provider = %engine.pick.provider,
-                    "OrtEngine ready (CPU fallback after GPU failure)",
-                );
-                failed.append(&mut engine.pick.failed);
-                engine.pick.failed = failed;
-                Ok(engine)
-            }
-            Err(e) => Err(e),
-        }
+        let mut engine = Self::build_with(model, intra_threads, &[], true, level)?;
+        tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (CPU fallback after GPU failure)");
+        engine.pick.put_first(failed);
+        Ok(engine)
     }
 
     /// `model`'s session as the app builds it: the model's graph
@@ -533,22 +540,24 @@ impl OrtEngine {
         &self.pick
     }
 
-    /// Try to load an optimized model variant from the filesystem.
-    /// Returns None if no variant is available (falls back to embedded FP32).
-    fn optimized_variant_bytes(model: ModelKind, cpu_only: bool) -> Option<(Vec<u8>, Weights)> {
-        let id: prunr_models::ModelId = model.into();
-        let weights = lighter_weights(id, cpu_only)?;
-        let bytes = match weights {
-            Weights::Int8 => prunr_models::model_int8_bytes(id),
-            Weights::Fp16 | Weights::Fp32 => prunr_models::model_fp16_bytes(id),
-        }?;
-        Some((bytes, weights))
+    /// `id`'s `weights` as a session loads them; `None` when a lighter
+    /// copy has gone from disk. Bundled weights are zero-copy; a download
+    /// missing its own weights is the "not installed" error.
+    fn weights_bytes(id: prunr_models::ModelId, weights: Weights) -> Result<Option<Cow<'static, [u8]>>, CoreError> {
+        Ok(match weights {
+            Weights::Fp32 => Some(
+                prunr_models::resolve_bytes(id).ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?,
+            ),
+            Weights::Fp16 => prunr_models::model_fp16_bytes(id).map(Cow::Owned),
+            Weights::Int8 => prunr_models::model_int8_bytes(id).map(Cow::Owned),
+        })
     }
 
-    fn build_session(model_bytes: &[u8], weights: Weights, intra_threads: usize, model: ModelKind, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
+    /// A session of `model_bytes` on the first provider in `eps` that
+    /// takes it, or on the CPU when `eps` is empty.
+    fn build_session(model_bytes: &[u8], weights: Weights, intra_threads: usize, model: ModelKind, eps: &[EpKind], level: GraphOptimizationLevel) -> Result<Self, CoreError> {
         let model_id: prunr_models::ModelId = model.into();
-        // CPU-only path: straight shot.
-        if cpu_only {
+        if eps.is_empty() {
             crate::cache::gc_stale_for_model(model_id, "CPU");
             let builder = Self::builder_with_base(intra_threads, level)?;
             let (builder, bytes) = apply_ort_graph_cache(builder, model_bytes, model_id, "CPU");
@@ -574,9 +583,9 @@ impl OrtEngine {
         // (registering them as a list hides which EP was actually selected and
         // lets a crashing EP abort session creation before the CPU fallback is
         // reached — exactly the DirectML AbiCustomRegistry failure seen in the
-        // wild). Fall through on error; the caller retries with cpu_only=true
-        // if all GPU EPs fail.
-        let (session, ep, failed) = walk_ladder("", model_id, weights, available_gpu_eps(), |ep| {
+        // wild). Fall through on error; the caller retries on the CPU if all
+        // GPU EPs fail.
+        let (session, ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner) = if ep.keeps_optimized_graph() {
@@ -987,6 +996,34 @@ mod tests {
         let none = walk_ladder("", model, Weights::Fp32, &[], |_| -> Result<(), Miss> { unreachable!() });
         assert_eq!(none.map_err(|w| w.reason()), Err("No GPU EPs available on this platform".to_string()));
         assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::Declared));
+        assert_eq!(
+            Walk::without_a_try(model, Weights::Fp32, &[EpKind::OpenVino]).map(|w| w.reason()),
+            Some("no GPU provider to try: OpenVINO is declared incompatible".to_string()),
+            "the same line, known before any weights are read",
+        );
+        assert_eq!(Walk::without_a_try(ModelId::U2net, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");
+    }
+
+    /// A GPU session on a machine without a GPU provider lands on the CPU,
+    /// naming for each weights it would have tried why none was, and reads
+    /// none of them on the way.
+    #[test]
+    fn a_gpu_session_without_a_gpu_provider_lands_on_the_cpu_and_says_why() {
+        use prunr_models::ModelId;
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let engine = OrtEngine::build_with(ModelKind::Silueta, 1, &[], false, GraphOptimizationLevel::Level3)
+            .expect("Silueta is bundled");
+        let none = "Inference error: No GPU EPs available on this platform";
+        let mut expected = Vec::new();
+        if lighter_weights(ModelId::Silueta, false).is_some() {
+            expected.push(format!("FP16 weights: {none}"));
+        }
+        expected.push(format!("FP32 weights: {none}"));
+        assert_eq!(engine.pick().provider, "CPU");
+        assert_eq!(engine.pick().failed, expected);
+        assert_eq!(engine.pick().weights, lighter_weights(ModelId::Silueta, true).unwrap_or(Weights::Fp32));
     }
 
     // Integration tests require dev-models feature and downloaded models.
