@@ -184,6 +184,29 @@ impl Drop for GraphDraft {
     }
 }
 
+/// A cache miss: `builder` writes its optimized graph to a draft of
+/// `path`, published once the session builds. When ORT refuses the
+/// path the build goes on uncached.
+pub(crate) fn attach_draft(
+    builder: ort::session::builder::SessionBuilder,
+    path: &Path,
+    model_id: ModelId,
+    ep_name: &str,
+    part: Option<&str>,
+) -> (ort::session::builder::SessionBuilder, Option<GraphDraft>) {
+    let draft = GraphDraft::for_path(path);
+    match builder.with_optimized_model_path(draft.draft()) {
+        Ok(builder) => {
+            tracing::debug!(?model_id, ep = %ep_name, part, path = %path.display(), "cache miss (writing optimized graph)");
+            (builder, Some(draft))
+        }
+        Err(e) => {
+            tracing::warn!(?model_id, ep = %ep_name, part, %e, "with_optimized_model_path failed; cache disabled for this build");
+            (e.recover(), None)
+        }
+    }
+}
+
 fn remove_abandoned_drafts(dir: &Path, name: &str) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let prefix = format!("{name}.");

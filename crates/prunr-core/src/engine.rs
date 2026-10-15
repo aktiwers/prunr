@@ -838,17 +838,8 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
         return (builder, Cow::Borrowed(model_bytes), None);
     }
-    let draft = crate::cache::GraphDraft::for_path(&path);
-    match builder.with_optimized_model_path(draft.draft()) {
-        Ok(builder) => {
-            tracing::debug!(?model_id, ep = %ep_name, path = %path.display(), "cache miss (writing optimized graph)");
-            (builder, Cow::Borrowed(model_bytes), Some(draft))
-        }
-        Err(e) => {
-            tracing::warn!(?model_id, ep = %ep_name, %e, "with_optimized_model_path failed; cache disabled for this build");
-            (e.recover(), Cow::Borrowed(model_bytes), None)
-        }
-    }
+    let (builder, draft) = crate::cache::attach_draft(builder, &path, model_id, ep_name, None);
+    (builder, Cow::Borrowed(model_bytes), draft)
 }
 
 #[cfg(test)]
