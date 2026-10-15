@@ -7,7 +7,14 @@ use super::chip;
 use super::refinement_row::render_refine_group;
 use super::upscale_chip::render_output_scale_chip;
 use crate::gui::item_settings::ItemSettings;
-use crate::gui::settings::Settings;
+use crate::gui::settings::{Settings, SettingsModel};
+
+/// Why the knobs an upscale reads can't change now: a change mid-run
+/// makes the landing result stale and drops it.
+pub(super) fn upscale_run_lock(model: SettingsModel, processing: bool) -> Option<&'static str> {
+    let upscaling = crate::gui::knob_catalog::shows(model, crate::gui::knob_catalog::Surface::Upscale);
+    (processing && upscaling).then_some("Wait for the upscale to finish, or cancel it.")
+}
 
 /// `source_dims` is `(w, h)` of the image the next upscale starts from,
 /// resolved by the caller.
@@ -24,9 +31,7 @@ pub(crate) fn render_upscale_chips(
     if app_settings.model.to_model_id().is_none() {
         return;
     }
-    // A change mid-run would make the landing result stale and drop it.
-    let reason = processing.then_some("Wait for the upscale to finish, or cancel it.");
-    chip::gated(ui, reason, |ui| {
+    chip::gated(ui, upscale_run_lock(app_settings.model, processing), |ui| {
         render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
         render_refine_group(ui, item_settings);
     });
