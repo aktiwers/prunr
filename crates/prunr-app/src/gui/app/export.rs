@@ -46,10 +46,7 @@ impl PrunrApp {
     /// one; `on_save_layers_picked` writes into it.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
         let targets: Vec<u64> = if has_selection {
-            self.batch.items.iter()
-                .filter(|i| i.selected && i.status == BatchStatus::Done)
-                .map(|i| i.id)
-                .collect()
+            self.batch.selected_ids_with_status(BatchStatus::Done)
         } else {
             self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
         };
@@ -139,10 +136,7 @@ impl PrunrApp {
     /// One or more sidebar checkboxes selected — ask for a folder;
     /// `on_save_selected_picked` writes into it.
     fn save_selected_to_folder(&mut self) {
-        let targets = self.batch.items.iter()
-            .filter(|i| i.selected && i.status == BatchStatus::Done)
-            .map(|i| i.id)
-            .collect();
+        let targets = self.batch.selected_ids_with_status(BatchStatus::Done);
         self.ask_dialog(DialogRequest::SaveSelected { targets });
     }
 
