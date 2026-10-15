@@ -60,7 +60,7 @@ pub enum InpaintBridgeMsg {
         sharpen: f32,
     },
     /// Kill the subprocess; every in-flight stroke ends Cancelled.
-    Cancel { item_id: u64 },
+    Cancel,
     /// Release any cached subprocess regardless of in-flight state.
     /// Differs from Cancel in two ways:
     ///   1. Idle subprocess (no in-flight) is also killed — Cancel
@@ -168,14 +168,13 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     last_used = Instant::now();
                     keep_loaded = sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
                     inflight_gens.insert(item_id, gen);
-                    let _ = gen;
                     let params = InpaintJob {
                         item_id, model_id, image_path, mask_path,
                         sd_req, feather_px, sharpen,
                     };
                     handle_dispatch(&mut sub_state, &mut inflight_gens, &res_tx, params);
                 }
-                InpaintBridgeMsg::Cancel { item_id: _ } => {
+                InpaintBridgeMsg::Cancel => {
                     // SD's UNet `run()` is uninterruptible mid-step;
                     // flag-flip cancel can't free RAM in time. The
                     // kill applies to ALL in-flight strokes — one
