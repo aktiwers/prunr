@@ -2869,6 +2869,22 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
+    /// What a TAESD-decoded step preview would cost per step: one
+    /// decode of a 512 px tile's latent.
+    /// `cargo test --profile profiling -p prunr-core --lib taesd_step_preview_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn taesd_step_preview_timing() {
+        let Ok(taesd) = TaesdSession::get() else { return };
+        let backend = VaeBackend::Taesd(&taesd);
+        let latent = Array4::<f32>::from_shape_fn((1, 4, 64, 64), |(_, c, y, x)| ((c * 7 + y * 3 + x) % 13) as f32 / 13.0 - 0.5);
+        for _ in 0..6 {
+            let t = std::time::Instant::now();
+            let img = vae_decode(&backend, &latent).expect("decoded");
+            println!("TAESD decode 64x64 latent -> {:?}: {:?}", img.dimensions(), t.elapsed());
+        }
+    }
+
     use super::*;
     use image::{Luma, Rgba};
 
