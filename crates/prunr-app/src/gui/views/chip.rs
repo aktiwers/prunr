@@ -426,12 +426,16 @@ pub fn slider_row_f32(
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
     let (lo, hi) = (*range.start() as f64, *range.end() as f64);
+    let value_w = value_box_width(ui, (label, lo.to_bits(), hi.to_bits(), logarithmic), || {
+        sample_values(lo, hi, logarithmic).map(|v| format(v as f32)).collect()
+    });
     let (change, resp) = labelled_slider(
         ui,
         label,
         egui::Slider::new(value, range)
             .custom_formatter(move |v, _| format(v as f32))
             .logarithmic(logarithmic),
+        value_w,
     );
     paint_handle(ui, &resp, slider_fraction(*value as f64, lo, hi, logarithmic));
     change
@@ -441,7 +445,10 @@ pub fn slider_row_f32(
 /// names the knob itself.
 pub(super) fn bare_slider_f32(ui: &mut Ui, name: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, format: impl Fn(f32) -> String) -> ChipChange {
     let (lo, hi) = (*range.start() as f64, *range.end() as f64);
-    let resp = chip_named_slider(ui, name, egui::Slider::new(value, range).custom_formatter(move |v, _| format(v as f32)));
+    let value_w = value_box_width(ui, (name, lo.to_bits(), hi.to_bits(), false), || {
+        sample_values(lo, hi, false).map(|v| format(v as f32)).collect()
+    });
+    let resp = chip_named_slider(ui, name, egui::Slider::new(value, range).custom_formatter(move |v, _| format(v as f32)), value_w);
     paint_handle(ui, &resp, slider_fraction(*value as f64, lo, hi, false));
     ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }
 }
@@ -455,18 +462,49 @@ pub fn slider_row<T: egui::emath::Numeric>(
     range: std::ops::RangeInclusive<T>,
 ) -> ChipChange {
     let (lo, hi) = (range.start().to_f64(), range.end().to_f64());
-    let (change, resp) = labelled_slider(ui, label, egui::Slider::new(value, range));
+    // Every caller's range is whole numbers, whose widest text is an end.
+    let value_w = value_box_width(ui, (label, lo.to_bits(), hi.to_bits(), false), || vec![format!("{lo}"), format!("{hi}")]);
+    let (change, resp) = labelled_slider(ui, label, egui::Slider::new(value, range), value_w);
     paint_handle(ui, &resp, slider_fraction(value.to_f64(), lo, hi, false));
     change
 }
 
-fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
+fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: f32) -> (ChipChange, Response) {
     if in_panel_rows(ui) {
-        return panel_slider(ui, label, slider);
+        return panel_slider(ui, label, slider, value_w);
     }
     let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
-    let resp = add_slider(ui, slider).labelled_by(label.id);
+    let resp = add_slider(ui, slider, value_w).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
+}
+
+/// Values across `lo..=hi` whose texts stand for every width a knob's
+/// value can take: the ends, zero, and points between (spaced evenly in
+/// log10 on a logarithmic knob).
+fn sample_values(lo: f64, hi: f64, logarithmic: bool) -> impl Iterator<Item = f64> {
+    const STEPS: u32 = 16;
+    let between = (0..=STEPS).map(move |i| {
+        let t = f64::from(i) / f64::from(STEPS);
+        if logarithmic && lo > 0.0 { lo * (hi / lo).powf(t) } else { lo + (hi - lo) * t }
+    });
+    between.chain((lo < 0.0 && hi > 0.0).then_some(0.0))
+}
+
+/// A value box as wide as the widest of `texts`, so the box and every
+/// control after it in its row hold still while the value changes. Kept
+/// per knob (`key`), so the texts are formatted once, not every frame.
+fn value_box_width(ui: &Ui, key: impl std::hash::Hash, texts: impl FnOnce() -> Vec<String>) -> f32 {
+    let id = egui::Id::new(("value_box_width", key));
+    if let Some(width) = ui.data(|d| d.get_temp::<f32>(id)) {
+        return width;
+    }
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let widest = texts().into_iter()
+        .map(|t| ui.painter().layout_no_wrap(t, font.clone(), Color32::WHITE).size().x)
+        .fold(0.0, f32::max);
+    let width = (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x).ceil();
+    ui.data_mut(|d| d.insert_temp(id, width));
+    width
 }
 
 /// The key under which `panel_rows` marks a panel whose sliders lay out
@@ -500,20 +538,20 @@ pub(super) fn panel_name(ui: &mut Ui, label: &str) {
     ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
 }
 
-fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> (ChipChange, Response) {
+fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: f32) -> (ChipChange, Response) {
     // On the caller's ui too: the handle is painted from its slider width.
     ui.spacing_mut().slider_width = (ui.available_width() - PANEL_NAME_WIDTH - PANEL_VALUE_WIDTH).max(60.0);
     ui.horizontal(|ui| {
         panel_name(ui, label);
-        let resp = chip_named_slider(ui, label, slider);
+        let resp = chip_named_slider(ui, label, slider, value_w);
         (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
     })
     .inner
 }
 
 /// A slider with its value box, named `label` for the tree.
-fn chip_named_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>) -> Response {
-    named(add_slider(ui, slider), label)
+fn chip_named_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: f32) -> Response {
+    named(add_slider(ui, slider, value_w), label)
 }
 
 /// The value box's padding above and below its number.
@@ -524,9 +562,11 @@ const SLIDER_VALUE_PAD_Y: f32 = 1.0;
 /// union of both) taller than the rail, and the white handle, painted
 /// at the response's centre, would slide off egui's own handle and
 /// leave its outline showing as a ring.
-fn add_slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
+fn add_slider(ui: &mut Ui, slider: egui::Slider<'_>, value_w: f32) -> Response {
     ui.scope(|ui| {
         ui.spacing_mut().button_padding.y = SLIDER_VALUE_PAD_Y;
+        // egui sizes the value box to its text, at least this wide.
+        ui.spacing_mut().interact_size.x = value_w;
         ui.add(slider.show_value(true))
     })
     .inner
@@ -1421,9 +1461,28 @@ mod tests {
             ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
             let thickness = ui.text_style_height(&egui::TextStyle::Body).max(ui.spacing().interact_size.y);
             let mut v = 0.5f32;
-            let resp = ui.horizontal(|ui| add_slider(ui, egui::Slider::new(&mut v, 0.0..=1.0))).inner;
+            let resp = ui.horizontal(|ui| add_slider(ui, egui::Slider::new(&mut v, 0.0..=1.0), 40.0)).inner;
             assert!(resp.rect.height() <= thickness + 0.5, "{} > {thickness}", resp.rect.height());
         });
+    }
+
+    /// A knob's value box keeps its width whatever it shows, so the
+    /// controls after it on a strip hold still while a slider moves.
+    #[test]
+    fn a_value_box_holds_its_width_while_the_value_changes() {
+        let ctx = egui::Context::default();
+        let row_width = |draw: &mut dyn FnMut(&mut Ui)| {
+            let mut w = 0.0;
+            let _ = ctx.run_ui(Default::default(), |ui| w = ui.horizontal(|ui| draw(ui)).response.rect.width());
+            w
+        };
+        let px = |v: f32| format!("{v:.0} px");
+        let strip = |v: f32| row_width(&mut |ui| { bare_slider_f32(ui, "Feather", &mut v.clone(), 0.0..=20.0, px); });
+        assert_eq!(strip(1.0), strip(20.0), "a strip slider");
+        let degrees = |v: i32| row_width(&mut |ui| { slider_row(ui, "Degrees", &mut v.clone(), -180..=180); });
+        assert_eq!(degrees(5), degrees(-180), "a whole-number slider");
+        let signed = |v: f32| row_width(&mut |ui| { slider_row_f32(ui, "Shift edge", &mut v.clone(), -10.0..=10.0, false, |v| format!("{v:+.0} px")); });
+        assert_eq!(signed(0.0), signed(-10.0), "a signed slider");
     }
 
     /// The painted handle sits where egui's mapping puts it: linear, and
