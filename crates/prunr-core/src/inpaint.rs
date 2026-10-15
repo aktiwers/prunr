@@ -1079,10 +1079,7 @@ fn fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, wid
             p.0[..3].copy_from_slice(&f.0[..3]);
         }
     }
-    if photo.dimensions() != (width, height) {
-        photo = crate::formats::resize_rgba(&photo, width, height, crate::formats::ResizeFilter::Lanczos3);
-    }
-    photo.into_raw()
+    crate::formats::preview_rgba(Cow::Owned(photo), width, height)
 }
 
 /// Bounding box of pixels where `mask >= min_value`, expanded by

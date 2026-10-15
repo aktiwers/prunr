@@ -52,6 +52,17 @@ pub fn resize_to_rgba(img: &DynamicImage, dst_width: u32, dst_height: u32, filte
     }
 }
 
+/// `img` as a progress preview's `width × height` straight RGBA: its own
+/// pixels at its own size (an owned image is handed over without a copy),
+/// else Lanczos3-resampled.
+pub fn preview_rgba(img: std::borrow::Cow<'_, RgbaImage>, width: u32, height: u32) -> Vec<u8> {
+    if img.dimensions() == (width, height) {
+        img.into_owned().into_raw()
+    } else {
+        resize_rgba(&img, width, height, ResizeFilter::Lanczos3).into_raw()
+    }
+}
+
 /// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call
 /// is unavoidable when `img` is a `DynamicImage` of a different layout
 /// (e.g. RGBA), but the resulting `RgbImage` is then borrowed into the
@@ -648,6 +659,19 @@ mod tests {
             // Each pixel is either red or blue (not black).
             assert!(p[0] == 255 || p[2] == 255, "Tile sample must come from bg");
         }
+    }
+
+    /// A preview at the image's own size is its pixels; any other size is
+    /// the Lanczos3 resample, borrowed or owned alike.
+    #[test]
+    fn a_preview_is_the_image_at_its_size_or_its_lanczos3_resample() {
+        use std::borrow::Cow;
+        let img = RgbaImage::from_fn(40, 30, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, ((x + y) * 3) as u8, 255 - x as u8]));
+        assert_eq!(preview_rgba(Cow::Borrowed(&img), 40, 30), img.as_raw().clone());
+        assert_eq!(preview_rgba(Cow::Owned(img.clone()), 40, 30), img.as_raw().clone());
+        let resampled = resize_rgba(&img, 17, 13, ResizeFilter::Lanczos3).into_raw();
+        assert_eq!(preview_rgba(Cow::Borrowed(&img), 17, 13), resampled);
+        assert_eq!(preview_rgba(Cow::Owned(img), 17, 13), resampled);
     }
 
     #[test]
