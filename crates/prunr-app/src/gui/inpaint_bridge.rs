@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::subprocess::manager::SubprocessManager;
+use crate::subprocess::manager::{InpaintJob, SubprocessManager};
 use crate::subprocess::protocol::SubprocessEvent;
 use prunr_core::inpaint_sd::SdInpaintRequest;
 use prunr_models::ModelId;
@@ -101,19 +101,6 @@ pub fn spawn_inpaint_bridge() -> (
     (msg_tx, res_rx)
 }
 
-/// Buffered dispatch params kept while the subprocess is mid-spawn.
-/// When `Ready` lands, the bridge replays each entry through
-/// `send_inpaint` in order.
-struct PendingDispatch {
-    item_id: u64,
-    model_id: ModelId,
-    image_path: std::path::PathBuf,
-    mask_path: std::path::PathBuf,
-    sd_req: Option<SdInpaintRequest>,
-    feather_px: f32,
-    sharpen: f32,
-}
-
 /// Spawn lifecycle. `Idle` and `Ready` are the steady states; `Spawning`
 /// is a transient that holds buffered dispatches until the worker
 /// reports Ready. The `Spawning` state exists specifically so a Cancel
@@ -124,7 +111,8 @@ enum SubState {
     Idle,
     Spawning {
         rx: mpsc::Receiver<Result<(SubprocessManager, String), String>>,
-        pending: Vec<PendingDispatch>,
+        /// Strokes dispatched mid-spawn, sent in order once `Ready` lands.
+        pending: Vec<InpaintJob>,
         /// Set when a Cancel arrives mid-spawn. The bridge has already
         /// drained `inflight_gens` and surfaced "Erase cancelled" — when
         /// the spawn result lands we kill the new subprocess instead of
@@ -181,7 +169,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     keep_loaded = sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
                     inflight_gens.insert(item_id, gen);
                     let _ = gen;
-                    let params = PendingDispatch {
+                    let params = InpaintJob {
                         item_id, model_id, image_path, mask_path,
                         sd_req, feather_px, sharpen,
                     };
@@ -272,17 +260,11 @@ fn handle_dispatch(
     sub_state: &mut SubState,
     inflight_gens: &mut HashMap<u64, u64>,
     res_tx: &mpsc::Sender<InpaintBridgeResult>,
-    params: PendingDispatch,
+    params: InpaintJob,
 ) {
     match sub_state {
         SubState::Ready(s) => {
-            if let Err(e) = s.send_inpaint(
-                params.item_id, params.model_id, params.image_path, params.mask_path,
-                params.sd_req, params.feather_px, params.sharpen,
-            ) {
-                let _ = res_tx.send(InpaintBridgeResult::Error { item_id: params.item_id, error: e });
-                inflight_gens.remove(&params.item_id);
-            }
+            send_or_fail(s, params, inflight_gens, res_tx);
         }
         SubState::Spawning { pending, .. } => {
             pending.push(params);
@@ -357,7 +339,7 @@ fn handle_release(
 /// thread so the bridge stays responsive to Cancel during the Init
 /// handshake. Returns the `Spawning` state with the result channel
 /// and the queued dispatch list.
-fn kick_spawn(pending: Vec<PendingDispatch>) -> SubState {
+fn kick_spawn(pending: Vec<InpaintJob>) -> SubState {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("prunr-inpaint-spawn".into())
@@ -406,13 +388,7 @@ fn poll_spawn_result(
         (Ok((mut mgr, provider)), false) => {
             tracing::info!(provider = %provider, "inpaint subprocess ready");
             for params in pending {
-                if let Err(e) = mgr.send_inpaint(
-                    params.item_id, params.model_id, params.image_path, params.mask_path,
-                    params.sd_req, params.feather_px, params.sharpen,
-                ) {
-                    let _ = res_tx.send(InpaintBridgeResult::Error { item_id: params.item_id, error: e });
-                    inflight_gens.remove(&params.item_id);
-                }
+                send_or_fail(&mut mgr, params, inflight_gens, res_tx);
             }
             *sub_state = SubState::Ready(mgr);
         }
@@ -453,6 +429,20 @@ fn kill_ready_and_drain(
         tracing::info!("{log_msg}");
     }
     fail_inflight(inflight_gens, res_tx, error_msg);
+}
+
+/// Send one stroke; one the subprocess won't take ends with its error.
+fn send_or_fail(
+    mgr: &mut SubprocessManager,
+    job: InpaintJob,
+    inflight_gens: &mut HashMap<u64, u64>,
+    res_tx: &mpsc::Sender<InpaintBridgeResult>,
+) {
+    let item_id = job.item_id;
+    if let Err(error) = mgr.send_inpaint(job) {
+        let _ = res_tx.send(InpaintBridgeResult::Error { item_id, error });
+        inflight_gens.remove(&item_id);
+    }
 }
 
 /// End every in-flight stroke with `error`.
