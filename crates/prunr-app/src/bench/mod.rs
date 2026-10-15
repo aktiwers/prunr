@@ -158,6 +158,11 @@ fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Side {
     pub provider: String,
+    /// Some or all of the session runs on the CPU provider: a Stable
+    /// Diffusion bundle names each part's provider in `provider`, and one
+    /// part on the CPU makes it no GPU run.
+    #[serde(skip)]
+    pub on_cpu: bool,
     /// The weights file the session loaded (FP32, or an FP16 / INT8 variant).
     pub weights: Option<&'static str>,
     /// `None` when the session failed to build.
@@ -226,7 +231,7 @@ pub fn verdict(family: Option<Family>, cpu: Option<&Side>, gpu: &Gpu, agreement:
         Gpu::ByDesign { .. } => Verdict::CpuByDesign,
         Gpu::FailedBefore { .. } => Verdict::FailedBefore,
         Gpu::Ran(side) if side.error.is_some() => Verdict::GpuFailed,
-        Gpu::Ran(side) if side.provider == CPU => Verdict::FellBack,
+        Gpu::Ran(side) if side.on_cpu => Verdict::FellBack,
         Gpu::Ran(_) if sizes_differ => Verdict::Mismatch,
         Gpu::Ran(_) => match agreement {
             Some(a) if family.is_some_and(|f| a.within(f.tolerance())) => Verdict::Match,
@@ -313,7 +318,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
             (Gpu::Ran(side), samples)
         }
     };
-    let on_gpu = matches!(&gpu, Gpu::Ran(side) if side.provider != CPU);
+    let on_gpu = matches!(&gpu, Gpu::Ran(side) if !side.on_cpu);
     let mut sizes_differ = false;
     if let (true, Some(a), Some(b)) = (on_gpu, &cpu_samples, &gpu_samples) {
         row.agreement = Agreement::of(a, b);
@@ -362,12 +367,13 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         Ok(session) => session,
         Err(error) => {
             let provider = if cpu_only { CPU } else { "none" };
-            return (Side { provider: provider.into(), weights: None, timing: None, failed: Vec::new(), error: Some(error) }, None);
+            return (Side { provider: provider.into(), on_cpu: cpu_only, weights: None, timing: None, failed: Vec::new(), error: Some(error) }, None);
         }
     };
     let pick = session.pick();
     let mut side = Side {
         provider: pick.provider.clone(),
+        on_cpu: session.on_cpu(),
         weights: session.weights(),
         timing: None,
         failed: pick.failed.clone(),
@@ -409,6 +415,10 @@ trait Run {
     fn run(&mut self) -> Result<Vec<u8>, String>;
     fn weights(&self) -> Option<&'static str> {
         Some(self.pick().weights.label())
+    }
+    /// Some or all of it runs on the CPU provider.
+    fn on_cpu(&self) -> bool {
+        self.pick().provider == CPU
     }
 }
 
@@ -509,7 +519,7 @@ struct DiffusionRun<'a> {
     id: ModelId,
     cpu_only: bool,
     request: prunr_core::inpaint_sd::SdInpaintRequest,
-    pick: SessionPick,
+    pick: BundlePick,
     inputs: &'a Inputs,
 }
 
@@ -518,17 +528,21 @@ impl<'a> DiffusionRun<'a> {
         let request = crate::gui::processor::sd_request(&diffusion_tuning(id, cpu_only))
             .ok_or_else(|| format!("{id:?} is not a Stable Diffusion eraser"))?;
         let parts = prunr_core::inpaint_sd::load_bundle(id, &request.tuning).map_err(|e| e.to_string())?;
-        Ok(Self { id, cpu_only, request, pick: bundle_pick(parts), inputs })
+        Ok(Self { id, cpu_only, request, pick: BundlePick::of(parts), inputs })
     }
 }
 
 impl Run for DiffusionRun<'_> {
     fn pick(&self) -> &SessionPick {
-        &self.pick
+        &self.pick.pick
     }
 
     fn weights(&self) -> Option<&'static str> {
         None
+    }
+
+    fn on_cpu(&self) -> bool {
+        self.pick.on_cpu
     }
 
     fn run(&mut self) -> Result<Vec<u8>, String> {
@@ -572,17 +586,26 @@ fn diffusion_tuning(id: ModelId, cpu_only: bool) -> crate::gui::processor::Inpai
 }
 
 /// One pick for a bundle of parts: their provider when they share one,
-/// else each part's; every part's failures, named by part.
-fn bundle_pick(parts: Vec<(&'static str, SessionPick)>) -> SessionPick {
-    let shared = parts.first().map(|(_, p)| p.provider.clone())
-        .filter(|first| parts.iter().all(|(_, p)| &p.provider == first));
-    let provider = shared.unwrap_or_else(|| {
-        parts.iter().map(|(part, p)| format!("{part} {}", p.provider)).collect::<Vec<_>>().join(", ")
-    });
-    let failed = parts.into_iter()
-        .flat_map(|(part, p)| p.failed.into_iter().map(move |f| format!("{part}: {f}")))
-        .collect();
-    SessionPick { provider, failed, ..Default::default() }
+/// else each part's; every part's failures, named by part. `on_cpu`: a
+/// part runs on the CPU provider.
+struct BundlePick {
+    pick: SessionPick,
+    on_cpu: bool,
+}
+
+impl BundlePick {
+    fn of(parts: Vec<(&'static str, SessionPick)>) -> Self {
+        let on_cpu = parts.iter().any(|(_, p)| p.provider == CPU);
+        let shared = parts.first().map(|(_, p)| p.provider.clone())
+            .filter(|first| parts.iter().all(|(_, p)| &p.provider == first));
+        let provider = shared.unwrap_or_else(|| {
+            parts.iter().map(|(part, p)| format!("{part} {}", p.provider)).collect::<Vec<_>>().join(", ")
+        });
+        let failed = parts.into_iter()
+            .flat_map(|(part, p)| p.failed.into_iter().map(move |f| format!("{part}: {f}")))
+            .collect();
+        Self { pick: SessionPick { provider, failed, ..Default::default() }, on_cpu }
+    }
 }
 
 #[cfg(test)]
@@ -659,7 +682,7 @@ mod tests {
     }
 
     fn side(provider: &str) -> Side {
-        Side { provider: provider.into(), weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None }
+        Side { provider: provider.into(), on_cpu: provider == CPU, weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None }
     }
 
     /// One row per way a model's run ends.
@@ -671,14 +694,16 @@ mod tests {
         let close = Agreement { max_abs: 40, mean_abs: 0.4, over_2: 0.01, samples: 10 };
         let far = Agreement { mean_abs: 9.0, ..close };
         let failed = Side { error: Some("boom".into()), ..side("DirectML") };
+        let part_on_cpu = Side { on_cpu: true, ..side("unet DirectML, vae_decoder CPU") };
         type Case<'a> = (Gpu, Option<&'a Side>, Option<&'a Agreement>, bool, Verdict);
-        let cases: [Case; 11] = [
+        let cases: [Case; 12] = [
             (gpu.clone(), Some(&cpu), Some(&close), false, Verdict::Match),
             (gpu.clone(), Some(&cpu), Some(&far), false, Verdict::Mismatch),
             (gpu.clone(), Some(&cpu), None, true, Verdict::Mismatch),
             (gpu.clone(), None, None, false, Verdict::NoReference),
             (gpu.clone(), Some(&failed), None, false, Verdict::CpuFailed),
             (Gpu::Ran(side("CPU")), Some(&cpu), None, false, Verdict::FellBack),
+            (Gpu::Ran(part_on_cpu), Some(&cpu), Some(&close), false, Verdict::FellBack),
             (Gpu::Ran(failed.clone()), Some(&cpu), None, false, Verdict::GpuFailed),
             (Gpu::NoProvider, Some(&cpu), None, false, Verdict::NoGpuProvider),
             (Gpu::ByDesign { reason: String::new() }, Some(&cpu), None, false, Verdict::CpuByDesign),
@@ -715,10 +740,11 @@ mod tests {
             failed: failed.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        let same = bundle_pick(vec![("unet", pick("DirectML", &[])), ("vae_decoder", pick("DirectML", &[]))]);
-        assert_eq!(same.provider, "DirectML");
-        let mixed = bundle_pick(vec![("unet", pick("DirectML", &[])), ("vae_decoder", pick("CPU", &["DirectML test run failed: NaN"]))]);
-        assert_eq!(mixed.provider, "unet DirectML, vae_decoder CPU");
-        assert_eq!(mixed.failed, ["vae_decoder: DirectML test run failed: NaN"]);
+        let same = BundlePick::of(vec![("unet", pick("DirectML", &[])), ("vae_decoder", pick("DirectML", &[]))]);
+        assert_eq!((same.pick.provider.as_str(), same.on_cpu), ("DirectML", false));
+        let mixed = BundlePick::of(vec![("unet", pick("DirectML", &[])), ("vae_decoder", pick("CPU", &["DirectML test run failed: NaN"]))]);
+        assert_eq!(mixed.pick.provider, "unet DirectML, vae_decoder CPU");
+        assert_eq!(mixed.pick.failed, ["vae_decoder: DirectML test run failed: NaN"]);
+        assert!(mixed.on_cpu, "a part on the CPU makes the bundle no GPU run");
     }
 }

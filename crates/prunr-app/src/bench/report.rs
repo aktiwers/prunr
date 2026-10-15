@@ -91,7 +91,7 @@ pub fn cells(row: &Row) -> [String; 11] {
     };
     let gpu_timing = gpu_side.and_then(|s| s.timing.as_ref());
     let cpu_timing = row.cpu.as_ref().and_then(|s| s.timing.as_ref());
-    let on_gpu = gpu_side.is_some_and(|s| s.provider != super::CPU && s.error.is_none());
+    let on_gpu = gpu_side.is_some_and(|s| !s.on_cpu && s.error.is_none());
     let speed = match (on_gpu, cpu_timing, gpu_timing) {
         (true, Some(cpu), Some(gpu)) => speedup(cpu, gpu).map(|x| format!("{x:.1}×")),
         _ => None,
@@ -278,7 +278,7 @@ fn legend() -> String {
     format!(
         "\n## Reading it\n\n\
          - **GPU path**: where the app's provider ladder put the model's session, and the weights it loaded. \
-         \"fell back to CPU\" means no GPU provider took it; the details say why.\n\
+         \"fell back to CPU\" means no GPU provider took it, or one part of a Stable Diffusion eraser; the details say why.\n\
          - **Session**: building the session, cold. **First run**: the first inference, which includes any compile a provider defers. \
          **Steady**: the mean of the timed runs. **CPU steady**: the same on the CPU provider. **Speed-up**: CPU steady over Steady.\n\
          - **Max Δ, Mean Δ, >2/255**: how far the GPU path's output is from the CPU's, in 0-255 levels, \
@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn ran(provider: &str, weights: &'static str, t: Timing) -> Side {
-        Side { provider: provider.into(), weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None }
+        Side { provider: provider.into(), on_cpu: provider == "CPU", weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None }
     }
 
     fn matched() -> Row {
