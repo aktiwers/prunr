@@ -53,14 +53,14 @@ impl FirstLook {
     }
 
     /// The first look a run of `item_id` on `model`, starting now beside a
-    /// pool of `pool_size` engines, takes: only when its image is the one
+    /// pool of `engine_count` engines, takes: only when its image is the one
     /// on screen as it starts. A run already under way never starts one.
-    pub fn for_run(&self, item_id: u64, model: ModelKind, pool_size: usize) -> Option<Look> {
+    pub fn for_run(&self, item_id: u64, model: ModelKind, engine_count: usize) -> Option<Look> {
         (self.shown.get() == Some(item_id) && prunr_core::subject::may_take_first_look(model)).then(|| Look {
             item_id,
             shown: self.shown.clone(),
             session: Arc::clone(&self.session),
-            pool_size,
+            engine_count,
         })
     }
 
@@ -75,7 +75,7 @@ pub struct Look {
     item_id: u64,
     shown: Shown,
     session: Session,
-    pool_size: usize,
+    engine_count: usize,
 }
 
 impl Look {
@@ -95,7 +95,7 @@ impl Look {
         let mut slot = lock(&self.session);
         if slot.is_none() {
             let started = std::time::Instant::now();
-            match prunr_core::subject::first_look_engine(self.pool_size) {
+            match prunr_core::subject::first_look_engine(self.engine_count) {
                 Ok(engine) => {
                     tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: first-look model loaded");
                     *slot = Some(Arc::new(engine));

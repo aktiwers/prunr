@@ -418,7 +418,7 @@ pub fn run_worker() -> ! {
                 let first_look = first_look.clone();
                 let on_screen = on_screen.clone();
                 let stopping = stopping.clone();
-                let pool_size = engines.len();
+                let engine_count = engines.len();
                 let cancel = cancels.register(item_id);
 
                 pool.spawn(move || {
@@ -467,7 +467,7 @@ pub fn run_worker() -> ! {
                     progress.step(prunr_core::Step::ReadingImage);
                     // Whether this image is the one on screen is settled
                     // as its run starts, here.
-                    let look = first_look.for_run(item_id, model, pool_size);
+                    let look = first_look.for_run(item_id, model, engine_count);
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // Off and non-chained SubjectOutline keep the seg tensor
@@ -733,7 +733,7 @@ pub fn run_worker() -> ! {
 
             SubprocessCommand::RePostProcess {
                 item_id, tensor_path, tensor_height, tensor_width,
-                model, original_image_path, mask: repost_mask,
+                model: cmd_model, original_image_path, mask: cmd_mask,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
@@ -768,7 +768,7 @@ pub fn run_worker() -> ! {
                         progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&repost_mask, model),
+                            &original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model),
                         ).map_err(|e| e.to_string())
                     })();
 
@@ -820,8 +820,6 @@ pub fn run_worker() -> ! {
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let mask_settings = cmd_mask;
-                let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
                 let line_depth = line_depth.clone();
                 let on_screen = on_screen.clone();
@@ -840,7 +838,7 @@ pub fn run_worker() -> ! {
                     }
                     let sem_guard = sem.acquire(10);
                     let progress = ipc_progress(item_id, evt_tx.clone());
-                    let mut spare = SpareScales::new(edge_scales.spare(&edge_settings, item_id, on_screen.get()));
+                    let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
                     // back as tensor_cache_path — the parent's read_tensor_cache
@@ -856,7 +854,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask_settings };
+                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..cmd_mask };
                         let subject = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&plain, cmd_model),
@@ -866,7 +864,7 @@ pub fn run_worker() -> ! {
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
                         let measured = line_depth.as_ref().and_then(|d| d.measure(&original));
-                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
+                        prunr_core::outline_subject(subject, cmd_mask.fill_style, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
 
