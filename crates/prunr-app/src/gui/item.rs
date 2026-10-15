@@ -594,6 +594,9 @@ pub(crate) struct BatchItem {
     /// new start misses; cleared when previews start from the source.
     pub(crate) start_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
     pub(crate) result_texture: Option<egui::TextureHandle>,
+    /// A drag's newest quick frame, shown in place of the result until
+    /// the full-size render lands; never the result itself.
+    pub(crate) quick: super::live_preview::QuickFrames,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
@@ -1067,6 +1070,7 @@ impl BatchItem {
             self.warm_neighbour_steps();
         } else {
             *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
+            self.quick.clear();
         }
     }
 
@@ -1112,7 +1116,8 @@ impl BatchItem {
     /// allows; otherwise the next image replaces it outright.
     pub(crate) fn hold_for_reveal(&mut self) {
         if !matches!(self.reveal, Some(Reveal::Held(_))) {
-            self.reveal = self.result_texture.clone()
+            self.reveal = self.quick.texture().cloned()
+                .or_else(|| self.result_texture.clone())
                 .or_else(|| self.source_texture.clone())
                 .filter(|t| super::views::effects::reveal_fits(t.byte_size(), crate::hardware::available_ram_bytes_throttled()))
                 .map(Reveal::Held);
@@ -1220,6 +1225,7 @@ impl BatchItem {
         self.result_rgba = Some(rgba);
         self.result_tex_pending = true;
         self.thumb_pending = true;
+        self.quick.clear();
     }
 
     /// Show `rgba` as the result: what is on screen, or the run's tile
@@ -1246,21 +1252,26 @@ impl BatchItem {
     /// reveals over what was held.
     pub(crate) fn land_texture(&mut self, tex: egui::TextureHandle, target: super::background_io::TexTarget) {
         use super::background_io::TexTarget;
-        if target == TexTarget::Source {
-            self.source_texture = Some(tex);
-            self.source_tex_pending = false;
-            tracing::info!(item_id = self.id, kind = "source", "texture uploaded");
-        } else {
-            self.result_texture = Some(tex);
-            self.result_tex_pending = false;
-            if target == TexTarget::Result {
-                self.start_reveal();
+        match target {
+            TexTarget::Source => {
+                self.source_texture = Some(tex);
+                self.source_tex_pending = false;
+                tracing::info!(item_id = self.id, kind = "source", "texture uploaded");
             }
-            // The faces it laid over the image are in the image now.
-            if self.face_preview.as_ref().is_some_and(|p| p.blended) {
-                self.face_preview = None;
+            TexTarget::QuickFrame(generation) => self.quick.land(tex, generation),
+            TexTarget::Result | TexTarget::LiveResult => {
+                self.result_texture = Some(tex);
+                self.result_tex_pending = false;
+                if target == TexTarget::Result {
+                    self.start_reveal();
+                }
+                // The faces it laid over the image are in the image now.
+                if self.face_preview.as_ref().is_some_and(|p| p.blended) {
+                    self.face_preview = None;
+                }
+                self.quick.result_landed();
+                tracing::info!(item_id = self.id, kind = "result", "texture uploaded");
             }
-            tracing::info!(item_id = self.id, kind = "result", "texture uploaded");
         }
     }
 
@@ -1415,6 +1426,7 @@ impl BatchItem {
     /// Make the working copy the shown state again.
     pub(crate) fn restore(&mut self) {
         self.hold_for_reveal();
+        self.quick.clear();
         // The restored step's face settings may differ from what the faced
         // photo and the cut-out over it were built with.
         self.faces_changed();
@@ -2168,6 +2180,7 @@ impl BatchItem {
             result_rgba: None,
             start_dyn_cache: None,
             result_texture: None,
+            quick: Default::default(),
             source_tex_pending: false,
             result_tex_pending: false,
             reveal: None,
@@ -2762,6 +2775,40 @@ mod tests {
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(new.id()));
         assert!(!item.result_tex_pending);
         assert!(matches!(item.reveal, Some(Reveal::Running(..))), "the new result reveals over the old");
+    }
+
+    /// A drag's quick frame is what is on screen until the state it was
+    /// made for goes: an undo reveals from it and takes it down, as do
+    /// leaving the screen and a run's result.
+    #[test]
+    fn a_quick_frame_goes_with_the_state_it_was_made_for() {
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
+        let frame = tex("frame");
+        let put_up = |item: &mut BatchItem| {
+            item.quick.expect(4);
+            item.quick.land(frame.clone(), 4);
+            assert!(item.quick.texture().is_some());
+        };
+        let mut item = fixture_item(1);
+        item.result_texture = Some(tex("result"));
+        item.commit(StepKind::Adjust);
+        put_up(&mut item);
+        assert!(item.undo_step().is_some());
+        assert!(item.quick.texture().is_none(), "an undo takes it down");
+        let revealed_from = match &item.reveal {
+            Some(Reveal::Held(t) | Reveal::Running(t, ..)) => Some(t.id()),
+            None => None,
+        };
+        assert_eq!(revealed_from, Some(frame.id()), "and reveals from it");
+
+        put_up(&mut item);
+        item.set_on_screen(false);
+        assert!(item.quick.texture().is_none(), "off screen");
+
+        put_up(&mut item);
+        item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
+        assert!(item.quick.texture().is_none(), "a run's result replaces it");
     }
 
     /// The decoded source lands on the image with what was derived from

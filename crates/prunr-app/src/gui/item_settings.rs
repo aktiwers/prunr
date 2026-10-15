@@ -268,6 +268,23 @@ impl ItemSettings {
     pub const HARD_EDGE: f32 = 1.0;
     pub const COLOR_STRENGTH_MAX_PCT: u8 = (prunr_core::colorize::STRENGTH_MAX * 100.0) as u8;
 
+    /// The same settings on the image at `scale` times its size: every
+    /// knob measured in pixels scales with it, so a drag's smaller quick
+    /// frame looks like its full-size render. A knob that was on stays at
+    /// least a pixel.
+    pub(crate) fn at_scale(&self, scale: f32) -> Self {
+        let px = |v: u8| ((f32::from(v) * scale).round() as u8).max(u8::from(v > 0));
+        Self {
+            edge_shift: self.edge_shift * scale,
+            guided_radius: px(self.guided_radius),
+            feather: self.feather * scale,
+            edge_thickness: px(self.edge_thickness),
+            fill_style: self.fill_style.at_scale(scale),
+            decoration: self.decoration.at_scale(scale),
+            ..*self
+        }
+    }
+
     /// Fade with distance as `LineFade` takes it, while lines are drawn.
     pub fn line_fade(&self) -> f32 {
         if self.line_mode == LineMode::Off { 0.0 } else { prunr_core::math::pct(self.line_fade_pct) }
@@ -553,6 +570,23 @@ mod tests {
     fn is_copy() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<ItemSettings>();
+    }
+
+    #[test]
+    fn pixel_knobs_scale_with_the_image() {
+        let s = ItemSettings {
+            edge_shift: -12.0, guided_radius: 8, feather: 6.0, edge_thickness: 1, gamma: 1.5,
+            fill_style: prunr_core::FillStyle::Pixelate { block_size: 12 },
+            decoration: prunr_core::Decoration { outline_width: 9.0, ..Default::default() },
+            ..ItemSettings::default()
+        };
+        let q = s.at_scale(1.0 / 3.0);
+        assert_eq!((q.edge_shift, q.guided_radius, q.feather), (-4.0, 3, 2.0));
+        assert_eq!(q.edge_thickness, 1, "a line that was drawn stays drawn");
+        assert_eq!(q.fill_style, prunr_core::FillStyle::Pixelate { block_size: 4 });
+        assert_eq!(q.decoration.outline_width, 3.0);
+        assert_eq!(q.gamma, s.gamma, "what isn't in pixels stays");
+        assert_eq!(ItemSettings { edge_thickness: 0, ..s }.at_scale(0.5).edge_thickness, 0);
     }
 
     #[test]

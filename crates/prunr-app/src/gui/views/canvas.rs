@@ -755,6 +755,9 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             if item.reveal_progress().is_some() {
                 draw_checkerboard(ui, img_rect, app.settings.dark_checker);
             }
+            // A drag on a photo with no result yet (No model's first one)
+            // shows its quick frames over it.
+            let texture = item.quick.texture().unwrap_or(texture);
             paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         }
 
@@ -835,6 +838,13 @@ fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&egui::Textu
     item.result_texture.as_ref().or(item.source_texture.as_ref())
 }
 
+/// What the canvas shows for a result. Until a new result's texture
+/// lands, the image it reveals over stays: the one it replaces, or the
+/// run's tile preview. A drag's quick frame shows in place of the result.
+fn done_texture(item: &crate::gui::item::BatchItem) -> Option<&egui::TextureHandle> {
+    item.held_texture().or(item.quick.texture()).or(item.result_texture.as_ref())
+}
+
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
     let item = app.batch.selected_item();
@@ -859,9 +869,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             painted = Some(img_rect);
         }
     } else if let Some(it) = item {
-        // Until the new result's texture lands, the image it reveals over
-        // stays: the one it replaces, or the run's tile preview.
-        let shown = it.held_texture().or(it.result_texture.as_ref())?;
+        let shown = done_texture(it)?;
         let img_rect = compute_img_rect(canvas_rect, it.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
         paint_backdrop(ui, img_rect, it, it.frame_size());
@@ -1060,6 +1068,27 @@ mod tests {
         item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta));
         assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
         assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
+    }
+
+    /// A drag's quick frame shows in place of the result; an image held
+    /// for a reveal still shows over both.
+    #[test]
+    fn a_quick_frame_shows_in_place_of_the_result() {
+        use crate::gui::item::{BatchItem, Reveal};
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
+        let shown = |item: &BatchItem| done_texture(item).map(|t| t.id());
+        let mut item = BatchItem::new_for_test();
+        let result = tex("result");
+        item.result_texture = Some(result.clone());
+        assert_eq!(shown(&item), Some(result.id()));
+        let frame = tex("frame");
+        item.quick.expect(1);
+        item.quick.land(frame.clone(), 1);
+        assert_eq!(shown(&item), Some(frame.id()), "the frame, not the result");
+        let held = tex("held");
+        item.reveal = Some(Reveal::Held(held.clone()));
+        assert_eq!(shown(&item), Some(held.id()));
     }
 
     #[test]

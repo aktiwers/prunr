@@ -148,6 +148,9 @@ pub enum TexTarget {
     Result,
     /// A live re-cut during a slider drag: swaps in at once.
     LiveResult,
+    /// A drag's quick frame of this generation: shown over the image, not
+    /// the result.
+    QuickFrame(u64),
 }
 
 impl BackgroundIO {

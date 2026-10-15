@@ -202,6 +202,17 @@ impl Decoration {
         self.outline_width >= 0.5
     }
 
+    /// The same decoration on the image at `scale` times its size: the
+    /// outline, the shadow's softness and its fall scale with it.
+    pub fn at_scale(&self, scale: f32) -> Self {
+        Self {
+            outline_width: self.outline_width * scale,
+            shadow_blur: self.shadow_blur * scale,
+            shadow_distance: self.shadow_distance * scale,
+            ..*self
+        }
+    }
+
     pub fn has_shadow(&self) -> bool {
         self.shadow != ShadowKind::Off && self.shadow_opacity > 0.0
     }
@@ -723,6 +734,17 @@ impl std::str::FromStr for BgImageFit {
 }
 
 impl FillStyle {
+    /// The same style on the image at `scale` times its size: pixel
+    /// blocks and halftone dots scale with it, at least a pixel each.
+    pub fn at_scale(self, scale: f32) -> Self {
+        let px = |v: u32| ((v as f32 * scale).round() as u32).max(1);
+        match self {
+            FillStyle::Pixelate { block_size } => FillStyle::Pixelate { block_size: px(block_size) },
+            FillStyle::Halftone { dot_spacing } => FillStyle::Halftone { dot_spacing: px(dot_spacing) },
+            other => other,
+        }
+    }
+
     pub const ALL: &'static [Self] = &[
         FillStyle::None,
         FillStyle::Desaturate,
@@ -796,6 +818,20 @@ pub const DOWNSCALE_TARGET: u32 = 4096;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixel_sizes_scale_with_the_image() {
+        use super::{Decoration, FillStyle, ShadowKind};
+        let d = Decoration { outline_width: 12.0, shadow: ShadowKind::Drop, shadow_blur: 24.0, shadow_distance: 20.0, ..Decoration::default() };
+        let half = d.at_scale(0.5);
+        assert_eq!((half.outline_width, half.shadow_blur, half.shadow_distance), (6.0, 12.0, 10.0));
+        assert_eq!((half.outline_color, half.shadow, half.shadow_opacity), (d.outline_color, d.shadow, d.shadow_opacity));
+        assert_eq!(FillStyle::Pixelate { block_size: 12 }.at_scale(0.25), FillStyle::Pixelate { block_size: 3 });
+        assert_eq!(FillStyle::Halftone { dot_spacing: 8 }.at_scale(0.01), FillStyle::Halftone { dot_spacing: 1 }, "at least a pixel");
+        for style in FillStyle::ALL.iter().filter(|s| !matches!(s, FillStyle::Pixelate { .. } | FillStyle::Halftone { .. })) {
+            assert_eq!(style.at_scale(0.3), *style, "{} has no pixel size", style.name());
+        }
+    }
+
     use super::*;
 
     #[test]
