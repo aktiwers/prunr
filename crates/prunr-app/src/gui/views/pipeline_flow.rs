@@ -83,11 +83,8 @@ pub fn render(ctx: &egui::Context) -> bool {
         ctx, "pipeline_flow", "Pipelines",
         [MODAL_WIDTH, MODAL_HEIGHT],
         |ui| chip::modal_page(ui, "Pipelines", "", |ui| {
-            let tab_id = egui::Id::new("pipeline_flow_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
             let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
-            chip::tab_strip(ui, &labels, &mut tab);
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            let tab = chip::remembered_tab_strip(ui, egui::Id::new("pipeline_flow_tab"), &labels);
             ui.separator();
 
             let pipeline = &PIPELINES[tab];
