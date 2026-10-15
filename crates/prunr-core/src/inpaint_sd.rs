@@ -1565,10 +1565,10 @@ fn build_part_with_ep_ladder(
         crate::engine::walk_ladder("SD: ", id, Weights::Fp32, session_key.gpu_eps(), |ep| {
             crate::cache::gc_stale_for_model(id, ep.as_str());
             let builder = sd_base_builder(session_key.mem, lean).map_err(Miss::Unusable)?;
-            let (builder, load_path) = if ep.keeps_optimized_graph() {
+            let (builder, load_path, draft) = if ep.keeps_optimized_graph() {
                 sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key)
             } else {
-                (builder, Cow::Borrowed(path.as_path()))
+                (builder, Cow::Borrowed(path.as_path()), None)
             };
             // A device override is the bench's; its failures say nothing
             // about the provider's default device.
@@ -1595,6 +1595,7 @@ fn build_part_with_ep_ladder(
             tracing::info!(?id, part = %key, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
             coverage.report(id, Some(key));
             smoke_test(&mut session, key).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+            if let Some(draft) = draft { draft.publish(); }
             tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
             Ok(session)
         })
@@ -1623,11 +1624,12 @@ fn build_part_with_ep_ladder(
     crate::cache::gc_stale_for_model(id, "CPU");
     let builder = sd_base_builder(session_key.mem, lean)
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
-    let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
+    let (mut builder, load_path, draft) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();
     let session = builder
         .commit_from_file(&load_path)
         .map_err(|e| format!("SD {key}: load from {}: {e}", load_path.display()))?;
+    if let Some(draft) = draft { draft.publish(); }
     tracing::info!(?id, part = %key, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
     Ok((session, SessionPick { failed, ..SessionPick::on("CPU") }))
 }
@@ -1672,29 +1674,30 @@ fn sd_apply_path_cache<'a>(
     model_id: prunr_models::ModelId,
     ep_name: &str,
     part: &str,
-) -> (ort::session::builder::SessionBuilder, Cow<'a, Path>) {
+) -> (ort::session::builder::SessionBuilder, Cow<'a, Path>, Option<crate::cache::GraphDraft>) {
     // An optimized copy elsewhere would not find the weights' data files.
     if prunr_models::keeps_weights_apart(model_id) {
-        return (builder, Cow::Borrowed(source_path));
+        return (builder, Cow::Borrowed(source_path), None);
     }
     let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part) else {
-        return (builder, Cow::Borrowed(source_path));
+        return (builder, Cow::Borrowed(source_path), None);
     };
     if cache_path.is_file() {
         tracing::debug!(?model_id, ep = %ep_name, part, "cache hit (optimized graph, file)");
-        return (builder, Cow::Owned(cache_path));
+        return (builder, Cow::Owned(cache_path), None);
     }
     if crate::cache::cache_dir_for_part(model_id, ep_name, part).is_none() {
-        return (builder, Cow::Borrowed(source_path));
+        return (builder, Cow::Borrowed(source_path), None);
     }
-    match builder.with_optimized_model_path(&cache_path) {
+    let draft = crate::cache::GraphDraft::for_path(&cache_path);
+    match builder.with_optimized_model_path(draft.draft()) {
         Ok(b) => {
             tracing::debug!(?model_id, ep = %ep_name, part, path = %cache_path.display(), "cache miss (writing optimized graph)");
-            (b, Cow::Borrowed(source_path))
+            (b, Cow::Borrowed(source_path), Some(draft))
         }
         Err(e) => {
             tracing::warn!(?model_id, ep = %ep_name, part, %e, "with_optimized_model_path failed; cache disabled for this build");
-            (e.recover(), Cow::Borrowed(source_path))
+            (e.recover(), Cow::Borrowed(source_path), None)
         }
     }
 }
