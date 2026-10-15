@@ -313,14 +313,14 @@ fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
 }
 
-/// The first-launch runtime prompt is a modal for either runtime: its
-/// buttons are named, and Escape closes it as Not now.
+/// The first-launch runtime prompt is a modal for each runtime it can
+/// offer: its buttons are named, and Escape closes it as Not now.
 #[test]
 fn the_runtime_prompt_is_a_modal_that_escape_closes() {
     use super::tree_tests::{assert_all_controls_named, names};
     use crate::runtime_install::RuntimeId;
     let mut h = loaded();
-    for rt in RuntimeId::ALL {
+    for &rt in RuntimeId::OFFERED {
         h.state_mut().runtime_prompt = Some(rt);
         settle(&mut h);
         let present = names(&h);

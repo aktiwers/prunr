@@ -1,4 +1,4 @@
-use crate::runtime_install::RuntimeId;
+use crate::runtime_install::{RuntimeChoice, RuntimeId};
 
 /// What is installed on disk, read once at launch and after every
 /// install, download or delete, so the toolbar never stats the
@@ -6,11 +6,12 @@ use crate::runtime_install::RuntimeId;
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
-    pub directml: bool,
-    /// The runtime the store names to load, `RuntimeId::preferred`.
-    pub preferred_runtime: Option<RuntimeId>,
-    /// The runtime this process loaded, `RuntimeId::loaded`.
-    pub loaded_runtime: Option<RuntimeId>,
+    /// The app ships a GPU runtime (DirectML on Windows release builds).
+    pub built_in_gpu: bool,
+    /// The runtime the store's preference names, `RuntimeChoice::preferred`.
+    pub preferred_runtime: Option<RuntimeChoice>,
+    /// The runtime this process loaded, `RuntimeChoice::loaded`.
+    pub loaded_runtime: Option<RuntimeChoice>,
     /// The TAESD fast decoder bundle.
     pub taesd: bool,
     /// The LCM eraser bundle, as `Settings::can_select_lcm_scheduler` sees it.
@@ -29,9 +30,9 @@ impl HardwareInstallCache {
         use prunr_models::ModelId;
         Self {
             openvino: RuntimeId::OpenVino.is_installed(),
-            directml: RuntimeId::DirectMl.is_installed(),
-            preferred_runtime: RuntimeId::preferred(),
-            loaded_runtime: RuntimeId::loaded(),
+            built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
+            preferred_runtime: RuntimeChoice::preferred(),
+            loaded_runtime: RuntimeChoice::loaded(),
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
             lcm_bundle: crate::gui::settings::Settings::can_select_lcm_scheduler(),
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
@@ -49,7 +50,7 @@ impl HardwareInstallCache {
     pub(crate) fn all_installed() -> Self {
         Self {
             openvino: true,
-            directml: true,
+            built_in_gpu: true,
             preferred_runtime: None,
             loaded_runtime: None,
             taesd: true,
@@ -64,7 +65,15 @@ impl HardwareInstallCache {
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
         match runtime {
             RuntimeId::OpenVino => self.openvino,
-            RuntimeId::DirectMl => self.directml,
+        }
+    }
+
+    /// Whether `choice` can load: the built-in GPU runtime is there, or
+    /// the store install is.
+    pub fn can_load(&self, choice: RuntimeChoice) -> bool {
+        match choice {
+            RuntimeChoice::BuiltIn => self.built_in_gpu,
+            RuntimeChoice::Store(rt) => self.has_runtime(rt),
         }
     }
 

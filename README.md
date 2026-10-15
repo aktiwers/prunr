@@ -41,6 +41,8 @@ on Ubuntu 22.04+ / Fedora 40+ / openSUSE Tumbleweed.
 | Installer | [prunr-windows-x86_64-setup.exe](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64-setup.exe) |
 | Portable | [zip](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64.zip) |
 
+GPU acceleration is built in: both downloads ship the DirectML runtime, which runs the models on any DirectX 12 graphics card (NVIDIA, AMD, Intel) and on the processor when there is none. Windows 10 1903 or later.
+
 All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/prunr/releases)
 
 ## Features
@@ -154,7 +156,7 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 |---|---|---|---|
 | CUDA | NVIDIA GPU | yes (Linux/Windows) | Auto when `nvidia-smi` is present |
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
-| DirectML | Any GPU on Windows | yes (Windows) | Vendor-agnostic |
+| DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download; falls back to the CPU without a GPU |
 | **OpenVINO** | **Intel CPU/iGPU/NPU** | **on-demand** | Settings → Hardware → Install (~80 MB) |
 | CPU | Always | yes (everywhere) | Automatic fallback |
 
@@ -194,7 +196,7 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 2. User Runtime Store: `~/.local/share/prunr/runtimes/<id>/libonnxruntime.so`
 3. Bundled fallback: `<exe>/runtime/libonnxruntime.so`
 
-Linux + Windows artifacts (tar.gz / AppImage / .deb / .rpm / .zip / installer) ship a CPU-only ORT in (3) so the app works on a clean machine. CI stages it via `cargo xtask install-runtime onnxruntime <ver> --stage-to <pkg>/runtime/` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. macOS artifacts (.app / .dmg / .tar.gz) ship a custom **CoreML-enabled** ORT build instead, bundled into `Prunr.app/Contents/Frameworks/` and resolved via rpath. Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
+Linux artifacts (tar.gz / AppImage / .deb / .rpm) ship a CPU-only ORT in (3) so the app works on a clean machine; Windows artifacts (.zip / installer) ship the DirectML build (`onnxruntime.dll` + `DirectML.dll`), which wins over a store install unless Settings › Hardware › Runtime picks the store one. CI stages them via `cargo xtask install-runtime onnxruntime[-directml] <ver> --stage-to <pkg>/runtime/` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. macOS artifacts (.app / .dmg / .tar.gz) ship a custom **CoreML-enabled** ORT build instead, bundled into `Prunr.app/Contents/Frameworks/` and resolved via rpath. Opt-in EP-specific runtimes (OpenVINO today, more on the roadmap) install via Settings → Hardware or `cargo xtask install-runtime`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 

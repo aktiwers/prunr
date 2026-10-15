@@ -3,9 +3,12 @@
 //! Resolution order, first hit wins:
 //!   1. `ORT_DYLIB_PATH` env var (escape hatch + dev override). Set but
 //!      not a file is an error, never a silent fall-through.
-//!   2. User Runtime Store install (`<data>/prunr/runtimes/<ep>-<ver>-<rid>/`):
-//!      the one named in [`PREFERRED_FILE`], else the first by name
-//!   3. Bundled fallback alongside the executable (`<exe parent>/runtime/`)
+//!   2. The runtime [`PREFERRED_FILE`] names: a Runtime Store install
+//!      (`<data>/prunr/runtimes/<ep>-<ver>-<rid>/`) or, as
+//!      [`PREFER_BUILT_IN`], the one beside the executable
+//!   3. Without a preference: on Windows the built-in runtime (the
+//!      DirectML build) before the store's first install by name;
+//!      elsewhere the store's first install before the built-in CPU one
 //!
 //! Every session in the workspace starts from [`session_builder`], which
 //! runs [`ensure_initialized`] first. Under `load-dynamic`, building a
@@ -30,7 +33,7 @@ pub const DYLIB_NAME: &str = if cfg!(windows) {
     "libonnxruntime.so"
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DylibSource {
     EnvVar,
     RuntimeStore,
@@ -47,12 +50,19 @@ impl std::fmt::Display for DylibSource {
     }
 }
 
+static INIT: OnceLock<Result<DylibSource, String>> = OnceLock::new();
+
 /// Load the runtime once per process. Every later call returns the
 /// first outcome, so a missing runtime surfaces as the same error at
 /// every session site instead of a hang.
 pub fn ensure_initialized() -> Result<DylibSource, String> {
-    static RESULT: OnceLock<Result<DylibSource, String>> = OnceLock::new();
-    RESULT.get_or_init(init).clone()
+    INIT.get_or_init(init).clone()
+}
+
+/// Where this process's runtime came from, once it has loaded; never
+/// loads it.
+pub fn loaded_source() -> Option<DylibSource> {
+    INIT.get()?.as_ref().ok().copied()
 }
 
 /// Names the loaded runtime build ("1.24.1-3fa2c901"), once it has
@@ -140,11 +150,8 @@ pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
         }
         return Ok((path, DylibSource::EnvVar));
     }
-    if let Some(path) = prunr_models::runtime_store_dir().and_then(|root| store_dylib(&root)) {
-        return Ok((path, DylibSource::RuntimeStore));
-    }
-    if let Some(path) = bundled_dylib() {
-        return Ok((path, DylibSource::Bundled));
+    if let Some(found) = pick_runtime(prunr_models::runtime_store_dir().as_deref(), bundled_dylib(), BUILT_IN_HAS_GPU) {
+        return Ok(found);
     }
     Err(format!(
         "ONNX Runtime not found. Looked for `{DYLIB_NAME}` in (in order): \
@@ -163,13 +170,29 @@ fn env_override() -> Option<PathBuf> {
 /// what the worker subprocess and the CLI see as well as the GUI.
 pub const PREFERRED_FILE: &str = "preferred";
 
-/// The install subdir every process loads first, when one is set.
+/// The preference for the runtime beside the executable over any store
+/// install. Install dirs are `<short>-<ver>-<rid>`, so it names none.
+pub const PREFER_BUILT_IN: &str = "built-in";
+
+/// The built-in runtime runs models on a GPU: on Windows it is the
+/// DirectML build, which also runs them on the CPU without a DirectX 12
+/// GPU. Elsewhere it is CPU-only, so an installed accelerator runtime
+/// wins when no preference says otherwise.
+pub const BUILT_IN_HAS_GPU: bool = cfg!(windows);
+
+/// Whether a runtime sits beside the executable (release builds).
+pub fn has_built_in() -> bool {
+    bundled_dylib().is_some()
+}
+
+/// The runtime every process loads first, when one is set: an install
+/// subdir, or [`PREFER_BUILT_IN`].
 pub fn preferred_runtime() -> Option<String> {
     read_preferred(&prunr_models::runtime_store_dir()?)
 }
 
-/// Make the install `subdir` the one every process loads from its next
-/// start.
+/// Make `subdir` (an install, or [`PREFER_BUILT_IN`]) the runtime every
+/// process loads from its next start.
 pub fn set_preferred_runtime(subdir: &str) -> Result<(), String> {
     let root = prunr_models::runtime_store_dir().ok_or("could not resolve user data dir")?;
     write_preferred(&root, subdir)
@@ -197,12 +220,25 @@ fn write_preferred(root: &Path, subdir: &str) -> Result<(), String> {
     std::fs::write(&path, subdir).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// The store's dylib: the preferred install's when it has one, else the
-/// first install's by name.
-fn store_dylib(root: &Path) -> Option<PathBuf> {
-    let usable: Vec<(String, PathBuf)> = store_entries_in(root).into_iter().filter(|(_, p)| p.is_file()).collect();
-    let preferred = read_preferred(root).and_then(|want| usable.iter().position(|(name, _)| *name == want));
-    usable.into_iter().nth(preferred.unwrap_or(0)).map(|(_, p)| p)
+/// The runtime to load from the store under `store_root` and the
+/// `built_in` one beside the executable: the preferred one when it is
+/// there, else the built-in one first when `built_in_first`, else the
+/// store's first install by name.
+fn pick_runtime(store_root: Option<&Path>, built_in: Option<PathBuf>, built_in_first: bool) -> Option<(PathBuf, DylibSource)> {
+    let installs: Vec<(String, PathBuf)> = store_root
+        .map(store_entries_in)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, p)| p.is_file())
+        .collect();
+    let built_in = built_in.map(|p| (p, DylibSource::Bundled));
+    let preferred = match store_root.and_then(read_preferred) {
+        Some(want) if want == PREFER_BUILT_IN => built_in.clone(),
+        Some(want) => installs.iter().find(|(name, _)| *name == want).map(|(_, p)| (p.clone(), DylibSource::RuntimeStore)),
+        None => None,
+    };
+    let first_install = installs.into_iter().next().map(|(_, p)| (p, DylibSource::RuntimeStore));
+    preferred.or(if built_in_first { built_in.or(first_install) } else { first_install.or(built_in) })
 }
 
 fn store_entries() -> Vec<(String, PathBuf)> {
@@ -301,12 +337,16 @@ mod tests {
         std::fs::write(dir.join(DYLIB_NAME), b"").unwrap();
     }
 
+    fn picked(root: &Path, built_in: Option<&Path>, built_in_first: bool) -> Option<PathBuf> {
+        pick_runtime(Some(root), built_in.map(Path::to_path_buf), built_in_first).map(|(p, _)| p)
+    }
+
     #[test]
     fn the_first_install_by_name_loads_without_a_preference() {
         let root = tempfile::tempdir().unwrap();
         install(root.path(), "openvino-1.24.1-windows-x64");
         install(root.path(), "directml-1.24.1-windows-x64");
-        assert_eq!(store_dylib(root.path()), Some(root.path().join("directml-1.24.1-windows-x64").join(DYLIB_NAME)));
+        assert_eq!(picked(root.path(), None, false), Some(root.path().join("directml-1.24.1-windows-x64").join(DYLIB_NAME)));
     }
 
     #[test]
@@ -315,7 +355,7 @@ mod tests {
         install(root.path(), "directml-1.24.1-windows-x64");
         install(root.path(), "openvino-1.24.1-windows-x64");
         write_preferred(root.path(), "openvino-1.24.1-windows-x64").unwrap();
-        assert_eq!(store_dylib(root.path()), Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME)));
+        assert_eq!(picked(root.path(), None, false), Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME)));
     }
 
     #[test]
@@ -324,15 +364,34 @@ mod tests {
         install(root.path(), "openvino-1.24.1-windows-x64");
         write_preferred(root.path(), "directml-1.24.1-windows-x64").unwrap();
         let fallback = Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME));
-        assert_eq!(store_dylib(root.path()), fallback);
+        assert_eq!(picked(root.path(), None, false), fallback);
         std::fs::create_dir_all(root.path().join("directml-1.24.1-windows-x64")).unwrap();
-        assert_eq!(store_dylib(root.path()), fallback, "an install without its library is skipped");
+        assert_eq!(picked(root.path(), None, false), fallback, "an install without its library is skipped");
+    }
+
+    /// Windows ships DirectML built in: an OpenVINO install loads only
+    /// when it is the preferred one, and the built-in choice beats it.
+    #[test]
+    fn the_built_in_gpu_runtime_wins_unless_a_store_install_is_preferred() {
+        let root = tempfile::tempdir().unwrap();
+        let exe_dir = tempfile::tempdir().unwrap();
+        let built_in = exe_dir.path().join(DYLIB_NAME);
+        install(root.path(), "openvino-1.24.1-windows-x64");
+        let openvino = Some(root.path().join("openvino-1.24.1-windows-x64").join(DYLIB_NAME));
+        assert_eq!(picked(root.path(), Some(&built_in), true), Some(built_in.clone()), "no preference: built in");
+        assert_eq!(picked(root.path(), Some(&built_in), false), openvino, "a CPU-only built-in runtime yields");
+        write_preferred(root.path(), "openvino-1.24.1-windows-x64").unwrap();
+        assert_eq!(picked(root.path(), Some(&built_in), true), openvino, "the store install the user picked");
+        write_preferred(root.path(), PREFER_BUILT_IN).unwrap();
+        assert_eq!(picked(root.path(), Some(&built_in), false), Some(built_in.clone()), "built in, as picked");
+        assert_eq!(picked(root.path(), None, false), openvino, "built in picked but absent (a dev build)");
+        assert_eq!(pick_runtime(Some(root.path()), Some(built_in), true).map(|(_, s)| s.to_string()), Some("bundled".to_string()));
     }
 
     #[test]
     fn the_preference_file_is_not_an_install_and_reads_back_trimmed() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(store_dylib(root.path()), None);
+        assert_eq!(picked(root.path(), None, false), None);
         std::fs::write(root.path().join(PREFERRED_FILE), "openvino-1.24.1-linux-x64\n").unwrap();
         assert_eq!(store_entries_in(root.path()), Vec::new());
         assert_eq!(read_preferred(root.path()).as_deref(), Some("openvino-1.24.1-linux-x64"));

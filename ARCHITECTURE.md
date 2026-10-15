@@ -410,18 +410,19 @@ Edge planes are kept per scale: Bold, for the dual-scale style, and the newest o
 `ort` (2.0.0-rc.13) is built with `load-dynamic`: no ONNX Runtime is linked in. `prunr_core::ort_runtime` resolves `libonnxruntime` once per process, first hit wins:
 
 1. `ORT_DYLIB_PATH` (developer override; set but missing is an error, never a fall-through)
-2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/`: the entry named in `runtimes/preferred`, else the first by name that holds the dylib. One process loads one runtime and no wheel carries another's EP, so with two installed the choice is a file every process reads (GUI, worker, CLI); installing a runtime makes it the preferred one
-3. **Bundled**: `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
+2. **Preferred**: the runtime `<data>/prunr/runtimes/preferred` names, a Runtime Store install (`runtimes/<name>-<ver>-<rid>/`) or `built-in`. One process loads one runtime and no wheel carries another's EP, so the choice is a file every process reads (GUI, worker, CLI); installing a runtime makes it the preferred one, and Settings › Hardware picks among what can load
+3. **Without a preference**: on Windows the bundled runtime (the DirectML build) before the store's first entry by name; elsewhere the store before the bundled CPU-only runtime
+4. **Bundled** is `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
 
 Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
 
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
 | Linux | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
-| Windows | CPU-only ORT 1.24.1 (PyPI wheel) | DirectML or OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads when both are installed; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| Windows | DirectML ORT 1.24.1 (PyPI `onnxruntime-directml`: `onnxruntime.dll` + `DirectML.dll`, +23.5 MB over the CPU build) | built in; OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
 | macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
 
-Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers the runtime the hardware suits: DirectML for a Windows machine with an NVIDIA or AMD GPU or one with 2 GB of dedicated memory, else OpenVINO for an Intel iGPU. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers OpenVINO for an Intel iGPU, except on a Windows machine with an NVIDIA or AMD GPU or one with 2 GB of dedicated memory, which the built-in DirectML already covers. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context. On Windows the strong card is the one DXGI ranks first for high performance, else the one with the most dedicated memory; a software adapter (VM, remote desktop) counts as no GPU.
 
 ### EP ladder
 
@@ -537,7 +538,7 @@ A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 | macos-aarch64 | `.dmg`, `.tar.gz` |
 | windows-x86_64 | `.zip`, Inno Setup `.exe` |
 
-Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Linux and Windows stage the CPU wheel with `cargo xtask install-runtime` (the in-app store's code) into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS builds ORT with CoreML and ships it in `Contents/Frameworks/`.
+Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Linux stages the CPU wheel and Windows the DirectML wheel with `cargo xtask install-runtime` (the in-app store's code) into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`. The DirectML build runs on the CPU too: without a DirectX 12 GPU (VM, remote desktop) DirectML fails to register, `available_gpu_eps` drops it after a one-time probe, and every session is a CPU one from the same DLL; macOS builds ORT with CoreML and ships it in `Contents/Frameworks/`.
 
 The workspace `version` is the app version; packages take theirs from the tag. ORT versions pinned in the workflow YAML are mirrored in Rust consts, and a test fails when they differ.
 
