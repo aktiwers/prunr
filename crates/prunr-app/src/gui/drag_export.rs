@@ -638,7 +638,7 @@ mod tests {
             let (sh, sw) = prunr_core::edge_scale_dims(scale, h, w);
             vec![if scale == EdgeScale::Fine { 1.0_f32 } else { 0.0 }; (sh * sw) as usize]
         };
-        let raw = EdgeTensorCache { tensors: EdgeScale::ALL.map(tensor), height: h, width: w };
+        let raw = EdgeTensorCache { tensors: EdgeScale::ALL.map(tensor), height: h, width: w, spare: None };
         let all_scales = prunr_core::EdgeInferenceResult { tensors: raw.tensors.clone(), height: h, width: w };
         let settings = ItemSettings {
             line_mode: LineMode::EdgesOnly,

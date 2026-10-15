@@ -29,20 +29,35 @@ pub const TILE_PREVIEW_EDGE: u32 = 1536;
 /// Which line scales a worker runs the detector at for each image.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InferredScales {
-    /// Every scale, so the app's later scale switch needs no new run.
+    /// The ones the lines draw before the result; then, for the image on
+    /// screen only, the rest, so the app's later scale switch there needs
+    /// no new run. Fine is most of the detector's work, so a result that
+    /// does not draw it waits for none of it.
     #[default]
-    All,
-    /// Only the ones the lines draw: the CLI never switches scale, and
-    /// skipping Fine saves most of the detector's work.
+    DrawnFirst,
+    /// Only the ones the lines draw: the CLI never switches scale.
     Drawn,
 }
 
 impl InferredScales {
+    /// The scales a run makes before its result: the drawn ones, with
+    /// those their detector runs make anyway.
     pub fn of(self, edge: &EdgeSettings) -> &'static [prunr_core::EdgeScale] {
         match self {
-            Self::All => &prunr_core::EdgeScale::ALL,
+            Self::DrawnFirst => prunr_core::scales_from_same_runs(edge.drawn_scales()),
             Self::Drawn => edge.drawn_scales(),
         }
+    }
+
+    /// The scales a run of `item_id` leaves for after its result: the
+    /// rest when it is the image `on_screen`, none for an image in the
+    /// background.
+    pub fn spare(self, edge: &EdgeSettings, item_id: u64, on_screen: Option<u64>) -> Vec<prunr_core::EdgeScale> {
+        if self == Self::Drawn || on_screen != Some(item_id) {
+            return Vec::new();
+        }
+        let made = self.of(edge);
+        prunr_core::EdgeScale::ALL.into_iter().filter(|s| !made.contains(s)).collect()
     }
 }
 
@@ -157,6 +172,10 @@ pub enum SubprocessCommand {
         /// its own; `None` lets the first-look model go.
         #[serde(default)]
         first_look: Option<u64>,
+        /// The image on screen: its Sketch runs make the line scales they
+        /// do not draw after their result.
+        #[serde(default)]
+        on_screen: Option<u64>,
     },
     /// Shut down gracefully.
     Shutdown,
@@ -230,6 +249,18 @@ pub enum SubprocessEvent {
         /// The line detector's planes, for Tier 2 edge reruns. Only
         /// present when the run used TEED (EdgesOnly or SubjectOutline).
         #[serde(default)]
+        edge_cache: Option<EdgeCacheFile>,
+        /// A `SpareEdgeScales` with this token follows: the run left the
+        /// scales it does not draw for after its result.
+        #[serde(default)]
+        spare_scales: Option<u64>,
+    },
+    /// The line scales a run left for after its `ImageDone`, under the
+    /// token that event named; `None` when they were skipped (the image
+    /// left the screen, a cancel, a shutdown) or failed.
+    SpareEdgeScales {
+        item_id: u64,
+        token: u64,
         edge_cache: Option<EdgeCacheFile>,
     },
     /// Image processing failed (non-fatal).
@@ -351,6 +382,10 @@ pub enum IpcKind {
     Result,
     /// Seg worker → parent: TEED multi-scale edge tensor cache.
     Edge,
+    /// Seg worker → parent: the line scales a run made after its result.
+    /// Its own kind, so it never overwrites an `Edge` file the parent is
+    /// still reading.
+    SpareEdge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,
     /// Parent → inpaint worker: source PNG for a stroke (gen-suffixed).
@@ -372,6 +407,7 @@ impl IpcKind {
             IpcKind::Orig => "orig_",
             IpcKind::Result => "result_",
             IpcKind::Edge => "edge_",
+            IpcKind::SpareEdge => "spare_edge_",
             IpcKind::CliDs => "cli_ds_",
             IpcKind::InpaintImg => "inpaint-img-",
             IpcKind::InpaintMask => "inpaint-mask-",
@@ -383,7 +419,7 @@ impl IpcKind {
     pub const fn ext(self) -> &'static str {
         match self {
             IpcKind::Input | IpcKind::Orig | IpcKind::CliDs => "img",
-            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge => "raw",
+            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge | IpcKind::SpareEdge => "raw",
             IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => "png",
         }
     }
@@ -426,6 +462,7 @@ impl IpcKind {
         IpcKind::Orig,
         IpcKind::Result,
         IpcKind::Edge,
+        IpcKind::SpareEdge,
         IpcKind::CliDs,
         IpcKind::InpaintImg,
         IpcKind::InpaintMask,
@@ -451,6 +488,7 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::Result.prefix(),
     IpcKind::Seg.prefix(),
     IpcKind::Tensor.prefix(),
+    IpcKind::SpareEdge.prefix(),
 ];
 
 /// File-name prefixes owned by the inpaint subprocess.
@@ -530,7 +568,7 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: false,
             line_fade_pct: 40,
-            edge_scales: InferredScales::All,
+            edge_scales: InferredScales::DrawnFirst,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -602,12 +640,14 @@ mod tests {
             line_mode: LineMode::SubjectOutline,
             edge: EdgeSettings { line_strength: 0.8, solid_line_color: None, edge_thickness: 2, edge_scale: prunr_core::EdgeScale::Fine, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
             first_look: Some(12),
+            on_screen: Some(12),
         });
         roundtrip(&SubprocessCommand::Configure {
             mask: MaskSettings::default(),
             line_mode: LineMode::Off,
             edge: EdgeSettings::default(),
             first_look: None,
+            on_screen: Some(3),
         });
     }
 
@@ -637,6 +677,7 @@ mod tests {
             tensor_cache_height: Some(320),
             tensor_cache_width: Some(320),
             edge_cache: None,
+            spare_scales: None,
         });
         roundtrip(&SubprocessEvent::ImageDone {
             item_id: 12,
@@ -652,6 +693,22 @@ mod tests {
                 height: 480,
                 width: 640,
                 scales: vec![prunr_core::EdgeScale::Bold, prunr_core::EdgeScale::Fused],
+            }),
+            spare_scales: Some(u64::MAX - 1),
+        });
+    }
+
+    #[test]
+    fn event_spare_edge_scales_roundtrip() {
+        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 77, edge_cache: None });
+        roundtrip(&SubprocessEvent::SpareEdgeScales {
+            item_id: 6,
+            token: (1 << 32) | 3,
+            edge_cache: Some(EdgeCacheFile {
+                path: PathBuf::from("/tmp/spare_edge_6.raw"),
+                height: 480,
+                width: 640,
+                scales: vec![prunr_core::EdgeScale::Fine],
             }),
         });
     }
@@ -832,7 +889,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path();
 
-        let seg = ["chain_42.raw", "edge_5.bin", "input_3.img",
+        let seg = ["chain_42.raw", "edge_5.bin", "spare_edge_5.raw", "input_3.img",
                    "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw"];
         let cli = ["cli_ds_0.img"];
         let inpaint = ["inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png"];
@@ -896,7 +953,7 @@ mod tests {
     #[test]
     fn every_ipc_filename_in_tree_matches_a_known_prefix() {
         let production_filenames = [
-            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
+            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "spare_edge_5.raw", "input_3.img",
             "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw",
             "inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png",
         ];
@@ -1018,7 +1075,7 @@ mod tests {
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: false,
             line_fade_pct: 40,
-            edge_scales: InferredScales::All,
+            edge_scales: InferredScales::DrawnFirst,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
@@ -1034,17 +1091,30 @@ mod tests {
         });
     }
 
-    /// The app keeps every scale so a scale switch reads a cached plane;
-    /// the CLI runs only the ones its lines draw.
+    /// The app's runs make the drawn scales (and what their detector run
+    /// makes anyway) before the result, the rest after it only for the
+    /// image on screen; the CLI runs only the ones its lines draw.
     #[test]
-    fn inferred_scales_are_every_scale_or_the_drawn_ones() {
-        use prunr_core::EdgeScale;
-        assert_eq!(InferredScales::default(), InferredScales::All);
-        for edge_scale in EdgeScale::ALL {
+    fn a_run_makes_the_drawn_scales_first_and_the_rest_only_on_screen() {
+        use prunr_core::EdgeScale::{self, Bold, Fine, Fused};
+        assert_eq!(InferredScales::default(), InferredScales::DrawnFirst);
+        let (shown, background) = (Some(7), Some(8));
+        for (edge_scale, first, rest) in [
+            (Fused, &[Bold, Fused][..], &[Fine][..]),
+            (Bold, &[Bold, Fused][..], &[Fine][..]),
+            (Fine, &[Fine][..], &[Bold, Fused][..]),
+        ] {
             let edge = EdgeSettings { edge_scale, ..EdgeSettings::default() };
-            assert_eq!(InferredScales::All.of(&edge), &EdgeScale::ALL);
+            assert_eq!(InferredScales::DrawnFirst.of(&edge), first, "{edge_scale:?}");
+            assert_eq!(InferredScales::DrawnFirst.spare(&edge, 7, shown), rest, "{edge_scale:?} on screen");
+            assert!(InferredScales::DrawnFirst.spare(&edge, 7, background).is_empty(), "{edge_scale:?} in the background");
+            assert!(InferredScales::DrawnFirst.spare(&edge, 7, None).is_empty(), "{edge_scale:?} with nothing on screen");
             assert_eq!(InferredScales::Drawn.of(&edge), &[edge_scale]);
+            assert!(InferredScales::Drawn.spare(&edge, 7, shown).is_empty(), "the CLI makes no spare scales");
         }
+        let dual = EdgeSettings { line_style: prunr_core::LineStyle::DualScale { fine_color: [0; 3], bold_color: [0; 3] }, ..EdgeSettings::default() };
+        assert_eq!(InferredScales::DrawnFirst.of(&dual), &EdgeScale::ALL);
+        assert!(InferredScales::DrawnFirst.spare(&dual, 7, shown).is_empty(), "Dual scale draws every run");
     }
 
     /// `Inpaint.feather_px` and `Inpaint.sharpen` default to 0.0 (no

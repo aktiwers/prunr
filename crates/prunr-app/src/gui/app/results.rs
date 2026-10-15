@@ -534,6 +534,9 @@ impl PrunrApp {
                 WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
                     self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
                 }
+                WorkerResult::SpareEdgeScales { item_id, token, tensors } => {
+                    self.on_spare_edge_scales(item_id, token, tensors);
+                }
                 WorkerResult::ChainStart { item_id, image } => {
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
                         item.chain_start_built(image);
@@ -680,6 +683,21 @@ impl PrunrApp {
         if crate::gui::memory::under_memory_pressure() {
             self.batch.demote_history_to_disk();
             self.batch.evict_all_tensors();
+        }
+    }
+
+    /// The line scales a run left for after its result. A lines preview
+    /// waiting for them renders on its next tick; when they did not come,
+    /// the image on screen runs the lines it still lacks.
+    pub(super) fn on_spare_edge_scales(&mut self, item_id: u64, token: u64, tensors: Option<crate::gui::worker::CompressedEdgeTensors>) {
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        if !item.land_spare_edge_scales(token, tensors) {
+            return;
+        }
+        let rerun = item.status == BatchStatus::Done && item.lines_need_a_run();
+        self.batch.enforce_tensor_budget();
+        if rerun && self.batch.is_selected(item_id) {
+            self.process_items(|i| i.id == item_id, None);
         }
     }
 
@@ -2110,5 +2128,95 @@ mod first_look_tests {
         app.batch.items[0].status = BatchStatus::Pending;
         app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
         assert!(texture_of(&app, 0).is_none(), "a new run starts without the last one's outline");
+    }
+}
+
+#[cfg(test)]
+mod spare_scales_tests {
+    use super::PrunrApp;
+    use crate::gui::item::BatchStatus;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache};
+    use prunr_core::EdgeScale::{self, Bold, Fine, Fused};
+
+    fn lines(scales: &[EdgeScale], spare: Option<u64>) -> Option<CompressedEdgeTensors> {
+        let tensors = EdgeScale::ALL.map(|s| {
+            let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
+            if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
+        });
+        CompressedEdgeTensors::from_raw(EdgeTensorCache { tensors, height: 2, width: 2, spare })
+    }
+
+    /// The image on screen, its Sketch result in with Bold and Fused
+    /// while the worker still makes Fine under token 5; Fine picked.
+    fn waiting_for_fine() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.status = BatchStatus::Done;
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        item.settings.edge_scale = Fine;
+        item.cached_edge_tensors = lines(&[Bold, Fused], Some(5));
+        app.batch.select_item(0);
+        app
+    }
+
+    fn holds(app: &PrunrApp, scales: &[EdgeScale]) -> bool {
+        app.batch.items[0].cached_edge_tensors.as_ref().is_some_and(|c| c.has_all(scales))
+    }
+
+    fn awaits(app: &PrunrApp) -> bool {
+        app.batch.items[0].cached_edge_tensors.as_ref().is_some_and(CompressedEdgeTensors::awaits_spare)
+    }
+
+    /// Spare scales join only the lines of the run that left them: one
+    /// that matches fills in Fine; a stale token (the image ran again
+    /// since), an evicted cache or another image changes nothing.
+    #[test]
+    fn spare_scales_land_only_on_the_run_that_left_them() {
+        let mut app = waiting_for_fine();
+        assert!(!app.batch.items[0].lines_need_a_run(), "a Fine pick waits for the spare scales");
+        app.on_spare_edge_scales(1, 5, lines(&[Fine], None));
+        assert!(holds(&app, &EdgeScale::ALL), "the run's own spare scales fill in Fine");
+        assert!(!awaits(&app));
+        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "nothing runs again");
+
+        let mut app = waiting_for_fine();
+        app.on_spare_edge_scales(1, 4, lines(&[Fine], None));
+        assert!(!holds(&app, &[Fine]), "a stale token lands nothing");
+        assert!(awaits(&app), "the run's own pass is still awaited");
+
+        let mut app = waiting_for_fine();
+        app.batch.items[0].cached_edge_tensors = lines(&[Bold, Fused], Some(6));
+        app.on_spare_edge_scales(1, 5, lines(&[Fine], None));
+        assert!(!holds(&app, &[Fine]), "a newer run's lines take no older run's scales");
+
+        let mut app = waiting_for_fine();
+        app.batch.items[0].invalidate_edge_cache();
+        app.on_spare_edge_scales(1, 5, lines(&[Fine], None));
+        assert!(app.batch.items[0].cached_edge_tensors.is_none(), "evicted lines stay evicted");
+
+        let mut app = waiting_for_fine();
+        app.on_spare_edge_scales(2, 5, lines(&[Fine], None));
+        assert!(!holds(&app, &[Fine]), "another image's scales land nowhere");
+    }
+
+    /// Spare scales that will not come (a cancel, a crash, the image left
+    /// the screen) end the wait: the image on screen runs the lines it
+    /// lacks, a background one keeps its result until Process.
+    #[test]
+    fn spare_scales_that_will_not_come_run_the_lines_on_screen() {
+        let mut app = waiting_for_fine();
+        app.on_spare_edge_scales(1, 5, None);
+        assert!(!awaits(&app));
+        assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "the lines run again");
+
+        let mut app = waiting_for_fine();
+        push_test_item(&mut app, 2);
+        app.batch.select_item(1);
+        app.on_spare_edge_scales(1, 5, None);
+        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "a background image waits for Process");
+        assert!(app.batch.items[0].lines_need_a_run());
     }
 }

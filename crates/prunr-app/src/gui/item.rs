@@ -804,11 +804,23 @@ impl BatchItem {
         self.edge_planes = Default::default();
     }
 
-    /// The kept lines lack a scale the settings draw: only a new run of
-    /// the line detector makes it.
+    /// The kept lines lack a scale the settings draw.
     pub(crate) fn lacks_drawn_scales(&self) -> bool {
         self.settings.line_mode != prunr_core::LineMode::Off
             && self.cached_edge_tensors.as_ref().is_some_and(|c| !c.has_all(self.settings.edge_settings().drawn_scales()))
+    }
+
+    /// The kept lines lack a scale the settings draw and the worker is
+    /// not still making it: only a new run of the line detector does.
+    pub(crate) fn lines_need_a_run(&self) -> bool {
+        self.lacks_drawn_scales() && !self.cached_edge_tensors.as_ref().is_some_and(super::worker::CompressedEdgeTensors::awaits_spare)
+    }
+
+    /// The scales the run that made the kept lines left for later join
+    /// them, when the kept lines are still that run's (`token`); `None`:
+    /// they will not come. Returns whether they were that run's.
+    pub(crate) fn land_spare_edge_scales(&mut self, token: u64, spare: Option<super::worker::CompressedEdgeTensors>) -> bool {
+        self.cached_edge_tensors.as_mut().is_some_and(|kept| kept.land_spare(token, spare))
     }
 
     /// Replaces the compressed tensor and the decoded copy tied to it.

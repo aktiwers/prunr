@@ -67,9 +67,10 @@ pub struct WorkerLines {
 
 impl WorkerLines {
     /// The app's lines: it fades the lines it shows from its own depth
-    /// map, and keeps every scale so a scale switch needs no new run.
+    /// map, and keeps every scale of the image on screen so a scale
+    /// switch there needs no new run.
     pub fn app(mode: LineMode, edge: EdgeSettings) -> Self {
-        Self { mode, edge, fade_pct: 0, scales: InferredScales::All }
+        Self { mode, edge, fade_pct: 0, scales: InferredScales::DrawnFirst }
     }
 }
 
@@ -399,11 +400,11 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// New mask, Sketch mode and line settings for the running worker, and
+    /// New mask, Sketch mode and line settings for the running worker,
     /// the image that shows a first look (`None`: no first look, and the
-    /// worker lets its first-look model go).
-    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings, first_look: Option<u64>) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge, first_look })
+    /// worker lets its first-look model go) and the image on screen.
+    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings, first_look: Option<u64>, on_screen: Option<u64>) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge, first_look, on_screen })
             .map_err(|e| format!("Failed to send Configure: {e}"))
     }
 
@@ -600,6 +601,7 @@ fn apply_event_state(
         // Non-terminal / one-off variants — no state change here.
         SubprocessEvent::Ready { .. }
         | SubprocessEvent::Report { .. }
+        | SubprocessEvent::SpareEdgeScales { .. }
         | SubprocessEvent::Finished
         | SubprocessEvent::InitError { .. } => {}
     }
@@ -638,6 +640,7 @@ mod tests {
                 tensor_cache_height: None,
                 tensor_cache_width: None,
                 edge_cache: None,
+                spare_scales: None,
             },
             SubprocessEvent::ImageError {
                 item_id: 2,
