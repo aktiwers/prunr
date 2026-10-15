@@ -463,13 +463,7 @@ pub enum ComposeMode {
 
 impl std::fmt::Display for ComposeMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ComposeMode::LinesOnly => "Lines only",
-            ComposeMode::SubjectFilled => "Subject filled",
-            ComposeMode::Engraving => "Engraving",
-            ComposeMode::Ghost => "Ghost",
-        };
-        f.write_str(s)
+        f.write_str(self.name())
     }
 }
 
@@ -486,6 +480,15 @@ impl std::str::FromStr for ComposeMode {
 }
 
 impl ComposeMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            ComposeMode::LinesOnly => "Lines only",
+            ComposeMode::SubjectFilled => "Subject filled",
+            ComposeMode::Engraving => "Engraving",
+            ComposeMode::Ghost => "Ghost",
+        }
+    }
+
     /// The output alpha for a subject alpha `s` and an edge value `e`,
     /// both 0..=255. Inlined into the row loops of the edge compositions.
     #[inline]
