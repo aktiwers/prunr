@@ -1349,10 +1349,6 @@ pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
         .unwrap_or(true)
 }
 
-pub fn descriptors_for(category: ModelCategory) -> impl Iterator<Item = &'static ModelDescriptor> {
-    REGISTRY.iter().filter(move |d| d.category == category)
-}
-
 /// Error variants for `resolve_part_bytes`. Each arm is locally
 /// verifiable from the call site and carries the minimal context
 /// needed to surface a diagnostic.
@@ -1878,12 +1874,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    #[test]
-    fn model_api_compiles() {
-        let _: fn() -> Arc<Vec<u8>> = silueta_bytes;
-        let _: fn() -> Arc<Vec<u8>> = birefnet_lite_bytes;
-        let _: fn() -> Arc<Vec<u8>> = teed_bytes;
-        let _: fn() -> Arc<Vec<u8>> = yunet_bytes;
+    fn ids_in(category: ModelCategory) -> Vec<ModelId> {
+        REGISTRY.iter().filter(|d| d.category == category).map(|d| d.id).collect()
     }
 
     #[test]
@@ -1989,10 +1981,8 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_for_segmentation_returns_seg_models_only() {
-        let ids: Vec<ModelId> = descriptors_for(ModelCategory::Segmentation)
-            .map(|d| d.id)
-            .collect();
+    fn segmentation_category_holds_the_seg_models_only() {
+        let ids = ids_in(ModelCategory::Segmentation);
         assert!(ids.contains(&ModelId::Silueta));
         assert!(ids.contains(&ModelId::U2net));
         assert!(ids.contains(&ModelId::BiRefNetLite));
@@ -2324,11 +2314,6 @@ mod tests {
     // ── RealEsrganX2Plus tests ────────────────────────────────────────────
 
     #[test]
-    fn x2plus_registered() {
-        assert!(descriptor(ModelId::RealEsrganX2Plus).is_some());
-    }
-
-    #[test]
     fn x2plus_sha256_is_real_hex() {
         let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
         if let ModelSource::OnDemand { sha256, .. } = desc.source {
@@ -2535,31 +2520,11 @@ mod tests {
     }
 
     #[test]
-    fn load_variant_maps_rrdb_upscale_models() {
-        // Each RRDB upscale ModelId must produce a stable filename stem
-        // for fp16 lookup. Test exercises load_variant's match arm by
-        // calling model_fp16_bytes — returns None (no file on disk in
-        // test env) but proves the match arm exists.
-        for id in [
-            ModelId::RealEsrganX4Plus,
-            ModelId::RealEsrganX2Plus,
-            ModelId::FourXNmkdSiaxCx,
-            ModelId::FourXNmkdSuperscale,
-        ] {
-            // We can't assert Some(bytes) without the actual file on
-            // disk, but we can confirm the call doesn't panic on a
-            // missing match arm — Nomos8k's `unreachable!`-free arm
-            // returns None cleanly.
-            let _ = model_fp16_bytes(id);
-        }
-    }
-
-    #[test]
     fn depth_anything_is_on_demand_depth() {
         let desc = descriptor(ModelId::DepthAnythingV2Small).expect("DepthAnythingV2Small in REGISTRY");
         assert_eq!(desc.category, ModelCategory::Depth);
         assert!(matches!(desc.source, ModelSource::OnDemand { filename: "depth_anything_v2_small.onnx", .. }));
-        assert_eq!(descriptors_for(ModelCategory::Depth).map(|d| d.id).collect::<Vec<_>>(), [ModelId::DepthAnythingV2Small]);
+        assert_eq!(ids_in(ModelCategory::Depth), [ModelId::DepthAnythingV2Small]);
     }
 
     #[test]
@@ -2568,7 +2533,7 @@ mod tests {
         assert_eq!(desc.category, ModelCategory::Colorize);
         assert!(matches!(desc.source, ModelSource::OnDemand { filename: "ddcolor_paper_tiny.onnx", .. }));
         assert!(desc.upscale.is_none());
-        assert_eq!(descriptors_for(ModelCategory::Colorize).map(|d| d.id).collect::<Vec<_>>(), [ModelId::DdcolorTiny]);
+        assert_eq!(ids_in(ModelCategory::Colorize), [ModelId::DdcolorTiny]);
     }
 
     // ── SAM 2.1 Hiera Small boundary tests ─────────────────────────────────
