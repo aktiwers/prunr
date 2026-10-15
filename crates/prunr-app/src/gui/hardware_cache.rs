@@ -25,10 +25,6 @@ pub(crate) struct HardwareInstallCache {
     models: u32,
 }
 
-fn model_bits(models: impl IntoIterator<Item = crate::gui::settings::SettingsModel>) -> u32 {
-    models.into_iter().fold(0, |bits, m| bits | 1 << m.index())
-}
-
 impl HardwareInstallCache {
     pub fn refresh() -> Self {
         use prunr_models::ModelId;
