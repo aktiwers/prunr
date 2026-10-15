@@ -201,6 +201,12 @@ impl PrunrApp {
                 ..DispatchInputs::new(kind, version, Arc::new(image::DynamicImage::new_rgba8(0, 0)), item.settings)
             });
         }
+        // A photo render without a scale the lines draw would show the
+        // image without those lines; the tick retries once the worker's
+        // spare scales (or a new run) bring it.
+        if item.lacks_drawn_scales() {
+            return None;
+        }
         let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
         // through to `run_preview`'s source+fill_style fallback and
