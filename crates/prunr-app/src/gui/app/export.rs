@@ -16,7 +16,7 @@ impl PrunrApp {
     /// result, or a ticked image does.
     pub fn can_save_intent(&self) -> bool {
         self.batch.app_state() == AppState::Done
-            || self.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done)
+            || self.batch.items.iter().any(|i| i.ticked && i.status == BatchStatus::Done)
     }
 
     /// "Separate layers" applies: the switch is on and the model cuts out a
@@ -28,7 +28,7 @@ impl PrunrApp {
 
     pub fn handle_save_selected(&mut self) {
         let has_selection = self.batch.items.iter()
-            .any(|i| i.selected && i.status == BatchStatus::Done && i.result_rgba.is_some());
+            .any(|i| i.ticked && i.status == BatchStatus::Done && i.result_rgba.is_some());
         // Layers mode: always folder-picker, regardless of selection count.
         // The filenames are derived from each item's source stem + layer suffix.
         if self.saves_layers() {
@@ -46,7 +46,7 @@ impl PrunrApp {
     /// one; `on_save_layers_picked` writes into it.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
         let targets: Vec<u64> = if has_selection {
-            self.batch.selected_ids_with_status(BatchStatus::Done)
+            self.batch.ticked_ids_with_status(BatchStatus::Done)
         } else {
             self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
         };
@@ -136,7 +136,7 @@ impl PrunrApp {
     /// One or more sidebar checkboxes selected — ask for a folder;
     /// `on_save_selected_picked` writes into it.
     fn save_selected_to_folder(&mut self) {
-        let targets = self.batch.selected_ids_with_status(BatchStatus::Done);
+        let targets = self.batch.ticked_ids_with_status(BatchStatus::Done);
         self.ask_dialog(DialogRequest::SaveSelected { targets });
     }
 
@@ -281,13 +281,13 @@ impl PrunrApp {
 
     pub fn handle_copy(&mut self) {
         // Selection rules:
-        // - 0 checkbox-selected → copy the currently-viewed result (original behavior).
-        // - 1 checkbox-selected → copy that one (even if not the currently-viewed item).
-        // - 2+ checkbox-selected → copy the first, show a hint toast about drag-out.
+        // - 0 ticked → copy the currently-viewed result (original behavior).
+        // - 1 ticked → copy that one (even if not the currently-viewed item).
+        // - 2+ ticked → copy the first, show a hint toast about drag-out.
         //   (System clipboards can't hold multiple images as bitmaps; drag-out
         //    is the native multi-image export path.)
         let with_result = |b: &BatchItem| Some((b.result_ref()?, b.export_bg()));
-        let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.selected).filter_map(with_result).collect();
+        let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.ticked).filter_map(with_result).collect();
         let (to_copy, multi_hint) = match ticked.len() {
             0 => (self.batch.selected_item().and_then(with_result), None),
             1 => (ticked.into_iter().next(), None),

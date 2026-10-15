@@ -482,10 +482,10 @@ mod process_targets_tests {
         assert!(!app.can_process_intent(), "nothing painted yet");
         app.batch.items[1].commit_selection_mask(mask(), StepKind::Stroke);
         assert!(!app.can_process_intent(), "the viewed image has no region");
-        app.batch.items[1].selected = true;
+        app.batch.items[1].ticked = true;
         assert!(app.can_process_intent(), "a ticked image has one");
         assert_eq!(app.erase_targets(), (vec![1], 0));
-        app.batch.items[0].selected = true;
+        app.batch.items[0].ticked = true;
         assert_eq!(app.erase_targets(), (vec![1], 1), "the ticked one without a region is counted");
 
         // Erases go one at a time through the run queue, like upscales:
@@ -522,9 +522,9 @@ mod process_targets_tests {
         // provider, which loads the runtime a test app never loads.
         let process = |app: &mut PrunrApp| {
             let item = &mut app.batch.items[1];
-            item.selected = true;
+            item.ticked = true;
             item.status = crate::gui::item::BatchStatus::Pending;
-            app.process_items(|i| i.selected, Some(StepKind::Process));
+            app.process_items(|i| i.ticked, Some(StepKind::Process));
             match rx.try_recv() {
                 Ok(WorkerMessage::BatchProcess { config, .. }) => config.first_look,
                 _ => panic!("a batch is sent"),
@@ -552,10 +552,10 @@ mod process_targets_tests {
             item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
             item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
             item.status = crate::gui::item::BatchStatus::Done;
-            item.selected = true;
+            item.ticked = true;
         }
         app.batch.items[0].settings.feather = 3.0;
-        app.process_items(|i| i.selected, Some(StepKind::Process));
+        app.process_items(|i| i.ticked, Some(StepKind::Process));
         let other = &app.batch.items[1];
         assert_eq!(other.settings.feather, 3.0, "the ticked image took the shown settings");
         assert_eq!(other.status, crate::gui::item::BatchStatus::Processing, "and reruns under them");
@@ -630,7 +630,7 @@ mod process_targets_tests {
             item.result_rgba = Some(img.clone());
             item.land_upscale(UpscaleCache::new(img.clone(), img.clone(), None));
             item.status = BatchStatus::Done;
-            item.selected = true;
+            item.ticked = true;
         }
         // The slot is taken while Process runs, so the queue holds what it
         // sent; freed to read the queue back.
@@ -685,8 +685,8 @@ mod process_targets_tests {
     fn an_upscale_can_start_for_ticked_images_and_waits_for_the_slot() {
         let mut app = two_images(SettingsModel::RealEsrganUpscale);
         assert!(app.can_process_intent(), "the viewed image");
-        app.batch.items[0].selected = true;
-        app.batch.items[1].selected = true;
+        app.batch.items[0].ticked = true;
+        app.batch.items[1].ticked = true;
         assert!(app.can_process_intent());
         app.processor.set_upscale_in_flight_for_test(true);
         assert!(!app.can_process_intent(), "one at a time");
