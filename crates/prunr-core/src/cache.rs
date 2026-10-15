@@ -9,8 +9,8 @@
 //!
 //! EP names match `OrtEngine::active_provider()`'s output (`"OpenVINO"`,
 //! `"CUDA"`, `"CoreML"`, `"DirectML"`, `"CPU"`) and the existing
-//! `ep_compat.json` cache keys — strings rather than an enum because
-//! the rest of the codebase already treats EP identity as a string.
+//! `ep_compat.json` cache keys — strings rather than `EpKind` because
+//! the CPU provider has no `EpKind`.
 
 use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
@@ -344,8 +344,8 @@ pub fn clear_all() -> u64 {
     bytes
 }
 
-/// Recursive directory size with depth bound. Used only by `clear_all`
-/// for the bytes-reclaimed report. Skips entries beyond
+/// Recursive directory size with depth bound, for the bytes-reclaimed
+/// reports. Skips entries beyond
 /// `MAX_WALK_DEPTH` so a symlink loop terminates instead of stack-
 /// overflowing.
 fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {

@@ -29,7 +29,7 @@ pub fn engine_pool_size(model: ModelKind, jobs: usize, cpu_only: bool, provider:
 ///
 /// Caller invariant: must not be called from inside a rayon scope — the
 /// parallel-build path uses the global pool and could deadlock under
-/// nested rayon (same hazard as `apply_background_color`).
+/// nested rayon.
 ///
 /// During parallel build (`pool_size > 1`, non-DirectML) the peak RSS
 /// briefly doubles relative to sequential build because both ORT
@@ -143,12 +143,8 @@ where
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
 
-    // Write each result directly into its pre-sized slot via
-    // `par_iter_mut().zip(...)`. The previous version `.collect`-ed
-    // a parallel intermediate Vec then sequentially copied into
-    // `results` — held N × `ProcessResult` (each carrying a full RGBA)
-    // alive in a duplicate buffer for the whole batch. On a 100-image
-    // batch of 4 K images that was multi-GB redundant retention.
+    // Results go straight into their slots: no second N × ProcessResult
+    // buffer, each holding a full RGBA.
     pool.install(|| {
         results
             .par_iter_mut()
