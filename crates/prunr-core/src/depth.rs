@@ -215,9 +215,7 @@ fn estimate_resized(engine: &OrtEngine, resized: RgbaImage, progress: &Progress)
     let input = ndarray::Array4::from_shape_vec((1, 3, ih as usize, iw as usize), chw)
         .map_err(|e| CoreError::Inference(format!("depth: input shape: {e}")))?;
     let tensor = Tensor::from_array(input).map_err(|e| CoreError::Inference(format!("depth: input tensor: {e}")))?;
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     let raw = engine.with_session(|session| {
         let outputs = session.run(inputs!["pixel_values" => &tensor])
             .map_err(|e| CoreError::Inference(format!("depth: inference failed: {e}")))?;
@@ -228,9 +226,7 @@ fn estimate_resized(engine: &OrtEngine, resized: RgbaImage, progress: &Progress)
     if raw.len() != n {
         return Err(CoreError::Inference(format!("depth: output has {} values, expected {n}", raw.len())));
     }
-    if progress.is_cancelled() {
-        return Err(CoreError::Cancelled);
-    }
+    progress.check_cancelled()?;
     Ok(DepthMap::from_raw(iw, ih, raw))
 }
 
