@@ -2092,6 +2092,19 @@ impl Processor {
     }
 }
 
+fn extract_f32(
+    outputs: &ort::session::SessionOutputs,
+    name: &str,
+    stage: &str,
+) -> Result<Vec<f32>, String> {
+    Ok(outputs[name]
+        .try_extract_array::<f32>()
+        .map_err(|e| format!("{stage}: extract {name}: {e}"))?
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset().0)
+}
+
 /// Run the SAM 2 encoder on the cached session: preprocess the source,
 /// run inference, marshal the three named outputs into a SamEmbedding.
 ///
@@ -2126,24 +2139,9 @@ fn run_sam_encoder_inline(
     //   image_embed      [1, 256, 64, 64]   — 1_048_576 f32
     //   high_res_feats_0 [1, 32, 256, 256]  — 2_097_152 f32
     //   high_res_feats_1 [1, 64, 128, 128]  — 1_048_576 f32
-    let image_embed = outputs["image_embed"]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("encoder: extract image_embed: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0;
-    let high_res_feats_0 = outputs["high_res_feats_0"]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("encoder: extract high_res_feats_0: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0;
-    let high_res_feats_1 = outputs["high_res_feats_1"]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("encoder: extract high_res_feats_1: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0;
+    let image_embed = extract_f32(&outputs, "image_embed", "encoder")?;
+    let high_res_feats_0 = extract_f32(&outputs, "high_res_feats_0", "encoder")?;
+    let high_res_feats_1 = extract_f32(&outputs, "high_res_feats_1", "encoder")?;
 
     let embedding = prunr_core::sam::SamEmbedding {
         image_embed,
@@ -2223,18 +2221,8 @@ fn run_sam_decoder_inline(
     // Outputs: masks [1, 3, 256, 256] and iou_predictions [1, 3].
     // Address by name for the same export-order resilience as the
     // encoder path above.
-    let masks = outputs["masks"]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("decoder: extract masks: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0;
-    let iou_raw = outputs["iou_predictions"]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("decoder: extract iou_predictions: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0;
+    let masks = extract_f32(&outputs, "masks", "decoder")?;
+    let iou_raw = extract_f32(&outputs, "iou_predictions", "decoder")?;
 
     if iou_raw.len() != 3 {
         return Err(format!("decoder: expected 3 IoU predictions, got {}", iou_raw.len()));
