@@ -365,17 +365,6 @@ fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
     }
 }
 
-/// Which subprocess owns an IPC temp file. Drives crash-recovery
-/// cleanup scope so a seg-side wipe (e.g. on cancel-all) leaves a
-/// sibling inpaint subprocess's in-flight files alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IpcOwner {
-    /// Seg / CLI pipeline (input, chain, edge, result, tensor, …).
-    SegCli,
-    /// Inpaint subprocess (`inpaint-img-…`, `inpaint-mask-…`, `inpaint-out-…`).
-    Inpaint,
-}
-
 /// Every IPC temp-file kind. One source of truth for the prefix +
 /// extension contract previously triplicated across 13 `format!` sites
 /// + the prefix tables + the drift-catcher test.
@@ -441,14 +430,6 @@ impl IpcKind {
         }
     }
 
-    /// Crash-recovery owner: who's allowed to wipe this file's prefix.
-    pub const fn owner(self) -> IpcOwner {
-        match self {
-            IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => IpcOwner::Inpaint,
-            _ => IpcOwner::SegCli,
-        }
-    }
-
     /// Build a path for an item-keyed file: `<ipc>/<prefix><id>.<ext>`.
     pub fn path_for(self, ipc_dir: &std::path::Path, id: u64) -> std::path::PathBuf {
         ipc_dir.join(format!("{}{id}.{}", self.prefix(), self.ext()))
@@ -468,23 +449,6 @@ impl IpcKind {
         );
         ipc_dir.join(format!("{}{id}-{gen}.{}", self.prefix(), self.ext()))
     }
-
-    /// All variants. Ordered so prefix-tables (derived below) are stable
-    /// across builds and test diffs are deterministic.
-    pub const ALL: &'static [IpcKind] = &[
-        IpcKind::Input,
-        IpcKind::Chain,
-        IpcKind::Seg,
-        IpcKind::Tensor,
-        IpcKind::Orig,
-        IpcKind::Result,
-        IpcKind::Edge,
-        IpcKind::SpareEdge,
-        IpcKind::CliDs,
-        IpcKind::InpaintImg,
-        IpcKind::InpaintMask,
-        IpcKind::InpaintOut,
-    ];
 }
 
 /// File-name prefixes the seg worker writes or consumes-and-deletes
@@ -543,12 +507,6 @@ pub fn cleanup_seg_pipeline_temps() {
 /// from `cli_ds_*` paths. Idempotent.
 pub fn cleanup_cli_persistent_temps() {
     cleanup_ipc_temp_for_prefix(CLI_PERSISTENT_PREFIXES);
-}
-
-/// Sweep every file in the IPC temp dir. Process-wide; never call from a
-/// path that could race a sibling subprocess — use a prefix-scoped helper.
-pub fn cleanup_ipc_temp() {
-    crate::fs_util::sweep_dir_files(ipc_temp_dir());
 }
 
 #[cfg(test)]
@@ -892,17 +850,6 @@ mod tests {
         assert_gone(&dir, &["cli_ds_0.img"]);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cleanup_ipc_temp_is_reentrant() {
-        let dir = ipc_temp_dir();
-        std::fs::write(dir.join("test-reentrant.bin"), b"x").unwrap();
-
-        cleanup_ipc_temp();
-        assert_gone(dir, &["test-reentrant.bin"]);
-        cleanup_ipc_temp();
-        assert_gone(dir, &["test-reentrant.bin"]);
     }
 
     /// A seg-side crash cleanup must not touch a sibling inpaint
