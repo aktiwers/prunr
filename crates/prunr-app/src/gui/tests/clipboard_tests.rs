@@ -3,7 +3,8 @@ use super::fixtures::push_test_item;
 
 #[test]
 fn handle_copy_without_clipboard_does_not_panic() {
-    // PrunrApp::new_for_test() sets clipboard = None
+    // new_for_test keeps the platform clipboard when the machine has one,
+    // so either outcome's message is accepted.
     let mut app = PrunrApp::new_for_test();
     push_test_item(&mut app, 1).result_rgba =
         Some(std::sync::Arc::new(image::RgbaImage::new(2, 2)));
