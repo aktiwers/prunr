@@ -128,9 +128,32 @@ pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
     ]
 }
 
+/// RGB ("ff8000") or RGBA ("ff800080") hex digits, no `#`; alpha is 255
+/// when absent. Callers strip their own prefix and decide which lengths
+/// they take.
+pub fn parse_hex_rgba(digits: &str) -> Option<[u8; 4]> {
+    if !matches!(digits.len(), 6 | 8) {
+        return None;
+    }
+    let mut out = [0, 0, 0, 255];
+    for (i, channel) in out.iter_mut().take(digits.len() / 2).enumerate() {
+        *channel = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_reads_six_or_eight_digits() {
+        assert_eq!(parse_hex_rgba("ff8000"), Some([255, 128, 0, 255]));
+        assert_eq!(parse_hex_rgba("FF800080"), Some([255, 128, 0, 128]));
+        for bad in ["", "fff", "ff800", "ff8000f", "ff80000080", "gg8000", "#ff8000"] {
+            assert_eq!(parse_hex_rgba(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn lightness_is_the_l_of_the_full_conversion() {

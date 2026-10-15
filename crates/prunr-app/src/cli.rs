@@ -522,10 +522,7 @@ fn flag_color(flag: &str, value: Option<&str>, example: &str) -> Result<Option<[
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
     if s.len() != 6 { return None; }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some([r, g, b])
+    prunr_core::color::parse_hex_rgba(s).map(|[r, g, b, _]| [r, g, b])
 }
 
 impl Cli {
