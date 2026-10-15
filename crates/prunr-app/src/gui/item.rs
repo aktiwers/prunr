@@ -2392,14 +2392,7 @@ mod tests {
     use crate::gui::item_settings::ItemSettings;
 
     fn fixture_item(id: u64) -> BatchItem {
-        BatchItem::new(
-            id,
-            "test.png".to_string(),
-            ImageSource::Bytes(Arc::new(Vec::new())),
-            (100, 100),
-            ItemSettings::default(),
-            String::new(),
-        )
+        BatchItem { id, ..BatchItem::new_for_test() }
     }
 
     #[test]
