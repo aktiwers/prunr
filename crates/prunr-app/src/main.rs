@@ -40,9 +40,8 @@ fn main() {
     }
 
     // Attach the parent console BEFORE init_tracing so the stderr writer
-    // captures a valid handle. The previous order inverted these, causing
-    // parent stderr to work by luck and worker stderr (via Stdio::inherit)
-    // to silently drop on Windows windows_subsystem=windows builds.
+    // captures a valid handle; otherwise worker stderr (via
+    // Stdio::inherit) silently drops on windows_subsystem=windows builds.
     #[cfg(windows)]
     if cli.writes_to_terminal() {
         attach_parent_console();
