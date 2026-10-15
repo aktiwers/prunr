@@ -20,6 +20,9 @@ pub struct BgImageLoad {
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
+/// A texture built off-thread for upload: item id, texture name, pixels, target.
+pub type TexPrepMsg = (u64, String, egui::ColorImage, TexTarget);
+
 /// What a selection texture was built from: the mask's content hash and
 /// the style baked into it. The item compares this against the current
 /// pair to decide whether a rebuild is due.
@@ -91,7 +94,7 @@ impl Drop for DecodeSlotGuard {
 /// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
 #[derive(Clone)]
 pub struct TexPrepHandles {
-    pub tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
+    pub tx: mpsc::Sender<TexPrepMsg>,
     pub slots: Arc<DecodeSlots>,
 }
 
@@ -114,8 +117,8 @@ pub struct BackgroundIO {
     pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,
     pub copy_ready_rx: mpsc::Receiver<(Arc<image::RgbaImage>, Option<String>)>,
     /// Pre-built ColorImages ready for GPU upload.
-    pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
-    pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, TexTarget)>,
+    pub tex_prep_tx: mpsc::Sender<TexPrepMsg>,
+    pub tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
     /// Filter-only (model=None) Process results — keeps the UI thread free
     /// while load + decode + `apply_fill_style` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
