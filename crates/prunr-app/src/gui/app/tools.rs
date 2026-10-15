@@ -353,13 +353,9 @@ impl PrunrApp {
     /// which also stops the per-frame encoder check from retrying.
     fn magic_brush_unavailable(&mut self, err: &str) {
         self.toasts.error(format!("Magic Brush unavailable: {err}"));
-        self.deactivate_magic_brush();
-    }
-
-    /// Turn Magic Brush off. The sessions stay warm and the selected
-    /// image keeps its embedding, so turning it back on is instant;
-    /// background images drop theirs on the next eviction pass.
-    pub(crate) fn deactivate_magic_brush(&mut self) {
+        // The sessions stay warm and the selected image keeps its
+        // embedding, so turning it back on is instant; background images
+        // drop theirs on the next eviction pass.
         self.magic_brush_state.deactivate();
     }
 

@@ -342,11 +342,8 @@ impl PrunrApp {
                 }
             }
             Action::Shortcuts => self.toggle_hotkeys_tab(),
-            Action::CliHelp | Action::PipelineFlow => {
-                if let Some(open) = self.help_modal_mut(action) {
-                    *open = !*open;
-                }
-            }
+            Action::CliHelp => self.show_cli_help ^= true,
+            Action::PipelineFlow => self.show_pipeline_flow ^= true,
             Action::Settings => self.toggle_settings_panel(),
             Action::PrevImage => self.navigate_batch(ctx, NavDir::Prev),
             Action::NextImage => self.navigate_batch(ctx, NavDir::Next),
@@ -907,17 +904,6 @@ impl PrunrApp {
         if self.pending_batch_sync {
             self.pending_batch_sync = false;
             self.sync_selected_batch_textures(ctx);
-        }
-    }
-
-    /// The visibility flag behind a help modal's shortcut action; `None`
-    /// for actions that are not help modals.
-    fn help_modal_mut(&mut self, action: crate::gui::views::shortcuts::Action) -> Option<&mut bool> {
-        use crate::gui::views::shortcuts::Action;
-        match action {
-            Action::CliHelp => Some(&mut self.show_cli_help),
-            Action::PipelineFlow => Some(&mut self.show_pipeline_flow),
-            _ => None,
         }
     }
 
