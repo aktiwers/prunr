@@ -18,43 +18,39 @@ pub const SAM_ENCODER_INPUT: u32 = 1024;
 /// caller upsamples to source resolution.
 pub const SAM_MASK_RESOLUTION: u32 = 256;
 
+/// Element counts of the SAM 2 Hiera Small encoder outputs.
+const IMAGE_EMBED_LEN: usize = 256 * 64 * 64;
+const HIGH_RES_0_LEN: usize = 32 * 256 * 256;
+const HIGH_RES_1_LEN: usize = 64 * 128 * 128;
+
 /// Cached encoder output for one source image.
 #[derive(Debug)]
 pub struct SamEmbedding {
-    /// f32[1, 256, 64, 64] — 1_048_576 f32 ≈ 4 MB
+    /// f32[1, 256, 64, 64] ≈ 4 MB
     pub image_embed: Vec<f32>,
-    /// f32[1, 32, 256, 256] — 2_097_152 f32 ≈ 8 MB
+    /// f32[1, 32, 256, 256] ≈ 8 MB
     pub high_res_feats_0: Vec<f32>,
-    /// f32[1, 64, 128, 128] — 1_048_576 f32 ≈ 4 MB
+    /// f32[1, 64, 128, 128] ≈ 4 MB
     pub high_res_feats_1: Vec<f32>,
 }
 
 impl SamEmbedding {
     /// Stable byte estimate for BatchItem::cache_size.
     pub const fn expected_bytes() -> usize {
-        (1_048_576 + 2_097_152 + 1_048_576) * 4
+        (IMAGE_EMBED_LEN + HIGH_RES_0_LEN + HIGH_RES_1_LEN) * 4
     }
 
     /// Verify the three Vec<f32> lengths match SAM 2 Hiera Small
     /// expected output shapes.
     pub fn validate_shapes(&self) -> Result<(), String> {
-        if self.image_embed.len() != 1_048_576 {
-            return Err(format!(
-                "image_embed len {} != 1_048_576",
-                self.image_embed.len()
-            ));
-        }
-        if self.high_res_feats_0.len() != 2_097_152 {
-            return Err(format!(
-                "high_res_feats_0 len {} != 2_097_152",
-                self.high_res_feats_0.len()
-            ));
-        }
-        if self.high_res_feats_1.len() != 1_048_576 {
-            return Err(format!(
-                "high_res_feats_1 len {} != 1_048_576",
-                self.high_res_feats_1.len()
-            ));
+        for (name, len, expected) in [
+            ("image_embed", self.image_embed.len(), IMAGE_EMBED_LEN),
+            ("high_res_feats_0", self.high_res_feats_0.len(), HIGH_RES_0_LEN),
+            ("high_res_feats_1", self.high_res_feats_1.len(), HIGH_RES_1_LEN),
+        ] {
+            if len != expected {
+                return Err(format!("{name} len {len} != {expected}"));
+            }
         }
         Ok(())
     }
@@ -289,9 +285,9 @@ mod tests {
     #[test]
     fn validate_shapes_accepts_correct_lengths() {
         let emb = SamEmbedding {
-            image_embed: vec![0.0; 1_048_576],
-            high_res_feats_0: vec![0.0; 2_097_152],
-            high_res_feats_1: vec![0.0; 1_048_576],
+            image_embed: vec![0.0; IMAGE_EMBED_LEN],
+            high_res_feats_0: vec![0.0; HIGH_RES_0_LEN],
+            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
         };
         assert!(emb.validate_shapes().is_ok());
     }
@@ -300,8 +296,8 @@ mod tests {
     fn validate_shapes_rejects_wrong_image_embed_len() {
         let emb = SamEmbedding {
             image_embed: vec![0.0; 42],
-            high_res_feats_0: vec![0.0; 2_097_152],
-            high_res_feats_1: vec![0.0; 1_048_576],
+            high_res_feats_0: vec![0.0; HIGH_RES_0_LEN],
+            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
         };
         let err = emb.validate_shapes().unwrap_err();
         assert!(err.contains("image_embed"), "error: {err}");
@@ -310,9 +306,9 @@ mod tests {
     #[test]
     fn validate_shapes_rejects_wrong_feats_len() {
         let emb = SamEmbedding {
-            image_embed: vec![0.0; 1_048_576],
+            image_embed: vec![0.0; IMAGE_EMBED_LEN],
             high_res_feats_0: vec![0.0; 1],
-            high_res_feats_1: vec![0.0; 1_048_576],
+            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
         };
         let err = emb.validate_shapes().unwrap_err();
         assert!(err.contains("high_res_feats_0"), "error: {err}");
