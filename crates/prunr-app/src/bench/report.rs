@@ -76,14 +76,31 @@ pub struct Report {
     pub running: Option<String>,
 }
 
-pub const COLUMNS: [&str; 11] = [
-    "Model", "GPU path", "Session", "First run", "Steady", "CPU steady", "Speed-up", "Max Δ", "Mean Δ", ">2/255", "Result",
+#[derive(Clone, Copy, PartialEq)]
+enum Align {
+    Left,
+    Right,
+}
+
+const COLUMN_COUNT: usize = 11;
+
+const COLUMNS: [(&str, Align); COLUMN_COUNT] = [
+    ("Model", Align::Left),
+    ("GPU path", Align::Left),
+    ("Session", Align::Right),
+    ("First run", Align::Right),
+    ("Steady", Align::Right),
+    ("CPU steady", Align::Right),
+    ("Speed-up", Align::Right),
+    ("Max Δ", Align::Right),
+    ("Mean Δ", Align::Right),
+    (">2/255", Align::Right),
+    ("Result", Align::Left),
 ];
-const RIGHT_ALIGNED: [bool; 11] = [false, false, true, true, true, true, true, true, true, true, false];
 
 /// A row's cells under `COLUMNS`. The times are the GPU path's; a dash
 /// where a value does not apply.
-pub fn cells(row: &Row) -> [String; 11] {
+pub fn cells(row: &Row) -> [String; COLUMN_COUNT] {
     let dash = || "—".to_string();
     let gpu_side = match &row.gpu {
         Gpu::Ran(side) => Some(side),
@@ -163,18 +180,21 @@ pub fn header_text(header: &Header) -> String {
 
 /// The rows as a padded table, numbers right-aligned.
 pub fn terminal_table(rows: &[Row]) -> String {
-    let body: Vec<[String; 11]> = rows.iter().map(cells).collect();
-    let widths: [usize; 11] = std::array::from_fn(|c| {
-        body.iter().map(|r| r[c].chars().count()).chain([COLUMNS[c].chars().count()]).max().unwrap_or(0)
+    let body: Vec<[String; COLUMN_COUNT]> = rows.iter().map(cells).collect();
+    let widths: [usize; COLUMN_COUNT] = std::array::from_fn(|c| {
+        body.iter().map(|r| r[c].chars().count()).chain([COLUMNS[c].0.chars().count()]).max().unwrap_or(0)
     });
     let line = |cells: &[String]| {
         let padded: Vec<String> = cells.iter().enumerate().map(|(c, cell)| {
             let pad = " ".repeat(widths[c] - cell.chars().count());
-            if RIGHT_ALIGNED[c] { format!("{pad}{cell}") } else { format!("{cell}{pad}") }
+            match COLUMNS[c].1 {
+                Align::Right => format!("{pad}{cell}"),
+                Align::Left => format!("{cell}{pad}"),
+            }
         }).collect();
         padded.join("  ").trim_end().to_string() + "\n"
     };
-    let headings = COLUMNS.map(str::to_string);
+    let headings = COLUMNS.map(|(heading, _)| heading.to_string());
     let rule: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
     let mut out = line(&headings);
     out.push_str(&line(&rule));
@@ -193,8 +213,11 @@ pub fn markdown(report: &Report) -> String {
         md.push_str(&format!("\n> **Running:** {step}. If the bench stopped, it stopped in this step.\n"));
     }
     md.push_str("\n## Results\n\n");
-    md.push_str(&format!("| {} |\n", COLUMNS.join(" | ")));
-    let align: Vec<&str> = RIGHT_ALIGNED.iter().map(|&r| if r { "---:" } else { "---" }).collect();
+    md.push_str(&format!("| {} |\n", COLUMNS.map(|(heading, _)| heading).join(" | ")));
+    let align = COLUMNS.map(|(_, align)| match align {
+        Align::Right => "---:",
+        Align::Left => "---",
+    });
     md.push_str(&format!("|{}|\n", align.join("|")));
     for row in &report.rows {
         let cells = cells(row).map(|c| escape(&c));
