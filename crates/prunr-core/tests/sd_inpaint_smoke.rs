@@ -15,18 +15,14 @@ mod test_common;
 use image::{GrayImage, Luma, Rgba, RgbaImage};
 use prunr_core::inpaint_blend;
 use prunr_core::inpaint_sd::{self, SdInpaintRequest};
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn sd_inpaint_modifies_painted_region() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_inpaint_smoke") { return; }
     let id = prunr_models::ModelId::SdV15InpaintFp16;
-    if !prunr_models::is_available(id) {
-        eprintln!("SKIP: SD 1.5 Inpaint bundle not installed at {:?}",
-            prunr_models::on_demand_dir());
-        return;
-    }
+    if skip_if_model_missing("sd_inpaint_smoke", id) { return; }
 
     // 512×512 solid blue. Mask covers the centre 128×128 region.
     let w: u32 = 512;
@@ -116,10 +112,7 @@ fn sd_step_previews() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_step_previews") { return; }
     let (id, default_steps, guidance, scheduler) = bench_model();
-    if !prunr_models::is_available(id) {
-        eprintln!("SKIP: {id:?} bundle not installed");
-        return;
-    }
+    if skip_if_model_missing("sd_step_previews", id) { return; }
     let steps = std::env::var("PRUNR_SD_BENCH_STEPS").ok().map_or(default_steps, |v| v.parse().expect("PRUNR_SD_BENCH_STEPS"));
     let (w, h) = (900u32, 700u32);
     let image = RgbaImage::from_fn(w, h, |x, y| {
@@ -205,10 +198,7 @@ fn sd_bench() {
     let _ = tracing_subscriber::fmt::try_init();
     if skip_if_no_ort("sd_bench") { return; }
     let (id, steps, guidance, scheduler) = bench_model();
-    if !prunr_models::is_available(id) {
-        eprintln!("SKIP: {id:?} bundle not installed");
-        return;
-    }
+    if skip_if_model_missing("sd_bench", id) { return; }
     // `PRUNR_SD_BENCH_IMAGE=a.png,b.png PRUNR_SD_BENCH_MASK=a_mask.png,b_mask.png`
     // run real photos with their painted regions (grown and blended as
     // the app does) instead of the synthetic pair.

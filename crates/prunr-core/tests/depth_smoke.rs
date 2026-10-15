@@ -12,8 +12,7 @@ use image::{Rgba, RgbaImage};
 use prunr_core::depth::{estimate_depth, estimate_depth_decoded, DepthLook, LensBlurMode, MODEL};
 use prunr_core::progress::{check_contract, RecordingSink};
 use prunr_core::{OrtEngine, Progress};
-use prunr_models::is_available;
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 /// A floor that brightens toward the bottom under a flat sky: the model
 /// should read the bottom as nearer than the top.
@@ -34,8 +33,7 @@ fn depth_maps_a_photo_and_reports_its_step() {
     if skip_if_no_ort("depth") {
         return;
     }
-    if !is_available(MODEL.into()) {
-        eprintln!("SKIP: the depth model is not installed — run the Model Store download");
+    if skip_if_model_missing("depth", MODEL.into()) {
         return;
     }
     let src = ground_plane(320, 240);
@@ -55,7 +53,7 @@ fn depth_maps_a_photo_and_reports_its_step() {
 
 #[test]
 fn a_cancelled_depth_run_returns_cancelled() {
-    if skip_if_no_ort("depth_cancel") || !is_available(MODEL.into()) {
+    if skip_if_no_ort("depth_cancel") || skip_if_model_missing("depth_cancel", MODEL.into()) {
         return;
     }
     let engine = OrtEngine::new_cpu_only(MODEL, 2).expect("depth session");
