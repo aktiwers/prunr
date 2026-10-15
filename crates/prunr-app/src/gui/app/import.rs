@@ -35,16 +35,6 @@ impl PrunrApp {
         self.show_original = false;
     }
 
-    /// Load an image from raw bytes (clipboard paste, CLI pipe).
-    fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
-        let Some(dims) = probe_dims_bytes(&bytes) else {
-            self.set_temporary_status("Could not load image");
-            return;
-        };
-        let name = filename.unwrap_or_else(|| "image".into());
-        self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
-    }
-
     pub fn handle_open_path(&mut self, path: PathBuf) {
         let Some(dims) = probe_dims_path(&path) else {
             self.set_temporary_status("Could not load image");
@@ -57,9 +47,14 @@ impl PrunrApp {
         self.load_image_source(ImageSource::Path(path), dims, filename);
     }
 
+    /// Open an image from raw bytes; an empty name reads as "image".
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
-        let filename = if name.is_empty() { None } else { Some(name) };
-        self.load_image(bytes, filename);
+        let Some(dims) = probe_dims_bytes(&bytes) else {
+            self.set_temporary_status("Could not load image");
+            return;
+        };
+        let name = if name.is_empty() { "image".into() } else { name };
+        self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
     }
 
     /// Open: ask for images; `on_open_picked` imports them.
