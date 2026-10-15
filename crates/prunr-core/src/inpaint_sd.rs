@@ -442,10 +442,10 @@ fn paint_regions_with(
     let plans: Vec<RegionPlan> = components.iter().map(|c| plan_region(c, img_w, img_h, max_side)).collect();
     let outer_total: u32 = plans.iter().map(|p| p.tile_count()).sum();
     // The crops and tiles, in the order they run: the tile map's layout.
-    progress.tiles(plans.iter().flat_map(|plan| match plan {
-        RegionPlan::Crop { x, y, w, h } => vec![TileRect::of_pixels(*x, *y, *w, *h, img_w, img_h)],
-        RegionPlan::Tiles(tiles) => tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, img_w, img_h)).collect(),
-    }).collect());
+    progress.tiles(plans.iter()
+        .flat_map(RegionPlan::windows)
+        .map(|((x, y, w, h), _)| TileRect::of_pixels(x, y, w, h, img_w, img_h))
+        .collect());
     let mut tile_idx: u32 = 0;
     // One crop or tile starts: the outer count, and the tile map's cell.
     let start = |idx: u32| {
@@ -453,36 +453,28 @@ fn paint_regions_with(
         progress.tile(idx, false);
     };
     let mut out = image.clone();
-    for (component, plan) in components.iter().zip(plans) {
+    for (component, plan) in components.iter().zip(&plans) {
         if progress.is_cancelled() { return Err(CoreError::Cancelled); }
-        let tiles = match plan {
-            RegionPlan::Crop { x: cx, y: cy, w: cw, h: ch } => {
-                start(tile_idx);
-                let cropped_img = image::imageops::crop_imm(&out, cx, cy, cw, ch).to_image();
-                let cropped_mask = image::imageops::crop_imm(mask, cx, cy, cw, ch).to_image();
-                // A failed region fails the run: left as it was, it would read
-                // as a finished erase.
-                let painted = fill(&cropped_img, &cropped_mask, &progress.within((cx, cy, cw, ch), (img_w, img_h)))?;
-                image::imageops::replace(&mut out, &painted, cx as i64, cy as i64);
-                progress.tile(tile_idx, true);
-                tile_idx += 1;
-                continue;
-            }
-            RegionPlan::Tiles(tiles) => tiles,
-        };
-        // Longer than `max_side` on an axis: overlapping 512² tiles with
-        // alpha-blended seams.
-        tracing::info!(
-            comp = ?component, n_tiles = tiles.len(),
-            "SD: tiling oversized component",
-        );
-        for tile in tiles {
+        if let RegionPlan::Tiles(tiles) = plan {
+            // Longer than `max_side` on an axis: overlapping 512² tiles
+            // with alpha-blended seams.
+            tracing::info!(
+                comp = ?component, n_tiles = tiles.len(),
+                "SD: tiling oversized component",
+            );
+        }
+        for ((x, y, w, h), tile) in plan.windows() {
             if progress.is_cancelled() { return Err(CoreError::Cancelled); }
             start(tile_idx);
-            let cropped_img = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
-            let cropped_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-            let painted = fill(&cropped_img, &cropped_mask, &progress.within((tile.x, tile.y, tile.w, tile.h), (img_w, img_h)))?;
-            blend_tile(&mut out, &painted, &tile);
+            let cropped_img = image::imageops::crop_imm(&out, x, y, w, h).to_image();
+            let cropped_mask = image::imageops::crop_imm(mask, x, y, w, h).to_image();
+            // A failed region fails the run: left as it was, it would read
+            // as a finished erase.
+            let painted = fill(&cropped_img, &cropped_mask, &progress.within((x, y, w, h), (img_w, img_h)))?;
+            match tile {
+                Some(tile) => blend_tile(&mut out, &painted, tile),
+                None => image::imageops::replace(&mut out, &painted, x as i64, y as i64),
+            }
             progress.tile(tile_idx, true);
             tile_idx += 1;
         }
@@ -762,6 +754,15 @@ impl RegionPlan {
         match self {
             Self::Crop { .. } => 1,
             Self::Tiles(t) => t.len() as u32,
+        }
+    }
+
+    /// Each window the region runs as, in order: its (x, y, w, h), and
+    /// the tile it blends back as (`None` for a crop, pasted as is).
+    fn windows(&self) -> Vec<((u32, u32, u32, u32), Option<&TileWindow>)> {
+        match self {
+            Self::Crop { x, y, w, h } => vec![((*x, *y, *w, *h), None)],
+            Self::Tiles(tiles) => tiles.iter().map(|t| ((t.x, t.y, t.w, t.h), Some(t))).collect(),
         }
     }
 }
