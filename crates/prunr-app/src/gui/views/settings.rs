@@ -473,27 +473,25 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
 
         // The same rule as the gate an erase passes, with the user's margin.
         use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
-        if !ctx.installs.has_sd_eraser() {
-            ui.add_space(4.0);
-            return;
+        for (name, id) in ctx.installs.sd_erasers() {
+            let (color, fit) = match sd_ram_fit(id, avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
+                SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
+                SdRamFit::TilesOnly => (
+                    Color32::from_rgb(0xe1, 0xb3, 0x4e),
+                    "runs, but tall regions are filled in tiles. Close other apps for one pass",
+                ),
+                SdRamFit::Refused => (
+                    Color32::from_rgb(0xd8, 0x6e, 0x6e),
+                    "not enough memory free. Close other apps or use Big-LaMa",
+                ),
+            };
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+                ui.label(RichText::new(format!("{name}: {fit}")).size(theme::FONT_SIZE_SECONDARY).color(color));
+            });
         }
-        let (color, text) = match sd_ram_fit(avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
-            SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "SD 1.5: enough memory free"),
-            SdRamFit::TilesOnly => (
-                Color32::from_rgb(0xe1, 0xb3, 0x4e),
-                "SD 1.5: runs, but tall regions are filled in tiles. Close other apps for one pass",
-            ),
-            SdRamFit::Refused => (
-                Color32::from_rgb(0xd8, 0x6e, 0x6e),
-                "SD 1.5: not enough memory free. Close other apps or use Big-LaMa",
-            ),
-        };
-        ui.horizontal(|ui| {
-            ui.set_min_height(28.0);
-            let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, color);
-            ui.label(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(color));
-        });
         ui.add_space(4.0);
     });
 
