@@ -1870,7 +1870,7 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let outputs = session.run(inputs![encoder.input.as_str() => &t])
         .map_err(|e| CoreError::Inference(format!("SD text encoder: run: {e}")))?;
-    extract_3d(&outputs[0], "text encoder")
+    extract::<ndarray::Ix3>(&outputs[0], "text encoder")
 }
 
 // ── VAE encode / decode ────────────────────────────────────────────────
@@ -1906,7 +1906,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
-            let mut latent = extract_4d(&outputs[0], "vae encoder")?;
+            let mut latent = extract::<ndarray::Ix4>(&outputs[0], "vae encoder")?;
             latent *= bundle.latent.vae_scale();
             Ok(latent)
         }
@@ -1915,7 +1915,7 @@ fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Arr
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let outputs = session.run(inputs![taesd.encoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("TAESD encoder: run: {e}")))?;
-            extract_4d(&outputs[0], "TAESD encoder")
+            extract::<ndarray::Ix4>(&outputs[0], "TAESD encoder")
         }
     }
 }
@@ -1929,7 +1929,7 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let outputs = session.run(inputs![bundle.vae_decoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("SD vae decoder: run: {e}")))?;
-            let arr = extract_4d(&outputs[0], "vae decoder")?;
+            let arr = extract::<ndarray::Ix4>(&outputs[0], "vae decoder")?;
             Ok(minus1_plus1_to_image(&arr))
         }
         VaeBackend::Taesd(taesd) => {
@@ -1940,7 +1940,7 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let outputs = session.run(inputs![taesd.decoder_input.as_str() => &t])
                 .map_err(|e| CoreError::Inference(format!("TAESD decoder: run: {e}")))?;
-            let arr = extract_4d(&outputs[0], "TAESD decoder")?;
+            let arr = extract::<ndarray::Ix4>(&outputs[0], "TAESD decoder")?;
             Ok(minus1_plus1_to_image(&arr))
         }
     }
@@ -1982,7 +1982,7 @@ fn unet_step(
         bundle.unet_inputs[2].as_str() => &cond_t,
     ])
         .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
-    extract_4d(&outputs[0], "unet")
+    extract::<ndarray::Ix4>(&outputs[0], "unet")
 }
 
 /// CFG batched: stack cond + uncond on batch dim 0 and run UNet ONCE
@@ -2022,7 +2022,7 @@ fn unet_step_batched(
         bundle.unet_inputs[2].as_str() => &emb_t,
     ])
         .map_err(|e| CoreError::Inference(format!("SD unet batched: run: {e}")))?;
-    extract_4d(&outputs[0], "unet (batched)")
+    extract::<ndarray::Ix4>(&outputs[0], "unet (batched)")
 }
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
@@ -2047,31 +2047,22 @@ fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
 /// Try f32 first, fall back to f16; either way return f32 ndarray.
 /// Centralises the "this export might emit either precision" handling
 /// so each session site is one line at the boundary.
-fn extract_3d(value: &ort::value::DynValue, label: &str) -> Result<Array3<f32>, CoreError> {
+fn extract<D: ndarray::Dimension>(
+    value: &ort::value::DynValue,
+    label: &str,
+) -> Result<ndarray::Array<f32, D>, CoreError> {
+    let shape_err = |e: ndarray::ShapeError| {
+        let ndim = D::NDIM.unwrap_or(0);
+        CoreError::Inference(format!("SD {label}: shape ≠ {ndim}D: {e}"))
+    };
     if let Ok(arr) = value.try_extract_array::<f32>() {
-        return arr.into_dimensionality::<ndarray::Ix3>()
-            .map(|a| a.to_owned())
-            .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 3D: {e}")));
+        return arr.into_dimensionality::<D>().map(|a| a.to_owned()).map_err(shape_err);
     }
     let arr = value
         .try_extract_array::<f16>()
         .map_err(|e| CoreError::Inference(format!("SD {label}: extract (tried f32, f16): {e}")))?
-        .into_dimensionality::<ndarray::Ix3>()
-        .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 3D: {e}")))?;
-    Ok(arr.mapv(|x| x.to_f32()))
-}
-
-fn extract_4d(value: &ort::value::DynValue, label: &str) -> Result<Array4<f32>, CoreError> {
-    if let Ok(arr) = value.try_extract_array::<f32>() {
-        return arr.into_dimensionality::<ndarray::Ix4>()
-            .map(|a| a.to_owned())
-            .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 4D: {e}")));
-    }
-    let arr = value
-        .try_extract_array::<f16>()
-        .map_err(|e| CoreError::Inference(format!("SD {label}: extract (tried f32, f16): {e}")))?
-        .into_dimensionality::<ndarray::Ix4>()
-        .map_err(|e| CoreError::Inference(format!("SD {label}: shape ≠ 4D: {e}")))?;
+        .into_dimensionality::<D>()
+        .map_err(shape_err)?;
     Ok(arr.mapv(|x| x.to_f32()))
 }
 
