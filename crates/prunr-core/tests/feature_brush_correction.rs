@@ -10,10 +10,9 @@ mod test_common;
 use prunr_core::{
     brush::{paint_circle, Stamp},
     selection::{BrushMode, MaskArtifact},
-    infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine,
-    PostprocessOpts,
+    infer_only, postprocess_from_flat, MaskSettings, ModelKind, PostprocessOpts,
 };
-use test_common::{multi_subject_canary, skip_if_no_ort};
+use test_common::{multi_subject_canary, silueta_engine, skip_if_no_ort};
 
 const SIZE: u32 = 256;
 
@@ -21,8 +20,7 @@ const SIZE: u32 = 256;
 fn brush_correction_stroke_alters_the_painted_region_only() {
     if skip_if_no_ort("brush_correction") { return; }
 
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    let engine = silueta_engine();
     let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
 
@@ -92,8 +90,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
 #[test]
 fn brush_correction_is_deterministic_across_runs() {
     if skip_if_no_ort("brush_correction_deterministic") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
+    let engine = silueta_engine();
     let img = multi_subject_canary();
     let mask_settings = MaskSettings::default();
     let ir = infer_only(&img, &engine, &prunr_core::Progress::none())

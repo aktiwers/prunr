@@ -10,11 +10,10 @@
 mod test_common;
 
 use prunr_core::{
-    compose_subject_outline, process_image_from_decoded, ComposeMode, EdgeEngine,
-    EdgeScale, EdgeSettings, InputTransform, LineStyle, MaskSettings, ModelKind,
-    OrtEngine,
+    compose_subject_outline, ComposeMode, EdgeEngine, EdgeScale, EdgeSettings, InputTransform,
+    LineStyle,
 };
-use test_common::{multi_subject_canary, skip_if_no_ort};
+use test_common::{canary_cutout, multi_subject_canary, silueta_engine, skip_if_no_ort};
 
 fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyle) -> EdgeSettings {
     EdgeSettings {
@@ -34,14 +33,7 @@ fn default_edge_settings(scale: EdgeScale, compose: ComposeMode, style: LineStyl
 #[test]
 fn line_mode_off_runs_seg_only() {
     if skip_if_no_ort("line_mode_off") { return; }
-    let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
-    let img = multi_subject_canary();
-    let result = process_image_from_decoded(
-        &img, &engine, &MaskSettings::default(),
-        &prunr_core::Progress::none(),
-    ).expect("Off pipeline should succeed");
-    assert_eq!(result.rgba_image.dimensions(), (256, 256));
+    assert_eq!(canary_cutout(&silueta_engine()).dimensions(), (256, 256));
 }
 
 /// `LineMode::EdgesOnly` runs TEED on the source and finalizes lines
@@ -61,16 +53,11 @@ fn line_mode_edges_only_produces_lines_from_source() {
 #[test]
 fn line_mode_subject_outline_combines_seg_and_edge() {
     if skip_if_no_ort("line_mode_subject_outline") { return; }
-    let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
     let img = multi_subject_canary();
 
     // Step 1: segmentation produces masked RGBA.
-    let masked = process_image_from_decoded(
-        &img, &seg_engine, &MaskSettings::default(),
-        &prunr_core::Progress::none(),
-    ).expect("seg pipeline").rgba_image;
+    let masked = canary_cutout(&silueta_engine());
 
     // Step 2: edge inference + compose_subject_outline overlays lines.
     let edge_res = edge_engine.infer_all_tensors(&img).expect("infer_all_tensors");
@@ -103,14 +90,9 @@ fn edge_scale_fine_bold_fused_all_run() {
 #[test]
 fn line_style_solid_and_dual_scale_compose() {
     if skip_if_no_ort("line_style_*") { return; }
-    let seg_engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
-        .expect("OrtEngine::new_cpu_only(Silueta)");
     let edge_engine = EdgeEngine::new().expect("EdgeEngine::new");
     let img = multi_subject_canary();
-    let masked = process_image_from_decoded(
-        &img, &seg_engine, &MaskSettings::default(),
-        &prunr_core::Progress::none(),
-    ).expect("seg").rgba_image;
+    let masked = canary_cutout(&silueta_engine());
     let edge_res = edge_engine.infer_all_tensors(&img).expect("infer_all_tensors");
 
     for style in [

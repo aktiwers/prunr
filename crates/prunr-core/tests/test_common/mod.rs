@@ -260,3 +260,21 @@ pub fn multi_subject_canary() -> image::DynamicImage {
     };
     image::DynamicImage::ImageRgba8(render_synthetic_source(&spec))
 }
+
+/// CPU Silueta session, the segmentation engine the feature tests run.
+pub fn silueta_engine() -> prunr_core::OrtEngine {
+    prunr_core::OrtEngine::new_cpu_only(prunr_core::ModelKind::Silueta, 1)
+        .expect("OrtEngine::new_cpu_only(Silueta)")
+}
+
+/// The canary cut out with default mask settings.
+pub fn canary_cutout(engine: &prunr_core::OrtEngine) -> RgbaImage {
+    prunr_core::process_image_from_decoded(
+        &multi_subject_canary(),
+        engine,
+        &prunr_core::MaskSettings::default(),
+        &prunr_core::Progress::none(),
+    )
+    .expect("seg pipeline on the canary")
+    .rgba_image
+}
