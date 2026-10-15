@@ -765,8 +765,7 @@ fn run_colorize(args: &Cli) -> i32 {
 /// optimisation level, the CPU alone with `--cpu`. The error is the line
 /// to print.
 fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Result<prunr_core::OrtEngine, String> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    prunr_core::OrtEngine::for_model(model, threads, cpu)
+    prunr_core::OrtEngine::for_model(model, prunr_core::batch::ort_intra_threads(1), cpu)
         .map_err(|e| format!("cannot load the {what} model: {e}"))
 }
 
