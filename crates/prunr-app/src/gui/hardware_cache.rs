@@ -62,6 +62,12 @@ impl HardwareInstallCache {
         }
     }
 
+    /// Only `models` installed, for tests that want a partial install.
+    #[cfg(test)]
+    pub(crate) fn with_models(models: &[crate::gui::settings::SettingsModel]) -> Self {
+        Self { models: models.iter().fold(0, |bits, m| bits | 1 << m.index()), ..Self::default() }
+    }
+
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
         match runtime {
             RuntimeId::OpenVino => self.openvino,
@@ -86,10 +92,23 @@ impl HardwareInstallCache {
         self.models & (1 << model.index()) != 0
     }
 
-    /// A Stable Diffusion eraser is installed: SD 1.5 (either quality) or RORem.
-    pub fn has_sd_eraser(&self) -> bool {
+    /// The Stable Diffusion erasers installed, each by the name the user
+    /// knows it by and the model its memory need is read from: SD 1.5
+    /// (either quality) and RORem.
+    pub fn sd_erasers(&self) -> impl Iterator<Item = (&'static str, prunr_models::ModelId)> {
         use crate::gui::settings::SettingsModel;
-        self.has_model(SettingsModel::SdInpaint) || self.has_model(SettingsModel::RoremInpaint) || self.lcm_bundle
+        use prunr_models::ModelId;
+        let sd15 = if self.has_model(SettingsModel::SdInpaint) {
+            Some(ModelId::SdV15InpaintFp16)
+        } else {
+            self.lcm_bundle.then_some(ModelId::SdV15LcmInpaintFp16)
+        };
+        let rorem = self.has_model(SettingsModel::RoremInpaint).then_some(ModelId::RoremFp16);
+        [sd15.map(|id| ("SD 1.5", id)), rorem.map(|id| ("RORem", id))].into_iter().flatten()
+    }
+
+    pub fn has_sd_eraser(&self) -> bool {
+        self.sd_erasers().next().is_some()
     }
 }
 
