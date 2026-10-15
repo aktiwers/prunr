@@ -19,18 +19,8 @@ impl PrunrApp {
 
     /// Core image loading: creates a BatchItem from a source + dimensions.
     fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String) {
-        let id = self.batch.next_id;
-        self.batch.next_id += 1;
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
-        let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch.items.push(BatchItem::new(
-            id,
-            name,
-            source,
-            dims,
-            new_settings,
-            self.settings.default_preset.clone(),
-        ));
+        let id = self.push_new_item(source, dims, name);
         self.batch.selected_index = self.batch.items.len() - 1;
         if do_decode {
             // invariant: push occurred above, so batch.items is non-empty.
@@ -47,37 +37,18 @@ impl PrunrApp {
 
     /// Load an image from raw bytes (clipboard paste, CLI pipe).
     fn load_image(&mut self, bytes: Vec<u8>, filename: Option<String>) {
-        let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
-        {
-            Some(d) => d,
-            None => {
-                self.set_temporary_status("Could not load image");
-                return;
-            }
+        let Some(dims) = probe_dims_bytes(&bytes) else {
+            self.set_temporary_status("Could not load image");
+            return;
         };
         let name = filename.unwrap_or_else(|| "image".into());
         self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
     }
 
     pub fn handle_open_path(&mut self, path: PathBuf) {
-        // Read dimensions from header only — don't load the full file into RAM.
-        let dims = match std::fs::File::open(&path)
-            .ok()
-            .and_then(|f| {
-                image::ImageReader::new(std::io::BufReader::new(f))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|r| r.into_dimensions().ok())
-            })
-        {
-            Some(d) => d,
-            None => {
-                self.set_temporary_status("Could not load image");
-                return;
-            }
+        let Some(dims) = probe_dims_path(&path) else {
+            self.set_temporary_status("Could not load image");
+            return;
         };
         let filename = path.file_name()
             .and_then(|n| n.to_str())
@@ -131,48 +102,18 @@ impl PrunrApp {
 
     /// Add an image to the batch from a file path (lazy — bytes not loaded yet).
     pub fn add_to_batch_path(&mut self, path: PathBuf, filename: String) {
-        // Read dimensions from header only
-        let dims = match std::fs::File::open(&path)
-            .ok()
-            .and_then(|f| {
-                image::ImageReader::new(std::io::BufReader::new(f))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|r| r.into_dimensions().ok())
-            })
-        {
-            Some(d) => d,
-            None => return, // not a valid image
-        };
+        let Some(dims) = probe_dims_path(&path) else { return };
         self.add_to_batch_source(ImageSource::Path(path), dims, filename);
     }
 
     /// Add an image to the batch from raw bytes (clipboard/paste).
     pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String) {
-        let dims = match image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|r| r.into_dimensions().ok())
-        {
-            Some(d) => d,
-            None => return,
-        };
+        let Some(dims) = probe_dims_bytes(&bytes) else { return };
         self.add_to_batch_source(ImageSource::Bytes(Arc::new(bytes)), dims, filename);
     }
 
     fn add_to_batch_source(&mut self, source: ImageSource, dims: (u32, u32), filename: String) {
-        let id = self.batch.next_id;
-        self.batch.next_id += 1;
-
-        let new_settings = self.settings.item_defaults_for_new_item();
-        self.batch.items.push(BatchItem::new(
-            id,
-            filename,
-            source,
-            dims,
-            new_settings,
-            self.settings.default_preset.clone(),
-        ));
+        self.push_new_item(source, dims, filename);
 
         // NOTE: do NOT touch `zoom_state` here. The callers that actually
         // change selection to the newly-added item (DnD inline single-file,
@@ -182,6 +123,20 @@ impl PrunrApp {
         // (previous_zoom) from the prior image into the fit logic, which can
         // mis-fire `canvas.rs`'s "toggle-back to previous_zoom" branch.
         self.pending_batch_sync = true;
+    }
+
+    fn push_new_item(&mut self, source: ImageSource, dims: (u32, u32), name: String) -> u64 {
+        let id = self.batch.next_id;
+        self.batch.next_id += 1;
+        self.batch.items.push(BatchItem::new(
+            id,
+            name,
+            source,
+            dims,
+            self.settings.item_defaults_for_new_item(),
+            self.settings.default_preset.clone(),
+        ));
+        id
     }
 
     pub fn remove_batch_item(&mut self, idx: usize) {
@@ -276,6 +231,25 @@ impl PrunrApp {
             }
         }
     }
+}
+
+/// Reads only the header, never the pixels.
+fn probe_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Reads only the header, so the file is never loaded into RAM.
+fn probe_dims_path(path: &Path) -> Option<(u32, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    image::ImageReader::new(std::io::BufReader::new(file))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// Resolve a list of dropped paths: directories expand to their immediate
