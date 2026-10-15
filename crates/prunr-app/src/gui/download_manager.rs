@@ -355,7 +355,8 @@ fn download_to_file(
     on_progress: &dyn Fn(u64, u64),
     on_verifying: &dyn Fn(),
 ) -> Result<(), DownloadError> {
-    prunr_runtime_install::retry_with_backoff(&cancel, 3, 500, |_attempt| {
+    use prunr_runtime_install::{retry_with_backoff, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS};
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |_attempt| {
         download_attempt(url, dest, expected_sha, &cancel, on_progress, on_verifying)
     })
 }

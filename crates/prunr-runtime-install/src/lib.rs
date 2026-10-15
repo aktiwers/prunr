@@ -179,11 +179,15 @@ impl<'a> DownloadHooks<'a> {
     }
 }
 
-/// Wraps `download_wheel_attempt` in up to 3 tries with exponential
-/// backoff. Transient errors (network timeout, 5xx, broken connection,
-/// SHA256 mismatch) retry; fatal errors (404, user cancel) fail fast.
-/// Mirrors the same policy as the model `download_manager` so users see
-/// consistent retry behaviour across runtime + model installs.
+/// Retry policy the app's downloads share, so runtime and model installs
+/// give up after the same number of tries.
+pub const DOWNLOAD_ATTEMPTS: u32 = 3;
+pub const DOWNLOAD_BACKOFF_BASE_MS: u64 = 500;
+
+/// Wraps `download_wheel_attempt` in `DOWNLOAD_ATTEMPTS` tries with
+/// exponential backoff. Transient errors (network timeout, 5xx, broken
+/// connection, SHA256 mismatch) retry; fatal errors (404, user cancel)
+/// fail fast.
 ///
 /// The SHA verification happens INSIDE the attempt (not after `download_wheel`
 /// returns). A transient corruption — CDN edge cache delivering a partial
@@ -192,7 +196,7 @@ impl<'a> DownloadHooks<'a> {
 /// retry loop give it ~3 chances before escalating.
 pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
     let cancel = Arc::clone(&hooks.cancel);
-    retry_with_backoff(&cancel, 3, 500, |attempt| {
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |attempt| {
         if attempt > 0 {
             tracing::info!(attempt, url = %info.url, "retrying wheel download");
         }
