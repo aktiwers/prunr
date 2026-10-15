@@ -2,6 +2,7 @@ use image::{DynamicImage, GrayImage, RgbaImage};
 use ndarray::ArrayView4;
 use rayon::prelude::*;
 
+use crate::color::lerp_rgb;
 use crate::selection::MaskArtifact;
 use crate::formats::resize_gray_lanczos3;
 use crate::guided_filter::guided_filter_alpha;
@@ -453,10 +454,8 @@ pub fn apply_fill_style(rgba: &mut RgbaImage, style: crate::types::FillStyle) {
                     (highlight, (y - 128) as u16) // 0..=127
                 };
                 let w = (t.min(128) * 2).min(255); // scale to 0..=256 then clamp
-                let inv = 255 - w;
-                p[0] = ((p[0] as u16 * inv + target[0] as u16 * w) / 255) as u8;
-                p[1] = ((p[1] as u16 * inv + target[1] as u16 * w) / 255) as u8;
-                p[2] = ((p[2] as u16 * inv + target[2] as u16 * w) / 255) as u8;
+                let rgb = lerp_rgb([p[0], p[1], p[2]], target, w);
+                p[..3].copy_from_slice(&rgb);
             });
         }
         FillStyle::Halftone { dot_spacing } => {
@@ -505,10 +504,7 @@ fn gradient_map(rgba: &mut RgbaImage, stops: &[[u8; 3]]) {
         let y = luma_u8(p[0], p[1], p[2]) as u16;
         let i = (y / span).min(segments - 1) as usize;
         let t = ((y - i as u16 * span) * 255 / span).min(255);
-        let (lo, hi, inv) = (stops[i], stops[i + 1], 255 - t);
-        for c in 0..3 {
-            p[c] = ((lo[c] as u16 * inv + hi[c] as u16 * t) / 255) as u8;
-        }
+        p[..3].copy_from_slice(&lerp_rgb(stops[i], stops[i + 1], t));
     });
 }
 

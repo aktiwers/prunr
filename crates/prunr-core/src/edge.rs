@@ -6,6 +6,7 @@ use ndarray::Array4;
 use rayon::prelude::*;
 use ort::{inputs, session::Session, value::Tensor};
 
+use crate::color::lerp_rgb;
 use crate::types::{CoreError, EdgeScale};
 
 /// The size TEED reads a photo at, whatever its aspect: Bold and Fused
@@ -458,29 +459,10 @@ fn line_weight(compose: crate::types::ComposeMode, edge: u8) -> u16 {
     if compose == crate::types::ComposeMode::LinesOnly { 255 } else { edge as u16 }
 }
 
-/// Blend `rgb` toward `target` using `weight` (0..=255 as a /255 fraction).
-/// Used where an edge pixel is painted with the user's `solid_line_color`.
+/// Blend `rgb` toward `target` by `weight`/255.
 #[inline]
 fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
-    if weight == 255 {
-        rgb.copy_from_slice(&target);
-        return;
-    }
-    let inv = 255 - weight;
-    rgb[0] = ((rgb[0] as u16 * inv + target[0] as u16 * weight) / 255) as u8;
-    rgb[1] = ((rgb[1] as u16 * inv + target[1] as u16 * weight) / 255) as u8;
-    rgb[2] = ((rgb[2] as u16 * inv + target[2] as u16 * weight) / 255) as u8;
-}
-
-/// Lerp two RGB triples: `a` at t=0, `b` at t=255.
-#[inline]
-fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
-    let inv = 255 - t;
-    [
-        ((a[0] as u16 * inv + b[0] as u16 * t) / 255) as u8,
-        ((a[1] as u16 * inv + b[1] as u16 * t) / 255) as u8,
-        ((a[2] as u16 * inv + b[2] as u16 * t) / 255) as u8,
-    ]
+    rgb.copy_from_slice(&lerp_rgb([rgb[0], rgb[1], rgb[2]], target, weight));
 }
 
 /// Compose subject outline: builds the edge mask(s) from a detector result

@@ -1,5 +1,6 @@
 //! sRGB ↔ CIE Lab (D65) for pixel math that works on lightness and
-//! colour apart: Reinhard colour match and colorization.
+//! colour apart (Reinhard colour match, colorization), and the 8-bit
+//! RGB blend the fills and line colours share.
 
 // ── sRGB ↔ linear helpers ──────────────────────────────────────────────────
 
@@ -114,6 +115,17 @@ pub(crate) fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     let g = (linear_to_srgb(lg) * 255.0).clamp(0.0, 255.0) as u8;
     let b = (linear_to_srgb(lb) * 255.0).clamp(0.0, 255.0) as u8;
     (r, g, b)
+}
+
+/// Lerp two RGB triples: `a` at t=0, `b` at t=255.
+#[inline]
+pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
+    let inv = 255 - t;
+    [
+        ((a[0] as u16 * inv + b[0] as u16 * t) / 255) as u8,
+        ((a[1] as u16 * inv + b[1] as u16 * t) / 255) as u8,
+        ((a[2] as u16 * inv + b[2] as u16 * t) / 255) as u8,
+    ]
 }
 
 #[cfg(test)]
