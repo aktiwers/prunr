@@ -799,12 +799,8 @@ pub fn run_worker() -> ! {
                     cleanup_inputs();
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = is_item_cancelled(&cancelled_items, item_id) || seg_cancel.load(Ordering::Acquire)
-                            || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = seg_cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
-                        // A cancel that reached the spare pass must not
-                        // outlive it and cancel this image's next run.
-                        let _ = is_item_cancelled(&cancelled_items, item_id);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -1010,12 +1006,8 @@ pub fn run_worker() -> ! {
                     }
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = is_item_cancelled(&cancelled_items, item_id) || cancel.load(Ordering::Acquire)
-                            || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
-                        // A cancel that reached the spare pass must not
-                        // outlive it and cancel this image's next run.
-                        let _ = is_item_cancelled(&cancelled_items, item_id);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });

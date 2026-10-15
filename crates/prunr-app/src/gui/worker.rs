@@ -585,8 +585,10 @@ struct SentWork {
     tier2_ids: Vec<u64>,
     add_edge_ids: Vec<u64>,
     /// Images whose result landed and whose spare line scales, under
-    /// this token, are still to come. They keep the batch open: the
-    /// worker is busy with them.
+    /// this token, are still to come. They keep the batch open (the
+    /// worker is busy with them) but are not in `ids`: a cancel for the
+    /// image is meant for a later run, and reaching the worker now it
+    /// would linger and cancel that run as it starts.
     spares: Vec<(u64, u64)>,
 }
 
@@ -609,7 +611,6 @@ impl SentWork {
         self.items.iter().map(|(id, _, _)| *id)
             .chain(self.tier2_ids.iter().copied())
             .chain(self.add_edge_ids.iter().copied())
-            .chain(self.spares.iter().map(|(id, _)| *id))
     }
 
     /// The worker will not send the spare scales still owed (it crashed
@@ -1416,9 +1417,10 @@ mod tests {
         assert_eq!(idle_after_run(ModelKind::U2net), WARM_IDLE);
     }
 
-    /// Owed spare scales keep the batch open and take cancels; a worker
-    /// that will not send them (cancel, crash) tells the app they will
-    /// not come, each under its own token.
+    /// Owed spare scales keep the batch open but take no cancels: their
+    /// run is over, and a cancel forwarded for the image would be one
+    /// meant for its next run. A worker that will not send them (cancel,
+    /// crash) tells the app they will not come, each under its own token.
     #[test]
     fn owed_spare_scales_hold_the_batch_and_are_abandoned_with_the_worker() {
         use super::SentWork;
@@ -1426,7 +1428,7 @@ mod tests {
         sent.spares.push((4, 40));
         sent.spares.push((5, 50));
         assert_eq!(sent.len(), 2);
-        assert_eq!(sent.ids().collect::<Vec<_>>(), vec![4, 5]);
+        assert_eq!(sent.ids().count(), 0, "no cancel goes to a spare pass");
         let (tx, rx) = std::sync::mpsc::channel();
         sent.abandon_spares(&tx);
         assert!(sent.is_empty());
