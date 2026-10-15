@@ -804,6 +804,13 @@ impl BatchItem {
         self.edge_planes = Default::default();
     }
 
+    /// The kept lines lack a scale the settings draw: only a new run of
+    /// the line detector makes it.
+    pub(crate) fn lacks_drawn_scales(&self) -> bool {
+        self.settings.line_mode != prunr_core::LineMode::Off
+            && self.cached_edge_tensors.as_ref().is_some_and(|c| !c.has_all(self.settings.edge_settings().drawn_scales()))
+    }
+
     /// Replaces the compressed tensor and the decoded copy tied to it.
     pub(crate) fn set_cached_tensor(&mut self, tensor: Option<super::worker::CompressedTensor>) {
         self.cached_tensor = tensor;
@@ -1962,8 +1969,9 @@ impl BatchItem {
             RequiredTier::MaskRerun if has_tensor && current.inference.uses_edge_detection => RunTier::AddEdge,
             RequiredTier::MaskRerun if has_tensor => RunTier::Mask,
             RequiredTier::AddEdgeInference if has_tensor => RunTier::AddEdge,
-            // An edge rerun through the subprocess isn't wired for batches;
-            // the live preview handles it in-process.
+            // Lines on the subject trace the cut-out the cached tensor
+            // makes again; over the whole photo there is no cut-out.
+            RequiredTier::EdgeRerun if has_tensor && current.inference.uses_segmentation && current.inference.uses_edge_detection => RunTier::AddEdge,
             RequiredTier::MaskRerun
             | RequiredTier::AddEdgeInference
             | RequiredTier::EdgeRerun
@@ -2750,7 +2758,10 @@ mod tests {
         assert_eq!(tier(true, |_| {}, lines_on), RunTier::AddEdge, "lines onto the cut-out");
         assert_eq!(tier(false, |_| {}, lines_on), RunTier::Full);
         assert_eq!(tier(true, lines_on, |s| s.feather = 3.0), RunTier::AddEdge, "a mask change under lines composes them again");
-        assert_eq!(tier(true, lines_on, |s| s.edge_thickness = 3), RunTier::Full, "an edge change runs whole in a batch");
+        assert_eq!(tier(true, lines_on, |s| s.edge_thickness = 3), RunTier::AddEdge, "an edge change traces the cached cut-out again");
+        assert_eq!(tier(false, lines_on, |s| s.edge_thickness = 3), RunTier::Full, "an edge change without a tensor runs whole");
+        let whole_photo = |s: &mut ItemSettings| s.line_mode = LineMode::EdgesOnly;
+        assert_eq!(tier(true, whole_photo, |s| s.edge_thickness = 3), RunTier::Full, "lines over the whole photo trace no cut-out");
         assert_eq!(tier(true, |_| {}, |s| s.line_mode = LineMode::EdgesOnly), RunTier::Full, "lines over the whole photo");
 
         let mut item = processed(true, |_| {});

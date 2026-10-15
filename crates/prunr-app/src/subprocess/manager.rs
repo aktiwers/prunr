@@ -637,9 +637,7 @@ mod tests {
                 tensor_cache_path: None,
                 tensor_cache_height: None,
                 tensor_cache_width: None,
-                edge_cache_path: None,
-                edge_cache_height: None,
-                edge_cache_width: None,
+                edge_cache: None,
             },
             SubprocessEvent::ImageError {
                 item_id: 2,
