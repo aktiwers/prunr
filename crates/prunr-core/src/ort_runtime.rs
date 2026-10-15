@@ -202,11 +202,11 @@ pub fn set_preferred_runtime(subdir: &str) -> Result<(), String> {
 
 /// Drop the preference when it names `subdir`, which is going away.
 pub fn forget_preferred_runtime(subdir: &str) {
-    let Some(root) = prunr_models::runtime_store_dir() else { return };
-    if read_preferred(&root).as_deref() == Some(subdir) {
-        if let Err(e) = std::fs::remove_file(root.join(PREFERRED_FILE)) {
-            tracing::warn!(%e, subdir, "could not clear the preferred runtime");
-        }
+    let Some(root) = prunr_models::runtime_store_dir().filter(|root| read_preferred(root).as_deref() == Some(subdir)) else {
+        return;
+    };
+    if let Err(e) = std::fs::remove_file(root.join(PREFERRED_FILE)) {
+        tracing::warn!(%e, subdir, "could not clear the preferred runtime");
     }
 }
 
@@ -234,11 +234,13 @@ fn pick_runtime(store_root: Option<&Path>, built_in: Option<PathBuf>, built_in_f
         .filter(|(_, p)| p.is_file())
         .collect();
     let built_in = built_in.map(|p| (p, DylibSource::Bundled));
-    let preferred = match store_root.and_then(read_preferred) {
-        Some(want) if want == PREFER_BUILT_IN => built_in.clone(),
-        Some(want) => installs.iter().find(|(name, _)| *name == want).map(|(_, p)| (p.clone(), DylibSource::RuntimeStore)),
-        None => None,
-    };
+    let preferred = store_root.and_then(read_preferred).and_then(|want| {
+        if want == PREFER_BUILT_IN {
+            built_in.clone()
+        } else {
+            installs.iter().find(|(name, _)| *name == want).map(|(_, p)| (p.clone(), DylibSource::RuntimeStore))
+        }
+    });
     let first_install = installs.into_iter().next().map(|(_, p)| (p, DylibSource::RuntimeStore));
     preferred.or(if built_in_first { built_in.or(first_install) } else { first_install.or(built_in) })
 }
