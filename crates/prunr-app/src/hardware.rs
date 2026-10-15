@@ -128,7 +128,11 @@ pub fn total_ram_bytes() -> u64 {
 /// per-frame loop; prefer `available_ram_bytes_throttled` for any caller
 /// that fires more than once per second.
 pub fn available_ram_bytes_now() -> u64 {
-    let mut sys = sysinfo::System::new();
+    use std::sync::{Mutex, PoisonError};
+    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    let sys = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
+    // Poison recovery: the System is only a reused buffer, refreshed below.
+    let mut sys = sys.lock().unwrap_or_else(PoisonError::into_inner);
     sys.refresh_memory();
     sys.available_memory()
 }

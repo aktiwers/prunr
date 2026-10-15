@@ -36,7 +36,7 @@ impl AdmissionController {
     /// safety margin; `first_look`: the first-look model may load beside
     /// the engines.
     pub fn new(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> Self {
-        let available = available_ram();
+        let available = crate::hardware::available_ram_bytes_now() as usize;
         let overhead = model_overhead(model, jobs, cpu_only)
             + if first_look { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL) } else { 0 };
         let budget = ((available as f64) * 0.85) as usize;
@@ -131,32 +131,13 @@ impl AdmissionController {
     }
 }
 
-/// Cached sysinfo::System instance to avoid repeated allocations.
-fn with_system<T>(f: impl FnOnce(&sysinfo::System) -> T) -> T {
-    use std::sync::{Mutex, OnceLock, PoisonError};
-    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
-    let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
-    // Poison recovery: a panic in a prior RAM query must not disable memory
-    // queries app-wide. The inner System is just a cache; stale data is fine.
-    let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
-    sys.refresh_memory();
-    f(&sys)
-}
-
-/// Query available system RAM (cross-platform via sysinfo).
-fn available_ram() -> usize {
-    with_system(|sys| sys.available_memory() as usize)
-}
-
 /// Returns true when available RAM drops below 20% of total.
 /// Used to trigger Tier 2 → Tier 3 demotion of history entries.
 pub fn under_memory_pressure() -> bool {
-    with_system(|sys| {
-        let total = sys.total_memory();
-        let available = sys.available_memory();
-        if total == 0 { return false; }
-        (available as f64 / total as f64) < 0.20
-    })
+    let total = crate::hardware::total_ram_bytes();
+    let available = crate::hardware::available_ram_bytes_now();
+    if total == 0 { return false; }
+    (available as f64 / total as f64) < 0.20
 }
 
 /// Total cost per concurrent inference slot: session weights + ORT workspace +
@@ -184,7 +165,7 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
 /// Conservative: engines should use at most 50% of available RAM,
 /// leaving the rest for image buffers, history, and OS headroom.
 pub fn safe_max_jobs(model: ModelKind) -> usize {
-    let available = available_ram();
+    let available = crate::hardware::available_ram_bytes_now() as usize;
     let budget = available / 2; // 50% of available RAM for engines
     let cost = per_engine_cost(model);
     if cost == 0 { return 4; }
