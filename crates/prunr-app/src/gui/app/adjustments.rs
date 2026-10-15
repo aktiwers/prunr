@@ -270,15 +270,13 @@ impl PrunrApp {
         }
 
         if tc.preset_applied {
-            // `None` model = filter-only mode; pick an arbitrary ModelKind for
-            // the diff since the seg stage is skipped regardless. Upscale and
-            // inpaint variants must resolve to their own ModelKind here, not
-            // the seg-only `to_model_kind` — see Bug #3.
+            // Upscale and inpaint must diff against their own ModelKind, not
+            // the seg-only `to_model_kind` fallback.
             let model = self
                 .settings
                 .model
                 .dispatch_model_kind()
-                .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+                .unwrap_or(super::NO_MODEL_RECIPE_KIND);
             let preset_dispatch = match &item.applied_recipe {
                 None => knob_catalog::DispatchKind::SubprocessFullPipeline,
                 Some(old) => {

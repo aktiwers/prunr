@@ -254,12 +254,12 @@ impl PrunrApp {
             self.process_filter_only(filter, step);
             return;
         }
-        // No-model-but-EdgesOnly falls through with a placeholder. The
+        // No-model-but-EdgesOnly falls through with the placeholder. The
         // subprocess Init still receives this field; `needs_segmentation`
         // is false for EdgesOnly so the seg model never loads.
         let model: prunr_core::ModelKind = self.settings.model
             .to_model_kind()
-            .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+            .unwrap_or(super::NO_MODEL_RECIPE_KIND);
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
             .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
