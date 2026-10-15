@@ -47,8 +47,9 @@ pub(crate) enum SelectionImage {
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
 }
 
-/// Counting semaphore used to bound the number of simultaneously-decoding
-/// background threads. Without this, a 50-image Process All fans out 50
+/// Counting semaphore bounding how many background jobs (decode, thumbnail,
+/// filter-only pass, background picture, texture prep, history compression)
+/// run at once. Without it, a 50-image Process All fans out 50
 /// threads each holding `compressed bytes + DynamicImage + RgbaImage`
 /// (~50–80 MB at 4 K) → multi-GB transient before any thread releases.
 /// Threads still spawn immediately; they park on `acquire` until a slot
@@ -122,16 +123,14 @@ pub struct BackgroundIO {
     /// Off-thread RGBA decode + ColorImage build for a per-item bg
     /// image. Drain calls `ctx.load_texture` with the bg-specific
     /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
-    /// Without this the `to_rgba8()` clone (~32 MB on a 4K bg) +
-    /// `ctx.load_texture` ran inline in `views/canvas.rs::render` on
-    /// the first frame after every bg-image pick.
+    /// The `to_rgba8()` copy (~32 MB on a 4K bg) stays off the UI thread.
     pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<egui::ColorImage>)>,
     pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<egui::ColorImage>)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
-    /// Bounds simultaneous decode/thumbnail/filter threads to
-    /// `available_parallelism()`. Threads spawn immediately but park here
-    /// until a slot opens, capping transient RAM at N × per-thread peak.
+    /// Bounds simultaneous background jobs to `available_parallelism()`.
+    /// Threads spawn immediately but park here until a slot opens,
+    /// capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
     /// Selection texture built off-thread whenever the selected item's
     /// texture is missing. Drained via ctx.load_texture (allowed —
