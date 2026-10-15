@@ -201,12 +201,12 @@ impl SdTuning {
     /// `PRUNR_SD_MEM_PATTERN`, `PRUNR_SD_DEV_INIT` and `PRUNR_SD_THREADS`.
     pub fn with_env_overrides(self) -> Self {
         Self {
-            keep_loaded: env_flag("PRUNR_SD_KEEP_LOADED").unwrap_or(self.keep_loaded),
-            tall_crop: env_flag("PRUNR_SD_TALL_CROP").unwrap_or(self.tall_crop),
+            keep_loaded: crate::env::flag("PRUNR_SD_KEEP_LOADED").unwrap_or(self.keep_loaded),
+            tall_crop: crate::env::flag("PRUNR_SD_TALL_CROP").unwrap_or(self.tall_crop),
             ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(self.ov_device),
             mem: SdMemPlan {
-                memory_pattern: env_flag("PRUNR_SD_MEM_PATTERN").or(self.mem.memory_pattern),
-                device_initializers: env_flag("PRUNR_SD_DEV_INIT").unwrap_or(self.mem.device_initializers),
+                memory_pattern: crate::env::flag("PRUNR_SD_MEM_PATTERN").or(self.mem.memory_pattern),
+                device_initializers: crate::env::flag("PRUNR_SD_DEV_INIT").unwrap_or(self.mem.device_initializers),
                 intra_threads: std::env::var("PRUNR_SD_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(self.mem.intra_threads),
             },
             ..self
@@ -215,14 +215,6 @@ impl SdTuning {
 
     fn session_key(&self) -> SdSessionKey {
         SdSessionKey { ov_device: self.ov_device.clone(), cpu_only: self.cpu_only, mem: self.mem }
-    }
-}
-
-fn env_flag(name: &str) -> Option<bool> {
-    match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 
