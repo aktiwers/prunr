@@ -65,10 +65,14 @@ impl Timing {
     }
 }
 
-/// How many times faster `gpu` ran than `cpu`.
+/// How many times faster `gpu` ran than `cpu`. A side timed once (a
+/// heavy model's CPU reference) is compared first run to first run, so
+/// both carry their warm-up.
 pub fn speedup(cpu: &Timing, gpu: &Timing) -> Option<f64> {
-    let gpu_ms = gpu.typical_ms();
-    (gpu_ms > 0.0).then(|| cpu.typical_ms() / gpu_ms)
+    let once = cpu.runs_ms.is_empty() || gpu.runs_ms.is_empty();
+    let ms = |t: &Timing| if once { t.first_ms } else { t.typical_ms() };
+    let gpu_ms = ms(gpu);
+    (gpu_ms > 0.0).then(|| ms(cpu) / gpu_ms)
 }
 
 pub fn alpha_samples(img: &RgbaImage) -> Vec<u8> {
@@ -132,6 +136,8 @@ mod tests {
         let cpu = Timing { runs_ms: vec![200.0], ..Timing::default() };
         assert_eq!(speedup(&cpu, &timed), Some(10.0));
         assert_eq!(speedup(&cpu, &Timing::default()), None);
+        let cpu_once = Timing { first_ms: 900.0, runs_ms: vec![], ..Timing::default() };
+        assert_eq!(speedup(&cpu_once, &timed), Some(10.0), "first run to first run when one side ran once");
     }
 
     #[test]
