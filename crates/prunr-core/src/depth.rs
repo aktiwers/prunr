@@ -295,7 +295,8 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 /// `amount` times how far it is. Alpha is unchanged.
 ///
 /// Peak working set: the result (w·h·4 bytes) and one row of nearness.
-pub fn depth_fog(src: &RgbaImage, depth: &DepthMap, amount: f32, color: [u8; 3]) -> RgbaImage {
+#[cfg(test)]
+fn depth_fog(src: &RgbaImage, depth: &DepthMap, amount: f32, color: [u8; 3]) -> RgbaImage {
     let mut out = src.clone();
     haze_in_place(&mut out, depth, amount, color, 0.0);
     out
@@ -315,7 +316,8 @@ const AERIAL_WARM_SHARE: f32 = 0.25;
 /// two pixels of one depth swap lightness order. Alpha is unchanged.
 ///
 /// Peak working set: the result (w·h·4 bytes) and one row of nearness.
-pub fn aerial_perspective(src: &RgbaImage, depth: &DepthMap, amount: f32) -> RgbaImage {
+#[cfg(test)]
+fn aerial_perspective(src: &RgbaImage, depth: &DepthMap, amount: f32) -> RgbaImage {
     let mut out = src.clone();
     haze_in_place(&mut out, depth, 0.0, FOG_COLOR, amount);
     out
