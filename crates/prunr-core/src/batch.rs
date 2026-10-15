@@ -18,7 +18,7 @@ pub fn engine_pool_size(model: ModelKind, jobs: usize, cpu_only: bool, provider:
     let on_cpu = cpu_only || crate::engine::runs_on_host_cpu(provider);
     if on_cpu && !model.parallel_jobs_pay_on_cpu() {
         1
-    } else if !cpu_only && !provider.eq_ignore_ascii_case("CPU") {
+    } else if !cpu_only && !provider.eq_ignore_ascii_case(crate::engine::CPU_NAME) {
         jobs.min(2)
     } else {
         jobs
