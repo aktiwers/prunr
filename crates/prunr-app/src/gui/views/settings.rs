@@ -144,7 +144,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         app.apply_processor();
     }
     if closed {
-        app.close_settings(ctx);
+        app.close_settings();
     }
 }
 

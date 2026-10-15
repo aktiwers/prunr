@@ -78,7 +78,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         if tooltip(icon_button(ui, ICON_SETTINGS.codepoint), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
-                app.close_settings(ui.ctx());
+                app.close_settings();
             } else {
                 app.open_settings();
             }

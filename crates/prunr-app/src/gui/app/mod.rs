@@ -341,13 +341,13 @@ impl PrunrApp {
                     self.apply_cancel_shortcut(ctx);
                 }
             }
-            Action::Shortcuts => self.toggle_hotkeys_tab(ctx),
+            Action::Shortcuts => self.toggle_hotkeys_tab(),
             Action::CliHelp | Action::PipelineFlow => {
                 if let Some(open) = self.help_modal_mut(action) {
                     *open = !*open;
                 }
             }
-            Action::Settings => self.toggle_settings_panel(ctx),
+            Action::Settings => self.toggle_settings_panel(),
             Action::PrevImage => self.navigate_batch(ctx, NavDir::Prev),
             Action::NextImage => self.navigate_batch(ctx, NavDir::Next),
             Action::ToggleQueue => self.sidebar_hidden = !self.sidebar_hidden,
@@ -642,7 +642,7 @@ impl PrunrApp {
         }
     }
 
-    pub(crate) fn close_settings(&mut self, _ctx: &egui::Context) {
+    pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
         // Don't carry the half-clicked reset confirm across modal opens.
         self.pending_reset_confirm = false;
@@ -924,7 +924,7 @@ impl PrunrApp {
     /// Escape: the top-most modal first, then a run in flight, then
     /// the selection. One press does one thing.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if self.close_top_modal(ctx) {
+        if self.close_top_modal() {
             return;
         }
         let finding_faces = self.processor.dispatch_progress().is_some_and(|p| p.kind == super::dispatch_progress::ProgressKind::Faces);
@@ -948,7 +948,7 @@ impl PrunrApp {
     }
 
     /// Closes the modal on top, in stacking order; false when none is open.
-    fn close_top_modal(&mut self, ctx: &egui::Context) -> bool {
+    fn close_top_modal(&mut self) -> bool {
         if self.save_preset.is_some() {
             self.save_preset = None;
         } else if self.pending_license_request.is_some() {
@@ -958,7 +958,7 @@ impl PrunrApp {
         } else if let Some(rt) = self.runtime_prompt.take() {
             self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
         } else if self.show_settings {
-            self.close_settings(ctx);
+            self.close_settings();
         } else if self.show_cli_help {
             self.show_cli_help = false;
         } else if self.show_pipeline_flow {
@@ -971,19 +971,19 @@ impl PrunrApp {
 
     /// Settings on the Hotkeys tab, the one list of shortcuts; closes it
     /// when that tab is already showing.
-    pub(crate) fn toggle_hotkeys_tab(&mut self, ctx: &egui::Context) {
+    pub(crate) fn toggle_hotkeys_tab(&mut self) {
         use super::views::settings::SettingsTab;
         if self.show_settings && self.settings_tab == SettingsTab::Hotkeys {
-            self.close_settings(ctx);
+            self.close_settings();
         } else {
             self.settings_tab = SettingsTab::Hotkeys;
             self.open_settings();
         }
     }
 
-    fn toggle_settings_panel(&mut self, ctx: &egui::Context) {
+    fn toggle_settings_panel(&mut self) {
         if self.show_settings {
-            self.close_settings(ctx);
+            self.close_settings();
         } else {
             self.open_settings();
         }
