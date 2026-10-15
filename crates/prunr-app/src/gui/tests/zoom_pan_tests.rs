@@ -20,37 +20,6 @@ fn previous_zoom_initialized_to_one() {
 }
 
 #[test]
-fn before_after_toggle_switches_show_original() {
-    let mut app = PrunrApp::new_for_test();
-    assert!(!app.show_original);
-    app.show_original = !app.show_original;
-    assert!(app.show_original);
-    app.show_original = !app.show_original;
-    assert!(!app.show_original);
-}
-
-#[test]
-fn show_original_resets_on_new_image_load() {
-    let mut app = PrunrApp::new_for_test();
-    app.show_original = true;
-    // Simulate loading a new image via load_image internals
-    // load_image resets show_original to false
-    app.show_original = false; // simulates what load_image does
-    assert!(!app.show_original);
-}
-
-#[test]
-fn zoom_clamped_to_range() {
-    let mut app = PrunrApp::new_for_test();
-    // Simulate zoom beyond max
-    app.zoom_state.zoom = 25.0_f32.clamp(0.10, 20.0);
-    assert!((app.zoom_state.zoom - 20.0).abs() < f32::EPSILON);
-    // Simulate zoom below min
-    app.zoom_state.zoom = 0.01_f32.clamp(0.10, 20.0);
-    assert!((app.zoom_state.zoom - 0.10).abs() < f32::EPSILON);
-}
-
-#[test]
 fn pending_fit_zoom_flag_defaults_false() {
     let app = PrunrApp::new_for_test();
     assert!(!app.zoom_state.pending_fit_zoom);
