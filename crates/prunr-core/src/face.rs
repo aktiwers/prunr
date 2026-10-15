@@ -244,7 +244,6 @@ impl LazyFaceFinder {
 /// The restorer (~1.2 GB for GFPGAN) loads on the first face and stays
 /// until this is dropped.
 pub struct FaceRestorer {
-    id: prunr_models::ModelId,
     finder: FaceFinder,
     restorer_path: std::path::PathBuf,
     restorer: Option<Session>,
@@ -257,7 +256,7 @@ impl FaceRestorer {
             .into_iter()
             .find_map(|(key, path)| (key == "restorer").then_some(path))
             .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no restorer part")))?;
-        Ok(Self { id, finder: FaceFinder::new()?, restorer_path, restorer: None })
+        Ok(Self { finder: FaceFinder::new()?, restorer_path, restorer: None })
     }
 
     /// `find_and_restore` with the models this holds.
@@ -272,11 +271,13 @@ impl FaceRestorer {
         }
         // Before the restorer loads, which takes seconds the first time.
         let places = report_found(image, &faces, progress);
-        if self.restorer.is_none() {
-            progress.step(Step::LoadingModel);
-            self.restorer = Some(load(&self.restorer_path)?);
-        }
-        let restorer = self.restorer.as_mut().ok_or_else(|| CoreError::Inference(format!("face model {:?}: restorer not loaded", self.id)))?;
+        let restorer = match &mut self.restorer {
+            Some(r) => r,
+            None => {
+                progress.step(Step::LoadingModel);
+                self.restorer.insert(load(&self.restorer_path)?)
+            }
+        };
         restore_each(image, &places, blend, progress, |crop| restore(restorer, crop))
     }
 }
