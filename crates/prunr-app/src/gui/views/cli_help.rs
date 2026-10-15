@@ -11,7 +11,7 @@ const FOOTER_HEIGHT: f32 = 28.0;
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
     theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",
-        [theme::SETTINGS_DIALOG_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
+        [theme::STANDARD_MODAL_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
         |ui| super::chip::modal_page(ui, "Command-line reference", "", |ui| {
             theme::apply_modal_visuals(ui);
 
