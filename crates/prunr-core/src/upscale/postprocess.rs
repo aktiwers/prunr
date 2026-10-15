@@ -27,7 +27,7 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
     out.as_mut().par_chunks_exact_mut(4).zip(src.as_raw().par_chunks_exact(4)).for_each(|(o, p)| {
         for c in 0..3 {
             let (v, bv) = (p[c] as f32, o[c] as f32);
-            let mixed = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
+            let mixed = v + strength * (v - bv);
             o[c] = mixed.round().clamp(0.0, 255.0) as u8;
         }
         o[3] = p[3];
