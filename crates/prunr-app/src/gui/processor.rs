@@ -1301,7 +1301,7 @@ impl Processor {
             match evt {
                 InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
                 InpaintBridgeResult::Done { item_id, gen, rgba_path, width, height, fill_scale } => {
-                    let outcome = match super::worker::read_and_delete(&rgba_path) {
+                    let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
                         Some(b) => match image::load_from_memory(&b) {
                             Ok(img) => {
                                 let rgba = img.to_rgba8();

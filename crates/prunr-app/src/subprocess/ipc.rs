@@ -61,6 +61,14 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
     Ok(Some(msg))
 }
 
+/// Read a one-shot IPC temp file and delete it in the same breath; a file
+/// that cannot be read is left for the prefix-scoped cleanup.
+pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(bytes)
+}
+
 /// View an f32 slice as raw bytes. Zero-copy on little-endian hosts (every
 /// platform we target). The returned slice borrows from `data`; the caller
 /// feeds it straight into `fs::write` / `zstd::encode_all` / similar
@@ -90,6 +98,16 @@ pub fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn a_read_temp_file_is_gone_and_a_missing_one_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.raw");
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        assert_eq!(read_and_delete(&path), Some(vec![1, 2, 3]));
+        assert!(!path.exists());
+        assert_eq!(read_and_delete(&path), None);
+    }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
     enum TestMsg {

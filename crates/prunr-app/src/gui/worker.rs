@@ -6,6 +6,7 @@ use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{EdgeCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
+use crate::subprocess::ipc::read_and_delete;
 pub(crate) use crate::subprocess::first_look::Shown;
 use prunr_core::IDLE_RELEASE as WARM_IDLE;
 
@@ -1028,14 +1029,6 @@ fn read_result_image(
         .ok_or_else(|| "Failed to read result from subprocess".to_string());
     let _ = std::fs::remove_file(result_path);
     result
-}
-
-/// Read a temp file and delete it in the same breath. Invariant shared by
-/// every subprocess-IPC reader: the temp file is one-shot, always removed.
-pub(super) fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
-    let _ = std::fs::remove_file(path);
-    Some(bytes)
 }
 
 /// Read the segmentation tensor cache from disk.
