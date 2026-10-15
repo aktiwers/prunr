@@ -190,29 +190,33 @@ fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), S
     Ok(())
 }
 
-/// The detector's planes as the item's edge cache: path, base height and
-/// width, or all `None` when nothing was written. A run that skipped a
-/// scale writes none — the app splits the file into every scale's plane,
-/// and a partial cache could not serve a scale switch anyway.
+/// The detector's planes the run made, written as the item's edge
+/// cache; `None` when it made none or the write failed.
 fn write_edge_cache(
     ipc: &std::path::Path,
     item_id: u64,
     res: &prunr_core::EdgeInferenceResult,
-) -> (Option<std::path::PathBuf>, Option<u32>, Option<u32>) {
-    if res.tensors.iter().any(Vec::is_empty) {
-        return (None, None, None);
+) -> Option<EdgeCacheFile> {
+    let scales: Vec<prunr_core::EdgeScale> = prunr_core::EdgeScale::ALL.into_iter()
+        .filter(|&s| !res.tensors[s as usize].is_empty())
+        .collect();
+    if scales.is_empty() {
+        return None;
     }
     let path = IpcKind::Edge.path_for(ipc, item_id);
     match write_edge_tensors(&path, res) {
-        Ok(()) => (Some(path), Some(res.height), Some(res.width)),
-        Err(_) => (None, None, None),
+        Ok(()) => Some(EdgeCacheFile { path, height: res.height, width: res.width, scales }),
+        Err(err) => {
+            tracing::error!(item_id, %err, "edge cache write failed");
+            None
+        }
     }
 }
 
-/// Stream an `EdgeInferenceResult`'s per-scale tensors to a path as one LE
-/// byte sequence — same layout the parent expects in `read_edge_tensor_cache`,
-/// but without the ~16 MB intermediate `Vec<u8>` that `std::fs::write(path,
-/// pack_edge_tensors(res))` would have built.
+/// Stream an `EdgeInferenceResult`'s non-empty planes to a path as one LE
+/// byte sequence in `EdgeScale` order — the layout `EdgeCacheFile`
+/// names — without the ~16 MB intermediate `Vec<u8>` that
+/// `std::fs::write(path, pack_edge_tensors(res))` would have built.
 fn write_edge_tensors(
     path: &std::path::Path,
     res: &prunr_core::EdgeInferenceResult,
@@ -704,8 +708,8 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
-                            let (ecp, ech, ecw) = edge_tensor_for_cache.as_ref()
-                                .map_or((None, None, None), |res| write_edge_cache(&ipc, item_id, res));
+                            let edge_cache = edge_tensor_for_cache.as_ref()
+                                .and_then(|res| write_edge_cache(&ipc, item_id, res));
 
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
@@ -729,9 +733,7 @@ pub fn run_worker() -> ! {
                                         tensor_cache_path: tcp,
                                         tensor_cache_height: tch,
                                         tensor_cache_width: tcw,
-                                        edge_cache_path: ecp,
-                                        edge_cache_height: ech,
-                                        edge_cache_width: ecw,
+                                        edge_cache,
                                     });
                                 }
                                 Err(e) => {
@@ -819,9 +821,7 @@ pub fn run_worker() -> ! {
                                     tensor_cache_path: None,
                                     tensor_cache_height: None,
                                     tensor_cache_width: None,
-                                    edge_cache_path: None,
-                                    edge_cache_height: None,
-                                    edge_cache_width: None,
+                                    edge_cache: None,
                                 });
                             }
                         }
@@ -914,7 +914,7 @@ pub fn run_worker() -> ! {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
-                            let (ecp, ech, ecw) = write_edge_cache(&ipc, item_id, &edge_res);
+                            let edge_cache = write_edge_cache(&ipc, item_id, &edge_res);
 
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
                             drop(rgba);
@@ -931,9 +931,7 @@ pub fn run_worker() -> ! {
                                     tensor_cache_path: Some(seg_tensor_path.clone()),
                                     tensor_cache_height: Some(seg_tensor_height),
                                     tensor_cache_width: Some(seg_tensor_width),
-                                    edge_cache_path: ecp,
-                                    edge_cache_height: ech,
-                                    edge_cache_width: ecw,
+                                    edge_cache,
                                 });
                             }
                         }
