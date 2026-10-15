@@ -1,12 +1,12 @@
-//! Per-model interpretation boundary tests.
-//!
-//! Each test commits a known selection on a fixture BatchItem under a specific
-//! active-model category and asserts the dispatch side-effect (or lack thereof)
-//! via `LivePreview::is_pending_for`, which returns true when
-//! `dispatch_brush_rerun` called `mark_tweak` for the item.
+//! Brushes and selections against the app: which active model re-cuts on a
+//! committed selection (`LivePreview::is_pending_for`), how strokes sit on
+//! the undo timeline, the live preview's tensor reuse, the Magic Brush
+//! retune and embedding cache, the cut-out switch (Restore / Erase /
+//! Select) and its correction cache, and what a model switch leaves
+//! correctable.
 //!
 //! The Magic Brush's model (Sam21HieraSmall) is not a `SettingsModel`: it
-//! is never the active model, so it has no row here.
+//! is never the active model, so it has no row in the per-model table.
 
 
 use crate::gui::app::PrunrApp;
