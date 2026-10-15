@@ -1,14 +1,8 @@
-//! Tier-2 postprocess operations applied to the cached `upscale_raw`
-//! RGBA buffer. Pure functions operating in-place; they do NOT
-//! re-allocate the image (the caller's RAM accounting depends on
-//! this).
+//! Refine's steps after the model: sharpen, AI blend, Reinhard Lab
+//! colour match. Straight sRGB u8 in and out, f32 math in between.
 //!
-//! All operate on STRAIGHT (un-premultiplied) sRGB u8 per
-//! CLAUDE.md ## Numerical & color invariants. Internal math uses
-//! f32 working buffers; clamp+cast at the u8 boundary.
-//!
-//! Reinhard Lab (not LMS) for color match, with proper IEC 61966-2-1
-//! linearisation and D65 XYZ→Lab pipeline.
+//! Colour match works in Lab, not LMS, with IEC 61966-2-1
+//! linearisation and a D65 XYZ→Lab pipeline.
 
 use image::RgbaImage;
 
