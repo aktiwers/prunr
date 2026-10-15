@@ -14,6 +14,13 @@ use serde::{Serialize, Deserialize};
 /// round-trip.
 pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 
+/// An image error that reports a cancel: the dispatch-time
+/// `CANCELLED_ERR_MSG`, or core's own text when the cancel stopped a run
+/// part-way.
+pub fn is_cancel_error(error: &str) -> bool {
+    error == CANCELLED_ERR_MSG || error == prunr_core::CoreError::Cancelled.to_string()
+}
+
 /// `InpaintBridgeResult::Error.error` value the inpaint bridge emits
 /// when its watchdog kills the subprocess to prevent a system-wide
 /// memory-pressure stall. Routed to a distinct user-facing toast
@@ -555,6 +562,13 @@ mod tests {
     use serde::de::DeserializeOwned;
     use std::fmt::Debug;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_cancel_reads_as_a_cancel_whoever_reported_it() {
+        assert!(is_cancel_error(CANCELLED_ERR_MSG));
+        assert!(is_cancel_error(&prunr_core::CoreError::Cancelled.message()));
+        assert!(!is_cancel_error(&prunr_core::CoreError::Inference("out of memory".into()).message()));
+    }
 
     fn roundtrip<T>(value: &T)
     where
