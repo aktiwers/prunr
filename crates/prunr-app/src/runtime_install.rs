@@ -313,6 +313,13 @@ fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    /// The installer checks the extracted library under its name and the
+    /// loader looks for it under core's; neither crate can see the other.
+    #[test]
+    fn installer_and_loader_agree_on_the_library_name() {
+        assert_eq!(ri::DYLIB_NAME, prunr_core::ort_runtime::DYLIB_NAME);
+    }
+
     /// The preference file names each offered install by its dir, which
     /// names the runtime back, and the built-in value can never name an
     /// install dir.
