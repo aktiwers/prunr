@@ -933,16 +933,8 @@ fn run_event_loop(
         }
 
         // If everything drained and no more coming, mark finished.
-        if sent.is_empty() && state.nothing_pending() {
-            if let Some(rx) = state.additional_rx.as_ref() {
-                match rx.try_recv() {
-                    Ok(item) => state.admit(item),
-                    Err(mpsc::TryRecvError::Disconnected) => subprocess_finished = true,
-                    Err(mpsc::TryRecvError::Empty) => {}
-                }
-            } else {
-                subprocess_finished = true;
-            }
+        if sent.is_empty() && matches!(poll_additional_items(state), WaitAction::Complete) {
+            subprocess_finished = true;
         }
     }
     EventLoopOutcome::Finished
@@ -1301,26 +1293,15 @@ fn finalize_or_continue(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> bool {
-    if state.nothing_pending() {
-        if let Some(rx) = state.additional_rx.as_ref() {
-            match rx.try_recv() {
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    let _ = res_tx.send(state.complete_event());
-                    ctx.request_repaint();
-                    return false;
-                }
-                Ok(item) => state.admit(item),
-                Err(mpsc::TryRecvError::Empty) => {
-                    // More might be coming — loop back.
-                }
-            }
-        } else {
+    match poll_additional_items(state) {
+        WaitAction::Complete => {
             let _ = res_tx.send(state.complete_event());
             ctx.request_repaint();
-            return false;
+            false
         }
+        // Sleep: more might be coming — loop back.
+        WaitAction::Continue | WaitAction::Sleep => true,
     }
-    true
 }
 
 /// Boot a worker with `spec`'s model before any Process asks for it: at
