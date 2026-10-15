@@ -832,7 +832,7 @@ pub fn run_worker() -> ! {
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
-                    // back as tensor_cache_path — the parent's read_tensor_cache
+                    // back as tensor_cache_path — the parent's read_raw_seg_tensor
                     // reads-and-deletes it. So here we `read`, not `read_and_delete`.
                     let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
                         let raw_bytes = std::fs::read(&seg_tensor_path)
