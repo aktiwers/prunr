@@ -841,14 +841,12 @@ impl PrunrApp {
         for id in &targets {
             self.processor.cancels.request_item_cancel(*id);
         }
-        // Flip status immediately so thumbnail / canvas spinners stop. Any late
-        // ImageDone or ImageError from the subprocess gets ignored in
-        // `on_batch_item_done` (the Processing-only guard).
+        // The image shows its state again at once; a late answer from the
+        // cancelled run finds it no longer processing, and a newer batch
+        // running it again takes it from the cancelled one's.
         for id in &targets {
             if let Some(item) = self.batch.find_by_id_mut(*id) {
-                if item.status == BatchStatus::Processing {
-                    item.status = BatchStatus::Pending;
-                }
+                item.abandon_job();
             }
         }
         self.toasts.info(format!("Cancelling {} image(s)", targets.len()));

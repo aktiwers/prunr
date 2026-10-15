@@ -396,6 +396,9 @@ pub enum WorkerResult {
         at: Instant,
     },
     BatchItemDone {
+        /// The batch whose run this answers: a cancelled run's late
+        /// answer names its own batch, not the image's next run.
+        batch: u64,
         item_id: u64,
         result: Result<ProcessResult, String>,
         /// Cached segmentation tensor from Tier 1 (for future mask-tier reruns).
@@ -978,6 +981,7 @@ fn handle_subprocess_event(
             }
 
             let _ = res_tx.send(WorkerResult::BatchItemDone {
+                batch: state.batch,
                 item_id, result, tensor_cache, edge_cache,
             });
             ctx.request_repaint();
@@ -988,6 +992,7 @@ fn handle_subprocess_event(
             state.completed.insert(item_id);
             sent.forget(item_id);
             let _ = res_tx.send(WorkerResult::BatchItemDone {
+                batch: state.batch,
                 item_id,
                 result: Err(error),
                 tensor_cache: None,
@@ -1190,6 +1195,7 @@ fn report_cancelled(
 ) {
     state.completed.insert(item_id);
     let _ = res_tx.send(WorkerResult::BatchItemDone {
+        batch: state.batch,
         item_id,
         result: Err(CANCELLED_ERR_MSG.to_string()),
         tensor_cache: None,
@@ -1232,6 +1238,7 @@ fn handle_crash_and_retry(
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
+                batch: state.batch,
                 item_id: tid,
                 result: Err(crash_reason.clone()),
                 tensor_cache: None,
@@ -1289,6 +1296,7 @@ fn emit_pending_errors(
     for (id, _, _) in &state.pending {
         if !state.completed.contains(id) {
             let _ = res_tx.send(WorkerResult::BatchItemDone {
+                batch: state.batch,
                 item_id: *id,
                 result: Err(err_msg.to_string()),
                 tensor_cache: None,
@@ -1298,6 +1306,7 @@ fn emit_pending_errors(
     }
     for t2 in &state.pending_tier2 {
         let _ = res_tx.send(WorkerResult::BatchItemDone {
+            batch: state.batch,
             item_id: t2.item_id,
             result: Err(err_msg.to_string()),
             tensor_cache: None,
@@ -1306,6 +1315,7 @@ fn emit_pending_errors(
     }
     for ae in &state.pending_add_edge {
         let _ = res_tx.send(WorkerResult::BatchItemDone {
+            batch: state.batch,
             item_id: ae.item_id,
             result: Err(err_msg.to_string()),
             tensor_cache: None,

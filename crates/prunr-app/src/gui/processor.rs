@@ -1428,7 +1428,9 @@ impl Processor {
     }
 
     /// Register a batch sent to the worker: `ids` land with `recipe`.
-    /// Returns the batch's id, which its completion names.
+    /// Returns the batch's id, which its completion names. An image an
+    /// older batch still lists (its run was cancelled) now awaits this
+    /// batch only: the older run's late answer no longer lands.
     pub(crate) fn track_dispatch(
         &mut self,
         recipe: ProcessingRecipe,
@@ -1436,6 +1438,12 @@ impl Processor {
     ) -> u64 {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
+        self.in_flight.retain_mut(|b| {
+            let before = b.pending.len();
+            b.pending.retain(|id| !pending.contains(id));
+            b.total -= before - b.pending.len();
+            !b.pending.is_empty()
+        });
         let id = self.next_batch;
         self.next_batch += 1;
         self.in_flight.push(InFlightBatch { id, recipe, pending, total });
@@ -1475,11 +1483,12 @@ impl Processor {
         }
     }
 
-    /// Take the recipe for a finished item from the batch that sent it.
-    /// `None` when no batch holds it (late delivery after cancel) and the
-    /// caller falls back. A batch whose last item lands is done.
-    pub(crate) fn take_recipe(&mut self, id: u64) -> Option<ProcessingRecipe> {
-        let at = self.in_flight.iter().position(|b| b.pending.contains(&id))?;
+    /// Take the recipe for an item batch `batch` answered. `None` when
+    /// that batch no longer awaits it (cancelled, or a newer batch runs
+    /// the image): the answer is stale. A batch whose last item lands is
+    /// done.
+    pub(crate) fn take_recipe(&mut self, batch: u64, id: u64) -> Option<ProcessingRecipe> {
+        let at = self.in_flight.iter().position(|b| b.id == batch && b.pending.contains(&id))?;
         let batch = &mut self.in_flight[at];
         batch.pending.remove(&id);
         let recipe = batch.recipe.clone();
@@ -2562,9 +2571,9 @@ mod tests {
     fn a_batch_counts_its_images_and_keeps_the_reported_step() {
         use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
         p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject));
-        assert!(p.take_recipe(1).is_some());
+        assert!(p.take_recipe(b, 1).is_some());
         let shown = p.dispatch_progress().unwrap();
         assert_eq!((shown.outer, shown.step_label.as_ref()), (Some((1, 3)), "Finding the subject"));
         p.track_streamed(4);
@@ -2880,12 +2889,12 @@ mod tests {
     #[test]
     fn track_dispatch_then_take_returns_recipe_per_item() {
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [10, 20, 30].iter().copied());
-        assert!(p.take_recipe(10).is_some());
-        assert!(p.take_recipe(20).is_some());
+        let b = p.track_dispatch(fixture_recipe(), [10, 20, 30].iter().copied());
+        assert!(p.take_recipe(b, 10).is_some());
+        assert!(p.take_recipe(b, 20).is_some());
         // Slot still alive while items remain.
         assert!(!p.in_flight.is_empty());
-        assert!(p.take_recipe(30).is_some());
+        assert!(p.take_recipe(b, 30).is_some());
         // Last item drains the slot.
         assert!(p.in_flight.is_empty());
     }
@@ -2898,17 +2907,17 @@ mod tests {
         let mut p = fixture();
         let mut second = fixture_recipe();
         second.mask = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings { gamma: 2.0, ..Default::default() });
-        p.track_dispatch(fixture_recipe(), [1]);
-        p.track_dispatch(second.clone(), [2]);
-        assert!(p.take_recipe(1).is_some_and(|r| r != second), "the first batch's image keeps its own recipe");
+        let one = p.track_dispatch(fixture_recipe(), [1]);
+        let two = p.track_dispatch(second.clone(), [2]);
+        assert!(p.take_recipe(one, 1).is_some_and(|r| r != second), "the first batch's image keeps its own recipe");
         assert_eq!(p.current_dispatch_progress(), Some((0, 1)), "the first batch is done; the queued one shows on");
-        assert_eq!(p.take_recipe(2), Some(second));
+        assert_eq!(p.take_recipe(two, 2), Some(second));
         assert_eq!(p.current_dispatch_progress(), None);
 
         let first = p.track_dispatch(fixture_recipe(), [3, 4]);
         p.track_streamed(5);
         let queued = p.track_dispatch(fixture_recipe(), [6]);
-        p.take_recipe(3);
+        p.take_recipe(first, 3);
         let mut unanswered = p.finish_batch(first);
         unanswered.sort();
         assert_eq!(unanswered, vec![4, 5], "its end names its own unanswered images, an admitted one too");
@@ -2920,10 +2929,11 @@ mod tests {
     #[test]
     fn take_recipe_unknown_id_is_none() {
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1].iter().copied());
-        assert!(p.take_recipe(999).is_none(), "unknown id must not return a recipe");
+        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        assert!(p.take_recipe(b, 999).is_none(), "unknown id must not return a recipe");
+        assert!(p.take_recipe(b + 1, 1).is_none(), "another batch's answer must not take it");
         // Tracked id still works.
-        assert!(p.take_recipe(1).is_some());
+        assert!(p.take_recipe(b, 1).is_some());
     }
 
     #[test]
@@ -2941,13 +2951,13 @@ mod tests {
         // a previously-Done item from a prior dispatch can't inflate
         // total.
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
             "fresh dispatch starts at 0/total");
-        assert!(p.take_recipe(10).is_some());
+        assert!(p.take_recipe(b, 10).is_some());
         assert_eq!(p.current_dispatch_progress(), Some((1, 2)),
             "one item delivered → 1/2");
-        assert!(p.take_recipe(20).is_some());
+        assert!(p.take_recipe(b, 20).is_some());
         // Last delivery self-drains the slot, so progress reports None
         // — the seg slot is cleared by the publisher on the next refresh.
         assert!(p.current_dispatch_progress().is_none(),
@@ -2961,12 +2971,12 @@ mod tests {
         // streamed item would deliver and decrement done-from-total
         // → counter goes negative-ish (saturating_sub clamps it).
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
         assert_eq!(p.current_dispatch_progress(), Some((0, 1)));
         p.track_streamed(2);
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
             "streamed item must bump total");
-        assert!(p.take_recipe(1).is_some());
+        assert!(p.take_recipe(b, 1).is_some());
         assert_eq!(p.current_dispatch_progress(), Some((1, 2)));
     }
 
@@ -2987,10 +2997,10 @@ mod tests {
         // current batch's recipe so a late ImageDone for a streamed id
         // still attributes correctly.
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
         p.track_streamed(2);
-        assert!(p.take_recipe(1).is_some());
-        assert!(p.take_recipe(2).is_some(), "streamed item must have a recipe");
+        assert!(p.take_recipe(b, 1).is_some());
+        assert!(p.take_recipe(b, 2).is_some(), "streamed item must have a recipe");
     }
 
     #[test]
@@ -3003,10 +3013,29 @@ mod tests {
     #[test]
     fn drain_recipes_clears_pending() {
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
         p.drain_recipes();
-        assert!(p.take_recipe(1).is_none(),
-            "drain must drop the slot so late deliveries fall back");
+        assert!(p.take_recipe(b, 1).is_none(),
+            "drain must drop the slot so late deliveries do not land");
+    }
+
+    /// An image a cancelled run left in an older batch awaits only the
+    /// newer batch that runs it again: the older run's answer is stale,
+    /// the older batch's end does not name it, and its count drops it.
+    #[test]
+    fn a_newer_batch_takes_an_image_from_the_batch_that_ran_it() {
+        let mut p = fixture();
+        let old = p.track_dispatch(fixture_recipe(), [1, 2]);
+        let new = p.track_dispatch(fixture_recipe(), [1]);
+        assert!(p.take_recipe(old, 1).is_none(), "the old run's answer is stale");
+        assert_eq!(p.current_dispatch_progress(), Some((0, 2)), "image 1 is counted once");
+        assert_eq!(p.finish_batch(old), vec![2]);
+        assert!(p.take_recipe(new, 1).is_some(), "the new run's answer lands");
+
+        let only = p.track_dispatch(fixture_recipe(), [3]);
+        let again = p.track_dispatch(fixture_recipe(), [3]);
+        assert!(p.finish_batch(only).is_empty(), "a batch left with nothing awaits nothing");
+        assert_eq!(p.finish_batch(again), vec![3]);
     }
 
     // ── Brush gate boundary contract (M-GUI-9) ───────────────────────────────
