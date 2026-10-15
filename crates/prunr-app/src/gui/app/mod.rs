@@ -219,7 +219,7 @@ impl PrunrApp {
         super::history_disk::cleanup_stale();
 
         let mut settings = Settings::load();
-        settings.active_backend = crate::hardware::profile().startup_provider(prunr_core::OrtEngine::detect_active_provider());
+        settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
         // PRUNR_OPEN_MODEL must apply BEFORE the worker prewarm config below
         // — otherwise the wrong model loads at startup and the first Process
         // click pays a full subprocess respawn (~15 s on this CPU). The env

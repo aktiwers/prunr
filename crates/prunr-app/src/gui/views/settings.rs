@@ -18,7 +18,7 @@ use crate::gui::app::PrunrApp;
 use crate::gui::hardware_cache::HardwareInstallCache;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
-use crate::runtime_install::RuntimeId;
+use crate::runtime_install::{RuntimeChoice, RuntimeId};
 
 use super::chip::{button, ButtonKind};
 use super::{hint, kv_row};
@@ -85,7 +85,7 @@ pub(crate) enum HardwareSectionIntent {
     StartInstall(RuntimeId),
     CancelInstall,
     Uninstall(RuntimeId),
-    PreferRuntime(RuntimeId),
+    PreferRuntime(RuntimeChoice),
     ClearCompiledCache,
 }
 
@@ -162,14 +162,14 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
             };
             app.refresh_install_cache();
         }
-        HardwareSectionIntent::PreferRuntime(rt) => {
-            match crate::runtime_install::prefer(rt) {
-                Ok(()) if app.hardware_install_cache.loaded_runtime != Some(rt) => {
-                    app.toasts.info(format!("Restart Prunr to switch to {}", rt.display_name()));
+        HardwareSectionIntent::PreferRuntime(choice) => {
+            match crate::runtime_install::prefer(choice) {
+                Ok(()) if app.hardware_install_cache.loaded_runtime != Some(choice) => {
+                    app.toasts.info(format!("Restart Prunr to switch to {}", choice.name()));
                 }
                 Ok(()) => {}
                 Err(e) => {
-                    app.toasts.error(format!("Could not choose {}: {e}", rt.display_name()));
+                    app.toasts.error(format!("Could not choose {}: {e}", choice.name()));
                 }
             }
             app.refresh_install_cache();
@@ -488,17 +488,20 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
     group_heading(ui, "Acceleration");
     let recommended = p.recommended_runtime();
     group(ui, |rows| {
+        if ctx.installs.built_in_gpu {
+            rows.row("DirectML Runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the processor without one.", |_| {});
+        }
         for &rt in ctx.offered {
             runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
         }
-        if ctx.offered.iter().filter(|&&rt| ctx.installs.has_runtime(rt)).count() > 1 {
+        if RuntimeChoice::ALL.iter().filter(|&&c| ctx.installs.can_load(c)).count() > 1 {
             rows.row("Runtime", "Which one Prunr uses. A change takes effect when you restart Prunr.", |ui| {
                 let mut chosen = ctx.installs.preferred_runtime.or(ctx.installs.loaded_runtime);
-                let choices = RuntimeId::ALL.map(|rt| super::chip::Choice {
-                    value: Some(rt),
-                    name: rt.choice_name(),
-                    description: rt.choice_description(),
-                    enabled: ctx.offered.contains(&rt) && ctx.installs.has_runtime(rt),
+                let choices = RuntimeChoice::ALL.map(|choice| super::chip::Choice {
+                    value: Some(choice),
+                    name: choice.name(),
+                    description: choice.description(),
+                    enabled: ctx.installs.can_load(choice),
                 });
                 if super::chip::choice_buttons(ui, &choices, &mut chosen) {
                     intent = chosen.map(HardwareSectionIntent::PreferRuntime);
