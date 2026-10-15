@@ -216,15 +216,31 @@ pub trait Retryable {
     fn cancelled() -> Self;
 }
 
+/// A failed download attempt: what to tell the user, and whether another
+/// attempt could succeed. Every downloader (runtime wheels, on-demand
+/// models, xtask's model fetch) shares it.
 #[derive(Debug)]
-struct DlError {
-    message: String,
+pub struct DlError {
+    pub message: String,
     retryable: bool,
 }
 
 impl DlError {
-    fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
-    fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+    pub fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
+    pub fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+
+    /// A response that was not a success: a 5xx is the server's passing
+    /// trouble and is worth another attempt; anything else (a 4xx: bad
+    /// URL, gone file) fails at once.
+    pub fn for_status(status: reqwest::StatusCode, msg: impl Into<String>) -> Self {
+        if status.is_server_error() { Self::transient(msg) } else { Self::fatal(msg) }
+    }
+}
+
+impl std::fmt::Display for DlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Retryable for DlError {
@@ -259,13 +275,9 @@ fn download_wheel_attempt(
     let response = client.get(&info.url).send()
         .map_err(|e| DlError::transient(format!("connect: {e}")))?;
 
-    // 4xx is the user/server contract being wrong (bad URL, gone wheel) —
-    // retrying won't help. 5xx is server transient. Anything not 2xx is
-    // an error at this stage.
     let status = response.status();
     if !status.is_success() {
-        let msg = format!("HTTP {status}");
-        return Err(if status.is_server_error() { DlError::transient(msg) } else { DlError::fatal(msg) });
+        return Err(DlError::for_status(status, format!("HTTP {status}")));
     }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
@@ -694,6 +706,22 @@ mod tests {
         });
         assert_eq!(r.expect("eventual success"), 42);
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn only_a_server_error_status_is_worth_retrying() {
+        use reqwest::StatusCode;
+        for (status, retry) in [
+            (StatusCode::INTERNAL_SERVER_ERROR, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::FORBIDDEN, false),
+            (StatusCode::MOVED_PERMANENTLY, false),
+        ] {
+            let e = DlError::for_status(status, format!("HTTP {status}"));
+            assert_eq!(e.is_retryable(), retry, "{status}");
+            assert_eq!(e.to_string(), format!("HTTP {status}"));
+        }
     }
 
     #[test]

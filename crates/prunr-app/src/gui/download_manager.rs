@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
+use prunr_runtime_install::DlError;
 use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource, OnDemandVariant};
 use sha2::{Digest, Sha256};
 
@@ -320,26 +321,6 @@ fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEve
     }
 }
 
-#[derive(Debug)]
-struct DownloadError {
-    message: String,
-    retryable: bool,
-}
-
-impl DownloadError {
-    fn fatal(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: false }
-    }
-    fn transient(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: true }
-    }
-}
-
-impl prunr_runtime_install::Retryable for DownloadError {
-    fn is_retryable(&self) -> bool { self.retryable }
-    fn cancelled() -> Self { DownloadError::fatal("Cancelled by user") }
-}
-
 /// Download `url` to `dest`, verifying SHA256 against `expected_sha`.
 /// Writes to a `<dest>.partial` sidecar; renames to `dest` only after
 /// verification passes. Wraps `download_attempt` in the shared retry
@@ -354,7 +335,7 @@ fn download_to_file(
     cancel: Arc<AtomicBool>,
     on_progress: &dyn Fn(u64, u64),
     on_verifying: &dyn Fn(),
-) -> Result<(), DownloadError> {
+) -> Result<(), DlError> {
     use prunr_runtime_install::{retry_with_backoff, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS};
     retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |_attempt| {
         download_attempt(url, dest, expected_sha, &cancel, on_progress, on_verifying)
@@ -368,7 +349,7 @@ fn download_attempt(
     cancel: &Arc<AtomicBool>,
     on_progress: &dyn Fn(u64, u64),
     on_verifying: &dyn Fn(),
-) -> Result<(), DownloadError> {
+) -> Result<(), DlError> {
     let partial = partial_path(dest);
 
     // Tear down any leftover partial from a previous aborted attempt so
@@ -376,58 +357,55 @@ fn download_attempt(
     let _ = std::fs::remove_file(&partial);
 
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
-        .map_err(|e| DownloadError::fatal(format!("HTTP client init failed: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("HTTP client init failed: {e}")))?;
 
     let response = client.get(url).send()
-        .map_err(|e| DownloadError::transient(format!("Network error: {e}")))?;
+        .map_err(|e| DlError::transient(format!("Network error: {e}")))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(if status.as_u16() >= 500 {
-            DownloadError::transient(format!("Server returned {status}"))
-        } else {
-            DownloadError::fatal(format!("Download failed: {status}"))
-        });
+        let msg = if status.is_server_error() { format!("Server returned {status}") } else { format!("Download failed: {status}") };
+        return Err(DlError::for_status(status, msg));
     }
 
     let total = response.content_length().unwrap_or(0);
     let mut response = response;
     let mut file = std::fs::File::create(&partial)
-        .map_err(|e| DownloadError::fatal(format!("Could not create {}: {e}", partial.display())))?;
+        .map_err(|e| DlError::fatal(format!("Could not create {}: {e}", partial.display())))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = 0;
     loop {
         if cancel.load(Ordering::Acquire) {
             let _ = std::fs::remove_file(&partial);
-            return Err(<DownloadError as prunr_runtime_install::Retryable>::cancelled());
+            return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
         }
         let n = std::io::Read::read(&mut response, &mut buf)
-            .map_err(|e| DownloadError::transient(format!("Read error: {e}")))?;
+            .map_err(|e| DlError::transient(format!("Read error: {e}")))?;
         if n == 0 {
             break;
         }
         std::io::Write::write_all(&mut file, &buf[..n])
-            .map_err(|e| DownloadError::fatal(format!("Write error: {e}")))?;
+            .map_err(|e| DlError::fatal(format!("Write error: {e}")))?;
         hasher.update(&buf[..n]);
         written += n as u64;
         on_progress(written, total);
     }
     std::io::Write::flush(&mut file)
-        .map_err(|e| DownloadError::fatal(format!("Flush error: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("Flush error: {e}")))?;
     drop(file);
 
     on_verifying();
     let actual_sha = hex::encode(hasher.finalize());
     if !actual_sha.eq_ignore_ascii_case(expected_sha) {
         let _ = std::fs::remove_file(&partial);
-        return Err(DownloadError::fatal(format!(
+        return Err(DlError::fatal(format!(
             "Checksum mismatch — expected {expected_sha}, got {actual_sha}",
         )));
     }
 
     std::fs::rename(&partial, dest)
-        .map_err(|e| DownloadError::fatal(format!("Could not finalize file: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("Could not finalize file: {e}")))?;
     Ok(())
 }
 
@@ -517,10 +495,10 @@ mod tests {
     fn retry_succeeds_after_two_transient_failures() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+        let result: Result<(), DlError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             let n = attempts.fetch_add(1, Ordering::SeqCst);
             if n < 2 {
-                Err(DownloadError::transient("simulated timeout"))
+                Err(DlError::transient("simulated timeout"))
             } else {
                 Ok(())
             }
@@ -533,9 +511,9 @@ mod tests {
     fn retry_fails_fast_on_fatal_error() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+        let result: Result<(), DlError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::fatal("404"))
+            Err(DlError::fatal("404"))
         });
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "fatal error must not retry");
@@ -545,9 +523,9 @@ mod tests {
     fn retry_exhausts_max_attempts() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
+        let result: Result<(), DlError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
+            Err(DlError::transient("network"))
         });
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -563,9 +541,9 @@ mod tests {
         });
         let attempts = std::sync::atomic::AtomicU32::new(0);
         let started = std::time::Instant::now();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
+        let result: Result<(), DlError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
             attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
+            Err(DlError::transient("network"))
         });
         let elapsed = started.elapsed();
         assert!(result.is_err());

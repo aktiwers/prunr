@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use prunr_runtime_install::{retry_with_backoff, Retryable};
+use prunr_runtime_install::{retry_with_backoff, DlError};
 use std::path::{Path, PathBuf};
 
 mod models;
@@ -173,28 +173,6 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     Ok(())
 }
 
-enum FetchError {
-    Transient(String),
-    Fatal(String),
-}
-
-impl Retryable for FetchError {
-    fn is_retryable(&self) -> bool {
-        matches!(self, Self::Transient(_))
-    }
-    fn cancelled() -> Self {
-        Self::Fatal("cancelled".into())
-    }
-}
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transient(m) | Self::Fatal(m) => f.write_str(m),
-        }
-    }
-}
-
 /// GET `url` into memory, streaming the body so a stall surfaces as a
 /// read timeout. Connection, read and 5xx failures retry with backoff;
 /// 4xx fails immediately.
@@ -207,20 +185,15 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
         let mut response = client
             .get(url)
             .send()
-            .map_err(|e| FetchError::Transient(format!("connect: {e}")))?;
+            .map_err(|e| DlError::transient(format!("connect: {e}")))?;
         let status = response.status();
         if !status.is_success() {
-            let msg = format!("HTTP {status}");
-            return Err(if status.is_server_error() {
-                FetchError::Transient(msg)
-            } else {
-                FetchError::Fatal(msg)
-            });
+            return Err(DlError::for_status(status, format!("HTTP {status}")));
         }
         let mut buf = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
         response
             .read_to_end(&mut buf)
-            .map_err(|e| FetchError::Transient(format!("read: {e}")))?;
+            .map_err(|e| DlError::transient(format!("read: {e}")))?;
         Ok(buf)
     })
     .map_err(|e| anyhow::anyhow!("{e} downloading {url}"))
