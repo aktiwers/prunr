@@ -8,7 +8,7 @@
 //! call is a branch on `None`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -354,17 +354,20 @@ fn split_overlaps(rects: &[TileRect]) -> Vec<TileRect> {
 }
 
 /// Keeps every report, for tests and for `check_contract`.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Default)]
 pub struct RecordingSink {
-    updates: Mutex<Vec<ProgressUpdate>>,
+    updates: std::sync::Mutex<Vec<ProgressUpdate>>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl RecordingSink {
     pub fn updates(&self) -> Vec<ProgressUpdate> {
         self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl ProgressSink for RecordingSink {
     fn report(&self, update: ProgressUpdate) {
         self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(update);
@@ -377,6 +380,7 @@ impl ProgressSink for RecordingSink {
 /// stands (an outer report starts the inner count afresh), and ending
 /// complete; tile updates naming a tile of the last
 /// layout, inside the image.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
     if !updates.iter().any(|u| matches!(u, ProgressUpdate::Step(_))) {
         return Err("no step was named".into());

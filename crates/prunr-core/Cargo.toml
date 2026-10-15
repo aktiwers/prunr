@@ -39,6 +39,8 @@ sysinfo = { workspace = true }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
+# The integration tests in tests/ record progress with RecordingSink.
+prunr-core = { path = ".", features = ["test-utils"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 # criterion: microbench harness for the perf-sensitive kernels in this
