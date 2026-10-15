@@ -587,7 +587,7 @@ mod selection_action_tests {
     #[test]
     fn copy_and_cut_report_success() {
         use crate::gui::views::selection_action_bar::SelectionAction;
-        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::worker::{CompressedTensor, RawSegTensor};
         for cutout in [false, true] {
             for (action, text) in [
                 (SelectionAction::Copy, "Selection copied to clipboard"),
@@ -597,7 +597,7 @@ mod selection_action_tests {
                 let mut item = make_item_done();
                 item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
                 if cutout {
-                    item.cached_tensor = CompressedTensor::from_raw(TensorCache {
+                    item.cached_tensor = CompressedTensor::from_raw(RawSegTensor {
                         data: vec![10.0; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta,
                     });
                 }

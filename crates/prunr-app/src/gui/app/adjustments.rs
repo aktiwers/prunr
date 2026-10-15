@@ -340,14 +340,14 @@ mod release_tests {
     #[test]
     fn a_scale_the_kept_lines_lack_runs_the_lines_again() {
         use crate::gui::knob_catalog::DispatchKind;
-        use crate::gui::worker::{CompressedEdgeTensors, EdgeTensorCache};
+        use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors};
         use prunr_core::{EdgeScale, LineMode};
         let kept = |scales: &[EdgeScale], spare: Option<u64>| {
             let tensors = EdgeScale::ALL.map(|s| {
                 let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
                 if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
             });
-            CompressedEdgeTensors::from_raw(EdgeTensorCache { tensors, height: 2, width: 2, spare })
+            CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare })
         };
         let switch = DispatchKind::LivePreviewEdge;
         let change = super::adjustments_toolbar::ToolbarChange { auto_dispatch: switch, ..Default::default() };

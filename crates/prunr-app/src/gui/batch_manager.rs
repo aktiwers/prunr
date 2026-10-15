@@ -809,7 +809,7 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
 mod tests {
     use super::*;
     use crate::gui::item_settings::ItemSettings;
-    use crate::gui::worker::{CompressedTensor, TensorCache};
+    use crate::gui::worker::{CompressedTensor, RawSegTensor};
     use prunr_core::ModelKind;
     use std::time::Duration;
 
@@ -869,7 +869,7 @@ mod tests {
         if tensor_floats > 0 {
             // Real CompressedTensor: zstd-compress f32 data via from_raw.
             let data: Vec<f32> = vec![0.5; tensor_floats];
-            let cache = TensorCache { data, height: 10, width: 10, model: ModelKind::Silueta };
+            let cache = RawSegTensor { data, height: 10, width: 10, model: ModelKind::Silueta };
             item.set_cached_tensor(CompressedTensor::from_raw(cache));
         }
         item
