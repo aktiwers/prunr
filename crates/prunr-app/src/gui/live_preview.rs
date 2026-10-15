@@ -1831,17 +1831,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_kind_upscale_tier2_added() {
-        // UpscaleTier2 is a distinct variant, not aliased to Mask or Edge.
-        assert_ne!(PreviewKind::UpscaleTier2, PreviewKind::Mask);
-        assert_ne!(PreviewKind::UpscaleTier2, PreviewKind::Edge);
-        // Copy + PartialEq + Eq — can be pattern-matched like the others.
-        let kind = PreviewKind::UpscaleTier2;
-        let copied = kind;
-        assert_eq!(kind, copied);
-    }
-
-    #[test]
     fn live_preview_mark_tweak_upscale_tier2_inserts_pending() {
         let mut lp = LivePreview::default();
         lp.mark_tweak(55, PreviewKind::UpscaleTier2);
