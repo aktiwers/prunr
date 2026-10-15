@@ -1152,22 +1152,21 @@ impl Processor {
         for flag in self.inpaint_cancels.values() {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
-        for &item_id in self.inpaint_cancels.keys() {
-            let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+        if !self.inpaint_cancels.is_empty() {
+            let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel);
         }
     }
 
     /// Cancel any in-flight inpaint stroke for `item_id`. The local
     /// flag and the capsule's "Stopping" show at once; for SD
-    /// strokes the bridge also forwards `CancelItem` to the subprocess
-    /// so its inference loop sees the flag too. Latency to actually-
-    /// stopping is one tile (LaMa) or one UNet step (SD); ORT has no
-    /// per-op cancel hook. Idempotent.
+    /// strokes the bridge kills the subprocess, ending every SD stroke.
+    /// A LaMa stroke stops at its next tile; ORT has no per-op cancel
+    /// hook. Idempotent.
     pub(crate) fn cancel_inpaint(&self, item_id: u64) {
         if let Some(flag) = self.inpaint_cancels.get(&item_id) {
             flag.store(true, std::sync::atomic::Ordering::Release);
         }
-        let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel { item_id });
+        let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel);
         self.mark_cancelling(super::dispatch_progress::ProgressKind::Inpaint);
     }
 
