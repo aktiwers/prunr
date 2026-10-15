@@ -70,10 +70,14 @@ impl HardwareProfile {
     }
 
     /// The runtime download the first-launch prompt and Settings
-    /// recommend. A graphics card that suits DirectML needs none, since
-    /// DirectML is built in, even with an Intel iGPU beside it.
+    /// recommend, among those offered here. A graphics card that suits
+    /// DirectML needs none, since DirectML is built in, even with an
+    /// Intel iGPU beside it.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
-        (!self.suits_directml && self.recommends_openvino()).then_some(crate::runtime_install::RuntimeId::OpenVino)
+        use crate::runtime_install::RuntimeId;
+        (!self.suits_directml && self.recommends_openvino())
+            .then_some(RuntimeId::OpenVino)
+            .filter(|rt| RuntimeId::OFFERED.contains(rt))
     }
 
     /// AMD discrete GPU only. APU iGPUs excluded — ROCm/MIGraphX
@@ -465,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn a_graphics_card_needs_no_download_and_an_intel_igpu_alone_gets_openvino() {
+    fn a_graphics_card_needs_no_download_and_an_intel_igpu_alone_gets_openvino_where_offered() {
         use crate::runtime_install::RuntimeId;
         let mut p = HardwareProfile {
             cpu_vendor: CpuVendor::Intel,
@@ -475,7 +479,8 @@ mod tests {
             suits_directml: false,
             os: "windows", arch: "x86_64",
         };
-        assert_eq!(p.recommended_runtime(), Some(RuntimeId::OpenVino));
+        let openvino_if_offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino).then_some(RuntimeId::OpenVino);
+        assert_eq!(p.recommended_runtime(), openvino_if_offered);
         p.dgpu = Some(GpuVendor::Nvidia);
         p.suits_directml = true;
         assert_eq!(p.recommended_runtime(), None, "DirectML is built in");

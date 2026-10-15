@@ -52,8 +52,12 @@ pub enum RuntimeId {
 
 impl RuntimeId {
     /// The runtimes Settings › Hardware offers to download. DirectML is
-    /// not one: Windows ships it built in.
-    pub const OFFERED: &'static [RuntimeId] = &[Self::OpenVino];
+    /// not one: Windows ships it built in. OpenVINO is not offered on
+    /// Windows: its `onnxruntime-openvino` wheel there ships the provider
+    /// DLL without `openvino.dll` (Python loads that from the separate
+    /// `openvino` package), so the provider never registers and every
+    /// session would run on the CPU, where DirectML runs the same iGPU.
+    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) { &[] } else { &[Self::OpenVino] };
 
     fn pypi_package(self) -> &'static str {
         match self { Self::OpenVino => "onnxruntime-openvino" }
@@ -339,6 +343,7 @@ mod tests {
 
     #[test]
     fn directml_is_built_in_and_not_offered_for_download() {
-        assert_eq!(RuntimeId::OFFERED, &[RuntimeId::OpenVino]);
+        let expected: &[RuntimeId] = if cfg!(windows) { &[] } else { &[RuntimeId::OpenVino] };
+        assert_eq!(RuntimeId::OFFERED, expected, "Windows offers no download: OpenVINO's wheel there lacks openvino.dll");
     }
 }

@@ -41,7 +41,7 @@ struct AdapterClass {
 
 /// What a display adapter is; `None` for a software one. `is_high_perf`:
 /// the strong card beside another hardware adapter. An Intel iGPU
-/// without a card beside it is left to OpenVINO.
+/// without a card beside it does not suit DirectML.
 fn classify_adapter(adapter: &AdapterFacts, is_high_perf: bool) -> Option<AdapterClass> {
     if !adapter.is_hardware() {
         return None;
