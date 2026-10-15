@@ -90,6 +90,11 @@ pub(super) fn differs(a: f32, b: f32) -> bool {
     (a - b).abs() > f32::EPSILON
 }
 
+/// Which of `all` has `value`'s variant, whatever its parameters.
+pub(super) fn variant_index<T>(all: &[T], value: &T) -> usize {
+    all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
+}
+
 /// Format a byte count for human display. Used by the Model Store
 /// (download progress, disk-usage footer) and stays here so future
 /// callers don't reinvent it.

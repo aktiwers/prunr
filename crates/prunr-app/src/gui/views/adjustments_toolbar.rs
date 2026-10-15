@@ -27,7 +27,7 @@ use crate::gui::views::effects::paint_rounded_mesh;
 use prunr_core::{EdgeScale, LineMode};
 
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
-use super::{differs, model_info};
+use super::{differs, model_info, variant_index};
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -361,11 +361,6 @@ const LINES_PANEL_WIDTH: f32 = 460.0;
 const FILTER_COUNT: usize = prunr_core::InputTransform::ALL.len();
 const STYLE_COUNT: usize = prunr_core::LineStyle::ALL.len();
 const COMPOSE_COUNT: usize = prunr_core::ComposeMode::ALL.len();
-
-/// Which of `all` has `value`'s variant, whatever its parameters.
-fn variant_index<T>(all: &[T], value: &T) -> usize {
-    all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
-}
 
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
