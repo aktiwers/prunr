@@ -300,14 +300,12 @@ impl PrunrApp {
             use crate::gui::download_manager::DownloadEvent;
             match event {
                 DownloadEvent::Complete { id } => {
-                    let name = prunr_models::descriptor(id)
-                        .map_or("Model", |d| d.display_name);
+                    let name = prunr_models::display_name(id);
                     self.toasts.success(format!("{name} ready"));
                     self.refresh_install_cache();
                 }
                 DownloadEvent::Failed { id, error } => {
-                    let name = prunr_models::descriptor(id)
-                        .map_or("Model", |d| d.display_name);
+                    let name = prunr_models::display_name(id);
                     self.toasts.error(format!("{name} download failed: {error}"));
                     self.refresh_install_cache();
                 }
