@@ -1,9 +1,8 @@
 //! SAM 2 inference primitives — encoder preprocessing, decoder prompt
 //! construction, and decoder output → MaskArtifact conversion.
 //!
-//! PURE module — no ORT dependency. The ort::Session.run plumbing
-//! lives in `prunr-app/src/gui/processor.rs` so this module stays
-//! unit-testable from prunr-core alone.
+//! ORT-free so it stays unit-testable; the session run lives with the
+//! caller.
 
 use rayon::prelude::*;
 
