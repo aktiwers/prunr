@@ -430,12 +430,12 @@ impl CorrectionCache {
     }
 }
 
-/// The photo faces are found in: a run's start image, the source, or an
+/// The photo faces are found in: a run's start image, the original, or an
 /// upscale's output. Compared by identity, never unpacked to compare.
 #[derive(Clone)]
 pub(crate) enum FacePhoto {
     Start(super::timeline::StoredImage),
-    Source(Arc<image::RgbaImage>),
+    Original(Arc<image::RgbaImage>),
     Upscaled(Arc<image::RgbaImage>),
 }
 
@@ -443,7 +443,7 @@ impl FacePhoto {
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Start(a), Self::Start(b)) => Arc::ptr_eq(a, b),
-            (Self::Source(a), Self::Source(b)) | (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
+            (Self::Original(a), Self::Original(b)) | (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -451,7 +451,7 @@ impl FacePhoto {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
         match self {
             Self::Start(stored) => stored.load(),
-            Self::Source(rgba) | Self::Upscaled(rgba) => Some(Arc::clone(rgba)),
+            Self::Original(rgba) | Self::Upscaled(rgba) => Some(Arc::clone(rgba)),
         }
     }
 }
@@ -1825,7 +1825,7 @@ impl BatchItem {
         match stage {
             FaceStage::Upscale => self.kept_upscale().map(|run| FacePhoto::Upscaled(Arc::clone(&run.raw))),
             FaceStage::Photo => self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
-                .or_else(|| self.source_rgba.clone().map(FacePhoto::Source)),
+                .or_else(|| self.source_rgba.clone().map(FacePhoto::Original)),
         }
     }
 
@@ -1902,7 +1902,7 @@ impl BatchItem {
     /// found them there already, so a depth run need not look again.
     pub(crate) fn faces_found_in_original(&self) -> Option<Vec<prunr_core::face::FacePlace>> {
         let source = self.source_rgba.as_ref()?;
-        let original = |photo: &FacePhoto| matches!(photo, FacePhoto::Source(s) if Arc::ptr_eq(s, source));
+        let original = |photo: &FacePhoto| matches!(photo, FacePhoto::Original(s) if Arc::ptr_eq(s, source));
         if let Some(found) = self.found_faces.as_ref().filter(|f| !f.failed && original(&f.photo)) {
             return Some(found.faces.iter().map(|f| *f.place()).collect());
         }
@@ -2704,7 +2704,7 @@ mod tests {
         let mut item = fixture_item(1);
         let source = Arc::new(image::RgbaImage::new(4, 4));
         item.source_rgba = Some(Arc::clone(&source));
-        assert!(item.face_photo(FaceStage::Photo).is_some_and(|p| p.same(&FacePhoto::Source(Arc::clone(&source)))));
+        assert!(item.face_photo(FaceStage::Photo).is_some_and(|p| p.same(&FacePhoto::Original(Arc::clone(&source)))));
         let raw = Arc::new(image::RgbaImage::new(16, 16));
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.result_rgba = Some(Arc::clone(&raw));
@@ -3002,7 +3002,7 @@ mod tests {
         let place = prunr_core::face::FacePlace::of(&face, [100, 100]);
         assert_eq!(item.faces_found_in_original(), None, "nothing searched");
 
-        item.begin_face_search(FacePhoto::Source(Arc::clone(&source)), prunr_models::ModelId::FaceGfpgan);
+        item.begin_face_search(FacePhoto::Original(Arc::clone(&source)), prunr_models::ModelId::FaceGfpgan);
         assert_eq!(item.faces_found_in_original(), None, "searching, nothing found yet");
         if let Some(pending) = item.faces_pending.as_mut() {
             pending.found = Some((vec![place].into(), std::time::Instant::now()));
@@ -3012,9 +3012,9 @@ mod tests {
         let restored = Arc::new(vec![prunr_core::face::RestoredFace::unchanged_for_test(place)]);
         let found = |photo, failed| FoundFaces { photo, found_at: std::time::Instant::now(), model: prunr_models::ModelId::FaceGfpgan, faces: Arc::clone(&restored), failed, stopped: false };
         item.faces_pending = None;
-        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), false));
+        item.found_faces = Some(found(FacePhoto::Original(Arc::clone(&source)), false));
         assert_eq!(item.faces_found_in_original(), Some(vec![place]));
-        item.found_faces = Some(found(FacePhoto::Source(Arc::clone(&source)), true));
+        item.found_faces = Some(found(FacePhoto::Original(Arc::clone(&source)), true));
         assert_eq!(item.faces_found_in_original(), None, "a failed search");
         item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
         assert_eq!(item.faces_found_in_original(), None, "another photo");

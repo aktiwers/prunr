@@ -999,7 +999,7 @@ mod faces_tests {
     }
 
     fn landed(photo: &Arc<image::RgbaImage>, model: FaceModel) -> FacesResult {
-        FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::clone(photo)), model: model.id(), result: Ok(Vec::new()), stopped: false }
+        FacesResult { item_id: 1, photo: FacePhoto::Original(Arc::clone(photo)), model: model.id(), result: Ok(Vec::new()), stopped: false }
     }
 
     /// Two faces as a search reports them in the 8 × 8 test photo.
@@ -1011,14 +1011,14 @@ mod faces_tests {
     /// The faces of `places` found and redrawn.
     fn restored(places: &[prunr_core::face::FacePlace]) -> FacesResult {
         let faces = places.iter().map(|p| prunr_core::face::RestoredFace::unchanged_for_test(*p)).collect();
-        FacesResult { item_id: 1, photo: FacePhoto::Source(Arc::new(image::RgbaImage::new(1, 1))), model: FaceModel::Gfpgan.id(), result: Ok(faces), stopped: false }
+        FacesResult { item_id: 1, photo: FacePhoto::Original(Arc::new(image::RgbaImage::new(1, 1))), model: FaceModel::Gfpgan.id(), result: Ok(faces), stopped: false }
     }
 
     /// The on-screen image starts a search of its photo.
     fn searching(app: &mut super::PrunrApp, source: &Arc<image::RgbaImage>) {
         let item = &mut app.batch.items[0];
         item.on_screen = true;
-        item.begin_face_search(FacePhoto::Source(Arc::clone(source)), FaceModel::Gfpgan.id());
+        item.begin_face_search(FacePhoto::Original(Arc::clone(source)), FaceModel::Gfpgan.id());
     }
 
     /// A search's pictures arrive for the image.
@@ -1089,7 +1089,7 @@ mod faces_tests {
         assert!(matches!(super::PrunrApp::face_search(item, FaceStage::Photo), Some(FaceSearch::Found(2))));
 
         let mut result = restored(&two_places());
-        result.photo = FacePhoto::Source(Arc::clone(&source));
+        result.photo = FacePhoto::Original(Arc::clone(&source));
         app.land_faces(result);
         let found = app.batch.items[0].outlined_faces(FaceStage::Photo).expect("the faces found");
         assert_eq!(found.places().count(), 2);
@@ -1137,7 +1137,7 @@ mod faces_tests {
         searching(&mut app, &source);
         arrive(&mut app, &ctx, [face_tile()]);
         let mut result = restored(&two_places());
-        result.photo = FacePhoto::Source(Arc::clone(&source));
+        result.photo = FacePhoto::Original(Arc::clone(&source));
         app.land_faces(result);
         arrive(&mut app, &ctx, [face_tile()]);
         assert!(app.batch.items[0].face_preview_texture().is_some(), "shown until the faces are in the image");
@@ -1162,12 +1162,12 @@ mod faces_tests {
         let item = &mut app.batch.items[0];
         let photo = item.face_photo(crate::gui::item::FaceStage::Photo).expect("the source");
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::Gfpgan.id()));
-        item.found_faces = Some(FoundFaces { photo: FacePhoto::Source(Arc::clone(&source)), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false });
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Original(Arc::clone(&source)), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false });
         assert!(item.faces_for(&photo).is_some() && item.faces_to_find(&photo).is_none());
         item.settings.faces.model = FaceModel::RestoreFormerPp;
         assert!(item.faces_for(&photo).is_none());
         assert_eq!(item.faces_to_find(&photo), Some(FaceModel::RestoreFormerPp.id()));
-        let other = FacePhoto::Source(Arc::new(image::RgbaImage::new(8, 8)));
+        let other = FacePhoto::Original(Arc::new(image::RgbaImage::new(8, 8)));
         assert!(item.faces_for(&other).is_none(), "another photo");
         item.settings.faces.on = false;
         assert!(item.faces_to_find(&photo).is_none() && item.faces_for(&photo).is_none());
@@ -1294,7 +1294,7 @@ mod faces_tests {
     fn images_not_on_screen_drop_the_faced_photo() {
         let (mut app, source) = app_with_faces_on();
         push_test_item(&mut app, 2);
-        let found = FoundFaces { photo: FacePhoto::Source(source), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false };
+        let found = FoundFaces { photo: FacePhoto::Original(source), found_at: std::time::Instant::now(), model: FaceModel::Gfpgan.id(), faces: Arc::default(), failed: false, stopped: false };
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         let item = &mut app.batch.items[0];
         item.found_faces = Some(found);
