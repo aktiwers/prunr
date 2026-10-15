@@ -4,9 +4,7 @@
 //! - The `Vec<BatchItem>` and selection state
 //! - The next-id counter for new items
 //! - The `BackgroundIO` channels (thumbnail, decode, save-done, tex-prep,
-//!   file-load) — historically mixed but the majority are batch-driven.
-//!   Future `Saver` / `ImageOpener` extractions may carve out the file-load
-//!   and save-done channels.
+//!   file-load)
 //!
 //! Does NOT own:
 //! - Inference dispatch (worker channels, admission, live-preview) — `Processor`
@@ -855,8 +853,7 @@ mod tests {
         assert_eq!(item.result_rgba.as_ref().unwrap().get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
 
-    /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`
-    /// raw size. Used by enforce_tensor_budget / cache_size tests.
+    /// A BatchItem with `tensor_floats` f32s of cached tensor (0 = none).
     fn item_with_cache(id: u64, tensor_floats: usize) -> BatchItem {
         let mut item = BatchItem::new(
             id,
@@ -915,9 +912,6 @@ mod tests {
     }
 
     // ── new + selected_item ─────────────────────────────────────────────
-
-    // (BatchManager::new defaults are covered indirectly by tests/batch_tests.rs
-    //  which assert the same fields via PrunrApp::new_for_test → BatchManager::new.)
 
     #[test]
     fn selected_item_returns_none_when_batch_empty() {

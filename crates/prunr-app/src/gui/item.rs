@@ -1,9 +1,7 @@
-//! Pure data types for batch items and the undo timeline each carries.
-//!
-//! These types are GUI-agnostic in spirit (they hold egui texture handles
-//! because the texture lifecycle is per-item, but no rendering happens here).
-//! Logic that mutates these types lives in the coordinators
-//! (`BatchManager`, `Processor`); undo lives in `timeline`.
+//! `BatchItem`: one image's state (source, result, caches, settings,
+//! textures, job) and the per-image logic over it. It holds egui texture
+//! handles because their lifecycle is per-item, but no rendering happens
+//! here; batch-wide decisions live in `BatchManager` and `Processor`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -228,7 +226,7 @@ pub(crate) enum ImageSource {
 }
 
 impl ImageSource {
-    /// Read the image bytes. For Path, reads from disk. For Bytes, clones the Arc.
+    /// Decode the source to straight RGBA.
     pub(crate) fn decode_rgba(&self) -> Result<Arc<image::RgbaImage>, String> {
         self.decode().map(|img| Arc::new(img.into_rgba8()))
     }
@@ -2067,18 +2065,7 @@ impl BatchItem {
                     self.cached_edge_tensors = Some(new);
                 }
                 self.cached_masked_base = None;
-                // Note: we used to null `source_rgba` / `source_texture` on
-                // non-selected items here to save ~48 MB per 4K image, but
-                // that broke live preview on any item that was NOT the
-                // viewed item when its batch result landed. `source_rgba` is
-                // required for the in-process Tier 2 rerun (see
-                // `build_preview_inputs` → `rgba = item.source_rgba.as_ref()?`)
-                // and without it, tweaking a slider on a previously-processed-
-                // but-not-yet-reviewed image would silently drop the tweak
-                // until the async re-decode from disk landed. Memory-pressure
-                // eviction is handled separately by `evict_all_tensors` /
-                // `enforce_tensor_budget`, which do preserve the selected
-                // item's cache.
+                // source_rgba stays on every item: live preview re-cuts from it.
                 // Tier 2 reruns report empty active_provider (no inference ran).
                 (!pr.active_provider.is_empty()).then_some(pr.active_provider)
             }
@@ -2409,9 +2396,6 @@ mod tests {
         )
     }
 
-    /// A landed upscale reveals over its finished-tile preview, which
-    /// stays on screen until the result's texture lands; a new run never
-    /// shows the last run's tiles.
     #[test]
     fn an_image_is_running_while_a_model_works_on_it() {
         let mut item = fixture_item(1);
@@ -2451,6 +2435,9 @@ mod tests {
         assert_eq!(uploads(&part), [None, Some([1, 1])], "a first part lands in a blank preview");
     }
 
+    /// A landed upscale reveals over its finished-tile preview, which
+    /// stays on screen until the result's texture lands; a new run never
+    /// shows the last run's tiles.
     #[test]
     fn an_upscale_reveals_over_its_tile_preview() {
         let ctx = egui::Context::default();
