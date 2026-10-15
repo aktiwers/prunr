@@ -3,8 +3,8 @@
 //! Mirrors `worker.rs`'s seg bridge but scoped to a single
 //! `spawn_inpaint_only` subprocess: it never serves seg/edge work, so the
 //! engine pool is skipped at Init. The subprocess is spawned lazily on
-//! the first SD dispatch and dropped after 5 minutes of inactivity to
-//! release the ~5 GB bundle resident set.
+//! the first SD dispatch and dropped after `IDLE_RELEASE` idle, unless
+//! kept loaded, to release the ~5 GB bundle resident set.
 //!
 //! `Processor` sends `InpaintBridgeMsg` and reads `InpaintBridgeResult`
 //! through a pair of mpsc channels — same pattern as `WorkerMessage` /
@@ -56,9 +56,7 @@ pub enum InpaintBridgeMsg {
         feather_px: f32,
         sharpen: f32,
     },
-    /// Cancel one in-flight stroke. Reuses `CancelItem` IPC; worker's
-    /// handler flips both seg and inpaint cancel flags so this is the
-    /// single cancel verb.
+    /// Kill the subprocess; every in-flight stroke ends Cancelled.
     Cancel { item_id: u64 },
     /// Release any cached subprocess regardless of in-flight state.
     /// Differs from Cancel in two ways:
@@ -84,8 +82,7 @@ pub enum InpaintBridgeResult {
 }
 
 /// Spawn the inpaint bridge thread. Returns send/receive channels.
-/// The thread runs until `Shutdown` is sent or the parent drops the
-/// receiver.
+/// The thread runs until the parent drops the sender.
 pub fn spawn_inpaint_bridge() -> (
     mpsc::Sender<InpaintBridgeMsg>,
     mpsc::Receiver<InpaintBridgeResult>,
@@ -349,11 +346,9 @@ fn handle_release(
     match std::mem::replace(sub_state, SubState::Idle) {
         SubState::Idle => {}
         SubState::Spawning { pending: _, cancelled: _, rx } => {
-            // Spawn is still in flight. We can't kill the helper
-            // thread; let it complete and the result will be ignored
-            // (state is now Idle, the spawn-completion poller will
-            // see it and discard). Drain inflight + restore the
-            // Spawning state so the rx is still polled.
+            // Spawn is still in flight and the helper thread can't be
+            // killed: stay Spawning with `cancelled` set so the
+            // arriving subprocess is killed, and drain inflight.
             *sub_state = SubState::Spawning { rx, pending: Vec::new(), cancelled: true };
             for (id, _gen) in inflight_gens.drain() {
                 let _ = res_tx.send(InpaintBridgeResult::Error {
