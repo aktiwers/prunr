@@ -19,8 +19,8 @@ mod test_common;
 
 use image::{GrayImage, Luma, RgbaImage};
 use prunr_core::inpaint::process_inpaint;
-use prunr_models::{is_available, ModelId};
-use test_common::skip_if_no_ort;
+use prunr_models::ModelId;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 /// 256² source: solid teal background, used so masked-region inpaint
 /// output is easily distinguishable from the unmasked area's identity.
@@ -53,13 +53,7 @@ fn run_inpaint_test_with(
     run: impl Fn(&RgbaImage, &GrayImage) -> Result<RgbaImage, prunr_core::CoreError>,
 ) {
     if skip_if_no_ort(label) { return; }
-    if !is_available(model_id) {
-        eprintln!(
-            "[{label}] SKIP: {model_id:?} is not installed. Run `cargo xtask fetch-models` \
-             or open the in-app Model Store to download it."
-        );
-        return;
-    }
+    if skip_if_model_missing(label, model_id) { return; }
     let image = fixture_source();
     let mask = fixture_mask();
     let out = run(&image, &mask)

@@ -12,16 +12,15 @@ use image::{Rgba, RgbaImage};
 use prunr_core::colorize::{colorize_plane, colorized, COLORIZE_INPUT};
 use prunr_core::progress::{check_contract, RecordingSink};
 use prunr_core::{ModelKind, OrtEngine, Progress};
-use prunr_models::{is_available, ModelId};
-use test_common::skip_if_no_ort;
+use prunr_models::ModelId;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn ddcolor_colours_a_grey_photo_and_reports_its_step() {
     if skip_if_no_ort("ddcolor") {
         return;
     }
-    if !is_available(ModelId::DdcolorTiny) {
-        eprintln!("SKIP: DdcolorTiny not installed — run the Model Store download");
+    if skip_if_model_missing("ddcolor", ModelId::DdcolorTiny) {
         return;
     }
     let src = RgbaImage::from_fn(96, 64, |x, y| {
@@ -40,7 +39,8 @@ fn ddcolor_colours_a_grey_photo_and_reports_its_step() {
 
 #[test]
 fn a_cancelled_run_returns_cancelled() {
-    if skip_if_no_ort("ddcolor_cancel") || !is_available(ModelId::DdcolorTiny) {
+    if skip_if_no_ort("ddcolor_cancel")
+        || skip_if_model_missing("ddcolor_cancel", ModelId::DdcolorTiny) {
         return;
     }
     let engine = OrtEngine::new_cpu_only(ModelKind::DdcolorTiny, 2).expect("DDColor session");
