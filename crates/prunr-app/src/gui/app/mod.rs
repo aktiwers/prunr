@@ -1348,11 +1348,10 @@ enum NavDir {
     Next,
 }
 
-/// Install-state is NOT a parameter — the model dropdown filter already
-/// restricts selection to installed models, and re-checking every frame
-/// would `is_file()`-stat the disk at 60 Hz.
-pub(crate) fn can_start_run(is_in_flight: bool, item_loaded: bool) -> bool {
-    item_loaded && !is_in_flight
+/// A run can start when some image qualifies and no run of its kind is
+/// under way.
+pub(crate) fn can_start_run(is_in_flight: bool, has_target: bool) -> bool {
+    has_target && !is_in_flight
 }
 
 #[cfg(test)]
@@ -1360,10 +1359,10 @@ mod can_start_run_tests {
     use super::can_start_run;
 
     #[test]
-    fn can_start_run_requires_idle_and_item_loaded() {
-        assert!(can_start_run(false, true),    "happy path: idle + item loaded");
+    fn can_start_run_requires_idle_and_a_target() {
+        assert!(can_start_run(false, true),    "happy path: idle + a target");
         assert!(!can_start_run(true, true),    "already in flight");
-        assert!(!can_start_run(false, false),  "no item loaded");
+        assert!(!can_start_run(false, false),  "no target");
     }
 }
 
