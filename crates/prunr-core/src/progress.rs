@@ -139,6 +139,12 @@ pub struct TilePreview {
 /// Whoever listens to a pipeline's reports.
 pub trait ProgressSink: Send + Sync {
     fn report(&self, update: ProgressUpdate);
+
+    /// Whether previews sent now would still be shown; a run whose
+    /// pictures can no longer land stops making them.
+    fn wants_previews(&self) -> bool {
+        true
+    }
 }
 
 /// Where the image a pipeline works on sits in the photo the listener
@@ -218,7 +224,7 @@ impl Progress {
 
     /// The preview size asked for, when someone listens for previews.
     pub fn preview_edge(&self) -> Option<u32> {
-        self.sink.as_ref().and(self.preview_edge)
+        self.sink.as_ref().filter(|sink| sink.wants_previews()).and(self.preview_edge)
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -515,7 +521,18 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         Progress::new(sink.clone()).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
         Progress::none().with_tile_previews(500).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
+        Progress::new(Arc::new(Elsewhere)).with_tile_previews(500).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
         assert!(!ran.get(), "no preview is made unless asked for and listened to");
+    }
+
+    /// A listener that no longer shows previews.
+    struct Elsewhere;
+
+    impl ProgressSink for Elsewhere {
+        fn report(&self, _: ProgressUpdate) {}
+        fn wants_previews(&self) -> bool {
+            false
+        }
     }
 
     #[test]
