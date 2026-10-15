@@ -577,13 +577,8 @@ impl LamaSession {
 
         let (session, pick) = build_lama_session(id, bytes, threads, cpu_only)?;
 
-        let inputs = session.inputs().iter()
-            .map(|i| i.name().to_string())
-            .collect::<Vec<_>>();
-        if inputs.len() < 2 {
-            return Err(format!("LaMa: expected 2 inputs, got {}: {inputs:?}", inputs.len()));
-        }
-        let (img_name, mask_name) = pick_input_names(&inputs);
+        let (img_name, mask_name) = lama_input_names(&session)
+            .map_err(|inputs| format!("LaMa: expected 2 inputs, got {}: {inputs:?}", inputs.len()))?;
         tracing::info!(
             ?id,
             image_input = %img_name,
@@ -714,13 +709,8 @@ fn smoke_test_session(session: &mut Session) -> Result<(), String> {
     let s = TILE as usize;
     let img = ndarray::Array4::<f32>::zeros((1, 3, s, s));
     let msk = ndarray::Array4::<f32>::zeros((1, 1, s, s));
-    let inputs = session.inputs().iter()
-        .map(|i| i.name().to_string())
-        .collect::<Vec<_>>();
-    if inputs.len() < 2 {
-        return Err(format!("smoke test: need 2 inputs, got {inputs:?}"));
-    }
-    let (img_name, mask_name) = pick_input_names(&inputs);
+    let (img_name, mask_name) = lama_input_names(session)
+        .map_err(|inputs| format!("smoke test: need 2 inputs, got {inputs:?}"))?;
     let img_t = Tensor::from_array(img)
         .map_err(|e| format!("smoke test: image tensor: {e}"))?;
     let msk_t = Tensor::from_array(msk)
@@ -740,6 +730,18 @@ fn base_builder(threads: usize) -> Result<ort::session::builder::SessionBuilder,
         .map_err(|e| format!("LaMa: optimization level: {e}"))?
         .with_intra_threads(threads)
         .map_err(|e| format!("LaMa: intra_threads: {e}"))
+}
+
+/// The session's (image, mask) input names, or every input name when
+/// there are fewer than two.
+fn lama_input_names(session: &Session) -> Result<(String, String), Vec<String>> {
+    let inputs = session.inputs().iter()
+        .map(|i| i.name().to_string())
+        .collect::<Vec<_>>();
+    if inputs.len() < 2 {
+        return Err(inputs);
+    }
+    Ok(pick_input_names(&inputs))
 }
 
 /// LaMa-ONNX exports use `image` + `mask` as input names (Carve/LaMa-ONNX
