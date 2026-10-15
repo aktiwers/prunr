@@ -361,7 +361,7 @@ use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use prunr_core::{
     MaskSettings, ModelKind, CoreError,
     DOWNSCALE_TARGET,
-    load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
+    load_image_from_path, downscale_image, encode_rgba_png,
 };
 
 use crate::gui::settings::LineMode;
@@ -916,47 +916,16 @@ fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
 
 // ── Image loading with large-image handling ──────────────────────────────────
 
-/// Load image bytes applying the LargeImagePolicy.
-/// Returns PNG-encoded bytes ready for process_image / process_image_unchecked.
-fn load_with_policy(
-    path: &std::path::Path,
-    policy: LargeImagePolicy,
-    quiet: bool,
-) -> Result<Vec<u8>, CoreError> {
+fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, CoreError> {
     let img = load_image_from_path(path)?;
-
-    if let Some(_large_err) = check_large_image(&img) {
-        match policy {
-            LargeImagePolicy::Downscale => {
-                if !quiet {
-                    eprintln!(
-                        "warning: '{}' exceeds 8000px. Downscaling to {}px (use --large-image=process to skip).",
-                        path.display(), DOWNSCALE_TARGET
-                    );
-                }
-                let downscaled = downscale_image(img, DOWNSCALE_TARGET);
-                // Encode to PNG bytes for process_image
-                let rgba = downscaled.into_rgba8();
-                return encode_rgba_png(&rgba);
-            }
-            LargeImagePolicy::Process => {
-                if !quiet {
-                    eprintln!(
-                        "warning: '{}' exceeds 8000px. Processing at full size (--large-image=process).",
-                        path.display()
-                    );
-                }
-                // Fall through — process_image_unchecked will skip the guard
-            }
-        }
+    if !quiet {
+        eprintln!(
+            "warning: '{}' exceeds 8000px. Downscaling to {}px (use --large-image=process to skip).",
+            path.display(), DOWNSCALE_TARGET
+        );
     }
-
-    // Encode as PNG bytes for uniform handling
-    let rgba = img.into_rgba8();
-    encode_rgba_png(&rgba)
+    encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
 }
-
-// ── Single-image execution path ──────────────────────────────────────────────
 
 // ── Batch execution path ─────────────────────────────────────────────────────
 
@@ -1045,7 +1014,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                 && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
             {
                 // Oversized — downscale to temp file, pass temp path to subprocess
-                match load_with_policy(input, args.large_image, args.quiet) {
+                match downscale_to_png(input, args.quiet) {
                     Ok(bytes) => {
                         let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
                             .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
