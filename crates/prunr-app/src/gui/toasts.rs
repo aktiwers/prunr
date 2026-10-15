@@ -46,6 +46,11 @@ impl Toasts {
         self.0.dismiss_all_toasts()
     }
 
+    #[cfg(test)]
+    pub fn len_for_test(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn show(&mut self, ctx: &Context) {
         self.0.show(ctx)
     }
