@@ -109,9 +109,9 @@ pub(crate) fn render(
         Vec2::new(width, CAPSULE_HEIGHT),
     );
     let radius = CAPSULE_HEIGHT / 2.0;
-    let shadow = Shadow { offset: [0, 14], blur: 36, spread: 0, color: Color32::from_black_alpha(128) };
+    let shadow = theme::glass_shadow();
     painter.add(shadow.as_shape(capsule, radius as u8));
-    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { theme::OVERLAY_CAPSULE_BORDER };
+    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { theme::HAIRLINE };
     painter.rect(capsule, radius, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let ring_center = Pos2::new(capsule.left() + CAPSULE_PAD_LEFT + RING_RADIUS + RING_STROKE / 2.0, capsule.center().y);
@@ -180,7 +180,7 @@ fn paint_pill(ui: &egui::Ui, canvas_rect: Rect, label: &str, place: impl FnOnce(
     let pill = Rect::from_min_size(min, size);
     let shadow = Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(115) };
     painter.add(shadow.as_shape(pill, 15));
-    painter.rect(pill, 15.0, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, theme::OVERLAY_CAPSULE_BORDER), StrokeKind::Inside);
+    painter.rect(pill, 15.0, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, theme::HAIRLINE), StrokeKind::Inside);
     paint_ring(&painter, Pos2::new(pill.left() + 9.0 + 8.0, pill.center().y), 6.0, 2.0, None, t, theme::ACCENT_BRIGHT);
     painter.galley(Pos2::new(pill.left() + 33.0, pill.center().y - text.size().y / 2.0), text, theme::TEXT_PRIMARY);
 }
@@ -225,7 +225,7 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
 /// A ring filled to `fraction` from twelve o'clock, or a turning arc
 /// when there is nothing to count yet.
 fn paint_ring(painter: &Painter, center: Pos2, radius: f32, width: f32, fraction: Option<f32>, t: f32, color: Color32) {
-    painter.circle_stroke(center, radius, Stroke::new(width, theme::PROGRESS_RING_TRACK));
+    painter.circle_stroke(center, radius, Stroke::new(width, theme::RAIL));
     let (start, sweep) = match fraction {
         Some(f) => (-FRAC_PI_2, f * TAU),
         None => (t * TAU * 0.8, 0.28 * TAU),
