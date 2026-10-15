@@ -3,6 +3,7 @@ use std::path::Path;
 use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
 use image::ImageEncoder;
+use image::buffer::ConvertBuffer;
 use fast_image_resize::{images::{Image, ImageRef}, PixelType, ResizeAlg, ResizeOptions, Resizer};
 pub use fast_image_resize::FilterType as ResizeFilter;
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
@@ -18,10 +19,15 @@ fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u
     dst.into_vec()
 }
 
+/// SIMD resize of a borrowed RGB image with the given filter.
+fn resize_rgb(src: &image::RgbImage, dst_width: u32, dst_height: u32, filter: ResizeFilter) -> image::RgbImage {
+    let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8x3, dst_width, dst_height, filter);
+    image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+}
+
 /// SIMD Lanczos3 resize of an RGB image, borrowed.
 pub fn resize_rgb_image_lanczos3(src: &image::RgbImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
-    let out = resize_raw(src.as_raw(), src.width(), src.height(), PixelType::U8x3, dst_width, dst_height, ResizeFilter::Lanczos3);
-    image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+    resize_rgb(src, dst_width, dst_height, ResizeFilter::Lanczos3)
 }
 
 /// SIMD-accelerated Lanczos3 resize for single-channel (gray) images.
@@ -43,11 +49,7 @@ pub fn resize_rgba(src: &RgbaImage, dst_width: u32, dst_height: u32, filter: Res
 pub fn resize_to_rgba(img: &DynamicImage, dst_width: u32, dst_height: u32, filter: ResizeFilter) -> RgbaImage {
     match img {
         DynamicImage::ImageRgba8(rgba) => resize_rgba(rgba, dst_width, dst_height, filter),
-        DynamicImage::ImageRgb8(rgb) => {
-            let out = resize_raw(rgb.as_raw(), rgb.width(), rgb.height(), PixelType::U8x3, dst_width, dst_height, filter);
-            let rgb = image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions");
-            DynamicImage::ImageRgb8(rgb).to_rgba8()
-        }
+        DynamicImage::ImageRgb8(rgb) => resize_rgb(rgb, dst_width, dst_height, filter).convert(),
         other => resize_rgba(&other.to_rgba8(), dst_width, dst_height, filter),
     }
 }
@@ -95,9 +97,7 @@ pub fn preview_reach(at: u32, len: u32, span: u32, out: u32) -> (u32, u32) {
 /// (e.g. RGBA), but the resulting `RgbImage` is then borrowed into the
 /// resizer rather than copied again.
 pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
-    let rgb = img.to_rgb8();
-    let out = resize_raw(rgb.as_raw(), rgb.width(), rgb.height(), PixelType::U8x3, dst_width, dst_height, ResizeFilter::Lanczos3);
-    image::RgbImage::from_raw(dst_width, dst_height, out).expect("valid dimensions")
+    resize_rgb_image_lanczos3(&img.to_rgb8(), dst_width, dst_height)
 }
 
 /// Load an image from a file path. Format detected by file extension.
@@ -228,13 +228,7 @@ pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
         return img;
     }
     let (nw, nh) = fit_long_side(w, h, max_dim);
-    let rgba = img.to_rgba8();
-    let src = Image::from_vec_u8(rgba.width(), rgba.height(), rgba.into_raw(), PixelType::U8x4)
-        .expect("valid RGBA buffer");
-    let mut dst = Image::new(nw, nh, PixelType::U8x4);
-    Resizer::new().resize(&src, &mut dst, None).expect("resize failed");
-    let out = image::RgbaImage::from_raw(nw, nh, dst.into_vec()).expect("valid dimensions");
-    DynamicImage::ImageRgba8(out)
+    DynamicImage::ImageRgba8(resize_rgba(&img.to_rgba8(), nw, nh, ResizeFilter::Lanczos3))
 }
 
 /// Alpha-blend an RGBA image onto a solid background color, making all pixels fully opaque.
@@ -316,7 +310,7 @@ fn build_bg_layer(
             let scaled = resize_rgb_lanczos3(bg, scaled_w, scaled_h);
             let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
             let cropped = image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image();
-            image::imageops::replace(&mut out, &rgb_to_rgba(&cropped), 0, 0);
+            image::imageops::replace(&mut out, &cropped.convert(), 0, 0);
         }
         BgImageFit::Contain => {
             let scale = (dst_w as f32 / sw as f32).min(dst_h as f32 / sh as f32);
@@ -325,24 +319,13 @@ fn build_bg_layer(
             let scaled = resize_rgb_lanczos3(bg, inner_w, inner_h);
             let ox = ((dst_w - inner_w) / 2) as i64;
             let oy = ((dst_h - inner_h) / 2) as i64;
-            image::imageops::replace(&mut out, &rgb_to_rgba(&scaled), ox, oy);
+            image::imageops::replace(&mut out, &scaled.convert(), ox, oy);
         }
         BgImageFit::Tile => {
             image::imageops::tile(&mut out, &bg.to_rgba8());
         }
     }
     out
-}
-
-/// Lift an opaque RGB image into an RGBA buffer (alpha=255). Required for
-/// `imageops::replace` whose top + bottom buffers must share a pixel type.
-fn rgb_to_rgba(rgb: &image::RgbImage) -> RgbaImage {
-    let (w, h) = (rgb.width(), rgb.height());
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for px in rgb.pixels() {
-        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-    }
-    RgbaImage::from_raw(w, h, out).expect("dims preserved from src")
 }
 
 /// Stream-encode an RgbaImage into a `Write` sink (typically
