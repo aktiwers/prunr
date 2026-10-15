@@ -7,9 +7,9 @@
 
 mod test_common;
 
-use image::{GrayImage, Luma, Rgba, RgbaImage};
+use image::{Rgba, RgbaImage};
 use prunr_core::inpaint;
-use test_common::{skip_if_model_missing, skip_if_no_ort};
+use test_common::{changed_in, rect_mask, skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn big_lama_modifies_painted_region() {
@@ -22,31 +22,14 @@ fn big_lama_modifies_painted_region() {
     let h: u32 = 256;
     let mut image = RgbaImage::new(w, h);
     for p in image.pixels_mut() { *p = Rgba([200, 50, 50, 255]); }
-    let mut mask = GrayImage::new(w, h);
-    for y in 96..160 {
-        for x in 96..160 {
-            mask.put_pixel(x, y, Luma([255]));
-        }
-    }
+    let mask = rect_mask(w, h, 96, 96, 64, 64);
 
     let result = inpaint::process_inpaint(&image, &mask, id)
         .expect("Big-LaMa inference should succeed");
 
     assert_eq!(result.dimensions(), image.dimensions());
 
-    // Sample inside the mask: the painted output should differ from
-    // the solid red source. If they're identical, the model is
-    // returning the input unchanged — the bug we're investigating.
-    let mut diffs = 0u32;
-    for y in 96..160 {
-        for x in 96..160 {
-            let src = image.get_pixel(x, y);
-            let dst = result.get_pixel(x, y);
-            if src.0 != dst.0 {
-                diffs += 1;
-            }
-        }
-    }
+    let diffs = changed_in(&image, &result, 96, 96, 64, 64);
     let total = 64 * 64;
     eprintln!("Big-LaMa: {diffs}/{total} masked pixels differ from source");
     eprintln!("Sample painted pixel at (128,128): {:?} → {:?}",
