@@ -470,10 +470,8 @@ pub fn run_worker() -> ! {
                     let look = first_look.for_run(item_id, model, pool_size);
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
-                    // For LineMode::Off we use the split pipeline (infer_only +
-                    // tensor_to_mask + apply_mask) to capture the raw tensor for
-                    // future Tier 2 mask reruns.  Other modes don't benefit from
-                    // tensor caching so they use the monolithic pipeline.
+                    // Off and non-chained SubjectOutline keep the seg tensor
+                    // for mask reruns.
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
                     let mut edge_tensor_for_cache: Option<prunr_core::EdgeInferenceResult> = None;
 
@@ -490,7 +488,7 @@ pub fn run_worker() -> ! {
                             };
                             img_ref.and_then(|img| {
                                 progress.step(prunr_core::Step::DrawingLines);
-                                // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
+                                // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
                                 spare.trace(eng_ref, &transformed, traced_scales).map(|res| {
@@ -510,7 +508,7 @@ pub fn run_worker() -> ! {
                                 // cut-out, effect included, so the lines are traced from
                                 // it directly. No seg cache — no seg tensor made it.
                                 progress.step(prunr_core::Step::DrawingLines);
-                                // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
+                                // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let measured = line_depth.as_ref().and_then(|d| d.measure(img));
                                 prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
@@ -520,8 +518,7 @@ pub fn run_worker() -> ! {
                                     })
                             } else {
                                 // Non-chain: split pipeline so the seg tensor is captured
-                                // for Tier 2 mask reruns and cross-mode transitions (the
-                                // monolithic `process_image_with_mask` threw it away).
+                                // for Tier 2 mask reruns and cross-mode transitions.
                                 let Some(eng) = engine.as_ref() else {
                                     let _ = evt_tx.send(SubprocessEvent::ImageError {
                                         item_id,
@@ -561,7 +558,7 @@ pub fn run_worker() -> ! {
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
                                         tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
                                         progress.step(prunr_core::Step::DrawingLines);
-                                        // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
+                                        // invariant: ensure_edge_engine ran above for every line mode but Off.
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let measured = line_depth.as_ref().and_then(|d| d.measure(original));
                                         let (rgba_image, edge_res) = prunr_core::outline_subject(
@@ -1050,10 +1047,9 @@ pub fn run_worker() -> ! {
                 if let Err(e) = spawn_result {
                     // The dropped closure took the cancel with it.
                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                    // The healthy path's `read_and_delete` inside the
-                    // spawned closure never ran — clean the parent-
-                    // written temps here before the InpaintError lands
-                    // so /dev/shm doesn't accumulate.
+                    // The closure never ran, so its input PNGs are still
+                    // there — clean them before the InpaintError lands so
+                    // /dev/shm doesn't accumulate.
                     let _ = std::fs::remove_file(&image_path_on_spawn_err);
                     let _ = std::fs::remove_file(&mask_path_on_spawn_err);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
