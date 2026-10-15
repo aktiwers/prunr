@@ -94,6 +94,72 @@ pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
 }
 
+/// An optimized graph a session is writing for `path`. ORT writes it in
+/// place while the session builds, so it goes to a file of its own and
+/// is renamed onto `path` once the session built: another session (a
+/// second worker, a parallel test) loading the cache meanwhile never
+/// reads half a graph, and a build that dies leaves no broken cache.
+/// Dropped unpublished, the draft is removed.
+pub struct GraphDraft {
+    draft: PathBuf,
+    path: PathBuf,
+}
+
+/// A draft left by a build that died is older than any build takes.
+const ABANDONED_DRAFT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+impl GraphDraft {
+    /// A draft for `path`, named for this process and build; drafts an
+    /// earlier build abandoned beside it are removed.
+    pub fn for_path(path: &Path) -> Self {
+        static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let build = BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = path.file_name().map_or_else(Default::default, |n| n.to_string_lossy().into_owned());
+        let draft = path.with_file_name(format!("{name}.{}-{build}.draft", std::process::id()));
+        if let Some(dir) = path.parent() {
+            remove_abandoned_drafts(dir, &name);
+        }
+        Self { draft, path: path.to_path_buf() }
+    }
+
+    /// Where ORT writes the graph.
+    pub fn draft(&self) -> &Path {
+        &self.draft
+    }
+
+    /// The session built: its graph becomes the cache.
+    pub fn publish(self) {
+        if let Err(e) = std::fs::rename(&self.draft, &self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(cache = %self.path.display(), %e, "optimized graph not cached");
+            }
+        }
+    }
+}
+
+impl Drop for GraphDraft {
+    fn drop(&mut self) {
+        // After `publish` the draft is gone and this finds nothing.
+        let _ = std::fs::remove_file(&self.draft);
+    }
+}
+
+fn remove_abandoned_drafts(dir: &Path, name: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{name}.");
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(file) = file.to_str() else { continue };
+        let abandoned = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > ABANDONED_DRAFT);
+        if file.starts_with(&prefix) && file.ends_with(".draft") && abandoned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Per-part variant of `cache_path_for` — isolates each bundle part so
 /// optimized blobs from one part can't collide with another's in shared
 /// EP cache directories.
@@ -272,6 +338,27 @@ mod tests {
     pub(super) fn temp_root() -> Option<PathBuf> {
         static ROOT: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
         ROOT.get_or_init(|| tempfile::tempdir().ok()).as_ref().map(|d| d.path().join("ep_cache"))
+    }
+
+    /// A draft becomes the cache only when published; one dropped (a
+    /// failed build) leaves nothing, and a reader never sees it.
+    #[test]
+    fn a_graph_is_cached_only_once_its_session_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("optimized.onnx");
+        let failed = GraphDraft::for_path(&path);
+        std::fs::write(failed.draft(), b"half a gra").unwrap();
+        assert!(!path.exists(), "a reader sees no cache while it is written");
+        drop(failed);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "a failed build leaves nothing");
+        let built = GraphDraft::for_path(&path);
+        let other = GraphDraft::for_path(&path);
+        assert_ne!(built.draft(), other.draft(), "two builds write apart");
+        std::fs::write(built.draft(), b"graph").unwrap();
+        built.publish();
+        assert_eq!(std::fs::read(&path).unwrap(), b"graph");
+        drop(other);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
     }
 
     /// A graph ORT optimized is tied to that ORT build: one made by an
