@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use prunr_core::upscale::{pick_optimization_level, upscale_rgba_with_engine, UpscaleRunOptions};
-use prunr_core::{CoreError, InferenceEngine, ModelKind, OrtEngine};
+use prunr_core::upscale::{upscale_rgba_with_engine, UpscaleRunOptions};
+use prunr_core::{CoreError, InferenceEngine, OrtEngine};
 use prunr_models::{is_available, ModelId};
 use test_common::skip_if_no_ort;
 
@@ -31,17 +31,13 @@ fn terminate_aborts_a_running_tile() {
     if skip_if_no_ort("upscale_cancel_latency") {
         return;
     }
-    let (id, kind) = (ModelId::FourXNmkdSiaxCx, ModelKind::FourXNmkdSiaxCx);
+    let id = ModelId::FourXNmkdSiaxCx;
     if !is_available(id) {
         eprintln!("SKIP: {id:?} not installed");
         return;
     }
-    let descriptor = prunr_models::descriptor(id).expect("registry entry");
-    let level = pick_optimization_level(descriptor);
     let t0 = Instant::now();
-    let engine = Arc::new(
-        OrtEngine::new_with_optimization_level(kind, 2, level).expect("engine"),
-    );
+    let engine = Arc::new(OrtEngine::for_model(id, 2, false).expect("engine"));
     eprintln!("engine ready in {:?} on {}", t0.elapsed(), engine.active_provider());
 
     let input = image::RgbaImage::from_fn(1024, 1024, |x, y| {
@@ -85,13 +81,12 @@ fn full_run_time() {
     if skip_if_no_ort("upscale_full_run") {
         return;
     }
-    let (id, kind) = (ModelId::FourXNmkdSiaxCx, ModelKind::FourXNmkdSiaxCx);
+    let id = ModelId::FourXNmkdSiaxCx;
     if !is_available(id) {
         eprintln!("SKIP: {id:?} not installed");
         return;
     }
-    let descriptor = prunr_models::descriptor(id).expect("registry entry");
-    let engine = OrtEngine::new_with_optimization_level(kind, 2, pick_optimization_level(descriptor)).expect("engine");
+    let engine = OrtEngine::for_model(id, 2, false).expect("engine");
     let input = image::RgbaImage::from_fn(1024, 1024, |x, y| {
         image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
     });

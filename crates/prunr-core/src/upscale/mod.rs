@@ -22,7 +22,6 @@ use ort::value::TensorElementType;
 
 use crate::CoreError;
 use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
-use crate::types::ModelKind;
 
 /// Shared `RunOptions` handle used by callers that want to terminate a
 /// running upscale session mid-tile. The owning thread holds the `Arc`
@@ -40,9 +39,7 @@ pub type UpscaleRunOptions = RunOptions<NoSelectedOutputs>;
 /// shape-mismatch (observed against 4xNomos8kSCHAT-L: Level3 panics with
 /// `Attempting to get index by a name which does not exist:
 /// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
-/// Exposed `pub` so the Processor's warm-engine cache can derive the
-/// same level without duplicating the branch.
-pub fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
+pub(crate) fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
     if descriptor.tile_size_multiple.is_some() {
         GraphOptimizationLevel::Level2
     } else {
@@ -330,19 +327,7 @@ pub fn upscale_rgba(
     intra_threads: usize,
     progress: &Progress,
 ) -> Result<RgbaImage, CoreError> {
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
-        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
-
-    let level = pick_optimization_level(descriptor);
-
-    let model_kind = ModelKind::try_from(model_id).map_err(|id| {
-        CoreError::Inference(format!(
-            "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
-        ))
-    })?;
-    let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
+    let engine = OrtEngine::for_model(model_id, intra_threads, false)?;
     upscale_rgba_with_engine(input, &engine, model_id, scale, progress, None)
 }
 

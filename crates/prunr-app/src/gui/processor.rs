@@ -185,17 +185,11 @@ fn ensure_warm_engine(
     slot: &WarmEngine,
     key: WarmEngineKey,
     intra_threads: usize,
-    level: prunr_core::engine::GraphOptimizationLevel,
 ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
     if let Some(cached) = cached_warm_engine(slot, key) {
         return Ok(cached);
     }
-    let engine = if key.cpu_only {
-        prunr_core::OrtEngine::new_cpu_only_with_optimization_level(key.kind, intra_threads, level)?
-    } else {
-        prunr_core::OrtEngine::new_with_optimization_level(key.kind, intra_threads, level)?
-    };
-    let fresh = Arc::new(engine);
+    let fresh = Arc::new(prunr_core::OrtEngine::for_model(key.kind.into(), intra_threads, key.cpu_only)?);
     *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
 }
@@ -456,11 +450,10 @@ fn measure_depth(
     } else {
         (prunr_core::Progress::none(), None)
     };
-    let level = prunr_core::upscale::pick_optimization_level(descriptor);
     let threads = prunr_core::batch::ort_intra_threads(1);
     let result = input.load()
         .and_then(|photo| {
-            let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads, level)?;
+            let engine = ensure_warm_engine(engine_slot, WarmEngineKey { kind, cpu_only }, threads)?;
             let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
             let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
             Ok(map.with_faces(&faces))
@@ -1616,7 +1609,6 @@ impl Processor {
                 return;
             }
         };
-        let level = prunr_core::upscale::pick_optimization_level(descriptor);
 
         // First dispatch initializes the shared RunOptions; subsequent
         // dispatches reuse it. ORT itself is initialised at app start.
@@ -1661,7 +1653,7 @@ impl Processor {
             // thread holds its own Arc, so a model swap that evicts the slot
             // mid-run never invalidates this session.
             let engine_for_thread = match ensure_warm_engine(
-                &engine_slot, WarmEngineKey { kind: cache_model_kind, cpu_only }, intra_threads, level,
+                &engine_slot, WarmEngineKey { kind: cache_model_kind, cpu_only }, intra_threads,
             ) {
                 Ok(engine) => engine,
                 Err(err) => {
@@ -1782,7 +1774,6 @@ impl Processor {
         if !admitted(descriptor) {
             return;
         }
-        let level = prunr_core::upscale::pick_optimization_level(descriptor);
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize));
         let done = self.colorize.begin(run.clone());
@@ -1791,7 +1782,7 @@ impl Processor {
         std::thread::spawn(move || {
             let key = WarmEngineKey { kind, cpu_only };
             let result = input.load().and_then(|input| {
-                let engine = ensure_warm_engine(&engine_slot, key, intra_threads, level)?;
+                let engine = ensure_warm_engine(&engine_slot, key, intra_threads)?;
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
                 let run = super::item::ColorizeCache::new(Arc::new(plane), input);
                 let shown = Arc::new(run.render(recipe.colorize.strength()));
@@ -3075,7 +3066,6 @@ mod upscale_dispatch_tests {
 mod warm_cache_tests {
     use super::*;
     use prunr_core::{ModelKind, OrtEngine};
-    use prunr_core::engine::GraphOptimizationLevel;
 
     fn make_processor() -> Processor {
         let (tx, _rx) = mpsc::channel::<WorkerMessage>();
@@ -3100,12 +3090,8 @@ mod warm_cache_tests {
         Some(
             CELL.get_or_init(|| {
                 Arc::new(
-                    OrtEngine::new_cpu_only_with_optimization_level(
-                        ModelKind::Silueta,
-                        1,
-                        GraphOptimizationLevel::Level1,
-                    )
-                    .expect("Silueta is bundled and must construct without errors once ORT is init"),
+                    OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
+                        .expect("Silueta is bundled and must construct without errors once ORT is init"),
                 )
             })
             .clone(),

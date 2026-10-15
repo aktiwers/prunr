@@ -420,8 +420,7 @@ struct EngineRun<'a> {
 
 impl<'a> EngineRun<'a> {
     fn open(family: Family, id: ModelId, inputs: &'a Inputs, cpu_only: bool) -> Result<Self, String> {
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let engine = prunr_core::OrtEngine::for_model(id, threads, cpu_only).map_err(|e| e.to_string())?;
+        let engine = prunr_core::OrtEngine::for_model(id, prunr_core::batch::ort_intra_threads(1), cpu_only).map_err(|e| e.to_string())?;
         let decoded = (family == Family::Segmentation).then(|| image::DynamicImage::ImageRgba8(inputs.photo.clone()));
         Ok(Self { engine, family, id, inputs, decoded })
     }
