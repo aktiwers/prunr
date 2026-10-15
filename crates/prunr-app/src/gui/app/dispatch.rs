@@ -270,7 +270,7 @@ impl PrunrApp {
 
         let cutter = Cutter::of(self.settings.model.to_model_kind());
         let tiers = self.batch.classify(&candidate_ids, model, step, cutter);
-        self.notify_skip(tiers.skip_count, tiers.process_count());
+        self.notify_skip(tiers.up_to_date_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
 
         for id in tiers.all_process_ids() {
@@ -279,15 +279,15 @@ impl PrunrApp {
             }
         }
 
-        let tier2_work = self.batch.cached_tensor_work(&tiers.tier2);
-        let add_edge_work = self.batch.cached_tensor_work(&tiers.tier_add_edge);
+        let mask_work = self.batch.cached_tensor_work(&tiers.mask);
+        let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge);
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
         self.update_on_screen();
-        if tiers.tier1.len() > 1 {
-            self.dispatch_with_admission(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
+        if tiers.full.len() > 1 {
+            self.dispatch_with_admission(&tiers.full, mask_work, add_edge_work, model, jobs);
         } else {
-            self.dispatch_small_batch(&tiers.tier1, tier2_work, add_edge_work, model, jobs);
+            self.dispatch_small_batch(&tiers.full, mask_work, add_edge_work, model, jobs);
         }
     }
 
@@ -336,7 +336,7 @@ impl PrunrApp {
     fn dispatch_with_admission(
         &mut self,
         tier1_ids: &HashSet<u64>,
-        tier2_work: Vec<CachedTensorWork>,
+        mask_work: Vec<CachedTensorWork>,
         add_edge_work: Vec<CachedTensorWork>,
         model: prunr_core::ModelKind,
         jobs: usize,
@@ -351,18 +351,18 @@ impl PrunrApp {
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
         // skip dispatch.
-        if initial_items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() {
+        if initial_items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() {
             self.processor.clear_admission();
             return;
         }
-        self.dispatch_batch(initial_items, tier2_work, add_edge_work, model, jobs, Some(additional_items_rx));
+        self.dispatch_batch(initial_items, mask_work, add_edge_work, model, jobs, Some(additional_items_rx));
     }
 
     /// Single-item or small-batch fast path — skip admission entirely.
     fn dispatch_small_batch(
         &mut self,
         tier1_ids: &HashSet<u64>,
-        tier2_work: Vec<CachedTensorWork>,
+        mask_work: Vec<CachedTensorWork>,
         add_edge_work: Vec<CachedTensorWork>,
         model: prunr_core::ModelKind,
         jobs: usize,
@@ -370,9 +370,9 @@ impl PrunrApp {
         let items = self.batch.full_run_work(tier1_ids);
 
         // If all prep failed, don't dispatch an empty batch.
-        if items.is_empty() && tier2_work.is_empty() && add_edge_work.is_empty() { return; }
+        if items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() { return; }
 
-        self.dispatch_batch(items, tier2_work, add_edge_work, model, jobs, None);
+        self.dispatch_batch(items, mask_work, add_edge_work, model, jobs, None);
     }
 
     /// The settings a batch runs with: the shown image's — what you see
