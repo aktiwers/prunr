@@ -583,7 +583,7 @@ fn diffusion_tuning(id: ModelId, cpu_only: bool) -> crate::gui::processor::Inpai
     let scheduler = if id == ModelId::SdV15LcmInpaintFp16 { SdScheduler::Lcm } else { SdScheduler::DpmPlusPlus2MKarras };
     let quality = crate::gui::presets::SdSchedulerBundle::default_for(scheduler);
     crate::gui::processor::InpaintTuning {
-        backend: id,
+        model: id,
         sd_prompt: brush.sd_prompt_for_run(),
         sd_negative_prompt: brush.sd_negative_prompt.clone(),
         sd_guidance_scale: quality.guidance_scale,

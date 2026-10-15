@@ -674,13 +674,13 @@ pub(crate) struct InpaintTuning {
     pub grow_px: f32,
     /// How large the hole is filled.
     pub fill_scale: prunr_core::inpaint::FillScale,
-    /// Which inpaint backend to use (LaMaFp32, BigLaMa, …). For
-    /// SD-family backends, the choice between `SdV15InpaintFp16`
+    /// Which eraser model runs (LaMaFp32, BigLaMa, …). For
+    /// SD-family models, the choice between `SdV15InpaintFp16`
     /// (standard SD weights) and `SdV15LcmInpaintFp16` (LCM weights)
     /// is driven by the user's scheduler pick upstream
     /// (`Settings::lcm_routing_active`).
-    pub backend: prunr_models::ModelId,
-    /// SD-only: text prompt; ignored for LaMa-family backends.
+    pub model: prunr_models::ModelId,
+    /// SD-only: text prompt; ignored for LaMa-family models.
     pub sd_prompt: String,
     pub sd_negative_prompt: String,
     pub sd_guidance_scale: f32,
@@ -719,7 +719,7 @@ impl Default for InpaintTuning {
             feather_px: 0.0,
             grow_px: 0.0,
             fill_scale: Default::default(),
-            backend: prunr_models::ModelId::LaMaFp32,
+            model: prunr_models::ModelId::LaMaFp32,
             sd_prompt: String::new(),
             sd_negative_prompt: String::new(),
             sd_guidance_scale: 1.0,
@@ -736,15 +736,15 @@ impl Default for InpaintTuning {
 
 /// The CFG an SD dispatch runs with.
 ///
-/// `backend` is the *actually-dispatched* model id (after
+/// `model` is the *actually-dispatched* model id (after
 /// `Settings::lcm_routing_active` resolution upstream). The clamp
-/// derives from the backend, NOT from the user's scheduler request —
+/// derives from the model, NOT from the user's scheduler request —
 /// picking the LCM scheduler without the LCM bundle installed must NOT
 /// clamp CFG against standard SD weights.
-pub(crate) fn effective_cfg(backend: prunr_models::ModelId, user_cfg: f32) -> f32 {
+pub(crate) fn effective_cfg(model: prunr_models::ModelId, user_cfg: f32) -> f32 {
     // LCM weights are calibrated for low CFG (model card: 1.0–2.0).
     // Standard SD passes the user's CFG straight through.
-    if backend == prunr_models::ModelId::SdV15LcmInpaintFp16 {
+    if model == prunr_models::ModelId::SdV15LcmInpaintFp16 {
         user_cfg.clamp(1.0, 2.0)
     } else {
         user_cfg
@@ -1088,7 +1088,7 @@ impl Processor {
         let progress = sink.clone().into_progress().with_cancel(cancel.clone());
         self.inpaint_cancels.insert(item_id, cancel.clone());
         self.inpaint_runs.insert(item_id, sink);
-        if tuning.backend.is_sd_family() {
+        if tuning.model.is_sd_family() {
             // The SD subprocess reports through the bridge to the run's sink.
             self.dispatch_inpaint_sd(item_id, gen, &image, &correction, &tuning, progress);
             return;
@@ -1098,7 +1098,7 @@ impl Processor {
             preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN.
-            let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.backend, tuning.cpu_only, tuning.fill_scale, &progress);
+            let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress);
             if outcome.is_ok() {
                 progress.step(prunr_core::Step::Blending);
             }
@@ -1160,7 +1160,7 @@ impl Processor {
     /// Tell the inpaint bridge to drop its cached subprocess. Idempotent;
     /// no-op when the bridge is already idle. Called by
     /// `apply_toolbar_change` on every model switch so a previous
-    /// SD-family backend's ~200 MB residual subprocess (bundle was
+    /// SD-family model's ~200 MB residual subprocess (bundle was
     /// already released by `inpaint_sd::release` on dispatch
     /// completion, but the worker process itself stays alive for the
     /// 5-min idle window) doesn't pin RAM the user no longer wants
@@ -1185,7 +1185,7 @@ impl Processor {
     /// Tell the seg/edge worker bridge to drop its warm subprocess.
     /// Idempotent; no-op when nothing is warm. Symmetric with
     /// `release_inpaint_subprocess` — both fire on model switch so a
-    /// previous backend's engine pool (BiRefNetLite ~2 GB, U2Net
+    /// previous model's engine pool (BiRefNetLite ~2 GB, U2Net
     /// ~800 MB, …) isn't held across the user's "I'm done with that
     /// model" signal.
     pub(crate) fn release_seg_warm(&mut self) {
@@ -1287,7 +1287,7 @@ impl Processor {
                 return;
             }
             let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch {
-                item_id, gen, model_id: tuning.backend, image_path, mask_path, sd_req,
+                item_id, gen, model_id: tuning.model, image_path, mask_path, sd_req,
                 feather_px: tuning.feather_px,
                 sharpen: tuning.sharpen,
             });
@@ -2197,14 +2197,14 @@ pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_s
         fill_scale: tuning.fill_scale,
         ..Default::default()
     };
-    match tuning.backend {
+    match tuning.model {
         prunr_models::ModelId::SdV15InpaintFp16
         | prunr_models::ModelId::SdV15LcmInpaintFp16 => {
             Some(SdInpaintRequest {
                 prompt: tuning.sd_prompt.clone(),
                 negative_prompt: tuning.sd_negative_prompt.clone(),
                 num_inference_steps: tuning.sd_steps,
-                guidance_scale: effective_cfg(tuning.backend, tuning.sd_guidance_scale),
+                guidance_scale: effective_cfg(tuning.model, tuning.sd_guidance_scale),
                 use_taesd: tuning.use_taesd,
                 scheduler: tuning.sd_scheduler.into(),
                 ..base
@@ -2230,7 +2230,7 @@ mod sd_request_tests {
     #[test]
     fn rorem_runs_its_own_steps_and_keeps_the_seed() {
         let tuning = InpaintTuning {
-            backend: prunr_models::ModelId::RoremFp16,
+            model: prunr_models::ModelId::RoremFp16,
             sd_prompt: "a cat".into(),
             sd_guidance_scale: 7.5,
             sd_scheduler: super::super::brush_state::SdScheduler::DpmPlusPlus2MKarras,
