@@ -451,44 +451,14 @@ impl OrtEngine {
         Self::new_with_fallback(model, intra_threads, true)
     }
 
-    /// Same as [`Self::new`] but with an explicit optimization-level override.
-    ///
-    /// Use `Level2` for window-attention transformers (HAT / Swin) where
-    /// `Level3` bakes the first tile's input shape into the graph during
-    /// session init, causing an irrecoverable shape-mismatch on the second
-    /// tile in the same session (observed against 4xNomos8kSCHAT-L: Level3
-    /// panics with `Attempting to get index by a name which does not exist:
-    /// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
-    pub fn new_with_optimization_level(
-        model: ModelKind,
-        intra_threads: usize,
-        level: GraphOptimizationLevel,
-    ) -> Result<Self, CoreError> {
-        Self::new_with_fallback_and_level(model, intra_threads, false, level)
-    }
-
-    /// CPU-only engine with an explicit optimization-level override.
-    /// Used by the upscale dispatcher to avoid OpenVINO's per-input-shape
-    /// lazy graph compilation, which on RRDB-class models (Real-ESRGAN)
-    /// can stall a single dispatch for tens of minutes the first time a
-    /// new tile dimension is seen — the EP cache for upscale wasn't
-    /// hitting in practice.
-    pub fn new_cpu_only_with_optimization_level(
-        model: ModelKind,
-        intra_threads: usize,
-        level: GraphOptimizationLevel,
-    ) -> Result<Self, CoreError> {
-        Self::new_with_fallback_and_level(model, intra_threads, true, level)
-    }
-
     fn new_with_fallback(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
         Self::new_with_fallback_and_level(model, intra_threads, cpu_only, GraphOptimizationLevel::Level3)
     }
 
     /// Core session-creation path shared by `new`, `new_cpu_only`, and
-    /// `new_with_optimization_level`. Tries optimized variant (FP16/INT8)
-    /// first; falls back to FP32 on failure. When `cpu_only=false`, also
-    /// falls back to CPU-only if the GPU EP crashes at init.
+    /// `for_model`. Tries optimized variant (FP16/INT8) first; falls back
+    /// to FP32 on failure. When `cpu_only=false`, also falls back to
+    /// CPU-only if the GPU EP crashes at init.
     fn new_with_fallback_and_level(
         model: ModelKind,
         intra_threads: usize,
@@ -1052,10 +1022,11 @@ mod tests {
     /// Gated on `dev-models` because Silueta is bundled only in that feature.
     #[cfg(feature = "dev-models")]
     #[test]
-    fn new_with_optimization_level_constructs_for_existing_model() {
-        let engine = OrtEngine::new_with_optimization_level(
+    fn level2_constructs_for_existing_model() {
+        let engine = OrtEngine::new_with_fallback_and_level(
             ModelKind::Silueta,
             1,
+            false,
             GraphOptimizationLevel::Level2,
         )
         .expect("Level2 must succeed for Silueta");
