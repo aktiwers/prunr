@@ -197,8 +197,7 @@ pub(crate) fn render(
             chip::gated(ui, reason, |ui| render_color_strength_chip(ui, item_settings));
         }
         if shows(model, Surface::SdChips) {
-            let outcome = super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed);
-            if outcome.committed {
+            if super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
                 change.brush_settings_committed = true;
             }
         }
@@ -247,7 +246,6 @@ pub(crate) fn render(
                     bg: &mut item_settings.bg,
                     bg_effect: &mut item_settings.bg_effect,
                     bg_image_fit: &mut item_settings.bg_image_fit,
-                    default_color: BG_COLOR_FALLBACK,
                     has_bg_image: state.has_bg_image,
                     bg_image_label: state.bg_image_label,
                 }, &mut change);
@@ -906,7 +904,6 @@ struct BgChipState<'a> {
     bg: &'a mut Option<[u8; 4]>,
     bg_effect: &'a mut prunr_core::BgEffect,
     bg_image_fit: &'a mut prunr_core::BgImageFit,
-    default_color: [u8; 4],
     has_bg_image: bool,
     bg_image_label: Option<&'a str>,
 }
@@ -923,7 +920,6 @@ fn render_background_chip(
         bg,
         bg_effect,
         bg_image_fit,
-        default_color,
         has_bg_image,
         bg_image_label,
     } = state;
@@ -949,7 +945,7 @@ fn render_background_chip(
             change.pick_bg_image = true;
             return;
         }
-        apply_bg_kind(bg, bg_effect, kind, default_color);
+        apply_bg_kind(bg, bg_effect, kind);
         if has_bg_image {
             // Any other kind drops the image so the new choice owns the
             // background alone.
@@ -985,7 +981,7 @@ fn render_background_chip(
             }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let shown = solid.unwrap_or([default_color[0], default_color[1], default_color[2]]);
+                let shown = solid.unwrap_or([BG_COLOR_FALLBACK[0], BG_COLOR_FALLBACK[1], BG_COLOR_FALLBACK[2]]);
                 for kind in BgKind::ALL {
                     let selected = kind == current;
                     let resp = chip::swatch_tile(ui, kind.short_name(), selected, BG_TILE, true, |painter, rect| {
@@ -1116,7 +1112,6 @@ fn apply_bg_kind(
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
     kind: BgKind,
-    default_color: [u8; 4],
 ) {
     use prunr_core::BgEffect;
     match kind {
@@ -1125,7 +1120,7 @@ fn apply_bg_kind(
             *bg_effect = BgEffect::None;
         }
         BgKind::Solid => {
-            if bg.is_none() { *bg = Some(default_color); }
+            if bg.is_none() { *bg = Some(BG_COLOR_FALLBACK); }
             *bg_effect = BgEffect::None;
         }
         BgKind::BlurredSource => {

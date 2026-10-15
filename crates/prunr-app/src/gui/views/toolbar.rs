@@ -192,7 +192,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
                 let (label_text, is_all) = match label {
                     ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
-                    ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
                     ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
                     ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
                 };
