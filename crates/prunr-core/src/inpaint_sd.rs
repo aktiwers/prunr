@@ -1708,17 +1708,8 @@ fn sd_apply_path_cache<'a>(
     if crate::cache::cache_dir_for_part(model_id, ep_name, part).is_none() {
         return (builder, Cow::Borrowed(source_path), None);
     }
-    let draft = crate::cache::GraphDraft::for_path(&cache_path);
-    match builder.with_optimized_model_path(draft.draft()) {
-        Ok(b) => {
-            tracing::debug!(?model_id, ep = %ep_name, part, path = %cache_path.display(), "cache miss (writing optimized graph)");
-            (b, Cow::Borrowed(source_path), Some(draft))
-        }
-        Err(e) => {
-            tracing::warn!(?model_id, ep = %ep_name, part, %e, "with_optimized_model_path failed; cache disabled for this build");
-            (e.recover(), Cow::Borrowed(source_path), None)
-        }
-    }
+    let (builder, draft) = crate::cache::attach_draft(builder, &cache_path, model_id, ep_name, Some(part));
+    (builder, Cow::Borrowed(source_path), draft)
 }
 
 // Per-part smoke tests. Each runs ONE forward pass with zero-valued
