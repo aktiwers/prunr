@@ -299,9 +299,24 @@ pub struct LivePreview {
     in_flight: HashMap<u64, InFlight>,
     owed: HashMap<u64, Owed>,
     generation_counter: u64,
-    result_tx: mpsc::Sender<PreviewResult>,
-    result_rx: mpsc::Receiver<PreviewResult>,
+    result_tx: mpsc::Sender<Finished>,
+    result_rx: mpsc::Receiver<Finished>,
     clock: Arc<dyn Clock>,
+}
+
+/// A dispatch that ran to its end: its result, or `None` when it could
+/// make none (a missing tensor, a mask that would not build). Either way
+/// it is no longer in flight.
+pub(crate) struct Finished {
+    item_id: u64,
+    generation: u64,
+    result: Option<PreviewResult>,
+}
+
+impl From<PreviewResult> for Finished {
+    fn from(r: PreviewResult) -> Self {
+        Self { item_id: r.item_id, generation: r.generation, result: Some(r) }
+    }
 }
 
 impl Default for LivePreview {
@@ -499,31 +514,33 @@ impl LivePreview {
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
-                if let Some(rgba) = output.rgba {
-                    let new_edge = is_edge.then_some((output.built_edge, primary_key));
-                    let new_bold = is_edge.then_some((output.built_bold, bold_key));
-                    let new_masked_base = output.built_masked_base
-                        .zip(seg_model)
-                        .map(|(base, model)| (base, mask_recipe, model));
-                    // `is_final` is set by `drain_results`, where the UI
-                    // thread can read `self.pending` atomically. The worker
-                    // ships a placeholder and doesn't care.
-                    let _ = tx.send(PreviewResult {
-                        item_id: id, rgba, kind: dispatch_kind, generation, version, start,
-                        cutter: seg_model.map(crate::gui::item::Cutter::Model),
-                        new_edge, new_bold, new_masked_base,
-                        new_reference: output.built_reference,
-                        new_faced: output.built_faced.zip(faced_key),
-                        new_depth_photo: output.built_depth_photo,
-                        new_quick_photo: output.built_quick_photo,
-                        applied_mask: mask_recipe,
-                        applied_depth,
-                        applied_tier2_knobs,
-                        applied_color_strength,
-                        is_final: false,
-                        quick,
-                    });
-                }
+                let Some(rgba) = output.rgba else {
+                    let _ = tx.send(Finished { item_id: id, generation, result: None });
+                    return;
+                };
+                let new_edge = is_edge.then_some((output.built_edge, primary_key));
+                let new_bold = is_edge.then_some((output.built_bold, bold_key));
+                let new_masked_base = output.built_masked_base
+                    .zip(seg_model)
+                    .map(|(base, model)| (base, mask_recipe, model));
+                // `is_final` is set by `drain_results`, where the UI
+                // thread can read `self.pending` atomically. The worker
+                // ships a placeholder and doesn't care.
+                let _ = tx.send(Finished::from(PreviewResult {
+                    item_id: id, rgba, kind: dispatch_kind, generation, version, start,
+                    cutter: seg_model.map(crate::gui::item::Cutter::Model),
+                    new_edge, new_bold, new_masked_base,
+                    new_reference: output.built_reference,
+                    new_faced: output.built_faced.zip(faced_key),
+                    new_depth_photo: output.built_depth_photo,
+                    new_quick_photo: output.built_quick_photo,
+                    applied_mask: mask_recipe,
+                    applied_depth,
+                    applied_tier2_knobs,
+                    applied_color_strength,
+                    is_final: false,
+                    quick,
+                }));
             });
         }
 
@@ -537,14 +554,17 @@ impl LivePreview {
     /// last result of the session.
     pub fn drain_results(&mut self) -> Vec<PreviewResult> {
         let mut out = Vec::new();
-        while let Ok(mut r) = self.result_rx.try_recv() {
+        while let Ok(done) = self.result_rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
             let is_latest = self.in_flight
-                .get(&r.item_id)
-                .is_some_and(|f| f.generation == r.generation);
-            if is_latest {
-                self.in_flight.remove(&r.item_id);
+                .get(&done.item_id)
+                .is_some_and(|f| f.generation == done.generation);
+            if !is_latest {
+                continue;
+            }
+            self.in_flight.remove(&done.item_id);
+            if let Some(mut r) = done.result {
                 r.is_final = !self.pending.contains_key(&r.item_id) && !self.owed.contains_key(&r.item_id);
                 out.push(r);
             }
@@ -1458,6 +1478,24 @@ mod tests {
         (clock, lp)
     }
 
+    /// A render that can make nothing (lines with no edge tensor) still
+    /// ends: the image is no longer worked on, so nothing waits on it.
+    #[test]
+    fn a_render_that_makes_nothing_still_ends() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        lp.mark_tweak(1, PreviewKind::Edge);
+        clock.advance(DEBOUNCE);
+        lp.tick(|_, _| Some(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(image::DynamicImage::new_rgb8(8, 8)), ItemSettings::default())));
+        assert!(lp.works_on(1), "dispatched");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lp.works_on(1) && Instant::now() < deadline {
+            assert!(lp.drain_results().is_empty(), "nothing to show");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!lp.works_on(1) && !lp.is_busy(), "the render ended");
+    }
+
     /// Held still with the slider down: the full-size render goes out
     /// `SETTLE_AFTER` after the last tweak, with no release.
     #[test]
@@ -1669,7 +1707,7 @@ mod tests {
             42,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
         );
-        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(42, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(42, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
 
         let drained = lp.drain_results();
         assert!(drained.is_empty(), "stale generation must not be returned");
@@ -1686,7 +1724,7 @@ mod tests {
             99,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
         );
-        lp.result_tx.send(PreviewResult { generation: 7, is_final: false, ..PreviewResult::mask_for_test(99, Arc::new(RgbaImage::new(2, 2))) }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 7, is_final: false, ..PreviewResult::mask_for_test(99, Arc::new(RgbaImage::new(2, 2))) }.into()).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
@@ -1702,7 +1740,7 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(777, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(777, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
         let drained = lp.drain_results();
         assert!(drained.is_empty());
     }
@@ -1715,7 +1753,7 @@ mod tests {
             11,
             InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
         );
-        lp.result_tx.send(PreviewResult { generation: 3, is_final: false, ..PreviewResult::mask_for_test(11, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 3, is_final: false, ..PreviewResult::mask_for_test(11, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
@@ -1735,7 +1773,7 @@ mod tests {
             22,
             Pending { armed_at: Instant::now(), latest_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
-        lp.result_tx.send(PreviewResult { generation: 2, is_final: false, ..PreviewResult::mask_for_test(22, Arc::new(RgbaImage::new(1, 1))) }).unwrap();
+        lp.result_tx.send(PreviewResult { generation: 2, is_final: false, ..PreviewResult::mask_for_test(22, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
