@@ -18,11 +18,15 @@ pub(crate) struct HardwareInstallCache {
     pub lcm_bundle: bool,
     pub x2plus: bool,
     /// The face models, in `FaceModel::ALL` order.
-    pub faces: [bool; 2],
+    pub faces: [bool; crate::gui::item_settings::FaceModel::ALL.len()],
     /// The depth model, for every depth effect.
     pub depth: bool,
     /// Bit `SettingsModel::index()` set when that model is installed.
     models: u32,
+}
+
+fn model_bits(models: impl IntoIterator<Item = crate::gui::settings::SettingsModel>) -> u32 {
+    models.into_iter().fold(0, |bits, m| bits | 1 << m.index())
 }
 
 impl HardwareInstallCache {
@@ -55,7 +59,7 @@ impl HardwareInstallCache {
             taesd: true,
             lcm_bundle: true,
             x2plus: true,
-            faces: [true; 2],
+            faces: [true; crate::gui::item_settings::FaceModel::ALL.len()],
             depth: true,
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
         }
