@@ -228,7 +228,7 @@ fn details(row: &Row) -> String {
         Gpu::NoProvider => md.push_str("- GPU path: the loaded ONNX Runtime has no GPU provider.\n"),
         Gpu::ByDesign { reason } => md.push_str(&format!("- GPU path: CPU by design ({reason}).\n")),
         Gpu::FailedBefore { providers } => md.push_str(&format!(
-            "- GPU path: skipped. {} failed this model on an earlier run, and the app skips it until `prunr --clear-ep-cache`.\n",
+            "- GPU path: skipped. {} failed this model on an earlier run, and the app skips it until the graphics driver or the app changes, or the failures are forgotten (Settings › Hardware, `prunr --clear-ep-cache`).\n",
             providers.join(", "),
         )),
         Gpu::NotInstalled => md.push_str("- Not installed: download it in the app's Model Store.\n"),

@@ -87,6 +87,26 @@ impl HardwareProfile {
     }
 }
 
+/// The graphics drivers a GPU provider runs on, as one string that a
+/// driver update changes: each DXGI adapter on Windows, the NVIDIA
+/// kernel driver on Linux. Empty where none is read.
+pub fn driver_identity() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        dxgi::driver_identity()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/sys/module/nvidia/version")
+            .map(|v| format!("nvidia {}", v.trim()))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        String::new()
+    }
+}
+
 pub fn profile() -> &'static HardwareProfile {
     static CACHE: OnceLock<HardwareProfile> = OnceLock::new();
     CACHE.get_or_init(detect_now)
