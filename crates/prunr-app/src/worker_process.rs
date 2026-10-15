@@ -18,6 +18,7 @@ use prunr_app::subprocess::protocol::*;
 use prunr_app::subprocess::ipc::{read_message, write_message};
 use prunr_app::subprocess::first_look::{FirstLook, Look, Shown};
 use prunr_app::subprocess::spare_scales::{next_token, SpareScales};
+use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
 use prunr_app::gui::settings::LineMode;
 
 /// Weighted memory semaphore for processing.
@@ -101,66 +102,6 @@ impl Drop for SemaphoreGuard {
         let mut state = self.sem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.units_remaining += self.acquired;
         self.sem.available.notify_all();
-    }
-}
-
-/// Check + consume the cancel flag for `item_id`. Removing on hit keeps
-/// the set bounded — without this, every `CancelItem` insert was
-/// permanent for the worker's lifetime and the per-dispatch lock
-/// contention scaled with the cumulative cancel count.
-///
-/// Each dispatch checks once at start; consuming the entry there is
-/// safe because the parent only ever queues one in-flight dispatch per
-/// id, and any later re-process would emit a fresh `CancelItem` if the
-/// user wanted it cancelled too.
-fn is_item_cancelled(
-    set: &Arc<Mutex<std::collections::HashSet<u64>>>,
-    item_id: u64,
-) -> bool {
-    let mut guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.remove(&item_id)
-}
-
-type CancelMap = Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>;
-
-/// Flip the mid-inference cancel flag for `item_id` if a dispatch has
-/// registered one. Used twice from `CancelItem` (seg + inpaint maps);
-/// shared so both sites keep the same lock-then-store sequence.
-fn flip_cancel_flag(map: &CancelMap, item_id: u64) {
-    if let Some(flag) = map.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&item_id)
-    {
-        flag.store(true, Ordering::Release);
-    }
-}
-
-/// Insert a fresh `Arc<AtomicBool>` for `item_id` into `map` and return
-/// a clone. Both seg + inpaint dispatches register the same shape so a
-/// `CancelItem` IPC can flip the flag mid-inference.
-fn register_cancel_flag(map: &CancelMap, item_id: u64) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    map.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(item_id, flag.clone());
-    flag
-}
-
-/// RAII guard that removes the cancel-flag entry from `map` on drop so
-/// the map stays bounded when a dispatch finishes (success / error /
-/// panic — Drop runs in every case). Used directly by the seg dispatch
-/// closure and embedded inside the inpaint thread's `Cleanup` struct
-/// (which carries extra fields for pump-join + in_flight decrement).
-struct CancelMapGuard {
-    item_id: u64,
-    map: CancelMap,
-}
-
-impl Drop for CancelMapGuard {
-    fn drop(&mut self) {
-        self.map.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.item_id);
     }
 }
 
@@ -400,17 +341,9 @@ pub fn run_worker() -> ! {
         // can't function; no useful recovery possible.
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-    // Worker-side mirror of the parent's per-item cancel set — IPC can't
-    // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
-    let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
-    // Mid-inference cancel flags shared across all dispatch lanes (seg and
-    // inpaint). One map covers both: seg checks `cancelled_items` at dispatch
-    // start AND polls this flag during inference; inpaint polls between LaMa
-    // tiles / SD UNet steps. A single `CancelItem` flips the flag here so
-    // one cancel reaches every flavour of in-flight work.
-    let cancel_flags: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // One per dispatch, seg and inpaint alike: a `CancelItem` stops a
+    // queued run before it starts and a running one between stages.
+    let cancels = DispatchCancels::default();
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
     let first_look = FirstLook::default();
@@ -470,30 +403,19 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
 
                 let evt_tx = evt_tx.clone();
-                let cancelled_items = cancelled_items.clone();
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
                 let line_depth = line_depth.clone();
                 let provider = active_provider.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let cancel_flags_for_dispatch = cancel_flags.clone();
                 let first_look = first_look.clone();
                 let on_screen = on_screen.clone();
                 let stopping = stopping.clone();
                 let pool_size = engines.len();
-                // Per-item mid-inference cancel flag. Registered before
-                // the closure starts heavy work so a `CancelItem` can
-                // flip it; the guard inside the closure removes the
-                // entry on every exit path so the map stays bounded.
-                let seg_cancel = register_cancel_flag(&cancel_flags_for_dispatch, item_id);
+                let cancel = cancels.register(item_id);
 
                 pool.spawn(move || {
-                    let _seg_cancel_guard = CancelMapGuard {
-                        item_id,
-                        map: cancel_flags_for_dispatch,
-                    };
-
                     // Hoist chain_path so every early-return path can clean up
                     // the parent-written temp files (img + optional chain) via
                     // `cleanup_ipc_temps`. Forgetting the chain leaks one
@@ -506,7 +428,7 @@ pub fn run_worker() -> ! {
                     });
                     let cleanup_inputs = || cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
 
-                    if is_item_cancelled(&cancelled_items, item_id) {
+                    if cancel.is_cancelled() {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id,
                             error: CANCELLED_ERR_MSG.into(),
@@ -535,7 +457,7 @@ pub fn run_worker() -> ! {
                     // Guard releases on drop (panic-safe).
                     let weight = pixel_weight(&img_bytes);
                     let sem_guard = sem.acquire(weight);
-                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(seg_cancel.clone());
+                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
                     // Whether this image is the one on screen is settled
                     // as its run starts, here.
@@ -804,7 +726,7 @@ pub fn run_worker() -> ! {
                     cleanup_inputs();
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = seg_cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
@@ -819,11 +741,11 @@ pub fn run_worker() -> ! {
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let cancelled_items = cancelled_items.clone();
+                let cancel = cancels.register(item_id);
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
-                    if is_item_cancelled(&cancelled_items, item_id) {
+                    if cancel.is_cancelled() {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
@@ -914,16 +836,13 @@ pub fn run_worker() -> ! {
                 let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
                 let line_depth = line_depth.clone();
-                let cancelled_items = cancelled_items.clone();
                 let on_screen = on_screen.clone();
                 let stopping = stopping.clone();
-                let cancel_flags_for_dispatch = cancel_flags.clone();
-                let cancel = register_cancel_flag(&cancel_flags_for_dispatch, item_id);
+                let cancel = cancels.register(item_id);
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
-                    let _cancel_guard = CancelMapGuard { item_id, map: cancel_flags_for_dispatch };
-                    if is_item_cancelled(&cancelled_items, item_id) {
+                    if cancel.is_cancelled() {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
@@ -1011,24 +930,14 @@ pub fn run_worker() -> ! {
                     }
                     if let Some(token) = spare_token {
                         drop(sem_guard);
-                        let skip = cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
+                        let skip = cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id);
                         send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
             }
 
-            SubprocessCommand::CancelItem { item_id } => {
-                {
-                    let mut guard = cancelled_items.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    guard.insert(item_id);
-                }
-                // Flip the shared mid-inference flag so any in-flight
-                // infer_only / SD UNet / LaMa tile loop sees the cancel
-                // between stages instead of running to completion.
-                flip_cancel_flag(&cancel_flags, item_id);
-            }
+            SubprocessCommand::CancelItem { item_id } => cancels.cancel(item_id),
 
             SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
                 // Inpaint runs independent of the seg/edge engine pool —
@@ -1041,18 +950,16 @@ pub fn run_worker() -> ! {
                 // correctly.
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
-                let inpaint_cancels = cancel_flags.clone();
-                let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
+                let inpaint_cancel = cancels.register(item_id);
                 // Reports go out on this stroke's own thread, ahead of its
                 // InpaintDone on the same channel.
                 let progress = ipc_progress(item_id, evt_tx.clone())
-                    .with_cancel(inpaint_cancel.clone())
+                    .with_cancel(inpaint_cancel.flag())
                     .with_tile_previews(TILE_PREVIEW_EDGE);
                 let in_flight_for_thread = in_flight.clone();
                 // Clones reserved for the spawn-failure unwind path
                 // — the closure below moves the originals.
                 let evt_tx_on_spawn_err = evt_tx.clone();
-                let inpaint_cancels_on_err = inpaint_cancels.clone();
                 // Pre-clone the parent-written PNG paths so the spawn-
                 // failure path can delete them. Without this, a thread-
                 // exhaustion error left ~20 MB of `inpaint-img-*` /
@@ -1070,44 +977,20 @@ pub fn run_worker() -> ! {
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
                     .spawn(move || {
-                    // RAII guard: clears the cancel registry and decrements
-                    // in_flight on Drop, even if the inference closure
-                    // panics; otherwise the parent's cancel flag is never
-                    // reclaimed.
-                    //
-                    // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
-                    // so a `Shutdown` waiting on `in_flight == 0` never
-                    // observes the count drop while the cancel-flag entry
-                    // for this item is still present.
-                    //
-                    // `cancel_guard` is the only owner of (item_id, map);
-                    // the body removes through it explicitly and the
-                    // guard's own drop is then a no-op. The guard stays
-                    // for panic-safety — if the body panics between the
-                    // explicit remove and `fetch_sub`, drop still runs
-                    // and (idempotent) re-removes. The parent only ever
-                    // queues one in-flight dispatch per id, so a `CancelItem`
-                    // can't insert a fresh flag between the body's remove and
-                    // the guard's drop — no accidental re-registration.
+                    // Unregisters the cancel and then decrements in_flight,
+                    // panics included, so a `Shutdown` waiting on zero
+                    // never sees this run still registered.
                     struct Cleanup {
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
-                        cancel_guard: CancelMapGuard,
+                        cancel: Option<DispatchCancel>,
                     }
                     impl Drop for Cleanup {
                         fn drop(&mut self) {
-                            self.cancel_guard.map.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&self.cancel_guard.item_id);
+                            drop(self.cancel.take());
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
                         }
                     }
-                    let _cleanup = Cleanup {
-                        in_flight: in_flight_for_thread,
-                        cancel_guard: CancelMapGuard {
-                            item_id,
-                            map: inpaint_cancels.clone(),
-                        },
-                    };
+                    let _cleanup = Cleanup { in_flight: in_flight_for_thread, cancel: Some(inpaint_cancel) };
                     let result = (|| -> Result<(image::RgbaImage, f32), String> {
                         // Inner scope drops encoded bytes + DynamicImage as
                         // soon as `to_rgba8`/`to_luma8` produces the final
@@ -1182,9 +1065,8 @@ pub fn run_worker() -> ! {
                 // unwind both before erroring out — otherwise the worker
                 // never completes its drain.
                 if let Err(e) = spawn_result {
+                    // The dropped closure took the cancel with it.
                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                    // Drops on scope exit, removing the cancel-map entry.
-                    let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
                     // The healthy path's `read_and_delete` inside the
                     // spawned closure never ran — clean the parent-
                     // written temps here before the InpaintError lands
