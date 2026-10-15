@@ -428,8 +428,13 @@ fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
 /// Encode a GrayImage (L8) as PNG bytes with fast compression.
 pub fn encode_gray_png(img: &GrayImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
-    write_fast_png(&mut buf, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)?;
+    encode_gray_png_into(img, &mut buf)?;
     Ok(buf)
+}
+
+/// `encode_gray_png` streamed into `w`.
+pub fn encode_gray_png_into<W: std::io::Write>(img: &GrayImage, w: W) -> Result<(), CoreError> {
+    write_fast_png(w, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
 }
 
 /// Encode a 16-bit grey image as PNG bytes with fast compression.
@@ -773,6 +778,9 @@ mod tests {
         }
         let bytes = encode_gray_png(&img).expect("gray encode");
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        let mut streamed = Vec::new();
+        encode_gray_png_into(&img, &mut streamed).expect("gray encode into");
+        assert_eq!(streamed, bytes, "streamed and buffered PNGs are the same bytes");
         let decoded = image::load_from_memory(&bytes).expect("decode back").to_luma8();
         assert_eq!(decoded.dimensions(), (8, 1));
         for x in 0..8 {
