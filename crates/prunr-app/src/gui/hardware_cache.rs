@@ -38,9 +38,8 @@ impl HardwareInstallCache {
             x2plus: prunr_models::is_available(ModelId::RealEsrganX2Plus),
             faces: crate::gui::item_settings::FaceModel::ALL.map(|m| prunr_models::is_available(m.id())),
             depth: prunr_models::is_available(prunr_core::depth::MODEL.into()),
-            models: crate::gui::settings::SettingsModel::ALL.iter()
-                .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))
-                .fold(0, |bits, m| bits | 1 << m.index()),
+            models: model_bits(crate::gui::settings::SettingsModel::ALL.iter()
+                .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
         }
     }
 
@@ -58,14 +57,14 @@ impl HardwareInstallCache {
             x2plus: true,
             faces: [true; 2],
             depth: true,
-            models: crate::gui::settings::SettingsModel::ALL.iter().fold(0, |bits, m| bits | 1 << m.index()),
+            models: model_bits(&crate::gui::settings::SettingsModel::ALL),
         }
     }
 
     /// Only `models` installed, for tests that want a partial install.
     #[cfg(test)]
     pub(crate) fn with_models(models: &[crate::gui::settings::SettingsModel]) -> Self {
-        Self { models: models.iter().fold(0, |bits, m| bits | 1 << m.index()), ..Self::default() }
+        Self { models: model_bits(models), ..Self::default() }
     }
 
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
@@ -89,7 +88,7 @@ impl HardwareInstallCache {
 
     /// Whether `model` can be picked: bundled, downloaded, or No model.
     pub fn has_model(&self, model: crate::gui::settings::SettingsModel) -> bool {
-        self.models & (1 << model.index()) != 0
+        self.models & model_bit(model) != 0
     }
 
     /// The Stable Diffusion erasers installed, each by the name the user
@@ -113,3 +112,11 @@ impl HardwareInstallCache {
 }
 
 const _: () = assert!(crate::gui::settings::SettingsModel::ALL.len() <= 32, "one bit per model in HardwareInstallCache::models");
+
+fn model_bit(model: crate::gui::settings::SettingsModel) -> u32 {
+    1 << model.index()
+}
+
+fn model_bits<'a>(models: impl IntoIterator<Item = &'a crate::gui::settings::SettingsModel>) -> u32 {
+    models.into_iter().fold(0, |bits, m| bits | model_bit(*m))
+}
