@@ -113,7 +113,7 @@ fn sheen(t: f32, u: f32, v: f32) -> f32 {
     let front = (t / PERIOD_SECS).fract() * 1.8 - 0.4;
     let d = ((u + v) * 0.5 - front).abs() / HALF_WIDTH;
     let x = (1.0 - d).max(0.0);
-    x * x * (3.0 - 2.0 * x)
+    prunr_core::math::smoothstep(x)
 }
 
 /// How far a reveal has come at `p` (0..1) for a point whose turn comes at
@@ -121,7 +121,7 @@ fn sheen(t: f32, u: f32, v: f32) -> f32 {
 /// Returns the new image's opacity and the glow riding the edge.
 fn reveal_at(p: f32, order: f32) -> (f32, f32) {
     const FEATHER: f32 = 0.35;
-    let eased = p * p * (3.0 - 2.0 * p);
+    let eased = prunr_core::math::smoothstep(p);
     let front = eased * (1.0 + FEATHER);
     let opacity = ((front - order) / FEATHER).clamp(0.0, 1.0);
     let glow = (1.0 - (2.0 * opacity - 1.0).abs()) * (1.0 - eased);
