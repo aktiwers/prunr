@@ -473,7 +473,7 @@ fn measure_depth(
 fn preview_the_photo(progress: &prunr_core::Progress, photo: &image::RgbaImage) {
     let size = photo.dimensions();
     progress.tile_preview((0, 0, size.0, size.1), size, |w, h| {
-        prunr_core::formats::preview_rgba(std::borrow::Cow::Borrowed(photo), w, h)
+        prunr_core::formats::preview_rgba(std::borrow::Cow::Borrowed(photo), (w, h), (0, 0, w, h))
     });
 }
 

@@ -40,6 +40,16 @@ pub(crate) struct Bbox {
     pub h: u32,
 }
 
+impl Bbox {
+    /// This box clipped to `rect` (x, y, w, h), which it must overlap.
+    pub(crate) fn within(self, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+        let (x0, y0) = (self.x.max(x), self.y.max(y));
+        let (x1, y1) = ((self.x + self.w).min(x + w), (self.y + self.h).min(y + h));
+        debug_assert!(x1 > x0 && y1 > y0, "{self:?} does not overlap {:?}", (x, y, w, h));
+        (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+}
+
 /// Eagerly initialise the inpaint session for `id` in the background so
 /// the first stroke doesn't pay the ~5-10s session-build latency.
 /// Idempotent — repeated calls for the same id are no-ops.
@@ -968,15 +978,17 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 ///
 /// Asked for previews, each finished tile goes out as its fill over the
 /// photo (`fill_preview`), made in the tile's photo crop, which the loop
-/// holds anyway; the result is the same either way. Extra per tile (the
-/// resample) and for a listener that paints them all into one preview
-/// of the whole photo:
+/// holds anyway, for the part of the tile the mask's box reaches; the
+/// photo the listener shows under the previews holds the rest. The result
+/// is the same either way. Extra per tile (the resample, then the part
+/// sent, at most the tile at preview size) and for a listener that paints
+/// them all into one preview of the whole photo:
 ///
-/// | Photo, preview edge | Extra per tile     | Whole preview |
-/// |---------------------|--------------------|---------------|
-/// | 1024 × 768, 1536    | none (1:1)         | 3 MB          |
-/// | 4096 × 3072, 1536   | 150 KB             | 7 MB          |
-/// | 8192 × 6144, 1536   | 40 KB              | 7 MB          |
+/// | Photo, preview edge | Extra per tile         | Whole preview |
+/// |---------------------|------------------------|---------------|
+/// | 1024 × 768, 1536    | the part, ≤ 1 MB (1:1) | 3 MB          |
+/// | 4096 × 3072, 1536   | 150 KB + the part      | 7 MB          |
+/// | 8192 × 6144, 1536   | 40 KB + the part       | 7 MB          |
 // `pub` to be reachable from `benches/tile_compose.rs`; `#[doc(hidden)]`
 // because it's still an internal kernel — callers should use
 // `process_inpaint`.
@@ -1027,7 +1039,8 @@ where
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
-        progress.tile_preview((tile.x, tile.y, tile.w, tile.h), (w, h), |pw, ph| fill_preview(tile_rgba, &painted, &tile_mask, pw, ph));
+        let rect = (tile.x, tile.y, tile.w, tile.h);
+        progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| fill_preview(tile_rgba, &painted, &tile_mask, size, part));
         progress.inner(i as u32 + 1, total, Unit::Tile);
         progress.tile(i as u32, true);
     }
@@ -1070,16 +1083,17 @@ where
     Ok(out)
 }
 
-/// A finished tile as the erase shows it, at `width × height`: the fill
-/// where the mask is set (the rule the final composite follows), the
-/// photo elsewhere, the photo's alpha throughout. Fills `photo` in place.
-fn fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, width: u32, height: u32) -> Vec<u8> {
+/// `part` of a finished tile as the erase shows it, previewed at `size`:
+/// the fill where the mask is set (the rule the final composite follows),
+/// the photo elsewhere, the photo's alpha throughout. Fills `photo` in
+/// place.
+fn fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, size: (u32, u32), part: (u32, u32, u32, u32)) -> Vec<u8> {
     for ((p, f), m) in photo.pixels_mut().zip(painted.pixels()).zip(mask.pixels()) {
         if m.0[0] != 0 {
             p.0[..3].copy_from_slice(&f.0[..3]);
         }
     }
-    crate::formats::preview_rgba(Cow::Owned(photo), width, height)
+    crate::formats::preview_rgba(Cow::Owned(photo), size, part)
 }
 
 /// Bounding box of pixels where `mask >= min_value`, expanded by
@@ -1232,6 +1246,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
             mask.put_pixel(102, 100, Luma([60]));
+            let mask_box = mask_bbox(&mask, 1, 0).expect("a mask");
             let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
             let sink = std::sync::Arc::new(RecordingSink::default());
             let with = tile_compose(&img, &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
@@ -1246,9 +1261,10 @@ mod tests {
                     ProgressUpdate::Tile { done: true, .. } => running = None,
                     ProgressUpdate::TilePreview(p) => {
                         let t = work[running.expect("a preview is sent while its tile runs")];
-                        assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (t.x, t.y, t.w, t.h, w, h), "at its place");
+                        let part = mask_box.within((t.x, t.y, t.w, t.h));
+                        assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (part.0, part.1, part.2, part.3, w, h), "the tile's part in the mask's box, at its place");
                         for (i, px) in p.rgba.chunks(4).enumerate() {
-                            let (x, y) = (t.x + i as u32 % t.w, t.y + i as u32 / t.w);
+                            let (x, y) = (p.x + i as u32 % p.width, p.y + i as u32 / p.width);
                             let photo = img.get_pixel(x, y).0;
                             let want = if mask.get_pixel(x, y).0[0] != 0 { [250, 0, 0, photo[3]] } else { photo };
                             assert_eq!(px, want, "({x}, {y})");
@@ -1266,6 +1282,51 @@ mod tests {
             assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
             assert_eq!(with.as_raw(), without.as_raw(), "previews leave the result as it is");
             assert_eq!(tile_compose(&img, &mask, &Progress::none(), fill).unwrap().as_raw(), with.as_raw());
+        }
+    }
+
+    /// Shrunk for the preview, each tile is sent for the part its mask can
+    /// reach: the same pixels the whole tile's preview has there, and
+    /// every pixel where that preview differs from the photo's is inside.
+    #[test]
+    fn a_shrunk_tile_preview_part_holds_what_the_fill_changes() {
+        use crate::progress::{ProgressUpdate, RecordingSink};
+        let (w, h) = (700, 500);
+        let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]));
+        let mut mask = GrayImage::new(w, h);
+        for (x, y) in (300..340).flat_map(|x| (200..230).map(move |y| (x, y))) {
+            mask.put_pixel(x, y, Luma([255]));
+        }
+        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        let previewed = |progress: &Progress| progress.clone().with_tile_previews(300);
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        tile_compose(&img, &mask, &previewed(&Progress::new(sink.clone())), fill).unwrap();
+        let parts: Vec<_> = sink.updates().into_iter().filter_map(|u| match u {
+            ProgressUpdate::TilePreview(p) => Some(p),
+            _ => None,
+        }).collect();
+        let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+        assert!(work.len() > 1 && parts.len() == work.len(), "one part per tile the mask touches");
+        for (t, part) in work.iter().zip(&parts) {
+            let rect = (t.x, t.y, t.w, t.h);
+            let tile_rgba = image::imageops::crop_imm(&img, t.x, t.y, t.w, t.h).to_image();
+            let tile_mask = image::imageops::crop_imm(&mask, t.x, t.y, t.w, t.h).to_image();
+            let whole_sink = std::sync::Arc::new(RecordingSink::default());
+            let whole_progress = previewed(&Progress::new(whole_sink.clone()));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask), &tile_mask, (pw, ph), (0, 0, pw, ph)));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| crate::formats::preview_rgba(Cow::Borrowed(&tile_rgba), (pw, ph), (0, 0, pw, ph)));
+            let updates = whole_sink.updates();
+            let [ProgressUpdate::TilePreview(whole), ProgressUpdate::TilePreview(photo)] = updates.as_slice() else { panic!("{updates:?}") };
+            assert!(part.width < whole.width, "less than the whole tile");
+            for (i, (a, b)) in whole.rgba.chunks(4).zip(photo.rgba.chunks(4)).enumerate() {
+                let (x, y) = (whole.x + i as u32 % whole.width, whole.y + i as u32 / whole.width);
+                if (part.x..part.x + part.width).contains(&x) && (part.y..part.y + part.height).contains(&y) {
+                    let j = (((y - part.y) * part.width + x - part.x) * 4) as usize;
+                    assert_eq!(part.rgba[j..j + 4], *a, "({x}, {y}) as the whole tile's preview has it");
+                } else {
+                    assert_eq!(a, b, "({x}, {y}) changes outside the part");
+                }
+            }
         }
     }
 

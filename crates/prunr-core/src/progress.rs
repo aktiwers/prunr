@@ -263,7 +263,37 @@ impl Progress {
     /// height)` gives the tile at that size as straight-alpha RGBA; it
     /// runs only when previews were asked for.
     pub fn tile_preview(&self, rect: (u32, u32, u32, u32), size: (u32, u32), pixels: impl FnOnce(u32, u32) -> Vec<u8>) {
-        let Some(edge) = self.preview_edge() else { return };
+        let Some(at) = self.preview_place(rect, size) else { return };
+        let rgba = pixels(at.width, at.height);
+        self.report_preview(TilePreview { rgba, ..at });
+    }
+
+    /// `tile_preview` for the part of `rect` where it changed: `changed`
+    /// (x, y, w, h of the same image, inside `rect`) and the preview pixels
+    /// the resample reaches from it (`formats::preview_reach`). The
+    /// listener keeps what it already shows around it. `pixels(size,
+    /// part)` gives `part` (x, y, w, h) of the rect's `size` preview, as
+    /// `formats::preview_rgba` cuts it.
+    pub fn tile_preview_part(
+        &self,
+        rect: (u32, u32, u32, u32),
+        size: (u32, u32),
+        changed: (u32, u32, u32, u32),
+        pixels: impl FnOnce((u32, u32), (u32, u32, u32, u32)) -> Vec<u8>,
+    ) {
+        let Some(at) = self.preview_place(rect, size) else { return };
+        debug_assert!(changed.0 >= rect.0 && changed.1 >= rect.1 && changed.0 + changed.2 <= rect.0 + rect.2 && changed.1 + changed.3 <= rect.1 + rect.3);
+        let (px, width) = crate::formats::preview_reach(changed.0 - rect.0, changed.2, rect.2, at.width);
+        let (py, height) = crate::formats::preview_reach(changed.1 - rect.1, changed.3, rect.3, at.height);
+        let rgba = pixels((at.width, at.height), (px, py, width, height));
+        self.report_preview(TilePreview { x: at.x + px, y: at.y + py, width, height, rgba, ..at });
+    }
+
+    /// Where `rect` of the `size` image lands on a preview of the photo
+    /// whose longer side is at most the asked edge, with no pixels yet;
+    /// `None` unless previews were asked for and someone listens.
+    fn preview_place(&self, rect: (u32, u32, u32, u32), size: (u32, u32)) -> Option<TilePreview> {
+        let edge = self.preview_edge()?;
         let f = self.place(rect, size);
         let (photo_w, photo_h) = f.photo;
         let s = (f64::from(edge) / f64::from(photo_w.max(photo_h).max(1))).min(1.0);
@@ -272,9 +302,12 @@ impl Progress {
         let (x, y) = (at(f.x).min(full_width - 1), at(f.y).min(full_height - 1));
         let width = at(f.x + f.w).clamp(x + 1, full_width) - x;
         let height = at(f.y + f.h).clamp(y + 1, full_height) - y;
-        let rgba = pixels(width, height);
-        debug_assert_eq!(rgba.len(), (width * height * 4) as usize);
-        self.report(ProgressUpdate::TilePreview(TilePreview { x, y, width, height, full_width, full_height, rgba }));
+        Some(TilePreview { x, y, width, height, full_width, full_height, rgba: Vec::new() })
+    }
+
+    fn report_preview(&self, tile: TilePreview) {
+        debug_assert_eq!(tile.rgba.len(), (tile.width * tile.height * 4) as usize);
+        self.report(ProgressUpdate::TilePreview(tile));
     }
 
     pub fn tile(&self, index: u32, done: bool) {
