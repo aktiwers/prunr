@@ -1,9 +1,6 @@
 use super::super::app::PrunrApp;
 use super::super::state::AppState;
 
-// NOTE: These tests validate the state-machine logic of the helpers,
-// not the egui input system. Full keyboard testing requires the running app (Plan 03).
-
 #[test]
 fn handle_cancel_raises_global_flag_during_processing() {
     let mut app = PrunrApp::new_for_test();
