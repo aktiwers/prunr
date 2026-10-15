@@ -5,7 +5,6 @@
 use std::sync::OnceLock;
 
 use image::{DynamicImage, GrayImage, ImageBuffer, Luma, RgbaImage};
-use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
 use crate::formats::ResizeFilter;
@@ -212,21 +211,7 @@ fn estimate_resized(engine: &OrtEngine, resized: RgbaImage, progress: &Progress)
         }
     }
     drop(resized);
-    let input = ndarray::Array4::from_shape_vec((1, 3, ih as usize, iw as usize), chw)
-        .map_err(|e| CoreError::Inference(format!("depth: input shape: {e}")))?;
-    let tensor = Tensor::from_array(input).map_err(|e| CoreError::Inference(format!("depth: input tensor: {e}")))?;
-    progress.check_cancelled()?;
-    let raw = engine.with_session(|session| {
-        let outputs = session.run(inputs!["pixel_values" => &tensor])
-            .map_err(|e| CoreError::Inference(format!("depth: inference failed: {e}")))?;
-        let (_, data) = outputs[0].try_extract_tensor::<f32>()
-            .map_err(|e| CoreError::Inference(format!("depth: output: {e}")))?;
-        Ok(data.to_vec())
-    })?;
-    if raw.len() != n {
-        return Err(CoreError::Inference(format!("depth: output has {} values, expected {n}", raw.len())));
-    }
-    progress.check_cancelled()?;
+    let raw = engine.run_single_f32("depth", "pixel_values", [1, 3, ih as usize, iw as usize], chw, n, progress)?;
     Ok(DepthMap::from_raw(iw, ih, raw))
 }
 

@@ -3,7 +3,6 @@
 //! lightness and takes the predicted colour, scaled by a strength.
 
 use image::RgbaImage;
-use ort::{inputs, value::Tensor};
 use rayon::prelude::*;
 
 use crate::color::{lab_to_srgb, srgb_lightness};
@@ -52,22 +51,7 @@ pub fn colorize_input(src: &RgbaImage) -> Vec<f32> {
 pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) -> Result<ColorPlane, CoreError> {
     progress.step(Step::Colorizing);
     let side = COLORIZE_INPUT as usize;
-    let input = ndarray::Array4::from_shape_vec((1, 3, side, side), colorize_input(src))
-        .map_err(|e| CoreError::Inference(format!("colorize: input shape: {e}")))?;
-    let tensor = Tensor::from_array(input).map_err(|e| CoreError::Inference(format!("colorize: input tensor: {e}")))?;
-    progress.check_cancelled()?;
-    let plane = engine.with_session(|session| {
-        let outputs = session.run(inputs!["input" => &tensor])
-            .map_err(|e| CoreError::Inference(format!("colorize: inference failed: {e}")))?;
-        let (_, data) = outputs[0].try_extract_tensor::<f32>()
-            .map_err(|e| CoreError::Inference(format!("colorize: output: {e}")))?;
-        Ok(data.to_vec())
-    })?;
-    if plane.len() != 2 * side * side {
-        return Err(CoreError::Inference(format!("colorize: output has {} values, expected {}", plane.len(), 2 * side * side)));
-    }
-    progress.check_cancelled()?;
-    Ok(plane)
+    engine.run_single_f32("colorize", "input", [1, 3, side, side], colorize_input(src), 2 * side * side, progress)
 }
 
 /// `src` with its lightness kept and the colour taken from `plane`,

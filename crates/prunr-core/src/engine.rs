@@ -694,6 +694,36 @@ impl OrtEngine {
         f(&mut session)
     }
 
+    /// Run a one-input f32 model on `data` shaped `shape`, returning its
+    /// first output flat; errors unless it holds `expected_len` values.
+    /// Bails before and after the run once `progress` is cancelled.
+    pub(crate) fn run_single_f32(
+        &self,
+        label: &str,
+        input: &str,
+        shape: [usize; 4],
+        data: Vec<f32>,
+        expected_len: usize,
+        progress: &crate::progress::Progress,
+    ) -> Result<Vec<f32>, CoreError> {
+        let array = ndarray::Array4::from_shape_vec(shape, data)
+            .map_err(|e| CoreError::Inference(format!("{label}: input shape: {e}")))?;
+        let tensor = Tensor::from_array(array).map_err(|e| CoreError::Inference(format!("{label}: input tensor: {e}")))?;
+        progress.check_cancelled()?;
+        let out = self.with_session(|session| {
+            let outputs = session.run(ort::inputs![input => &tensor])
+                .map_err(|e| CoreError::Inference(format!("{label}: inference failed: {e}")))?;
+            let (_, values) = outputs[0].try_extract_tensor::<f32>()
+                .map_err(|e| CoreError::Inference(format!("{label}: output: {e}")))?;
+            Ok(values.to_vec())
+        })?;
+        if out.len() != expected_len {
+            return Err(CoreError::Inference(format!("{label}: output has {} values, expected {expected_len}", out.len())));
+        }
+        progress.check_cancelled()?;
+        Ok(out)
+    }
+
     /// Run inference via `IoBinding` and pass the output **as a borrow**
     /// to `f`. The borrow is alive only for the duration of `f`'s call.
     ///
