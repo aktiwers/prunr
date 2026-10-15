@@ -384,6 +384,12 @@ impl LivePreview {
         }
     }
 
+    /// Queue `item_id`'s settled render for the next tick, outside any drag.
+    pub(crate) fn render_now(&mut self, item_id: u64, kind: PreviewKind) {
+        self.mark_tweak(item_id, kind);
+        self.flush(item_id);
+    }
+
     /// Dispatch `item_id`'s queued render at the next tick, as a drag's
     /// in-between frame: it is not settled.
     pub(crate) fn hurry(&mut self, item_id: u64) {
