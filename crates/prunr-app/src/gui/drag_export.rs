@@ -47,7 +47,7 @@ fn drag_subdir() -> &'static str {
 const STALE_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// Return (and create if needed) the drag temp directory.
-fn temp_dir() -> PathBuf {
+fn drag_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(drag_subdir());
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -57,7 +57,7 @@ fn temp_dir() -> PathBuf {
 /// two images with one file name (IMG_1.jpg from two folders) never write
 /// over each other, and the dropped files keep their plain names.
 fn item_dir(item_id: u64) -> PathBuf {
-    let dir = temp_dir().join(item_id.to_string());
+    let dir = drag_dir().join(item_id.to_string());
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -72,7 +72,7 @@ pub(crate) fn is_self_drop(path: &Path) -> bool {
 /// for: the folder holds a handful of files, and a sweep left on a thread
 /// can die with the process.
 pub(crate) fn cleanup_all() {
-    let Ok(entries) = std::fs::read_dir(temp_dir()) else { return };
+    let Ok(entries) = std::fs::read_dir(drag_dir()) else { return };
     for entry in entries.flatten() {
         remove_entry(&entry.path());
     }
@@ -86,7 +86,7 @@ fn remove_entry(path: &Path) {
 /// Remove stale temp files left behind by previous sessions or crashes.
 /// Silent on errors — this is best-effort housekeeping.
 pub(crate) fn cleanup_stale() {
-    let dir = temp_dir();
+    let dir = drag_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let now = SystemTime::now();
     for entry in entries.flatten() {
