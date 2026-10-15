@@ -531,8 +531,8 @@ impl PrunrApp {
                     self.processor.cut_times.note(item_id, &update, at);
                     self.on_seg_report(item_id, update, ctx);
                 }
-                WorkerResult::BatchItemDone { item_id, result, tensor_cache, edge_cache } => {
-                    self.on_batch_item_done(ctx, item_id, result, tensor_cache, edge_cache);
+                WorkerResult::BatchItemDone { batch, item_id, result, tensor_cache, edge_cache } => {
+                    self.on_batch_item_done(ctx, batch, item_id, result, tensor_cache, edge_cache);
                 }
                 WorkerResult::SpareEdgeScales { item_id, token, landing } => {
                     self.on_spare_edge_scales(item_id, token, landing);
@@ -608,19 +608,22 @@ impl PrunrApp {
     fn on_batch_item_done(
         &mut self,
         ctx: &egui::Context,
+        batch: u64,
         item_id: u64,
         result: Result<prunr_core::ProcessResult, String>,
         tensor_cache: Option<crate::gui::worker::TensorCache>,
         edge_cache: Option<crate::gui::worker::EdgeTensorCache>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
-        let recipe_snapshot = self.take_dispatch_recipe(item_id);
-        let landed = recipe_snapshot.as_ref().zip(result.as_ref().ok()).map(|(r, pr)| (r.inference.model, pr.active_provider.as_str()));
+        let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
+            tracing::info!(item_id, batch, "a run's answer dropped: its batch no longer awaits the image");
+            return;
+        };
+        let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
         self.processor.cut_times.ended(item_id, landed);
-        let Some(recipe_snapshot) = recipe_snapshot else { return };
 
         // A cancelled run leaves the item on the state it shows.
-        if matches!(result.as_ref(), Err(e) if e == crate::subprocess::protocol::CANCELLED_ERR_MSG) {
+        if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 if item.status == BatchStatus::Processing {
                     item.abandon_job();
@@ -686,6 +689,15 @@ impl PrunrApp {
         }
     }
 
+    /// Answer `item_id` from a batch just sent with its own settings.
+    #[cfg(test)]
+    pub(crate) fn answer_for_test(&mut self, ctx: &egui::Context, item_id: u64, result: Result<prunr_core::ProcessResult, String>) {
+        let model = self.settings.model.to_model_kind().unwrap_or(prunr_core::ModelKind::BiRefNetLite);
+        let Some(recipe) = self.batch.find_by_id(item_id).map(|i| i.settings.current_recipe(model)) else { return };
+        let batch = self.processor.track_dispatch(recipe, [item_id]);
+        self.on_batch_item_done(ctx, batch, item_id, result, None, None);
+    }
+
     /// The line scales a run left for after its result. A lines preview
     /// waiting for them renders on its next tick; when making them
     /// failed, the image on screen runs the lines it still lacks. Skipped
@@ -716,22 +728,6 @@ impl PrunrApp {
         if rerun && self.batch.is_selected(item_id) {
             self.process_items(|i| i.id == item_id, None);
         }
-    }
-
-    /// Recipe to stamp on a finished item. Pulled from the in-flight slot
-    /// owned by `Processor` — name is `take_*` because each call removes
-    /// the entry. Late deliveries after `drain_recipes` fall back to
-    /// reconstructing from current item state; returns `None` when the item
-    /// is no longer in the batch (already removed by the user).
-    fn take_dispatch_recipe(&mut self, item_id: u64) -> Option<prunr_core::ProcessingRecipe> {
-        if let Some(recipe) = self.processor.take_recipe(item_id) {
-            return Some(recipe);
-        }
-        let model: prunr_core::ModelKind = self.settings.model
-            .to_model_kind()
-            .unwrap_or(prunr_core::ModelKind::BiRefNetLite);
-        self.batch.find_by_id(item_id)
-            .map(|b| b.settings.current_recipe(model))
     }
 
     fn refresh_batch_progress_status(&mut self) {
@@ -1722,7 +1718,7 @@ mod timeline_contract_tests {
         assert!(app.processor.cancels.is_cancelled(1), "the run is asked to stop");
 
         let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
-        app.on_batch_item_done(&ctx, 1, Ok(late), None, None);
+        app.answer_for_test(&ctx, 1, Ok(late));
         assert_eq!(shown(&app), None, "undo went back to the original and stays there");
         assert_eq!(app.batch.items[0].status, BatchStatus::Pending);
     }
@@ -1765,7 +1761,7 @@ mod timeline_contract_tests {
             assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "{what}: the ticked image reruns");
 
             let rerun = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 90, 90, 255])), active_provider: String::new() };
-            app.on_batch_item_done(&ctx, 2, Ok(rerun), None, None);
+            app.answer_for_test(&ctx, 2, Ok(rerun));
             let item = &mut app.batch.items[1];
             assert_eq!(item.status, BatchStatus::Done, "{what}");
             assert_eq!(item.timeline.undo_steps(), steps_before + 1, "{what}: the rerun is a step of its own");
@@ -1773,6 +1769,59 @@ mod timeline_contract_tests {
             assert_eq!(item.settings, before, "{what}: undo brings back its own settings");
             let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
             assert_eq!(shown, Some(true), "{what}: and the result it had");
+        }
+    }
+
+    /// Process, Cancel (selected) mid-run, change a knob, Process again:
+    /// the cancelled run's late answer, whatever it is, never lands on the
+    /// new run, and the new run's own result does.
+    #[test]
+    fn a_cancelled_runs_late_answer_never_lands_on_the_next_run() {
+        use crate::gui::item::Cutter;
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use prunr_core::ModelKind;
+        let cancelled = prunr_core::CoreError::Cancelled.message();
+        let late_answers: [(&str, Result<prunr_core::ProcessResult, String>); 2] = [
+            ("its cancel", Err(cancelled)),
+            ("a result made before the cancel reached it", Ok(prunr_core::ProcessResult { rgba_image: (*px(5)).clone(), active_provider: String::new() })),
+        ];
+        for (what, late) in late_answers {
+            let ctx = egui::Context::default();
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (4, 4);
+            item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
+            item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
+            item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), px(1));
+            item.selected = true;
+            app.batch.select_item(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            let process = |app: &mut PrunrApp, feather: f32| {
+                app.batch.items[0].settings.feather = feather;
+                app.batch.items[0].commit(StepKind::Adjust);
+                app.process_items(|i| i.selected, Some(StepKind::Process));
+                match rx.try_recv() {
+                    Ok(crate::gui::worker::WorkerMessage::BatchProcess { batch, .. }) => batch,
+                    _ => panic!("{what}: a batch is sent"),
+                }
+            };
+            let first = process(&mut app, 2.0);
+            app.handle_cancel_selected();
+            assert_ne!(app.batch.items[0].status, BatchStatus::Processing, "{what}: the cancel stops the wait");
+            assert!(app.batch.items[0].job.is_none(), "{what}: nothing is awaited after the cancel");
+            let second = process(&mut app, 4.0);
+            assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "{what}");
+
+            app.on_batch_item_done(&ctx, first, 1, late, None, None);
+            assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "{what}: the cancelled run's answer does not end the new run");
+            assert_eq!(shown(&app), Some(1), "{what}: nor lands on it");
+
+            let own = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+            app.on_batch_item_done(&ctx, second, 1, Ok(own), None, None);
+            assert_eq!(app.batch.items[0].status, BatchStatus::Done, "{what}");
+            assert_eq!(shown(&app), Some(9), "{what}: the new run's own result lands");
         }
     }
 
@@ -1790,7 +1839,7 @@ mod timeline_contract_tests {
         item.commit(StepKind::Adjust);
 
         let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
-        app.on_batch_item_done(&ctx, 1, Ok(late), None, None);
+        app.answer_for_test(&ctx, 1, Ok(late));
         let item = &app.batch.items[0];
         assert_eq!(item.status, BatchStatus::Done, "shows its current state again");
         assert!(item.job.is_none(), "nothing is awaited any more");
@@ -1888,7 +1937,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         item.status = BatchStatus::Processing;
         let cpu = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: "CPU".into() };
-        app.on_batch_item_done(&ctx, 1, Ok(cpu), None, None);
+        app.answer_for_test(&ctx, 1, Ok(cpu));
         assert_eq!(app.settings.active_backend, "OpenVINO");
         assert_eq!(app.settings.parallel_jobs, 3);
     }
@@ -1901,7 +1950,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         item.status = BatchStatus::Processing;
         let fresh = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
-        app.on_batch_item_done(&ctx, 1, Ok(fresh), None, None);
+        app.answer_for_test(&ctx, 1, Ok(fresh));
         assert_eq!(shown(&app), Some(9));
         app.handle_undo(&ctx);
         assert_eq!(shown(&app), Some(1), "undo shows the result it replaced");
@@ -2102,7 +2151,7 @@ mod first_look_tests {
         let held = ctx.load_texture("held", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         app.batch.items[0].source_texture = Some(held);
         let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(8, 8), active_provider: "CPU".into() };
-        app.on_batch_item_done(&ctx, 1, Ok(result), None, None);
+        app.answer_for_test(&ctx, 1, Ok(result));
         let landed = ctx.load_texture("result", egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4]), Default::default());
         app.batch.items[0].land_texture(landed, crate::gui::background_io::TexTarget::Result);
         let item = &mut app.batch.items[0];
