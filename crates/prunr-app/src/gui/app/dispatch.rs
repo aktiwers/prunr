@@ -61,10 +61,7 @@ impl PrunrApp {
     /// upscaler and left alone by the colorizer (its run would give the
     /// same picture); the rest queue for a run.
     pub(super) fn process_kept_run_items(&mut self) {
-        let model = if self.settings.model.is_colorize() { crate::gui::settings::COLORIZER } else {
-            let Some(kind) = self.settings.model.dispatch_model_kind() else { return };
-            kind
-        };
+        let Some(model) = self.settings.model.dispatch_model_kind() else { return };
         let ids = self.batch.items_to_process();
         let shown = self.batch.selected_idx_clamped();
         let shown_settings = shown.map(|i| self.batch.items[i].settings);
@@ -105,20 +102,14 @@ impl PrunrApp {
     /// and idle.
     fn dispatch_upscale_for(&mut self, item_id: u64) -> bool {
         let Some(item) = self.batch.find_by_id(item_id) else { return false };
-        let model_id = match self.settings.model.to_model_id() {
-            Some(id) => id,
-            None => return false,
-        };
+        let Some(model_id) = self.settings.model.to_model_id() else { return false };
         let output_scale = item.settings.output_scale;
         // Capture the recipe at dispatch time so the pump can stamp
         // `item.applied_recipe` against what actually ran (not what the
         // user has tweaked to since).
-        let model_kind = match prunr_core::ModelKind::try_from(model_id) {
-            Ok(k) => k,
-            Err(id) => {
-                tracing::error!(?id, "upscale dispatch skipped: ModelId has no ModelKind mapping");
-                return false;
-            }
+        let Some(model_kind) = self.settings.model.dispatch_model_kind() else {
+            tracing::error!(?model_id, "upscale dispatch skipped: ModelId has no ModelKind mapping");
+            return false;
         };
         let recipe = item.settings.current_recipe(model_kind);
         let start = item.next_upscale_start(model_kind);
