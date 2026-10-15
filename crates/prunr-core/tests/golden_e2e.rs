@@ -50,7 +50,7 @@ use prunr_core::{
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::Path};
 use test_common::{
-    assert_golden_fixtures, ensure_ort_initialized, golden_fixtures, render_synthetic_source,
+    assert_golden_fixtures, golden_fixtures, render_synthetic_source, skip_if_no_ort,
     synthetic_specs,
 };
 
@@ -70,8 +70,7 @@ struct Recipe {
 
 #[test]
 fn golden_e2e() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[golden_e2e] SKIP: {msg}");
+    if skip_if_no_ort("golden_e2e") {
         return;
     }
 
