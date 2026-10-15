@@ -45,7 +45,7 @@ pub fn edge_scale_dims(scale: EdgeScale, base_h: u32, base_w: u32) -> (u32, u32)
 }
 
 /// Opaque wrapper around the TEED ORT session.
-/// Thread-safe via internal Mutex (same pattern as OrtEngine).
+/// Thread-safe via internal Mutex.
 pub struct EdgeEngine {
     session: Mutex<Session>,
 }
@@ -315,10 +315,9 @@ pub fn edge_plane(
 /// compose time on already-cached tensors, so switching modes is instant
 /// in live preview.
 ///
-/// `base` carries the subject silhouette in its alpha channel (output of
-/// `postprocess::postprocess_from_flat`). With a `solid_line_color`, line
-/// pixels are blended toward that color weighted by edge strength;
-/// otherwise base RGB shows through at line pixels.
+/// `base` carries the subject silhouette in its alpha channel. With a
+/// `solid_line_color`, line pixels are blended toward that color weighted
+/// by edge strength; otherwise base RGB shows through at line pixels.
 pub fn compose_edges_styled(
     mask: &image::GrayImage,
     base: &RgbaImage,
@@ -467,9 +466,7 @@ fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
 
 /// Compose subject outline: builds the edge mask(s) from a detector result
 /// and calls `compose_edges_styled` (or `compose_edges_dual_styled` for
-/// `LineStyle::DualScale`) onto the supplied masked subject RGBA. Used by
-/// the subprocess worker and the animation-sweep path so they share the
-/// same line-styling logic.
+/// `LineStyle::DualScale`) onto the supplied masked subject RGBA.
 pub fn compose_subject_outline(
     edge_res: &EdgeInferenceResult,
     masked_rgba: &RgbaImage,
@@ -692,8 +689,6 @@ mod tests {
         assert_eq!(fine.fine.as_ref().map(|i| i.dimensions()), Some((BASE_W * 2, BASE_H * 2)));
     }
 
-    /// The detector sees a 640×480 copy, so Smooth must soften that copy
-    /// alike on a large photo and a small one.
     /// Smooth is made at the Fine scale's size, so Fine still sees twice
     /// the base detail rather than an upscaled base-size photo.
     #[test]
@@ -704,6 +699,8 @@ mod tests {
         assert_eq!((smooth.width(), smooth.height()), (w, h));
     }
 
+    /// The detector sees a 640×480 copy, so Smooth must soften that copy
+    /// alike on a large photo and a small one.
     #[test]
     fn smooth_softens_what_the_detector_sees_at_any_photo_size() {
         for (w, h) in [(3200u32, 2400u32), (320, 240)] {
@@ -1105,9 +1102,9 @@ mod tests {
         );
     }
 
-    /// `LineStyle::Noise`'s `i as i32 * 360` overflowed i32 above
+    /// `LineStyle::Rainbow`'s `i as i32 * 360` overflowed i32 above
     /// ~5.96 M pixels — past that threshold the second half of the
-    /// image got wrapped numerators and the noise hue became
+    /// image got wrapped numerators and the rainbow hue became
     /// uncorrelated with pixel position. In debug builds the overflow
     /// check panics; in release the output is garbled. Drive a strip
     /// big enough to cross the overflow threshold and assert the call
@@ -1133,10 +1130,7 @@ mod tests {
 
     /// `apply_input_transform`'s `None` arm must return a borrowed
     /// `Cow` so the ~32 MB `to_rgba8()` clone is skipped on the
-    /// identity case. CLAUDE.md `## Test expectations` requires unit
-    /// tests for new pure functions in `edge.rs` — this contract was
-    /// implicit via the `if matches!(...) { return Cow::Borrowed(...) }`
-    /// fast path with no test pinning it.
+    /// identity case.
     #[test]
     fn apply_input_transform_none_returns_borrowed() {
         let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([10, 20, 30])));
