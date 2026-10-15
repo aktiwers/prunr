@@ -16,7 +16,7 @@ use crate::progress::Progress;
 
 use half::f16;
 use image::{RgbImage, RgbaImage};
-use ort::{inputs, value::Tensor};
+use ort::{inputs, value::{DynValue, Tensor}};
 use ort::session::{NoSelectedOutputs, RunOptions};
 use ort::value::TensorElementType;
 
@@ -180,7 +180,6 @@ fn run_upscale_native(
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
-        let pixel_count = (padded_w * padded_h) as usize;
         let shape = [1, 3, padded_h as usize, padded_w as usize];
 
         let out_h = padded_h * ns;
@@ -188,53 +187,23 @@ fn run_upscale_native(
         let plane = (out_w * out_h) as usize;
         let mut packed = vec![0u8; 3 * plane];
 
-        // The two branches keep the f16/f32 buffers + tensor scoped to
-        // the relevant arm so the unused dtype's buffer doesn't sit
-        // allocated during inference. When `terminate` is Some, the
-        // session.run is wired through RunOptions so another thread can
-        // abort the running tile — on EPs that honour it (CPU does;
-        // OpenVINO only returns at the tile boundary).
-        if is_fp16 {
-            let mut input_data = vec![f16::ZERO; 3 * pixel_count];
-            for (i, p) in rgb_tile.pixels().enumerate() {
-                let [r, g, b] = p.0;
-                input_data[i] = f16::from_f32(r as f32 * INV_255);
-                input_data[pixel_count + i] = f16::from_f32(g as f32 * INV_255);
-                input_data[2 * pixel_count + i] = f16::from_f32(b as f32 * INV_255);
-            }
-            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
-                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
-            let tensor = Tensor::from_array(arr)
-                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
-            engine.with_session(|session| {
-                let outputs = match terminate {
-                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
-                    None => session.run(inputs![input_name => &tensor]),
-                }
-                .map_err(classify_run_error)?;
-                pack_output(&outputs[0], plane, &mut packed, is_fp16)
-            })?;
+        // Only the session's dtype gets a buffer. When `terminate` is
+        // Some, the session.run is wired through RunOptions so another
+        // thread can abort the running tile — on EPs that honour it (CPU
+        // does; OpenVINO only returns at the tile boundary).
+        let tensor = if is_fp16 {
+            chw_tensor(rgb_tile, shape, |v| f16::from_f32(v * INV_255))?
         } else {
-            let mut input_data = vec![0.0_f32; 3 * pixel_count];
-            for (i, p) in rgb_tile.pixels().enumerate() {
-                let [r, g, b] = p.0;
-                input_data[i] = r as f32 * INV_255;
-                input_data[pixel_count + i] = g as f32 * INV_255;
-                input_data[2 * pixel_count + i] = b as f32 * INV_255;
+            chw_tensor(rgb_tile, shape, |v| v * INV_255)?
+        };
+        engine.with_session(|session| {
+            let outputs = match terminate {
+                Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
+                None => session.run(inputs![input_name => &tensor]),
             }
-            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
-                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
-            let tensor = Tensor::from_array(arr)
-                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
-            engine.with_session(|session| {
-                let outputs = match terminate {
-                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
-                    None => session.run(inputs![input_name => &tensor]),
-                }
-                .map_err(classify_run_error)?;
-                pack_output(&outputs[0], plane, &mut packed, is_fp16)
-            })?;
-        }
+            .map_err(classify_run_error)?;
+            pack_output(&outputs[0], plane, &mut packed, is_fp16)
+        })?;
 
         RgbImage::from_raw(out_w, out_h, packed).ok_or_else(|| {
             CoreError::Inference("upscale: from_raw failed (packed length mismatch)".into())
@@ -243,6 +212,27 @@ fn run_upscale_native(
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
     upscale_tiled(input, ns, cfg, run_tile, progress)
+}
+
+/// `rgb` as a planar CHW tensor of `shape`, each channel value mapped
+/// through `convert`.
+fn chw_tensor<T>(rgb: &RgbImage, shape: [usize; 4], convert: impl Fn(f32) -> T) -> Result<DynValue, CoreError>
+where
+    T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + Clone + Default + 'static,
+{
+    let pixel_count = shape[2] * shape[3];
+    let mut data = vec![T::default(); 3 * pixel_count];
+    for (i, p) in rgb.pixels().enumerate() {
+        let [r, g, b] = p.0;
+        data[i] = convert(r as f32);
+        data[pixel_count + i] = convert(g as f32);
+        data[2 * pixel_count + i] = convert(b as f32);
+    }
+    let arr = ndarray::Array4::from_shape_vec(shape, data)
+        .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
+    Tensor::from_array(arr)
+        .map(|t| t.into_dyn())
+        .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))
 }
 
 /// Map an ORT run-time error to a `CoreError`. ORT reports a session
