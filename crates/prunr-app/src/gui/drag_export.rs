@@ -111,7 +111,7 @@ fn source_stem(source_filename: &str) -> &str {
 
 /// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
 pub(crate) fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
-    format!("{}.prunr.{}", source_stem(source_filename), format.extension())
+    format!("{}{}", source_stem(source_filename), format.result_suffix())
 }
 
 /// Build a human-friendly filename stem for a batch item given its processing mode.
