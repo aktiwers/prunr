@@ -322,29 +322,21 @@ impl DispatchProgressSlot {
     /// Replace the active progress snapshot. Pass `None` to clear when
     /// the dispatch finishes (success, cancel, or error).
     pub fn set(&self, progress: Option<DispatchProgress>) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = progress;
+        *self.lock() = progress;
     }
 
     pub fn update(&self, f: impl FnOnce(&mut Option<DispatchProgress>)) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&mut guard);
+        f(&mut self.lock());
     }
 
     /// Snapshot the current progress for a widget. `None` when no
     /// dispatch is in flight.
     pub fn read(&self) -> Option<DispatchProgress> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.clone()
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DispatchProgress>> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
