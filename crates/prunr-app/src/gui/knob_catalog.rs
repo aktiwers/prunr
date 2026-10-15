@@ -49,7 +49,7 @@ pub enum StaticKnob {
     // Inference-level — needs worker subprocess.
     Model,
 
-    // Mask tier, appended to keep the other ordinals stable.
+    // Mask tier.
     Decoration,
     /// The Depth chip: lens blur, fog, aerial perspective and focus.
     /// Re-renders the photo from the kept depth map.
@@ -59,33 +59,6 @@ pub enum StaticKnob {
 }
 
 impl StaticKnob {
-    /// Stable bit position for `KnobSet`. Order must match `ALL`.
-    const fn ordinal(self) -> u8 {
-        match self {
-            StaticKnob::Gamma => 0,
-            StaticKnob::Contrast => 1,
-            StaticKnob::EdgeShift => 2,
-            StaticKnob::RefineEdges => 3,
-            StaticKnob::GuidedRadius => 4,
-            StaticKnob::GuidedEpsilon => 5,
-            StaticKnob::Feather => 6,
-            StaticKnob::FillStyle => 7,
-            StaticKnob::BgEffect => 8,
-            StaticKnob::LineStrength => 9,
-            StaticKnob::EdgeThickness => 10,
-            StaticKnob::EdgeScale => 11,
-            StaticKnob::SolidLineColor => 12,
-            StaticKnob::ComposeMode => 13,
-            StaticKnob::LineStyle => 14,
-            StaticKnob::BgColor => 15,
-            StaticKnob::BgImageFit => 16,
-            StaticKnob::Model => 17,
-            StaticKnob::Decoration => 18,
-            StaticKnob::DepthLook => 19,
-            StaticKnob::LineFade => 20,
-        }
-    }
-
     /// All variants, for table-driven tests and catalog validation.
     pub const ALL: &'static [StaticKnob] = &[
         StaticKnob::Gamma,
@@ -271,23 +244,6 @@ impl StaticKnob {
             | StaticKnob::DepthLook
             | StaticKnob::Model => KnobRequirement::Always,
         }
-    }
-}
-
-/// Bitset over `StaticKnob` variants. `Copy`, zero-alloc; a single u32
-/// covers all 18 static knobs with room to spare.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct KnobSet(u32);
-
-impl KnobSet {
-    pub fn insert(&mut self, k: StaticKnob) {
-        self.0 |= 1u32 << (k.ordinal() as u32);
-    }
-    pub fn contains(self, k: StaticKnob) -> bool {
-        (self.0 >> (k.ordinal() as u32)) & 1 == 1
-    }
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
     }
 }
 
