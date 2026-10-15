@@ -1500,33 +1500,29 @@ impl SdSession {
         // PARTS. `IndexedParallelIterator::collect` preserves order, so
         // this is defensive — cheap at N=4.
         let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
-        let mut take = |want: &str| -> Result<(Session, String), String> {
+        let mut take = |want: &str| -> Result<Session, String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
-            let (_, s, pick) = parts.swap_remove(pos);
-            Ok((s, pick.provider))
+            Ok(parts.swap_remove(pos).1)
         };
         let text = has_text.then(|| take("text_encoder")).transpose()?;
-        let (vae_encoder,  vae_enc_ep) = take("vae_encoder")?;
-        let (vae_decoder,  vae_dec_ep) = take("vae_decoder")?;
-        let (unet,         unet_ep)    = take("unet")?;
+        let vae_encoder = take("vae_encoder")?;
+        let vae_decoder = take("vae_decoder")?;
+        let unet = take("unet")?;
 
         let unet_inputs = take_three_inputs(&unet, "unet")?;
         let vae_encoder_input = take_first_input(&vae_encoder, "vae_encoder")?;
         let vae_decoder_input = take_first_input(&vae_decoder, "vae_decoder")?;
-        let text_encoder = text.map(|(session, ep)| -> Result<(TextEncoder, String), String> {
+        let text_encoder = text.map(|session| -> Result<TextEncoder, String> {
             let input = take_first_input(&session, "text_encoder")?;
-            Ok((TextEncoder { session: Mutex::new(session), input }, ep))
+            Ok(TextEncoder { session: Mutex::new(session), input })
         }).transpose()?;
         let vae_f32 = input_is_f32(&vae_encoder, 0);
 
         let rss_after_mb = process_rss_mb();
         tracing::info!(
             ?id,
-            text_encoder_ep = ?text_encoder.as_ref().map(|(_, ep)| ep),
-            vae_encoder_ep = %vae_enc_ep,
-            vae_decoder_ep = %vae_dec_ep,
-            unet_ep = %unet_ep,
+            providers = ?picks.iter().map(|(part, pick)| (*part, pick.provider.as_str())).collect::<Vec<_>>(),
             unet_inputs = ?unet_inputs,
             rss_before_mb,
             rss_after_mb,
@@ -1537,7 +1533,7 @@ impl SdSession {
             unet: Mutex::new(unet),
             vae_encoder: Mutex::new(vae_encoder),
             vae_decoder: Mutex::new(vae_decoder),
-            text_encoder: text_encoder.map(|(t, _)| t),
+            text_encoder,
             unet_inputs,
             vae_encoder_input,
             vae_decoder_input,
