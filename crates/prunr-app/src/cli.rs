@@ -1443,8 +1443,7 @@ pub fn run_doctor() {
     println!("CPU brand:   {}", p.cpu_brand);
     println!("dGPU:        {}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
     println!("iGPU:        {}", p.igpu.map_or("None".to_string(), |g| g.to_string()));
-    println!("Recommends OpenVINO: {}", p.recommends_openvino());
-    println!("Recommends DirectML: {}", p.recommends_directml());
+    println!("Recommended runtime: {}", p.recommended_runtime().map_or("none", |rt| rt.display_name()));
     println!("Recommends ROCm:     {}", p.recommends_rocm());
     println!();
 

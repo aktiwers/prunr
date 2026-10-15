@@ -508,7 +508,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         }
         if RuntimeChoice::ALL.iter().filter(|&&c| ctx.installs.can_load(c)).count() > 1 {
             rows.row("Runtime", "Which one Prunr uses. A change takes effect when you restart Prunr.", |ui| {
-                let mut chosen = ctx.installs.preferred_runtime.or(ctx.installs.loaded_runtime);
+                let mut chosen = ctx.installs.next_runtime;
                 let choices = RuntimeChoice::ALL.map(|choice| super::chip::Choice {
                     value: Some(choice),
                     name: choice.name(),
