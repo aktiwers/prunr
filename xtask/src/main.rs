@@ -158,7 +158,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     #[allow(clippy::disallowed_methods)] // same reason as the init_from above
     let mut session = Session::builder().map_err(ort_err("Session::builder"))?
         .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
-        .commit_from_memory(silueta).map_err(ort_err("commit_from_memory"))?;
+        .commit_from_memory(&silueta).map_err(ort_err("commit_from_memory"))?;
 
     let inputs = session.inputs();
     let outputs = session.outputs();

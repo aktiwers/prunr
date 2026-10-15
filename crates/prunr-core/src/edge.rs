@@ -68,7 +68,7 @@ impl EdgeEngine {
             .map_err(|e| CoreError::Inference(format!("Edge set opt level failed: {e}")))?
             .with_intra_threads(num_cpus::get().max(1))
             .map_err(|e| CoreError::Inference(format!("Edge set threads failed: {e}")))?
-            .commit_from_memory(edge_bytes)
+            .commit_from_memory(&edge_bytes)
             .map_err(|e| CoreError::Inference(format!("Edge model load failed: {e}")))?;
 
         // A re-export that renames the outputs would otherwise surface as

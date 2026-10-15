@@ -9,8 +9,7 @@
 //
 // Models are declared in `REGISTRY`; bytes are resolved via `resolve_bytes`.
 
-use std::borrow::Cow;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 // ── Registry types ──────────────────────────────────────────────────────────
 
@@ -1371,20 +1370,19 @@ pub enum ResolveError {
 }
 
 /// Resolve bytes for a model. Returns `None` for `OnDemand` entries that
-/// haven't been downloaded yet. Bundled entries return `Cow::Borrowed`
-/// (zero-copy from the embedded zstd cache); OnDemand entries are read
-/// from disk on every call and owned by the caller: a session copies the
-/// weights it is built from, so keeping the file's bytes would hold up
-/// to a few hundred MB per model for nothing.
-pub fn resolve_bytes(id: ModelId) -> Option<Cow<'static, [u8]>> {
+/// haven't been downloaded yet. A session copies the weights it is built
+/// from, so nothing keeps them past the last holder: a download is read
+/// from disk for each caller, and a bundled model is unpacked once and
+/// shared by everyone holding it at the time (see `shared_bundled`).
+pub fn resolve_bytes(id: ModelId) -> Option<Arc<Vec<u8>>> {
     resolve_bytes_from(id, on_demand_dir().as_deref())
 }
 
-fn resolve_bytes_from(id: ModelId, downloads: Option<&std::path::Path>) -> Option<Cow<'static, [u8]>> {
+fn resolve_bytes_from(id: ModelId, downloads: Option<&std::path::Path>) -> Option<Arc<Vec<u8>>> {
     let desc = descriptor(id)?;
     match desc.source {
-        ModelSource::Bundled { .. } => Some(Cow::Borrowed(bundled_bytes(id))),
-        ModelSource::OnDemand { filename, .. } => read_on_demand(downloads?, filename).map(Cow::Owned),
+        ModelSource::Bundled { .. } => Some(bundled_bytes(id)),
+        ModelSource::OnDemand { filename, .. } => read_on_demand(downloads?, filename).map(Arc::new),
         // Multi-part models aren't a single byte-blob — callers go
         // through `resolve_part_bytes(id, key)` or `multi_part_paths(id)`
         // and load each part separately.
@@ -1406,7 +1404,7 @@ fn resolve_bytes_from(id: ModelId, downloads: Option<&std::path::Path>) -> Optio
 pub fn resolve_part_bytes(
     id: ModelId,
     part_key: &str,
-) -> Result<Cow<'static, [u8]>, ResolveError> {
+) -> Result<Arc<Vec<u8>>, ResolveError> {
     let desc = REGISTRY.iter().find(|d| d.id == id)
         .ok_or(ResolveError::NotInRegistry)?;
     match desc.source {
@@ -1418,12 +1416,12 @@ pub fn resolve_part_bytes(
             let path = dir.join(subdir).join(part.filename);
             let bytes = std::fs::read(&path)
                 .map_err(|e| ResolveError::Io(format!("read {}: {e}", path.display())))?;
-            Ok(Cow::Owned(bytes))
+            Ok(Arc::new(bytes))
         }
         ModelSource::MultiPartBundled { parts, .. } => {
             let part = parts.iter().find(|p| p.key == part_key)
                 .ok_or_else(|| ResolveError::UnknownPart(part_key.to_string()))?;
-            Ok(Cow::Borrowed(bundled_multipart_bytes(id, part.key)))
+            Ok(bundled_multipart_bytes(id, part.key))
         }
         _ => Err(ResolveError::NotMultiPart),
     }
@@ -1549,7 +1547,7 @@ fn read_on_demand(dir: &std::path::Path, filename: &str) -> Option<Vec<u8>> {
 /// OnDemand ids are unreachable here — `resolve_bytes` routes them
 /// through the disk read path. The panic guards against a REGISTRY
 /// row that says `Bundled` but lists no match arm below.
-fn bundled_bytes(id: ModelId) -> &'static [u8] {
+fn bundled_bytes(id: ModelId) -> Arc<Vec<u8>> {
     match id {
         ModelId::Silueta => silueta_bytes(),
         ModelId::BiRefNetLite => birefnet_lite_bytes(),
@@ -1583,6 +1581,26 @@ fn bundled_bytes(id: ModelId) -> &'static [u8] {
 
 // ── Bundled byte loaders ────────────────────────────────────────────────────
 
+/// A bundled model's unpacked weights while anyone holds them.
+type Held = std::sync::Mutex<std::sync::Weak<Vec<u8>>>;
+
+/// The unpacked weights `slot` holds while anyone else does, else
+/// `unpack`ed afresh. Sessions built together (an engine pool, the first
+/// look beside a run) unpack once; once the last of them is built the
+/// weights are freed, where a cache kept them for the process's life
+/// (210 MB for BiRefNet Lite in a worker, 150 MB of SAM in the app). The
+/// lock is held while unpacking, so callers arriving meanwhile wait for
+/// that copy instead of making their own.
+fn shared_bundled(slot: &Held, unpack: impl FnOnce() -> Vec<u8>) -> Arc<Vec<u8>> {
+    let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(bytes) = held.upgrade() {
+        return bytes;
+    }
+    let bytes = Arc::new(unpack());
+    *held = Arc::downgrade(&bytes);
+    bytes
+}
+
 #[cfg(not(feature = "dev-models"))]
 static SILUETA_ZST: &[u8] = include_bytes!("../../../models/silueta.onnx.zst");
 #[cfg(not(feature = "dev-models"))]
@@ -1597,78 +1615,78 @@ static SAM2_ENCODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_sm
 static SAM2_DECODER_ZST: &[u8] = include_bytes!("../../../models/sam2.1_hiera_small.decoder.onnx.zst");
 
 #[cfg(not(feature = "dev-models"))]
-static SILUETA_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static SILUETA_CACHE: Held = Held::new(std::sync::Weak::new());
 #[cfg(not(feature = "dev-models"))]
-static BIREFNET_LITE_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static BIREFNET_LITE_CACHE: Held = Held::new(std::sync::Weak::new());
 #[cfg(not(feature = "dev-models"))]
-static TEED_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static TEED_CACHE: Held = Held::new(std::sync::Weak::new());
 #[cfg(not(feature = "dev-models"))]
-static YUNET_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static YUNET_CACHE: Held = Held::new(std::sync::Weak::new());
 #[cfg(not(feature = "dev-models"))]
-static SAM2_ENCODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static SAM2_ENCODER_CACHE: Held = Held::new(std::sync::Weak::new());
 #[cfg(not(feature = "dev-models"))]
-static SAM2_DECODER_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+static SAM2_DECODER_CACHE: Held = Held::new(std::sync::Weak::new());
 
 #[cfg(not(feature = "dev-models"))]
-pub fn silueta_bytes() -> &'static [u8] {
-    SILUETA_CACHE.get_or_init(|| {
+pub fn silueta_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&SILUETA_CACHE, || {
         zstd::bulk::decompress(SILUETA_ZST, 50 * 1024 * 1024)
             .expect("failed to decompress embedded silueta model")
     })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn birefnet_lite_bytes() -> &'static [u8] {
-    BIREFNET_LITE_CACHE.get_or_init(|| {
+pub fn birefnet_lite_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&BIREFNET_LITE_CACHE, || {
         zstd::bulk::decompress(BIREFNET_LITE_ZST, 250 * 1024 * 1024)
             .expect("failed to decompress embedded birefnet-lite model")
     })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn teed_bytes() -> &'static [u8] {
-    TEED_CACHE.get_or_init(|| {
+pub fn teed_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&TEED_CACHE, || {
         zstd::bulk::decompress(TEED_ZST, 1024 * 1024)
             .expect("failed to decompress embedded TEED model")
     })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn yunet_bytes() -> &'static [u8] {
-    YUNET_CACHE.get_or_init(|| {
+pub fn yunet_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&YUNET_CACHE, || {
         zstd::bulk::decompress(YUNET_ZST, 1024 * 1024)
             .expect("failed to decompress embedded YuNet model")
     })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn sam2_encoder_bytes() -> &'static [u8] {
-    SAM2_ENCODER_CACHE.get_or_init(|| {
+pub fn sam2_encoder_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&SAM2_ENCODER_CACHE, || {
         zstd::bulk::decompress(SAM2_ENCODER_ZST, 200 * 1024 * 1024)
             .expect("failed to decompress embedded SAM 2 encoder")
     })
 }
 
 #[cfg(not(feature = "dev-models"))]
-pub fn sam2_decoder_bytes() -> &'static [u8] {
-    SAM2_DECODER_CACHE.get_or_init(|| {
+pub fn sam2_decoder_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&SAM2_DECODER_CACHE, || {
         zstd::bulk::decompress(SAM2_DECODER_ZST, 32 * 1024 * 1024)
             .expect("failed to decompress embedded SAM 2 decoder")
     })
 }
 
 #[cfg(feature = "dev-models")]
-static DEV_SILUETA: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_SILUETA: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
-static DEV_BIREFNET: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_BIREFNET: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
-static DEV_TEED: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_TEED: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
-static DEV_YUNET: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_YUNET: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
-static DEV_SAM2_ENCODER: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_SAM2_ENCODER: Held = Held::new(std::sync::Weak::new());
 #[cfg(feature = "dev-models")]
-static DEV_SAM2_DECODER: OnceLock<Vec<u8>> = OnceLock::new();
+static DEV_SAM2_DECODER: Held = Held::new(std::sync::Weak::new());
 
 #[cfg(feature = "dev-models")]
 fn dev_model_path(name: &str) -> std::path::PathBuf {
@@ -1700,33 +1718,33 @@ fn dev_model_bytes_in(raw: &std::path::Path) -> Vec<u8> {
 }
 
 #[cfg(feature = "dev-models")]
-pub fn silueta_bytes() -> &'static [u8] {
-    DEV_SILUETA.get_or_init(|| dev_model_bytes("silueta.onnx"))
+pub fn silueta_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_SILUETA, || dev_model_bytes("silueta.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn birefnet_lite_bytes() -> &'static [u8] {
-    DEV_BIREFNET.get_or_init(|| dev_model_bytes("birefnet_lite.onnx"))
+pub fn birefnet_lite_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_BIREFNET, || dev_model_bytes("birefnet_lite.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn teed_bytes() -> &'static [u8] {
-    DEV_TEED.get_or_init(|| dev_model_bytes("teed.onnx"))
+pub fn teed_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_TEED, || dev_model_bytes("teed.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn yunet_bytes() -> &'static [u8] {
-    DEV_YUNET.get_or_init(|| dev_model_bytes("face_detection_yunet_2026may.onnx"))
+pub fn yunet_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_YUNET, || dev_model_bytes("face_detection_yunet_2026may.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn sam2_encoder_bytes() -> &'static [u8] {
-    DEV_SAM2_ENCODER.get_or_init(|| dev_model_bytes("sam2.1_hiera_small.encoder.onnx"))
+pub fn sam2_encoder_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_SAM2_ENCODER, || dev_model_bytes("sam2.1_hiera_small.encoder.onnx"))
 }
 
 #[cfg(feature = "dev-models")]
-pub fn sam2_decoder_bytes() -> &'static [u8] {
-    DEV_SAM2_DECODER.get_or_init(|| dev_model_bytes("sam2.1_hiera_small.decoder.onnx"))
+pub fn sam2_decoder_bytes() -> Arc<Vec<u8>> {
+    shared_bundled(&DEV_SAM2_DECODER, || dev_model_bytes("sam2.1_hiera_small.decoder.onnx"))
 }
 
 /// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
@@ -1734,7 +1752,7 @@ pub fn sam2_decoder_bytes() -> &'static [u8] {
 /// Adding a new `MultiPartBundled` REGISTRY row means adding an arm
 /// here AND a per-part accessor above. The fallback panic guards
 /// against a REGISTRY row that declares a part with no backing bytes.
-fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> &'static [u8] {
+fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> Arc<Vec<u8>> {
     match (id, part_key) {
         (ModelId::Sam21HieraSmall, "encoder") => sam2_encoder_bytes(),
         (ModelId::Sam21HieraSmall, "decoder") => sam2_decoder_bytes(),
@@ -1866,10 +1884,10 @@ mod tests {
 
     #[test]
     fn model_api_compiles() {
-        let _: fn() -> &'static [u8] = silueta_bytes;
-        let _: fn() -> &'static [u8] = birefnet_lite_bytes;
-        let _: fn() -> &'static [u8] = teed_bytes;
-        let _: fn() -> &'static [u8] = yunet_bytes;
+        let _: fn() -> Arc<Vec<u8>> = silueta_bytes;
+        let _: fn() -> Arc<Vec<u8>> = birefnet_lite_bytes;
+        let _: fn() -> Arc<Vec<u8>> = teed_bytes;
+        let _: fn() -> Arc<Vec<u8>> = yunet_bytes;
     }
 
     #[test]
@@ -2163,8 +2181,8 @@ mod tests {
         };
         std::fs::write(dir.path().join(filename), b"weights").unwrap();
         let bytes = resolve_bytes_from(ModelId::U2net, Some(dir.path())).expect("on disk");
-        assert!(
-            matches!(bytes, Cow::Owned(_)),
+        assert_eq!(
+            Arc::strong_count(&bytes), 1,
             "a session copies the weights it is built from: a kept copy holds the file's size in RAM for nothing",
         );
         assert_eq!(&*bytes, b"weights");
@@ -2615,14 +2633,16 @@ mod tests {
             "SAM 2 decoder decompressed too small: {} bytes", dec.len());
     }
 
-    /// Second call must return the same `&'static [u8]` — pin the cache so
-    /// per-click decoder dispatch doesn't re-decompress 150 MiB each time.
+    /// Callers at the same time share one unpacked copy; once the last
+    /// lets go it is freed, not kept for the process's life.
     #[test]
-    fn sam2_bundled_resolve_is_cached() {
+    fn sam2_bundled_bytes_are_shared_while_held_and_then_freed() {
         let a = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
         let b = resolve_part_bytes(ModelId::Sam21HieraSmall, "encoder").unwrap();
-        assert_eq!(a.as_ptr(), b.as_ptr(),
-            "MultiPartBundled bytes must be cached, not re-decompressed");
+        assert!(Arc::ptr_eq(&a, &b), "unpacked once for both");
+        let held = Arc::downgrade(&a);
+        drop((a, b));
+        assert!(held.upgrade().is_none(), "freed with its last holder");
     }
 
     // ── resolve_part_bytes error-path tests ──────────────────────────────
