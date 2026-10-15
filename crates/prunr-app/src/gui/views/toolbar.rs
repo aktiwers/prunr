@@ -60,7 +60,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
-        let has_selected = app.batch.has_any_selected();
+        let any_ticked = app.batch.any_ticked();
 
         // ── Left: Open ──
         let open_btn = egui::Button::new(
@@ -131,7 +131,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         // ── Right group: action buttons ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if has_selected {
+            if any_ticked {
                 let remove_sel_btn = egui::Button::new(
                     RichText::new(format!("{}  Remove selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
                 )
@@ -143,7 +143,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
             if app.can_save_intent() {
                 render_save_options(ui, app);
-                let (save_title, save_label) = if has_selected {
+                let (save_title, save_label) = if any_ticked {
                     ("Save selected", format!("{}  Save selected", ICON_SAVE.codepoint))
                 } else {
                     ("Save", format!("{}  Save", ICON_SAVE.codepoint))
@@ -159,10 +159,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
 
             let is_batch_processing = app.batch.status_counts().processing > 0;
-            let selected_processing = app.batch.any_selected_with_status(BatchStatus::Processing);
+            let ticked_processing = app.batch.any_ticked_with_status(BatchStatus::Processing);
 
             if is_batch_processing {
-                let partial = selected_processing;
+                let partial = ticked_processing;
                 let cancel_label = if partial { "Cancel Selected" } else { "Cancel All" };
                 let cancel_btn = egui::Button::new(
                     RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),

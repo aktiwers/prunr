@@ -165,26 +165,26 @@ impl BatchManager {
         self.selected_item().is_some_and(|b| b.id == id)
     }
 
-    /// IDs of checkbox-selected items currently in a given status. Used by
+    /// IDs of ticked items currently in a given status. Used by
     /// the partial-cancel path to decide which in-flight items to stop.
-    pub(crate) fn selected_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
-        self.selected_with_status(status).map(|i| i.id).collect()
+    pub(crate) fn ticked_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
+        self.ticked_with_status(status).map(|i| i.id).collect()
     }
 
-    /// Whether any checkbox-selected item is in `status`: the same set
-    /// `selected_ids_with_status` returns, without collecting it.
-    pub(crate) fn any_selected_with_status(&self, status: BatchStatus) -> bool {
-        self.selected_with_status(status).next().is_some()
+    /// Whether any ticked item is in `status`: the same set
+    /// `ticked_ids_with_status` returns, without collecting it.
+    pub(crate) fn any_ticked_with_status(&self, status: BatchStatus) -> bool {
+        self.ticked_with_status(status).next().is_some()
     }
 
-    fn selected_with_status(&self, status: BatchStatus) -> impl Iterator<Item = &BatchItem> {
-        self.items.iter().filter(move |i| i.selected && i.status == status)
+    fn ticked_with_status(&self, status: BatchStatus) -> impl Iterator<Item = &BatchItem> {
+        self.items.iter().filter(move |i| i.ticked && i.status == status)
     }
 
     /// Tick or untick every item's checkbox.
-    pub(crate) fn set_all_selected(&mut self, selected: bool) {
+    pub(crate) fn set_all_ticked(&mut self, ticked: bool) {
         for item in &mut self.items {
-            item.selected = selected;
+            item.ticked = ticked;
         }
     }
 
@@ -254,8 +254,8 @@ impl BatchManager {
     /// as a glitch.
     pub(crate) fn process_button_label(&self) -> ProcessButtonLabel {
         let total = self.items.len();
-        let selected = self.selected_count();
-        match (selected, total) {
+        let ticked = self.ticked_count();
+        match (ticked, total) {
             (0, _) => ProcessButtonLabel::ProcessViewed,
             (n, t) if n == t && t >= 2 => ProcessButtonLabel::ProcessAll(t),
             (n, _) => ProcessButtonLabel::ProcessSelected(n),
@@ -285,9 +285,9 @@ impl BatchManager {
     /// themselves: Process clamps a stale index, Undo/Redo and the
     /// targeted indices skip it.
     fn targets(&self, viewed: Option<usize>) -> impl Iterator<Item = (usize, &BatchItem)> {
-        let ticked = self.has_any_selected();
+        let ticked = self.any_ticked();
         self.items.iter().enumerate()
-            .filter(move |&(i, item)| if ticked { item.selected } else { Some(i) == viewed })
+            .filter(move |&(i, item)| if ticked { item.ticked } else { Some(i) == viewed })
     }
 
     /// `selected_index` when it names an item.
@@ -317,19 +317,19 @@ impl BatchManager {
 
     /// Number of items with the checkbox set. Single source of truth so
     /// statusbar / sidebar don't re-roll `iter().filter(...).count()`.
-    pub(crate) fn selected_count(&self) -> usize {
-        self.items.iter().filter(|i| i.selected).count()
+    pub(crate) fn ticked_count(&self) -> usize {
+        self.items.iter().filter(|i| i.ticked).count()
     }
 
     /// True when at least one item has the checkbox set.
-    pub(crate) fn has_any_selected(&self) -> bool {
-        self.items.iter().any(|i| i.selected)
+    pub(crate) fn any_ticked(&self) -> bool {
+        self.items.iter().any(|i| i.ticked)
     }
 
     /// True when every item has the checkbox set (and the batch is
-    /// non-empty — an empty batch is not "all selected").
-    pub(crate) fn all_selected(&self) -> bool {
-        !self.items.is_empty() && self.items.iter().all(|i| i.selected)
+    /// non-empty — an empty batch is not "all ticked").
+    pub(crate) fn all_ticked(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|i| i.ticked)
     }
 
     /// Single pass over `items` producing the three counts that callers
@@ -597,7 +597,7 @@ impl BatchManager {
     pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
         let free = |b: &&BatchItem| b.status != BatchStatus::Processing;
         match self.items.get(idx) {
-            Some(row) if row.selected => self.items.iter().filter(|b| b.selected).filter(free).map(|b| b.id).collect(),
+            Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).filter(free).map(|b| b.id).collect(),
             Some(row) => std::iter::once(row).filter(free).map(|b| b.id).collect(),
             None => Vec::new(),
         }
@@ -1250,7 +1250,7 @@ mod tests {
 
     fn checked(id: u64) -> BatchItem {
         let mut i = item_with_cache(id, 0);
-        i.selected = true;
+        i.ticked = true;
         i
     }
 
@@ -1345,14 +1345,14 @@ mod tests {
         assert!(bm.any_target_can(|i| i.id == 20));
         assert!(!bm.any_target_can(|i| i.id != 20));
 
-        bm.items[0].selected = true;
-        bm.items[2].selected = true;
+        bm.items[0].ticked = true;
+        bm.items[2].ticked = true;
         assert_eq!(bm.items_to_process(), vec![10, 30]);
         assert_eq!(bm.targeted_indices(), vec![0, 2]);
         assert!(bm.any_target_can(|i| i.id == 30));
         assert!(!bm.any_target_can(|i| i.id == 20));
 
-        bm.set_all_selected(false);
+        bm.set_all_ticked(false);
         bm.selected_index = 99;
         assert_eq!(bm.items_to_process(), vec![30]);
         assert!(bm.targeted_indices().is_empty());
@@ -1562,8 +1562,8 @@ mod tests {
         for id in 0..3 {
             bm.items.push(item_with_cache(id, 0));
         }
-        bm.items[0].selected = true;
-        bm.items[2].selected = true;
+        bm.items[0].ticked = true;
+        bm.items[2].ticked = true;
         assert_eq!(bm.drag_targets(0), [0, 2]);
         assert_eq!(bm.drag_targets(1), [1]);
         bm.items[2].status = BatchStatus::Processing;
@@ -1582,16 +1582,16 @@ mod tests {
         }
         bm.items[1].status = BatchStatus::Processing;
         let agree = |bm: &BatchManager| {
-            bm.any_selected_with_status(BatchStatus::Processing)
-                != bm.selected_ids_with_status(BatchStatus::Processing).is_empty()
+            bm.any_ticked_with_status(BatchStatus::Processing)
+                != bm.ticked_ids_with_status(BatchStatus::Processing).is_empty()
         };
-        assert!(!bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm));
-        bm.items[0].selected = true;
-        assert!(!bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm), "ticked but not processing");
-        bm.set_all_selected(true);
-        assert!(bm.any_selected_with_status(BatchStatus::Processing) && agree(&bm));
-        bm.set_all_selected(false);
-        assert!(bm.items.iter().all(|i| !i.selected));
+        assert!(!bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm));
+        bm.items[0].ticked = true;
+        assert!(!bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm), "ticked but not processing");
+        bm.set_all_ticked(true);
+        assert!(bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm));
+        bm.set_all_ticked(false);
+        assert!(bm.items.iter().all(|i| !i.ticked));
     }
 
     #[test]

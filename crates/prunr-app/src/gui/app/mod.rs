@@ -839,7 +839,7 @@ impl PrunrApp {
     }
 
     pub fn handle_cancel_selected(&mut self) {
-        let targets = self.batch.selected_ids_with_status(BatchStatus::Processing);
+        let targets = self.batch.ticked_ids_with_status(BatchStatus::Processing);
         if targets.is_empty() {
             return;
         }
