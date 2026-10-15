@@ -1692,6 +1692,55 @@ mod timeline_contract_tests {
         assert_eq!(app.batch.items[0].status, BatchStatus::Pending);
     }
 
+    /// A ticked image off screen that Process re-runs under the shown
+    /// image's settings gets its own undo step, as the shown one does:
+    /// undoing it brings back the settings and the result it had. Both
+    /// re-runs that need no new cut: a mask knob and lines added.
+    #[test]
+    fn a_ticked_image_off_screen_gets_an_undo_step_for_its_rerun() {
+        use crate::gui::item::{BatchStatus, Cutter};
+        use crate::gui::worker::{CompressedTensor, TensorCache};
+        use crate::gui::item_settings::ItemSettings;
+        use prunr_core::ModelKind;
+        let change: [(&str, fn(&mut ItemSettings)); 2] = [
+            ("mask knob", |s| s.feather = 3.0),
+            ("lines added", |s| s.line_mode = prunr_core::LineMode::SubjectOutline),
+        ];
+        for (what, edit) in change {
+            let ctx = egui::Context::default();
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            for id in [1, 2] {
+                crate::gui::tests::fixtures::push_test_item(&mut app, id).dimensions = (4, 4);
+            }
+            app.batch.select_item(0);
+            let first = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255])));
+            for item in &mut app.batch.items {
+                item.applied_recipe = Some(item.settings.current_recipe(ModelKind::Silueta));
+                item.set_cached_tensor(CompressedTensor::from_raw(TensorCache { data: vec![0.5; 16], height: 4, width: 4, model: ModelKind::Silueta }));
+                item.land_cut_for_test(Cutter::Model(ModelKind::Silueta), Arc::clone(&first));
+                item.selected = true;
+            }
+            app.batch.items[1].set_on_screen(false);
+            let before = app.batch.items[1].settings;
+            let steps_before = app.batch.items[1].timeline.undo_steps();
+            edit(&mut app.batch.items[0].settings);
+            app.batch.items[0].commit(StepKind::Adjust);
+            app.process_items(|i| i.selected, Some(StepKind::Process));
+            assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "{what}: the ticked image reruns");
+
+            let rerun = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 90, 90, 255])), active_provider: String::new() };
+            app.on_batch_item_done(&ctx, 2, Ok(rerun), None, None);
+            let item = &mut app.batch.items[1];
+            assert_eq!(item.status, BatchStatus::Done, "{what}");
+            assert_eq!(item.timeline.undo_steps(), steps_before + 1, "{what}: the rerun is a step of its own");
+            assert!(item.undo_step().is_some(), "{what}");
+            assert_eq!(item.settings, before, "{what}: undo brings back its own settings");
+            let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
+            assert_eq!(shown, Some(true), "{what}: and the result it had");
+        }
+    }
+
     /// A result for a state the image has since left (a knob change while
     /// it ran) cannot land; the image shows its current state again
     /// instead of staying "Processing" with nothing under way.
