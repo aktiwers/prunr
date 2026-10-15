@@ -511,11 +511,11 @@ pub fn compose_subject_outline(
 
 /// Lines over the subject (Sketch on Subject): `trace` (the line
 /// detector) reads the plain cut-out after the pre-filter, so an effect
-/// never moves the lines; then `fill` colours the subject and the lines
+/// never moves the lines; then `effect` colours the subject and the lines
 /// are drawn over it. Returns the result and the traced tensors.
 pub fn outline_subject(
     subject: RgbaImage,
-    fill: crate::FillStyle,
+    effect: crate::SubjectEffect,
     edge: &crate::EdgeSettings,
     fade: Option<crate::depth::LineFade<'_>>,
     trace: impl FnOnce(&DynamicImage) -> Result<EdgeInferenceResult, CoreError>,
@@ -523,7 +523,7 @@ pub fn outline_subject(
     let plain = DynamicImage::ImageRgba8(subject);
     let traced = trace(&apply_input_transform(&plain, edge.input_transform))?;
     let mut subject = plain.into_rgba8();
-    crate::postprocess::apply_fill_style(&mut subject, fill);
+    crate::postprocess::apply_subject_effect(&mut subject, effect);
     Ok((compose_subject_outline(&traced, &subject, edge, fade), traced))
 }
 
@@ -975,7 +975,7 @@ mod tests {
         let subject = RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]));
         let mut traced_from = None;
         let edge = crate::EdgeSettings { compose_mode: crate::ComposeMode::SubjectFilled, ..crate::EdgeSettings::default() };
-        let (out, _) = outline_subject(subject.clone(), crate::FillStyle::Invert, &edge, None, |img| {
+        let (out, _) = outline_subject(subject.clone(), crate::SubjectEffect::Invert, &edge, None, |img| {
             traced_from = Some(img.to_rgba8());
             Ok(EdgeInferenceResult { tensors: std::array::from_fn(|_| vec![0.0; 4]), height: 2, width: 2 })
         })

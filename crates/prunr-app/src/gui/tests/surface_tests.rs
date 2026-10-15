@@ -400,9 +400,9 @@ fn the_background_flyout_names_every_control_for_each_choice() {
 /// The Effect flyout names every control for each effect, "None" first.
 #[test]
 fn the_effect_flyout_names_every_control_for_each_effect() {
-    for style in prunr_core::FillStyle::ALL {
+    for style in prunr_core::SubjectEffect::ALL {
         let mut h = loaded();
-        h.state_mut().batch.items[0].settings.fill_style = *style;
+        h.state_mut().batch.items[0].settings.effect = *style;
         settle(&mut h);
         click(&mut h, "Effect");
         assert!(egui::Popup::is_any_open(&h.ctx), "{style:?}: the Effect flyout opened");

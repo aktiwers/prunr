@@ -31,7 +31,7 @@ pub enum StaticKnob {
     GuidedRadius,
     GuidedEpsilon,
     Feather,
-    FillStyle,
+    SubjectEffect,
     BgEffect,
 
     // Edge tier — cached TEED tensor reused.
@@ -68,7 +68,7 @@ impl StaticKnob {
         StaticKnob::GuidedRadius,
         StaticKnob::GuidedEpsilon,
         StaticKnob::Feather,
-        StaticKnob::FillStyle,
+        StaticKnob::SubjectEffect,
         StaticKnob::BgEffect,
         StaticKnob::LineStrength,
         StaticKnob::EdgeThickness,
@@ -228,7 +228,7 @@ impl StaticKnob {
             | StaticKnob::Feather
             | StaticKnob::Decoration => KnobRequirement::MaskProduced,
 
-            StaticKnob::FillStyle => KnobRequirement::SubjectPresent,
+            StaticKnob::SubjectEffect => KnobRequirement::SubjectPresent,
 
             StaticKnob::BgEffect
             | StaticKnob::BgColor
@@ -346,7 +346,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::GuidedRadius
         | StaticKnob::GuidedEpsilon
         | StaticKnob::Feather
-        | StaticKnob::FillStyle
+        | StaticKnob::SubjectEffect
         | StaticKnob::Decoration
         | StaticKnob::DepthLook => s(MaskRerun, Nothing, LivePreviewMask, true),
 
@@ -482,7 +482,7 @@ mod tests {
             (StaticKnob::GuidedRadius, MaskProduced),
             (StaticKnob::GuidedEpsilon, MaskProduced),
             (StaticKnob::Feather, MaskProduced),
-            (StaticKnob::FillStyle, SubjectPresent),
+            (StaticKnob::SubjectEffect, SubjectPresent),
             (StaticKnob::BgEffect, TransparencyProduced),
             (StaticKnob::LineStrength, Always),
             (StaticKnob::EdgeThickness, Always),
@@ -719,7 +719,7 @@ mod tests {
     fn mutate_static(knob: StaticKnob, base: crate::gui::item_settings::ItemSettings)
         -> crate::gui::item_settings::ItemSettings
     {
-        use prunr_core::{ComposeMode, EdgeScale, FillStyle, LineStyle};
+        use prunr_core::{ComposeMode, EdgeScale, SubjectEffect, LineStyle};
         let mut new = base;
         match knob {
             StaticKnob::Gamma => new.gamma = base.gamma + 0.5,
@@ -729,10 +729,10 @@ mod tests {
             StaticKnob::GuidedRadius => new.guided_radius = base.guided_radius + 1,
             StaticKnob::GuidedEpsilon => new.guided_epsilon = base.guided_epsilon * 2.0,
             StaticKnob::Feather => new.feather = base.feather + 0.5,
-            StaticKnob::FillStyle => {
-                new.fill_style = match base.fill_style {
-                    FillStyle::None => FillStyle::Invert,
-                    _ => FillStyle::None,
+            StaticKnob::SubjectEffect => {
+                new.effect = match base.effect {
+                    SubjectEffect::None => SubjectEffect::Invert,
+                    _ => SubjectEffect::None,
                 };
             }
             StaticKnob::Decoration => new.decoration.outline_width = base.decoration.outline_width + 4.0,
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn cache_impact_for_recipe_diff_covers_common_knobs() {
-        use prunr_core::{ComposeMode, EdgeScale, FillStyle, InputTransform, LineStyle, ModelKind};
+        use prunr_core::{ComposeMode, EdgeScale, SubjectEffect, InputTransform, LineStyle, ModelKind};
         use prunr_core::{CompositeRecipe, EdgeRecipe, InferenceRecipe, MaskSettings, UpscaleRecipe};
 
         let base = ProcessingRecipe {
@@ -954,7 +954,7 @@ mod tests {
                 line_fade_pct: 0,
             },
             mask: (&MaskSettings {
-                fill_style: FillStyle::None,
+                effect: SubjectEffect::None,
                 ..Default::default()
             }).into(),
             composite: CompositeRecipe::default(),

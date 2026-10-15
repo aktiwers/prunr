@@ -2750,7 +2750,7 @@ mod tests {
 
     fn fixture_recipe() -> ProcessingRecipe {
         use prunr_core::{
-            CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, FillStyle, InferenceRecipe,
+            CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, SubjectEffect, InferenceRecipe,
             InputTransform, LineStyle, MaskSettings, ModelKind, UpscaleRecipe,
         };
         ProcessingRecipe {
@@ -2769,7 +2769,7 @@ mod tests {
                 line_style: LineStyle::Solid,
                 line_fade_pct: 0,
             },
-            mask: (&MaskSettings { fill_style: FillStyle::None, ..Default::default() }).into(),
+            mask: (&MaskSettings { effect: SubjectEffect::None, ..Default::default() }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
             colorize: Default::default(),

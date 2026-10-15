@@ -189,7 +189,7 @@ impl PrunrApp {
         }
         let seg_tensor = item.hot_seg_tensor();
         // A Mask dispatch in a seg model with no cached tensor falls
-        // through to `run_preview`'s source+fill_style fallback and
+        // through to `run_preview`'s source+effect fallback and
         // overwrites any existing `result_rgba`. Filter-only mode is
         // the legitimate user of that fallback (the filter IS the
         // pipeline). Anywhere else, refuse — better to skip the
@@ -235,7 +235,7 @@ impl PrunrApp {
             .flatten();
         match kind {
             // Mask kind without a seg tensor is the filter-only path:
-            // `run_preview` applies fill_style to the raw source. No tensor
+            // `run_preview` applies effect to the raw source. No tensor
             // required. Edge kind still needs an edge tensor (nothing to
             // preview without one).
             PreviewKind::Edge if edge_tensor.is_none() => return None,

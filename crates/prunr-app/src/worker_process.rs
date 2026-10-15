@@ -521,7 +521,7 @@ pub fn run_worker() -> ! {
                                 // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let measured = line_depth.as_ref().and_then(|d| d.measure(img));
-                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
+                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
                                     .map(|(rgba_image, res)| {
                                         edge_tensor_for_cache = Some(res);
                                         ProcessResult { rgba_image, active_provider: provider.clone() }
@@ -550,7 +550,7 @@ pub fn run_worker() -> ! {
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
-                                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask };
+                                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..mask };
                                         let subject = prunr_core::postprocess_from_flat(
                                             &ir.tensor_data, th, tw, original,
                                             &prunr_core::PostprocessOpts::new(&plain, model),
@@ -563,7 +563,7 @@ pub fn run_worker() -> ! {
                                         let eng_ref = edge_eng.as_ref().unwrap();
                                         let measured = line_depth.as_ref().and_then(|d| d.measure(original));
                                         let (rgba_image, edge_res) = prunr_core::outline_subject(
-                                            subject, mask.fill_style, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
+                                            subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
                                         )?;
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -845,7 +845,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..cmd_mask };
+                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..cmd_mask };
                         let subject = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&plain, cmd_model),
@@ -855,7 +855,7 @@ pub fn run_worker() -> ! {
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
                         let measured = line_depth.as_ref().and_then(|d| d.measure(&original));
-                        prunr_core::outline_subject(subject, cmd_mask.fill_style, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
+                        prunr_core::outline_subject(subject, cmd_mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
 

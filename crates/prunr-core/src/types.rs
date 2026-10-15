@@ -161,8 +161,8 @@ pub struct MaskSettings {
     /// Gaussian blur sigma (pixels). Color-agnostic edge softening.
     pub feather: f32,
     /// How the subject RGB is transformed after masking and before compose.
-    #[serde(default)]
-    pub fill_style: FillStyle,
+    #[serde(default, rename = "fill_style")]
+    pub effect: SubjectEffect,
     /// Sticker outline and shadow around the cut-out.
     #[serde(default)]
     pub decoration: Decoration,
@@ -277,7 +277,7 @@ impl Default for MaskSettings {
             guided_radius: 8,
             guided_epsilon: 1e-4,
             feather: 0.0,
-            fill_style: FillStyle::default(),
+            effect: SubjectEffect::default(),
             decoration: Decoration::default(),
         }
     }
@@ -589,7 +589,7 @@ impl std::fmt::Display for LineStyle {
     serde::Serialize, serde::Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum FillStyle {
+pub enum SubjectEffect {
     /// Pass source RGB through unchanged.
     #[default]
     None,
@@ -748,58 +748,58 @@ impl std::str::FromStr for BgImageFit {
     }
 }
 
-impl FillStyle {
+impl SubjectEffect {
     /// The same style on the image at `scale` times its size: pixel
     /// blocks and halftone dots scale with it, at least a pixel each.
     pub fn at_scale(self, scale: f32) -> Self {
         let px = |v: u32| ((v as f32 * scale).round() as u32).max(1);
         match self {
-            FillStyle::Pixelate { block_size } => FillStyle::Pixelate { block_size: px(block_size) },
-            FillStyle::Halftone { dot_spacing } => FillStyle::Halftone { dot_spacing: px(dot_spacing) },
+            SubjectEffect::Pixelate { block_size } => SubjectEffect::Pixelate { block_size: px(block_size) },
+            SubjectEffect::Halftone { dot_spacing } => SubjectEffect::Halftone { dot_spacing: px(dot_spacing) },
             other => other,
         }
     }
 
     pub const ALL: &'static [Self] = &[
-        FillStyle::None,
-        FillStyle::Desaturate,
-        FillStyle::Invert,
-        FillStyle::Sepia,
-        FillStyle::Threshold { level: 128 },
-        FillStyle::Posterize { levels: 4 },
-        FillStyle::Solarize { pivot: 128 },
-        FillStyle::HueShift { degrees: 90 },
-        FillStyle::Saturate { percent: 180 },
-        FillStyle::ColorSplash { keep_hue: 0, tolerance: 30 },
-        FillStyle::Pixelate { block_size: 12 },
-        FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
-        FillStyle::CrossProcess { shadow: [30, 60, 110], highlight: [245, 220, 180] },
-        FillStyle::Halftone { dot_spacing: 8 },
-        FillStyle::GradientMap { stops: [[20, 20, 60], [120, 60, 140], [240, 120, 80], [255, 230, 180]] },
+        SubjectEffect::None,
+        SubjectEffect::Desaturate,
+        SubjectEffect::Invert,
+        SubjectEffect::Sepia,
+        SubjectEffect::Threshold { level: 128 },
+        SubjectEffect::Posterize { levels: 4 },
+        SubjectEffect::Solarize { pivot: 128 },
+        SubjectEffect::HueShift { degrees: 90 },
+        SubjectEffect::Saturate { percent: 180 },
+        SubjectEffect::ColorSplash { keep_hue: 0, tolerance: 30 },
+        SubjectEffect::Pixelate { block_size: 12 },
+        SubjectEffect::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+        SubjectEffect::CrossProcess { shadow: [30, 60, 110], highlight: [245, 220, 180] },
+        SubjectEffect::Halftone { dot_spacing: 8 },
+        SubjectEffect::GradientMap { stops: [[20, 20, 60], [120, 60, 140], [240, 120, 80], [255, 230, 180]] },
     ];
 
     pub fn name(&self) -> &'static str {
         match self {
-            FillStyle::None => "None",
-            FillStyle::Desaturate => "Desaturate",
-            FillStyle::Invert => "Invert",
-            FillStyle::Duotone { .. } => "Duotone",
-            FillStyle::Sepia => "Sepia",
-            FillStyle::Threshold { .. } => "Threshold",
-            FillStyle::Posterize { .. } => "Posterize",
-            FillStyle::Solarize { .. } => "Solarize",
-            FillStyle::HueShift { .. } => "Hue shift",
-            FillStyle::Saturate { .. } => "Saturate",
-            FillStyle::ColorSplash { .. } => "Color splash",
-            FillStyle::Pixelate { .. } => "Pixelate",
-            FillStyle::CrossProcess { .. } => "Cross-process",
-            FillStyle::Halftone { .. } => "Halftone",
-            FillStyle::GradientMap { .. } => "Gradient map",
+            SubjectEffect::None => "None",
+            SubjectEffect::Desaturate => "Desaturate",
+            SubjectEffect::Invert => "Invert",
+            SubjectEffect::Duotone { .. } => "Duotone",
+            SubjectEffect::Sepia => "Sepia",
+            SubjectEffect::Threshold { .. } => "Threshold",
+            SubjectEffect::Posterize { .. } => "Posterize",
+            SubjectEffect::Solarize { .. } => "Solarize",
+            SubjectEffect::HueShift { .. } => "Hue shift",
+            SubjectEffect::Saturate { .. } => "Saturate",
+            SubjectEffect::ColorSplash { .. } => "Color splash",
+            SubjectEffect::Pixelate { .. } => "Pixelate",
+            SubjectEffect::CrossProcess { .. } => "Cross-process",
+            SubjectEffect::Halftone { .. } => "Halftone",
+            SubjectEffect::GradientMap { .. } => "Gradient map",
         }
     }
 }
 
-impl std::fmt::Display for FillStyle {
+impl std::fmt::Display for SubjectEffect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
@@ -807,7 +807,7 @@ impl std::fmt::Display for FillStyle {
 
 /// Reads a display name in CLI form (`hue-shift`, `Color splash`), giving
 /// that effect with its default settings.
-impl std::str::FromStr for FillStyle {
+impl std::str::FromStr for SubjectEffect {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         parse_cli_name(s, Self::ALL, |f| f.name())
@@ -831,14 +831,14 @@ pub const DOWNSCALE_TARGET: u32 = 4096;
 mod tests {
     #[test]
     fn pixel_sizes_scale_with_the_image() {
-        use super::{Decoration, FillStyle, ShadowKind};
+        use super::{Decoration, SubjectEffect, ShadowKind};
         let d = Decoration { outline_width: 12.0, shadow: ShadowKind::Drop, shadow_blur: 24.0, shadow_distance: 20.0, ..Decoration::default() };
         let half = d.at_scale(0.5);
         assert_eq!((half.outline_width, half.shadow_blur, half.shadow_distance), (6.0, 12.0, 10.0));
         assert_eq!((half.outline_color, half.shadow, half.shadow_opacity), (d.outline_color, d.shadow, d.shadow_opacity));
-        assert_eq!(FillStyle::Pixelate { block_size: 12 }.at_scale(0.25), FillStyle::Pixelate { block_size: 3 });
-        assert_eq!(FillStyle::Halftone { dot_spacing: 8 }.at_scale(0.01), FillStyle::Halftone { dot_spacing: 1 }, "at least a pixel");
-        for style in FillStyle::ALL.iter().filter(|s| !matches!(s, FillStyle::Pixelate { .. } | FillStyle::Halftone { .. })) {
+        assert_eq!(SubjectEffect::Pixelate { block_size: 12 }.at_scale(0.25), SubjectEffect::Pixelate { block_size: 3 });
+        assert_eq!(SubjectEffect::Halftone { dot_spacing: 8 }.at_scale(0.01), SubjectEffect::Halftone { dot_spacing: 1 }, "at least a pixel");
+        for style in SubjectEffect::ALL.iter().filter(|s| !matches!(s, SubjectEffect::Pixelate { .. } | SubjectEffect::Halftone { .. })) {
             assert_eq!(style.at_scale(0.3), *style, "{} has no pixel size", style.name());
         }
     }
@@ -927,12 +927,12 @@ mod tests {
     #[test]
     fn every_effect_parses_from_its_cli_name() {
         use std::str::FromStr;
-        for style in FillStyle::ALL {
+        for style in SubjectEffect::ALL {
             let cli = cli_name(style.name());
-            assert_eq!(FillStyle::from_str(&cli), Ok(*style), "{cli}");
+            assert_eq!(SubjectEffect::from_str(&cli), Ok(*style), "{cli}");
         }
-        assert_eq!(FillStyle::from_str("Color splash").map(|f| f.name()), Ok("Color splash"));
-        assert!(FillStyle::from_str("channel-swap").is_err(), "retired");
+        assert_eq!(SubjectEffect::from_str("Color splash").map(|f| f.name()), Ok("Color splash"));
+        assert!(SubjectEffect::from_str("channel-swap").is_err(), "retired");
     }
 
     #[test]

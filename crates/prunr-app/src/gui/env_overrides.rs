@@ -7,7 +7,7 @@
 //!
 //! Production users never touch these — unset env vars are no-ops.
 
-use prunr_core::{BgEffect, FillStyle, LineMode};
+use prunr_core::{BgEffect, SubjectEffect, LineMode};
 
 use super::item_settings::ItemSettings;
 
@@ -23,7 +23,7 @@ pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
     if let Some(v) = read_line_mode("PRUNR_LINE_MODE") { item.line_mode = v; }
     if let Some(v) = read("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
-    if let Some(v) = read_fill_style("PRUNR_FILL_STYLE") { item.fill_style = v; }
+    if let Some(v) = read_subject_effect("PRUNR_FILL_STYLE") { item.effect = v; }
     if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") { item.bg_effect = v; }
 }
 
@@ -77,13 +77,13 @@ fn read_line_mode(var: &str) -> Option<LineMode> {
     }
 }
 
-fn read_fill_style(var: &str) -> Option<FillStyle> {
+fn read_subject_effect(var: &str) -> Option<SubjectEffect> {
     let s = std::env::var(var).ok()?;
     match s.trim().to_ascii_lowercase().as_str() {
-        "none" => Some(FillStyle::None),
-        "desaturate" => Some(FillStyle::Desaturate),
-        "invert" => Some(FillStyle::Invert),
-        "sepia" => Some(FillStyle::Sepia),
+        "none" => Some(SubjectEffect::None),
+        "desaturate" => Some(SubjectEffect::Desaturate),
+        "invert" => Some(SubjectEffect::Invert),
+        "sepia" => Some(SubjectEffect::Sepia),
         _ => None,
     }
 }
