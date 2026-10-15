@@ -86,8 +86,7 @@ impl PrunrApp {
                     if adopting.contains(&id) {
                         item.commit(StepKind::Adjust);
                     }
-                    self.processor.live_preview.mark_tweak(id, refinish);
-                    self.processor.live_preview.flush(id);
+                    self.processor.live_preview.render_now(id, refinish);
                     refinished += 1;
                 }
                 KeptRunTier::Full => runs.push(id),

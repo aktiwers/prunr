@@ -36,8 +36,7 @@ impl PrunrApp {
         use crate::gui::live_preview::PreviewKind;
         let item_id = self.batch.items[idx].id;
         // Unconditional — see canvas::handle_brush_input.
-        self.processor.live_preview.mark_tweak(item_id, PreviewKind::Mask);
-        self.processor.live_preview.flush(item_id);
+        self.processor.live_preview.render_now(item_id, PreviewKind::Mask);
     }
 
     /// Per-model interpretation rule for a newly-committed selection.

@@ -88,8 +88,7 @@ impl PrunrApp {
             live.hurry(id);
         } else if !live.works_on(id) {
             tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
-            live.mark_tweak(id, PreviewKind::Mask);
-            live.flush(id);
+            live.render_now(id, PreviewKind::Mask);
         }
     }
 
