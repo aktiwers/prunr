@@ -15,6 +15,17 @@ use prunr_core::{
 use test_common::{multi_subject_canary, silueta_engine, skip_if_no_ort};
 
 const SIZE: u32 = 256;
+/// Centre of the Subtract stroke, on the canary's left subject.
+const DISK_CENTRE: (u32, u32) = (80, 128);
+
+/// A full-strength `Subtract` disk of radius 25 at `DISK_CENTRE`.
+fn subtract_disk() -> MaskArtifact {
+    let mut correction = MaskArtifact::new_empty(SIZE, SIZE);
+    let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
+    let (cx, cy) = DISK_CENTRE;
+    paint_circle(&mut correction, cx as f32, cy as f32, 25.0, stamp);
+    correction
+}
 
 #[test]
 fn brush_correction_stroke_alters_the_painted_region_only() {
@@ -38,9 +49,7 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
     // Step 2b: apply a `Subtract` brush stroke covering a small disk.
     // Subtract drives mask alpha → 0 in the painted region, so the
     // result's alpha there should drop noticeably.
-    let mut correction = MaskArtifact::new_empty(SIZE, SIZE);
-    let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
-    paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
+    let correction = subtract_disk();
     let opts_with_corr = opts.with_correction(Some(&correction));
     let corrected = postprocess_from_flat(
         &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts_with_corr,
@@ -66,8 +75,9 @@ fn brush_correction_stroke_alters_the_painted_region_only() {
         sum as f32 / count.max(1) as f32
     };
 
-    let baseline_inside = mean_a(&baseline, 80, 128, 20);
-    let corrected_inside = mean_a(&corrected, 80, 128, 20);
+    let (cx, cy) = DISK_CENTRE;
+    let baseline_inside = mean_a(&baseline, cx, cy, 20);
+    let corrected_inside = mean_a(&corrected, cx, cy, 20);
     assert!(
         corrected_inside + 50.0 < baseline_inside,
         "subtract stroke should drop mean alpha inside disk: baseline={baseline_inside}, corrected={corrected_inside}"
@@ -97,10 +107,7 @@ fn brush_correction_is_deterministic_across_runs() {
         .expect("infer_only");
     let opts = PostprocessOpts::new(&mask_settings, ModelKind::Silueta);
 
-    let mut correction = MaskArtifact::new_empty(SIZE, SIZE);
-    let stamp = Stamp { hardness: 1.0, strength: 1.0, mode: BrushMode::Subtract };
-    paint_circle(&mut correction, 80.0, 128.0, 25.0, stamp);
-
+    let correction = subtract_disk();
     let opts_with_corr = opts.with_correction(Some(&correction));
     let run1 = postprocess_from_flat(
         &ir.tensor_data, ir.tensor_height, ir.tensor_width, &img, &opts_with_corr,
