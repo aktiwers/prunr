@@ -1331,8 +1331,8 @@ impl Processor {
                     // Translate bridge sentinels to user-facing text at
                     // this seam so `drain_inpaint_results` doesn't have
                     // to know about IPC strings.
-                    use crate::subprocess::protocol::{CANCELLED_ERR_MSG, MEMORY_PRESSURE_ABORT_MSG};
-                    let outcome = if error == CANCELLED_ERR_MSG {
+                    use crate::subprocess::protocol::{is_cancel_error, MEMORY_PRESSURE_ABORT_MSG};
+                    let outcome = if is_cancel_error(&error) {
                         InpaintOutcome::Cancelled
                     } else if error == MEMORY_PRESSURE_ABORT_MSG {
                         InpaintOutcome::Failed(format!(
@@ -3017,6 +3017,18 @@ mod tests {
         p.drain_recipes();
         assert!(p.take_recipe(b, 1).is_none(),
             "drain must drop the slot so late deliveries do not land");
+    }
+
+    /// A stroke stopped part-way by its cancel reports core's own text;
+    /// it reads as a cancel ("Erase cancelled"), not as a failed erase.
+    #[test]
+    fn an_erase_stopped_part_way_is_a_cancel() {
+        let mut p = fixture();
+        let (tx, rx) = mpsc::channel();
+        p.inpaint_bridge_rx = rx;
+        tx.send(crate::gui::inpaint_bridge::InpaintBridgeResult::Error { item_id: 1, error: prunr_core::CoreError::Cancelled.message() }).unwrap();
+        p.pump_inpaint_subprocess();
+        assert!(matches!(p.inpaint_rx.try_recv(), Ok((1, InpaintOutcome::Cancelled))));
     }
 
     /// An image a cancelled run left in an older batch awaits only the
