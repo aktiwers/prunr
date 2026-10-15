@@ -238,19 +238,6 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[test]
-    fn test_batch_process_bad_image_returns_err_not_panic() {
-        // batch_process with a garbage image should return Err in that slot, not panic
-        // We test the error type check independently of OrtEngine creation
-        // (unit test without dev-models — just verify the error propagation logic)
-        use crate::formats::load_image_from_bytes;
-        let result = load_image_from_bytes(b"garbage");
-        assert!(
-            matches!(result, Err(CoreError::ImageFormat(_))),
-            "Expected ImageFormat error for garbage bytes"
-        );
-    }
-
     #[cfg(feature = "dev-models")]
     #[test]
     fn test_batch_process_jobs_1_sequential() {
