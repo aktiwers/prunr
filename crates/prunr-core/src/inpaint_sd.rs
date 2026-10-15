@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
-use crate::engine::{EpKind, EpSite, SessionPick, Weights};
+use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length. Latent space is 1/8 on each axis.
@@ -1525,9 +1525,9 @@ impl SdSession {
 }
 
 /// SD bundle's GPU EP ladder: try CUDA / CoreML / DirectML in platform
-/// order, smoke-test each, fall back to CPU. Same pattern as
-/// `inpaint::build_lama_session`. Each part's smoke test is supplied by
-/// the caller because input shapes/types differ per ONNX file.
+/// order, smoke-test each, fall back to CPU. Each part's smoke test is
+/// supplied by the caller because input shapes/types differ per ONNX
+/// file.
 fn build_part_with_ep_ladder(
     id: prunr_models::ModelId,
     key: &str,
@@ -1537,81 +1537,50 @@ fn build_part_with_ep_ladder(
 ) -> Result<(Session, SessionPick), String> {
     let path = by_key.get(key)
         .ok_or_else(|| format!("SD bundle missing required part: {key}"))?;
+    let lean = id.sd_spec().is_some_and(|s| s.lean_sessions);
 
-    let gpu_eps = session_key.gpu_eps();
-    let mut failed: Vec<String> = Vec::new();
-
-    for &ep in gpu_eps {
-        if !prunr_models::is_ep_compatible(id, ep.as_str()) {
-            tracing::debug!(?id, part = %key, ep = %ep, "SD: EP statically incompatible; skipping");
-            continue;
-        }
-        if crate::ep_compat::is_known_failure(ep, id, Weights::Fp32) {
-            tracing::debug!(?id, part = %key, ep = %ep, "SD: EP cached as incompatible; skipping");
-            continue;
-        }
-        crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match sd_base_builder(session_key.mem, id.sd_spec().is_some_and(|s| s.lean_sessions)) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(part = %key, ep = %ep, %e, "SD: builder init failed");
-                continue;
-            }
-        };
-        let (builder, load_path) = if ep.keeps_optimized_graph() {
-            sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key)
-        } else {
-            (builder, Cow::Borrowed(path.as_path()))
-        };
-        let record_failure = |msg: &str| {
-            if session_key.records_ep_failures() {
-                crate::engine::handle_commit_failure(
-                    matches!(load_path, Cow::Owned(_)),
-                    ep, id, Weights::Fp32,
-                    || crate::cache::optimized_model_path_for_part(id, ep.as_str(), key),
-                    msg,
-                );
-            }
-        };
-        let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-        let registered = builder.with_execution_providers([ep.provider(
-            id,
-            EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() },
-        )]);
-        let mut built = match registered {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(part = %key, ep = %ep, %e, "SD: register EP failed");
-                failed.push(format!("ORT register {ep} EP failed: {e}"));
-                continue;
-            }
-        };
-        let started = Instant::now();
-        let mut session = match built.commit_from_file(&load_path) {
-            Ok(s) => {
-                tracing::info!(?id, part = %key, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
-                coverage.report(id, Some(key));
-                s
-            }
-            Err(e) => {
-                tracing::warn!(part = %key, ep = %ep, %e, "SD: GPU session commit failed — trying next");
-                record_failure(&format!("{e}"));
-                failed.push(format!("ORT session creation failed ({ep}): {e}"));
-                continue;
-            }
-        };
-        match smoke_test(&mut session, key) {
-            Ok(()) => {
-                tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
-                return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) }));
-            }
-            Err(e) => {
-                tracing::warn!(part = %key, ep = %ep, %e, "SD: smoke test failed — falling back");
-                record_failure(&e);
-                failed.push(format!("{ep} test run failed: {e}"));
-            }
-        }
-    }
+    let landed = tracing::info_span!("sd_part", part = key).in_scope(|| {
+        crate::engine::walk_ladder("SD: ", id, Weights::Fp32, session_key.gpu_eps(), |ep| {
+            crate::cache::gc_stale_for_model(id, ep.as_str());
+            let builder = sd_base_builder(session_key.mem, lean).map_err(Miss::Unusable)?;
+            let (builder, load_path) = if ep.keeps_optimized_graph() {
+                sd_apply_path_cache(builder, path.as_path(), id, ep.as_str(), key)
+            } else {
+                (builder, Cow::Borrowed(path.as_path()))
+            };
+            // A device override is the bench's; its failures say nothing
+            // about the provider's default device.
+            let failed = |error| if session_key.records_ep_failures() {
+                let suspect_cache = match &load_path {
+                    Cow::Owned(cached) => Some(cached.clone()),
+                    Cow::Borrowed(_) => None,
+                };
+                Miss::Failed { error, suspect_cache }
+            } else {
+                Miss::Unusable(error)
+            };
+            let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
+            let mut built = builder
+                .with_execution_providers([ep.provider(
+                    id,
+                    EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() },
+                )])
+                .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+            let started = Instant::now();
+            let mut session = built
+                .commit_from_file(&load_path)
+                .map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
+            tracing::info!(?id, part = %key, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
+            coverage.report(id, Some(key));
+            smoke_test(&mut session, key).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+            tracing::info!(part = %key, ep = %ep, "SD: GPU session validated");
+            Ok(session)
+        })
+    });
+    let failed = match landed {
+        Ok((session, ep, failed)) => return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) })),
+        Err(walk) => walk.failed,
+    };
 
     if !sd_spec(id).cpu_output_correct {
         tracing::warn!(?id, part = %key,
@@ -1630,7 +1599,7 @@ fn build_part_with_ep_ladder(
         ));
     }
     crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = sd_base_builder(session_key.mem, id.sd_spec().is_some_and(|s| s.lean_sessions))
+    let builder = sd_base_builder(session_key.mem, lean)
         .map_err(|e| format!("SD {key}: builder init: {e}"))?;
     let (mut builder, load_path) = sd_apply_path_cache(builder, path.as_path(), id, "CPU", key);
     let started = Instant::now();

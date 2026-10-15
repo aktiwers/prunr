@@ -12,7 +12,7 @@ pub mod stats;
 
 use std::time::Instant;
 
-use prunr_core::engine::SessionPick;
+use prunr_core::engine::{SessionPick, Skip};
 use prunr_models::{ModelCategory, ModelId};
 use serde::Serialize;
 
@@ -137,36 +137,21 @@ pub fn select(names: &[String], heavy: bool, installed: impl Fn(ModelId) -> bool
     Ok(picked)
 }
 
-/// What the GPU side of a model does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GpuPlan {
-    /// Build a session through the ladder; it may still land on the CPU.
-    Build,
-    /// The loaded runtime offers no GPU provider.
-    NoProvider,
-    /// The registry declares every provider incompatible with the model.
-    ByDesign(String),
-    /// These providers failed the model on an earlier run; the app skips
-    /// them until `prunr --clear-ep-cache`.
-    FailedBefore(Vec<String>),
-}
-
-/// The plan for a model given the runtime's GPU `providers`, whether the
-/// registry allows each one (`declared_ok`) and whether the model runs on
-/// it (`runs_on`: allowed and not failed before).
-pub fn plan_gpu(providers: &[&str], declared_ok: impl Fn(&str) -> bool, runs_on: impl Fn(&str) -> bool) -> GpuPlan {
-    if providers.is_empty() {
-        return GpuPlan::NoProvider;
+/// The GPU side when the ladder would try none of the providers in
+/// `ladder` (`engine::gpu_ladder`); `None` when it would try one, so the
+/// side builds a session, which may still land on the CPU.
+fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
+    if ladder.is_empty() {
+        return Some(Gpu::NoProvider);
     }
-    if providers.iter().any(|p| runs_on(p)) {
-        return GpuPlan::Build;
-    }
-    let failed: Vec<String> = providers.iter().filter(|p| declared_ok(p)).map(|p| p.to_string()).collect();
-    if failed.is_empty() {
-        GpuPlan::ByDesign(format!("{} declared incompatible", providers.join(", ")))
+    let skips: Vec<(&str, Skip)> = ladder.iter().map(|&(p, skip)| skip.map(|s| (p, s))).collect::<Option<_>>()?;
+    let failed: Vec<String> = skips.iter().filter(|(_, s)| *s == Skip::FailedBefore).map(|(p, _)| p.to_string()).collect();
+    Some(if failed.is_empty() {
+        let names: Vec<&str> = skips.iter().map(|(p, _)| *p).collect();
+        Gpu::ByDesign { reason: format!("{} declared incompatible", names.join(", ")) }
     } else {
-        GpuPlan::FailedBefore(failed)
-    }
+        Gpu::FailedBefore { providers: failed }
+    })
 }
 
 /// One side of a model's run: where its session landed and how long it took.
@@ -275,12 +260,11 @@ pub enum Event<'a> {
 /// Run `models` one after the other on `inputs`, each side once untimed
 /// and `runs` times timed.
 pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event<'_>)) -> Vec<Row> {
-    let providers = prunr_core::engine::gpu_provider_names();
     let total = models.len();
     let mut rows = Vec::with_capacity(total);
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
-        let row = bench_model(id, inputs, runs, &providers, &mut |stage| {
+        let row = bench_model(id, inputs, runs, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
         on(Event::Done(&row));
@@ -293,7 +277,7 @@ fn display_name(id: ModelId) -> &'static str {
     prunr_models::descriptor(id).map_or(id.stable_name(), |d| d.display_name)
 }
 
-fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, providers: &[&str], stage: &mut dyn FnMut(&'static str)) -> Row {
+fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'static str)) -> Row {
     let family = Family::of(id);
     let mut row = Row {
         model: display_name(id),
@@ -326,19 +310,12 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, providers: &[&str], stag
         row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
         (None, None)
     };
-    let plan = plan_gpu(
-        providers,
-        |ep| prunr_models::is_ep_compatible(id, ep),
-        |ep| prunr_core::engine::model_runs_on(id, ep),
-    );
-    let (gpu, gpu_samples) = match plan {
-        GpuPlan::Build => {
+    let (gpu, gpu_samples) = match gpu_passed_over(&prunr_core::engine::gpu_ladder(id)) {
+        Some(passed_over) => (passed_over, None),
+        None => {
             let (side, samples) = measure(family, id, inputs, false, runs, stage);
             (Gpu::Ran(side), samples)
         }
-        GpuPlan::NoProvider => (Gpu::NoProvider, None),
-        GpuPlan::ByDesign(reason) => (Gpu::ByDesign { reason }, None),
-        GpuPlan::FailedBefore(providers) => (Gpu::FailedBefore { providers }, None),
     };
     let on_gpu = matches!(&gpu, Gpu::Ran(side) if side.provider != CPU);
     let mut sizes_differ = false;
@@ -654,17 +631,16 @@ mod tests {
     }
 
     #[test]
-    fn the_gpu_plan_builds_when_any_provider_takes_the_model() {
-        let all = |_: &str| true;
-        assert_eq!(plan_gpu(&[], all, all), GpuPlan::NoProvider);
-        assert_eq!(plan_gpu(&["OpenVINO", "DirectML"], all, |p| p == "DirectML"), GpuPlan::Build);
+    fn the_gpu_side_builds_when_the_ladder_would_try_any_provider() {
+        assert_eq!(gpu_passed_over(&[]), Some(Gpu::NoProvider));
+        assert_eq!(gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("DirectML", None)]), None);
         assert_eq!(
-            plan_gpu(&["OpenVINO"], |_| false, |_| false),
-            GpuPlan::ByDesign("OpenVINO declared incompatible".into()),
+            gpu_passed_over(&[("OpenVINO", Some(Skip::Declared))]),
+            Some(Gpu::ByDesign { reason: "OpenVINO declared incompatible".into() }),
         );
         assert_eq!(
-            plan_gpu(&["OpenVINO", "CUDA"], |p| p == "CUDA", |_| false),
-            GpuPlan::FailedBefore(vec!["CUDA".into()]),
+            gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("CUDA", Some(Skip::FailedBefore))]),
+            Some(Gpu::FailedBefore { providers: vec!["CUDA".into()] }),
             "OpenVINO is declared out; CUDA is allowed but failed before",
         );
     }
