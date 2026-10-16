@@ -2381,6 +2381,7 @@ impl BatchItem {
 
     /// Bring a parked result back from the timeline. Every result reader
     /// and writer calls this first; a result that landed meanwhile wins.
+    #[cfg(test)]
     pub(crate) fn unpark_result(&mut self) {
         if self.result_parked() {
             self.result_rgba = self.timeline.current().result.as_ref().and_then(|r| r.load());
