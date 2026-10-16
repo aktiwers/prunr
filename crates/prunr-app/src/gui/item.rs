@@ -483,6 +483,23 @@ impl Pixels {
     }
 }
 
+/// A painted region an erase fills: the one on screen, or a step's,
+/// stored compressed until the erase's thread reads it.
+#[derive(Clone)]
+pub(crate) enum Region {
+    Ready(Arc<prunr_core::selection::MaskArtifact>),
+    Stored(super::timeline::StoredSelection),
+}
+
+impl Region {
+    pub(crate) fn load(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        match self {
+            Self::Ready(mask) => Some(Arc::clone(mask)),
+            Self::Stored(stored) => stored.load(),
+        }
+    }
+}
+
 /// What an export writes: the image as the canvas shows it, the result
 /// or the photo with its restored faces.
 #[derive(Clone)]

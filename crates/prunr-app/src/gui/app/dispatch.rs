@@ -173,7 +173,7 @@ impl PrunrApp {
             .then(|| self.settings.brush.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
         tracing::info!(item_id, ?picked_model, ?seed, "inpaint stroke committed; dispatching");
         let tuning = self.erase_tuning(seed);
-        self.processor.dispatch_inpaint(item_id, source, selection, tuning);
+        self.processor.dispatch_inpaint(item_id, source, crate::gui::item::Region::Ready(selection), tuning);
         self.batch.items[idx].start_erase(seed);
         true
     }
