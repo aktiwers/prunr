@@ -207,8 +207,9 @@ impl PrunrApp {
         if matches!(kind, PreviewKind::Mask) {
             need(Need::Cutout)?;
         }
-        let seg_tensor = item.hot_seg_tensor();
-        if matches!(kind, PreviewKind::Mask) && !is_filter_only && seg_tensor.is_none() {
+        let (seg_tensor, packed_seg) = item.render_seg();
+        let seg_model = seg_tensor.as_ref().map(|s| s.model).or_else(|| packed_seg.as_ref().map(|c| c.model));
+        if matches!(kind, PreviewKind::Mask) && !is_filter_only && seg_model.is_none() {
             return Err(Verdict::Never(Reason::ProcessAgain));
         }
         // A run on top of an earlier result (an erase, a hand edit) keeps
@@ -243,20 +244,27 @@ impl PrunrApp {
                 }
             }
         };
-        let edge_tensor = Self::edge_tensor_for_active_scale(item);
-        // DualScale needs TWO edge tensors — the primary (active scale, used
-        // as the Fine layer) and a secondary Bold layer. Only decompress the
-        // Bold tensor when the style actually uses it; skipping this keeps
-        // single-scale dispatches fast.
-        let secondary_edge_tensor = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. })
-            .then(|| Self::edge_tensor_for_scale(item, prunr_core::EdgeScale::Bold))
-            .flatten();
+        // The line scales the render reads: the active one (hot from the
+        // drag's last tick, else unpacked on the render's thread) and,
+        // for a dual-scale style, Bold.
+        let primary = item.settings.edge_settings().primary_scale();
+        let edges = item.cached_edge_tensors.clone();
+        let has_scale = |scale| edges.as_ref().is_some_and(|e| e.has_all(&[scale]));
+        let edge_tensor = item.volatile_edge_tensor.as_ref()
+            .filter(|(scale, _)| *scale == primary)
+            .zip(edges.as_ref())
+            .map(|((_, data), e)| {
+                let (height, width) = e.dims(primary);
+                crate::gui::live_preview::EdgeTensor { data: Arc::clone(data), height, width }
+            });
+        let packed_primary = (edge_tensor.is_none() && has_scale(primary)).then_some(primary);
+        let bold = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. }) && has_scale(prunr_core::EdgeScale::Bold);
         match kind {
             // Mask kind without a seg tensor is the filter-only path:
             // `run_preview` applies effect to the raw source. No tensor
             // required. Edge kind still needs an edge tensor (nothing to
             // preview without one).
-            PreviewKind::Edge if edge_tensor.is_none() => {
+            PreviewKind::Edge if edge_tensor.is_none() && packed_primary.is_none() => {
                 return Err(match need(Need::Idle) {
                     Ok(()) => Verdict::Never(Reason::LinesNotRun),
                     Err(wait) => wait,
@@ -270,18 +278,24 @@ impl PrunrApp {
         let cached_bold = item.edge_planes.lookup(plane_key(prunr_core::EdgeScale::Bold));
         let cached_masked_base = item.cached_masked_base.as_ref().and_then(|(base, recipe, model)| {
             let current_recipe = prunr_core::MaskRecipe::from(&item.settings.mask_settings());
-            let seg_model_match = seg_tensor.as_ref().is_some_and(|s| s.model == *model);
+            let seg_model_match = seg_model == Some(*model);
             (*recipe == current_recipe && seg_model_match).then(|| base.clone())
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_tensor.as_ref().and_then(|_| item.correction(style, action));
+        let correction = seg_model.and_then(|_| item.correction(style, action));
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Ok(DispatchInputs {
             start,
             original_from,
-            seg_tensor, edge_tensor, secondary_edge_tensor,
+            seg_tensor, edge_tensor,
+            packed: crate::gui::live_preview::Packed {
+                seg: packed_seg,
+                edges: edges.filter(|_| packed_primary.is_some() || bold),
+                primary: packed_primary,
+                bold,
+            },
             cached_edge, cached_bold, cached_masked_base,
             correction,
             faces,
@@ -311,43 +325,6 @@ impl PrunrApp {
             item.depth_photo.as_ref().filter(|(_, k)| k.matches(&want)).map(|(p, _)| Arc::clone(p))
         });
         Some(crate::gui::live_preview::DepthInput { map, look, photo })
-    }
-
-    /// Decompress the edge tensor for the item's currently-selected scale,
-    /// using the `volatile_edge_tensor` hot cache to skip zstd work during a
-    /// drag. The tensor rides through as `Arc<Vec<f32>>` so hot hits are a
-    /// pointer bump, not a 1.2 MB memcpy per dispatch.
-    fn edge_tensor_for_active_scale(item: &mut BatchItem) -> Option<crate::gui::live_preview::EdgeTensor> {
-        Self::edge_tensor_for_scale(item, item.settings.edge_settings().primary_scale())
-    }
-
-    /// Decompress the edge tensor for a specific scale. Uses the
-    /// `volatile_edge_tensor` hot cache when the requested scale matches
-    /// the cached one; otherwise pays the zstd decompress. Only updates the
-    /// hot cache when `scale` matches the item's active scale — otherwise a
-    /// DualScale dispatch that asks for Bold would evict the active-scale
-    /// entry and make the next Edge tweak miss. Returns `None` when the
-    /// multi-scale cache isn't populated (user must Process first).
-    fn edge_tensor_for_scale(
-        item: &mut BatchItem,
-        scale: prunr_core::EdgeScale,
-    ) -> Option<crate::gui::live_preview::EdgeTensor> {
-        let hot_hit = item.volatile_edge_tensor.as_ref()
-            .filter(|(s, _)| *s == scale)
-            .map(|(_, arc)| arc.clone());
-        if let Some(arc) = hot_hit {
-            let (height, width) = item.cached_edge_tensors.as_ref()?.dims(scale);
-            return Some(crate::gui::live_preview::EdgeTensor { data: arc, height, width });
-        }
-
-        let (data, (height, width)) = {
-            let cache = item.cached_edge_tensors.as_ref()?;
-            (Arc::new(cache.decompress(scale)?), cache.dims(scale))
-        };
-        if scale == item.settings.edge_settings().primary_scale() {
-            item.volatile_edge_tensor = Some((scale, data.clone()));
-        }
-        Some(crate::gui::live_preview::EdgeTensor { data, height, width })
     }
 
     /// Critical: do NOT null `result_texture` here — the old texture must stay
@@ -381,6 +358,7 @@ impl PrunrApp {
                 if let Some(built) = r.new_correction.clone() {
                     item.keep_built_correction(built);
                 }
+                item.keep_unpacked(r.unpacked.clone());
                 if r.quick {
                     // Shown only: the result, its step, its recipe and its
                     // thumbnail wait for the full-size render. The faced

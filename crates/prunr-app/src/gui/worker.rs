@@ -193,6 +193,11 @@ impl CompressedTensor {
     pub fn compressed_size(&self) -> usize {
         self.compressed.len()
     }
+
+    /// Whether both share one stored tensor.
+    pub fn same(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.compressed, &other.compressed)
+    }
 }
 
 /// Raw multi-scale TEED output for IPC transfer. `tensors` is indexed by
@@ -237,6 +242,14 @@ impl CompressedEdgeTensors {
         }
         let tensors = parts.try_into().ok()?;
         Some(Self { tensors, height: raw.height, width: raw.width, spare: raw.spare })
+    }
+
+    /// Whether both share `scale`'s stored tensor.
+    pub fn same_scale(&self, other: &Self, scale: EdgeScale) -> bool {
+        match (&self.tensors[scale as usize], &other.tensors[scale as usize]) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
     /// Whether the worker still makes the scales this run left for later.

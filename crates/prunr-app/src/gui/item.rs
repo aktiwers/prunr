@@ -2426,20 +2426,47 @@ impl BatchItem {
         seg + edge + hot_seg + hot_edge
     }
 
-    /// The decoded segmentation tensor for live preview, decoded on the
-    /// first call of a drag and shared by the following ticks.
-    pub(crate) fn hot_seg_tensor(&mut self) -> Option<Arc<super::live_preview::SegTensor>> {
+    /// The segmentation a live render re-cuts: the copy a render of this
+    /// drag unpacked, else the packed one for the render's thread.
+    pub(crate) fn render_seg(&self) -> (Option<Arc<super::live_preview::SegTensor>>, Option<super::worker::CompressedTensor>) {
         // Only the cut this segmentation made is re-cut with it: not the
         // photo after an undo, an upscale over it, another model's cut, or
         // No model's pass, which carries its cut in its start.
         if !self.shows_cutout() {
-            return None;
+            return (None, None);
         }
-        let ct = self.cached_tensor.as_ref()?;
-        if self.volatile_seg_tensor.is_none() {
-            self.volatile_seg_tensor = super::live_preview::decompress_seg(ct).map(Arc::new);
+        match &self.volatile_seg_tensor {
+            Some(hot) => (Some(Arc::clone(hot)), None),
+            None => (None, self.cached_tensor.clone()),
         }
-        self.volatile_seg_tensor.clone()
+    }
+
+    /// The segmentation a live render re-cuts, unpacked here.
+    #[cfg(test)]
+    pub(crate) fn hot_seg_tensor(&self) -> Option<Arc<super::live_preview::SegTensor>> {
+        let (hot, packed) = self.render_seg();
+        hot.or_else(|| packed.and_then(|ct| super::live_preview::decompress_seg(&ct)).map(Arc::new))
+    }
+
+    /// Keep what a render unpacked for the drag's next ticks, while the
+    /// item's caches are still the ones it came from; the line scale
+    /// only while it is the active one.
+    pub(crate) fn keep_unpacked(&mut self, unpacked: super::live_preview::Unpacked) {
+        // Off screen the hot copies are let go; one landing late stays out.
+        if !self.on_screen {
+            return;
+        }
+        if let Some((from, seg)) = unpacked.seg {
+            if self.cached_tensor.as_ref().is_some_and(|c| c.same(&from)) {
+                self.volatile_seg_tensor = Some(seg);
+            }
+        }
+        if let Some((from, scale, data)) = unpacked.edge {
+            let current = self.cached_edge_tensors.as_ref().is_some_and(|c| c.same_scale(&from, scale));
+            if current && scale == self.settings.edge_settings().primary_scale() {
+                self.volatile_edge_tensor = Some((scale, data));
+            }
+        }
     }
 
     /// Test-only constructor: returns a BatchItem with all fields at their

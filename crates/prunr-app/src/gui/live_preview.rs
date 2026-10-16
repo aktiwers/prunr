@@ -177,6 +177,8 @@ pub struct PreviewResult {
     pub(crate) new_original: Option<BuiltOriginal>,
     /// The correction plane the render built, for the item to keep.
     pub(crate) new_correction: Option<crate::gui::item::BuiltCorrection>,
+    /// The tensors the render unpacked, for the item's hot cache.
+    pub(crate) unpacked: Unpacked,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -505,7 +507,7 @@ impl LivePreview {
                 let is_edge = matches!(inputs.kind, PreviewKind::Edge);
                 let dispatch_kind = inputs.kind;
                 let mask_recipe = prunr_core::MaskRecipe::from(&inputs.settings.mask_settings());
-                let seg_model = inputs.seg_tensor.as_ref().map(|s| s.model);
+                let seg_model = inputs.seg_model();
                 // Capture Tier-2 knob values at dispatch time. When the result
                 // lands, apply_completed_previews patches only the 4 Tier-2
                 // fields (sharpen/ai_blend/color_match) on
@@ -547,6 +549,7 @@ impl LivePreview {
                     new_quick_photo: output.built_quick_photo,
                     new_original: output.built_original,
                     new_correction: output.built_correction,
+                    unpacked: output.unpacked,
                     applied_mask: mask_recipe,
                     applied_depth,
                     applied_tier2_knobs,
@@ -664,6 +667,8 @@ pub struct DispatchInputs {
     /// (DualScale). Only populated when the style needs it, so single-scale
     /// dispatches skip the extra zstd decompress.
     pub secondary_edge_tensor: Option<EdgeTensor>,
+    /// The tensors above still packed, unpacked on the render's thread.
+    pub(crate) packed: Packed,
     /// The edge planes of previous dispatches that still match the current
     /// strength, scale and thickness, so a tweak redoes only what changed.
     pub cached_edge: EdgePlanes,
@@ -705,6 +710,36 @@ pub(crate) struct DepthInput {
 }
 
 impl DispatchInputs {
+    /// The model whose segmentation the render re-cuts, unpacked or not.
+    fn seg_model(&self) -> Option<ModelKind> {
+        self.seg_tensor.as_ref().map(|s| s.model).or_else(|| self.packed.seg.as_ref().map(|s| s.model))
+    }
+
+    /// Unpack what came packed into the tensors a render reads; what was
+    /// unpacked goes back for the item's hot cache.
+    fn unpack(&mut self) -> Unpacked {
+        let packed = std::mem::take(&mut self.packed);
+        let seg = packed.seg.and_then(|ct| decompress_seg(&ct).map(|seg| (ct, Arc::new(seg))));
+        if let Some((_, seg)) = &seg {
+            self.seg_tensor = Some(Arc::clone(seg));
+        }
+        let Some(edges) = packed.edges else { return Unpacked { seg, edge: None } };
+        let tensor = |scale| edges.decompress(scale).map(|data| {
+            let (height, width) = edges.dims(scale);
+            EdgeTensor { data: Arc::new(data), height, width }
+        });
+        let edge = packed.primary.and_then(|scale| tensor(scale).map(|t| (scale, t)));
+        if packed.bold {
+            self.secondary_edge_tensor = tensor(prunr_core::EdgeScale::Bold);
+        }
+        let edge = edge.map(|(scale, t)| {
+            let data = Arc::clone(&t.data);
+            self.edge_tensor = Some(t);
+            (edges.clone(), scale, data)
+        });
+        Unpacked { seg, edge }
+    }
+
     /// The correction plane; a render resolves a plane still to build
     /// before it reads one.
     fn correction_plane(&self) -> Option<&prunr_core::selection::MaskArtifact> {
@@ -728,6 +763,7 @@ impl DispatchInputs {
             seg_tensor: None,
             edge_tensor: None,
             secondary_edge_tensor: None,
+            packed: Packed::default(),
             cached_edge: EdgePlanes::default(),
             cached_bold: EdgePlanes::default(),
             cached_masked_base: None,
@@ -929,6 +965,25 @@ struct RunOutput {
     built_quick_photo: Option<QuickPhoto>,
     built_original: Option<BuiltOriginal>,
     built_correction: Option<crate::gui::item::BuiltCorrection>,
+    unpacked: Unpacked,
+}
+
+/// Tensors a render unpacks on its thread: the segmentation, and of the
+/// line scales the primary one and, for a dual-scale style, Bold.
+#[derive(Default)]
+pub(crate) struct Packed {
+    pub(crate) seg: Option<CompressedTensor>,
+    pub(crate) edges: Option<crate::gui::worker::CompressedEdgeTensors>,
+    pub(crate) primary: Option<prunr_core::EdgeScale>,
+    pub(crate) bold: bool,
+}
+
+/// What a render unpacked, with the packed form it came from, for the
+/// item to keep while its caches are still those.
+#[derive(Default, Clone)]
+pub(crate) struct Unpacked {
+    pub(crate) seg: Option<(CompressedTensor, Arc<SegTensor>)>,
+    pub(crate) edge: Option<(crate::gui::worker::CompressedEdgeTensors, prunr_core::EdgeScale, Arc<Vec<f32>>)>,
 }
 
 /// The photo a render draws on, before it is a `DynamicImage`.
@@ -980,7 +1035,8 @@ fn run_preview(mut inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let (correction, built_correction) = inputs.correction.take().map(crate::gui::item::Correction::resolve).unzip();
     inputs.correction = correction.map(crate::gui::item::Correction::Ready);
-    RunOutput { built_correction: built_correction.flatten(), ..render(inputs, cancel) }
+    let unpacked = inputs.unpack();
+    RunOutput { built_correction: built_correction.flatten(), unpacked, ..render(inputs, cancel) }
 }
 
 fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
@@ -1403,7 +1459,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None, new_correction: None,
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None, new_correction: None, unpacked: Unpacked::default(),
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,
@@ -1989,6 +2045,42 @@ mod tests {
         assert!(output.rgba.is_some(), "UpscaleTier2 dispatch must produce an RGBA result");
         assert!(output.built_edge.dilated.is_none(), "UpscaleTier2 must not build an edge mask");
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
+    }
+
+    /// A render from packed tensors unpacks them on its thread and draws
+    /// what it draws from unpacked ones, handing back what it unpacked.
+    #[test]
+    fn a_render_from_packed_tensors_draws_the_same() {
+        use crate::gui::item_settings::ItemSettings;
+        use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors, RawSegTensor};
+        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([90, 120, 150, 255]))));
+        let seg: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let settings = ItemSettings { line_mode: LineMode::SubjectOutline, ..ItemSettings::default() };
+        let primary = settings.edge_settings().primary_scale();
+        let tensors = prunr_core::EdgeScale::ALL.map(|scale| {
+            let (h, w) = prunr_core::edge_scale_dims(scale, 8, 8);
+            (0..h * w).map(|i| (i % 7) as f32 / 7.0).collect::<Vec<f32>>()
+        });
+        let edges = CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 8, width: 8, spare: None }).unwrap();
+        let ct = CompressedTensor::from_raw(RawSegTensor { data: seg.clone(), height: 8, width: 8, model: ModelKind::Silueta }).unwrap();
+        for kind in [PreviewKind::Mask, PreviewKind::Edge] {
+            let (eh, ew) = edges.dims(primary);
+            let unpacked = DispatchInputs {
+                seg_tensor: Some(Arc::new(SegTensor { data: seg.clone(), height: 8, width: 8, model: ModelKind::Silueta })),
+                edge_tensor: Some(EdgeTensor { data: Arc::new(edges.decompress(primary).unwrap()), height: eh, width: ew }),
+                ..DispatchInputs::new(kind, 0, Arc::clone(&photo), settings)
+            };
+            let packed = DispatchInputs {
+                packed: Packed { seg: Some(ct.clone()), edges: Some(edges.clone()), primary: Some(primary), bold: false },
+                ..DispatchInputs::new(kind, 0, Arc::clone(&photo), settings)
+            };
+            assert_eq!(packed.seg_model(), Some(ModelKind::Silueta));
+            let want = run_preview(unpacked, &AtomicBool::new(false)).rgba.expect("rendered");
+            let out = run_preview(packed, &AtomicBool::new(false));
+            assert_eq!(*out.rgba.expect("rendered"), *want, "{kind:?}");
+            assert!(out.unpacked.seg.is_some_and(|(from, _)| from.same(&ct)));
+            assert!(out.unpacked.edge.is_some_and(|(from, scale, _)| scale == primary && from.same_scale(&edges, primary)));
+        }
     }
 
     /// A quick frame of every kind is made at `QUICK_FRAME_SIDE`, whatever
