@@ -117,6 +117,9 @@ pub struct BackgroundIO {
     /// clipboard, with the note to show once copied.
     pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,
     pub copy_ready_rx: mpsc::Receiver<(Arc<image::RgbaImage>, Option<String>)>,
+    /// Selection Delete / Cut / Copy made off the UI thread.
+    pub(crate) selection_edit_tx: mpsc::Sender<SelectionEditDone>,
+    pub(crate) selection_edit_rx: mpsc::Receiver<SelectionEditDone>,
     /// Pre-built ColorImages ready for GPU upload.
     pub tex_prep_tx: mpsc::Sender<TexPrepMsg>,
     pub tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
@@ -183,6 +186,7 @@ impl BackgroundIO {
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
         let (copy_ready_tx, copy_ready_rx) = mpsc::channel();
+        let (selection_edit_tx, selection_edit_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
@@ -197,6 +201,7 @@ impl BackgroundIO {
             decode_tx, decode_rx,
             save_done_tx, save_done_rx,
             copy_ready_tx, copy_ready_rx,
+            selection_edit_tx, selection_edit_rx,
             tex_prep_tx, tex_prep_rx,
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
@@ -263,6 +268,16 @@ impl BackgroundIO {
 
 /// Narrowest outline, in screen points, the overlay draws at any zoom.
 const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
+
+/// A selection Delete / Cut / Copy made off the UI thread: the copy for
+/// the clipboard and the cut image, for the item at the timeline version
+/// it started from.
+pub(crate) struct SelectionEditDone {
+    pub(crate) item_id: u64,
+    pub(crate) version: u64,
+    pub(crate) copy: Option<(image::RgbaImage, crate::gui::system_bridge::CopyNote)>,
+    pub(crate) cut: Option<image::RgbaImage>,
+}
 
 /// What a selection texture bakes in; the overlay is a single textured
 /// quad drawn untinted.
