@@ -64,6 +64,8 @@ pub(crate) struct ItemFacts {
     pub(crate) kept_upscale: bool,
     pub(crate) kept_colorize: bool,
     pub(crate) painted: bool,
+    /// What the Sketch setting draws: Whole photo leaves nothing cut out.
+    pub(crate) line_mode: prunr_core::LineMode,
 }
 
 impl ItemFacts {
@@ -101,6 +103,7 @@ impl ItemFacts {
             kept_upscale: item.kept_upscale().is_some(),
             kept_colorize: item.kept_colorize().is_some(),
             painted: item.has_painted_region(),
+            line_mode: item.settings.line_mode,
         }
     }
 }
@@ -119,6 +122,7 @@ impl ItemFacts {
             kept_upscale: false,
             kept_colorize: false,
             painted: false,
+            line_mode: prunr_core::LineMode::Off,
         }
     }
 }

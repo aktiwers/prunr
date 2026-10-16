@@ -18,7 +18,7 @@ use super::shortcuts::Action;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::{Backdrop, ItemSettings};
 use crate::gui::knob_catalog::{
-    self, shows, CacheImpact, DispatchKind, KnobContext, LineModeChange, StaticKnob, Surface,
+    self, shows, CacheImpact, DispatchKind, LineModeChange, StaticKnob, Surface,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
@@ -172,15 +172,9 @@ pub(crate) fn render(
     let before_line_mode = item_settings.line_mode;
 
     let model_uses_seg = app_settings.model.uses_segmentation();
-    let knob_ctx = KnobContext {
-        model_uses_seg,
-        model_is_none: matches!(app_settings.model, SettingsModel::None),
-        line_mode: item_settings.line_mode,
-    };
-    let mask_active = knob_catalog::knob_enabled(StaticKnob::Gamma.requirement(), knob_ctx);
+    let mask_active = model_uses_seg && item_settings.line_mode != prunr_core::LineMode::EdgesOnly;
     let gate_ctx = knob_catalog::GateContext {
         model: app_settings.model,
-        line_mode: item_settings.line_mode,
         facts: state.facts,
         processing: state.processing,
     };
