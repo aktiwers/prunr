@@ -101,12 +101,12 @@ impl PrunrApp {
         // mutably so `build_preview_inputs` can lazily cache an
         // `Arc<DynamicImage>` on the item (built once, reused across every
         // subsequent dispatch of the drag session — see `source_dyn`).
-        let is_filter_only = self.settings.model == crate::gui::settings::SettingsModel::None;
+        let role = self.settings.model.role();
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
         let batch_items = &mut self.batch.items;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, is_filter_only, style, action)
+            Self::build_preview_inputs(batch_items, id, kind, role, style, action)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -152,20 +152,26 @@ impl PrunrApp {
         items: &mut [BatchItem],
         id: u64,
         kind: PreviewKind,
-        is_filter_only: bool,
+        role: crate::gui::knob_catalog::ModelRole,
         style: crate::gui::background_io::SelectionStyle,
         action: crate::gui::brush_state::CutoutAction,
-    ) -> Option<crate::gui::live_preview::DispatchInputs> {
+    ) -> Result<crate::gui::live_preview::DispatchInputs, crate::gui::capability::Verdict> {
+        use crate::gui::capability::{check, ItemFacts, Need, Reason, Verdict};
+        use crate::gui::knob_catalog::ModelRole;
         use crate::gui::live_preview::{DispatchInputs, PreviewKind};
-        let item = items.iter_mut().find(|b| b.id == id)?;
+        let item = items.iter_mut().find(|b| b.id == id).ok_or(Verdict::Never(Reason::Removed))?;
+        let facts = ItemFacts::of(item);
+        let need = |need| match check(&facts, need, role) {
+            Verdict::Ready => Ok(()),
+            refused => Err(refused),
+        };
         let version = item.timeline.version();
-        // UpscaleTier2: short-circuit the seg/edge path entirely. We need only
-        // the kept upscale run + knob snapshot. Return None if there is no
-        // upscale run yet (Tier-1 must run first).
+        // A Refine render needs only the kept upscale run and the knobs.
         if matches!(kind, PreviewKind::UpscaleTier2) {
-            let upscale = item.kept_upscale()?.clone();
+            need(Need::KeptUpscale)?;
+            let upscale = item.kept_upscale().ok_or(Verdict::Never(Reason::UpscaleFirst))?.clone();
             let knobs = item.settings.upscale_refine();
-            return Some(DispatchInputs {
+            return Ok(DispatchInputs {
                 upscale: Some(upscale),
                 upscale_tier2_knobs: Some(knobs),
                 faces: item.faces_input(crate::gui::item::FaceStage::Upscale),
@@ -174,32 +180,30 @@ impl PrunrApp {
             });
         }
         if matches!(kind, PreviewKind::ColorizeTier2) {
-            let colorize = item.kept_colorize()?.clone();
+            need(Need::KeptColorize)?;
+            let colorize = item.kept_colorize().ok_or(Verdict::Never(Reason::ColorizeFirst))?.clone();
             // `original` is unread: Strength re-renders the kept run.
-            return Some(DispatchInputs {
+            return Ok(DispatchInputs {
                 colorize: Some(colorize),
                 ..DispatchInputs::new(kind, version, Arc::new(image::DynamicImage::new_rgba8(0, 0)), item.settings)
             });
         }
         // A photo render without a scale the lines draw would show the
-        // image without those lines; the tick retries once the worker's
-        // spare scales (or a new run) bring it.
+        // image without those lines: it waits for the worker's spare
+        // scales, or for a new run when none are coming.
         if item.lacks_drawn_scales() {
-            return None;
+            need(Need::DrawnLines)?;
+        }
+        // Only No model renders the photo itself; every other model's Mask
+        // render re-cuts the cut-out on screen, and without one would
+        // publish the plain photo as a result.
+        let is_filter_only = role == ModelRole::Filters;
+        if matches!(kind, PreviewKind::Mask) && !is_filter_only {
+            need(Need::Cutout)?;
         }
         let seg_tensor = item.hot_seg_tensor();
-        // A Mask dispatch in a seg model with no cached tensor falls
-        // through to `run_preview`'s source+effect fallback and
-        // overwrites any existing `result_rgba`. Filter-only mode is
-        // the legitimate user of that fallback (the filter IS the
-        // pipeline). Anywhere else, refuse — better to skip the
-        // dispatch than discard a prior result.
-        if matches!(kind, PreviewKind::Mask)
-            && !is_filter_only
-            && seg_tensor.is_none()
-            && item.result_rgba.is_some()
-        {
-            return None;
+        if matches!(kind, PreviewKind::Mask) && !is_filter_only && seg_tensor.is_none() {
+            return Err(Verdict::Never(Reason::ProcessAgain));
         }
         // A run on top of an earlier result (an erase, a hand edit) keeps
         // it: the preview starts where Process would, the shown step's own
@@ -219,7 +223,7 @@ impl PrunrApp {
         } else {
             item.start_dyn_cache = None;
             if item.source_dyn.is_none() {
-                let rgba = item.source_rgba.as_ref()?;
+                let rgba = item.source_rgba.as_ref().ok_or(Verdict::Wait(Reason::Decoding))?;
                 item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
             }
             // invariant: source_dyn was filled just above when it was None.
@@ -238,7 +242,12 @@ impl PrunrApp {
             // `run_preview` applies effect to the raw source. No tensor
             // required. Edge kind still needs an edge tensor (nothing to
             // preview without one).
-            PreviewKind::Edge if edge_tensor.is_none() => return None,
+            PreviewKind::Edge if edge_tensor.is_none() => {
+                return Err(match need(Need::Idle) {
+                    Ok(()) => Verdict::Never(Reason::LinesNotRun),
+                    Err(wait) => wait,
+                });
+            }
             _ => {}
         }
         let has_depth = item.depth.is_some();
@@ -255,7 +264,7 @@ impl PrunrApp {
         let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
-        Some(DispatchInputs {
+        Ok(DispatchInputs {
             start,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,

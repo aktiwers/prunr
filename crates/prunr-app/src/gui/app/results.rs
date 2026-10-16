@@ -1556,8 +1556,8 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, false, style, app.settings.brush.cutout_action);
-        assert!(inputs.is_some_and(|i| i.upscale.is_some()), "dispatched from the kept run");
+        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, app.settings.model.role(), style, app.settings.brush.cutout_action);
+        assert!(inputs.is_ok_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
 
@@ -2301,7 +2301,7 @@ mod spare_scales_tests {
         let mut app = PrunrApp::new_for_test();
         app.settings.model = SettingsModel::Silueta;
         let item = push_test_item(&mut app, 1);
-        item.status = BatchStatus::Done;
+        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
         item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
         item.settings.edge_scale = Fine;
         item.cached_edge_tensors = lines(&[Bold, Fused], Some(5));
@@ -2383,13 +2383,13 @@ mod spare_scales_tests {
         app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
         let (style, action) = (app.selection_style(), app.settings.brush.cutout_action);
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, false, style, action);
-            assert!(inputs.is_none(), "{kind:?} waits for Fine");
+            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, app.settings.model.role(), style, action);
+            assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Wait(_))), "{kind:?} waits for Fine");
         }
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, false, style, action);
-            assert!(inputs.is_some_and(|i| i.edge_tensor.is_some()), "{kind:?} renders with Fine once it lands");
+            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, app.settings.model.role(), style, action);
+            assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some()), "{kind:?} renders with Fine once it lands");
         }
     }
 }

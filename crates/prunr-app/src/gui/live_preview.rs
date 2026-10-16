@@ -414,11 +414,12 @@ impl LivePreview {
     /// `snapshot` provides per-item inputs (tensors, settings, original image)
     /// for any dispatches we fire this frame. A dispatch is quick when the
     /// edit has not settled (a drag's in-between frame) and its image is
-    /// larger than a quick frame. Items that aren't in the snapshot (e.g.
-    /// tensor cache evicted) are silently skipped.
-    pub fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
+    /// larger than a quick frame. A
+    /// render that cannot be built yet waits for a later tick; one that
+    /// never can (`Verdict::Never`) is dropped, so nothing waits for good.
+    pub(crate) fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
-        F: FnMut(u64, PreviewKind) -> Option<DispatchInputs>,
+        F: FnMut(u64, PreviewKind) -> Result<DispatchInputs, crate::gui::capability::Verdict>,
     {
         let now = self.clock.now();
         let mut ready_ids: Vec<u64> = Vec::new();
@@ -464,21 +465,17 @@ impl LivePreview {
                 in_flight_count = self.in_flight.len(),
                 "tick: item ready for dispatch"
             );
-            let Some(mut inputs) = snapshot(id, kind) else {
-                tracing::debug!(
-                    event = "live_preview_tick_no_snapshot",
-                    item_id = id,
-                    ?kind,
-                    "tick: snapshot returned None — dispatch skipped, will retry"
-                );
-                // Snapshot couldn't assemble inputs this frame. Possibilities:
-                // (a) `source_rgba` is None (decode pending after view
-                //     switch) — retry once the decode lands.
-                // (b) required tensor cache is permanently absent (item
-                //     never processed) — the retry is cheap and the pending
-                //     entry stays inert until the user clicks Process or
-                //     stops tweaking; no harm.
-                continue;
+            let mut inputs = match snapshot(id, kind) {
+                Ok(inputs) => inputs,
+                Err(verdict) => {
+                    let never = matches!(verdict, crate::gui::capability::Verdict::Never(_));
+                    tracing::debug!(event = "live_preview_tick_unbuilt", item_id = id, ?kind, ?verdict, "render not built");
+                    if never {
+                        self.pending.remove(&id);
+                        self.owed.remove(&id);
+                    }
+                    continue;
+                }
             };
             self.pending.remove(&id);
             inputs.quick = !settled && inputs.can_be_quick();
@@ -1463,7 +1460,7 @@ mod tests {
         // tick at the same simulated `now` — DEBOUNCE elapsed since T0,
         // so the dispatch must be ready. `wait` is None because nothing's
         // pending after dispatch.
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _| Err(WAIT));
         assert!(
             wait.is_none(),
             "tick at frame 1 (200ms after T0) must clear the pending entry"
@@ -1492,8 +1489,26 @@ mod tests {
         DispatchInputs::new(PreviewKind::Mask, 0, photo, ItemSettings::default())
     }
 
-    fn large() -> Option<DispatchInputs> {
-        Some(photo_inputs(QUICK_FRAME_SIDE + 1))
+    fn large() -> Result<DispatchInputs, crate::gui::capability::Verdict> {
+        Ok(photo_inputs(QUICK_FRAME_SIDE + 1))
+    }
+
+    const WAIT: crate::gui::capability::Verdict = crate::gui::capability::Verdict::Wait(crate::gui::capability::Reason::Decoding);
+
+    /// A render that can never be built leaves the queue, and an owed
+    /// settle with it: the busy pill would otherwise stay up for good.
+    #[test]
+    fn a_render_that_never_can_be_built_is_dropped() {
+        use crate::gui::capability::{Reason, Verdict};
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        lp.mark_tweak(1, PreviewKind::Mask);
+        lp.owe_for_test(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE + Duration::from_millis(1));
+        lp.tick(|_, _| Err(WAIT));
+        assert!(lp.is_busy(), "a render that waits is kept");
+        lp.tick(|_, _| Err(Verdict::Never(Reason::ProcessFirst)));
+        assert!(!lp.is_busy(), "nothing left: not pending, not owed");
     }
 
     /// The last dispatch for item 1: its generation and whether it was a
@@ -1522,7 +1537,7 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Edge);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| Some(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(image::DynamicImage::new_rgb8(8, 8)), ItemSettings::default())));
+        lp.tick(|_, _| Ok(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(image::DynamicImage::new_rgb8(8, 8)), ItemSettings::default())));
         assert!(lp.works_on(1), "dispatched");
         let deadline = Instant::now() + Duration::from_secs(10);
         while lp.works_on(1) && Instant::now() < deadline {
@@ -1629,12 +1644,12 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| Some(photo_inputs(QUICK_FRAME_SIDE)));
+        lp.tick(|_, _| Ok(photo_inputs(QUICK_FRAME_SIDE)));
         let full = dispatched(&lp);
         assert!(matches!(full, Some((_, false))), "full size");
         assert!(!lp.owed.contains_key(&1));
         clock.advance(SETTLE_AFTER * 2);
-        assert_eq!(lp.tick(|_, _| Some(photo_inputs(QUICK_FRAME_SIDE))), None);
+        assert_eq!(lp.tick(|_, _| Ok(photo_inputs(QUICK_FRAME_SIDE))), None);
         assert_eq!(dispatched(&lp), full, "no settle render");
     }
 
@@ -1700,12 +1715,12 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
 
         // Before DEBOUNCE — wait is Some(>0).
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _| Err(WAIT));
         assert!(wait.is_some(), "before DEBOUNCE tick should report a wait");
 
         // After DEBOUNCE — wait is None (entry is ready).
         clock.advance(DEBOUNCE + Duration::from_millis(1));
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _| Err(WAIT));
         assert!(
             wait.is_none(),
             "after DEBOUNCE tick should report no remaining wait (entry is ready)"
@@ -1716,7 +1731,7 @@ mod tests {
     fn tick_before_debounce_does_not_dispatch() {
         let mut lp = LivePreview::default();
         lp.mark_tweak(1, PreviewKind::Mask);
-        let wait = lp.tick(|_, _| None);
+        let wait = lp.tick(|_, _| Err(WAIT));
         assert!(wait.is_some(), "should still be pending");
         assert!(lp.in_flight.is_empty(), "no dispatch before debounce expires");
     }
