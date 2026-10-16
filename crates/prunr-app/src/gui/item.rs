@@ -413,22 +413,53 @@ pub(crate) fn apply_selection(
     }
 }
 
-/// See `BatchItem::correction_cache`.
-struct CorrectionCache {
+/// What a correction plane is built from: the edits, and the selection
+/// applied over them as `action` says.
+#[derive(Clone)]
+pub(crate) struct CorrectionInputs {
     edits: Option<Arc<prunr_core::selection::MaskArtifact>>,
     selection: Arc<prunr_core::selection::MaskArtifact>,
     action: CutoutAction,
-    plane: Arc<prunr_core::selection::MaskArtifact>,
 }
 
-impl CorrectionCache {
-    fn matches(&self, edits: Option<&Arc<prunr_core::selection::MaskArtifact>>, selection: &Arc<prunr_core::selection::MaskArtifact>, action: CutoutAction) -> bool {
-        let same_edits = match (&self.edits, edits) {
+impl CorrectionInputs {
+    fn same(&self, other: &Self) -> bool {
+        let same_edits = match (&self.edits, &other.edits) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
         };
-        same_edits && Arc::ptr_eq(&self.selection, selection) && self.action == action
+        same_edits && Arc::ptr_eq(&self.selection, &other.selection) && self.action == other.action
+    }
+}
+
+/// A correction plane and what it was built from; see
+/// `BatchItem::correction_cache`.
+#[derive(Clone)]
+pub(crate) struct BuiltCorrection {
+    inputs: CorrectionInputs,
+    plane: Arc<prunr_core::selection::MaskArtifact>,
+}
+
+/// What corrects a cut-out: the plane, or what it is built from. A build
+/// is a full-resolution pass over the selection, so it runs where the
+/// plane is used, off the UI thread.
+#[derive(Clone)]
+pub(crate) enum Correction {
+    Ready(Arc<prunr_core::selection::MaskArtifact>),
+    Build(CorrectionInputs),
+}
+
+impl Correction {
+    /// The plane, and the build that made it here, for the item to keep.
+    pub(crate) fn resolve(self) -> (Arc<prunr_core::selection::MaskArtifact>, Option<BuiltCorrection>) {
+        match self {
+            Self::Ready(plane) => (plane, None),
+            Self::Build(inputs) => {
+                let plane = Arc::new(apply_selection(inputs.edits.as_deref(), &inputs.selection, inputs.action));
+                (Arc::clone(&plane), Some(BuiltCorrection { inputs, plane }))
+            }
+        }
     }
 }
 
@@ -825,7 +856,7 @@ pub(crate) struct BatchItem {
     pub(crate) edits: Option<Arc<prunr_core::selection::MaskArtifact>>,
     /// The last correction built from the selection and the edits, with
     /// the inputs it was built from (held, so a match is never a reused address).
-    correction_cache: std::sync::Mutex<Option<CorrectionCache>>,
+    correction_cache: std::sync::Mutex<Option<BuiltCorrection>>,
 
     /// Key of the selection texture build in flight, if any; cleared when
     /// that build lands or is dropped as stale.
@@ -970,24 +1001,41 @@ impl BatchItem {
     /// feathered plane once the overlay has built it (its landing re-cuts
     /// again). Built once per change of its inputs.
     pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.correction(style, action).map(|c| {
+            let (plane, built) = c.resolve();
+            if let Some(built) = built {
+                self.keep_built_correction(built);
+            }
+            plane
+        })
+    }
+
+    /// What corrects a cut-out, as a handle: built already, or to build
+    /// where it is used. Never builds here.
+    pub(crate) fn correction(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Correction> {
         let selection = self.selection_mask.as_ref()
             .filter(|m| !m.is_blank() && action != CutoutAction::Select)
             .map(|m| self.feathered_selection(style).unwrap_or_else(|| Arc::clone(m)));
         match (&self.edits, selection) {
             (None, None) => None,
-            (Some(edits), None) => Some(Arc::clone(edits)),
+            (Some(edits), None) => Some(Correction::Ready(Arc::clone(edits))),
             // A selection is stored as an erase: as it is, it erases.
-            (None, Some(selection)) if action == CutoutAction::Erase => Some(selection),
+            (None, Some(selection)) if action == CutoutAction::Erase => Some(Correction::Ready(selection)),
             (edits, Some(selection)) => {
-                let mut cache = self.correction_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(hit) = cache.as_ref().filter(|c| c.matches(edits.as_ref(), &selection, action)) {
-                    return Some(Arc::clone(&hit.plane));
-                }
-                let plane = Arc::new(apply_selection(edits.as_deref(), &selection, action));
-                *cache = Some(CorrectionCache { edits: edits.clone(), selection, action, plane: Arc::clone(&plane) });
-                Some(plane)
+                let inputs = CorrectionInputs { edits: edits.clone(), selection, action };
+                let cache = self.correction_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                Some(match cache.as_ref().filter(|c| c.inputs.same(&inputs)) {
+                    Some(hit) => Correction::Ready(Arc::clone(&hit.plane)),
+                    None => Correction::Build(inputs),
+                })
             }
         }
+    }
+
+    /// Keep a correction plane built elsewhere, so the next use of the
+    /// same inputs reads it instead of building again.
+    pub(crate) fn keep_built_correction(&self, built: BuiltCorrection) {
+        *self.correction_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(built);
     }
 
     /// Fold the selection into the edits as `action` says and clear it:

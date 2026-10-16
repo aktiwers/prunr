@@ -642,6 +642,28 @@ fn the_correction_is_built_once() {
     assert!(!std::sync::Arc::ptr_eq(&first, &erase), "another action builds anew");
 }
 
+/// A live render on a cut-out with edits and a selection hands its thread
+/// the correction's inputs, not a plane built on the UI thread; the
+/// plane the render built is kept, so the next render reads it.
+#[test]
+fn a_render_builds_the_correction_on_its_own_thread() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::item::Correction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    app.settings.brush.cutout_action = CutoutAction::Restore;
+    app.batch.items[0].edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let dispatched = preview_inputs(&mut app, 10, false).and_then(|i| i.correction);
+    assert!(matches!(dispatched, Some(Correction::Build(_))), "the render gets the inputs");
+    let style = app.selection_style();
+    let item = &app.batch.items[0];
+    let Some(Correction::Build(inputs)) = item.correction(style, CutoutAction::Restore) else { panic!("built off the UI thread") };
+    let (plane, built) = Correction::Build(inputs).resolve();
+    item.keep_built_correction(built.expect("a build"));
+    let Some(Correction::Ready(kept)) = item.correction(style, CutoutAction::Restore) else { panic!("the build is kept") };
+    assert!(std::sync::Arc::ptr_eq(&plane, &kept));
+}
+
 /// The cached correction (up to three full-size planes) goes once it
 /// cannot be hit again: the selection baked, or the image off screen.
 #[test]

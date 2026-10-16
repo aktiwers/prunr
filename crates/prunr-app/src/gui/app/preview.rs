@@ -275,7 +275,7 @@ impl PrunrApp {
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_tensor.as_ref().and_then(|_| item.correction_plane(style, action));
+        let correction = seg_tensor.as_ref().and_then(|_| item.correction(style, action));
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Ok(DispatchInputs {
@@ -377,6 +377,9 @@ impl PrunrApp {
                 }
                 if let Some(built) = r.new_original.clone() {
                     item.keep_built_original(built);
+                }
+                if let Some(built) = r.new_correction.clone() {
+                    item.keep_built_correction(built);
                 }
                 if r.quick {
                     // Shown only: the result, its step, its recipe and its
