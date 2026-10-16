@@ -107,7 +107,7 @@ Length-prefixed bincode frames over the child's stdin/stdout (`subprocess/protoc
 
 Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
 
-Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item reverts to Pending, not Error, so its caches survive.
+Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item shows its own state again (its result, or the photo), not an error, so its caches survive.
 
 ## Threading Model
 
@@ -457,7 +457,11 @@ Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVIN
 
 ## GUI State Machine
 
-`AppState` (Empty / Loaded / Processing / Done) is derived each frame from the selected item's `BatchStatus`, never stored: no item is Empty, Pending and Error read as Loaded. Cancel returns in-flight items to Pending; removing the last item returns to Empty.
+Nothing about an image's progress is stored. `BatchStatus` is derived from the undo timeline and the item's job: a cut under way is Processing, a result on the shown step (on screen or parked) is Done, a failure with nothing to show is Error, otherwise Pending. `AppState` (Empty / Loaded / Processing / Done) is derived in turn from the selected item's status. Undo, cancel and parking therefore cannot leave a stale state behind.
+
+**One answer to "may this run".** `gui/capability` derives an image's facts (what it shows: the photo, a run's output or a hand edit; whether a run is queued or under way; which caches it holds) and answers each need as Ready, Wait or Never with a reason. The toolbar greys a surface by the same answer (`knob_catalog::surface_gate`) that the live-preview queue checks at its door, so a control the dispatch would refuse is never live, and a render that can never be built leaves the queue instead of waiting for good.
+
+**Process is for big-model output.** The cut-out, Upscale, Colorize and the erasers run on Process. Controls that need that output (Mask, Outline & Shadow, Effect and Background on a cut-out model, Refine, Strength) wait for it, greyed with "Process first."; everything else (Faces, Depth, Magic Brush, brushes, Lines on No model) works on what the canvas shows. Exports write what the canvas shows: a result, or the photo with its restored faces.
 
 ## Canvas & Texture Lifecycle
 
