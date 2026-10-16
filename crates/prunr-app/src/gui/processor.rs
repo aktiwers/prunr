@@ -773,6 +773,10 @@ pub(crate) struct Processor {
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
     /// The batch admission feeds: images it admits join that batch.
     admission_batch: Option<u64>,
+    /// Re-runs that failed on images still showing an earlier result,
+    /// since the last batch ended: their status stays Done, so the end of
+    /// the batch must not read as all done.
+    failed_reruns: u32,
     /// Re-runs asked for while admission was still feeding a batch, run
     /// once it is through: a batch opened meanwhile would take the
     /// admitted images' answers and wait behind them for good.
@@ -902,6 +906,7 @@ impl Processor {
             admission: None,
             admission_tx: None,
             admission_batch: None,
+            failed_reruns: 0,
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             next_batch: 0,
@@ -1514,6 +1519,15 @@ impl Processor {
             }
             None => debug_assert!(false, "track_streamed called without active batch"),
         }
+    }
+
+    pub(crate) fn note_failed_rerun(&mut self) {
+        self.failed_reruns += 1;
+    }
+
+    /// The re-runs that failed since this was last asked.
+    pub(crate) fn take_failed_reruns(&mut self) -> u32 {
+        std::mem::take(&mut self.failed_reruns)
     }
 
     /// Admission feeds `batch` from now on.

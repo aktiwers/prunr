@@ -2345,8 +2345,12 @@ impl BatchItem {
                 // (otherwise resolve_tier might return Skip for an errored item).
                 self.fail(e);
                 self.drop_tensor_caches();
-                self.invalidate_upscale_cache();
-                self.invalidate_colorize_cache();
+                // An image that still shows a result keeps the runs that
+                // result is refined from.
+                if !self.has_result() {
+                    self.invalidate_upscale_cache();
+                    self.invalidate_colorize_cache();
+                }
                 self.applied_recipe = None;
                 None
             }
