@@ -1115,6 +1115,12 @@ impl eframe::App for PrunrApp {
     /// tests build many apps in one process, and each drop emptied the
     /// process-wide history dir under the others' feet.
     fn on_exit(&mut self) {
+        // A change still waiting out its save delay is saved, and every
+        // config write is on disk before the process goes.
+        if self.settings_save_due.take().is_some() {
+            self.settings.save();
+        }
+        super::config_writer::flush();
         super::drag_export::cleanup_all();
         super::history_disk::cleanup_all();
     }

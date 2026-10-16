@@ -32,6 +32,7 @@ pub mod dispatch_progress;
 pub(crate) mod first_look;
 pub mod automation;
 pub(crate) mod capability;
+pub(crate) mod config_writer;
 
 #[cfg(test)]
 mod tests;
