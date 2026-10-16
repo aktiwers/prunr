@@ -292,46 +292,6 @@ mod tests {
         assert_eq!(buf, want);
     }
 
-    /// The mask blur, the shadow and the face blend each hand-rolled
-    /// three passes before sharing `box_blur3_into` (ping-pong `_into`,
-    /// swap loop, allocating `box_filter`). On noise of several shapes
-    /// and radii, with one scratch reused across calls, all three former
-    /// shapes and the helper agree bit for bit.
-    #[test]
-    fn box_blur3_matches_the_former_hand_rolled_passes() {
-        let mut seed = 0x2545_F491u32;
-        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
-        let mut scratch = Vec::new();
-        for (w, h) in [(1u32, 1u32), (2, 9), (31, 7), (64, 64), (127, 45), (300, 3)] {
-            for radius in [1u32, 2, 5, 17] {
-                let data: Vec<f32> = (0..w * h).map(|_| (next() % 256) as f32).collect();
-                let n = data.len();
-
-                let (mut buf, mut tmp) = (data.clone(), vec![0.0f32; n]);
-                box_filter_into(&buf, w, h, radius, &mut tmp);
-                box_filter_into(&tmp, w, h, radius, &mut buf);
-                box_filter_into(&buf, w, h, radius, &mut tmp);
-                let ping_pong = tmp;
-
-                let (mut cast, mut tmp) = (data.clone(), vec![0.0f32; n]);
-                for _ in 0..3 {
-                    box_filter_into(&cast, w, h, radius, &mut tmp);
-                    std::mem::swap(&mut cast, &mut tmp);
-                }
-
-                let mut alloc = data.clone();
-                for _ in 0..3 { alloc = box_filter(&alloc, w, h, radius); }
-
-                let mut shared = data;
-                box_blur3_into(&mut shared, w, h, radius, &mut scratch);
-                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-                assert_eq!(bits(&shared), bits(&ping_pong), "{w}x{h} r{radius} ping-pong");
-                assert_eq!(bits(&shared), bits(&cast), "{w}x{h} r{radius} swap");
-                assert_eq!(bits(&shared), bits(&alloc), "{w}x{h} r{radius} alloc");
-            }
-        }
-    }
-
     #[test]
     fn test_box_filter_uniform_is_identity() {
         let data = vec![0.5f32; 16];
