@@ -22,11 +22,12 @@ pub struct BgImageLoad {
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
-/// An import, read off the UI thread: an image file with its batch name,
-/// file size and pixel size (`None`: its header could not be read), or
-/// word that the folders dropped held no images.
+/// An import, read off the UI thread: an image (a file, or bytes dropped
+/// in) with its batch name, size in bytes and pixel size (`None`: its
+/// header could not be read), or word that the folders dropped held no
+/// images.
 pub(crate) enum FileLoad {
-    Image { path: std::path::PathBuf, name: String, len: usize, dims: Option<(u32, u32)> },
+    Image { source: crate::gui::item::ImageSource, name: String, len: usize, dims: Option<(u32, u32)> },
     NoImagesInFolder,
 }
 

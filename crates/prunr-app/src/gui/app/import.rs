@@ -83,10 +83,10 @@ impl PrunrApp {
         }
     }
 
-    /// Add an image to the batch from a file path whose header was read
-    /// (lazy: its bytes are read when used).
-    pub(super) fn add_to_batch_path(&mut self, path: PathBuf, filename: String, len: usize, dims: (u32, u32)) {
-        self.add_to_batch_source(ImageSource::Path(path), dims, filename);
+    /// Add an image whose header was read where it was imported (a file's
+    /// bytes are read when used).
+    pub(super) fn add_imported(&mut self, source: ImageSource, filename: String, len: usize, dims: (u32, u32)) {
+        self.add_to_batch_source(source, dims, filename);
         if let Some(item) = self.batch.items.last_mut() {
             item.source_len = len;
         }
@@ -145,7 +145,7 @@ impl PrunrApp {
 
         // Collect paths (need background I/O) and inline bytes (already in memory)
         let mut paths: Vec<PathBuf> = Vec::new();
-        let mut inline_items: Vec<(Vec<u8>, String)> = Vec::new();
+        let mut inline_items: Vec<(Arc<[u8]>, String)> = Vec::new();
         let mut saw_self_drop = false;
 
         for file in dropped {
@@ -160,7 +160,7 @@ impl PrunrApp {
                 self.last_open_dir = path.parent().map(|p| p.to_path_buf());
                 paths.push(path);
             } else if let Some(bytes) = file.bytes {
-                inline_items.push((bytes.to_vec(), file.name.clone()));
+                inline_items.push((bytes, file.name.clone()));
             }
         }
 
@@ -177,25 +177,9 @@ impl PrunrApp {
             queue_file_loads(&self.batch.bg_io.file_load_tx, paths);
         }
 
-        // Handle inline bytes immediately (Wayland — already in memory, no I/O)
+        // Bytes dropped in (Wayland) import like files, off the UI thread.
         if !inline_items.is_empty() {
-            if inline_items.len() == 1 && self.batch.items.is_empty() {
-                // invariant: inline_items.len() == 1 checked in the guard above.
-                let (bytes, name) = inline_items.into_iter().next().unwrap();
-                self.handle_open_bytes(bytes, name);
-            } else {
-                let id_floor = self.batch.next_id;
-                let count = inline_items.len();
-                for (bytes, name) in inline_items {
-                    self.add_to_batch(bytes, name);
-                }
-                if count == 1 {
-                    self.batch.selected_index = self.batch.items.len() - 1;
-                    self.zoom_state.reset();
-                    self.pending_batch_sync = true;
-                }
-                self.auto_process_imported(id_floor);
-            }
+            queue_bytes_loads(&self.batch.bg_io.file_load_tx, inline_items);
         }
     }
 }
@@ -266,7 +250,24 @@ pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Ve
             let len = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
             let dims = probe_dims_path(&path);
             // Once the receiver is gone every later send fails too.
-            if tx.send(FileLoad::Image { path, name, len, dims }).is_err() {
+            if tx.send(FileLoad::Image { source: ImageSource::Path(path), name, len, dims }).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Import images dropped in as bytes (Wayland) on a worker: each is
+/// copied out of the drop and its header read there.
+fn queue_bytes_loads(tx: &std::sync::mpsc::Sender<FileLoad>, dropped: Vec<(Arc<[u8]>, String)>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        for (bytes, name) in dropped {
+            let bytes = Arc::new(bytes.to_vec());
+            let dims = probe_dims_bytes(&bytes);
+            let name = if name.is_empty() { "image".into() } else { name };
+            let load = FileLoad::Image { len: bytes.len(), source: ImageSource::Bytes(bytes), name, dims };
+            if tx.send(load).is_err() {
                 break;
             }
         }
@@ -277,4 +278,21 @@ fn is_supported_image_ext(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| OPEN_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Bytes dropped in are copied and read off the UI thread, and land
+    /// as an import with their size; bytes that are no image say so.
+    #[test]
+    fn dropped_bytes_import_off_the_ui_thread() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(3, 2).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        super::queue_bytes_loads(&tx, vec![(png.clone().into(), String::new()), (vec![1u8, 2, 3].into(), "junk".into())]);
+        let mut landed: Vec<_> = (0..2).map(|_| rx.recv_timeout(std::time::Duration::from_secs(5)).expect("lands")).collect();
+        let super::FileLoad::Image { name, len, dims, .. } = landed.remove(0) else { panic!("an image") };
+        assert_eq!((name.as_str(), len, dims), ("image", png.len(), Some((3, 2))));
+        assert!(matches!(landed.remove(0), super::FileLoad::Image { dims: None, .. }), "junk has no header");
+    }
 }
