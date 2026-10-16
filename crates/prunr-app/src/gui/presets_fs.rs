@@ -217,7 +217,7 @@ fn merge_into(
 pub(crate) fn queue_save(name: &str, file: &PresetFile) {
     let Ok(path) = writable_path(name) else { return };
     match serde_json::to_string_pretty(file) {
-        Ok(json) => super::config_writer::write(path, json.into_bytes()),
+        Ok(json) => super::disk_queue::write(path, json.into_bytes()),
         Err(err) => tracing::error!(preset = %name, %err, "preset not saved"),
     }
 }
@@ -225,7 +225,7 @@ pub(crate) fn queue_save(name: &str, file: &PresetFile) {
 /// Remove a preset's file off the UI thread.
 pub(crate) fn queue_delete(name: &str) {
     if let Some(path) = preset_path(name) {
-        super::config_writer::remove(path);
+        super::disk_queue::remove(path);
     }
 }
 

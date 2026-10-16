@@ -1120,7 +1120,7 @@ impl eframe::App for PrunrApp {
         if self.settings_save_due.take().is_some() {
             self.settings.save();
         }
-        super::config_writer::flush();
+        super::disk_queue::flush();
         super::drag_export::cleanup_all();
         super::history_disk::cleanup_all();
     }
