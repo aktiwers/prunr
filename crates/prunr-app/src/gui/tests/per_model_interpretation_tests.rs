@@ -306,7 +306,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none(), "the region stroke is undone");
-    assert!(item.result_rgba.is_some() && item.status() == crate::gui::item::BatchStatus::Done, "the result stays");
+    assert!(item.has_result() && item.status() == crate::gui::item::BatchStatus::Done, "the result stays");
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none());
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == before), "the pre-stroke image is back");
+    assert!(item.shown_result().is_some_and(|r| *r == before), "the pre-stroke image is back");
     assert_eq!(item.status(), crate::gui::item::BatchStatus::Done);
 
     app.handle_redo(&ctx);
@@ -373,7 +373,7 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(2)), "undoing the run brings back the corrected image it replaced");
+    assert!(item.shown_result().is_some_and(|r| *r == px(2)), "undoing the run brings back the corrected image it replaced");
     assert!(item.selection_mask.is_some(), "the selection belongs to the stroke, not the run");
 
     app.handle_undo(&ctx);
@@ -427,7 +427,7 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     let landed = PreviewResult { version: inputs.version, ..PreviewResult::mask_for_test(8, std::sync::Arc::new(px(9))) };
     app.apply_completed_previews(&ctx, vec![landed]);
     let item = &app.batch.items[0];
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "the undone stroke's re-cut does not land");
+    assert!(item.shown_result().is_some_and(|r| *r == px(1)), "the undone stroke's re-cut does not land");
     assert!(app.batch.items[0].timeline.can_redo(), "and the redo step is intact");
 }
 
@@ -455,7 +455,7 @@ fn switching_images_keeps_every_undo_step() {
     assert!(app.batch.items[0].result_rgba.is_none(), "the background result is released");
     app.batch.select_item(0);
     app.sync_selected_batch_textures(&ctx);
-    assert!(app.batch.items[0].result_rgba.as_ref().is_some_and(|r| **r == px(2)), "and back on return");
+    assert!(app.batch.items[0].shown_result().is_some_and(|r| *r == px(2)), "and back on return");
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];

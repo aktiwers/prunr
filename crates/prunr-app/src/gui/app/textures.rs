@@ -1,8 +1,8 @@
 //! The shown image's textures: the selection-change reconcile, background eviction and texture prep.
 
-use std::sync::Arc;
 
 use crate::gui::background_io::TexTarget;
+use crate::gui::item::Pixels;
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -27,7 +27,6 @@ impl PrunrApp {
             self.synced_selected = selected;
             if let Some(idx) = idx {
                 self.evict_background_item_caches(idx);
-                self.batch.items[idx].unpark_result();
                 self.batch.items[idx].set_on_screen(true);
             }
             self.show_original = false;
@@ -153,7 +152,7 @@ impl PrunrApp {
             if let Some(rgba) = self.batch.items[idx].source_rgba.clone() {
                 self.batch.items[idx].source_tex_pending = true;
                 Self::spawn_tex_prep(
-                    rgba, item_id, Self::tex_name("source", item_id, None), TexTarget::Source,
+                    Pixels::Resident(rgba), item_id, Self::tex_name("source", item_id, None), TexTarget::Source,
                     self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
@@ -162,12 +161,13 @@ impl PrunrApp {
         if self.batch.items[idx].result_texture.is_none()
             && !self.batch.items[idx].result_tex_pending
         {
-            if let Some(rgba) = self.batch.items[idx].result_rgba.clone() {
+            // A parked result is unpacked by the build, not here.
+            if let Some(pixels) = self.batch.items[idx].result_pixels() {
                 let switch = self.result_switch_id;
                 self.batch.items[idx].result_tex_pending = true;
                 let target = self.batch.items[idx].request_result_texture(false);
                 Self::spawn_tex_prep(
-                    rgba, item_id, Self::tex_name("result", item_id, Some(switch)), target,
+                    pixels, item_id, Self::tex_name("result", item_id, Some(switch)), target,
                     self.batch.bg_io.tex_prep_handles(), ctx.clone(),
                 );
             }
@@ -182,7 +182,7 @@ impl PrunrApp {
     }
 
     pub(super) fn spawn_tex_prep(
-        rgba: Arc<image::RgbaImage>,
+        pixels: Pixels,
         item_id: u64,
         name: String,
         target: TexTarget,
@@ -197,13 +197,21 @@ impl PrunrApp {
             let queued = std::time::Instant::now();
             let _slot = handles.slots.acquire();
             let waited_ms = queued.elapsed().as_millis() as u64;
+            let parked = matches!(pixels, Pixels::Parked(_));
+            let rgba = match pixels.read() {
+                Ok(rgba) => rgba,
+                // Nothing lands and the request stays pending: retrying an
+                // unreadable step would only fail again every frame.
+                Err(err) => return tracing::warn!(item_id, %err, "texture not prepared"),
+            };
             let (w, h) = (rgba.width(), rgba.height());
             let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [w as usize, h as usize],
                 rgba.as_flat_samples().as_slice(),
             );
             tracing::debug!(item_id, waited_ms, convert_ms = queued.elapsed().as_millis() as u64 - waited_ms, "texture prepared");
-            let _ = handles.tx.send((item_id, name, ci, target));
+            let unpacked = parked.then_some(rgba);
+            let _ = handles.tx.send(crate::gui::background_io::TexPrepMsg { item_id, name, image: ci, target, unpacked });
             ctx.request_repaint();
         });
     }

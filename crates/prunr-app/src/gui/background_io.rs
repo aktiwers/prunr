@@ -20,8 +20,15 @@ pub struct BgImageLoad {
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
-/// A texture built off-thread for upload: item id, texture name, pixels, target.
-pub type TexPrepMsg = (u64, String, egui::ColorImage, TexTarget);
+/// A texture built off-thread for upload.
+pub struct TexPrepMsg {
+    pub item_id: u64,
+    pub name: String,
+    pub image: egui::ColorImage,
+    pub target: TexTarget,
+    /// A parked result the build unpacked, for the item to hold again.
+    pub unpacked: Option<std::sync::Arc<image::RgbaImage>>,
+}
 
 /// What a selection texture was built from: the mask's content hash and
 /// the style baked into it. The item compares this against the current

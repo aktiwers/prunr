@@ -841,7 +841,69 @@ mod tests {
         let item = &mut batch.items[0];
         item.undo_step();
         item.undo_step();
-        assert_eq!(item.result_rgba.as_ref().unwrap().get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
+        assert_eq!(item.shown_result().expect("shown").get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
+    }
+
+    /// Undo onto a packed step unpacks nothing on the UI thread: the step
+    /// stays packed and shows through its handle until the result
+    /// texture's build unpacks it, and the item holds what that build
+    /// unpacked only while the step still shows it.
+    #[test]
+    fn undo_onto_a_packed_step_leaves_it_for_the_texture_build() {
+        let mut batch = fixture();
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255]))));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(64, 64)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        batch.items.push(item);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first_packed = |b: &BatchManager| b.items[0].timeline.stored_images().next().is_some_and(|c| c.is_compressed());
+        while !first_packed(&batch) && std::time::Instant::now() < deadline {
+            batch.compress_history_off_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(first_packed(&batch));
+        let item = &mut batch.items[0];
+        item.on_screen = true;
+        item.undo_step();
+        assert!(item.result_rgba.is_none() && first_packed(&batch), "undo unpacked nothing");
+        let item = &mut batch.items[0];
+        let pixels = item.result_pixels().expect("the step's result");
+        assert!(matches!(pixels, crate::gui::item::Pixels::Parked(_)));
+        let unpacked = pixels.read().expect("unpacks");
+        item.hold_unpacked_result(Arc::new(image::RgbaImage::new(64, 64)));
+        assert!(item.result_rgba.is_none(), "pixels of another step are not held");
+        item.hold_unpacked_result(Arc::clone(&unpacked));
+        assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &unpacked)));
+        assert_eq!(unpacked.get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
+    }
+
+    /// The step undo returns to keeps its selection and edits unpacked too,
+    /// so restoring them reads the held planes.
+    #[test]
+    fn the_step_undo_returns_to_keeps_its_planes_unpacked() {
+        let mut item = item_with_cache(1, 0);
+        item.on_screen = true;
+        let plane = |v: i8| Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, vec![v; 16]));
+        item.selection_mask = Some(plane(1));
+        item.edits = Some(plane(-1));
+        item.commit(crate::gui::timeline::StepKind::Stroke);
+        item.selection_mask = None;
+        item.edits = None;
+        item.commit(crate::gui::timeline::StepKind::Stroke);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let held = |i: &BatchItem| i.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[crate::gui::item::BACK]
+            .as_ref().map(|w| w.planes.clone());
+        while held(&item).is_none_or(|p| p.iter().any(Option::is_none)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let [selection, edits] = held(&item).expect("warmed");
+        let back = item.timeline.previous().expect("previous");
+        assert!(selection.is_some_and(|s| back.selection.as_ref().is_some_and(|b| b.holds(&s))));
+        assert!(edits.is_some_and(|e| back.edits.as_ref().is_some_and(|b| b.holds(&e))));
     }
 
     /// A BatchItem with `tensor_floats` f32s of cached tensor (0 = none).
