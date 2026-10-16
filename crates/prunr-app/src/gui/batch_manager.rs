@@ -823,7 +823,7 @@ mod tests {
         item.on_screen = true;
         let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
         item.result_rgba = Some(Arc::clone(&rgba));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item.commit(crate::gui::timeline::StepKind::Process);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([1, 1, 1, 255]))));
         item.commit(crate::gui::timeline::StepKind::Edit);
@@ -988,7 +988,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.set_status_for_test(status);
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1017,7 +1017,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.set_status_for_test(status);
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1034,7 +1034,7 @@ mod tests {
     fn progress_stage_says_finishing_when_no_in_flight() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 0);
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         bm.items.push(item);
 
         let report = bm.progress();
@@ -1055,7 +1055,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.set_status_for_test(status);
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1561,9 +1561,9 @@ mod tests {
         bm.items[2].ticked = true;
         assert_eq!(bm.drag_targets(0), [0, 2]);
         assert_eq!(bm.drag_targets(1), [1]);
-        bm.items[2].set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut bm.items[2], BatchStatus::Processing);
         assert_eq!(bm.drag_targets(0), [0]);
-        bm.items[1].set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
         assert!(bm.drag_targets(1).is_empty());
     }
 
@@ -1575,7 +1575,7 @@ mod tests {
         for id in 0..3 {
             bm.items.push(item_with_cache(id, 0));
         }
-        bm.items[1].set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
         let agree = |bm: &BatchManager| {
             bm.any_ticked_with_status(BatchStatus::Processing)
                 != bm.ticked_ids_with_status(BatchStatus::Processing).is_empty()

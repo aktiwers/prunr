@@ -22,7 +22,7 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     for (id, ticked, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
         let item = push_test_item(&mut app, id);
         item.ticked = ticked;
-        item.set_status_for_test(status);
+        crate::gui::tests::fixtures::put_in(item, status);
     }
 
     app.handle_cancel_selected();

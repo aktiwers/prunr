@@ -1201,7 +1201,7 @@ mod faces_tests {
         use crate::gui::timeline::StepKind;
         let (mut app, _) = app_with_faces_on();
         let item = &mut app.batch.items[0];
-        item.set_status_for_test(crate::gui::item::BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
         item.commit(StepKind::Process);
         item.record_origin(Engine::Segment, None, None);
@@ -1256,7 +1256,7 @@ mod faces_tests {
     #[test]
     fn a_blend_change_reblends() {
         let (mut app, _) = app_with_faces_on();
-        app.batch.items[0].set_status_for_test(crate::gui::item::BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], crate::gui::item::BatchStatus::Done);
         let faced = Arc::new(image::DynamicImage::new_rgba8(8, 8));
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         app.batch.items[0].faced_photo = Some((faced, key));
@@ -1360,7 +1360,7 @@ mod timeline_contract_tests {
         item.dimensions = (4, 4);
         item.source_rgba = Some(px(0));
         item.result_rgba = Some(px(1));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
@@ -1610,7 +1610,7 @@ mod timeline_contract_tests {
         let old = ctx.load_texture("old", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let item = &mut app.batch.items[0];
         item.result_texture = Some(old.clone());
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
         app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
@@ -1792,7 +1792,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         app.handle_undo(&ctx);
         assert!(app.processor.cancels.is_cancelled(1), "the run is asked to stop");
 
@@ -1913,7 +1913,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.settings.gamma = 1.8;
         item.commit(StepKind::Adjust);
 
@@ -1948,7 +1948,7 @@ mod timeline_contract_tests {
         for (model, engine, step) in runs {
             let mut app = app_with_processed_item(model);
             app.batch.items[0].start_job(Some(step), engine);
-            app.batch.items[0].set_status_for_test(BatchStatus::Processing);
+            crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
             app.batch.items[0].settings.gamma = 1.8;
             app.batch.items[0].commit(StepKind::Adjust);
             let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
@@ -1969,7 +1969,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         let recipe = item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
         let batch = app.processor.track_dispatch(recipe, [1]);
         app.on_batch_complete(batch);
@@ -1987,7 +1987,7 @@ mod timeline_contract_tests {
         queued.dimensions = (4, 4);
         for item in &mut app.batch.items {
             item.start_job(Some(StepKind::Process), Engine::Segment);
-            item.set_status_for_test(BatchStatus::Processing);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         }
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
         let first = app.processor.track_dispatch(recipe.clone(), [1]);
@@ -2014,7 +2014,7 @@ mod timeline_contract_tests {
         app.settings.parallel_jobs = 3;
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         let cpu = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: "CPU".into() };
         app.answer_for_test(&ctx, 1, Ok(cpu));
         assert_eq!(app.settings.active_backend, "OpenVINO");
@@ -2027,7 +2027,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         let fresh = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.answer_for_test(&ctx, 1, Ok(fresh));
         assert_eq!(shown(&app), Some(9));
@@ -2097,7 +2097,7 @@ mod depth_tests {
             let item = push_test_item(&mut app, 1);
             match status {
                 BatchStatus::Done => crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::BiRefNetLite),
-                other => item.set_status_for_test(other),
+                other => crate::gui::tests::fixtures::put_in(item, other),
             }
             set(&mut item.settings);
             let epoch = item.depth_run.epoch;
@@ -2203,7 +2203,7 @@ mod first_look_tests {
             let item = push_test_item(&mut app, id);
             item.dimensions = (8, 8);
             item.start_job(Some(StepKind::Process), Engine::Segment);
-            item.set_status_for_test(BatchStatus::Processing);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         }
         app.batch.select_item(0);
         app
@@ -2274,7 +2274,7 @@ mod first_look_tests {
         let mut app = two_images_cut();
         app.on_seg_report(1, subject(3), &ctx);
         assert!(texture_of(&app, 0).is_some());
-        app.batch.items[0].set_status_for_test(BatchStatus::Pending);
+        crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Pending);
         app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
         assert!(texture_of(&app, 0).is_none(), "a new run starts without the last one's outline");
     }

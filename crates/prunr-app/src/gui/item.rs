@@ -1086,32 +1086,6 @@ impl BatchItem {
         }
     }
 
-    /// Put the image in `status` the way a run leaves it: Done holds a
-    /// result, Processing a cut under way, Error a failure.
-    #[cfg(test)]
-    pub(crate) fn set_status_for_test(&mut self, status: BatchStatus) {
-        match status {
-            BatchStatus::Pending => {
-                self.job = None;
-                self.failure = None;
-            }
-            BatchStatus::Processing => {
-                if !self.job.as_ref().is_some_and(|j| j.engine == Engine::Segment) {
-                    self.start_job(None, Engine::Segment);
-                }
-                self.mark_running();
-            }
-            BatchStatus::Done => {
-                self.job = None;
-                if self.result_rgba.is_none() && self.timeline.current().result.is_none() {
-                    let (w, h) = self.dimensions;
-                    self.result_rgba = Some(Arc::new(image::RgbaImage::new(w.max(1), h.max(1))));
-                }
-            }
-            BatchStatus::Error(why) => self.fail(why),
-        }
-    }
-
     /// Why the image failed, while the failure is what it shows.
     pub(crate) fn error(&self) -> Option<&str> {
         self.failure.as_deref().filter(|_| !self.is_cutting() && !self.has_result())
@@ -2545,11 +2519,11 @@ mod tests {
         assert!(!item.is_running());
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(!item.is_running(), "a queued cut-out waits");
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
         assert!(item.is_running(), "the worker has taken it");
         for engine in [Engine::Upscale, Engine::Colorize, Engine::Erase] {
             let mut item = fixture_item(2);
-            item.set_status_for_test(BatchStatus::Done);
+            crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
             item.start_job(None, engine);
             assert!(item.is_running(), "{engine:?} runs from its start");
         }
@@ -2952,7 +2926,7 @@ mod tests {
         let mut item = fixture_item(1);
         let old = tex("old");
         item.result_texture = Some(old.clone());
-        item.set_status_for_test(BatchStatus::Pending);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Pending);
         item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays");
         assert!(item.result_tex_pending && item.thumb_pending, "and a new one and thumbnail are on their way");
@@ -3178,7 +3152,7 @@ mod tests {
     #[test]
     fn apply_tier_result_success_sets_done_and_returns_provider() {
         let mut item = fixture_item(1);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
 
         let provider = item.apply_tier_result(
             Ok(fixture_process_result("CUDA")),
@@ -3199,7 +3173,7 @@ mod tests {
         // Tier 2 reruns omit active_provider so the caller knows not to
         // overwrite the backend label shown in the UI.
         let mut item = fixture_item(1);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
 
         let provider = item.apply_tier_result(
             Ok(fixture_process_result("")),
@@ -3218,7 +3192,7 @@ mod tests {
         // Live preview re-cuts from `source_rgba` on any item, including
         // one that was not shown when its result landed.
         let mut item = fixture_item(1);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
         item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
 
         let _ = item.apply_tier_result(
@@ -3234,7 +3208,7 @@ mod tests {
     #[test]
     fn apply_tier_result_error_clears_recipe_and_tensors_for_fresh_retry() {
         let mut item = fixture_item(1);
-        item.set_status_for_test(BatchStatus::Processing);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
         item.applied_recipe = Some(fixture_recipe());
 
         let provider = item.apply_tier_result(
@@ -3323,7 +3297,7 @@ mod tests {
     fn undo_and_redo_restore_the_whole_state_of_each_step() {
         let mut item = fixture_item(1);
         item.result_rgba = Some(px(1));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item.commit(StepKind::Process);
         item.commit_selection_mask(make_mask(5, 4, 4), StepKind::Stroke);
         item.result_rgba = Some(px(2)); // the stroke's re-cut landed
@@ -3453,7 +3427,7 @@ mod tests {
     fn a_parked_result_comes_back_from_the_timeline() {
         let mut item = fixture_item(1);
         item.result_rgba = Some(px(3));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item.commit(StepKind::Process);
         assert!(item.park_result());
         assert!(item.result_rgba.is_none());

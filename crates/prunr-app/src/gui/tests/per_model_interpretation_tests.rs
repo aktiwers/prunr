@@ -298,7 +298,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     let mut app = app_with_model(SettingsModel::Inpaint);
     let item = push_test_item(&mut app, 4);
     item.dimensions = (8, 8);
-    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Erase);
     app.commit_selection_and_dispatch(4, make_mask(8, 8), StepKind::Stroke);
@@ -316,7 +316,7 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 5);
     item.dimensions = (8, 8);
-    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
     // History entries may be stored compressed, so compare pixels, not Arcs.
     let before = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
     let recut = image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]));
@@ -395,7 +395,7 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_tensor(item);
     // The state after undoing a Process: the tensor stays, the result is gone.
-    item.set_status_for_test(crate::gui::item::BatchStatus::Pending);
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Pending);
 
     app.commit_selection_and_dispatch(6, make_mask(8, 8), StepKind::Stroke);
     assert!(!app.processor.live_preview.is_pending_for(6), "a stroke on the original must not re-cut");
@@ -442,7 +442,6 @@ fn switching_images_keeps_every_undo_step() {
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.set_status_for_test(BatchStatus::Done);
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
     item.result_rgba = Some(Arc::new(px(2)));
