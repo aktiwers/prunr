@@ -70,7 +70,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
                 status: format!("{:?}", it.status()),
                 selected: it.ticked,
                 dimensions: it.dimensions,
-                has_result: it.result_rgba.is_some(),
+                has_result: it.has_result(),
                 result_dims: it.result_rgba.as_ref().map(|r| r.dimensions()),
                 has_selection: it.selection_mask.is_some(),
                 undo_steps: it.timeline.undo_steps(),
