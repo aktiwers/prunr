@@ -316,7 +316,8 @@ impl PrunrApp {
             }
             Action::Copy => match selection_idx {
                 Some(idx) => self.handle_selection_action(idx, SelectionAction::Copy, ctx),
-                None if app_state == AppState::Done => self.handle_copy(),
+                // Copy writes what the canvas shows, like Save.
+                None if self.can_save_intent() => self.handle_copy(),
                 None => {}
             },
             Action::Cut | Action::Delete | Action::Invert => {
