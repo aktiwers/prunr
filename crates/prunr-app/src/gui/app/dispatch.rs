@@ -138,11 +138,16 @@ impl PrunrApp {
         }
         let input = item.pixels_from(start.as_ref());
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
+        // The job starts only once the run is accepted; a refused one
+        // would leave the image waiting on nothing.
+        if let Err(why) = self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe) {
+            self.toasts.error(format!("Upscale not started: {why}"));
+            return false;
+        }
         tracing::info!(item_id, ?model_id, ?run_model, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job_at(Some(StepKind::Upscale), Engine::Upscale, start);
         }
-        self.processor.dispatch_upscale(item_id, input, run_model, output_scale, self.settings.cpu_only(), recipe);
         true
     }
 
@@ -152,11 +157,14 @@ impl PrunrApp {
         let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let input = item.run_input_or_source(Engine::Colorize);
         let recipe = item.settings.current_recipe(crate::gui::settings::COLORIZER);
+        if let Err(why) = self.processor.dispatch_colorize(item_id, input, self.settings.cpu_only(), recipe) {
+            self.toasts.error(format!("Colorize not started: {why}"));
+            return false;
+        }
         tracing::info!(item_id, "colorize dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {
             item.start_job(Some(StepKind::Colorize), Engine::Colorize);
         }
-        self.processor.dispatch_colorize(item_id, input, self.settings.cpu_only(), recipe);
         true
     }
 
