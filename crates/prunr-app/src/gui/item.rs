@@ -2408,13 +2408,16 @@ impl BatchItem {
     /// Resolve the RGBA source for an inpaint stroke. Stack-based inpaint
     /// runs each stroke against the previous result (if any), so:
     ///   1. result_rgba (most-recent processed result)
-    ///   2. source_rgba (original decoded image)
-    ///   3. source_dyn  (lazy decode fallback under memory pressure)
+    ///   2. the shown step's result, parked while the image is off screen
+    ///   3. source_rgba (original decoded image)
+    ///   4. source_dyn  (lazy decode fallback under memory pressure)
     ///
     /// Returns None when no decoded source is available — caller should warn
     /// and skip the dispatch.
     pub(crate) fn source_for_inpaint(&self) -> Option<Arc<image::RgbaImage>> {
-        self.result_rgba.clone().or_else(|| self.decoded_source())
+        self.result_rgba.clone()
+            .or_else(|| self.timeline.current().result.as_ref().and_then(|r| r.load()))
+            .or_else(|| self.decoded_source())
     }
 
     /// The decoded source as RGBA: `source_rgba`, else a copy out of `source_dyn`.

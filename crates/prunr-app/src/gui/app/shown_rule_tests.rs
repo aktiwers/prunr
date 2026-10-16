@@ -208,3 +208,15 @@ fn cancel_all_ends_waiting_cuts_too() {
     assert!(item.job.is_none() && !item.is_busy(), "nothing awaited after Cancel All");
     assert_eq!(item.status(), BatchStatus::Done);
 }
+
+/// An erase on an image off screen starts from the result it shows, kept
+/// parked in its timeline, not from the photo: earlier fills stay.
+#[test]
+fn an_erase_off_screen_starts_from_the_parked_result() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    let shown = item.result_rgba.clone().expect("a cut-out");
+    assert!(item.park_result());
+    let source = item.source_for_inpaint().expect("pixels to erase");
+    assert_eq!(*source, *shown, "the cut-out, not the photo");
+}
