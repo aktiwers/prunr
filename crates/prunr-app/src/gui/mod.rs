@@ -33,6 +33,7 @@ pub(crate) mod first_look;
 pub mod automation;
 pub(crate) mod capability;
 pub(crate) mod disk_queue;
+pub(crate) mod reclaim;
 
 #[cfg(test)]
 mod tests;

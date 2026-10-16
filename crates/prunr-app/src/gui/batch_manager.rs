@@ -321,7 +321,7 @@ impl BatchManager {
     /// for clamping `selected_index` and any downstream sync.
     pub(crate) fn remove(&mut self, idx: usize) -> bool {
         if idx >= self.items.len() { return false; }
-        self.items.remove(idx);
+        super::reclaim::later(self.items.remove(idx));
         true
     }
 
@@ -696,7 +696,7 @@ impl BatchManager {
     /// Drop every image's Magic Brush embedding (16 MB each).
     pub fn clear_magic_embeddings(&mut self) {
         for item in &mut self.items {
-            item.magic_brush_embedding = None;
+            super::reclaim::later(item.magic_brush_embedding.take());
         }
     }
 

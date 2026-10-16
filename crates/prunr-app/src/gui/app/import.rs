@@ -74,7 +74,9 @@ impl PrunrApp {
         for id in removed {
             self.cancel_runs_on(id);
         }
-        self.batch.items.retain(|item| !item.ticked);
+        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.batch.items).into_iter().partition(|item| item.ticked);
+        self.batch.items = kept;
+        crate::gui::reclaim::later(removed);
         self.sync_after_batch_change();
         if count > 0 {
             self.toasts.info(format!("Removed {count} image(s)"));
