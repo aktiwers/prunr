@@ -385,30 +385,33 @@ impl BatchManager {
     /// `decode_pending` and surfaces the error instead of leaving the
     /// item stuck in a "still loading" state forever.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
+        self.spawn_decode(item_id, move || Ok(bytes));
+    }
+
+    /// Pre-decode from an ImageSource. The file is read on the decode
+    /// thread, not the UI thread; a read that fails lands as a failed
+    /// decode, so the image stops waiting for one.
+    pub(crate) fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
+        let source = source.clone();
+        self.spawn_decode(item_id, move || source.load_bytes().map_err(super::item::load_failed));
+    }
+
+    fn spawn_decode(&self, item_id: u64, bytes: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static) {
         let tx = self.bg_io.decode_tx.clone();
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             // Park here past `available_parallelism()` so a 50-image
             // Process All doesn't hold 50 × ~80 MB transient peaks.
             let _slot = slots.acquire();
-            // Inner block scope: the `DynamicImage` (~50 MB at 4 K RGBA)
-            // and the encoded `bytes` Arc both drop before the channel
-            // send, so concurrent decodes don't pile up DynamicImage +
-            // RGBA simultaneously per thread.
-            let result = match image::load_from_memory(&bytes) {
+            // The `DynamicImage` (~50 MB at 4 K RGBA) and the encoded
+            // bytes both drop before the channel send, so concurrent
+            // decodes don't pile up DynamicImage + RGBA per thread.
+            let result = bytes().and_then(|bytes| match image::load_from_memory(&bytes) {
                 Ok(img) => Ok(Arc::new(img.to_rgba8())),
                 Err(e) => Err(format!("decode failed: {e}")),
-            };
-            drop(bytes);
+            });
             let _ = tx.send((item_id, result));
         });
-    }
-
-    /// Pre-decode from an ImageSource (reads file if needed).
-    pub(crate) fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
-        if let Ok(bytes) = source.load_bytes() {
-            self.request_decode_bytes(item_id, bytes);
-        }
     }
 
     /// A background picture finished loading. A picked one replaces the
@@ -1135,6 +1138,17 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
         buf
+    }
+
+    /// A file that can't be read reports a failed decode: before, nothing
+    /// came back and the image waited for a decode forever.
+    #[test]
+    fn a_source_that_cannot_be_read_lands_as_a_failed_decode() {
+        let bm = fixture();
+        bm.request_decode_source(5, &ImageSource::Path("/nonexistent/prunr-test/missing.jpg".into()));
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(5)).expect("an answer comes back");
+        assert_eq!(id, 5);
+        assert!(result.is_err());
     }
 
     #[test]

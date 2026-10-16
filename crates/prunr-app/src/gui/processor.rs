@@ -360,8 +360,8 @@ pub(crate) struct SamRethresholdRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) reading: prunr_core::MaskReading,
-    /// The selection the stroke was merged onto.
-    pub(crate) base: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    /// The selection the stroke was merged onto, read on the job's thread.
+    pub(crate) base: Option<super::item::Region>,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
@@ -1310,23 +1310,30 @@ impl Processor {
             match evt {
                 InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
                 InpaintBridgeResult::Done { item_id, generation, rgba_path, width, height, fill_scale } => {
-                    let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
-                        Some(b) => match image::load_from_memory(&b) {
-                            Ok(img) => {
-                                let rgba = img.to_rgba8();
-                                debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
-                                // Stamp with the dispatch's own generation — drain
-                                // drops it as stale if a fresher stroke
-                                // bumped `inpaint_latest_generation` while this
-                                // one was in the subprocess.
-                                InpaintOutcome::Done { rgba, fill_scale, generation }
-                            }
-                            Err(e) => InpaintOutcome::Failed(format!("decode SD result: {e}")),
-                        },
-                        None => InpaintOutcome::Failed(format!("read SD result missing: {}", rgba_path.display())),
-                    };
-                    let _ = self.inpaint_tx.send((item_id, outcome));
-                    self.end_inpaint_run(item_id);
+                    // The result file is read and decoded off the UI thread
+                    // (a full-size PNG); the capsule ends once it is there.
+                    let (tx, sink) = (self.inpaint_tx.clone(), self.inpaint_runs.get(&item_id).cloned());
+                    rayon::spawn(move || {
+                        let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
+                            Some(b) => match image::load_from_memory(&b) {
+                                Ok(img) => {
+                                    let rgba = img.to_rgba8();
+                                    debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
+                                    // Stamp with the dispatch's own generation — drain
+                                    // drops it as stale if a fresher stroke
+                                    // bumped `inpaint_latest_generation` while this
+                                    // one was in the subprocess.
+                                    InpaintOutcome::Done { rgba, fill_scale, generation }
+                                }
+                                Err(e) => InpaintOutcome::Failed(format!("decode SD result: {e}")),
+                            },
+                            None => InpaintOutcome::Failed(format!("read SD result missing: {}", rgba_path.display())),
+                        };
+                        let _ = tx.send((item_id, outcome));
+                        if let Some(sink) = sink {
+                            sink.end();
+                        }
+                    });
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
                     // Translate bridge sentinels to user-facing text at
@@ -2038,7 +2045,8 @@ impl Processor {
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
-            let merged = Arc::new(merge_stroke(req.base, mask));
+            let base = req.base.as_ref().and_then(super::item::Region::load);
+            let merged = Arc::new(merge_stroke(base, mask));
             let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
                 item_id: req.item_id, mode: req.mode, reading: req.reading,
