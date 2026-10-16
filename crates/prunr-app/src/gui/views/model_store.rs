@@ -145,7 +145,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 app.download_manager.cancel_download(id);
             }
             CardAction::Delete => {
-                delete_installed_model(app, id);
+                delete_installed_model(app, id, ctx);
             }
             CardAction::Bundled | CardAction::Verifying => {}
         }
@@ -366,36 +366,39 @@ fn action_enabled(action: CardAction) -> bool {
     !matches!(action, CardAction::Bundled | CardAction::Verifying)
 }
 
-fn delete_installed_model(app: &mut PrunrApp, id: ModelId) {
+fn delete_installed_model(app: &mut PrunrApp, id: ModelId, ctx: &egui::Context) {
     let Some(desc) = model_descriptor(id) else { return };
     let Some(dir) = on_demand_dir() else {
         app.toasts.error("Could not resolve user data directory");
         return;
     };
-    let result = match desc.source {
-        ModelSource::OnDemand { filename, .. } => std::fs::remove_file(dir.join(filename)),
-        ModelSource::MultiPartOnDemand { subdir, .. } => std::fs::remove_dir_all(dir.join(subdir)),
+    let path = match desc.source {
+        ModelSource::OnDemand { filename, .. } => dir.join(filename),
+        ModelSource::MultiPartOnDemand { subdir, .. } => dir.join(subdir),
         ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => return,
     };
-    match result {
-        Ok(()) => {
-            // Compiled-model cache (CUDA optimized.onnx, CoreML mlmodelc) is
-            // useless without the source weights. Off-thread because a
-            // multi-GB rmtree on a slow disk would stall the GUI frame.
-            std::thread::spawn(move || {
+    let name = desc.display_name;
+    let (done, ctx) = (app.batch.bg_io.removed_tx.clone(), ctx.clone());
+    // Gigabytes of weights take a while to unlink; the toast and the
+    // installed set follow when it is done.
+    std::thread::spawn(move || {
+        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        let outcome = match removed {
+            Ok(()) => {
+                tracing::info!(?id, "deleted on-demand model");
+                // The compiled-model cache (CUDA optimized.onnx, CoreML
+                // mlmodelc) is useless without the source weights.
                 let bytes = prunr_core::cache::clear_for_model(id);
                 if bytes > 0 {
                     tracing::info!(?id, bytes, "cleared compiled-model cache after uninstall");
                 }
-            });
-            app.toasts.success(format!("{} removed", desc.display_name));
-            tracing::info!(?id, "deleted on-demand model");
-            app.refresh_install_cache();
-        }
-        Err(e) => {
-            app.toasts.error(format!("Could not delete {}: {e}", desc.display_name));
-        }
-    }
+                Ok(format!("{name} removed"))
+            }
+            Err(e) => Err(format!("Could not delete {name}: {e}")),
+        };
+        let _ = done.send(outcome);
+        ctx.request_repaint();
+    });
 }
 
 /// True when the descriptor for `id` declares a restrictive license that
