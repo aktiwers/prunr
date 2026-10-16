@@ -190,21 +190,67 @@ pub(crate) fn draw_trail_for(
             let stroke = egui::Stroke::new(first.2 * 2.0, solid);
             painter.line_segment([Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)], stroke);
         }
-        prunr_core::brush::BrushShape::Circle => {
-            for (sx, sy, outer_r) in stamps {
-                super::chip::paint_falloff_circle(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 8,
-                );
-            }
-        }
-        prunr_core::brush::BrushShape::Square => {
-            for (sx, sy, outer_r) in stamps {
-                super::chip::paint_falloff_square(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 6,
-                );
-            }
+        prunr_core::brush::BrushShape::Circle | prunr_core::brush::BrushShape::Square => {
+            let key = TrailKey { shape, hardness, accent, alpha: center_alpha, ppp: ui.ctx().pixels_per_point() };
+            let options = ui.ctx().tessellation_options(|o| *o);
+            let mesh = trail_mesh(ui.ctx(), key, options, stamps.into_iter());
+            painter.add(egui::Shape::mesh(mesh));
         }
     }
+}
+
+/// What a trail's tessellated stamps were made with.
+#[derive(Clone, Copy, PartialEq)]
+struct TrailKey {
+    shape: prunr_core::brush::BrushShape,
+    hardness: f32,
+    accent: Color32,
+    alpha: u8,
+    ppp: f32,
+}
+
+/// A stroke's stamps tessellated once each and kept across frames: a long
+/// stroke with a small brush is thousands of stamps of a fill and rings
+/// each, tessellated anew every frame. New stamps are appended; another
+/// stroke, look or scale starts over.
+#[derive(Clone, Default)]
+struct TrailMesh {
+    key: Option<TrailKey>,
+    first: Option<(f32, f32, f32)>,
+    done: usize,
+    mesh: std::sync::Arc<egui::Mesh>,
+}
+
+fn trail_mesh(
+    ctx: &egui::Context,
+    key: TrailKey,
+    options: egui::epaint::TessellationOptions,
+    stamps: impl Iterator<Item = (f32, f32, f32)>,
+) -> std::sync::Arc<egui::Mesh> {
+    let id = egui::Id::new("brush_trail_mesh");
+    let stamps: Vec<(f32, f32, f32)> = stamps.collect();
+    let mut kept: TrailMesh = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    if kept.key != Some(key) || kept.first != stamps.first().copied() || stamps.len() < kept.done {
+        kept = TrailMesh { key: Some(key), first: stamps.first().copied(), ..TrailMesh::default() };
+    }
+    if stamps.len() > kept.done {
+        let mut tessellator = egui::epaint::Tessellator::new(key.ppp, options, [1, 1], Vec::new());
+        let mesh = std::sync::Arc::make_mut(&mut kept.mesh);
+        for &(sx, sy, outer_r) in &stamps[kept.done..] {
+            let center = Pos2::new(sx, sy);
+            let shapes: Vec<egui::Shape> = match key.shape {
+                prunr_core::brush::BrushShape::Square => super::chip::falloff_square_shapes(center, outer_r, key.hardness, key.accent, key.alpha, 6).collect(),
+                _ => super::chip::falloff_circle_shapes(center, outer_r, key.hardness, key.accent, key.alpha, 8).collect(),
+            };
+            for shape in shapes {
+                tessellator.tessellate_shape(shape, mesh);
+            }
+        }
+        kept.done = stamps.len();
+    }
+    let mesh = std::sync::Arc::clone(&kept.mesh);
+    ctx.data_mut(|d| d.insert_temp(id, kept));
+    mesh
 }
 
 pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
@@ -243,6 +289,25 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
 
 #[cfg(test)]
 mod tests {
+    /// A stroke's stamps are tessellated once: a frame with no new stamp
+    /// reuses the mesh, a new stamp only adds to it, another stroke
+    /// starts over.
+    #[test]
+    fn a_trail_tessellates_each_stamp_once() {
+        let ctx = egui::Context::default();
+        let key = super::TrailKey { shape: prunr_core::brush::BrushShape::Circle, hardness: 0.5, accent: egui::Color32::RED, alpha: 100, ppp: 1.0 };
+        let options = egui::epaint::TessellationOptions::default();
+        let one = [(10.0, 10.0, 6.0)];
+        let two = [(10.0, 10.0, 6.0), (14.0, 10.0, 6.0)];
+        let first = super::trail_mesh(&ctx, key, options, one.into_iter());
+        let again = super::trail_mesh(&ctx, key, options, one.into_iter());
+        assert!(std::sync::Arc::ptr_eq(&first, &again), "nothing new: the same mesh");
+        let grown = super::trail_mesh(&ctx, key, options, two.into_iter());
+        assert!(grown.vertices.len() > first.vertices.len() && grown.vertices.starts_with(&first.vertices), "the new stamp is appended");
+        let other = super::trail_mesh(&ctx, key, options, [(50.0, 50.0, 6.0)].into_iter());
+        assert_eq!(other.vertices.len(), first.vertices.len(), "another stroke starts over");
+    }
+
     use super::*;
 
     /// Pin the screen→model coordinate transform. A bug here flips an

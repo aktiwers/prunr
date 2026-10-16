@@ -154,46 +154,36 @@ fn falloff(
     (core, rings)
 }
 
-/// Solid inner + concentric soft-falloff strokes. Shared by the canvas
-/// trail and the popover preview so the on-screen brush always matches
-/// what `paint_circle` will write into the mask.
-pub(super) fn paint_falloff_circle(
-    painter: &egui::Painter,
+
+/// A soft round brush stamp: a solid core and fading rings out to
+/// `outer`, as `hardness` says.
+pub(super) fn falloff_circle_shapes(
     center: egui::Pos2,
     outer: f32,
     hardness: f32,
     color: egui::Color32,
     base_alpha: u8,
     steps: u32,
-) {
+) -> impl Iterator<Item = egui::Shape> {
     let (core, rings) = falloff(outer, hardness, color, base_alpha, steps);
-    if let Some((inner, solid)) = core {
-        painter.circle_filled(center, inner, solid);
-    }
-    for (dist, stroke) in rings {
-        painter.circle_stroke(center, dist, stroke);
-    }
+    core.map(|(inner, solid)| egui::Shape::circle_filled(center, inner, solid)).into_iter()
+        .chain(rings.into_iter().map(move |(dist, stroke)| egui::Shape::circle_stroke(center, dist, stroke)))
 }
 
-/// Square variant of `paint_falloff_circle` — axis-aligned rect with
-/// the same smoothstep falloff toward the corners (chebyshev).
-pub(super) fn paint_falloff_square(
-    painter: &egui::Painter,
+/// The square stamp of `falloff_circle_shapes`: an axis-aligned rect
+/// fading toward the corners (chebyshev).
+pub(super) fn falloff_square_shapes(
     center: egui::Pos2,
     outer: f32,
     hardness: f32,
     color: egui::Color32,
     base_alpha: u8,
     steps: u32,
-) {
-    let square = |half: f32| egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
+) -> impl Iterator<Item = egui::Shape> {
+    let square = move |half: f32| egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
     let (core, rings) = falloff(outer, hardness, color, base_alpha, steps);
-    if let Some((inner, solid)) = core {
-        painter.rect_filled(square(inner), 0.0, solid);
-    }
-    for (dist, stroke) in rings {
-        painter.rect_stroke(square(dist), 0.0, stroke, egui::StrokeKind::Outside);
-    }
+    core.map(|(inner, solid)| egui::Shape::rect_filled(square(inner), 0.0, solid)).into_iter()
+        .chain(rings.into_iter().map(move |(dist, stroke)| egui::Shape::rect_stroke(square(dist), 0.0, stroke, egui::StrokeKind::Outside)))
 }
 
 /// Square icon-only button with an active/inactive visual state. Used by
