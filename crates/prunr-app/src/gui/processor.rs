@@ -461,9 +461,7 @@ fn measure_depth(
     let DepthJob { input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
-    if !admitted(descriptor) {
-        return Err(format!("needs about {} MB of free memory", descriptor.working_set_mb));
-    }
+    admitted(descriptor)?;
     let (progress, run) = if slot.read().is_none() {
         let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label());
         let run = slot.begin(initial);
@@ -646,21 +644,21 @@ pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
 }
 
-/// Whether free RAM covers the model's working set; a refusal is logged.
-/// The toolbar's `can_process_intent` gate should have stopped the run
-/// already; this is the last guard at the dispatch layer.
-fn admitted(descriptor: &prunr_models::ModelDescriptor) -> bool {
+/// Whether free RAM covers the model's working set, or why not; a
+/// refusal is logged. The toolbar's `can_process_intent` gate should have
+/// stopped the run already; this is the last guard at the dispatch layer.
+fn admitted(descriptor: &prunr_models::ModelDescriptor) -> Result<(), String> {
     let free_mb = crate::hardware::available_ram_mb_throttled();
-    let ok = admission_check(descriptor.working_set_mb, free_mb);
-    if !ok {
-        tracing::warn!(
-            model = ?descriptor.id,
-            working_set_mb = descriptor.working_set_mb,
-            free_mb,
-            "admission refused: insufficient RAM"
-        );
+    if admission_check(descriptor.working_set_mb, free_mb) {
+        return Ok(());
     }
-    ok
+    tracing::warn!(
+        model = ?descriptor.id,
+        working_set_mb = descriptor.working_set_mb,
+        free_mb,
+        "admission refused: insufficient RAM"
+    );
+    Err(format!("needs about {} MB of free memory", descriptor.working_set_mb))
 }
 
 /// The image the upscale model reads: the input, denoised first when
@@ -1698,17 +1696,15 @@ impl Processor {
         output_scale: prunr_core::OutputScale,
         cpu_only: bool,
         recipe: ProcessingRecipe,
-    ) {
+    ) -> Result<(), String> {
         // One upscale runs at a time, so it gets every core; "Parallel
         // jobs" splits cores between images of a batch, not this run.
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let Some(descriptor) = prunr_models::descriptor(model_id) else {
             tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
-            return;
+            return Err("the model is not available".into());
         };
-        if !admitted(descriptor) {
-            return;
-        }
+        admitted(descriptor)?;
 
         let scale_factor = output_scale.factor();
 
@@ -1719,7 +1715,7 @@ impl Processor {
                     model = ?id,
                     "upscale dispatch: ModelKind mapping missing — refusing dispatch"
                 );
-                return;
+                return Err("the model is not available".into());
             }
         };
 
@@ -1791,6 +1787,7 @@ impl Processor {
             });
             done.deliver(UpscaleResult { item_id, result, recipe });
         });
+        Ok(())
     }
 
     /// Cancel any in-flight upscale dispatch.
@@ -1891,12 +1888,10 @@ impl Processor {
     /// Colorize `input` on a background thread; the result comes back
     /// through `pump_colorize_results`. Refused (logged) when free RAM is
     /// below the model's working set.
-    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) {
+    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
         let kind = super::settings::COLORIZER;
-        let Some(descriptor) = prunr_models::descriptor(kind.into()) else { return };
-        if !admitted(descriptor) {
-            return;
-        }
+        let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
+        admitted(descriptor)?;
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize));
         let done = self.colorize.begin(run.clone());
@@ -1916,6 +1911,7 @@ impl Processor {
             }
             done.deliver(ColorizeResult { item_id, result, recipe });
         });
+        Ok(())
     }
 
     /// Cancel the colorize run in flight. The model's one run is not
