@@ -91,6 +91,9 @@ pub enum PreviewKind {
     UpscaleTier2,
     /// Strength → re-render the kept colorize run. No model run.
     ColorizeTier2,
+    /// The unprocessed photo with what goes on it before any model runs
+    /// (restored faces): shown in place of the photo, never a result.
+    Photo,
 }
 
 impl PreviewKind {
@@ -727,6 +730,7 @@ impl DispatchInputs {
             PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
             PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
             PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
+            PreviewKind::Photo => return false,
         };
         w.max(h) > QUICK_FRAME_SIDE
     }
@@ -963,6 +967,9 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         None => None,
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
+    if inputs.kind == PreviewKind::Photo {
+        return RunOutput { rgba: Some(Arc::new(inputs.original.to_rgba8())), built_faced, ..RunOutput::default() };
+    }
     let full_width = inputs.original.width();
     // A looked photo kept from a full-size render is the one to shrink;
     // otherwise the photo is, and the look goes on the small one.
@@ -1133,7 +1140,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             PreviewKind::Mask => fresh_base(),
             PreviewKind::Edge => inputs.cached_masked_base.clone()
                 .map_or_else(fresh_base, |cached| (Some(cached), None)),
-            PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
+            PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 | PreviewKind::Photo => unreachable!("run_preview finishes these kinds itself"),
         }
     } else {
         (None, None)
@@ -1200,7 +1207,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             );
             RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::default() }
         }
-        PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => unreachable!("run_preview finishes the kept-run kinds itself"),
+        PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 | PreviewKind::Photo => unreachable!("run_preview finishes these kinds itself"),
     }
 }
 
@@ -1211,6 +1218,11 @@ impl LivePreview {
     pub(crate) fn owe_for_test(&mut self, item_id: u64, kind: PreviewKind) {
         let latest_tweak_at = self.clock.now();
         self.owed.insert(item_id, Owed { kind, latest_tweak_at });
+    }
+
+    /// The kind of render queued for `item_id`.
+    pub(crate) fn pending_kind_for_test(&self, item_id: u64) -> Option<PreviewKind> {
+        self.pending.get(&item_id).map(|p| p.kind)
     }
 
     /// Whether the render queued for `item_id` is the settled one.
