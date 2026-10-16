@@ -133,10 +133,11 @@ enum Encoded {
 }
 
 impl Encoded {
-    fn read(&self) -> std::io::Result<Vec<u8>> {
+    /// The stored bytes: borrowed when they are in memory, never copied.
+    fn read(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
         match self {
-            Encoded::Bytes(b) => Ok(b.to_vec()),
-            Encoded::File(p) => std::fs::read(p),
+            Encoded::Bytes(b) => Ok(std::borrow::Cow::Borrowed(b.as_slice())),
+            Encoded::File(p) => std::fs::read(p).map(std::borrow::Cow::Owned),
         }
     }
 
