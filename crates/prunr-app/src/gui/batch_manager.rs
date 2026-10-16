@@ -476,10 +476,12 @@ impl BatchManager {
         std::thread::spawn(move || {
             let _slot = slots.acquire();
             let load = || source.load_bytes().map_err(super::item::load_failed);
-            let (start, chain_start) = base.map_or((None, None), |run| run.resolve(item_id, load));
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
+            let mut chain_start = None;
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
+                let (start, built) = base.map_or(Ok((None, None)), |run| run.resolve(item_id, load))?;
+                chain_start = built;
                 let mut rgba = match start {
                     // No effect: the pass is its start, without a copy.
                     Some(start) if effect == prunr_core::SubjectEffect::None => return Ok(start),
@@ -753,35 +755,20 @@ impl BatchManager {
     }
 
     /// The work for the images in `ids` that run again from their cached
-    /// tensor. One whose cache or file can't be read fails, and starts
-    /// over next time.
+    /// tensor.
     pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<CachedTensorWork> {
-        fn start_over(item: &mut BatchItem, why: String) {
-            item.fail(why);
-            item.set_cached_tensor(None);
-            item.applied_recipe = None;
-        }
-        let mut out = Vec::new();
-        for item in self.in_set(ids) {
-            let Some(ct) = &item.cached_tensor else { continue };
-            match (ct.decompress(), item.source.load_bytes()) {
-                (Some(data), Ok(bytes)) => {
-                    out.push(CachedTensorWork {
-                        item_id: item.id,
-                        tensor_data: data,
-                        tensor_height: ct.height,
-                        tensor_width: ct.width,
-                        model: ct.model,
-                        original_bytes: bytes,
-                        mask: item.settings.mask_settings(),
-                    });
-                    item.mark_running();
-                }
-                (None, _) => start_over(item, "Tensor cache corrupt".into()),
-                (_, Err(e)) => start_over(item, super::item::load_failed(e)),
-            }
-        }
-        out
+        self.in_set(ids)
+            .filter_map(|item| {
+                let work = CachedTensorWork {
+                    item_id: item.id,
+                    tensor: item.cached_tensor.clone()?,
+                    source: item.source.clone(),
+                    mask: item.settings.mask_settings(),
+                };
+                item.mark_running();
+                Some(work)
+            })
+            .collect()
     }
 
     /// What a full run on each image in `ids` is expected to hold in RAM.
@@ -792,10 +779,9 @@ impl BatchManager {
             .collect()
     }
 
-    /// The work for full runs on the images in `ids`, in batch order;
-    /// one whose file can't be read is left out.
+    /// The work for full runs on the images in `ids`, in batch order.
     pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
-        self.in_set(ids).filter_map(BatchItem::full_run_work).collect()
+        self.in_set(ids).map(BatchItem::full_run_work).collect()
     }
 
 }

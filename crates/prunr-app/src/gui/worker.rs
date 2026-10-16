@@ -62,40 +62,72 @@ fn is_stalled(
     in_flight_count > 0 && last_event_age > hang_timeout
 }
 
-/// A single image item to be processed (Tier 1: full pipeline): its id,
-/// its file, and what it reads instead of or with the file.
-pub(crate) type WorkItem = (u64, Arc<Vec<u8>>, Option<RunImage>);
+/// A full run on one image (Tier 1). Its file and start are handles,
+/// read on the bridge thread when the run is sent.
+#[derive(Clone)]
+pub(crate) struct WorkItem {
+    pub(crate) id: u64,
+    pub(crate) source: super::item::ImageSource,
+    pub(crate) image: Option<RunImage>,
+}
+
+/// What a sent full run reads: the file, the start it runs from (`None`:
+/// the file) and a chained cut's start built for it.
+struct RunInputs {
+    bytes: Arc<Vec<u8>>,
+    start: Option<Arc<image::RgbaImage>>,
+    built: Option<Arc<image::RgbaImage>>,
+}
+
+impl WorkItem {
+    fn read_inputs(&self) -> Result<RunInputs, String> {
+        let bytes = self.source.load_bytes().map_err(super::item::load_failed)?;
+        let (start, built) = match &self.image {
+            Some(run) => run.resolve(self.id, || Ok(Arc::clone(&bytes)))?,
+            None => (None, None),
+        };
+        Ok(RunInputs { bytes, start, built })
+    }
+}
 
 /// What a full run reads besides its file.
 #[derive(Clone)]
 pub(crate) enum RunImage {
     /// An earlier image the run starts from instead of the file.
-    Start(Arc<image::RgbaImage>),
+    Start(super::item::Pixels),
     /// A cut of another model's cut-out: `start`'s colours (`None`: the
     /// file's) seen through `cutout`'s transparency. Built on the bridge
     /// thread, which decodes the file anyway.
-    Kept { start: Option<Arc<image::RgbaImage>>, cutout: super::timeline::StoredImage },
+    Kept { start: Option<super::item::Pixels>, cutout: super::timeline::StoredImage },
 }
+
+/// The error an image fails with when the start it runs from is unreadable.
+const START_UNREADABLE: &str = "The image to process could not be read";
 
 impl RunImage {
     /// What the run starts from (`None`: its file) and, for a chained cut,
     /// the start built for it here; `file` is read only when that start's
     /// colours are the file's. A chained start that cannot be built runs
-    /// from its plain start rather than not at all.
+    /// from its plain start rather than not at all; a start that cannot
+    /// be read fails the run rather than cut the file in its place.
     pub(crate) fn resolve(
         &self,
         item_id: u64,
         file: impl FnOnce() -> Result<Arc<Vec<u8>>, String>,
-    ) -> (Option<Arc<image::RgbaImage>>, Option<Arc<image::RgbaImage>>) {
+    ) -> Result<(Option<Arc<image::RgbaImage>>, Option<Arc<image::RgbaImage>>), String> {
+        let load = |start: &super::item::Pixels| start.load().ok_or_else(|| START_UNREADABLE.to_string());
         match self {
-            RunImage::Start(image) => (Some(Arc::clone(image)), None),
-            RunImage::Kept { start, cutout } => match Self::kept(start.as_deref(), cutout, file) {
-                Ok(built) => (Some(Arc::clone(&built)), Some(built)),
-                Err(err) => {
-                    tracing::warn!(item_id, %err, "chained cut runs from its plain start");
-                    (start.clone(), None)
-                }
-            },
+            RunImage::Start(start) => Ok((Some(load(start)?), None)),
+            RunImage::Kept { start, cutout } => {
+                let start = start.as_ref().map(load).transpose()?;
+                Ok(match Self::kept(start.as_deref(), cutout, file) {
+                    Ok(built) => (Some(Arc::clone(&built)), Some(built)),
+                    Err(err) => {
+                        tracing::warn!(item_id, %err, "chained cut runs from its plain start");
+                        (start, None)
+                    }
+                })
+            }
         }
     }
 
@@ -281,14 +313,12 @@ impl CompressedTensor {
 
 /// Work that starts from an item's cached seg tensor instead of a seg run:
 /// a mask re-postprocess, or edge detection added on top of the mask.
-pub struct CachedTensorWork {
-    pub item_id: u64,
-    pub tensor_data: Vec<f32>,
-    pub tensor_height: u32,
-    pub tensor_width: u32,
-    pub model: ModelKind,
-    pub original_bytes: Arc<Vec<u8>>,
-    pub mask: MaskSettings,
+pub(crate) struct CachedTensorWork {
+    pub(crate) item_id: u64,
+    /// Unpacked, with the file read, on the bridge thread.
+    pub(crate) tensor: CompressedTensor,
+    pub(crate) source: super::item::ImageSource,
+    pub(crate) mask: MaskSettings,
 }
 
 
@@ -625,13 +655,13 @@ impl SentWork {
     }
 
     fn forget(&mut self, item_id: u64) {
-        self.items.retain(|(id, _, _)| *id != item_id);
+        self.items.retain(|w| w.id != item_id);
         self.tier2_ids.retain(|id| *id != item_id);
         self.add_edge_ids.retain(|id| *id != item_id);
     }
 
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.items.iter().map(|(id, _, _)| *id)
+        self.items.iter().map(|w| w.id)
             .chain(self.tier2_ids.iter().copied())
             .chain(self.add_edge_ids.iter().copied())
     }
@@ -752,7 +782,7 @@ fn emit_loading_status(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    let first_id = state.pending.front().map(|(id, _, _)| *id)
+    let first_id = state.pending.front().map(|w| w.id)
         .or_else(|| state.pending_tier2.front().map(|t| t.item_id))
         .or_else(|| state.pending_add_edge.front().map(|a| a.item_id));
     if let Some(fid) = first_id {
@@ -842,19 +872,10 @@ fn spawn_and_initial_burst(
     let burst = state.max_jobs.min(total_pending);
     let mut sent_count = 0;
     while sent_count < burst {
-        if try_send_cached(&mut sub, &mut state.pending_tier2, &mut sent.tier2_ids, SubprocessManager::send_repostprocess)
-            || try_send_cached(&mut sub, &mut state.pending_add_edge, &mut sent.add_edge_ids, SubprocessManager::send_add_edge_inference)
-        {
-            sent_count += 1;
-        } else if let Some(item) = state.pending.pop_front() {
-            if send_item_to_sub(&mut sub, &item, res_tx).is_err() {
-                state.pending.push_front(item);
-                break;
-            }
-            sent.items.push(item);
-            sent_count += 1;
-        } else {
-            break;
+        match send_next(&mut sub, state, &mut sent, None, res_tx, ctx) {
+            Sent::Sent => sent_count += 1,
+            Sent::Unreadable => {}
+            Sent::Held | Sent::Nothing => break,
         }
     }
     Some(InitialBurst { sub, sent, engines })
@@ -1100,31 +1121,96 @@ fn admit_next_item(
     if sub.should_pause_admission() {
         return;
     }
-    if try_send_cached(sub, &mut state.pending_tier2, &mut sent.tier2_ids, SubprocessManager::send_repostprocess) {
-        return;
+    send_next(sub, state, sent, Some(cancels), res_tx, ctx);
+}
+
+/// What `send_next` did.
+enum Sent {
+    Sent,
+    /// The next work's inputs could not be read: it failed and went no further.
+    Unreadable,
+    /// The worker refused it; it stays at the front to retry.
+    Held,
+    Nothing,
+}
+
+/// Send the next pending work to the worker: cached-tensor work first,
+/// then full runs, then (with `admitted`'s cancels) an image the memory
+/// controller admitted since. Its inputs are read here, off the UI thread.
+fn send_next(
+    sub: &mut SubprocessManager,
+    state: &mut BatchRunState,
+    sent: &mut SentWork,
+    admitted: Option<&super::processor::CancelRegistry>,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) -> Sent {
+    let cached = [
+        (Lane::Tier2, SubprocessManager::send_repostprocess as SendCached),
+        (Lane::AddEdge, SubprocessManager::send_add_edge_inference),
+    ];
+    for (lane, send) in cached {
+        let (pending, ids) = match lane {
+            Lane::Tier2 => (&mut state.pending_tier2, &mut sent.tier2_ids),
+            Lane::AddEdge => (&mut state.pending_add_edge, &mut sent.add_edge_ids),
+        };
+        let Some(work) = pending.pop_front() else { continue };
+        return match send_cached(sub, &work, send) {
+            Ok(()) => {
+                ids.push(work.item_id);
+                Sent::Sent
+            }
+            Err(Refused::Unreadable(err)) => {
+                report_failed(work.item_id, err, state, res_tx, ctx);
+                Sent::Unreadable
+            }
+            Err(Refused::Worker) => {
+                pending.push_front(work);
+                Sent::Held
+            }
+        };
     }
-    if try_send_cached(sub, &mut state.pending_add_edge, &mut sent.add_edge_ids, SubprocessManager::send_add_edge_inference) {
-        return;
-    }
-    if let Some(item) = state.pending.pop_front() {
-        if send_item_to_sub(sub, &item, res_tx).is_ok() {
+    let (item, from_pending) = match state.pending.pop_front() {
+        Some(item) => (item, true),
+        None => match (admitted, state.additional_rx.as_ref().and_then(|rx| rx.try_recv().ok())) {
+            (Some(cancels), Some(item)) if cancels.is_cancelled(item.id) => {
+                report_cancelled(item.id, state, res_tx, ctx);
+                return Sent::Nothing;
+            }
+            (Some(_), Some(item)) => (item, false),
+            _ => return Sent::Nothing,
+        },
+    };
+    match send_item_to_sub(sub, &item, res_tx) {
+        Ok(()) => {
             sent.items.push(item);
-        } else {
-            state.pending.push_front(item);
+            Sent::Sent
         }
-        return;
-    }
-    if let Some(rx) = state.additional_rx.as_ref() {
-        if let Ok(item) = rx.try_recv() {
-            if cancels.is_cancelled(item.0) {
-                report_cancelled(item.0, state, res_tx, ctx);
-            } else if send_item_to_sub(sub, &item, res_tx).is_ok() {
-                sent.items.push(item);
+        Err(Refused::Unreadable(err)) => {
+            report_failed(item.id, err, state, res_tx, ctx);
+            Sent::Unreadable
+        }
+        Err(Refused::Worker) => {
+            if from_pending {
+                state.pending.push_front(item);
             } else {
                 state.admit(item);
             }
+            Sent::Held
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Lane {
+    Tier2,
+    AddEdge,
+}
+
+/// Why work did not reach the worker.
+enum Refused {
+    Unreadable(String),
+    Worker,
 }
 
 fn drop_cancelled_pending(
@@ -1134,8 +1220,8 @@ fn drop_cancelled_pending(
     ctx: &egui::Context,
 ) {
     let mut cancelled: Vec<u64> = Vec::new();
-    for (id, _, _) in &state.pending {
-        if cancels.is_cancelled(*id) { cancelled.push(*id); }
+    for item in &state.pending {
+        if cancels.is_cancelled(item.id) { cancelled.push(item.id); }
     }
     for w in &state.pending_tier2 {
         if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
@@ -1144,7 +1230,7 @@ fn drop_cancelled_pending(
         if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
     }
     if cancelled.is_empty() { return; }
-    state.pending.retain(|(id, _, _)| !cancels.is_cancelled(*id));
+    state.pending.retain(|item| !cancels.is_cancelled(item.id));
     state.pending_tier2.retain(|w| !cancels.is_cancelled(w.item_id));
     state.pending_add_edge.retain(|w| !cancels.is_cancelled(w.item_id));
     for id in cancelled {
@@ -1173,8 +1259,18 @@ fn report_cancelled(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
+    report_failed(item_id, CANCELLED_ERR_MSG.to_string(), state, res_tx, ctx);
+}
+
+fn report_failed(
+    item_id: u64,
+    error: String,
+    state: &mut BatchRunState,
+    res_tx: &mpsc::Sender<WorkerResult>,
+    ctx: &egui::Context,
+) {
     state.completed.insert(item_id);
-    let _ = res_tx.send(state.item_failed(item_id, CANCELLED_ERR_MSG.to_string()));
+    let _ = res_tx.send(state.item_failed(item_id, error));
     ctx.request_repaint();
 }
 
@@ -1216,7 +1312,7 @@ fn handle_crash_and_retry(
     }
 
     let re_queued: Vec<WorkItem> = sent.items.into_iter()
-        .filter(|(id, _, _)| !state.completed.contains(id))
+        .filter(|item| !state.completed.contains(&item.id))
         .collect();
     let re_count = re_queued.len();
 
@@ -1261,9 +1357,9 @@ fn emit_pending_errors(
     err_msg: &str,
     res_tx: &mpsc::Sender<WorkerResult>,
 ) {
-    for (id, _, _) in &state.pending {
-        if !state.completed.contains(id) {
-            let _ = res_tx.send(state.item_failed(*id, err_msg.to_string()));
+    for item in &state.pending {
+        if !state.completed.contains(&item.id) {
+            let _ = res_tx.send(state.item_failed(item.id, err_msg.to_string()));
         }
     }
     // Cached-tensor work is errored whether or not it completed.
@@ -1319,38 +1415,36 @@ fn spawn_warm(
 
 /// Send a WorkItem to the subprocess via temp file IPC. A chained cut's
 /// start is built here and reported back.
-fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc::Sender<WorkerResult>) -> Result<(), String> {
-    let (item_id, bytes, run_image) = item;
-    let (start, built) = run_image.as_ref().map_or((None, None), |run| run.resolve(*item_id, || Ok(Arc::clone(bytes))));
+fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc::Sender<WorkerResult>) -> Result<(), Refused> {
+    let RunInputs { bytes, start, built } = item.read_inputs().map_err(Refused::Unreadable)?;
     if let Some(image) = built {
-        let _ = res_tx.send(WorkerResult::ChainStart { item_id: *item_id, image });
+        let _ = res_tx.send(WorkerResult::ChainStart { item_id: item.id, image });
     }
     let chain_input = start.as_deref().map(|rgba| (rgba, rgba.width(), rgba.height()));
-    sub.send_image(*item_id, bytes, chain_input)
+    sub.send_image(item.id, &bytes, chain_input).map_err(|_| Refused::Worker)
 }
 
 type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &[u8], MaskSettings) -> Result<(), String>;
 
-/// Send the next cached-tensor job with `send`; one that fails goes back
-/// to the front. Returns true if sent.
-fn try_send_cached(
-    sub: &mut SubprocessManager,
-    pending: &mut VecDeque<CachedTensorWork>,
-    sent_ids: &mut Vec<u64>,
-    send: SendCached,
-) -> bool {
-    let Some(work) = pending.pop_front() else { return false };
-    let tensor = crate::subprocess::manager::TensorView {
-        data: &work.tensor_data,
-        height: work.tensor_height,
-        width: work.tensor_width,
-    };
-    if send(sub, work.item_id, &tensor, work.model, &work.original_bytes, work.mask).is_ok() {
-        sent_ids.push(work.item_id);
-        return true;
+impl CachedTensorWork {
+    /// The unpacked tensor and the file. A corrupt cache or an unreadable
+    /// file fails the image; its failure drops the cache, so the next
+    /// Process starts over.
+    fn read_inputs(&self) -> Result<(Vec<f32>, Arc<Vec<u8>>), String> {
+        let data = self.tensor.decompress().ok_or("Tensor cache corrupt")?;
+        let bytes = self.source.load_bytes().map_err(super::item::load_failed)?;
+        Ok((data, bytes))
     }
-    pending.push_front(work);
-    false
+}
+
+fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendCached) -> Result<(), Refused> {
+    let (data, bytes) = work.read_inputs().map_err(Refused::Unreadable)?;
+    let tensor = crate::subprocess::manager::TensorView {
+        data: &data,
+        height: work.tensor.height,
+        width: work.tensor.width,
+    };
+    send(sub, work.item_id, &tensor, work.tensor.model, &bytes, work.mask).map_err(|_| Refused::Worker)
 }
 
 #[cfg(test)]
@@ -1440,8 +1534,9 @@ mod tests {
         use super::RunImage;
         let cutout = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba([9, 9, 9, if x == 0 { 0 } else { 200 }]))));
         let start = Arc::new(image::RgbaImage::from_pixel(2, 1, image::Rgba([50, 60, 70, 255])));
-        let kept = RunImage::Kept { start: Some(start), cutout: Arc::clone(&cutout) };
-        let (runs_from, built) = kept.resolve(1, || panic!("the colours are the start's"));
+        let resident = |image: &Arc<image::RgbaImage>| Some(crate::gui::item::Pixels::Resident(Arc::clone(image)));
+        let kept = RunImage::Kept { start: resident(&start), cutout: Arc::clone(&cutout) };
+        let (runs_from, built) = kept.resolve(1, || panic!("the colours are the start's")).unwrap();
         let built = built.expect("built");
         assert!(runs_from.is_some_and(|r| Arc::ptr_eq(&r, &built)), "the run starts from the built image");
         assert_eq!(built.get_pixel(0, 0).0, [50, 60, 70, 0]);
@@ -1449,13 +1544,42 @@ mod tests {
 
         let mut png = Vec::new();
         image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        let (_, from_file) = RunImage::Kept { start: None, cutout: Arc::clone(&cutout) }.resolve(2, || Ok(Arc::new(png)));
+        let (_, from_file) = RunImage::Kept { start: None, cutout: Arc::clone(&cutout) }.resolve(2, || Ok(Arc::new(png))).unwrap();
         assert_eq!(from_file.expect("built from the file").get_pixel(1, 0).0, [1, 2, 3, 200]);
 
         let wide = Arc::new(image::RgbaImage::new(3, 1));
-        let (runs_from, built) = RunImage::Kept { start: Some(Arc::clone(&wide)), cutout }.resolve(3, || unreachable!());
+        let (runs_from, built) = RunImage::Kept { start: resident(&wide), cutout }.resolve(3, || unreachable!()).unwrap();
         assert!(built.is_none(), "a cut-out of another size is refused");
         assert!(runs_from.is_some_and(|r| Arc::ptr_eq(&r, &wide)), "and the run starts from its plain start");
+    }
+
+    /// A run's inputs are read on the bridge thread: an unreadable file,
+    /// start or tensor cache fails the image there, with the words the
+    /// image shows; a stored start is unpacked there too.
+    #[test]
+    fn a_runs_inputs_are_read_where_it_is_sent() {
+        use super::{CachedTensorWork, RunImage, WorkItem};
+        use crate::gui::item::{ImageSource, Pixels};
+        let missing = ImageSource::Path(std::path::PathBuf::from("/nonexistent/photo.png"));
+        let file = ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
+
+        let gone = WorkItem { id: 1, source: missing.clone(), image: None }.read_inputs();
+        assert!(gone.is_err_and(|e| e.starts_with("Failed to load")));
+
+        let start = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 255]))));
+        let stored = WorkItem { id: 2, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))) };
+        let inputs = stored.read_inputs().expect("reads");
+        assert_eq!(inputs.bytes.as_slice(), &[1, 2, 3]);
+        assert_eq!(inputs.start.expect("unpacked").get_pixel(0, 0).0, [5, 6, 7, 255]);
+
+        let unreadable = WorkItem { id: 3, source: file.clone(), image: Some(RunImage::Start(Pixels::Source(missing.clone()))) };
+        assert!(unreadable.read_inputs().is_err(), "a start that can't be read fails the run, not cut the file instead");
+
+        let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: ModelKind::Silueta }).unwrap();
+        let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, mask: MaskSettings::default() };
+        assert_eq!(cached.read_inputs().expect("reads").0, vec![0.5; 4]);
+        let cached = CachedTensorWork { item_id: 5, tensor, source: missing, mask: MaskSettings::default() };
+        assert!(cached.read_inputs().is_err_and(|e| e.starts_with("Failed to load")));
     }
 
     use super::*;
@@ -1486,13 +1610,12 @@ mod tests {
             first_look: Shown::default(),
             on_screen: Shown::default(),
         };
-        let bytes = Arc::new(Vec::new());
-        let tier2 = CachedTensorWork {
-            item_id: 3, tensor_data: Vec::new(), tensor_height: 1, tensor_width: 1,
-            model: ModelKind::Silueta, original_bytes: Arc::clone(&bytes), mask: MaskSettings::default(),
-        };
-        let mut state = BatchRunState::new(7, vec![(1, Arc::clone(&bytes), None), (2, Arc::clone(&bytes), None)], vec![tier2], Vec::new(), None, cfg);
-        state.admit((4, bytes, None));
+        let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
+        let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), mask: MaskSettings::default() };
+        let work = |id| WorkItem { id, source: source.clone(), image: None };
+        let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
+        state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
     }
 

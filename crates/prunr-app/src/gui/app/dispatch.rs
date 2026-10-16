@@ -354,7 +354,7 @@ impl PrunrApp {
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let batch = &mut self.batch;
         let (initial_items, additional_items_rx) =
-            self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).and_then(BatchItem::full_run_work));
+            self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).map(BatchItem::full_run_work));
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
         // skip dispatch.
@@ -402,7 +402,7 @@ impl PrunrApp {
 
         let current_settings = self.run_settings();
         let process_ids: std::collections::HashSet<u64> = items.iter()
-            .map(|wi| wi.0)
+            .map(|wi| wi.id)
             .chain(tier2_items.iter().map(|ti| ti.item_id))
             .chain(add_edge_items.iter().map(|ai| ai.item_id))
             .collect();
@@ -452,7 +452,7 @@ impl PrunrApp {
     /// Release an item's memory budget and greedily admit the next fitting items.
     pub(super) fn admission_release_and_admit(&mut self, completed_id: u64) {
         let batch = &mut self.batch;
-        self.processor.release_and_admit(completed_id, |id| batch.find_by_id_mut(id).and_then(BatchItem::full_run_work));
+        self.processor.release_and_admit(completed_id, |id| batch.find_by_id_mut(id).map(BatchItem::full_run_work));
     }
 }
 
