@@ -756,7 +756,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             }
             // A drag on a photo with no result yet (No model's first one)
             // shows its quick frames over it.
-            let texture = item.quick.texture().unwrap_or(texture);
+            let texture = item.quick.texture().or(item.photo_look.as_ref()).unwrap_or(texture);
             paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         }
 

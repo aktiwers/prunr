@@ -1,0 +1,180 @@
+//! The contract between what an image shows and the work its controls
+//! start, for every state an image can be in and every trigger that
+//! starts work: no request is left waiting for good, an unprocessed
+//! cut-out never becomes a result, and Faces runs on what is shown.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use super::PrunrApp;
+use crate::gui::capability::{ItemFacts, Shown};
+use crate::gui::item::{BatchStatus, Engine};
+use crate::gui::item_settings::FaceModel;
+use crate::gui::knob_catalog::DispatchKind;
+use crate::gui::settings::SettingsModel;
+use crate::gui::tests::fixtures::push_test_item;
+use crate::gui::timeline::StepKind;
+use crate::gui::views::adjustments_toolbar::ToolbarChange;
+use crate::gui::views::faces_chip::FacesChange;
+
+fn px(v: u8) -> Arc<image::RgbaImage> {
+    Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255])))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum State {
+    /// Opened, never processed.
+    Unprocessed,
+    /// Cut out, its segmentation kept.
+    Cut,
+    /// Delete on the unprocessed photo: a hand edit with no cut under it.
+    DeletedOnPhoto,
+    /// An upscale on screen whose kept run is gone (a model round trip).
+    UpscaleNotKept,
+}
+
+fn app_in(state: State, model: SettingsModel) -> PrunrApp {
+    let mut app = PrunrApp::new_for_test();
+    app.settings.model = model;
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(px(10));
+    match state {
+        State::Unprocessed => {}
+        State::Cut => {
+            item.result_rgba = Some(px(20));
+            item.commit(StepKind::Process);
+            crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+        }
+        State::DeletedOnPhoto => {
+            item.result_rgba = Some(px(30));
+            item.status = BatchStatus::Done;
+            item.commit(StepKind::Edit);
+        }
+        State::UpscaleNotKept => {
+            item.result_rgba = Some(px(40));
+            item.status = BatchStatus::Done;
+            item.commit(StepKind::Upscale);
+            item.record_origin(Engine::Upscale, None, None);
+        }
+    }
+    app.batch.select_item(0);
+    app
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Trigger {
+    MaskKnob,
+    OutlineKnob,
+    FacesOn,
+    FaceModelSwitch,
+}
+
+fn pull(app: &mut PrunrApp, trigger: Trigger) {
+    let ctx = egui::Context::default();
+    let before = app.batch.items[0].settings;
+    let s = &mut app.batch.items[0].settings;
+    let change = match trigger {
+        Trigger::MaskKnob => {
+            s.gamma = 1.4;
+            ToolbarChange { auto_dispatch: DispatchKind::LivePreviewMask, commit: true, ..Default::default() }
+        }
+        Trigger::OutlineKnob => {
+            s.decoration.outline_width = 6.0;
+            ToolbarChange { auto_dispatch: DispatchKind::LivePreviewMask, commit: true, ..Default::default() }
+        }
+        Trigger::FacesOn => {
+            s.faces.on = true;
+            ToolbarChange { faces: FacesChange { search: true, ..Default::default() }, commit: true, ..Default::default() }
+        }
+        Trigger::FaceModelSwitch => {
+            s.faces.on = true;
+            s.faces.model = FaceModel::RestoreFormerPp;
+            ToolbarChange { faces: FacesChange { search: true, ..Default::default() }, commit: true, ..Default::default() }
+        }
+    };
+    app.apply_toolbar_change(&ctx, change, before);
+}
+
+/// Frames until the live preview has nothing left, or two seconds.
+fn settle(app: &mut PrunrApp) -> bool {
+    let ctx = egui::Context::default();
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        app.pump_results(&ctx);
+        app.pump_live_preview(&ctx);
+        if !app.processor.live_preview.is_busy() {
+            return true;
+        }
+        if Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+const STATES: [State; 4] = [State::Unprocessed, State::Cut, State::DeletedOnPhoto, State::UpscaleNotKept];
+const TRIGGERS: [Trigger; 4] = [Trigger::MaskKnob, Trigger::OutlineKnob, Trigger::FacesOn, Trigger::FaceModelSwitch];
+const MODELS: [SettingsModel; 3] = [SettingsModel::Silueta, SettingsModel::None, SettingsModel::RealEsrganUpscale];
+
+#[test]
+fn no_request_waits_for_good() {
+    let mut stuck = Vec::new();
+    for model in MODELS {
+        for state in STATES {
+            for trigger in TRIGGERS {
+                let mut app = app_in(state, model);
+                pull(&mut app, trigger);
+                if !settle(&mut app) {
+                    stuck.push(format!("{model:?} / {state:?} / {trigger:?}"));
+                }
+            }
+        }
+    }
+    assert!(stuck.is_empty(), "renders that never finish:\n{}", stuck.join("\n"));
+}
+
+#[test]
+fn an_unprocessed_cutout_never_becomes_a_result() {
+    let mut faked = Vec::new();
+    for trigger in TRIGGERS {
+        let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+        pull(&mut app, trigger);
+        settle(&mut app);
+        let item = &app.batch.items[0];
+        if ItemFacts::of(item).shown != Shown::Photo || item.status == BatchStatus::Done {
+            faked.push(format!("{trigger:?}: shown {:?}, status {:?}", ItemFacts::of(item).shown, item.status));
+        }
+    }
+    assert!(faked.is_empty(), "an unprocessed cut-out turned into a result:\n{}", faked.join("\n"));
+}
+
+#[test]
+fn faces_run_on_what_is_shown() {
+    let mut idle = Vec::new();
+    for (model, state) in [
+        (SettingsModel::Silueta, State::Unprocessed),
+        (SettingsModel::Silueta, State::Cut),
+        (SettingsModel::None, State::Unprocessed),
+    ] {
+        let mut app = app_in(state, model);
+        pull(&mut app, Trigger::FacesOn);
+        app.pump_results(&egui::Context::default());
+        if app.batch.items[0].faces_pending.is_none() && app.batch.items[0].found_faces.is_none() {
+            idle.push(format!("{model:?} / {state:?}"));
+        }
+    }
+    assert!(idle.is_empty(), "Faces turned on but no search started:\n{}", idle.join("\n"));
+}
+
+#[test]
+fn an_export_writes_what_the_canvas_shows() {
+    use crate::gui::item::ExportImage;
+    let app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    assert!(app.batch.items[0].export_image().is_untouched_photo(), "the photo as opened");
+
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    assert!(matches!(app.batch.items[0].export_image(), ExportImage::Shown(_)), "the cut-out on screen");
+    assert!(app.batch.items[0].park_result());
+    assert!(matches!(app.batch.items[0].export_image(), ExportImage::Parked(_)), "off screen: the parked cut-out, not the photo");
+}

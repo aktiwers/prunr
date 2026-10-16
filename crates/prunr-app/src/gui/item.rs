@@ -456,21 +456,46 @@ impl FacePhoto {
     }
 }
 
-/// A result for an export off the UI thread: the one on screen, or one
-/// parked in the timeline while its image is off screen, unpacked where
-/// it is used.
+/// What an export writes: the image as the canvas shows it. Unpacked,
+/// decoded or blended where it is used, off the UI thread.
 #[derive(Clone)]
-pub(crate) enum ResultRef {
+pub(crate) enum ExportImage {
+    /// The result on screen.
     Shown(Arc<image::RgbaImage>),
+    /// A result parked in the timeline while its image is off screen.
     Parked(super::timeline::StoredImage),
+    /// The unprocessed photo, with its restored faces when Faces is on.
+    Photo {
+        source: ImageSource,
+        decoded: Option<Arc<image::RgbaImage>>,
+        faces: Option<super::live_preview::FacesInput>,
+    },
 }
 
-impl ResultRef {
+impl ExportImage {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
         match self {
             Self::Shown(rgba) => Some(Arc::clone(rgba)),
             Self::Parked(stored) => stored.load(),
+            Self::Photo { source, decoded, faces } => {
+                let photo = match decoded {
+                    Some(rgba) => Arc::clone(rgba),
+                    None => source.decode_rgba().ok()?,
+                };
+                let Some(faces) = faces else { return Some(photo) };
+                if let Some(faced) = &faces.faced {
+                    return Some(Arc::new(faced.to_rgba8()));
+                }
+                let mut faced = (*photo).clone();
+                prunr_core::face::compose_faces_into(&mut faced, &faces.key.faces, faces.key.blend);
+                Some(Arc::new(faced))
+            }
         }
+    }
+
+    /// The photo as it was opened: an export can copy its file unchanged.
+    pub(crate) fn is_untouched_photo(&self) -> bool {
+        matches!(self, Self::Photo { faces: None, .. })
     }
 }
 
@@ -609,6 +634,9 @@ pub(crate) struct BatchItem {
     /// A drag's newest quick frame, shown in place of the result until
     /// the full-size render lands; never the result itself.
     pub(crate) quick: super::live_preview::QuickFrames,
+    /// The unprocessed photo with restored faces, shown in its place; not
+    /// a result. One texture while Restore faces is on before Process.
+    pub(crate) photo_look: Option<egui::TextureHandle>,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
@@ -1111,6 +1139,7 @@ impl BatchItem {
         if on {
             self.warm_neighbour_steps();
         } else {
+            self.photo_look = None;
             *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
             self.quick.clear();
         }
@@ -1214,6 +1243,15 @@ impl BatchItem {
         paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile);
     }
 
+    /// The photo's look goes once the image is no longer the unprocessed
+    /// photo, or Restore faces is off.
+    pub(crate) fn settle_photo_look(&mut self) {
+        let photo = self.timeline.current().result.is_none();
+        if self.photo_look.is_some() && !(photo && self.settings.faces.on) {
+            self.photo_look = None;
+        }
+    }
+
     /// The faces' preview, while there is one to lay over the image.
     pub(crate) fn face_preview_texture(&self) -> Option<&egui::TextureHandle> {
         self.face_preview.as_ref()?.texture.as_ref()
@@ -1309,6 +1347,7 @@ impl BatchItem {
                 tracing::info!(item_id = self.id, kind = "source", "texture uploaded");
             }
             TexTarget::QuickFrame(generation) => self.quick.land(tex, generation),
+            TexTarget::PhotoLook => self.photo_look = Some(tex),
             TexTarget::Result(request) | TexTarget::LiveResult(request) if request != self.result_tex_request => {
                 tracing::debug!(item_id = self.id, "superseded result texture dropped");
             }
@@ -2147,10 +2186,16 @@ impl BatchItem {
         }
     }
 
-    /// The result to export, parked or not; nothing is unpacked here.
-    pub(crate) fn result_ref(&self) -> Option<ResultRef> {
-        self.result_rgba.clone().map(ResultRef::Shown)
-            .or_else(|| self.timeline.current().result.clone().map(ResultRef::Parked))
+    /// What an export of this image writes: what the canvas shows, the
+    /// result (parked or not) or the photo. Nothing is unpacked here.
+    pub(crate) fn export_image(&self) -> ExportImage {
+        self.result_rgba.clone().map(ExportImage::Shown)
+            .or_else(|| self.timeline.current().result.clone().map(ExportImage::Parked))
+            .unwrap_or_else(|| ExportImage::Photo {
+                source: self.source.clone(),
+                decoded: self.source_rgba.clone(),
+                faces: self.faces_input(FaceStage::Photo),
+            })
     }
 
     /// The shown state has a result that the working copy has released.
@@ -2221,6 +2266,7 @@ impl BatchItem {
             start_dyn_cache: None,
             result_texture: None,
             quick: Default::default(),
+            photo_look: None,
             source_tex_pending: false,
             result_tex_pending: false,
             result_tex_request: 0,

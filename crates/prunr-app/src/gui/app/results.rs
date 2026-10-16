@@ -380,20 +380,27 @@ impl PrunrApp {
         crate::gui::item::FaceStage::of(self.settings.model.role())
     }
 
-    /// The image shows what Restore faces blends into: a finished result,
-    /// or No model's photo, which is its own result.
+    /// Restore faces works on what the image shows: the photo before
+    /// Process, the result after.
     fn shows_face_result(&self, idx: usize) -> bool {
-        let item = &self.batch.items[idx];
-        let photo_is_result = self.settings.model.role() == crate::gui::knob_catalog::ModelRole::Filters;
-        shows(self.settings.model, Surface::Faces) && (item.status == BatchStatus::Done || photo_is_result)
+        use crate::gui::capability::{check, ItemFacts, Need};
+        let facts = ItemFacts::of(&self.batch.items[idx]);
+        shows(self.settings.model, Surface::Faces) && check(&facts, Need::ShownImage, self.settings.model.role()).is_ready()
     }
 
-    /// Blend the faces again: a Refine re-finish for a shown upscale, a
+    /// Blend the faces again: a Refine re-finish for a shown upscale, the
+    /// photo's look before Process (No model's photo is its result), a
     /// re-cut otherwise.
     fn redo_faces_blend(&mut self, idx: usize) {
-        if self.batch.items[idx].kept_upscale().is_some() {
-            let id = self.batch.items[idx].id;
-            self.processor.live_preview.render_now(id, crate::gui::live_preview::PreviewKind::UpscaleTier2);
+        use crate::gui::capability::{ItemFacts, Shown};
+        use crate::gui::live_preview::PreviewKind;
+        let item = &self.batch.items[idx];
+        let id = item.id;
+        let photo = ItemFacts::of(item).shown == Shown::Photo && self.settings.model.role() != crate::gui::knob_catalog::ModelRole::Filters;
+        if item.kept_upscale().is_some() {
+            self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
+        } else if photo {
+            self.processor.live_preview.render_now(id, PreviewKind::Photo);
         } else {
             self.dispatch_brush_rerun(idx);
         }
@@ -533,6 +540,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let stage = self.face_stage();
         self.batch.items[idx].settle_face_preview(stage);
+        self.batch.items[idx].settle_photo_look();
         let item = &self.batch.items[idx];
         let installed = self.hardware_install_cache.has_face_model(item.settings.faces.model);
         if !item.settings.faces.on || !installed || !self.shows_face_result(idx) {
@@ -1263,13 +1271,14 @@ mod faces_tests {
         assert!(app.processor.live_preview.is_pending_for(1));
     }
 
-    /// Before an image is processed a Faces change has nothing to blend
-    /// into; a re-cut would publish the plain photo as the result.
+    /// Before an image is processed a Faces change re-renders the photo's
+    /// look, never a re-cut: that would publish the plain photo as the
+    /// result.
     #[test]
-    fn a_faces_change_before_processing_publishes_nothing() {
+    fn a_faces_change_before_processing_renders_the_photo_not_a_result() {
         let (mut app, _) = app_with_faces_on();
         app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { search: true, ..Default::default() });
-        assert!(!app.processor.live_preview.is_pending_for(1));
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(crate::gui::live_preview::PreviewKind::Photo));
     }
 
     /// Undo / redo can bring back other face settings: the faced photo and
@@ -1373,17 +1382,17 @@ mod timeline_contract_tests {
         assert_eq!(crate::gui::drag_export::export_name("noext", ExportFormat::Webp), "noext.prunr.webp");
     }
 
-    /// Cmd+S works whenever the Save button shows: a ticked finished
-    /// image is enough even while the shown one is still unprocessed.
+    /// Save writes what the canvas shows, so it works on any image: an
+    /// unprocessed photo is written as it is. Only an empty batch has
+    /// nothing to save.
     #[test]
-    fn save_is_possible_with_a_ticked_finished_image() {
-        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
-        push_test_item(&mut app, 2);
-        app.batch.select_item(1);
-        app.batch.items[0].ticked = true;
-        assert!(app.can_save_intent(), "the ticked image is done");
-        app.batch.items[0].ticked = false;
-        assert!(!app.can_save_intent(), "nothing finished to save");
+    fn save_works_on_any_image_processed_or_not() {
+        let mut app = PrunrApp::new_for_test();
+        assert!(!app.can_save_intent(), "no image");
+        push_test_item(&mut app, 1);
+        app.batch.select_item(0);
+        assert!(app.can_save_intent(), "the shown photo, unprocessed");
+        assert!(app.batch.items[0].export_image().is_untouched_photo(), "written as it was opened");
     }
 
     /// Auto-process on import runs background removal (or the No-model

@@ -165,6 +165,11 @@ impl BatchManager {
         self.selected_item().is_some_and(|b| b.id == id)
     }
 
+    /// IDs of the ticked items.
+    pub(crate) fn ticked_ids(&self) -> Vec<u64> {
+        self.items.iter().filter(|i| i.ticked).map(|i| i.id).collect()
+    }
+
     /// IDs of ticked items currently in a given status. Used by
     /// the partial-cancel path to decide which in-flight items to stop.
     pub(crate) fn ticked_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {

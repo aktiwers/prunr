@@ -23,6 +23,8 @@ mod preview;
 mod results;
 mod textures;
 mod tools;
+#[cfg(test)]
+mod shown_rule_tests;
 
 /// Quiet work shorter than this needs no pill; longer, the user wonders
 /// whether anything is happening.

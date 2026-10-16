@@ -6,17 +6,16 @@ use std::sync::{mpsc, Arc};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
-use crate::gui::item::{BatchItem, BatchStatus, ExportDepth};
-use crate::gui::state::AppState;
+use crate::gui::item::{BatchItem, ExportDepth};
 use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
 impl PrunrApp {
-    /// The Save button's and Cmd+S's one gate: the shown image has a
-    /// result, or a ticked image does.
+    /// The Save button's and Cmd+S's one gate: an image is shown or
+    /// ticked. Save writes what the canvas shows; an untouched photo is
+    /// written as it is, in the chosen format.
     pub fn can_save_intent(&self) -> bool {
-        self.batch.app_state() == AppState::Done
-            || self.batch.items.iter().any(|i| i.ticked && i.status == BatchStatus::Done)
+        self.batch.selected_item().is_some() || self.batch.items.iter().any(|i| i.ticked)
     }
 
     /// "Separate layers" applies: the switch is on and the model cuts out a
@@ -27,8 +26,7 @@ impl PrunrApp {
     }
 
     pub fn handle_save_selected(&mut self) {
-        let has_selection = self.batch.items.iter()
-            .any(|i| i.ticked && i.status == BatchStatus::Done && i.result_rgba.is_some());
+        let has_selection = self.batch.items.iter().any(|i| i.ticked);
         // Layers mode: always folder-picker, regardless of selection count.
         // The filenames are derived from each item's source stem + layer suffix.
         if self.saves_layers() {
@@ -46,7 +44,7 @@ impl PrunrApp {
     /// one; `on_save_layers_picked` writes into it.
     fn save_layers_to_folder(&mut self, has_selection: bool) {
         let targets: Vec<u64> = if has_selection {
-            self.batch.ticked_ids_with_status(BatchStatus::Done)
+            self.batch.ticked_ids()
         } else {
             self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
         };
@@ -66,7 +64,7 @@ impl PrunrApp {
             .filter_map(|id| self.batch.find_by_id(*id))
             .map(|item| LayerSave {
                 layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
-                composite: item.result_ref().map(|r| (r, item.export_bg())),
+                composite: Some((item.export_image(), item.export_bg())),
                 depth: self.settings.export_depth_map.then(|| item.depth_export()),
             })
             .collect();
@@ -100,7 +98,7 @@ impl PrunrApp {
     /// from its source; `on_save_image_picked` writes it. The sidebar's
     /// per-row save and Save with nothing ticked.
     pub(crate) fn save_item_to_file(&mut self, idx: usize) {
-        let Some(item) = self.batch.items.get(idx).filter(|i| i.result_rgba.is_some()) else { return };
+        let Some(item) = self.batch.items.get(idx) else { return };
         let preferred = self.settings.export_format;
         let request = DialogRequest::SaveImage {
             item_id: item.id,
@@ -118,12 +116,8 @@ impl PrunrApp {
             self.toasts.error("Not saved — the image was removed");
             return;
         };
-        let Some(rgba) = item.result_rgba.clone() else {
-            self.toasts.error("Nothing to save — process the image first");
-            return;
-        };
         let depth = self.settings.export_depth_map.then(|| item.depth_export());
-        let one = SaveOne { rgba, bg: item.export_bg(), depth };
+        let one = SaveOne { image: item.export_image(), bg: item.export_bg(), depth };
         let (path, format) = match prunr_core::ExportFormat::from_path(&path) {
             Some(f) => (path, f),
             None => (path.with_extension(preferred.extension()), preferred),
@@ -136,7 +130,7 @@ impl PrunrApp {
     /// One or more sidebar checkboxes selected — ask for a folder;
     /// `on_save_selected_picked` writes into it.
     fn save_selected_to_folder(&mut self) {
-        let targets = self.batch.ticked_ids_with_status(BatchStatus::Done);
+        let targets = self.batch.ticked_ids();
         self.ask_dialog(DialogRequest::SaveSelected { targets });
     }
 
@@ -146,12 +140,12 @@ impl PrunrApp {
         let with_depth = self.settings.export_depth_map;
         let items: Vec<BatchSave> = targets.iter()
             .filter_map(|id| self.batch.find_by_id(*id))
-            .filter_map(|item| Some(BatchSave {
+            .map(|item| BatchSave {
                 filename: item.filename.clone(),
-                result: item.result_ref()?,
+                result: item.export_image(),
                 bg: item.export_bg(),
                 depth: with_depth.then(|| item.depth_export()),
-            }))
+            })
             .collect();
         if items.is_empty() {
             self.toasts.error("Not saved — the images were removed");
@@ -286,10 +280,10 @@ impl PrunrApp {
         // - 2+ ticked → copy the first, show a hint toast about drag-out.
         //   (System clipboards can't hold multiple images as bitmaps; drag-out
         //    is the native multi-image export path.)
-        let with_result = |b: &BatchItem| Some((b.result_ref()?, b.export_bg()));
-        let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.ticked).filter_map(with_result).collect();
+        let shown = |b: &BatchItem| (b.export_image(), b.export_bg());
+        let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.ticked).map(shown).collect();
         let (to_copy, multi_hint) = match ticked.len() {
-            0 => (self.batch.selected_item().and_then(with_result), None),
+            0 => (self.batch.selected_item().map(shown), None),
             1 => (ticked.into_iter().next(), None),
             n => (
                 ticked.into_iter().next(),
@@ -303,7 +297,7 @@ impl PrunrApp {
         // The background goes into the clipboard image so it matches the
         // canvas; a blur of the full photo, or a parked result to unpack,
         // is made off the UI thread.
-        if let (true, crate::gui::item::ResultRef::Shown(rgba)) = (bg.is_empty(), &result) {
+        if let (true, crate::gui::item::ExportImage::Shown(rgba)) = (bg.is_empty(), &result) {
             let rgba = Arc::clone(rgba);
             self.finish_copy(&rgba, multi_hint);
             return;
@@ -333,7 +327,7 @@ impl PrunrApp {
 /// One image to save: its result, what goes behind it, and its depth map
 /// when Save options asks for it.
 struct SaveOne {
-    rgba: Arc<image::RgbaImage>,
+    image: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
     depth: Option<crate::gui::item::DepthExport>,
 }
@@ -349,9 +343,10 @@ fn spawn_save_single(
 ) {
     std::thread::spawn(move || {
         let depth = ExportDepth::default();
-        let mut outcome = match write_composite(&path, &one.rgba, &one.bg, format, &depth) {
-            Ok(()) => Ok("Saved".to_string()),
-            Err(e) => Err(format!("Save failed: {e}")),
+        let mut outcome = match one.image.load().map(|rgba| write_composite(&path, &rgba, &one.bg, format, &depth)) {
+            Some(Ok(())) => Ok("Saved".to_string()),
+            Some(Err(e)) => Err(format!("Save failed: {e}")),
+            None => Err("Save failed: the image could not be read".to_string()),
         };
         let folder = path.parent().unwrap_or(Path::new("."));
         if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
@@ -400,7 +395,7 @@ fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Pat
 /// instead when it has none.
 struct LayerSave {
     layers: crate::gui::drag_export::LayerJob,
-    composite: Option<(crate::gui::item::ResultRef, crate::gui::item::ExportBg)>,
+    composite: Option<(crate::gui::item::ExportImage, crate::gui::item::ExportBg)>,
     depth: Option<crate::gui::item::DepthExport>,
 }
 
@@ -435,7 +430,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
 /// One image of a batch save.
 struct BatchSave {
     filename: String,
-    result: crate::gui::item::ResultRef,
+    result: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
     depth: Option<crate::gui::item::DepthExport>,
 }
