@@ -57,9 +57,10 @@ fn give_cutout(item: &mut BatchItem) {
     super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 }
 
-/// The live preview decompresses the segmentation tensor once per drag:
-/// consecutive dispatch inputs share one plane, and replacing the cached
-/// tensor drops it.
+/// The live preview unpacks the segmentation tensor once per drag, on the
+/// render's thread: the first tick sends it packed, the render's unpacked
+/// copy is kept, and the next ticks share that one plane until the cached
+/// tensor changes.
 #[test]
 fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     use std::sync::Arc;
@@ -67,13 +68,22 @@ fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
     let item = push_test_item(&mut app, 3);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.on_screen = true;
     give_cutout(item);
-    let first = preview_inputs(&mut app, 3, false).expect("inputs").seg_tensor.expect("tensor");
-    let second = preview_inputs(&mut app, 3, false).expect("inputs").seg_tensor.expect("tensor");
-    assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
+    let first = preview_inputs(&mut app, 3, false).expect("inputs");
+    assert!(first.seg_tensor.is_none(), "nothing unpacked on the UI thread");
+    let packed = first.packed.seg.expect("sent packed");
+    let unpacked = Arc::new(crate::gui::live_preview::decompress_seg(&packed).expect("unpacks"));
+    let render = |seg: &Arc<_>| crate::gui::live_preview::Unpacked { seg: Some((packed.clone(), Arc::clone(seg))), edge: None };
+    app.batch.items[0].keep_unpacked(render(&unpacked));
+    let second = preview_inputs(&mut app, 3, false).expect("inputs");
+    assert!(second.packed.seg.is_none());
+    assert!(second.seg_tensor.is_some_and(|s| Arc::ptr_eq(&s, &unpacked)), "the next tick reuses the render's copy");
     let item = app.batch.find_by_id_mut(3).unwrap();
     item.set_cached_tensor(None);
     assert!(item.volatile_seg_tensor.is_none());
+    item.keep_unpacked(render(&unpacked));
+    assert!(item.volatile_seg_tensor.is_none(), "a copy of a tensor no longer cached is not kept");
 }
 
 fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
@@ -575,9 +585,13 @@ fn a_recut_landing_off_screen_keeps_the_image_parked() {
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 3);
     let inputs = preview_inputs(&mut app, 3, false).expect("the re-cut starts");
-    assert!(app.batch.items[0].volatile_seg_tensor.is_some());
+    let packed = inputs.packed.seg.clone().expect("sent packed");
     app.batch.items[0].set_on_screen(false);
-    let landed = PreviewResult { version: inputs.version, ..PreviewResult::mask_for_test(3, Arc::new(px(9))) };
+    let unpacked = crate::gui::live_preview::Unpacked {
+        seg: Some((packed.clone(), Arc::new(crate::gui::live_preview::decompress_seg(&packed).expect("unpacks")))),
+        edge: None,
+    };
+    let landed = PreviewResult { version: inputs.version, unpacked, ..PreviewResult::mask_for_test(3, Arc::new(px(9))) };
     app.apply_completed_previews(&ctx, vec![landed]);
     let item = &mut app.batch.items[0];
     assert!(item.result_rgba.is_none(), "parked");
