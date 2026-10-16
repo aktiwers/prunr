@@ -642,10 +642,38 @@ impl<'a> OutlinedFaces<'a> {
 pub(crate) const BACK: usize = 0;
 pub(crate) const AHEAD: usize = 1;
 
-/// A step next to the shown one, and its image once unpacked.
+/// A step next to the shown one, and its image and planes once
+/// unpacked: holding them keeps the step unpacked for undo to read.
 pub(crate) struct WarmStep {
-    step: super::timeline::StoredImage,
+    step: WarmKey,
     pub(crate) image: Option<Arc<image::RgbaImage>>,
+    pub(crate) planes: [Option<Arc<prunr_core::selection::MaskArtifact>>; 2],
+}
+
+/// What a step stores that undo would unpack: its result, selection and
+/// edits.
+#[derive(Clone)]
+struct WarmKey {
+    result: Option<super::timeline::StoredImage>,
+    planes: [Option<super::timeline::StoredSelection>; 2],
+}
+
+impl WarmKey {
+    fn of(step: &DocState) -> Option<Self> {
+        let key = Self { result: step.result.clone(), planes: [step.selection.clone(), step.edits.clone()] };
+        (key.result.is_some() || key.planes.iter().any(Option::is_some)).then_some(key)
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        fn eq<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        eq(&self.result, &other.result) && self.planes.iter().zip(&other.planes).all(|(a, b)| eq(a, b))
+    }
 }
 
 pub(crate) struct BatchItem {
@@ -1254,28 +1282,31 @@ impl BatchItem {
         }
     }
 
-    /// Unpack the images of the steps either side of the shown one on a
-    /// worker and hold them; drop whatever was held for other steps.
+    /// Unpack the images and planes of the steps either side of the shown
+    /// one on a worker and hold them; drop whatever was held for other
+    /// steps.
     fn warm_neighbour_steps(&self) {
         if !self.on_screen {
             return;
         }
-        let back = self.timeline.previous().and_then(|s| s.result.clone());
-        let ahead = self.timeline.next().and_then(|s| s.result.clone());
-        for (at, stored) in [(BACK, back), (AHEAD, ahead)] {
+        let back = self.timeline.previous().and_then(WarmKey::of);
+        let ahead = self.timeline.next().and_then(WarmKey::of);
+        for (at, key) in [(BACK, back), (AHEAD, ahead)] {
             let slot = Arc::clone(&self.warm_steps);
             let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            match stored {
-                Some(stored) if held[at].as_ref().is_some_and(|w| Arc::ptr_eq(&w.step, &stored)) => {}
-                Some(stored) => {
-                    held[at] = Some(WarmStep { step: Arc::clone(&stored), image: None });
+            match key {
+                Some(key) if held[at].as_ref().is_some_and(|w| w.step.same(&key)) => {}
+                Some(key) => {
+                    held[at] = Some(WarmStep { step: key.clone(), image: None, planes: [None, None] });
                     drop(held);
                     std::thread::spawn(move || {
-                        let image = stored.load();
+                        let image = key.result.as_ref().and_then(|r| r.load());
+                        let planes = key.planes.clone().map(|p| p.and_then(|p| p.load()));
                         let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         // A newer step may have taken the slot meanwhile.
-                        if let Some(w) = held[at].as_mut().filter(|w| Arc::ptr_eq(&w.step, &stored)) {
+                        if let Some(w) = held[at].as_mut().filter(|w| w.step.same(&key)) {
                             w.image = image;
+                            w.planes = planes;
                         }
                     });
                 }
@@ -1485,6 +1516,20 @@ impl BatchItem {
         }
     }
 
+    /// The shown step's result, unpacked here if parked.
+    #[cfg(test)]
+    pub(crate) fn shown_result(&self) -> Option<Arc<image::RgbaImage>> {
+        self.result_pixels().and_then(|p| p.load())
+    }
+
+    /// A parked result a texture build unpacked: held again while the
+    /// step still shows it, so its readers find it without a decode.
+    pub(crate) fn hold_unpacked_result(&mut self, rgba: Arc<image::RgbaImage>) {
+        if self.result_parked() && self.timeline.current().result.as_ref().is_some_and(|r| r.holds(&rgba)) {
+            self.result_rgba = Some(rgba);
+        }
+    }
+
     /// The decoded source lands: the item holds its pixels (`true`), or
     /// shows why decoding failed.
     pub(crate) fn land_decode(&mut self, result: Result<Arc<image::RgbaImage>, String>) -> bool {
@@ -1645,8 +1690,9 @@ impl BatchItem {
         self.subject = None;
         let shown = self.timeline.current().clone();
         // Off screen the restored step's result stays parked in the
-        // timeline; on screen the neighbour warm-up has it unpacked.
-        self.result_rgba = shown.result.as_ref().filter(|_| self.on_screen).and_then(|r| r.load());
+        // timeline; on screen the neighbour warm-up has it unpacked, and
+        // when it has not yet, the result texture's build unpacks it.
+        self.result_rgba = shown.result.as_ref().filter(|_| self.on_screen).and_then(|r| r.loaded());
         self.applied_recipe = shown.recipe;
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
         self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
@@ -1659,7 +1705,7 @@ impl BatchItem {
         self.job = None;
         self.tile_preview = None;
         self.reset_result_caches();
-        if self.result_rgba.is_none() {
+        if shown.result.is_none() {
             // Back to the original: the source is already on the GPU.
             self.start_reveal();
         }

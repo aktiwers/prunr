@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::gui::item::{BatchItem, Engine, KeptRunTier};
+use crate::gui::item::{BatchItem, Engine, KeptRunTier, Pixels};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::background_io::TexTarget;
 use crate::gui::live_preview::PreviewKind;
@@ -391,7 +391,7 @@ impl PrunrApp {
                     if item.on_screen {
                         item.quick.expect(r.generation);
                         Self::spawn_tex_prep(
-                            r.rgba, item.id, Self::tex_name("quick", item.id, None),
+                            Pixels::Resident(r.rgba), item.id, Self::tex_name("quick", item.id, None),
                             TexTarget::QuickFrame(r.generation), handles.clone(), ctx.clone(),
                         );
                     }
@@ -403,7 +403,7 @@ impl PrunrApp {
                     }
                     if item.on_screen {
                         Self::spawn_tex_prep(
-                            r.rgba, item.id, Self::tex_name("photo-look", item.id, None),
+                            Pixels::Resident(r.rgba), item.id, Self::tex_name("photo-look", item.id, None),
                             TexTarget::PhotoLook, handles.clone(), ctx.clone(),
                         );
                     }
@@ -472,7 +472,7 @@ impl PrunrApp {
                     let switch = self.result_switch_id;
                     let target = item.request_result_texture(true);
                     Self::spawn_tex_prep(
-                        Arc::clone(&new_rgba), item.id, Self::tex_name("result", item.id, Some(switch)),
+                        Pixels::Resident(Arc::clone(&new_rgba)), item.id, Self::tex_name("result", item.id, Some(switch)),
                         target, handles.clone(), ctx.clone(),
                     );
                     item.quick.supersede();
@@ -697,10 +697,10 @@ mod landing_tests {
 
     /// Land the next prepared texture on the item, as the frame loop does.
     fn land_next_texture(app: &mut PrunrApp, ctx: &egui::Context) -> TexTarget {
-        let (id, name, image, target) = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
-        let texture = ctx.load_texture(name, image, Default::default());
-        app.batch.find_by_id_mut(id).expect("the item").land_texture(texture, target);
-        target
+        let prep = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
+        let texture = ctx.load_texture(prep.name, prep.image, Default::default());
+        app.batch.find_by_id_mut(prep.item_id).expect("the item").land_texture(texture, prep.target);
+        prep.target
     }
 
     #[test]
