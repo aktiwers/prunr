@@ -277,7 +277,7 @@ impl<T: Payload> Stored<T> {
 impl<T: Payload> Drop for Stored<T> {
     fn drop(&mut self) {
         if let Tier::OnDisk(path) | Tier::Loaded(_, Encoded::File(path)) = &*self.lock() {
-            let _ = std::fs::remove_file(path);
+            super::disk_queue::remove(path.clone());
         }
     }
 }
@@ -616,6 +616,7 @@ mod tests {
         };
         assert_eq!(cell.load().unwrap().get_pixel(3, 3), &image::Rgba([9, 9, 9, 255]));
         drop(cell);
+        super::super::disk_queue::flush();
         assert!(!path.exists(), "the file is removed with its last state");
     }
 

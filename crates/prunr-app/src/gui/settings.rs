@@ -264,7 +264,7 @@ impl Settings {
     pub fn save(&self) {
         let Some(path) = Self::config_path() else { return };
         match serde_json::to_string_pretty(self) {
-            Ok(json) => super::config_writer::write(path, json.into_bytes()),
+            Ok(json) => super::disk_queue::write(path, json.into_bytes()),
             Err(err) => tracing::warn!(%err, "settings not saved"),
         }
     }
