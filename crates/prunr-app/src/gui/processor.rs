@@ -505,6 +505,22 @@ pub(crate) struct RunPicture {
     pub item_id: u64,
     pub from: PictureFrom,
     pub update: prunr_core::ProgressUpdate,
+    /// A tile's pixels, made ready for upload on the run's thread; the
+    /// tile in `update` keeps only its place.
+    pub tile: Option<Arc<egui::ColorImage>>,
+}
+
+impl RunPicture {
+    pub(crate) fn new(item_id: u64, from: PictureFrom, mut update: prunr_core::ProgressUpdate) -> Self {
+        let tile = match &mut update {
+            prunr_core::ProgressUpdate::TilePreview(t) => {
+                let rgba = std::mem::take(&mut t.rgba);
+                Some(Arc::new(egui::ColorImage::from_rgba_unmultiplied([t.width as usize, t.height as usize], &rgba)))
+            }
+            _ => None,
+        };
+        Self { item_id, from, update, tile }
+    }
 }
 
 /// Where a tile picture lands: its item, maker and rectangle on a
@@ -565,7 +581,7 @@ impl prunr_core::ProgressSink for PictureSink {
         match update {
             update @ (prunr_core::ProgressUpdate::TilePreview(_) | prunr_core::ProgressUpdate::Faces(_)) => {
                 if (self.current)() {
-                    let _ = self.pictures.send(RunPicture { item_id: self.item_id, from: self.from, update });
+                    let _ = self.pictures.send(RunPicture::new(self.item_id, self.from, update));
                 }
             }
             update => {
@@ -2326,8 +2342,8 @@ mod tests {
     fn a_tile_painted_twice_before_a_frame_lands_once() {
         use prunr_core::{ProgressUpdate, TilePreview};
         let tile = |x: u32, v: u8| ProgressUpdate::TilePreview(TilePreview { x, y: 0, width: 2, height: 2, full_width: 8, full_height: 8, rgba: vec![v; 16] });
-        let run = |item_id, update| RunPicture { item_id, from: PictureFrom::Run, update };
-        let face = |item_id, update| RunPicture { item_id, from: PictureFrom::FaceSearch, update };
+        let run = |item_id, update| RunPicture::new(item_id, PictureFrom::Run, update);
+        let face = |item_id, update| RunPicture::new(item_id, PictureFrom::FaceSearch, update);
         let mut p = fixture();
         let tx = p.picture_sender();
         for picture in [run(1, tile(0, 1)), run(1, tile(4, 2)), run(2, tile(0, 3)), face(1, tile(0, 5)), face(1, ProgressUpdate::Faces(Vec::new())), run(1, tile(0, 4))] {
@@ -2354,7 +2370,7 @@ mod tests {
         let first = PictureSink::of_run(4, slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Loading")), tx.clone());
         first.report(tile());
         first.report(ProgressUpdate::Step(Step::Erasing));
-        let run = |item_id| RunPicture { item_id, from: PictureFrom::Run, update: tile() };
+        let run = |item_id| RunPicture::new(item_id, PictureFrom::Run, tile());
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![run(4)]);
         assert_eq!(slot.read().map(|p| p.step_label), Some(Step::Erasing.label().into()));
 
@@ -2370,7 +2386,7 @@ mod tests {
         no_pill.report(ProgressUpdate::Step(Step::Finishing));
         no_pill.report(tile());
         assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![RunPicture { item_id: 6, from: PictureFrom::FaceSearch, update: tile() }]);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(6, PictureFrom::FaceSearch, tile())]);
         let previews = no_pill.clone().into_progress();
         assert!(previews.preview_edge().is_some());
         open.store(false, Ordering::Release);
@@ -2447,7 +2463,7 @@ mod tests {
         let (_, current) = p.begin_faces_search();
         let sink = PictureSink::of_face_search(3, None, current, p.picture_sender());
         sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![RunPicture { item_id: 3, from: PictureFrom::FaceSearch, update: ProgressUpdate::Faces(Vec::new()) }]);
+        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(3, PictureFrom::FaceSearch, ProgressUpdate::Faces(Vec::new()))]);
         let _next = p.begin_faces_search();
         sink.report(ProgressUpdate::Faces(Vec::new()));
         assert!(p.picture_rx.try_recv().is_err(), "a newer search took over");
