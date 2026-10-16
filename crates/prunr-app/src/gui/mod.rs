@@ -31,6 +31,7 @@ pub mod env_overrides;
 pub mod dispatch_progress;
 pub(crate) mod first_look;
 pub mod automation;
+pub(crate) mod capability;
 
 #[cfg(test)]
 mod tests;
