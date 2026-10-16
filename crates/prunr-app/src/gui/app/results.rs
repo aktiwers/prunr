@@ -229,7 +229,7 @@ impl PrunrApp {
     /// the user hears why.
     fn end_run_without_result(&mut self, item_id: u64, run: &str, why: RunLost) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if item.status != BatchStatus::Processing && item.job.is_none() {
+        if item.status() != BatchStatus::Processing && item.job.is_none() {
             return;
         }
         let name = item.filename.clone();
@@ -497,7 +497,7 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let item = &self.batch.items[idx];
         let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
-        let has_result = item.status == BatchStatus::Done || role == ModelRole::Filters;
+        let has_result = item.status() == BatchStatus::Done || role == ModelRole::Filters;
         if reads && has_result && shows(self.settings.model, Surface::Effect) {
             self.rerun_photo(idx);
         }
@@ -604,7 +604,7 @@ impl PrunrApp {
         if !self.settings.animations {
             return;
         }
-        let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.status == BatchStatus::Processing && i.job_is_current());
+        let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.status() == BatchStatus::Processing && i.job_is_current());
         if !self.batch.is_selected(item_id) || !awaited {
             return;
         }
@@ -656,7 +656,7 @@ impl PrunrApp {
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                if item.status == BatchStatus::Processing {
+                if item.status() == BatchStatus::Processing {
                     item.abandon_job();
                 }
             }
@@ -667,7 +667,7 @@ impl PrunrApp {
 
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         // A cancelled run's item already shows its state again.
-        if item.status != BatchStatus::Processing {
+        if item.status() != BatchStatus::Processing {
             return;
         }
         if !item.job_is_current() {
@@ -682,7 +682,6 @@ impl PrunrApp {
         if succeeded {
             item.finish_job();
         } else {
-            item.job = None;
             item.reveal = None;
             item.subject = None;
         }
@@ -690,7 +689,7 @@ impl PrunrApp {
         // reports (when did inference actually finish?) and as a stable
         // signal for any external observer (e.g. a smoke driver) that a
         // dispatch round-trip closed for this item.
-        tracing::info!(item_id, status = ?item.status, "item processing complete");
+        tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
         // A model the accelerator does not run used the CPU by design; the
         // app's accelerator, and the job count derived from it, stay.
@@ -753,7 +752,7 @@ impl PrunrApp {
             tracing::info!(item_id, token, outcome, "spare line scales dropped: the kept lines are another run's");
             return;
         }
-        let rerun = failed && item.status == BatchStatus::Done && item.lines_need_a_run();
+        let rerun = failed && item.status() == BatchStatus::Done && item.lines_need_a_run();
         tracing::info!(item_id, token, outcome, rerun, "spare line scales landed");
         self.batch.enforce_tensor_budget();
         if rerun && self.batch.is_selected(item_id) {
@@ -774,7 +773,7 @@ impl PrunrApp {
     fn on_batch_complete(&mut self, batch: u64) {
         let never_answered = self.processor.finish_batch(batch);
         let unanswered: Vec<u64> = self.batch.items.iter()
-            .filter(|i| never_answered.contains(&i.id) && i.status == BatchStatus::Processing && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
+            .filter(|i| never_answered.contains(&i.id) && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
             .map(|i| i.id)
             .collect();
         for item_id in unanswered {
@@ -890,14 +889,10 @@ impl PrunrApp {
                 Ok(rgba) => {
                     self.publish_result(item_id, rgba, "filter", ctx);
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                        item.status = BatchStatus::Done;
                         item.finish_job();
                     }
                 }
-                Err(msg) => {
-                    item.job = None;
-                    item.status = BatchStatus::Error(msg);
-                }
+                Err(msg) => item.fail(msg),
             }
             filter_only_arrived = true;
         }
@@ -1207,7 +1202,7 @@ mod faces_tests {
         use crate::gui::timeline::StepKind;
         let (mut app, _) = app_with_faces_on();
         let item = &mut app.batch.items[0];
-        item.status = crate::gui::item::BatchStatus::Done;
+        item.set_status_for_test(crate::gui::item::BatchStatus::Done);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
         item.commit(StepKind::Process);
         item.record_origin(Engine::Segment, None, None);
@@ -1262,7 +1257,7 @@ mod faces_tests {
     #[test]
     fn a_blend_change_reblends() {
         let (mut app, _) = app_with_faces_on();
-        app.batch.items[0].status = crate::gui::item::BatchStatus::Done;
+        app.batch.items[0].set_status_for_test(crate::gui::item::BatchStatus::Done);
         let faced = Arc::new(image::DynamicImage::new_rgba8(8, 8));
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         app.batch.items[0].faced_photo = Some((faced, key));
@@ -1366,7 +1361,7 @@ mod timeline_contract_tests {
         item.dimensions = (4, 4);
         item.source_rgba = Some(px(0));
         item.result_rgba = Some(px(1));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.commit(StepKind::Process);
         app.batch.select_item(0);
         app
@@ -1406,7 +1401,7 @@ mod timeline_contract_tests {
             app.settings.auto_process_on_import = true;
             push_test_item(&mut app, 5);
             app.auto_process_imported(5);
-            let ran = matches!(app.batch.items[0].status, BatchStatus::Processing);
+            let ran = matches!(app.batch.items[0].status(), BatchStatus::Processing);
             assert_eq!(ran, matches!(model, SettingsModel::BiRefNetLite | SettingsModel::None), "{model:?}");
         }
     }
@@ -1420,7 +1415,7 @@ mod timeline_contract_tests {
         push_test_item(&mut app, 2).settings.line_mode = prunr_core::LineMode::EdgesOnly;
         app.batch.select_item(0);
         app.process_items(|_| true, Some(StepKind::Process));
-        assert!(app.batch.items.iter().all(|i| matches!(i.status, BatchStatus::Processing)), "both run as filters");
+        assert!(app.batch.items.iter().all(|i| matches!(i.status(), BatchStatus::Processing)), "both run as filters");
         assert_eq!(app.batch.items[1].settings.line_mode, prunr_core::LineMode::Off, "and show the settings they ran with");
     }
 
@@ -1616,7 +1611,7 @@ mod timeline_contract_tests {
         let old = ctx.load_texture("old", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let item = &mut app.batch.items[0];
         item.result_texture = Some(old.clone());
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
         app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
@@ -1624,7 +1619,7 @@ mod timeline_contract_tests {
         assert_eq!(shown(&app), Some(5));
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays until the new one lands");
         assert!(item.result_tex_pending);
-        assert_eq!(item.status, BatchStatus::Done);
+        assert_eq!(item.status(), BatchStatus::Done);
         assert!(item.job.is_none(), "the step is recorded");
     }
 
@@ -1798,14 +1793,14 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         app.handle_undo(&ctx);
         assert!(app.processor.cancels.is_cancelled(1), "the run is asked to stop");
 
         let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.answer_for_test(&ctx, 1, Ok(late));
         assert_eq!(shown(&app), None, "undo went back to the original and stays there");
-        assert_eq!(app.batch.items[0].status, BatchStatus::Pending);
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Pending);
     }
 
     /// A ticked image off screen that Process re-runs under the shown
@@ -1843,12 +1838,12 @@ mod timeline_contract_tests {
             edit(&mut app.batch.items[0].settings);
             app.batch.items[0].commit(StepKind::Adjust);
             app.process_items(|i| i.ticked, Some(StepKind::Process));
-            assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "{what}: the ticked image reruns");
+            assert_eq!(app.batch.items[1].status(), BatchStatus::Processing, "{what}: the ticked image reruns");
 
             let rerun = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 90, 90, 255])), active_provider: String::new() };
             app.answer_for_test(&ctx, 2, Ok(rerun));
             let item = &mut app.batch.items[1];
-            assert_eq!(item.status, BatchStatus::Done, "{what}");
+            assert_eq!(item.status(), BatchStatus::Done, "{what}");
             assert_eq!(item.timeline.undo_steps(), steps_before + 1, "{what}: the rerun is a step of its own");
             assert!(item.undo_step().is_some(), "{what}");
             assert_eq!(item.settings, before, "{what}: undo brings back its own settings");
@@ -1894,18 +1889,18 @@ mod timeline_contract_tests {
             };
             let first = process(&mut app, 2.0);
             app.handle_cancel_selected();
-            assert_ne!(app.batch.items[0].status, BatchStatus::Processing, "{what}: the cancel stops the wait");
+            assert_ne!(app.batch.items[0].status(), BatchStatus::Processing, "{what}: the cancel stops the wait");
             assert!(app.batch.items[0].job.is_none(), "{what}: nothing is awaited after the cancel");
             let second = process(&mut app, 4.0);
-            assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "{what}");
+            assert_eq!(app.batch.items[0].status(), BatchStatus::Processing, "{what}");
 
             app.on_batch_item_done(&ctx, first, 1, late, None, None);
-            assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "{what}: the cancelled run's answer does not end the new run");
+            assert_eq!(app.batch.items[0].status(), BatchStatus::Processing, "{what}: the cancelled run's answer does not end the new run");
             assert_eq!(shown(&app), Some(1), "{what}: nor lands on it");
 
             let own = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
             app.on_batch_item_done(&ctx, second, 1, Ok(own), None, None);
-            assert_eq!(app.batch.items[0].status, BatchStatus::Done, "{what}");
+            assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "{what}");
             assert_eq!(shown(&app), Some(9), "{what}: the new run's own result lands");
         }
     }
@@ -1919,14 +1914,14 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         item.settings.gamma = 1.8;
         item.commit(StepKind::Adjust);
 
         let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.answer_for_test(&ctx, 1, Ok(late));
         let item = &app.batch.items[0];
-        assert_eq!(item.status, BatchStatus::Done, "shows its current state again");
+        assert_eq!(item.status(), BatchStatus::Done, "shows its current state again");
         assert!(item.job.is_none(), "nothing is awaited any more");
         assert_eq!(shown(&app), Some(1), "the late result did not land");
         assert!(!crate::gui::automation::state::dump(&app).busy);
@@ -1954,7 +1949,7 @@ mod timeline_contract_tests {
         for (model, engine, step) in runs {
             let mut app = app_with_processed_item(model);
             app.batch.items[0].start_job(Some(step), engine);
-            app.batch.items[0].status = BatchStatus::Processing;
+            app.batch.items[0].set_status_for_test(BatchStatus::Processing);
             app.batch.items[0].settings.gamma = 1.8;
             app.batch.items[0].commit(StepKind::Adjust);
             let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
@@ -1962,7 +1957,7 @@ mod timeline_contract_tests {
             app.pump_upscale_results(&ctx);
             app.pump_colorize_results(&ctx);
             let item = &app.batch.items[0];
-            assert_eq!(item.status, BatchStatus::Done, "{engine:?}: shows its current state again");
+            assert_eq!(item.status(), BatchStatus::Done, "{engine:?}: shows its current state again");
             assert!(item.job.is_none(), "{engine:?}: the run is over");
             assert_eq!(shown(&app), Some(1), "{engine:?}: the late result did not land");
         }
@@ -1975,11 +1970,11 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         let recipe = item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
         let batch = app.processor.track_dispatch(recipe, [1]);
         app.on_batch_complete(batch);
-        assert_eq!(app.batch.items[0].status, BatchStatus::Done);
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Done);
         assert!(app.batch.items[0].job.is_none());
         assert!(!crate::gui::automation::state::dump(&app).busy);
     }
@@ -1993,18 +1988,18 @@ mod timeline_contract_tests {
         queued.dimensions = (4, 4);
         for item in &mut app.batch.items {
             item.start_job(Some(StepKind::Process), Engine::Segment);
-            item.status = BatchStatus::Processing;
+            item.set_status_for_test(BatchStatus::Processing);
         }
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
         let first = app.processor.track_dispatch(recipe.clone(), [1]);
         let queued = app.processor.track_dispatch(recipe, [2]);
         app.on_batch_complete(first);
-        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "its own unanswered image is freed");
-        assert_eq!(app.batch.items[1].status, BatchStatus::Processing, "the queued batch's image waits for its own batch");
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "its own unanswered image is freed");
+        assert_eq!(app.batch.items[1].status(), BatchStatus::Processing, "the queued batch's image waits for its own batch");
         assert!(app.batch.items[1].job.is_some());
         assert_eq!(app.processor.current_dispatch_progress(), Some((0, 1)), "the queued batch is still tracked");
         app.on_batch_complete(queued);
-        assert_eq!(app.batch.items[1].status, BatchStatus::Pending, "never answered and never had a result: back to Pending");
+        assert_eq!(app.batch.items[1].status(), BatchStatus::Pending, "never answered and never had a result: back to Pending");
         assert!(app.batch.items[1].job.is_none());
     }
 
@@ -2020,7 +2015,7 @@ mod timeline_contract_tests {
         app.settings.parallel_jobs = 3;
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         let cpu = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: "CPU".into() };
         app.answer_for_test(&ctx, 1, Ok(cpu));
         assert_eq!(app.settings.active_backend, "OpenVINO");
@@ -2033,7 +2028,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let item = &mut app.batch.items[0];
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         let fresh = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.answer_for_test(&ctx, 1, Ok(fresh));
         assert_eq!(shown(&app), Some(9));
@@ -2101,7 +2096,7 @@ mod depth_tests {
             let mut app = PrunrApp::new_for_test();
             app.settings.model = model;
             let item = push_test_item(&mut app, 1);
-            item.status = status;
+            item.set_status_for_test(status);
             set(&mut item.settings);
             let epoch = item.depth_run.epoch;
             assert!(item.land_depth(epoch, Ok(map())));
@@ -2206,7 +2201,7 @@ mod first_look_tests {
             let item = push_test_item(&mut app, id);
             item.dimensions = (8, 8);
             item.start_job(Some(StepKind::Process), Engine::Segment);
-            item.status = BatchStatus::Processing;
+            item.set_status_for_test(BatchStatus::Processing);
         }
         app.batch.select_item(0);
         app
@@ -2277,7 +2272,7 @@ mod first_look_tests {
         let mut app = two_images_cut();
         app.on_seg_report(1, subject(3), &ctx);
         assert!(texture_of(&app, 0).is_some());
-        app.batch.items[0].status = BatchStatus::Pending;
+        app.batch.items[0].set_status_for_test(BatchStatus::Pending);
         app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
         assert!(texture_of(&app, 0).is_none(), "a new run starts without the last one's outline");
     }
@@ -2336,7 +2331,7 @@ mod spare_scales_tests {
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         assert!(holds(&app, &EdgeScale::ALL), "the run's own spare scales fill in Fine");
         assert!(!awaits(&app));
-        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "nothing runs again");
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "nothing runs again");
 
         let mut app = waiting_for_fine();
         app.on_spare_edge_scales(1, 4, made(&[Fine]));
@@ -2367,18 +2362,18 @@ mod spare_scales_tests {
         let mut app = waiting_for_fine();
         app.on_spare_edge_scales(1, 5, SpareLanding::Skipped);
         assert!(!awaits(&app));
-        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "a cancel starts no run");
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "a cancel starts no run");
 
         let mut app = waiting_for_fine();
         app.on_spare_edge_scales(1, 5, SpareLanding::Failed);
         assert!(!awaits(&app));
-        assert_eq!(app.batch.items[0].status, BatchStatus::Processing, "the lines run again");
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Processing, "the lines run again");
 
         let mut app = waiting_for_fine();
         push_test_item(&mut app, 2);
         app.batch.select_item(1);
         app.on_spare_edge_scales(1, 5, SpareLanding::Failed);
-        assert_eq!(app.batch.items[0].status, BatchStatus::Done, "a background image waits for Process");
+        assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "a background image waits for Process");
         assert!(app.batch.items[0].lines_need_a_run());
     }
 

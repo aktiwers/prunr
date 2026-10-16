@@ -476,7 +476,7 @@ mod toast_kind_tests {
 
     fn done_item(app: &mut PrunrApp, id: u64) {
         let item = push_test_item(app, id);
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))));
     }
 

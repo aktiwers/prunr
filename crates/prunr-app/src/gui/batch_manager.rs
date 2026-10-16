@@ -150,7 +150,7 @@ impl BatchManager {
     pub(crate) fn app_state(&self) -> AppState {
         match self.selected_item() {
             None => AppState::Empty,
-            Some(item) => match item.status {
+            Some(item) => match item.status() {
                 BatchStatus::Done => AppState::Done,
                 BatchStatus::Processing => AppState::Processing,
                 _ => AppState::Loaded,
@@ -183,7 +183,7 @@ impl BatchManager {
     }
 
     fn ticked_with_status(&self, status: BatchStatus) -> impl Iterator<Item = &BatchItem> {
-        self.items.iter().filter(move |i| i.ticked && i.status == status)
+        self.items.iter().filter(move |i| i.ticked && i.status() == status)
     }
 
     /// Tick or untick every item's checkbox.
@@ -309,12 +309,12 @@ impl BatchManager {
         true
     }
 
-    /// Return every `Processing` item to the state it shows, after a
-    /// Cancel-All. Late arrivals from the worker are dropped by the job
-    /// check in `on_batch_item_done`.
-    pub(crate) fn reset_processing_to_pending(&mut self) {
+    /// Abandon every cut, under way or waiting for a slot, after a
+    /// Cancel-All: each image shows its own state again. Late arrivals
+    /// from the worker are dropped by the job check in `on_batch_item_done`.
+    pub(crate) fn abandon_cuts(&mut self) {
         for item in &mut self.items {
-            if item.status == BatchStatus::Processing {
+            if item.job.as_ref().is_some_and(|j| j.engine == super::item::Engine::Segment) {
                 item.abandon_job();
             }
         }
@@ -343,7 +343,7 @@ impl BatchManager {
     pub(crate) fn status_counts(&self) -> StatusCounts {
         let mut c = StatusCounts::default();
         for item in &self.items {
-            match item.status {
+            match item.status() {
                 BatchStatus::Done => c.done += 1,
                 BatchStatus::Processing => c.processing += 1,
                 BatchStatus::Error(_) => c.errored += 1,
@@ -373,10 +373,7 @@ impl BatchManager {
     /// Used for batch-failure toasts so the user sees the *reason* instead of
     /// just the count.
     pub(crate) fn first_error_message(&self) -> Option<&str> {
-        self.items.iter().find_map(|item| match &item.status {
-            BatchStatus::Error(msg) => Some(msg.as_str()),
-            _ => None,
-        })
+        self.items.iter().find_map(BatchItem::error)
     }
 
     /// Pre-decode source bytes to RgbaImage on a background thread; the
@@ -600,7 +597,7 @@ impl BatchManager {
     /// The items a drag from row `idx` carries: every ticked one when that
     /// row is ticked, else that row; never one still processing.
     pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
-        let free = |b: &&BatchItem| b.status != BatchStatus::Processing;
+        let free = |b: &&BatchItem| b.status() != BatchStatus::Processing;
         match self.items.get(idx) {
             Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).filter(free).map(|b| b.id).collect(),
             Some(row) => std::iter::once(row).filter(free).map(|b| b.id).collect(),
@@ -753,7 +750,7 @@ impl BatchManager {
     /// over next time.
     pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<CachedTensorWork> {
         fn start_over(item: &mut BatchItem, why: String) {
-            item.status = BatchStatus::Error(why);
+            item.fail(why);
             item.set_cached_tensor(None);
             item.applied_recipe = None;
         }
@@ -771,7 +768,7 @@ impl BatchManager {
                         original_bytes: bytes,
                         mask: item.settings.mask_settings(),
                     });
-                    item.status = BatchStatus::Processing;
+                    item.mark_running();
                 }
                 (None, _) => start_over(item, "Tensor cache corrupt".into()),
                 (_, Err(e)) => start_over(item, super::item::load_failed(e)),
@@ -794,13 +791,6 @@ impl BatchManager {
         self.in_set(ids).filter_map(BatchItem::full_run_work).collect()
     }
 
-    /// The images in `ids` not under way wait their turn; one that has
-    /// just failed keeps its error.
-    pub(crate) fn mark_waiting(&mut self, ids: &HashSet<u64>) {
-        for item in self.in_set(ids).filter(|i| matches!(i.status, BatchStatus::Done | BatchStatus::Pending)) {
-            item.status = BatchStatus::Pending;
-        }
-    }
 }
 
 /// Compute dimensions that fit within `max_w` × `max_h` preserving aspect ratio.
@@ -833,7 +823,7 @@ mod tests {
         item.on_screen = true;
         let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
         item.result_rgba = Some(Arc::clone(&rgba));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.commit(crate::gui::timeline::StepKind::Process);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([1, 1, 1, 255]))));
         item.commit(crate::gui::timeline::StepKind::Edit);
@@ -998,7 +988,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            item.set_status_for_test(status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1027,7 +1017,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            item.set_status_for_test(status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1044,7 +1034,7 @@ mod tests {
     fn progress_stage_says_finishing_when_no_in_flight() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 0);
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         bm.items.push(item);
 
         let report = bm.progress();
@@ -1065,7 +1055,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            item.set_status_for_test(status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -1571,9 +1561,9 @@ mod tests {
         bm.items[2].ticked = true;
         assert_eq!(bm.drag_targets(0), [0, 2]);
         assert_eq!(bm.drag_targets(1), [1]);
-        bm.items[2].status = BatchStatus::Processing;
+        bm.items[2].set_status_for_test(BatchStatus::Processing);
         assert_eq!(bm.drag_targets(0), [0]);
-        bm.items[1].status = BatchStatus::Processing;
+        bm.items[1].set_status_for_test(BatchStatus::Processing);
         assert!(bm.drag_targets(1).is_empty());
     }
 
@@ -1585,7 +1575,7 @@ mod tests {
         for id in 0..3 {
             bm.items.push(item_with_cache(id, 0));
         }
-        bm.items[1].status = BatchStatus::Processing;
+        bm.items[1].set_status_for_test(BatchStatus::Processing);
         let agree = |bm: &BatchManager| {
             bm.any_ticked_with_status(BatchStatus::Processing)
                 != bm.ticked_ids_with_status(BatchStatus::Processing).is_empty()

@@ -32,7 +32,7 @@ pub(crate) fn cut_out(item: &mut BatchItem, model: prunr_core::ModelKind) {
     if item.result_rgba.is_none() {
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(w, h)));
     }
-    item.status = crate::gui::item::BatchStatus::Done;
+    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     item.amend();
     item.record_origin(crate::gui::item::Engine::Segment, None, Some(crate::gui::item::Cutter::Model(model)));
 }

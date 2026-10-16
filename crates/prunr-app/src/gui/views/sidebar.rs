@@ -194,7 +194,7 @@ fn render_item_row(
         actions.needs_repaint = true;
     }
 
-    let status = if running { &BatchStatus::Processing } else { &app.batch.items[i].status };
+    let status = if running { &BatchStatus::Processing } else { &app.batch.items[i].status() };
     if paint_status_indicator(ui, status, item_rect, ctx.anim_time) {
         actions.needs_repaint = true;
     }
@@ -331,7 +331,7 @@ fn paint_thumbnail(
 
     // Gate on `Done`, not `result_rgba`: a background item's result may be
     // released while its thumbnail, built from the result, stays.
-    if matches!(item.status, BatchStatus::Done) {
+    if matches!(item.status(), BatchStatus::Done) {
         let (w, h) = item.dimensions;
         super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32));
     }
