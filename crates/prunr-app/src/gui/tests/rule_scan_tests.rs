@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const OWNERS: [&str; 2] = ["gui/item.rs", "gui/capability/"];
 
-const BANNED: [(&str, &str); 12] = [
+const BANNED: [(&str, &str); 18] = [
     ("result_rgba.is_some()", "BatchItem::has_result() (parked results count)"),
     ("result_rgba.is_none()", "BatchItem::has_result() (parked results count)"),
     ("status() == BatchStatus::Done", "has_result(), or the capability check for what may run"),
@@ -23,6 +23,12 @@ const BANNED: [(&str, &str); 12] = [
     ("AppState::Loaded | AppState::Done", "is_idle() or verdict(): the selected item's display state is not a gate"),
     ("app_state() == AppState::Processing", "is_cutting() / is_idle()"),
     ("status_counts().processing", "any_awaiting_cut() (counts waiting cuts too)"),
+    ("counts.processing", "any_awaiting_cut() (counts waiting cuts too)"),
+    ("status(), BatchStatus::Done", "has_result()"),
+    ("status(), BatchStatus::Pending", "has_result()"),
+    ("status(), BatchStatus::Processing", "is_cutting(), or is_idle() for any run"),
+    ("j.engine == Engine::Segment", "awaits_cut()"),
+    ("j.engine == super::item::Engine::Segment", "awaits_cut()"),
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

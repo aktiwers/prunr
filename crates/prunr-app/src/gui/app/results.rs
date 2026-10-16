@@ -483,7 +483,10 @@ impl PrunrApp {
         self.after_depth_landed(idx);
         let item_id = self.batch.items[idx].id;
         if let Some(click) = self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id) {
-            self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
+            // The click waited for the map; a run started meanwhile holds edits.
+            if self.batch.items[idx].is_idle() {
+                self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
+            }
         }
     }
 
@@ -771,14 +774,14 @@ impl PrunrApp {
     fn on_batch_complete(&mut self, batch: u64) {
         let never_answered = self.processor.finish_batch(batch);
         let unanswered: Vec<u64> = self.batch.items.iter()
-            .filter(|i| never_answered.contains(&i.id) && i.job.as_ref().is_some_and(|j| j.engine == Engine::Segment))
+            .filter(|i| never_answered.contains(&i.id) && i.awaits_cut())
             .map(|i| i.id)
             .collect();
         for item_id in unanswered {
             self.end_run_without_result(item_id, "processing", RunLost::Unanswered);
         }
         let counts = self.batch.status_counts();
-        let still_processing = counts.processing > 0;
+        let still_processing = self.batch.any_awaiting_cut();
         if counts.errored > 0 {
             let first_err = self.batch.first_error_message().unwrap_or("unknown error");
             let msg = if counts.errored == 1 {

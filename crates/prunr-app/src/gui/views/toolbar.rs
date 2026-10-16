@@ -174,11 +174,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     ("Cancel all", "Stop all processing.")
                 };
                 if tooltip(with_fill(ui, theme::DESTRUCTIVE, |ui| ui.add(cancel_btn)), title, body, Some(Action::Cancel)).clicked() {
-                    if partial {
-                        app.handle_cancel_selected();
-                    } else {
-                        app.handle_cancel_all_and_reset();
-                    }
+                    app.handle_cancel_cuts();
                 }
             }
 

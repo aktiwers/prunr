@@ -131,7 +131,9 @@ impl PrunrApp {
     /// the selected one after sidebar navigation, or one a queued render
     /// reads.
     pub(super) fn ensure_source_decoded(&mut self, idx: usize) {
-        if self.batch.items[idx].source_rgba.is_some() || self.batch.items[idx].decode_pending {
+        let item = &self.batch.items[idx];
+        // A source that failed to decode is not asked for again every frame.
+        if item.source_rgba.is_some() || item.decode_pending || item.decode_failed {
             return;
         }
         self.batch.items[idx].decode_pending = true;

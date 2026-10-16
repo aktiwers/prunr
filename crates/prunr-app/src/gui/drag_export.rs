@@ -187,7 +187,7 @@ impl LayerJob {
             // The cut-out's mask only while it made the image shown: after
             // an undo to the photo there is no subject layer to cut.
             seg: item.cached_tensor.clone().filter(|_| item.shows_cutout()),
-            edges: item.cached_edge_tensors.clone(),
+            edges: item.cached_edge_tensors.clone().filter(|_| item.shows_lines()),
             faces: item.faces_input(super::item::FaceStage::Photo),
             depth: item.depth_source(),
         }
@@ -481,7 +481,7 @@ impl DragKey {
                 selection: item.selection_hash,
                 edits: item.edits.as_ref().map(Arc::downgrade),
                 seg: item.shows_cutout(),
-                edges: item.cached_edge_tensors.is_some(),
+                edges: item.shows_lines(),
             }),
         }
     }
@@ -661,6 +661,9 @@ mod tests {
         };
         let mut item = BatchItem::new(1, "x.png".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (16, 16), settings, String::new());
         item.cached_edge_tensors = CompressedEdgeTensors::from_raw(raw);
+        // The lines run left its result: the lines are on screen.
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(16, 16)));
+        item.amend();
         let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
 
         let src = LayerSource { original: photo.clone(), correction: None };

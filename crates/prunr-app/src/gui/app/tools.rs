@@ -169,19 +169,36 @@ impl PrunrApp {
         }
     }
 
-    /// Selection actions act on the latest result or, before processing,
-    /// on the source: a painted region on an image whose pixels can be
-    /// read, with no run under way that the edit would make stale. Shared
-    /// by the action bar, the keyboard shortcuts and the actions themselves.
-    pub(crate) fn can_selection_action(&self) -> bool {
-        use crate::gui::capability::Need;
+    /// Whether `action` can act on the shown image's selection: Copy
+    /// needs a painted region on pixels that can be read; Clear needs a
+    /// selection; every other action also changes the image, so it waits
+    /// for a run under way, which it would make stale. Clear is a step,
+    /// so it waits too. Shared by the action bar, the shortcuts, Escape
+    /// and the actions themselves.
+    pub(crate) fn can_selection_action(&self, action: SelectionAction) -> bool {
+        self.selection_action_refusal(action).is_none()
+    }
+
+    /// Why `action` can't act now, if it can't: the action bar's tooltip.
+    pub(crate) fn selection_action_refusal(&self, action: SelectionAction) -> Option<&'static str> {
+        use crate::gui::capability::{Need, Reason};
+        if !shows(self.settings.model, Surface::Brushes) {
+            return Some(Reason::NotForModel.text());
+        }
         let role = self.settings.model.role();
-        shows(self.settings.model, Surface::Brushes)
-            && self.batch.selected_item().is_some_and(|i| {
-                i.is_idle()
-                    && i.verdict(Need::PaintedRegion, role).is_ready()
-                    && i.verdict(Need::ShownImage, role).is_ready()
-            })
+        let item = self.batch.selected_item()?;
+        if item.selection_mask.is_none() {
+            return Some(Reason::PaintFirst.text());
+        }
+        if action != SelectionAction::Copy && !item.is_idle() {
+            return Some(Reason::Running.text());
+        }
+        if action == SelectionAction::Clear {
+            return None;
+        }
+        item.verdict(Need::PaintedRegion, role).reason()
+            .or_else(|| item.verdict(Need::ShownImage, role).reason())
+            .map(Reason::text)
     }
 
     /// Make a selection Delete / Cut / Copy off the UI thread: the
@@ -430,6 +447,12 @@ impl PrunrApp {
         self.maybe_rethreshold_last_stroke();
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
+            // A selection is a step: one landing after a run started on the
+            // image would make that run's result stale, so it is dropped.
+            if result.result.is_ok() && self.batch.find_by_id(result.item_id).is_some_and(|i| !i.is_idle()) {
+                tracing::info!(item_id = result.item_id, "Magic Brush selection dropped: a run started on the image");
+                continue;
+            }
             match result.result {
                 Ok(DecodedSelection::Fresh { mask, output }) => {
                     let existing = self.batch

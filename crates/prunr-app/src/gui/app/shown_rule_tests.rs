@@ -268,12 +268,15 @@ fn edits_wait_for_a_run_on_the_image() {
     let mut cells = vec![0i8; 64];
     cells[9] = prunr_core::selection::FULL;
     app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(8, 8, cells), StepKind::Stroke);
-    assert!(app.batch.items[0].is_idle() && app.can_selection_action());
+    use crate::gui::views::selection_action_bar::SelectionAction;
+    assert!(app.batch.items[0].is_idle() && app.can_selection_action(SelectionAction::Delete));
     app.batch.items[0].start_erase(None);
-    assert!(!app.batch.items[0].is_idle() && !app.can_selection_action(), "an erase under way");
+    assert!(!app.batch.items[0].is_idle() && !app.can_selection_action(SelectionAction::Delete), "an erase under way");
+    assert!(!app.can_selection_action(SelectionAction::Clear), "clearing is a step too");
+    assert!(app.can_selection_action(SelectionAction::Copy), "a copy changes nothing: it may go");
     app.batch.items[0].abandon_job();
     crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
-    assert!(!app.can_selection_action(), "a cut under way");
+    assert!(!app.can_selection_action(SelectionAction::Cut), "a cut under way");
 }
 
 /// The Process shortcut and the Process button are one gate: with a
@@ -340,4 +343,50 @@ fn the_render_door_hands_the_photo_over_unwrapped() {
     app.batch.items[0].keep_built_original(crate::gui::live_preview::BuiltOriginal { rgba, wrapped: Arc::clone(&wrapped), start: false });
     let next = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::Mask, role, style, action).expect("a render");
     assert!(next.original_from.is_none() && Arc::ptr_eq(&next.original, &wrapped), "the kept wrap is reused");
+}
+
+/// Cancelling erases ends the queue after them too, from Escape and the
+/// capsule alike: a stopped erase does not start the next image.
+#[test]
+fn cancelling_erases_ends_their_queue() {
+    let mut app = app_in(State::Cut, SettingsModel::Inpaint);
+    app.processor.queue_runs(vec![7, 8, 9]);
+    app.cancel_erases();
+    assert_eq!(app.processor.next_queued_run(), None, "nothing waits to start");
+}
+
+/// A source that failed to decode is not asked for again every frame;
+/// its renders are refused, not left waiting.
+#[test]
+fn an_unreadable_photo_is_not_decoded_again() {
+    let mut app = PrunrApp::new_for_test();
+    app.settings.model = SettingsModel::None;
+    push_test_item(&mut app, 1).dimensions = (8, 8);
+    app.batch.select_item(0);
+    app.batch.items[0].land_decode(Err("corrupt".into()));
+    app.ensure_source_decoded(0);
+    assert!(!app.batch.items[0].decode_pending, "no second decode");
+    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Never(_))), "refused for good, so the busy pill goes");
+}
+
+/// Try another runs one fill at a time, as Process does: it waits for an
+/// erase on another image.
+#[test]
+fn try_another_waits_for_an_erase_elsewhere() {
+    let mut app = app_in(State::Cut, SettingsModel::SdInpaint);
+    assert_eq!(app.reroll_refusal(), Some("Erase something first; this generates that fill again."));
+    let mut cells = vec![0i8; 64];
+    cells[9] = prunr_core::selection::FULL;
+    app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(8, 8, cells), StepKind::Stroke);
+    let item = &mut app.batch.items[0];
+    item.start_erase(Some(7));
+    item.result_rgba = Some(px(60));
+    item.invalidate_selection();
+    item.finish_job();
+    assert!(app.can_reroll_intent(), "a generated fill on screen");
+    app.processor.set_inpaint_in_flight_for_test(99, true);
+    assert_eq!(app.reroll_refusal(), Some("Wait for the erase to finish, or cancel it."));
+    assert!(!app.can_reroll_intent(), "one fill at a time");
 }

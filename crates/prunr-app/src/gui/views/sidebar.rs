@@ -332,9 +332,9 @@ fn paint_thumbnail(
     let fitted = tex_size * scale;
     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
 
-    // Gate on `Done`, not `result_rgba`: a background item's result may be
-    // released while its thumbnail, built from the result, stays.
-    if matches!(item.status(), BatchStatus::Done) {
+    // A result, parked or not: a background item's result may be released
+    // while its thumbnail, built from the result, stays.
+    if item.has_result() {
         let (w, h) = item.dimensions;
         super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32));
     }

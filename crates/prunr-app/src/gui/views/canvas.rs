@@ -157,20 +157,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
 
     if let Some(progress) = app.processor.dispatch_progress() {
-        let active_inpaint_item = app.batch.selected_idx_clamped()
-            .map(|idx| app.batch.items[idx].id)
-            .filter(|&id| app.processor.is_inpaint_in_flight(id));
         let preview = app.batch.selected_item().and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
         if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, preview) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
-            if let Some(target) = cancel_target_for(progress.kind, active_inpaint_item) {
+            if let Some(target) = cancel_target_for(progress.kind) {
                 match target {
-                    CancelTarget::InpaintForItem(id) => {
-                        app.processor.clear_run_queue();
-                        app.cancel_inpaint_for(id);
-                    }
+                    CancelTarget::Inpaint => app.cancel_erases(),
                     // The capsule counts the queued images too: its Cancel ends them all.
                     CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
@@ -190,7 +184,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
-            can_reroll: app.can_reroll_intent(),
+            reroll_refusal: app.reroll_refusal(),
         };
         let depth_before = app.settings.brush.magic_depth;
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);

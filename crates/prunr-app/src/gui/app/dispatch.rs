@@ -27,10 +27,18 @@ impl PrunrApp {
     /// The target images an erase runs on (those with a painted region),
     /// and how many targets have none.
     pub(super) fn erase_targets(&self) -> (Vec<usize>, usize) {
-        let (with_region, without): (Vec<usize>, Vec<usize>) = self.batch.targeted_indices().into_iter()
-            .filter(|&idx| self.batch.items[idx].is_idle())
-            .partition(|&idx| self.run_may_start(&self.batch.items[idx]));
-        (with_region, without.len())
+        use crate::gui::capability::Reason;
+        let mut with_region = Vec::new();
+        let mut without = 0;
+        for idx in self.batch.targeted_indices() {
+            match self.run_refusal(&self.batch.items[idx]) {
+                None => with_region.push(idx),
+                Some(Reason::PaintFirst) => without += 1,
+                // Busy or unreadable images wait out of this run.
+                Some(_) => {}
+            }
+        }
+        (with_region, without)
     }
 
     /// Start the next queued upscale, colorize or erase when the slot is free,

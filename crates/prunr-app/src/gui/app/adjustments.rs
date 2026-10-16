@@ -54,14 +54,17 @@ impl PrunrApp {
     pub(super) fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-        // A run whose knobs the toolbar shows: a cut of this image, or an
-        // upscale or colorize anywhere (one slot each).
-        let is_processing = self.batch.items[idx].is_cutting() || self.processor.is_run_in_flight();
+        // A run a model switch or a knob it reads would break: a cut queued
+        // or under way on any image (the batch runs on the model), or the
+        // upscale or colorize in flight. An erase took its model and
+        // settings when it started.
+        let is_processing = self.batch.any_awaiting_cut() || self.processor.is_run_in_flight();
         // Compared after the toolbar ran: a changed knob or preset is a step.
         let settings_before = self.batch.items[idx].settings;
         adjustments_panel(panel_frame)
             .show_inside(ui, |ui| {
                 let can_compare = self.can_compare_intent();
+                let selection_gates = crate::gui::views::selection_action_bar::SelectionGates::of(|a| self.selection_action_refusal(a));
                 // Split borrow: app.settings and app.batch are disjoint
                 // fields of PrunrApp, and within the batch item its
                 // `settings` and `applied_preset` are disjoint fields too.
@@ -94,6 +97,7 @@ impl PrunrApp {
                     source_dims,
                     has_selection: item.selection_mask.is_some(),
                     corrects_cutout: item.corrects_cutout(settings_ref.model),
+                    selection_gates,
                     installed: self.hardware_install_cache,
                     show_original: self.show_original,
                     can_compare,
@@ -148,7 +152,7 @@ impl PrunrApp {
             self.batch.items[idx].clear_bg_image();
             ctx.request_repaint();
         }
-        if let Some(action) = toolbar_change.selection_action.filter(|_| self.can_selection_action()) {
+        if let Some(action) = toolbar_change.selection_action.filter(|&a| self.can_selection_action(a)) {
             self.handle_selection_action(idx, action, ctx);
         }
         if toolbar_change.toggle_compare {

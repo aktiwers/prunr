@@ -40,7 +40,8 @@ pub(crate) struct StripFacts {
     pub model: SettingsModel,
     pub encoder_pending: bool,
     /// The shown fill can be generated again ("Try another").
-    pub can_reroll: bool,
+    /// Why "Try another" can't run now (`None`: it can).
+    pub reroll_refusal: Option<&'static str>,
 }
 
 /// What the strip asks of the app this frame.
@@ -81,7 +82,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     ));
                     if tool == Tool::Paint && facts.model.generates() {
                         ui.separator();
-                        let reason = (!facts.can_reroll).then_some("Erase something first; this generates that fill again.");
+                        let reason = facts.reroll_refusal;
                         let resp = chip::gated(ui, reason, |ui| {
                             chip::button(ui, chip::ButtonKind::Secondary, try_another_label())
                         });
