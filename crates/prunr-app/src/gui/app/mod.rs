@@ -1372,6 +1372,12 @@ fn drain_screenshot_replies(ctx: &egui::Context) {
         }).collect()
     });
     if images.is_empty() { return; }
+    std::thread::spawn(move || save_screenshots(images));
+}
+
+/// Encoded and written off the UI thread; each PNG appears under its
+/// final name only once whole, for a reader polling the folder.
+fn save_screenshots(images: Vec<std::sync::Arc<egui::ColorImage>>) {
     let dir = screenshot_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(%e, ?dir, "screenshot dir create failed");
@@ -1383,13 +1389,17 @@ fn drain_screenshot_replies(ctx: &egui::Context) {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let path = dir.join(format!("{stamp}.png"));
+        let partial = dir.join(format!("{stamp}.png.part"));
         let [w, h] = image.size;
         let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
         let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
             tracing::warn!("screenshot dims mismatch — skipping");
             continue;
         };
-        match rgba.save(&path) {
+        let saved = rgba.save_with_format(&partial, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())
+            .and_then(|()| std::fs::rename(&partial, &path).map_err(|e| e.to_string()));
+        match saved {
             Ok(()) => tracing::info!(?path, "screenshot saved"),
             Err(e) => tracing::warn!(%e, ?path, "screenshot save failed"),
         }
