@@ -498,8 +498,8 @@ fn paint_hover_buttons(
         close_clicked = true;
     }
 
-    // Save — bottom-left, Done items only.
-    if matches!(item.status, BatchStatus::Done) {
+    // Save — bottom-left: what the image shows, processed or not.
+    {
         let save_center = Pos2::new(
             item_rect.min.x + 4.0 + btn_size * 0.5,
             item_rect.max.y - 4.0 - btn_size * 0.5,

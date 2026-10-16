@@ -191,7 +191,7 @@ impl PrunrApp {
         // A photo render without a scale the lines draw would show the
         // image without those lines: it waits for the worker's spare
         // scales, or for a new run when none are coming.
-        if item.lacks_drawn_scales() {
+        if kind != PreviewKind::Photo && item.lacks_drawn_scales() {
             need(Need::DrawnLines)?;
         }
         // Only No model renders the photo itself; every other model's Mask
@@ -375,6 +375,18 @@ impl PrunrApp {
                         Self::spawn_tex_prep(
                             r.rgba, item.id, Self::tex_name("quick", item.id, None),
                             TexTarget::QuickFrame(r.generation), handles.clone(), ctx.clone(),
+                        );
+                    }
+                    continue;
+                }
+                if r.kind == PreviewKind::Photo {
+                    if let Some(faced) = r.new_faced {
+                        item.faced_photo = Some(faced);
+                    }
+                    if item.on_screen {
+                        Self::spawn_tex_prep(
+                            r.rgba, item.id, Self::tex_name("photo-look", item.id, None),
+                            TexTarget::PhotoLook, handles.clone(), ctx.clone(),
                         );
                     }
                     continue;
@@ -635,6 +647,8 @@ mod landing_tests {
             // A new kind fails to compile here until it joins `all`.
             match kind {
                 PreviewKind::Mask | PreviewKind::Edge | PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 => {}
+                // Shown over the photo, never a result: tested on its own.
+                PreviewKind::Photo => {}
             }
         }
         all

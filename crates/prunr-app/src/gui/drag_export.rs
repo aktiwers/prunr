@@ -353,16 +353,17 @@ fn write_atomically(
 struct Composite {
     item_id: u64,
     filename: String,
-    result: Option<(super::item::ResultRef, super::item::ExportBg)>,
+    result: Option<(super::item::ExportImage, super::item::ExportBg)>,
     source: ImageSource,
 }
 
 impl Composite {
     fn of(item: &BatchItem) -> Self {
+        let image = item.export_image();
         Self {
             item_id: item.id,
-            filename: make_filename(&item.filename, item.result_ref().is_some(), item.settings.line_mode),
-            result: item.result_ref().map(|r| (r, item.export_bg())),
+            filename: make_filename(&item.filename, !image.is_untouched_photo(), item.settings.line_mode),
+            result: (!image.is_untouched_photo()).then(|| (image, item.export_bg())),
             source: item.source.clone(),
         }
     }

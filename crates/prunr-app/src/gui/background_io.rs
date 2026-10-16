@@ -156,6 +156,8 @@ pub enum TexTarget {
     /// A drag's quick frame of this generation: shown over the image, not
     /// the result.
     QuickFrame(u64),
+    /// The unprocessed photo's look (restored faces), shown in its place.
+    PhotoLook,
 }
 
 impl BackgroundIO {
