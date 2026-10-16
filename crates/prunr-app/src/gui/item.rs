@@ -705,6 +705,8 @@ pub(crate) struct BatchItem {
     pub(crate) faced_photo: Option<(Arc<image::DynamicImage>, super::live_preview::FacedKey)>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
+    /// The source could not be decoded; no decode is asked for again.
+    pub(crate) decode_failed: bool,
     /// Every state this image has been in, and which one is shown. The
     /// fields above and below (result, recipe, selection, settings) are
     /// the working copy of the shown state.
@@ -1120,6 +1122,13 @@ impl BatchItem {
         self.job.is_none()
     }
 
+    /// The shown step draws lines and their tensors are kept: what a lines
+    /// layer exports. After an undo to the photo, or with Sketch off,
+    /// kept tensors draw nothing on screen.
+    pub(crate) fn shows_lines(&self) -> bool {
+        self.has_result() && self.settings.line_mode != prunr_core::LineMode::Off && self.cached_edge_tensors.is_some()
+    }
+
     /// A cut is queued for a worker slot or under way: what Cancel stops.
     pub(crate) fn awaits_cut(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.engine == Engine::Segment)
@@ -1477,6 +1486,7 @@ impl BatchItem {
         self.decode_pending = false;
         match result {
             Ok(rgba) => {
+                self.decode_failed = false;
                 self.source_rgba = Some(rgba);
                 // Live-preview DynamicImage cache is built from source_rgba;
                 // invalidate so the next dispatch rebuilds against the new one.
@@ -1485,6 +1495,7 @@ impl BatchItem {
                 true
             }
             Err(msg) => {
+                self.decode_failed = true;
                 self.failure = Some(msg);
                 false
             }
@@ -2399,6 +2410,7 @@ impl BatchItem {
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
             failure: None,
+            decode_failed: false,
             ticked: false,
             settings,
             applied_recipe: None,

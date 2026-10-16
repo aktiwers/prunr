@@ -39,16 +39,17 @@ pub enum ProgressKind {
 /// one the click does nothing rather than stop another item's stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTarget {
-    InpaintForItem(u64),
+    /// The erase run the capsule shows, and the images queued after it.
+    Inpaint,
     Upscale,
     Colorize,
     SegBatchAndReset,
     Faces,
 }
 
-pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
+pub fn cancel_target_for(kind: ProgressKind) -> Option<CancelTarget> {
     match kind {
-        ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
+        ProgressKind::Inpaint => Some(CancelTarget::Inpaint),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
@@ -510,13 +511,15 @@ mod tests {
     /// target, so the button and Esc did nothing while it ran.
     #[test]
     fn cancel_target_faces_stops_the_search() {
-        assert_eq!(cancel_target_for(ProgressKind::Faces, None), Some(CancelTarget::Faces));
+        assert_eq!(cancel_target_for(ProgressKind::Faces), Some(CancelTarget::Faces));
     }
 
+    /// The capsule shows an erase run whichever image is on screen, and
+    /// its Cancel stops that run: a button that showed and did nothing
+    /// was the bug.
     #[test]
-    fn cancel_target_eraser_needs_active_item() {
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, Some(42)), Some(CancelTarget::InpaintForItem(42)));
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, None), None, "another item's stroke is not ours to stop");
+    fn cancel_target_eraser_stops_the_run_shown() {
+        assert_eq!(cancel_target_for(ProgressKind::Inpaint), Some(CancelTarget::Inpaint));
     }
 
     /// A run that was replaced, or has ended, can still have a report in
@@ -555,24 +558,24 @@ mod tests {
         // Upscale is single-flight on the Processor; the item handle
         // is irrelevant — there's only one upscale to cancel.
         assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, None),
+            cancel_target_for(ProgressKind::Upscale),
             Some(CancelTarget::Upscale),
         );
         assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, Some(99)),
+            cancel_target_for(ProgressKind::Upscale),
             Some(CancelTarget::Upscale),
         );
     }
 
     #[test]
     fn a_depth_run_has_no_cancel() {
-        assert_eq!(cancel_target_for(ProgressKind::Depth, Some(3)), None);
+        assert_eq!(cancel_target_for(ProgressKind::Depth), None);
     }
 
     #[test]
     fn cancel_target_colorize_ignores_item() {
-        assert_eq!(cancel_target_for(ProgressKind::Colorize, None), Some(CancelTarget::Colorize));
-        assert_eq!(cancel_target_for(ProgressKind::Colorize, Some(99)), Some(CancelTarget::Colorize));
+        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
+        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
     }
 
     #[test]
@@ -582,11 +585,11 @@ mod tests {
         // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
         // fails this assertion before users see a dropped click.
         assert_eq!(
-            cancel_target_for(ProgressKind::Seg, None),
+            cancel_target_for(ProgressKind::Seg),
             Some(CancelTarget::SegBatchAndReset),
         );
         assert_eq!(
-            cancel_target_for(ProgressKind::Seg, Some(1)),
+            cancel_target_for(ProgressKind::Seg),
             Some(CancelTarget::SegBatchAndReset),
             "seg routes to batch reset regardless of selection",
         );

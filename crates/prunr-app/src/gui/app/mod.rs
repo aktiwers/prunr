@@ -297,9 +297,13 @@ impl PrunrApp {
     /// between surfaces.
     pub(crate) fn perform(&mut self, action: crate::gui::views::shortcuts::Action, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::Action;
-        // Selection actions share the action bar's gate; Copy without a
-        // usable selection is the whole-result copy.
-        let selection_idx = self.batch.selected_idx_clamped().filter(|_| self.can_selection_action());
+        // Selection actions share the action bar's gate; Copy with no
+        // selection is the whole-image copy.
+        let selection_idx = |app: &Self, action: SelectionAction| {
+            app.batch.selected_idx_clamped().filter(|_| app.can_selection_action(action))
+        };
+        let has_selection = self.batch.selected_item().is_some_and(|i| i.selection_mask.is_some())
+            && crate::gui::knob_catalog::shows(self.settings.model, crate::gui::knob_catalog::Surface::Brushes);
         match action {
             Action::Open => self.handle_open_dialog(),
             Action::Process => self.handle_process_intent(),
@@ -308,19 +312,24 @@ impl PrunrApp {
                     self.handle_save_selected();
                 }
             }
-            Action::Copy => match selection_idx {
-                Some(idx) => self.handle_selection_action(idx, SelectionAction::Copy, ctx),
-                // Copy writes what the canvas shows, like Save.
-                None if self.can_save_intent() => self.handle_copy(),
-                None => {}
-            },
+            Action::Copy if has_selection => {
+                if let Some(idx) = selection_idx(self, SelectionAction::Copy) {
+                    self.handle_selection_action(idx, SelectionAction::Copy, ctx);
+                }
+            }
+            // Copy writes what the canvas shows, like Save.
+            Action::Copy => {
+                if self.can_save_intent() {
+                    self.handle_copy();
+                }
+            }
             Action::Cut | Action::Delete | Action::Invert => {
-                if let Some(idx) = selection_idx {
-                    let selection = match action {
-                        Action::Cut => SelectionAction::Cut,
-                        Action::Delete => SelectionAction::Delete,
-                        _ => SelectionAction::Invert,
-                    };
+                let selection = match action {
+                    Action::Cut => SelectionAction::Cut,
+                    Action::Delete => SelectionAction::Delete,
+                    _ => SelectionAction::Invert,
+                };
+                if let Some(idx) = selection_idx(self, selection) {
                     self.handle_selection_action(idx, selection, ctx);
                 }
             }
@@ -639,13 +648,16 @@ impl PrunrApp {
         if in_flight.is_some() {
             return in_flight;
         }
-        if self.batch.any_target_can(|it| self.run_may_start(it)) {
-            None
-        } else if model.is_inpaint() {
-            Some("Paint a region first; Process then runs the eraser over it.")
-        } else {
-            Some("Wait for the run on the image to finish.")
+        if self.batch.process_targets().any(|it| self.run_may_start(it)) {
+            return None;
         }
+        // Nothing can run: say why for the image Process would start with.
+        let why = self.batch.process_targets().find_map(|it| self.run_refusal(it));
+        Some(match why {
+            Some(crate::gui::capability::Reason::PaintFirst) | None if model.is_inpaint() => "Paint a region first; Process then runs the eraser over it.",
+            Some(reason) => reason.text(),
+            None => "Open an image first.",
+        })
     }
 
     /// Whether a Process run of the active model may start on `item`:
@@ -653,11 +665,20 @@ impl PrunrApp {
     /// painted region. The Process gate, every target list and the queue
     /// read this, so the button, the shortcut and a queued run agree.
     pub(crate) fn run_may_start(&self, item: &BatchItem) -> bool {
-        use crate::gui::capability::Need;
+        self.run_refusal(item).is_none()
+    }
+
+    /// Why a Process run can't start on `item`, if it can't.
+    pub(crate) fn run_refusal(&self, item: &BatchItem) -> Option<crate::gui::capability::Reason> {
+        use crate::gui::capability::{Need, Reason, Verdict};
         let role = self.settings.model.role();
-        item.is_idle()
-            && item.verdict(Need::ShownImage, role).allows_request()
-            && (!self.settings.model.is_inpaint() || item.verdict(Need::PaintedRegion, role).is_ready())
+        if !item.is_idle() {
+            return Some(Reason::Running);
+        }
+        if let Verdict::Never(why) = item.verdict(Need::ShownImage, role) {
+            return Some(why);
+        }
+        self.settings.model.is_inpaint().then(|| item.verdict(Need::PaintedRegion, role).reason()).flatten()
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -759,10 +780,25 @@ impl PrunrApp {
     }
 
     /// "Try another" is possible: the SD eraser is chosen and the shown
-    /// step is a generated fill, with nothing running on the image.
+    /// step is a generated fill, with nothing running on the image and no
+    /// erase in flight (one fill at a time, as Process runs them).
     pub fn can_reroll_intent(&self) -> bool {
-        self.settings.model.generates()
-            && self.batch.selected_item().is_some_and(|i| i.is_idle() && i.reroll().is_some())
+        self.settings.model.generates() && self.reroll_refusal().is_none()
+    }
+
+    /// Why "Try another" can't run now, if it can't: the strip's tooltip.
+    pub(crate) fn reroll_refusal(&self) -> Option<&'static str> {
+        use crate::gui::capability::Reason;
+        let item = self.batch.selected_item()?;
+        if item.reroll().is_none() {
+            Some("Erase something first; this generates that fill again.")
+        } else if !item.is_idle() {
+            Some(Reason::Running.text())
+        } else if self.processor.any_inpaint_in_flight() {
+            Some("Wait for the erase to finish, or cancel it.")
+        } else {
+            None
+        }
     }
 
     /// Fill the shown fill's region again from the image it started on,
@@ -846,6 +882,24 @@ impl PrunrApp {
         // has to clear it.
         self.processor.end_seg_run();
         self.status.text = "Cancelled".to_string();
+    }
+
+    /// Stop every erase in flight and the images queued after it: the
+    /// capsule's Cancel and Escape alike.
+    pub(crate) fn cancel_erases(&mut self) {
+        self.processor.clear_run_queue();
+        self.processor.cancel_all_inpaints();
+    }
+
+    /// Cancel the cuts under way or waiting: the ticked ones when any
+    /// ticked image has one, else all. The toolbar's Cancel button (whose
+    /// label says which) and Escape alike.
+    pub(crate) fn handle_cancel_cuts(&mut self) {
+        if self.batch.ticked_awaiting_cut().next().is_some() {
+            self.handle_cancel_selected();
+        } else {
+            self.handle_cancel_all_and_reset();
+        }
     }
 
     /// Cancel only the in-flight inpaint stroke for `item_id`. Used by
@@ -937,14 +991,10 @@ impl PrunrApp {
         } else if finding_faces {
             self.processor.cancel_faces();
         } else if self.processor.any_inpaint_in_flight() {
-            self.processor.cancel_all_inpaints();
+            self.cancel_erases();
         } else if self.batch.any_awaiting_cut() {
-            self.handle_cancel_all_and_reset();
-        } else if self
-            .batch
-            .selected_item()
-            .is_some_and(|i| i.selection_mask.is_some())
-        {
+            self.handle_cancel_cuts();
+        } else if self.can_selection_action(SelectionAction::Clear) {
             if let Some(idx) = self.batch.selected_idx_clamped() {
                 self.handle_selection_action(idx, SelectionAction::Clear, ctx);
             }

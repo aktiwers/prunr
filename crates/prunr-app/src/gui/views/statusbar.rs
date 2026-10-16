@@ -18,7 +18,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         let app_state = app.batch.app_state();
         let counts = app.batch.status_counts();
-        let batch_processing = counts.processing > 0;
+        let batch_processing = app.batch.any_awaiting_cut();
         let batch_done_count = counts.done;
         // Only count items involved in processing (not idle Pending items)
         let batch_total = counts.batch_total();

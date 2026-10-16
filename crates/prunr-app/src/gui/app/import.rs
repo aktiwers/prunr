@@ -88,6 +88,11 @@ impl PrunrApp {
 
     pub fn remove_selected(&mut self) {
         let count = self.batch.ticked_count();
+        // A run on a removed image would go on for an image that is gone.
+        let removed: Vec<u64> = self.batch.items.iter().filter(|i| i.ticked).map(|i| i.id).collect();
+        for id in removed {
+            self.cancel_runs_on(id);
+        }
         self.batch.items.retain(|item| !item.ticked);
         self.sync_after_batch_change();
         if count > 0 {
@@ -135,6 +140,9 @@ impl PrunrApp {
     }
 
     pub fn remove_batch_item(&mut self, idx: usize) {
+        if let Some(id) = self.batch.items.get(idx).map(|i| i.id) {
+            self.cancel_runs_on(id);
+        }
         if self.batch.remove(idx) {
             self.sync_after_batch_change();
         }
