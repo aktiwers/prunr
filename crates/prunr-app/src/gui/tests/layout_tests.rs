@@ -104,3 +104,43 @@ fn a_window_with_no_room_renders_with_a_brush_on() {
     harness.set_size(egui::vec2(1.0, 1.0));
     settle(&mut harness);
 }
+
+/// The toolbar's layout settles: at any width, with a selection and the
+/// brush on, the row decides once whether it is compact and stays so,
+/// frame after frame. A layout that measures itself into flipping
+/// redraws the toolbar every frame, which flickers.
+#[test]
+fn the_toolbar_layout_settles_at_every_width() {
+    let mut flips = Vec::new();
+    for width in (MIN_WINDOW_SIZE[0] as u32..=1800).step_by(4) {
+        let mut harness = harness_sized(egui::vec2(width as f32, MIN_WINDOW_SIZE[1]));
+        {
+            let app = harness.state_mut();
+            app.settings.model = SettingsModel::BiRefNetLite;
+            let item = push_test_item(app, 1);
+            item.dimensions = (64, 64);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+            // The preset chip shows the applied preset's name, wider in
+            // full mode than in compact.
+            item.applied_preset = "Prunr".to_string();
+            let mut cells = vec![0i8; 64 * 64];
+            cells[64 * 10 + 10] = prunr_core::selection::FULL;
+            app.batch.select_item(0);
+            app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells), crate::gui::timeline::StepKind::Stroke);
+        }
+        settle(&mut harness);
+        click(&mut harness, "Paint Brush");
+        harness.run_steps(6);
+        let fit = |h: &egui_kittest::Harness<'_, crate::gui::app::PrunrApp>| h.ctx.data(|d| d.get_temp::<(f32, f32)>(egui::Id::new("toolbar_fit")));
+        let settled = fit(&harness);
+        for _ in 0..6 {
+            harness.run_steps(1);
+            if fit(&harness) != settled {
+                flips.push(width);
+                break;
+            }
+        }
+    }
+    assert!(flips.is_empty(), "the toolbar keeps re-laying out at widths {flips:?}");
+}
+
