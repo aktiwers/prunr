@@ -192,7 +192,7 @@ impl PrunrApp {
     pub(crate) fn can_selection_action(&self) -> bool {
         shows(self.settings.model, Surface::Brushes)
             && self.batch.selected_item().is_some_and(|i| {
-            i.selection_mask.is_some() && (i.result_rgba.is_some() || i.source_rgba.is_some())
+            i.selection_mask.is_some() && (i.has_result() || i.source_rgba.is_some())
         })
     }
 
