@@ -147,7 +147,7 @@ pub(crate) fn render(
                                     settings.presets.remove(&name);
                                     // Remove the on-disk file too; presets are
                                     // the filesystem-store's source of truth.
-                                    let _ = crate::gui::presets_fs::delete(&name);
+                                    crate::gui::presets_fs::queue_delete(&name);
                                     // If the deleted preset was the app's default,
                                     // fall back to Prunr so default_preset stays valid.
                                     if is_default {
@@ -294,27 +294,15 @@ pub(crate) fn render(
                 sd: crate::gui::presets::sd_preset_for_save(&settings.brush, model_id),
             };
 
-            let result = if is_overwrite {
-                // Merge into existing on disk so other-model entries +
-                // other-scheduler bundles stay intact.
-                crate::gui::presets_fs::save_merged(&name, model_id, mp)
-            } else {
-                let file = crate::gui::presets::PresetFile::single(model_id, mp);
-                crate::gui::presets_fs::save(&name, &file)
+            // An overwrite merges into the preset as loaded, so other-model
+            // entries and other-scheduler bundles stay intact; the store
+            // keeps what is written, for dirty-tracking.
+            let file = match settings.presets.get(&name).filter(|_| is_overwrite) {
+                Some(existing) => crate::gui::presets_fs::merged(existing.clone(), model_id, mp),
+                None => crate::gui::presets::PresetFile::single(model_id, mp),
             };
-
-            if let Err(e) = result {
-                tracing::error!(preset = %name, %e, "failed to save preset to disk");
-            }
-
-            // Refresh just the saved entry from disk so dirty-tracking
-            // round-trips against the merged file. Avoids the O(n)
-            // directory rescan that load_all() would do.
-            if let Some(path) = crate::gui::presets_fs::preset_path(&name) {
-                if let Some(reloaded) = crate::gui::presets_fs::load_from_path(&path) {
-                    settings.presets.insert(name.clone(), reloaded);
-                }
-            }
+            crate::gui::presets_fs::queue_save(&name, &file);
+            settings.presets.insert(name.clone(), file);
 
             applied = Some(name);
             cancel = true;
