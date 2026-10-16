@@ -73,6 +73,8 @@ pub(crate) struct BatchManager {
     pub(crate) next_id: u64,
     pub(crate) bg_io: BackgroundIO,
     last_history_sweep: std::time::Instant,
+    /// A move of undo states to disk is running.
+    demoting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -104,13 +106,23 @@ impl BatchManager {
         }
     }
 
-    /// Under memory pressure: move compressed undo states to disk.
+    /// Under memory pressure: move compressed undo states to disk, on a
+    /// worker. One move runs at a time; while it does, another ask is
+    /// skipped, and the next landing under pressure asks again.
     pub(crate) fn demote_history_to_disk(&self) {
-        for item in &self.items {
-            for cell in item.timeline.stored_images() {
-                cell.demote_to_disk();
-            }
+        use std::sync::atomic::Ordering;
+        if self.demoting.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let cells: Vec<super::timeline::StoredImage> = self.items.iter()
+            .flat_map(|item| item.timeline.stored_images().cloned())
+            .collect();
+        let demoting = Arc::clone(&self.demoting);
+        std::thread::spawn(move || {
+            let moved = cells.iter().filter(|cell| cell.demote_to_disk()).count();
+            tracing::info!(moved, "undo states moved to disk");
+            demoting.store(false, Ordering::Release);
+        });
     }
 
     pub(crate) fn new() -> Self {
@@ -120,6 +132,7 @@ impl BatchManager {
             next_id: 0,
             bg_io: BackgroundIO::new(),
             last_history_sweep: std::time::Instant::now(),
+            demoting: Arc::default(),
         }
     }
 
@@ -904,6 +917,31 @@ mod tests {
         let back = item.timeline.previous().expect("previous");
         assert!(selection.is_some_and(|s| back.selection.as_ref().is_some_and(|b| b.holds(&s))));
         assert!(edits.is_some_and(|e| back.edits.as_ref().is_some_and(|b| b.holds(&e))));
+    }
+
+    /// Under memory pressure the undo states move to disk on a worker,
+    /// not on the frame that asked.
+    #[test]
+    fn undo_states_move_to_disk_off_the_ui_thread() {
+        let mut batch = fixture();
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(16, 16, image::Rgba([4, 5, 6, 255]))));
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(16, 16)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        batch.items.push(item);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first = |b: &BatchManager| b.items[0].timeline.stored_images().next().cloned().expect("a stored step");
+        while !first(&batch).is_compressed() && std::time::Instant::now() < deadline {
+            batch.compress_history_off_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        batch.demote_history_to_disk();
+        while !first(&batch).is_on_disk() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(first(&batch).is_on_disk(), "moved by the worker");
+        assert_eq!(first(&batch).load().expect("reads back").get_pixel(1, 1), &image::Rgba([4, 5, 6, 255]));
     }
 
     /// A BatchItem with `tensor_floats` f32s of cached tensor (0 = none).
