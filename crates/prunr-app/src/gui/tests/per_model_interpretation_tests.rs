@@ -419,7 +419,6 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     item.source_rgba = Some(Arc::new(px(0)));
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
-    give_tensor(item);
     super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
     let inputs = preview_inputs(&mut app, 8, false).expect("the stroke's re-cut starts");

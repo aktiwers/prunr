@@ -64,20 +64,16 @@ impl PrunrApp {
             .filter_map(|id| self.batch.find_by_id(*id))
             .map(|item| LayerSave {
                 layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
-                composite: Some((item.export_image(), item.export_bg())),
+                composite: (item.export_image(), item.export_bg()),
                 depth: self.settings.export_depth_map.then(|| item.depth_export()),
             })
             .collect();
         let without_layers: Vec<&str> = targets.iter()
             .filter_map(|id| self.batch.find_by_id(*id))
             .zip(&jobs)
-            .filter(|(_, job)| !job.layers.has_layers() && job.composite.is_some())
+            .filter(|(_, job)| !job.layers.has_layers())
             .map(|(item, _)| item.filename.as_str())
             .collect();
-        if jobs.iter().all(|j| !j.layers.has_layers() && j.composite.is_none()) {
-            self.toasts.error("Nothing to save — process the image first");
-            return;
-        }
         if !without_layers.is_empty() {
             self.toasts.info(format!(
                 "Saved as one image, without layers: {}. Process it again for layers.",
@@ -395,7 +391,7 @@ fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Pat
 /// instead when it has none.
 struct LayerSave {
     layers: crate::gui::drag_export::LayerJob,
-    composite: Option<(crate::gui::item::ExportImage, crate::gui::item::ExportBg)>,
+    composite: (crate::gui::item::ExportImage, crate::gui::item::ExportBg),
     depth: Option<crate::gui::item::DepthExport>,
 }
 
@@ -409,7 +405,8 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
         for job in jobs {
             let mut files = job.layers.render_bytes(&depth);
             if files.is_empty() {
-                if let Some((rgba, bg)) = job.composite.as_ref().and_then(|(r, bg)| Some((r.load()?, bg))) {
+                let (image, bg) = &job.composite;
+                if let Some(rgba) = image.load() {
                     if let Ok(bytes) = format.encode(&bg.bake(&rgba, &depth)) {
                         files.push((crate::gui::drag_export::export_name(job.layers.filename(), format), bytes));
                     }

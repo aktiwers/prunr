@@ -488,9 +488,8 @@ impl ExportImage {
                 if let Some(faced) = &faces.faced {
                     return Some(Arc::new(faced.to_rgba8()));
                 }
-                let mut faced = (*photo).clone();
-                prunr_core::face::compose_faces_into(&mut faced, &faces.key.faces, faces.key.blend);
-                Some(Arc::new(faced))
+                let photo = Arc::try_unwrap(photo).unwrap_or_else(|shared| (*shared).clone());
+                Some(Arc::new(faces.key.blend_into(photo)))
             }
         }
     }
@@ -1053,14 +1052,11 @@ impl BatchItem {
         self.last_decode = None;
     }
 
-    /// True while a model works on this image: a cut-out the worker has
-    /// taken, or an upscale, colorize or erase, which start their job only
-    /// when they run (a queued cut-out holds its job while it waits).
     /// Where the image is, derived: a cut under way, a failure with
     /// nothing to show, a result, or the photo waiting. Never stored, so
     /// undo, cancel and parking cannot leave it stale.
     pub(crate) fn status(&self) -> BatchStatus {
-        if self.job.as_ref().is_some_and(|j| j.running && j.engine == Engine::Segment) {
+        if self.is_cutting() {
             return BatchStatus::Processing;
         }
         if self.has_result() {
@@ -1100,7 +1096,18 @@ impl BatchItem {
 
     /// Why the image failed, while the failure is what it shows.
     pub(crate) fn error(&self) -> Option<&str> {
-        matches!(self.status(), BatchStatus::Error(_)).then_some(self.failure.as_deref()).flatten()
+        self.failure.as_deref().filter(|_| !self.is_cutting() && !self.has_result())
+    }
+
+    /// A cut is under way: the worker has taken it (`status()` Processing,
+    /// without building the status).
+    pub(crate) fn is_cutting(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.running && j.engine == Engine::Segment)
+    }
+
+    /// Whether `need` is met for this image under a model of `role`.
+    pub(crate) fn verdict(&self, need: super::capability::Need, role: super::knob_catalog::ModelRole) -> super::capability::Verdict {
+        super::capability::check(&super::capability::ItemFacts::of(self), need, role)
     }
 
     /// The awaited cut has a worker slot and is under way.
@@ -1116,6 +1123,9 @@ impl BatchItem {
         self.failure = Some(why);
     }
 
+    /// True while a model works on this image: a cut-out the worker has
+    /// taken, or an upscale, colorize or erase, which start their job only
+    /// when they run (a queued cut-out holds its job while it waits).
     pub(crate) fn is_running(&self) -> bool {
         self.job.as_ref().is_some_and(|job| job.running)
     }
@@ -1309,8 +1319,7 @@ impl BatchItem {
     /// The photo's look goes once the image is no longer the unprocessed
     /// photo, or Restore faces is off.
     pub(crate) fn settle_photo_look(&mut self) {
-        let photo = self.timeline.current().result.is_none();
-        if self.photo_look.is_some() && !(photo && self.settings.faces.on) {
+        if self.photo_look.is_some() && (self.has_result() || !self.settings.faces.on) {
             self.photo_look = None;
         }
     }
@@ -2041,8 +2050,7 @@ impl BatchItem {
         let bytes = match self.source.load_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.job = None;
-                self.failure = Some(load_failed(e));
+                self.fail(load_failed(e));
                 return None;
             }
         };

@@ -630,16 +630,15 @@ impl PrunrApp {
             return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_inpaint() {
-            use crate::gui::capability::{check, ItemFacts, Need};
             let role = self.settings.model.role();
-            let painted = |it: &BatchItem| check(&ItemFacts::of(it), Need::PaintedRegion, role).is_ready();
+            let painted = |it: &BatchItem| it.verdict(crate::gui::capability::Need::PaintedRegion, role).is_ready();
             can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(painted))
         } else {
             // A batch still admitting images into its RAM budget takes the
             // next Process once every one of them is on its way; the worker
             // queues batches, the budget cannot feed two.
             !self.processor.admission_still_feeding()
-                && self.batch.any_target_can(|it| !matches!(it.status(), BatchStatus::Processing))
+                && self.batch.any_target_can(|it| !it.is_cutting())
         }
     }
 
@@ -724,7 +723,7 @@ impl PrunrApp {
     /// Stop whatever run `item_id` is waiting on, so its result cannot land.
     fn cancel_runs_on(&mut self, item_id: u64) {
         let Some(item) = self.batch.find_by_id(item_id) else { return };
-        if item.status() != BatchStatus::Processing && item.job.is_none() {
+        if item.job.is_none() {
             return;
         }
         match item.job.as_ref().map(|j| j.engine) {

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::mpsc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Cutter, Engine, ImageSource, KeptRunTier};
+use crate::gui::item::{BatchItem, Cutter, Engine, ImageSource, KeptRunTier};
 use crate::gui::live_preview::PreviewKind;
 use crate::gui::processor::RunInput;
 use crate::gui::timeline::StepKind;
@@ -253,7 +253,7 @@ impl PrunrApp {
             .unwrap_or(super::NO_MODEL_RECIPE_KIND);
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
-            .filter(|i| filter(i) && !matches!(i.status(), BatchStatus::Processing))
+            .filter(|i| filter(i) && !i.is_cutting())
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
@@ -298,7 +298,7 @@ impl PrunrApp {
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let settings = self.run_settings();
         let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
-            .filter(|i| filter(i) && !matches!(i.status(), BatchStatus::Processing))
+            .filter(|i| filter(i) && !i.is_cutting())
             .map(|i| (i.id, i.source.clone()))
             .collect();
         if let Some(shown) = self.batch.selected_idx_clamped() {

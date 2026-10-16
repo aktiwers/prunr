@@ -499,17 +499,15 @@ fn paint_hover_buttons(
     }
 
     // Save — bottom-left: what the image shows, processed or not.
-    {
-        let save_center = Pos2::new(
-            item_rect.min.x + 4.0 + btn_size * 0.5,
-            item_rect.max.y - 4.0 - btn_size * 0.5,
-        );
-        let save_id = egui::Id::new(("sidebar_save", item.id));
-        let save_name = || format!("Save {}", item.filename);
-        if paint_hover_circle_btn(ui, save_center, btn_size, save_id, save_name, ICON_SAVE.codepoint, theme::ACCENT) {
-            actions.save_idx = Some(i);
-            close_clicked = true;
-        }
+    let save_center = Pos2::new(
+        item_rect.min.x + 4.0 + btn_size * 0.5,
+        item_rect.max.y - 4.0 - btn_size * 0.5,
+    );
+    let save_id = egui::Id::new(("sidebar_save", item.id));
+    let save_name = || format!("Save {}", item.filename);
+    if paint_hover_circle_btn(ui, save_center, btn_size, save_id, save_name, ICON_SAVE.codepoint, theme::ACCENT) {
+        actions.save_idx = Some(i);
+        close_clicked = true;
     }
     close_clicked
 }
