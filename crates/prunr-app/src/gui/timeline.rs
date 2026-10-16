@@ -263,6 +263,11 @@ impl<T: Payload> Stored<T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn is_on_disk(&self) -> bool {
+        matches!(&*self.lock(), Tier::OnDisk(_))
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_compressed(&self) -> bool {
         matches!(&*self.lock(), Tier::Compressed(_) | Tier::OnDisk(_))
     }
