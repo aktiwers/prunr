@@ -202,8 +202,9 @@ fn ensure_warm_engine(
     Ok(fresh)
 }
 
-fn release_warm_engine(slot: &WarmEngine) {
-    *lock_warm_engine(slot) = None;
+/// The slot's engine, taken out; it frees where the result drops.
+fn take_warm_engine(slot: &WarmEngine) -> Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)> {
+    lock_warm_engine(slot).take()
 }
 
 /// Images waiting for the whole-image run slot, and how far the queue is.
@@ -262,8 +263,8 @@ impl<R> RunSlot<R> {
         RunDone { active: Arc::clone(&self.active), tx: self.tx.clone(), progress }
     }
 
-    fn release_engine(&self) {
-        release_warm_engine(&self.warm);
+    fn take_engine(&self) -> Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)> {
+        take_warm_engine(&self.warm)
     }
 }
 
@@ -1201,10 +1202,15 @@ impl Processor {
     /// and colorize ones, and both workers'. On a model switch or a
     /// Processor change.
     pub(crate) fn release_all_sessions(&mut self) {
-        prunr_core::inpaint::release_all();
-        self.upscale.release_engine();
-        self.colorize.release_engine();
-        release_warm_engine(&self.depth.warm);
+        let released = (
+            prunr_core::inpaint::release_all(),
+            self.upscale.take_engine(),
+            self.colorize.take_engine(),
+            take_warm_engine(&self.depth.warm),
+        );
+        // Freeing the sessions can take hundreds of ms; the caches are
+        // already empty, so it waits on no one.
+        std::thread::spawn(move || drop(released));
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -3171,11 +3177,26 @@ mod warm_cache_tests {
         let mut p = make_processor();
         *p.warm_upscale_engine_for_test() =
             Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
-        p.upscale.release_engine();
+        drop(p.upscale.take_engine());
         assert!(
             p.warm_upscale_engine_for_test().is_none(),
             "releasing the upscale engine must clear the slot"
         );
+    }
+
+    /// A model switch empties every session slot before it returns; only
+    /// the free runs on another thread.
+    #[test]
+    fn releasing_all_sessions_empties_the_slots_at_once() {
+        let Some(sentinel) = sentinel_engine() else {
+            eprintln!("[releasing_all_sessions_empties_the_slots_at_once] SKIP: ORT runtime not found");
+            return;
+        };
+        let mut p = make_processor();
+        *p.warm_upscale_engine_for_test() =
+            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        p.release_all_sessions();
+        assert!(p.warm_upscale_engine_for_test().is_none());
     }
 }
 

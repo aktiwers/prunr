@@ -523,7 +523,7 @@ impl Run for LamaRun<'_> {
 
 impl Drop for LamaRun<'_> {
     fn drop(&mut self) {
-        prunr_core::inpaint::release_all();
+        drop(prunr_core::inpaint::release_all());
     }
 }
 
@@ -570,7 +570,7 @@ impl Run for DiffusionRun<'_> {
 
 impl Drop for DiffusionRun<'_> {
     fn drop(&mut self) {
-        prunr_core::inpaint::release_all();
+        drop(prunr_core::inpaint::release_all());
     }
 }
 
