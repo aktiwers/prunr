@@ -18,6 +18,7 @@ mod adjustments;
 mod dispatch;
 mod export;
 pub(crate) mod import;
+mod installs;
 mod preview;
 mod results;
 mod textures;

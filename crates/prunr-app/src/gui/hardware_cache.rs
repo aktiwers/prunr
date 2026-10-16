@@ -25,6 +25,21 @@ pub(crate) struct HardwareInstallCache {
     models: u32,
     /// Bit `i` set when `REGISTRY[i]` is on disk (or bundled).
     registry: u128,
+    /// Bytes the downloaded models take, multi-part bundles included.
+    pub models_on_disk: u64,
+}
+
+/// Bytes the downloaded models take in `dir`, multi-part bundles included.
+fn disk_usage_in(dir: &std::path::Path) -> u64 {
+    use prunr_models::ModelSource;
+    let size = |p: std::path::PathBuf| std::fs::metadata(p).map_or(0, |m| m.len());
+    prunr_models::REGISTRY.iter().map(|d| match d.source {
+        ModelSource::OnDemand { filename, .. } => size(dir.join(filename)),
+        ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
+            parts.iter().map(|p| size(dir.join(subdir).join(p.filename))).sum()
+        }
+        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => 0,
+    }).sum()
 }
 
 fn registry_bits() -> u128 {
@@ -50,6 +65,7 @@ impl HardwareInstallCache {
             models: model_bits(crate::gui::settings::SettingsModel::ALL.iter()
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
             registry: registry_bits(),
+            models_on_disk: prunr_models::on_demand_dir().map_or(0, |dir| disk_usage_in(&dir)),
         }
     }
 
@@ -74,6 +90,7 @@ impl HardwareInstallCache {
             depth: true,
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
             registry: u128::MAX,
+            models_on_disk: 0,
         }
     }
 
@@ -139,6 +156,22 @@ fn model_bits<'a>(models: impl IntoIterator<Item = &'a crate::gui::settings::Set
 
 #[cfg(test)]
 mod tests {
+    /// Disk usage counts the multi-part bundles (Stable Diffusion) too.
+    #[test]
+    fn disk_usage_counts_single_files_and_multi_part_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = prunr_models::REGISTRY.iter().find_map(|d| match d.source {
+            prunr_models::ModelSource::OnDemand { filename, .. } => Some(filename), _ => None,
+        }).unwrap();
+        let (subdir, part) = prunr_models::REGISTRY.iter().find_map(|d| match d.source {
+            prunr_models::ModelSource::MultiPartOnDemand { subdir, parts, .. } => Some((subdir, parts[0].filename)), _ => None,
+        }).unwrap();
+        std::fs::write(dir.path().join(single), [0u8; 10]).unwrap();
+        std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
+        std::fs::write(dir.path().join(subdir).join(part), [0u8; 32]).unwrap();
+        assert_eq!(super::disk_usage_in(dir.path()), 42);
+    }
+
     /// A card reads installed weights from the cache, not the disk:
     /// nothing counts as installed until a refresh has read it.
     #[test]

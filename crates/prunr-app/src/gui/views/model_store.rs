@@ -5,7 +5,7 @@ use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
 use prunr_models::{
-    descriptor as model_descriptor, on_demand_dir, ModelCategory, ModelDescriptor, ModelId,
+    descriptor as model_descriptor, ModelCategory, ModelDescriptor, ModelId,
     ModelSource, REGISTRY,
 };
 
@@ -48,43 +48,6 @@ pub(crate) fn card_action(
     }
 }
 
-/// Bytes the downloaded models take in `dir`, multi-part bundles included.
-fn disk_usage_in(dir: &std::path::Path) -> u64 {
-    let size = |p: std::path::PathBuf| std::fs::metadata(p).map_or(0, |m| m.len());
-    REGISTRY.iter().map(|d| match d.source {
-        ModelSource::OnDemand { filename, .. } => size(dir.join(filename)),
-        ModelSource::MultiPartOnDemand { subdir, parts, .. } => {
-            parts.iter().map(|p| size(dir.join(subdir).join(p.filename))).sum()
-        }
-        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => 0,
-    }).sum()
-}
-
-fn disk_usage_bytes_uncached() -> u64 {
-    on_demand_dir().map_or(0, |dir| disk_usage_in(&dir))
-}
-
-/// 1 s TTL cache around the per-OnDemand-model `fs::metadata` walk —
-/// the modal repaints every frame while the user drags a scrollbar
-/// or hovers a row, which fired ~7 stat syscalls per frame (~420
-/// stat/sec on cold-cache disk).
-fn disk_usage_bytes() -> u64 {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::Instant;
-    static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
-    let cell = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = Instant::now();
-    if let Some((at, bytes)) = *guard {
-        if now.duration_since(at).as_secs_f32() < 1.0 {
-            return bytes;
-        }
-    }
-    let bytes = disk_usage_bytes_uncached();
-    *guard = Some((now, bytes));
-    bytes
-}
-
 /// Returns true when the user closed the modal this frame.
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let provider = app.settings.effective_backend().to_string();
@@ -94,7 +57,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
 
     let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
-        let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(disk_usage_bytes()));
+        let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(app.hardware_install_cache.models_on_disk));
         super::chip::modal_page(ui, "Model Store", &subtitle, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
@@ -146,7 +109,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 app.download_manager.cancel_download(id);
             }
             CardAction::Delete => {
-                delete_installed_model(app, id, ctx);
+                app.remove_model(id, ctx);
             }
             CardAction::Bundled | CardAction::Verifying => {}
         }
@@ -367,40 +330,6 @@ fn action_enabled(action: CardAction) -> bool {
     !matches!(action, CardAction::Bundled | CardAction::Verifying)
 }
 
-fn delete_installed_model(app: &mut PrunrApp, id: ModelId, ctx: &egui::Context) {
-    let Some(desc) = model_descriptor(id) else { return };
-    let Some(dir) = on_demand_dir() else {
-        app.toasts.error("Could not resolve user data directory");
-        return;
-    };
-    let path = match desc.source {
-        ModelSource::OnDemand { filename, .. } => dir.join(filename),
-        ModelSource::MultiPartOnDemand { subdir, .. } => dir.join(subdir),
-        ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => return,
-    };
-    let name = desc.display_name;
-    let (done, ctx) = (app.batch.bg_io.removed_tx.clone(), ctx.clone());
-    // Gigabytes of weights take a while to unlink; the toast and the
-    // installed set follow when it is done.
-    std::thread::spawn(move || {
-        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-        let outcome = match removed {
-            Ok(()) => {
-                tracing::info!(?id, "deleted on-demand model");
-                // The compiled-model cache (CUDA optimized.onnx, CoreML
-                // mlmodelc) is useless without the source weights.
-                let bytes = prunr_core::cache::clear_for_model(id);
-                if bytes > 0 {
-                    tracing::info!(?id, bytes, "cleared compiled-model cache after uninstall");
-                }
-                Ok(format!("{name} removed"))
-            }
-            Err(e) => Err(format!("Could not delete {name}: {e}")),
-        };
-        let _ = done.send(outcome);
-        ctx.request_repaint();
-    });
-}
 
 /// True when the descriptor for `id` declares a restrictive license that
 /// the user hasn't yet accepted in `Settings::accepted_licenses`.
@@ -585,22 +514,6 @@ mod tests {
         let a = card_action(&d, false, &dl_failed_disk_full());
         assert_eq!(a, CardAction::Retry);
         assert!(action_enabled(a));
-    }
-
-    /// Disk usage counts the multi-part bundles (Stable Diffusion) too.
-    #[test]
-    fn disk_usage_counts_single_files_and_multi_part_bundles() {
-        let dir = tempfile::tempdir().unwrap();
-        let single = REGISTRY.iter().find_map(|d| match d.source {
-            ModelSource::OnDemand { filename, .. } => Some(filename), _ => None,
-        }).unwrap();
-        let (subdir, part) = REGISTRY.iter().find_map(|d| match d.source {
-            ModelSource::MultiPartOnDemand { subdir, parts, .. } => Some((subdir, parts[0].filename)), _ => None,
-        }).unwrap();
-        std::fs::write(dir.path().join(single), [0u8; 10]).unwrap();
-        std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
-        std::fs::write(dir.path().join(subdir).join(part), [0u8; 32]).unwrap();
-        assert_eq!(disk_usage_in(dir.path()), 42);
     }
 
     #[test]
