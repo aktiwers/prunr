@@ -517,7 +517,7 @@ mod process_targets_tests {
         let process = |app: &mut PrunrApp| {
             let item = &mut app.batch.items[1];
             item.ticked = true;
-            item.set_status_for_test(crate::gui::item::BatchStatus::Pending);
+            crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Pending);
             app.process_items(|i| i.ticked, Some(StepKind::Process));
             match rx.try_recv() {
                 Ok(WorkerMessage::BatchProcess { config, .. }) => config.first_look,
@@ -545,7 +545,7 @@ mod process_targets_tests {
             // Both are done under their own settings, with the tensor a mask rerun needs.
             item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
             item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
-            item.set_status_for_test(crate::gui::item::BatchStatus::Done);
+            crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
             item.ticked = true;
         }
         app.batch.items[0].settings.feather = 3.0;
@@ -623,7 +623,7 @@ mod process_targets_tests {
             item.applied_recipe = Some(item.settings.current_recipe(model));
             item.result_rgba = Some(img.clone());
             item.land_upscale(UpscaleCache::new(img.clone(), img.clone(), None));
-            item.set_status_for_test(BatchStatus::Done);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
             item.ticked = true;
         }
         // The slot is taken while Process runs, so the queue holds what it
@@ -661,7 +661,7 @@ mod process_targets_tests {
         item.applied_recipe = Some(item.settings.current_recipe(model));
         item.result_rgba = Some(img.clone());
         item.land_colorize(ColorizeCache::new(plane, img));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         app.process_kept_run_items();
         assert!(app.batch.items[0].job.is_none() && !app.processor.is_colorize_in_flight(), "nothing runs");
     }

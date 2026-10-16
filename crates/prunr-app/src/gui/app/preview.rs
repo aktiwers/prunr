@@ -653,7 +653,7 @@ mod landing_tests {
         let item = push_test_item(&mut app, 1);
         let result = Arc::new(RgbaImage::new(2, 2));
         item.result_rgba = Some(Arc::clone(&result));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.commit(StepKind::Process);
         item.set_on_screen(true);
@@ -736,7 +736,7 @@ mod drift_tests {
         let mut app = PrunrApp::new_for_test();
         app.settings.model = SettingsModel::Silueta;
         let item = push_test_item(&mut app, 1);
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.gamma = 1.5;

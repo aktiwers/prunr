@@ -48,12 +48,12 @@ fn app_in(state: State, model: SettingsModel) -> PrunrApp {
         }
         State::DeletedOnPhoto => {
             item.result_rgba = Some(px(30));
-            item.set_status_for_test(BatchStatus::Done);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
             item.commit(StepKind::Edit);
         }
         State::UpscaleNotKept => {
             item.result_rgba = Some(px(40));
-            item.set_status_for_test(BatchStatus::Done);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
             item.commit(StepKind::Upscale);
             item.record_origin(Engine::Upscale, None, None);
         }

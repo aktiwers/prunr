@@ -537,7 +537,7 @@ mod selection_action_tests {
             *px = image::Rgba([255, 255, 255, 255]);
         }
         item.result_rgba = Some(Arc::new(rgba));
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item
     }
 
@@ -550,7 +550,7 @@ mod selection_action_tests {
         let mut app = super::PrunrApp::new_for_test();
         let mut item = make_item_done();
         let source = item.result_rgba.take().unwrap();
-        item.set_status_for_test(BatchStatus::Pending);
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Pending);
         item.source_rgba = Some(source);
         item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
         app.batch.items.push(item);
