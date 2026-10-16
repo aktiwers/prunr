@@ -503,23 +503,23 @@ fn lama_cache() -> &'static Mutex<LamaCache> {
 /// models — keeping the previous backend cached for 5 min after they've
 /// committed to a different tool wastes ~700 MB–2 GB (LaMa) or ~16 GB
 /// (SD) on a model they're no longer using.
-pub fn release_all() {
-    release_lama_sessions();
-    crate::inpaint_sd::release_all();
+///
+/// The caches are empty when this returns; the sessions free where the
+/// result is dropped, so a caller that must not wait hundreds of
+/// milliseconds on the free drops it on another thread.
+pub fn release_all() -> ReleasedSessions {
+    let lama = std::mem::take(&mut *lama_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    if !lama.is_empty() {
+        tracing::info!(dropped = lama.len(), "LaMa: cache cleared on model switch");
+    }
+    ReleasedSessions { _lama: lama, _sd: crate::inpaint_sd::release_all() }
 }
 
-fn release_lama_sessions() {
-    let cache = lama_cache();
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dropped = guard.len();
-    guard.clear();
-    if dropped > 0 {
-        tracing::info!(
-            dropped,
-            rss_mb = crate::inpaint_sd::process_rss_mb(),
-            "LaMa: cache cleared on model switch",
-        );
-    }
+/// Eraser sessions taken out of their caches; dropping it frees them.
+#[must_use = "dropping it frees the sessions; drop it where the wait does not matter"]
+pub struct ReleasedSessions {
+    _lama: LamaCache,
+    _sd: crate::inpaint_sd::SdCache,
 }
 
 fn ensure_lama_sweeper_running() {

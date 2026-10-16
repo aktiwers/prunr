@@ -1304,7 +1304,7 @@ impl<T> CacheEntry<T> {
 /// nearly OOMing the box (`SD session bundle dropped` immediately after
 /// `SD session bundle loaded` in the trace).
 type SdBundleSlot = Arc<std::sync::OnceLock<Result<Arc<SdSession>, String>>>;
-type SdCache = HashMap<(prunr_models::ModelId, SdSessionKey), CacheEntry<SdBundleSlot>>;
+pub(crate) type SdCache = HashMap<(prunr_models::ModelId, SdSessionKey), CacheEntry<SdBundleSlot>>;
 
 fn sd_cache() -> &'static Mutex<SdCache> {
     static CACHE: OnceLock<Mutex<SdCache>> = OnceLock::new();
@@ -1336,9 +1336,10 @@ pub fn load_bundle(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Vec<(
     SdSession::get(id, &tuning.session_key(), tuning.keep_loaded).map(|bundle| bundle.picks.clone())
 }
 
-/// Release every loaded bundle, kept ones too.
-pub(crate) fn release_all() {
-    sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+/// Take every loaded bundle out of the cache, kept ones too; they free
+/// where the result drops.
+pub(crate) fn release_all() -> SdCache {
+    std::mem::take(&mut *sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
 /// Drop entries whose `last_used` is older than `idle` relative to `now`,
