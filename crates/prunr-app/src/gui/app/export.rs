@@ -299,7 +299,7 @@ impl PrunrApp {
         // is made off the UI thread.
         if let (true, Some(rgba)) = (bg.is_empty(), result.ready()) {
             let rgba = Arc::clone(rgba);
-            self.finish_copy(&rgba, multi_hint);
+            self.system.copy_image(rgba, crate::gui::system_bridge::CopyNote::Image { hint: multi_hint });
             return;
         }
         let tx = self.batch.bg_io.copy_ready_tx.clone();
@@ -310,16 +310,20 @@ impl PrunrApp {
         });
     }
 
-    /// Hand a copy to the clipboard and say how it went.
-    pub(super) fn finish_copy(&mut self, rgba: &image::RgbaImage, multi_hint: Option<String>) {
-        if self.system.copy_image(rgba) {
-            if let Some(msg) = multi_hint {
-                self.toasts.info(msg);
-            } else {
-                self.status_success("Copied to clipboard");
-            }
-        } else {
+    /// Say how a copy went once the clipboard has it.
+    pub(super) fn on_copy_done(&mut self, note: crate::gui::system_bridge::CopyNote, took: bool) {
+        use crate::gui::system_bridge::CopyNote;
+        if !took {
             self.status_error("Could not copy to clipboard. Try saving instead.");
+            return;
+        }
+        match note {
+            CopyNote::Image { hint: Some(msg) } => {
+                self.toasts.info(msg);
+            }
+            CopyNote::Image { hint: None } => self.status_success("Copied to clipboard"),
+            CopyNote::Selection => self.status_success("Selection copied to clipboard"),
+            CopyNote::SelectionCut => self.status_success("Selection cut to clipboard"),
         }
     }
 }
@@ -507,20 +511,24 @@ mod toast_kind_tests {
 
     #[test]
     fn a_copy_says_whether_the_clipboard_took_it() {
+        use crate::gui::system_bridge::CopyNote;
         let mut app = PrunrApp::new_for_test();
-        let rgba = image::RgbaImage::new(2, 2);
-        let took = app.system.copy_image(&rgba);
-        app.finish_copy(&rgba, None);
-        let expected = if took {
-            ("success", "Copied to clipboard")
-        } else {
-            ("error", "Could not copy to clipboard. Try saving instead.")
+        let rgba = Arc::new(image::RgbaImage::new(2, 2));
+        let land = |app: &mut PrunrApp| {
+            for (note, took) in app.system.take_copy_outcomes() {
+                app.on_copy_done(note, took);
+            }
         };
-        assert_eq!(app.toasts.last_for_test(), Some(expected));
-
-        app.system.drop_clipboard_for_test();
-        app.finish_copy(&rgba, None);
+        app.system.copy_image(Arc::clone(&rgba), CopyNote::Image { hint: None });
+        land(&mut app);
         assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not copy to clipboard. Try saving instead.")));
+        app.system.accept_copies_for_test();
+        app.system.copy_image(Arc::clone(&rgba), CopyNote::Image { hint: None });
+        land(&mut app);
+        assert_eq!(app.toasts.last_for_test(), Some(("success", "Copied to clipboard")));
+        app.system.copy_image(rgba, CopyNote::SelectionCut);
+        land(&mut app);
+        assert_eq!(app.toasts.last_for_test(), Some(("success", "Selection cut to clipboard")));
     }
 
     #[test]

@@ -132,10 +132,8 @@ impl PrunrApp {
                 SelectionAction::Delete => Some(CutoutAction::Erase),
                 SelectionAction::Clear => Some(self.settings.brush.cutout_action),
                 SelectionAction::Cut => {
-                    if let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) {
-                        self.system.copy_image(&selected);
-                        self.status_success("Selection cut to clipboard");
-                    }
+                    // The copy is made from the selection before it folds in.
+                    self.start_selection_edit(idx, SelectionEdit::Copy(crate::gui::system_bridge::CopyNote::SelectionCut));
                     Some(CutoutAction::Erase)
                 }
                 SelectionAction::Copy | SelectionAction::Invert => None,
@@ -153,23 +151,9 @@ impl PrunrApp {
         match action {
             // Only a cut-out offers it; handled above.
             SelectionAction::Restore => {}
-            SelectionAction::Delete => {
-                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                self.apply_selection_cut(idx, &mask, &base, ctx);
-            }
-            SelectionAction::Copy => {
-                let Some(selected) = self.selection_edit_inputs(idx).and_then(|(mask, base)| mask.copy_to_rgba(&base)) else { return };
-                self.system.copy_image(&selected);
-                self.status_success("Selection copied to clipboard");
-            }
-            SelectionAction::Cut => {
-                let Some((mask, base)) = self.selection_edit_inputs(idx) else { return };
-                if let Some(selected) = mask.copy_to_rgba(&base) {
-                    self.system.copy_image(&selected);
-                }
-                self.apply_selection_cut(idx, &mask, &base, ctx);
-                self.status_success("Selection cut to clipboard");
-            }
+            SelectionAction::Delete => self.start_selection_edit(idx, SelectionEdit::Cut),
+            SelectionAction::Copy => self.start_selection_edit(idx, SelectionEdit::Copy(crate::gui::system_bridge::CopyNote::Selection)),
+            SelectionAction::Cut => self.start_selection_edit(idx, SelectionEdit::CopyAndCut),
             SelectionAction::Invert => {
                 let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
                 let inverted = mask.invert();
@@ -200,37 +184,52 @@ impl PrunrApp {
             })
     }
 
-    /// The selection plus the image a Delete / Copy / Cut acts on.
-    fn selection_edit_inputs(
-        &self,
-        idx: usize,
-    ) -> Option<(Arc<prunr_core::selection::MaskArtifact>, Arc<image::RgbaImage>)> {
+    /// Make a selection Delete / Cut / Copy off the UI thread: the
+    /// handles are taken here, the image is unpacked, feathered, copied
+    /// and cut on a worker, and `land_selection_edit` applies it.
+    fn start_selection_edit(&mut self, idx: usize, edit: SelectionEdit) {
         let item = &self.batch.items[idx];
-        let mask = item.selection_mask.clone()?;
-        let base = item.edit_pixels().load()?;
+        let Some(mask) = item.selection_mask.clone() else { return };
         // What gets cut is what the overlay shows: the feathered mask, which
         // the texture build already computed when it is current.
         let style = self.selection_style();
-        let shown = item.current_selection_texture(style)
-            .and_then(|t| t.feathered.clone())
-            .or_else(|| style.feather(&mask, item.source_rgba.as_deref()))
-            .unwrap_or(mask);
-        Some((shown, base))
+        let feathered = item.current_selection_texture(style).and_then(|t| t.feathered.clone());
+        let (base, photo) = (item.edit_pixels(), item.photo_pixels());
+        let (item_id, version) = (item.id, item.timeline.version());
+        let tx = self.batch.bg_io.selection_edit_tx.clone();
+        std::thread::spawn(move || {
+            let Some(base) = base.load() else {
+                tracing::warn!(item_id, "selection edit skipped: the image could not be read");
+                return;
+            };
+            let shown = feathered
+                .or_else(|| style.feather(&mask, photo.load().as_deref()))
+                .unwrap_or(mask);
+            let copy = edit.copy_note().and_then(|note| shown.copy_to_rgba(&base).map(|rgba| (rgba, note)));
+            let cut = edit.cuts().then(|| {
+                let mut edited = (*base).clone();
+                shown.alpha_cut(&mut edited);
+                edited
+            });
+            let _ = tx.send(crate::gui::background_io::SelectionEditDone { item_id, version, copy, cut });
+        });
     }
 
-    /// Cut the selection out of `base` and publish it as the item's result,
-    /// one undo step.
-    fn apply_selection_cut(
-        &mut self,
-        idx: usize,
-        mask: &prunr_core::selection::MaskArtifact,
-        base: &image::RgbaImage,
-        ctx: &egui::Context,
-    ) {
-        let item_id = self.batch.items[idx].id;
-        let mut edited = base.clone();
-        mask.alpha_cut(&mut edited);
-        self.publish_result(item_id, Arc::new(edited), "edit", ctx);
+    /// A selection edit made off the UI thread lands: its copy goes to
+    /// the clipboard, and its cut becomes the result, one undo step, when
+    /// the image is still in the state the edit started from.
+    pub(super) fn land_selection_edit(&mut self, done: crate::gui::background_io::SelectionEditDone, ctx: &egui::Context) {
+        let crate::gui::background_io::SelectionEditDone { item_id, version, copy, cut } = done;
+        if let Some((rgba, note)) = copy {
+            self.system.copy_image(Arc::new(rgba), note);
+        }
+        let Some(cut) = cut else { return };
+        let Some(idx) = self.batch.index_of(item_id) else { return };
+        if self.batch.items[idx].timeline.version() != version {
+            tracing::info!(item_id, "selection cut dropped: the image changed while it was made");
+            return;
+        }
+        self.publish_result(item_id, Arc::new(cut), "edit", ctx);
         self.batch.items[idx].commit(StepKind::Edit);
     }
 
@@ -515,6 +514,29 @@ impl PrunrApp {
     }
 }
 
+
+/// What a selection action makes of the selected pixels.
+#[derive(Clone)]
+enum SelectionEdit {
+    Copy(crate::gui::system_bridge::CopyNote),
+    Cut,
+    CopyAndCut,
+}
+
+impl SelectionEdit {
+    fn copy_note(&self) -> Option<crate::gui::system_bridge::CopyNote> {
+        match self {
+            Self::Copy(note) => Some(note.clone()),
+            Self::CopyAndCut => Some(crate::gui::system_bridge::CopyNote::SelectionCut),
+            Self::Cut => None,
+        }
+    }
+
+    fn cuts(&self) -> bool {
+        matches!(self, Self::Cut | Self::CopyAndCut)
+    }
+}
+
 #[cfg(test)]
 mod selection_action_tests {
     use std::sync::Arc;
@@ -524,6 +546,17 @@ mod selection_action_tests {
     fn make_mask(w: u32, h: u32, selected: bool) -> MaskArtifact {
         let v = if selected { prunr_core::selection::FULL } else { 0 };
         MaskArtifact::from_cells(w, h, vec![v; (w * h) as usize])
+    }
+
+    /// Let the selection edit started by the last action land, as the
+    /// frame loop does: the job, then its copy's outcome.
+    fn land_edit(app: &mut super::PrunrApp) {
+        let ctx = egui::Context::default();
+        let done = app.batch.bg_io.selection_edit_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        app.land_selection_edit(done, &ctx);
+        for (note, took) in app.system.take_copy_outcomes() {
+            app.on_copy_done(note, took);
+        }
     }
 
     fn make_item_done() -> BatchItem {
@@ -560,6 +593,7 @@ mod selection_action_tests {
         app.batch.items.push(item);
 
         app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+        land_edit(&mut app);
 
         let item = &app.batch.items[0];
         let result = item.result_rgba.as_ref().expect("Delete must produce a result from the source");
@@ -580,6 +614,7 @@ mod selection_action_tests {
         app.batch.items.push(item);
 
         app.handle_selection_action(0, SelectionAction::Cut, &egui::Context::default());
+        land_edit(&mut app);
 
         let item = &app.batch.items[0];
         assert!(item.result_rgba.as_ref().unwrap().pixels().all(|px| px.0[3] == 0));
@@ -604,10 +639,33 @@ mod selection_action_tests {
                 }
                 app.batch.items.push(item);
                 assert_eq!(app.batch.items[0].corrects_cutout(app.settings.model), cutout);
+                app.system.accept_copies_for_test();
                 app.handle_selection_action(0, action, &egui::Context::default());
+                land_edit(&mut app);
                 assert_eq!(app.toasts.last_for_test(), Some(("success", text)), "cut-out {cutout}");
             }
         }
+    }
+
+    /// A selection cut made off the UI thread lands only on the state it
+    /// started from: a step taken meanwhile (an undo, a new stroke) keeps
+    /// the image as it now is.
+    #[test]
+    fn a_selection_cut_for_a_state_left_behind_is_dropped() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        use crate::gui::timeline::StepKind;
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.commit(StepKind::Process);
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        app.batch.items.push(item);
+        let before = app.batch.items[0].result_rgba.clone();
+        app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+        app.batch.items[0].commit(StepKind::Adjust);
+        land_edit(&mut app);
+        let item = &app.batch.items[0];
+        assert!(item.result_rgba.as_ref().zip(before.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b)), "the image stays as it is");
+        assert_eq!(item.timeline.undo_steps(), 2, "no Edit step from the stale cut");
     }
 
     /// Invert: coverage complement, signed by the active brush mode.
