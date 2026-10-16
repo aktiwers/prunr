@@ -507,13 +507,15 @@ impl PrunrApp {
         let want = self.settings.brush.magic_reading();
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
-        let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
-        let Some(ld) = item.retunable_decode() else { return };
-        if ld.reading == want {
+        let Some((output, mode, reading)) = item.retunable_decode().map(|ld| (Arc::clone(&ld.output), ld.mode, ld.reading)) else { return };
+        if reading == want {
             return;
         }
+        // Asked for only once a retune runs: a handle the job unpacks, not
+        // a decode on every frame.
+        let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
         self.processor.dispatch_sam_rethreshold(crate::gui::processor::SamRethresholdRequest {
-            item_id, output: Arc::clone(&ld.output), mode: ld.mode,
+            item_id, output, mode,
             source_dims, reading: want, base,
         });
         self.magic_brush_state.rethreshold_in_flight = true;
