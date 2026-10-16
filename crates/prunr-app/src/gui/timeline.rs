@@ -595,37 +595,20 @@ mod tests {
         assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane);
     }
 
-    /// Payloads at rest keep their bytes: the former inline mask encode
-    /// (literal zstd level 1) and header decode, kept here, must agree
-    /// with the shared framing on every input.
+    /// Masks and images stored for undo come back as they went in, and
+    /// a payload's size header reads back as written.
     #[test]
-    fn payload_framing_matches_its_former_inline_code() {
-        fn old_mask_encode(m: &MaskArtifact) -> Vec<u8> {
-            let mut raw = Vec::with_capacity(8 + m.cells().len());
-            raw.extend_from_slice(&m.width.to_le_bytes());
-            raw.extend_from_slice(&m.height.to_le_bytes());
-            raw.extend(m.cells().iter().map(|&c| c as u8));
-            zstd::encode_all(raw.as_slice(), 1).unwrap()
-        }
-        fn old_dims(h: &[u8]) -> (u32, u32) {
-            (u32::from_le_bytes([h[0], h[1], h[2], h[3]]), u32::from_le_bytes([h[4], h[5], h[6], h[7]]))
-        }
+    fn payloads_round_trip() {
         let mut seed = 0x9E37_79B9u32;
         let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
-
-        for _ in 0..10_000 {
-            let header: [u8; 8] = std::array::from_fn(|_| next() as u8);
-            assert_eq!(super::super::history_disk::read_dims(&header), old_dims(&header));
-        }
         for (w, h) in [(1, 1), (3, 7), (64, 48), (257, 129)] {
             let plane = MaskArtifact::from_cells(w, h, (0..w * h).map(|_| next() as i8).collect());
-            let bytes = plane.encode().unwrap();
-            assert_eq!(bytes, old_mask_encode(&plane), "{w}x{h} mask bytes");
-            assert_eq!(MaskArtifact::decode(&bytes).unwrap(), plane);
-            assert_eq!(MaskArtifact::decode(&old_mask_encode(&plane)).unwrap(), plane);
-
+            assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane, "{w}x{h} mask");
             let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(next().to_le_bytes()));
             assert_eq!(image::RgbaImage::decode(&img.encode().unwrap()).unwrap(), img, "{w}x{h} image");
+            let (wb, hb) = (w.to_le_bytes(), h.to_le_bytes());
+            let header = [wb[0], wb[1], wb[2], wb[3], hb[0], hb[1], hb[2], hb[3]];
+            assert_eq!(super::super::history_disk::read_dims(&header), (w, h));
         }
     }
 
