@@ -458,45 +458,63 @@ impl FacePhoto {
     }
 }
 
-/// What an export writes: the image as the canvas shows it. Unpacked,
-/// decoded or blended where it is used, off the UI thread.
+/// Where an image's pixels are. Loading may unpack a parked step, copy
+/// the photo out of its wrapper or decode its file, so it runs where the
+/// pixels are used: off the UI thread.
 #[derive(Clone)]
-pub(crate) enum ExportImage {
-    /// The result on screen.
-    Shown(Arc<image::RgbaImage>),
-    /// A result parked in the timeline while its image is off screen.
+pub(crate) enum Pixels {
+    Resident(Arc<image::RgbaImage>),
+    /// A step's image in the timeline, compressed while off screen.
     Parked(super::timeline::StoredImage),
-    /// The unprocessed photo, with its restored faces when Faces is on.
-    Photo {
-        source: ImageSource,
-        decoded: Option<Arc<image::RgbaImage>>,
-        faces: Option<super::live_preview::FacesInput>,
-    },
+    /// The photo, decoded into a `DynamicImage` only.
+    Wrapped(Arc<image::DynamicImage>),
+    /// The photo, not decoded.
+    Source(ImageSource),
+}
+
+impl Pixels {
+    pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
+        match self {
+            Self::Resident(rgba) => Some(Arc::clone(rgba)),
+            Self::Parked(stored) => stored.load(),
+            Self::Wrapped(dynamic) => Some(Arc::new(dynamic.to_rgba8())),
+            Self::Source(source) => source.decode_rgba().ok(),
+        }
+    }
+}
+
+/// What an export writes: the image as the canvas shows it, the result
+/// or the photo with its restored faces.
+#[derive(Clone)]
+pub(crate) struct ExportImage {
+    pub(crate) pixels: Pixels,
+    /// The pixels are the photo, not a result.
+    pub(crate) photo: bool,
+    pub(crate) faces: Option<super::live_preview::FacesInput>,
 }
 
 impl ExportImage {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
-        match self {
-            Self::Shown(rgba) => Some(Arc::clone(rgba)),
-            Self::Parked(stored) => stored.load(),
-            Self::Photo { source, decoded, faces } => {
-                let photo = match decoded {
-                    Some(rgba) => Arc::clone(rgba),
-                    None => source.decode_rgba().ok()?,
-                };
-                let Some(faces) = faces else { return Some(photo) };
-                if let Some(faced) = &faces.faced {
-                    return Some(Arc::new(faced.to_rgba8()));
-                }
-                let photo = Arc::try_unwrap(photo).unwrap_or_else(|shared| (*shared).clone());
-                Some(Arc::new(faces.key.blend_into(photo)))
-            }
+        let Some(faces) = &self.faces else { return self.pixels.load() };
+        if let Some(faced) = &faces.faced {
+            return Some(Arc::new(faced.to_rgba8()));
+        }
+        let photo = self.pixels.load()?;
+        let photo = Arc::try_unwrap(photo).unwrap_or_else(|shared| (*shared).clone());
+        Some(Arc::new(faces.key.blend_into(photo)))
+    }
+
+    /// The pixels as they are, when nothing needs loading or blending.
+    pub(crate) fn ready(&self) -> Option<&Arc<image::RgbaImage>> {
+        match (&self.pixels, &self.faces) {
+            (Pixels::Resident(rgba), None) => Some(rgba),
+            _ => None,
         }
     }
 
     /// The photo as it was opened: an export can copy its file unchanged.
     pub(crate) fn is_untouched_photo(&self) -> bool {
-        matches!(self, Self::Photo { faces: None, .. })
+        self.photo && self.faces.is_none()
     }
 }
 
@@ -2257,13 +2275,25 @@ impl BatchItem {
     /// What an export of this image writes: what the canvas shows, the
     /// result (parked or not) or the photo. Nothing is unpacked here.
     pub(crate) fn export_image(&self) -> ExportImage {
-        self.result_rgba.clone().map(ExportImage::Shown)
-            .or_else(|| self.timeline.current().result.clone().map(ExportImage::Parked))
-            .unwrap_or_else(|| ExportImage::Photo {
-                source: self.source.clone(),
-                decoded: self.source_rgba.clone(),
-                faces: self.faces_input(FaceStage::Photo),
-            })
+        match self.result_pixels() {
+            Some(pixels) => ExportImage { pixels, photo: false, faces: None },
+            None => ExportImage { pixels: self.photo_pixels(), photo: true, faces: self.faces_input(FaceStage::Photo) },
+        }
+    }
+
+    /// The shown step's result, on screen or parked.
+    fn result_pixels(&self) -> Option<Pixels> {
+        self.result_rgba.clone().map(Pixels::Resident)
+            .or_else(|| self.timeline.current().result.clone().map(Pixels::Parked))
+    }
+
+    /// The photo, however far it is decoded.
+    pub(crate) fn photo_pixels(&self) -> Pixels {
+        match (&self.source_rgba, &self.source_dyn) {
+            (Some(rgba), _) => Pixels::Resident(Arc::clone(rgba)),
+            (None, Some(dynamic)) => Pixels::Wrapped(Arc::clone(dynamic)),
+            (None, None) => Pixels::Source(self.source.clone()),
+        }
     }
 
     /// The shown state has a result that the working copy has released.
@@ -2413,25 +2443,10 @@ impl BatchItem {
         self.settings.bg_image_hash = None;
     }
 
-    /// Resolve the RGBA source for an inpaint stroke. Stack-based inpaint
-    /// runs each stroke against the previous result (if any), so:
-    ///   1. result_rgba (most-recent processed result)
-    ///   2. the shown step's result, parked while the image is off screen
-    ///   3. source_rgba (original decoded image)
-    ///   4. source_dyn  (lazy decode fallback under memory pressure)
-    ///
-    /// Returns None when no decoded source is available — caller should warn
-    /// and skip the dispatch.
-    pub(crate) fn source_for_inpaint(&self) -> Option<Arc<image::RgbaImage>> {
-        self.result_rgba.clone()
-            .or_else(|| self.timeline.current().result.as_ref().and_then(|r| r.load()))
-            .or_else(|| self.decoded_source())
-    }
-
-    /// The decoded source as RGBA: `source_rgba`, else a copy out of `source_dyn`.
-    pub(crate) fn decoded_source(&self) -> Option<Arc<image::RgbaImage>> {
-        self.source_rgba.clone()
-            .or_else(|| self.source_dyn.as_ref().map(|d| Arc::new(d.to_rgba8())))
+    /// What an erase or a selection edit acts on: the result shown (an
+    /// erase builds on earlier fills), else the photo.
+    pub(crate) fn edit_pixels(&self) -> Pixels {
+        self.result_pixels().unwrap_or_else(|| self.photo_pixels())
     }
 
     /// The depth map to save beside this item's result.

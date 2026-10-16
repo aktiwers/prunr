@@ -293,7 +293,7 @@ impl PrunrApp {
         // The background goes into the clipboard image so it matches the
         // canvas; a blur of the full photo, or a parked result to unpack,
         // is made off the UI thread.
-        if let (true, crate::gui::item::ExportImage::Shown(rgba)) = (bg.is_empty(), &result) {
+        if let (true, Some(rgba)) = (bg.is_empty(), result.ready()) {
             let rgba = Arc::clone(rgba);
             self.finish_copy(&rgba, multi_hint);
             return;

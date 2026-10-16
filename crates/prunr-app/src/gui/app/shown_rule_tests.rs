@@ -169,14 +169,14 @@ fn faces_run_on_what_is_shown() {
 
 #[test]
 fn an_export_writes_what_the_canvas_shows() {
-    use crate::gui::item::ExportImage;
+    use crate::gui::item::Pixels;
     let app = app_in(State::Unprocessed, SettingsModel::Silueta);
     assert!(app.batch.items[0].export_image().is_untouched_photo(), "the photo as opened");
 
     let mut app = app_in(State::Cut, SettingsModel::Silueta);
-    assert!(matches!(app.batch.items[0].export_image(), ExportImage::Shown(_)), "the cut-out on screen");
+    assert!(matches!(app.batch.items[0].export_image().pixels, Pixels::Resident(_)), "the cut-out on screen");
     assert!(app.batch.items[0].park_result());
-    assert!(matches!(app.batch.items[0].export_image(), ExportImage::Parked(_)), "off screen: the parked cut-out, not the photo");
+    assert!(matches!(app.batch.items[0].export_image().pixels, Pixels::Parked(_)), "off screen: the parked cut-out, not the photo");
 }
 
 /// A failed re-run leaves the result it had on screen: the failure is
@@ -217,7 +217,9 @@ fn an_erase_off_screen_starts_from_the_parked_result() {
     let item = &mut app.batch.items[0];
     let shown = item.result_rgba.clone().expect("a cut-out");
     assert!(item.park_result());
-    let source = item.source_for_inpaint().expect("pixels to erase");
+    let pixels = item.edit_pixels();
+    assert!(matches!(pixels, crate::gui::item::Pixels::Parked(_)), "handed over parked: the erase's thread unpacks it, not the UI");
+    let source = pixels.load().expect("pixels to erase");
     assert_eq!(*source, *shown, "the cut-out, not the photo");
 }
 

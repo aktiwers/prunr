@@ -1068,7 +1068,7 @@ impl Processor {
     pub(crate) fn dispatch_inpaint(
         &mut self,
         item_id: u64,
-        image: std::sync::Arc<image::RgbaImage>,
+        image: super::item::Pixels,
         correction: std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: InpaintTuning,
     ) {
@@ -1095,6 +1095,11 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         self.spawn_model(move || {
+            let Some(image) = image.load() else {
+                run.end();
+                let _ = tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
+                return;
+            };
             preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());
             // This path only sees LaMa / Big-LaMa / MI-GAN.
@@ -1231,7 +1236,7 @@ impl Processor {
         &mut self,
         item_id: u64,
         generation: u64,
-        image: &std::sync::Arc<image::RgbaImage>,
+        image: &super::item::Pixels,
         correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
         tuning: &InpaintTuning,
         progress: prunr_core::Progress,
@@ -1256,6 +1261,10 @@ impl Processor {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
             };
             if cancelled() { send_cancelled(); return; }
+            let Some(image) = image.load() else {
+                let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
+                return;
+            };
             // Before the dispatch, so it lands under the worker's previews.
             preview_the_photo(&progress, &image);
             let mask = tuning.fill_region(&correction, image.dimensions());

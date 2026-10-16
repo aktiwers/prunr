@@ -158,13 +158,8 @@ impl PrunrApp {
             return false;
         };
         // Stack-based inpaint: each stroke runs against the previous
-        // result so earlier strokes stay intact. source_for_inpaint
-        // walks result_rgba → source_rgba → source_dyn, the last arm
-        // handling memory-pressure eviction.
-        let Some(source) = item.source_for_inpaint() else {
-            tracing::warn!(item_id, "inpaint dispatch skipped: source RGBA unavailable");
-            return false;
-        };
+        // result so earlier strokes stay intact; the run loads it.
+        let source = item.edit_pixels();
         let picked_model = self.eraser_model();
         let seed = picked_model.is_sd_family()
             .then(|| self.settings.brush.sd_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
