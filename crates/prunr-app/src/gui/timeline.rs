@@ -232,16 +232,12 @@ impl<T: Payload> Stored<T> {
         };
     }
 
-    /// Compress on a worker thread when nothing else uses the payload.
-    /// `slots` caps how many encoders run at once.
-    pub(crate) fn compress_when_idle(self: &Arc<Self>, slots: &Arc<super::background_io::DecodeSlots>) {
-        let Some(value) = self.begin_compress() else { return };
+    /// The compression to run on a worker, when nothing else uses the
+    /// payload.
+    pub(crate) fn compress_job(self: &Arc<Self>) -> Option<CompressJob> {
+        let value = self.begin_compress()?;
         let cell = Arc::clone(self);
-        let slots = Arc::clone(slots);
-        std::thread::spawn(move || {
-            let _slot = slots.acquire();
-            cell.finish_compress(value.encode());
-        });
+        Some(Box::new(move || cell.finish_compress(value.encode())))
     }
 
     /// Move a compressed payload to disk; true when it moved.
@@ -282,6 +278,9 @@ impl<T: Payload> Drop for Stored<T> {
         }
     }
 }
+
+/// One payload's compression, run off the UI thread.
+pub(crate) type CompressJob = Box<dyn FnOnce() + Send>;
 
 pub(crate) type StoredImage = Arc<Stored<image::RgbaImage>>;
 pub(crate) type StoredSelection = Arc<Stored<MaskArtifact>>;

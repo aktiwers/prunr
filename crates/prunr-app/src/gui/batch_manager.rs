@@ -99,10 +99,26 @@ impl BatchManager {
             return;
         }
         self.last_history_sweep = now;
-        let slots = &self.bg_io.decode_slots;
-        for item in &self.items {
-            item.timeline.stored_images().for_each(|c| c.compress_when_idle(slots));
-            item.timeline.stored_selections().for_each(|c| c.compress_when_idle(slots));
+        let jobs: std::collections::VecDeque<super::timeline::CompressJob> = self.items.iter()
+            .flat_map(|item| {
+                let images = item.timeline.stored_images().filter_map(|c| c.compress_job());
+                images.chain(item.timeline.stored_selections().filter_map(|c| c.compress_job()))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        // A few workers share the sweep's jobs: after a batch lands there
+        // can be a hundred, and a thread each cost the frame milliseconds.
+        let workers = jobs.len().min(std::thread::available_parallelism().map_or(2, |n| n.get()));
+        let jobs = Arc::new(std::sync::Mutex::new(jobs));
+        for _ in 0..workers {
+            let (jobs, slots) = (Arc::clone(&jobs), Arc::clone(&self.bg_io.decode_slots));
+            std::thread::spawn(move || loop {
+                let Some(job) = jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front() else { break };
+                let _slot = slots.acquire();
+                job();
+            });
         }
     }
 
