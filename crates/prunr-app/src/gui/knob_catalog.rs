@@ -213,8 +213,8 @@ pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static
         Surface::Faces => (g.processing && g.model.role() == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.")
             .or_else(|| (g.model.role() != ModelRole::Upscale).then(|| needs(Need::ShownImage)).flatten()),
         Surface::Colorize => g.processing.then_some("Wait for Colorize to finish, or cancel it."),
-        Surface::Lines
-        | Surface::SdChips
+        Surface::Lines => needs(Need::Processed),
+        Surface::SdChips
         | Surface::RoremChips
         | Surface::Brushes
         | Surface::SelectionStrokes
