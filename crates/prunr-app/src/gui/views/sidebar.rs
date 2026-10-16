@@ -188,6 +188,9 @@ fn render_item_row(
         actions.hovered = Some((app.batch.items[i].id, item_response.is_pointer_button_down_on()));
     }
 
+    // The row shows any run on the image (an upscale, an erase) as work
+    // under way; status() is Processing only for a cut, which the canvas
+    // animates differently.
     let running = app.batch.items[i].is_running();
     if running {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
@@ -282,7 +285,7 @@ fn request_item_thumbnail(app: &mut PrunrApp, i: usize) {
     app.batch.request_thumbnail(
         item_id,
         &app.batch.items[i].source,
-        app.batch.items[i].result_rgba.as_ref(),
+        app.batch.items[i].result_pixels(),
     );
 }
 

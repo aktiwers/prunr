@@ -8,6 +8,9 @@ use prunr_core::LineMode;
 pub(crate) enum Need {
     /// The pixels on screen: the photo, or the result.
     ShownImage,
+    /// A model whose result is the photo re-rendered (a cut-out model or
+    /// No model): what a Mask, Edge or Photo render draws for.
+    PhotoRender,
     /// The cut-out's mask under the image on screen: Mask, Outline &
     /// Shadow, a brush re-cut.
     Cutout,
@@ -115,6 +118,8 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
             (None, Photo::Decoding) => Verdict::Wait(Reason::Decoding),
             (None, Photo::Unreadable) => Verdict::Never(Reason::Unreadable),
         },
+        Need::PhotoRender if matches!(role, ModelRole::Cutout | ModelRole::Filters) => Verdict::Ready,
+        Need::PhotoRender => Verdict::Never(Reason::NotForModel),
         Need::Cutout if facts.line_mode == LineMode::EdgesOnly => Verdict::Never(Reason::SketchCoversPhoto),
         // No model's photo is its own result: what cut-out controls act on.
         Need::Cutout if role == ModelRole::Filters => Verdict::Ready,

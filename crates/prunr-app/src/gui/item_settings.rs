@@ -271,11 +271,19 @@ impl ItemSettings {
     /// lens-blur background.
     pub fn wants_depth(&self, role: crate::gui::knob_catalog::ModelRole) -> bool {
         use crate::gui::knob_catalog::ModelRole;
-        let photo_look = role == ModelRole::Filters && self.depth.is_active();
-        let lines = matches!(role, ModelRole::Cutout | ModelRole::Filters) && self.line_fade() > 0.0;
         let backdrop = matches!(role, ModelRole::Cutout | ModelRole::Filters)
             && matches!(self.backdrop(), Backdrop::Effect(e) if e.needs_depth());
-        photo_look || lines || backdrop
+        self.photo_reads_depth(role) || backdrop
+    }
+
+    /// The photo render itself reads the depth map (the Depth chip's look
+    /// on No model, faded lines), so a landing map re-renders it; a depth
+    /// backdrop re-renders on its own.
+    pub fn photo_reads_depth(&self, role: crate::gui::knob_catalog::ModelRole) -> bool {
+        use crate::gui::knob_catalog::ModelRole;
+        let photo_look = role == ModelRole::Filters && self.depth.is_active();
+        let lines = matches!(role, ModelRole::Cutout | ModelRole::Filters) && self.line_fade() > 0.0;
+        photo_look || lines
     }
 
     /// Strength as the colorizer takes it: 1 = as predicted.

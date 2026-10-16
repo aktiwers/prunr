@@ -28,7 +28,8 @@ impl PrunrApp {
     /// and how many targets have none.
     pub(super) fn erase_targets(&self) -> (Vec<usize>, usize) {
         let (with_region, without): (Vec<usize>, Vec<usize>) = self.batch.targeted_indices().into_iter()
-            .partition(|&idx| self.batch.items[idx].has_painted_region());
+            .filter(|&idx| self.batch.items[idx].is_idle())
+            .partition(|&idx| self.run_may_start(&self.batch.items[idx]));
         (with_region, without.len())
     }
 
@@ -38,6 +39,11 @@ impl PrunrApp {
         // An image gone from the batch, or one without a run, passes its
         // turn on: nothing else would call this again for the rest.
         while let Some(item_id) = self.processor.next_queued_run() {
+            // Its image changed while it waited (a run started on it, its
+            // region was cleared): it passes its turn.
+            if !self.batch.find_by_id(item_id).is_some_and(|i| self.run_may_start(i)) {
+                continue;
+            }
             if let Some(shown) = self.batch.selected_idx_clamped() {
                 self.batch.share_settings(shown, &HashSet::from([item_id]));
             }
@@ -62,7 +68,9 @@ impl PrunrApp {
     /// same picture); the rest queue for a run.
     pub(super) fn process_kept_run_items(&mut self) {
         let Some(model) = self.settings.model.dispatch_model_kind() else { return };
-        let ids = self.batch.items_to_process();
+        let ids: Vec<u64> = self.batch.items_to_process().into_iter()
+            .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| self.run_may_start(i)))
+            .collect();
         let shown = self.batch.selected_idx_clamped();
         let shown_settings = shown.map(|i| self.batch.items[i].settings);
         let adopting: HashSet<u64> = ids.iter().copied()
@@ -248,7 +256,7 @@ impl PrunrApp {
             .unwrap_or(super::NO_MODEL_RECIPE_KIND);
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
-            .filter(|i| filter(i) && !i.is_cutting())
+            .filter(|i| filter(i) && self.run_may_start(i))
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
@@ -293,7 +301,7 @@ impl PrunrApp {
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let settings = self.run_settings();
         let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
-            .filter(|i| filter(i) && !i.is_cutting())
+            .filter(|i| filter(i) && self.run_may_start(i))
             .map(|i| (i.id, i.source.clone()))
             .collect();
         if let Some(shown) = self.batch.selected_idx_clamped() {

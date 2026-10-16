@@ -21,8 +21,12 @@ impl PrunrApp {
     /// "Separate layers" applies: the switch is on and the model cuts out a
     /// subject (layers come from its mask and lines).
     pub(crate) fn saves_layers(&self) -> bool {
-        self.settings.export_split_layers
-            && self.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout
+        self.settings.export_split_layers && self.offers_layers()
+    }
+
+    /// "Separate layers" applies to this model: it cuts out a subject.
+    pub(crate) fn offers_layers(&self) -> bool {
+        self.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout
     }
 
     pub fn handle_save_selected(&mut self) {
