@@ -203,7 +203,7 @@ impl PrunrApp {
     ) -> Option<(Arc<prunr_core::selection::MaskArtifact>, Arc<image::RgbaImage>)> {
         let item = &self.batch.items[idx];
         let mask = item.selection_mask.clone()?;
-        let base = item.source_for_inpaint()?;
+        let base = item.edit_pixels().load()?;
         // What gets cut is what the overlay shows: the feathered mask, which
         // the texture build already computed when it is current.
         let style = self.selection_style();
