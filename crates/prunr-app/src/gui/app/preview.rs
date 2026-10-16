@@ -158,7 +158,7 @@ impl PrunrApp {
     ) -> Result<crate::gui::live_preview::DispatchInputs, crate::gui::capability::Verdict> {
         use crate::gui::capability::{check, ItemFacts, Need, Reason, Verdict};
         use crate::gui::knob_catalog::ModelRole;
-        use crate::gui::live_preview::{DispatchInputs, PreviewKind};
+        use crate::gui::live_preview::{DispatchInputs, OriginalFrom, PreviewKind};
         let item = items.iter_mut().find(|b| b.id == id).ok_or(Verdict::Never(Reason::Removed))?;
         let facts = ItemFacts::of(item);
         let need = |need| match check(&facts, need, role) {
@@ -208,26 +208,30 @@ impl PrunrApp {
         // A run on top of an earlier result (an erase, a hand edit) keeps
         // it: the preview starts where Process would, the shown step's own
         // start when it redoes that step.
+        // The photo as a DynamicImage, kept on the item once a render has
+        // made it; until then the render's thread unpacks and wraps it.
         let start = item.run_start(Engine::Segment);
-        let original = if let Some(rgba) = start.as_ref().and_then(|s| s.image.load()) {
-            let cached = item.start_dyn_cache.as_ref()
-                .and_then(|(src, dyn_img)| Arc::ptr_eq(&rgba, src).then(|| Arc::clone(dyn_img)));
-            match cached {
-                Some(dyn_img) => dyn_img,
-                None => {
-                    let dyn_img = Arc::new(image::DynamicImage::ImageRgba8((*rgba).clone()));
-                    item.start_dyn_cache = Some((rgba, Arc::clone(&dyn_img)));
-                    dyn_img
+        let unwrapped = || Arc::new(image::DynamicImage::new_rgba8(0, 0));
+        let (original, original_from) = match start.as_ref() {
+            Some(s) => {
+                let kept = s.image.loaded().and_then(|rgba| item.start_dyn_cache.as_ref()
+                    .filter(|(src, _)| Arc::ptr_eq(&rgba, src))
+                    .map(|(_, wrapped)| Arc::clone(wrapped)));
+                match kept {
+                    Some(wrapped) => (wrapped, None),
+                    None => (unwrapped(), Some(OriginalFrom::Start(Arc::clone(&s.image), s.dims))),
                 }
             }
-        } else {
-            item.start_dyn_cache = None;
-            if item.source_dyn.is_none() {
-                let rgba = item.source_rgba.as_ref().ok_or(Verdict::Wait(Reason::Decoding))?;
-                item.source_dyn = Some(Arc::new(image::DynamicImage::ImageRgba8((**rgba).clone())));
+            None => {
+                item.start_dyn_cache = None;
+                match &item.source_dyn {
+                    Some(wrapped) => (Arc::clone(wrapped), None),
+                    None => {
+                        let rgba = item.source_rgba.as_ref().ok_or(Verdict::Wait(Reason::Decoding))?;
+                        (unwrapped(), Some(OriginalFrom::Photo(Arc::clone(rgba))))
+                    }
+                }
             }
-            // invariant: source_dyn was filled just above when it was None.
-            Arc::clone(item.source_dyn.as_ref().unwrap())
         };
         let edge_tensor = Self::edge_tensor_for_active_scale(item);
         // DualScale needs TWO edge tensors — the primary (active scale, used
@@ -266,6 +270,7 @@ impl PrunrApp {
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Ok(DispatchInputs {
             start,
+            original_from,
             seg_tensor, edge_tensor, secondary_edge_tensor,
             cached_edge, cached_bold, cached_masked_base,
             correction,
@@ -359,6 +364,9 @@ impl PrunrApp {
                 if r.version != item.timeline.version() {
                     // Computed for a state the item has since left.
                     continue;
+                }
+                if let Some(built) = r.new_original.clone() {
+                    item.keep_built_original(built);
                 }
                 if r.quick {
                     // Shown only: the result, its step, its recipe and its

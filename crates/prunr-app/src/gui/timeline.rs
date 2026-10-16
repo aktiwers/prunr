@@ -169,6 +169,15 @@ impl<T: Payload> Stored<T> {
         Some(value)
     }
 
+    /// The payload when it is already decoded; `None` while it is stored
+    /// compressed or on disk. Never decodes, so the UI thread may ask.
+    pub(crate) fn loaded(&self) -> Option<Arc<T>> {
+        match &*self.lock() {
+            Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) => Some(Arc::clone(v)),
+            Tier::Compressed(_) | Tier::OnDisk(_) => None,
+        }
+    }
+
     /// True when `value` is the payload this cell hands out.
     pub(crate) fn holds(&self, value: &Arc<T>) -> bool {
         matches!(&*self.lock(), Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) if Arc::ptr_eq(v, value))
