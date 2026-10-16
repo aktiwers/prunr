@@ -64,9 +64,16 @@ impl StepKind {
 pub(crate) trait Payload: Send + Sync + Sized + 'static {
     fn encode(&self) -> std::io::Result<Vec<u8>>;
     fn decode(bytes: &[u8]) -> std::io::Result<Self>;
+    /// Width and height, kept beside the stored form so a reader needs
+    /// no unpack to know them.
+    fn dims(&self) -> (u32, u32);
 }
 
 impl Payload for image::RgbaImage {
+    fn dims(&self) -> (u32, u32) {
+        self.dimensions()
+    }
+
     fn encode(&self) -> std::io::Result<Vec<u8>> {
         super::history_disk::compress_to_ram(self)
     }
@@ -77,6 +84,10 @@ impl Payload for image::RgbaImage {
 }
 
 impl Payload for MaskArtifact {
+    fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     fn encode(&self) -> std::io::Result<Vec<u8>> {
         let mut raw = Vec::with_capacity(8 + self.cells().len());
         raw.extend_from_slice(&self.width.to_le_bytes());
@@ -112,6 +123,7 @@ enum Tier<T> {
 /// One stored payload, shared by every state that has it.
 pub(crate) struct Stored<T: Payload> {
     tier: Mutex<Tier<T>>,
+    dims: (u32, u32),
 }
 
 #[derive(Clone, PartialEq)]
@@ -138,7 +150,8 @@ impl Encoded {
 
 impl<T: Payload> Stored<T> {
     pub(crate) fn new(value: Arc<T>) -> Arc<Self> {
-        Arc::new(Self { tier: Mutex::new(Tier::Plain(value)) })
+        let dims = value.dims();
+        Arc::new(Self { tier: Mutex::new(Tier::Plain(value)), dims })
     }
 
     fn lock(&self) -> MutexGuard<'_, Tier<T>> {
@@ -167,6 +180,11 @@ impl<T: Payload> Stored<T> {
             *tier = Tier::Loaded(Arc::clone(&value), encoded);
         }
         Some(value)
+    }
+
+    /// The payload's width and height, packed or not.
+    pub(crate) fn dims(&self) -> (u32, u32) {
+        self.dims
     }
 
     /// The payload when it is already decoded; `None` while it is stored

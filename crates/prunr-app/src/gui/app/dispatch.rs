@@ -270,13 +270,10 @@ impl PrunrApp {
         if candidate_ids.is_empty() { return; }
         // What you see is what you process: every target takes the shown
         // image's settings first, so one that was up to date under its own
-        // reruns under these. A background image's result is released; a
-        // run may start from it.
+        // reruns under these. A background image's result stays parked:
+        // the run starts from its stored step.
         if let Some(shown) = self.batch.selected_idx_clamped() {
             self.batch.share_settings(shown, &candidate_ids);
-        }
-        for item in self.batch.in_set(&candidate_ids) {
-            item.unpark_result();
         }
 
         let cutter = Cutter::of(self.settings.model.to_model_kind());
