@@ -23,6 +23,15 @@ pub(crate) struct HardwareInstallCache {
     pub depth: bool,
     /// Bit `SettingsModel::index()` set when that model is installed.
     models: u32,
+    /// Bit `i` set when `REGISTRY[i]` is on disk (or bundled).
+    registry: u128,
+}
+
+fn registry_bits() -> u128 {
+    debug_assert!(prunr_models::REGISTRY.len() <= 128, "the registry outgrew its bit set");
+    prunr_models::REGISTRY.iter().enumerate()
+        .filter(|(_, d)| prunr_models::is_available(d.id))
+        .fold(0, |bits, (i, _)| bits | 1 << i)
 }
 
 impl HardwareInstallCache {
@@ -40,7 +49,13 @@ impl HardwareInstallCache {
             depth: prunr_models::is_available(prunr_core::depth::MODEL.into()),
             models: model_bits(crate::gui::settings::SettingsModel::ALL.iter()
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
+            registry: registry_bits(),
         }
+    }
+
+    /// Whether `id`'s weights are installed, as read at the last refresh.
+    pub fn has_installed(&self, id: prunr_models::ModelId) -> bool {
+        prunr_models::REGISTRY.iter().position(|d| d.id == id).is_some_and(|i| self.registry & (1 << i) != 0)
     }
 
     /// Every model and runtime present, for tests that drive runs; a
@@ -58,6 +73,7 @@ impl HardwareInstallCache {
             faces: [true; crate::gui::item_settings::FaceModel::ALL.len()],
             depth: true,
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
+            registry: u128::MAX,
         }
     }
 
@@ -119,4 +135,16 @@ fn model_bit(model: crate::gui::settings::SettingsModel) -> u32 {
 
 fn model_bits<'a>(models: impl IntoIterator<Item = &'a crate::gui::settings::SettingsModel>) -> u32 {
     models.into_iter().fold(0, |bits, m| bits | model_bit(*m))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A card reads installed weights from the cache, not the disk:
+    /// nothing counts as installed until a refresh has read it.
+    #[test]
+    fn installed_weights_come_from_the_last_refresh() {
+        let id = prunr_models::REGISTRY[0].id;
+        assert!(!super::HardwareInstallCache::default().has_installed(id));
+        assert!(super::HardwareInstallCache::all_installed().has_installed(id));
+    }
 }

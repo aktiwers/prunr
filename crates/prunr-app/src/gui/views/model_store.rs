@@ -114,7 +114,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                         let row = i / 3;
                         let state = app.download_manager.state(desc.id);
                         let height = last.get(row).copied().unwrap_or(0.0);
-                        let (action, natural) = render_card(ui, desc, &state, &provider, egui::vec2(card_width, height));
+                        let installed = app.hardware_install_cache.has_installed(desc.id);
+                        let (action, natural) = render_card(ui, desc, installed, &state, &provider, egui::vec2(card_width, height));
                         heights[row] = heights[row].max(natural);
                         if let Some(action) = action {
                             pending_actions.push((desc.id, action));
@@ -219,11 +220,11 @@ fn category_icon(c: ModelCategory) -> &'static str {
 fn render_card(
     ui: &mut egui::Ui,
     desc: &ModelDescriptor,
+    installed: bool,
     state: &DownloadState,
     provider: &str,
     size: egui::Vec2,
 ) -> (Option<CardAction>, f32) {
-    let installed = prunr_models::is_available(desc.id);
     let action = card_action(desc, installed, state);
     let advisory = desc.hardware_advisory(provider);
     let border = if installed {
@@ -282,7 +283,7 @@ fn render_card(
             }
             let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
             ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                let (meta, color) = card_meta(desc, state, advisory.is_some());
+                let (meta, color) = card_meta(desc, installed, state, advisory.is_some());
                 ui.label(RichText::new(meta).size(theme::FONT_SIZE_SECONDARY).color(color));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(action, CardAction::Bundled) || (installed && action == CardAction::Delete) {
@@ -309,7 +310,7 @@ fn render_card(
 }
 
 /// The footer's text: the size, or what the download is doing.
-fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (String, Color32) {
+fn card_meta(desc: &ModelDescriptor, installed: bool, state: &DownloadState, advisory: bool) -> (String, Color32) {
     let size = desc.size_mb().map(super::get_model::size_label);
     match state {
         DownloadState::InProgress { bytes_so_far, total_bytes } => {
@@ -318,7 +319,7 @@ fn card_meta(desc: &ModelDescriptor, state: &DownloadState, advisory: bool) -> (
         }
         DownloadState::Queued => ("Queued".into(), theme::TEXT_SECONDARY),
         DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY),
-        DownloadState::Failed { .. } if !prunr_models::is_available(desc.id) => ("Download failed".into(), FAILED_TEXT),
+        DownloadState::Failed { .. } if !installed => ("Download failed".into(), FAILED_TEXT),
         _ => match size {
             Some(s) => (s, if advisory { theme::ADVISORY_TEXT } else { theme::TEXT_SECONDARY }),
             None => ("Built-in".into(), theme::TEXT_SECONDARY),

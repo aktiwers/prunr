@@ -213,7 +213,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
         SettingsTab::Images => { render_page_images(ui, &mut app.settings); None }
         SettingsTab::Editing => { render_page_editing(ui, &mut app.settings); None }
         SettingsTab::Hotkeys => { render_tab_hotkeys(ui, app); None }
-        SettingsTab::Credits => { render_tab_model_credits(ui); None }
+        SettingsTab::Credits => { render_tab_model_credits(ui, &app.hardware_install_cache); None }
     }
 }
 
@@ -725,13 +725,13 @@ fn sort_for_model_credits<'a>(
     out
 }
 
-fn render_tab_model_credits(ui: &mut egui::Ui) {
+fn render_tab_model_credits(ui: &mut egui::Ui, installs: &crate::gui::hardware_cache::HardwareInstallCache) {
     super::hint(ui, "All installed models, their authors, and licenses.");
     ui.add_space(theme::SPACE_SM);
 
     let installed_raw: Vec<&prunr_models::ModelDescriptor> = prunr_models::REGISTRY
         .iter()
-        .filter(|d| prunr_models::is_available(d.id))
+        .filter(|d| installs.has_installed(d.id))
         .collect();
     let installed = sort_for_model_credits(&installed_raw);
 
