@@ -156,16 +156,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
                 p.cancel.store(true, std::sync::atomic::Ordering::Release);
             }
         }
-        HardwareSectionIntent::Uninstall(rt) => {
-            let (done, ctx) = (app.batch.bg_io.removed_tx.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let outcome = crate::runtime_install::uninstall(rt)
-                    .map(|()| format!("{} removed", rt.display_name()))
-                    .map_err(|e| format!("Uninstall failed: {e}"));
-                let _ = done.send(outcome);
-                ctx.request_repaint();
-            });
-        }
+        HardwareSectionIntent::Uninstall(rt) => app.uninstall_runtime(rt, ctx),
         HardwareSectionIntent::PreferRuntime(choice) => {
             match crate::runtime_install::prefer(choice) {
                 Ok(()) if app.hardware_install_cache.loaded_runtime != Some(choice) => {
@@ -178,22 +169,8 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
             }
             app.refresh_install_cache();
         }
-        HardwareSectionIntent::ClearCompiledCache => {
-            // Off-thread: a multi-GB rmtree on a slow disk would stall
-            // the GUI frame.
-            std::thread::spawn(|| {
-                let bytes = prunr_core::cache::clear_all();
-                tracing::info!(bytes, "cleared compiled-model cache");
-            });
-            app.toasts.info("Clearing compiled-model cache…");
-        }
-        HardwareSectionIntent::ForgetGpuFailures => {
-            std::thread::spawn(|| {
-                let entries = prunr_core::ep_compat::clear();
-                tracing::info!(entries, "forgot recorded GPU failures");
-            });
-            app.toasts.info("Every model will try the graphics card again");
-        }
+        HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
+        HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
     }
 }
 
