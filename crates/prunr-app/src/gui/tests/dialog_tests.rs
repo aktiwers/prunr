@@ -232,6 +232,7 @@ fn imports_are_read_off_the_ui_thread_and_say_what_failed() {
         app.drain_background_channels(&ctx);
     }
     assert_eq!(app.batch.items.len(), 1, "the image imports");
+    assert!(app.batch.items[0].source_len > 0, "with its file size, read where it was imported");
     assert!(warned(&app), "the broken file and the empty folder each say so");
 }
 

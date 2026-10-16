@@ -971,8 +971,8 @@ impl PrunrApp {
         let mut channel_drained = false;
         for _ in 0..FILE_LOAD_DRAIN_PER_FRAME {
             match self.batch.bg_io.file_load_rx.try_recv() {
-                Ok(crate::gui::background_io::FileLoad::Image { path, name, dims: Some(dims) }) => {
-                    self.add_to_batch_path(path, name, dims);
+                Ok(crate::gui::background_io::FileLoad::Image { path, name, len, dims: Some(dims) }) => {
+                    self.add_to_batch_path(path, name, len, dims);
                     loaded_count += 1;
                 }
                 Ok(crate::gui::background_io::FileLoad::Image { path, dims: None, .. }) => {
