@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Engine, KeptRunTier};
+use crate::gui::item::{BatchItem, Engine, KeptRunTier};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::background_io::TexTarget;
 use crate::gui::live_preview::PreviewKind;
@@ -394,13 +394,6 @@ impl PrunrApp {
                 let new_rgba = r.rgba;
                 item.unpark_result();
                 item.result_rgba = Some(new_rgba.clone());
-                // Filter-only mode (model=None) never clicks Process — the
-                // first live preview result IS the processed result. Promote
-                // a Pending item to Done so the canvas flips from source
-                // view to result view. Processing / Done items untouched.
-                if item.status == BatchStatus::Pending {
-                    item.status = BatchStatus::Done;
-                }
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
                 item.result_tex_pending = true;
@@ -660,7 +653,7 @@ mod landing_tests {
         let item = push_test_item(&mut app, 1);
         let result = Arc::new(RgbaImage::new(2, 2));
         item.result_rgba = Some(Arc::clone(&result));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.commit(StepKind::Process);
         item.set_on_screen(true);
@@ -743,7 +736,7 @@ mod drift_tests {
         let mut app = PrunrApp::new_for_test();
         app.settings.model = SettingsModel::Silueta;
         let item = push_test_item(&mut app, 1);
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.gamma = 1.5;

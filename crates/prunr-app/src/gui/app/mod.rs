@@ -636,7 +636,7 @@ impl PrunrApp {
             // next Process once every one of them is on its way; the worker
             // queues batches, the budget cannot feed two.
             !self.processor.admission_still_feeding()
-                && self.batch.any_target_can(|it| !matches!(it.status, BatchStatus::Processing))
+                && self.batch.any_target_can(|it| !matches!(it.status(), BatchStatus::Processing))
         }
     }
 
@@ -721,7 +721,7 @@ impl PrunrApp {
     /// Stop whatever run `item_id` is waiting on, so its result cannot land.
     fn cancel_runs_on(&mut self, item_id: u64) {
         let Some(item) = self.batch.find_by_id(item_id) else { return };
-        if item.status != BatchStatus::Processing && item.job.is_none() {
+        if item.status() != BatchStatus::Processing && item.job.is_none() {
             return;
         }
         match item.job.as_ref().map(|j| j.engine) {
@@ -818,13 +818,13 @@ impl PrunrApp {
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
-    /// clear admission, flip every Processing item back to Pending, and
+    /// clear admission, abandon every cut (waiting ones too), and
     /// surface "Cancelled" in the status bar. Single source of truth so
     /// the toolbar button and the keyboard shortcut don't drift.
     pub fn handle_cancel_all_and_reset(&mut self) {
         self.handle_cancel();
         self.processor.clear_admission();
-        self.batch.reset_processing_to_pending();
+        self.batch.abandon_cuts();
         // The capsule reads the slot, not the app state, so the reset
         // has to clear it.
         self.processor.end_seg_run();

@@ -537,7 +537,7 @@ mod selection_action_tests {
             *px = image::Rgba([255, 255, 255, 255]);
         }
         item.result_rgba = Some(Arc::new(rgba));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item
     }
 
@@ -550,7 +550,7 @@ mod selection_action_tests {
         let mut app = super::PrunrApp::new_for_test();
         let mut item = make_item_done();
         let source = item.result_rgba.take().unwrap();
-        item.status = BatchStatus::Pending;
+        item.set_status_for_test(BatchStatus::Pending);
         item.source_rgba = Some(source);
         item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
         app.batch.items.push(item);
@@ -560,7 +560,7 @@ mod selection_action_tests {
         let item = &app.batch.items[0];
         let result = item.result_rgba.as_ref().expect("Delete must produce a result from the source");
         assert!(result.pixels().all(|px| px.0[3] == 0), "selected region must be cut");
-        assert_eq!(item.status, BatchStatus::Done);
+        assert_eq!(item.status(), BatchStatus::Done);
         assert!(item.result_tex_pending, "a texture build must be in flight for the new result");
         assert_eq!(item.timeline.undo_steps(), 1, "one Edit step, back to the unprocessed source");
     }

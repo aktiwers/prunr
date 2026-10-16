@@ -491,7 +491,7 @@ fn save_options_name_their_controls_and_follow_the_model() {
             item.dimensions = (4, 4);
             item.source_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
             item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
-            item.status = BatchStatus::Done;
+            item.set_status_for_test(BatchStatus::Done);
             item.commit(crate::gui::timeline::StepKind::Process);
             app.batch.select_item(0);
         }
@@ -610,7 +610,7 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
         {
             let app = h.state_mut();
             let item = push_test_item(app, 1);
-            item.status = status.clone();
+            item.set_status_for_test(status.clone());
             item.source_texture = Some(photo.clone());
             item.thumb_texture = Some(photo);
             app.batch.select_item(0);

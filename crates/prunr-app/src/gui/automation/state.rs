@@ -67,7 +67,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             .map(|it| ItemDump {
                 id: it.id,
                 filename: it.filename.clone(),
-                status: format!("{:?}", it.status),
+                status: format!("{:?}", it.status()),
                 selected: it.ticked,
                 dimensions: it.dimensions,
                 has_result: it.result_rgba.is_some(),

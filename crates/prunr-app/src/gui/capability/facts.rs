@@ -1,4 +1,4 @@
-use crate::gui::item::{BatchItem, BatchStatus, Engine};
+use crate::gui::item::{BatchItem, Engine};
 
 /// What the image on screen is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,13 +75,12 @@ impl ItemFacts {
             (Some(_), Some(origin)) => Shown::Run(origin.engine),
             (Some(_), None) => Shown::Edited { on: item.timeline.latest_run().map(|o| o.engine) },
         };
-        let activity = match (&item.status, &item.job) {
-            (BatchStatus::Processing, _) => Activity::Running(Engine::Segment),
-            (_, Some(job)) if job.engine != Engine::Segment => Activity::Running(job.engine),
-            (_, Some(_)) => Activity::Queued,
-            (_, None) => Activity::Idle,
+        let activity = match &item.job {
+            Some(job) if job.running => Activity::Running(job.engine),
+            Some(_) => Activity::Queued,
+            None => Activity::Idle,
         };
-        let failed = matches!(item.status, BatchStatus::Error(_));
+        let failed = item.error().is_some();
         let photo = if item.source_rgba.is_some() || item.source_dyn.is_some() {
             Photo::Decoded
         } else if failed && !item.decode_pending {

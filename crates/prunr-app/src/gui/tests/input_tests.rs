@@ -22,7 +22,7 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     for (id, ticked, status) in [(1u64, true, BatchStatus::Processing), (2, true, BatchStatus::Done), (3, false, BatchStatus::Processing)] {
         let item = push_test_item(&mut app, id);
         item.ticked = ticked;
-        item.status = status;
+        item.set_status_for_test(status);
     }
 
     app.handle_cancel_selected();
@@ -35,9 +35,9 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     // Cancelled item flipped immediately → thumbnail / canvas spinners stop
     // before the subprocess acknowledges the cancel.
     let item1 = app.batch.find_by_id(1).expect("id 1 still present");
-    assert_eq!(item1.status, BatchStatus::Pending);
+    assert_eq!(item1.status(), BatchStatus::Pending);
     let item3 = app.batch.find_by_id(3).expect("id 3 still present");
-    assert_eq!(item3.status, BatchStatus::Processing, "unselected item keeps running");
+    assert_eq!(item3.status(), BatchStatus::Processing, "unselected item keeps running");
 }
 
 #[test]

@@ -301,6 +301,8 @@ pub(crate) struct Job {
     /// A cut of another model's cut-out: that cut-out, whose transparency
     /// the run starts from, with `start`'s colours under it.
     pub(crate) keep: Option<super::timeline::StoredImage>,
+    /// Under way; a cut waits for a worker slot until it starts.
+    pub(crate) running: bool,
 }
 
 /// What "Try another" reruns: the shown fill's start (`None`: the
@@ -675,7 +677,8 @@ pub(crate) struct BatchItem {
     pub(crate) timeline: Timeline,
     /// The run (Process, erase, upscale) whose result this item awaits.
     pub(crate) job: Option<Job>,
-    pub(crate) status: BatchStatus,
+    /// Why the last run or decode failed; cleared by the next run.
+    failure: Option<String>,
     pub(crate) ticked: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
     pub(crate) settings: super::item_settings::ItemSettings,
@@ -1053,13 +1056,73 @@ impl BatchItem {
     /// True while a model works on this image: a cut-out the worker has
     /// taken, or an upscale, colorize or erase, which start their job only
     /// when they run (a queued cut-out holds its job while it waits).
+    /// Where the image is, derived: a cut under way, a failure with
+    /// nothing to show, a result, or the photo waiting. Never stored, so
+    /// undo, cancel and parking cannot leave it stale.
+    pub(crate) fn status(&self) -> BatchStatus {
+        if self.job.as_ref().is_some_and(|j| j.running && j.engine == Engine::Segment) {
+            return BatchStatus::Processing;
+        }
+        if self.result_rgba.is_some() || self.timeline.current().result.is_some() {
+            return BatchStatus::Done;
+        }
+        match &self.failure {
+            Some(why) => BatchStatus::Error(why.clone()),
+            None => BatchStatus::Pending,
+        }
+    }
+
+    /// Put the image in `status` the way a run leaves it: Done holds a
+    /// result, Processing a cut under way, Error a failure.
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&mut self, status: BatchStatus) {
+        match status {
+            BatchStatus::Pending => {
+                self.job = None;
+                self.failure = None;
+            }
+            BatchStatus::Processing => {
+                if !self.job.as_ref().is_some_and(|j| j.engine == Engine::Segment) {
+                    self.start_job(None, Engine::Segment);
+                }
+                self.mark_running();
+            }
+            BatchStatus::Done => {
+                self.job = None;
+                if self.result_rgba.is_none() && self.timeline.current().result.is_none() {
+                    let (w, h) = self.dimensions;
+                    self.result_rgba = Some(Arc::new(image::RgbaImage::new(w.max(1), h.max(1))));
+                }
+            }
+            BatchStatus::Error(why) => self.fail(why),
+        }
+    }
+
+    /// Why the image failed, while the failure is what it shows.
+    pub(crate) fn error(&self) -> Option<&str> {
+        matches!(self.status(), BatchStatus::Error(_)).then_some(self.failure.as_deref()).flatten()
+    }
+
+    /// The awaited cut has a worker slot and is under way.
+    pub(crate) fn mark_running(&mut self) {
+        if let Some(job) = self.job.as_mut() {
+            job.running = true;
+        }
+    }
+
+    /// The run or read failed with `why`: nothing is awaited any more.
+    pub(crate) fn fail(&mut self, why: String) {
+        self.job = None;
+        self.failure = Some(why);
+    }
+
     pub(crate) fn is_running(&self) -> bool {
-        self.status == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
+        self.status() == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
     }
 
     /// True while a run, a decode, a texture or a thumbnail is still to land.
     pub(crate) fn is_busy(&self) -> bool {
-        self.status == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
+        self.status() == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
     }
 
     /// True while a background thread owes this item a decode, a texture
@@ -1314,16 +1377,14 @@ impl BatchItem {
         self.hold_tile_preview_for_reveal();
         self.unpark_result();
         self.take_result(rgba);
-        if self.status == BatchStatus::Pending {
-            self.status = BatchStatus::Done;
-        }
+        self.failure = None;
     }
 
     /// Show a finished upscale or colorize with the recipe it ran: over
     /// its tile preview when there is one.
     pub(crate) fn show_run_result(&mut self, shown: Arc<image::RgbaImage>, recipe: prunr_core::ProcessingRecipe) {
         self.applied_recipe = Some(recipe);
-        self.status = BatchStatus::Done;
+        self.failure = None;
         self.hold_tile_preview_for_reveal();
         self.take_result(shown);
     }
@@ -1381,7 +1442,7 @@ impl BatchItem {
                 true
             }
             Err(msg) => {
-                self.status = BatchStatus::Error(msg);
+                self.failure = Some(msg);
                 false
             }
         }
@@ -1534,7 +1595,6 @@ impl BatchItem {
         }
         self.settings = shown.settings;
         self.applied_preset = shown.applied_preset;
-        self.status = if self.result_rgba.is_some() { BatchStatus::Done } else { BatchStatus::Pending };
         self.job = None;
         self.tile_preview = None;
         self.reset_result_caches();
@@ -1603,7 +1663,10 @@ impl BatchItem {
         seed: Option<u64>,
         region: Option<super::timeline::StoredSelection>,
     ) {
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None });
+        // Only a cut queues for a worker slot; other runs start at once.
+        let running = engine != Engine::Segment;
+        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
+        self.failure = None;
         self.tile_preview = None;
         self.subject = None;
     }
@@ -1643,7 +1706,6 @@ impl BatchItem {
     pub(crate) fn land_cut_for_test(&mut self, cutter: Cutter, result: Arc<image::RgbaImage>) {
         self.start_cut(Some(StepKind::Process), cutter);
         self.result_rgba = Some(result);
-        self.status = BatchStatus::Done;
         self.finish_job();
     }
 
@@ -1689,8 +1751,6 @@ impl BatchItem {
         self.reveal = None;
         self.subject = None;
         self.tile_preview = None;
-        let has_result = self.result_rgba.is_some() || self.result_parked();
-        self.status = if has_result { BatchStatus::Done } else { BatchStatus::Pending };
     }
 
     /// Record a landed run's result, now in the working copy.
@@ -1982,12 +2042,12 @@ impl BatchItem {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.job = None;
-                self.status = BatchStatus::Error(load_failed(e));
+                self.failure = Some(load_failed(e));
                 return None;
             }
         };
         let input = self.job_run_image();
-        self.status = BatchStatus::Processing;
+        self.mark_running();
         Some((self.id, bytes, input))
     }
 
@@ -2103,7 +2163,7 @@ impl BatchItem {
                 self.reset_result_caches();
                 self.unpark_result();
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
-                self.status = BatchStatus::Done;
+                self.failure = None;
                 self.applied_recipe = Some(recipe_snapshot);
                 // Preserve existing cache when the worker returned without a
                 // fresh tensor (Tier 2 RePostProcess / AddEdgeInference for
@@ -2125,7 +2185,7 @@ impl BatchItem {
             Err(e) => {
                 // Clear recipe + tensors so retry runs a fresh Tier 1
                 // (otherwise resolve_tier might return Skip for an errored item).
-                self.status = BatchStatus::Error(e);
+                self.fail(e);
                 self.drop_tensor_caches();
                 self.invalidate_upscale_cache();
                 self.invalidate_colorize_cache();
@@ -2144,7 +2204,7 @@ impl BatchItem {
     /// on screen. After undoing back to the original the tensor stays
     /// cached, and a re-cut there would bring the undone result back.
     pub(crate) fn shows_cutout(&self) -> bool {
-        self.status == BatchStatus::Done && self.cached_tensor.is_some()
+        self.status() == BatchStatus::Done && self.cached_tensor.is_some()
     }
 
     /// The cached segmentation is what made the shown step: after an undo
@@ -2167,7 +2227,7 @@ impl BatchItem {
     /// Release the working result while the item is in the background;
     /// the timeline keeps it and compresses it once nothing else holds it.
     pub(crate) fn park_result(&mut self) -> bool {
-        if self.status != BatchStatus::Done {
+        if self.status() != BatchStatus::Done {
             return false;
         }
         let Some(rgba) = self.result_rgba.as_ref() else { return false };
@@ -2282,7 +2342,7 @@ impl BatchItem {
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
-            status: BatchStatus::Pending,
+            failure: None,
             ticked: false,
             settings,
             applied_recipe: None,
@@ -2459,11 +2519,11 @@ mod tests {
         assert!(!item.is_running());
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(!item.is_running(), "a queued cut-out waits");
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         assert!(item.is_running(), "the worker has taken it");
         for engine in [Engine::Upscale, Engine::Colorize, Engine::Erase] {
             let mut item = fixture_item(2);
-            item.status = BatchStatus::Done;
+            item.set_status_for_test(BatchStatus::Done);
             item.start_job(None, engine);
             assert!(item.is_running(), "{engine:?} runs from its start");
         }
@@ -2866,11 +2926,11 @@ mod tests {
         let mut item = fixture_item(1);
         let old = tex("old");
         item.result_texture = Some(old.clone());
-        item.status = BatchStatus::Pending;
+        item.set_status_for_test(BatchStatus::Pending);
         item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays");
         assert!(item.result_tex_pending && item.thumb_pending, "and a new one and thumbnail are on their way");
-        assert_eq!(item.status, BatchStatus::Done);
+        assert_eq!(item.status(), BatchStatus::Done);
         let new = tex("new");
         let target = item.request_result_texture(false);
         item.land_texture(new.clone(), target);
@@ -2950,7 +3010,7 @@ mod tests {
         assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(2, 2)))));
         assert!(item.source_rgba.is_some() && item.source_dyn.is_none() && !item.decode_pending);
         assert!(!item.land_decode(Err("bad file".into())));
-        assert_eq!(item.status, BatchStatus::Error("bad file".into()));
+        assert_eq!(item.status(), BatchStatus::Error("bad file".into()));
     }
 
     /// A selection overlay built for a mask the image has since replaced
@@ -3074,7 +3134,7 @@ mod tests {
         item.source = ImageSource::Path(PathBuf::from("/nonexistent/photo.png"));
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(item.full_run_work().is_none());
-        assert!(matches!(&item.status, BatchStatus::Error(why) if why.starts_with("Failed to load")), "{:?}", item.status);
+        assert!(matches!(&item.status(), BatchStatus::Error(why) if why.starts_with("Failed to load")), "{:?}", item.status());
         assert!(item.job.is_none(), "nothing is awaited");
     }
 
@@ -3092,7 +3152,7 @@ mod tests {
     #[test]
     fn apply_tier_result_success_sets_done_and_returns_provider() {
         let mut item = fixture_item(1);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
 
         let provider = item.apply_tier_result(
             Ok(fixture_process_result("CUDA")),
@@ -3100,9 +3160,10 @@ mod tests {
             None,
             fixture_recipe(),
         );
+        item.finish_job();
 
         assert_eq!(provider.as_deref(), Some("CUDA"));
-        assert_eq!(item.status, BatchStatus::Done);
+        assert_eq!(item.status(), BatchStatus::Done);
         assert!(item.result_rgba.is_some());
         assert!(item.applied_recipe.is_some());
     }
@@ -3112,7 +3173,7 @@ mod tests {
         // Tier 2 reruns omit active_provider so the caller knows not to
         // overwrite the backend label shown in the UI.
         let mut item = fixture_item(1);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
 
         let provider = item.apply_tier_result(
             Ok(fixture_process_result("")),
@@ -3121,8 +3182,9 @@ mod tests {
             fixture_recipe(),
         );
 
+        item.finish_job();
         assert!(provider.is_none());
-        assert_eq!(item.status, BatchStatus::Done);
+        assert_eq!(item.status(), BatchStatus::Done);
     }
 
     #[test]
@@ -3130,7 +3192,7 @@ mod tests {
         // Live preview re-cuts from `source_rgba` on any item, including
         // one that was not shown when its result landed.
         let mut item = fixture_item(1);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
 
         let _ = item.apply_tier_result(
@@ -3146,7 +3208,7 @@ mod tests {
     #[test]
     fn apply_tier_result_error_clears_recipe_and_tensors_for_fresh_retry() {
         let mut item = fixture_item(1);
-        item.status = BatchStatus::Processing;
+        item.set_status_for_test(BatchStatus::Processing);
         item.applied_recipe = Some(fixture_recipe());
 
         let provider = item.apply_tier_result(
@@ -3157,7 +3219,7 @@ mod tests {
         );
 
         assert!(provider.is_none());
-        assert!(matches!(item.status, BatchStatus::Error(ref e) if e == "boom"));
+        assert!(matches!(item.status(), BatchStatus::Error(ref e) if e == "boom"));
         assert!(item.cached_tensor.is_none());
         assert!(item.cached_edge_tensors.is_none());
         assert!(item.applied_recipe.is_none(),
@@ -3235,7 +3297,7 @@ mod tests {
     fn undo_and_redo_restore_the_whole_state_of_each_step() {
         let mut item = fixture_item(1);
         item.result_rgba = Some(px(1));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.commit(StepKind::Process);
         item.commit_selection_mask(make_mask(5, 4, 4), StepKind::Stroke);
         item.result_rgba = Some(px(2)); // the stroke's re-cut landed
@@ -3249,7 +3311,7 @@ mod tests {
         assert_eq!(shown(&item), Some(1), "the image before the stroke, stored, not re-cut");
         assert!(item.selection_mask.is_none() && item.selection_hash.is_none());
         assert_eq!(item.undo_step(), Some(StepKind::Process));
-        assert_eq!((shown(&item), &item.status), (None, &BatchStatus::Pending));
+        assert_eq!((shown(&item), &item.status()), (None, &BatchStatus::Pending));
         assert_eq!(item.undo_step(), None);
 
         assert_eq!(item.redo_step(), Some(StepKind::Process));
@@ -3268,7 +3330,6 @@ mod tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(item.job_is_current());
         item.result_rgba = Some(px(1));
-        item.status = BatchStatus::Done;
         item.finish_job();
         assert_eq!(item.timeline.undo_steps(), 1);
 
@@ -3287,7 +3348,6 @@ mod tests {
         item.start_job(step, engine);
         let base = item.job_input().map(|b| b.get_pixel(0, 0).0[0]);
         item.result_rgba = Some(px(v));
-        item.status = BatchStatus::Done;
         item.finish_job();
         base
     }
@@ -3367,13 +3427,13 @@ mod tests {
     fn a_parked_result_comes_back_from_the_timeline() {
         let mut item = fixture_item(1);
         item.result_rgba = Some(px(3));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item.commit(StepKind::Process);
         assert!(item.park_result());
         assert!(item.result_rgba.is_none());
         item.start_job(None, Engine::Segment);
         item.abandon_job();
-        assert_eq!(item.status, BatchStatus::Done, "a parked result still counts as shown");
+        assert_eq!(item.status(), BatchStatus::Done, "a parked result still counts as shown");
         item.unpark_result();
         assert_eq!((shown(&item), item.timeline.undo_steps()), (Some(3), 1));
 

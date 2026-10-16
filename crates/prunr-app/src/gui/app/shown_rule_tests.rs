@@ -48,12 +48,12 @@ fn app_in(state: State, model: SettingsModel) -> PrunrApp {
         }
         State::DeletedOnPhoto => {
             item.result_rgba = Some(px(30));
-            item.status = BatchStatus::Done;
+            item.set_status_for_test(BatchStatus::Done);
             item.commit(StepKind::Edit);
         }
         State::UpscaleNotKept => {
             item.result_rgba = Some(px(40));
-            item.status = BatchStatus::Done;
+            item.set_status_for_test(BatchStatus::Done);
             item.commit(StepKind::Upscale);
             item.record_origin(Engine::Upscale, None, None);
         }
@@ -142,8 +142,8 @@ fn an_unprocessed_cutout_never_becomes_a_result() {
         pull(&mut app, trigger);
         settle(&mut app);
         let item = &app.batch.items[0];
-        if ItemFacts::of(item).shown != Shown::Photo || item.status == BatchStatus::Done {
-            faked.push(format!("{trigger:?}: shown {:?}, status {:?}", ItemFacts::of(item).shown, item.status));
+        if ItemFacts::of(item).shown != Shown::Photo || item.status() == BatchStatus::Done {
+            faked.push(format!("{trigger:?}: shown {:?}, status {:?}", ItemFacts::of(item).shown, item.status()));
         }
     }
     assert!(faked.is_empty(), "an unprocessed cut-out turned into a result:\n{}", faked.join("\n"));
@@ -177,4 +177,34 @@ fn an_export_writes_what_the_canvas_shows() {
     assert!(matches!(app.batch.items[0].export_image(), ExportImage::Shown(_)), "the cut-out on screen");
     assert!(app.batch.items[0].park_result());
     assert!(matches!(app.batch.items[0].export_image(), ExportImage::Parked(_)), "off screen: the parked cut-out, not the photo");
+}
+
+/// A failed re-run leaves the result it had on screen: the failure is
+/// told, never shown in place of the image.
+#[test]
+fn a_failure_never_hides_a_result() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    item.start_cut(None, crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
+    item.fail("boom".into());
+    assert_eq!(item.status(), BatchStatus::Done, "the cut-out stays");
+    assert!(item.error().is_none());
+    let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    app.batch.items[0].fail("boom".into());
+    assert_eq!(app.batch.items[0].error(), Some("boom"), "with nothing to show, the failure is what the image is");
+}
+
+/// A cut waiting for a worker slot shows the result it has, and Cancel
+/// All ends it like one under way: nothing is left awaited.
+#[test]
+fn cancel_all_ends_waiting_cuts_too() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    item.start_cut(Some(StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
+    assert_eq!(item.status(), BatchStatus::Done, "waiting, it shows its cut-out");
+    assert_eq!(ItemFacts::of(item).activity, crate::gui::capability::Activity::Queued);
+    app.handle_cancel_all_and_reset();
+    let item = &app.batch.items[0];
+    assert!(item.job.is_none() && !item.is_busy(), "nothing awaited after Cancel All");
+    assert_eq!(item.status(), BatchStatus::Done);
 }
