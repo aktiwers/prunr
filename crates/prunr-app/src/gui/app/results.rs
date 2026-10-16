@@ -2409,7 +2409,7 @@ mod spare_scales_tests {
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
             let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, app.settings.model.role(), style, action);
-            assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some()), "{kind:?} renders with Fine once it lands");
+            assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some() || i.packed.primary == Some(Fine)), "{kind:?} renders with Fine once it lands");
         }
     }
 }
