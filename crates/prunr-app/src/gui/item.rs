@@ -632,10 +632,10 @@ pub(crate) struct FacePreview {
 /// Paint `tile` into its square of the preview in `slot`, made on the
 /// first tile (or anew when the size changes). Only the tile is uploaded
 /// (`set_partial`).
-fn paint_tile(slot: &mut Option<egui::TextureHandle>, ctx: &egui::Context, name: &str, tile: &prunr_core::TilePreview) {
+fn paint_tile(slot: &mut Option<egui::TextureHandle>, ctx: &egui::Context, name: &str, tile: &prunr_core::TilePreview, image: Arc<egui::ColorImage>) {
     let full = [tile.full_width as usize, tile.full_height as usize];
     let at = [tile.x as usize, tile.y as usize];
-    let image = egui::ColorImage::from_rgba_unmultiplied([tile.width as usize, tile.height as usize], &tile.rgba);
+    let image = Arc::unwrap_or_clone(image);
     match slot {
         Some(t) if t.size() == full => t.set_partial(at, image, egui::TextureOptions::LINEAR),
         // A tile that is the whole preview (the photo laid under an erase)
@@ -1385,8 +1385,8 @@ impl BatchItem {
     /// Paint a finished tile into its square of the run's preview, made
     /// on the run's first tile (or anew when the size changes). Only the
     /// tile is uploaded (`set_partial`).
-    pub(crate) fn paint_tile_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview) {
-        paint_tile(&mut self.tile_preview, ctx, &format!("tile-preview-{}", self.id), tile);
+    pub(crate) fn paint_tile_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview, image: Arc<egui::ColorImage>) {
+        paint_tile(&mut self.tile_preview, ctx, &format!("tile-preview-{}", self.id), tile, image);
     }
 
     /// A face search of `photo` with `model` starts; what an earlier one
@@ -1421,13 +1421,13 @@ impl BatchItem {
     /// A face the search has redrawn, laid in its place over the image,
     /// when the search is one the image still wants. A face that comes
     /// in the frame its search lands counts too.
-    pub(crate) fn paint_face_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview, stage: FaceStage) {
+    pub(crate) fn paint_face_preview(&mut self, ctx: &egui::Context, tile: &prunr_core::TilePreview, image: Arc<egui::ColorImage>, stage: FaceStage) {
         let Some((photo, model)) = self.previewed_search(stage).filter(|_| self.on_screen) else { return };
         let preview = match &mut self.face_preview {
             Some(p) if p.model == model && p.photo.same(&photo) => p,
             slot => slot.insert(FacePreview { photo, model, texture: None, blended: false }),
         };
-        paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile);
+        paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile, image);
     }
 
     /// Keep the `DynamicImage` a render made of this image's photo, while
@@ -2707,17 +2707,18 @@ mod tests {
         let tile = |x: u32, y: u32, w: u32, h: u32| prunr_core::TilePreview {
             x, y, width: w, height: h, full_width: 4, full_height: 3, rgba: vec![9; (w * h * 4) as usize],
         };
+        let image = |w: usize, h: usize| Arc::new(egui::ColorImage::new([w, h], vec![egui::Color32::WHITE; w * h]));
         let uploads = |texture: &Option<egui::TextureHandle>| {
             let id = texture.as_ref().expect("a texture").id();
             ctx.tex_manager().write().take_delta().set.into_iter().filter(|(t, _)| *t == id).map(|(_, d)| d.pos).collect::<Vec<_>>()
         };
         let mut whole = None;
-        paint_tile(&mut whole, &ctx, "whole", &tile(0, 0, 4, 3));
+        paint_tile(&mut whole, &ctx, "whole", &tile(0, 0, 4, 3), image(4, 3));
         assert_eq!(uploads(&whole), [None], "the tile is the texture");
-        paint_tile(&mut whole, &ctx, "whole", &tile(1, 1, 2, 2));
+        paint_tile(&mut whole, &ctx, "whole", &tile(1, 1, 2, 2), image(2, 2));
         assert_eq!(uploads(&whole), [Some([1, 1])], "a later tile updates its part");
         let mut part = None;
-        paint_tile(&mut part, &ctx, "part", &tile(1, 1, 2, 2));
+        paint_tile(&mut part, &ctx, "part", &tile(1, 1, 2, 2), image(2, 2));
         assert_eq!(uploads(&part), [None, Some([1, 1])], "a first part lands in a blank preview");
     }
 

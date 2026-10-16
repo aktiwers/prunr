@@ -129,11 +129,11 @@ impl PrunrApp {
         let face_stage = self.face_stage();
         for picture in pictures {
             let Some(item) = self.batch.find_by_id_mut(picture.item_id) else { continue };
-            match (picture.from, picture.update) {
+            match (picture.from, picture.update, picture.tile) {
                 // A stale run's result is dropped: its tiles with it.
-                (PictureFrom::Run, ProgressUpdate::TilePreview(tile)) if item.job_is_current() => item.paint_tile_preview(ctx, &tile),
-                (PictureFrom::FaceSearch, ProgressUpdate::TilePreview(tile)) => item.paint_face_preview(ctx, &tile, face_stage),
-                (PictureFrom::FaceSearch, ProgressUpdate::Faces(places)) => item.keep_found_faces(places, face_stage),
+                (PictureFrom::Run, ProgressUpdate::TilePreview(tile), Some(image)) if item.job_is_current() => item.paint_tile_preview(ctx, &tile, image),
+                (PictureFrom::FaceSearch, ProgressUpdate::TilePreview(tile), Some(image)) => item.paint_face_preview(ctx, &tile, image, face_stage),
+                (PictureFrom::FaceSearch, ProgressUpdate::Faces(places), _) => item.keep_found_faces(places, face_stage),
                 _ => {}
             }
         }
@@ -1035,7 +1035,7 @@ mod faces_tests {
     /// A search's pictures arrive for the image.
     fn arrive(app: &mut super::PrunrApp, ctx: &egui::Context, pictures: impl IntoIterator<Item = prunr_core::ProgressUpdate>) {
         for picture in pictures {
-            let picture = crate::gui::processor::RunPicture { item_id: 1, from: crate::gui::processor::PictureFrom::FaceSearch, update: picture };
+            let picture = crate::gui::processor::RunPicture::new(1, crate::gui::processor::PictureFrom::FaceSearch, picture);
             app.processor.picture_sender().send(picture).expect("the pump's end is open");
         }
         app.pump_run_pictures(ctx);
@@ -1464,7 +1464,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
         let send = |app: &PrunrApp, item_id: u64, x: u32| {
             let tile = TilePreview { x, y: 0, width: 1, height: 2, full_width: 3, full_height: 2, rgba: vec![200; 8] };
-            let picture = crate::gui::processor::RunPicture { item_id, from: crate::gui::processor::PictureFrom::Run, update: ProgressUpdate::TilePreview(tile) };
+            let picture = crate::gui::processor::RunPicture::new(item_id, crate::gui::processor::PictureFrom::Run, ProgressUpdate::TilePreview(tile));
             app.processor.picture_sender().send(picture).unwrap();
         };
         send(&app, 1, 0);
