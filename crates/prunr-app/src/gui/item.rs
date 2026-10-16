@@ -2204,12 +2204,10 @@ impl BatchItem {
     }
 
     /// What a full run on this image sends: its file and the pixels the
-    /// run starts from, read where the run is sent; the image shows as
-    /// processing.
-    pub(crate) fn full_run_work(&mut self) -> super::worker::WorkItem {
-        let image = self.job_run_image();
-        self.mark_running();
-        super::worker::WorkItem { id: self.id, source: self.source.clone(), image }
+    /// run starts from, read where the run is sent. The image shows as
+    /// processing once it is sent (`mark_running`).
+    pub(crate) fn full_run_work(&self) -> super::worker::WorkItem {
+        super::worker::WorkItem { id: self.id, source: self.source.clone(), image: self.job_run_image() }
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -3325,7 +3323,8 @@ mod tests {
     }
 
     /// A run's work is handles: its file is read where the run is sent,
-    /// never on the UI thread, so a missing file does not fail it here.
+    /// never on the UI thread, so a missing file does not fail it here;
+    /// and building it starts nothing (the image runs once it is sent).
     #[test]
     fn a_runs_work_leaves_its_file_unread() {
         let mut item = fixture_item(1);
@@ -3333,7 +3332,7 @@ mod tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         let work = item.full_run_work();
         assert_eq!(work.id, 1);
-        assert!(item.is_cutting(), "{:?}", item.status());
+        assert!(item.awaits_cut() && !item.is_cutting() && item.failure.is_none(), "{:?}", item.status());
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {

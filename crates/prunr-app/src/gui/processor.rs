@@ -401,6 +401,14 @@ pub(crate) struct DepthResult {
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
+/// What `release_and_admit` did with the images that fit.
+#[derive(Default, Debug)]
+pub(crate) struct Admitted {
+    pub(crate) sent: Vec<u64>,
+    /// Built but not sent: the worker had gone.
+    pub(crate) lost: Vec<u64>,
+}
+
 /// One photo to measure, queued for the depth thread.
 pub(crate) struct DepthJob {
     pub(crate) item_id: u64,
@@ -763,6 +771,12 @@ pub(crate) struct Processor {
     pub(crate) admission: Option<AdmissionController>,
     /// Sender for streaming additional items to the worker.
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
+    /// The batch admission feeds: images it admits join that batch.
+    admission_batch: Option<u64>,
+    /// Re-runs asked for while admission was still feeding a batch, run
+    /// once it is through: a batch opened meanwhile would take the
+    /// admitted images' answers and wait behind them for good.
+    deferred_runs: Vec<(Vec<u64>, Option<super::timeline::StepKind>)>,
     /// The batches sent and not finished, oldest first: one queued behind
     /// a running one keeps its own images and recipe.
     in_flight: Vec<InFlightBatch>,
@@ -887,6 +901,8 @@ impl Processor {
             live_preview: LivePreview::default(),
             admission: None,
             admission_tx: None,
+            admission_batch: None,
+            deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             next_batch: 0,
             seg_run: None,
@@ -1480,12 +1496,16 @@ impl Processor {
         Some((done as u32, total as u32))
     }
 
-    /// Add a streamed (admission-pool) item to the newest batch, the one
-    /// that opened admission. The `debug_assert` catches "admission ran
-    /// without a tracked batch" in tests; release builds no-op so a late
-    /// delivery can't take down a real batch.
+    /// Add a streamed (admission-pool) item to the batch admission feeds
+    /// (without one, the newest batch). The `debug_assert` catches
+    /// "admission ran without a tracked batch" in tests; release builds
+    /// no-op so a late delivery can't take down a real batch.
     pub(crate) fn track_streamed(&mut self, id: u64) {
-        match self.in_flight.last_mut() {
+        let fed = match self.admission_batch {
+            Some(batch) => self.in_flight.iter_mut().find(|b| b.id == batch),
+            None => self.in_flight.last_mut(),
+        };
+        match fed {
             Some(b) => {
                 if b.pending.insert(id) {
                     b.total += 1;
@@ -1496,16 +1516,47 @@ impl Processor {
         }
     }
 
+    /// Admission feeds `batch` from now on.
+    pub(crate) fn admission_feeds(&mut self, batch: u64) {
+        self.admission_batch = Some(batch);
+    }
+
+    /// `batch` ended: when admission fed it, admission ends too, and the
+    /// images it never admitted come back (they will not run).
+    pub(crate) fn end_admission_with(&mut self, batch: u64) -> Vec<u64> {
+        if self.admission_batch != Some(batch) {
+            return Vec::new();
+        }
+        let waiting = self.admission.as_ref().map(|a| a.pending_ids().collect()).unwrap_or_default();
+        self.clear_admission();
+        waiting
+    }
+
+    /// Keep a re-run of `ids` for when admission is through.
+    pub(crate) fn defer_run(&mut self, ids: Vec<u64>, step: Option<super::timeline::StepKind>) {
+        self.deferred_runs.push((ids, step));
+    }
+
+    /// The re-runs kept while admission fed a batch, once it no longer does.
+    pub(crate) fn take_deferred_runs(&mut self) -> Vec<(Vec<u64>, Option<super::timeline::StepKind>)> {
+        if self.admission_still_feeding() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.deferred_runs)
+    }
+
     /// Take the recipe for an item batch `batch` answered. `None` when
     /// that batch no longer awaits it (cancelled, or a newer batch runs
     /// the image): the answer is stale. A batch whose last item lands is
     /// done.
     pub(crate) fn take_recipe(&mut self, batch: u64, id: u64) -> Option<ProcessingRecipe> {
         let at = self.in_flight.iter().position(|b| b.id == batch && b.pending.contains(&id))?;
+        let fed = self.admission_batch == Some(batch);
         let batch = &mut self.in_flight[at];
         batch.pending.remove(&id);
         let recipe = batch.recipe.clone();
-        if batch.pending.is_empty() {
+        // A batch admission still feeds stays open for the images to come.
+        if batch.pending.is_empty() && !fed {
             self.in_flight.remove(at);
         }
         self.after_batch_change();
@@ -1549,6 +1600,7 @@ impl Processor {
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
         self.admission_tx = None;
+        self.admission_batch = None;
     }
 
     /// Open streamed admission over the full runs queued on `ctrl`: what
@@ -1578,28 +1630,40 @@ impl Processor {
     /// `completed` frees its share of the budget, and the images that
     /// now fit are sent to the worker, each prepared by `work` (`None`:
     /// it can't be sent, and frees its share too). Admission ends once
-    /// every image is through.
-    pub(crate) fn release_and_admit(&mut self, completed: u64, mut work: impl FnMut(u64) -> Option<WorkItem>) {
-        let Some(ctrl) = self.admission.as_mut() else { return };
+    /// every image is through. Returns the images sent, and those that
+    /// could not be (the worker is gone): neither started running here.
+    pub(crate) fn release_and_admit(&mut self, completed: u64, mut work: impl FnMut(u64) -> Option<WorkItem>) -> Admitted {
+        let mut admitted = Admitted::default();
+        let Some(ctrl) = self.admission.as_mut() else { return admitted };
         ctrl.release(completed);
-        let mut streamed = Vec::new();
         while let Some(next) = ctrl.try_admit_next() {
             let Some(item) = work(next) else {
                 ctrl.release(next);
                 continue;
             };
             match self.admission_tx.as_ref() {
-                Some(tx) if tx.send(item).is_ok() => streamed.push(next),
-                _ => break, // worker gone
+                Some(tx) if tx.send(item).is_ok() => admitted.sent.push(next),
+                _ => {
+                    ctrl.release(next);
+                    admitted.lost.push(next);
+                    break;
+                }
             }
         }
         let complete = ctrl.is_complete();
-        for id in streamed {
+        for &id in &admitted.sent {
             self.track_streamed(id);
         }
         if complete {
+            let fed = self.admission_batch;
             self.clear_admission();
+            // Every image answered: the batch it fed is done.
+            if let Some(at) = fed.and_then(|b| self.in_flight.iter().position(|f| f.id == b && f.pending.is_empty())) {
+                self.in_flight.remove(at);
+                self.after_batch_change();
+            }
         }
+        admitted
     }
 
     /// Spawn a background thread that upscales the input and posts the
@@ -2719,6 +2783,59 @@ mod tests {
         assert_eq!(_rx.try_recv().map(|w| w.id), Ok(3), "3 goes out behind 2");
         p.release_and_admit(3, work);
         assert!(p.admission.is_none(), "nothing holds the budget: 1's share was given back");
+    }
+
+    /// An image admission sends joins the batch admission feeds, not a
+    /// newer batch opened meanwhile, so its answer is taken.
+    #[test]
+    fn an_admitted_image_joins_the_batch_admission_feeds() {
+        use crate::gui::memory::ImageMemCost;
+        let mut p = fixture();
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 2), (2, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
+        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        p.admission_feeds(fed);
+        let newer = p.track_dispatch(fixture_recipe(), [9]);
+        assert!(p.release_and_admit(2, |id| Some(test_work(id))).sent == vec![1]);
+        assert!(p.take_recipe(newer, 1).is_none(), "not the newer batch's");
+        assert!(p.take_recipe(fed, 1).is_some(), "the fed batch takes its answer");
+    }
+
+    /// When the worker has gone, an admitted image is not sent: it comes
+    /// back as lost, its share freed; and the batch admission fed ending
+    /// hands back the images never admitted.
+    #[test]
+    fn a_batch_that_ends_hands_back_what_admission_still_held() {
+        use crate::gui::memory::ImageMemCost;
+        let mut p = fixture();
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 3), (2, 2), (3, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (first, rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
+        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        p.admission_feeds(fed);
+        drop(rx);
+        let admitted = p.release_and_admit(first[0].id, |id| Some(test_work(id)));
+        assert!(admitted.sent.is_empty() && admitted.lost.len() == 1, "{admitted:?}");
+        assert_eq!(p.end_admission_with(fed + 1), Vec::<u64>::new(), "another batch's end leaves admission");
+        assert_eq!(p.end_admission_with(fed).len(), 1, "the one never admitted comes back");
+        assert!(p.admission.is_none() && !p.admission_still_feeding());
+    }
+
+    /// A re-run asked for while admission feeds waits, and goes once it is
+    /// through.
+    #[test]
+    fn a_rerun_waits_while_admission_feeds() {
+        use crate::gui::memory::ImageMemCost;
+        let mut p = fixture();
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 2), (2, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
+        p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        p.defer_run(vec![7], None);
+        assert!(p.take_deferred_runs().is_empty(), "held while admission feeds");
+        p.clear_admission();
+        assert_eq!(p.take_deferred_runs().len(), 1, "then it goes");
     }
 
     #[test]

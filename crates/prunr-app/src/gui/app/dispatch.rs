@@ -244,6 +244,14 @@ impl PrunrApp {
     /// `step`: the undo step the results record, or `None` to fill in the
     /// shown one (a re-run a knob change asked for).
     pub(super) fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
+        // One gate for every caller: a batch opened while admission still
+        // feeds another would take its images' answers and wait behind it.
+        if self.processor.admission_still_feeding() {
+            let ids: Vec<u64> = self.batch.items.iter().filter(|item| filter(item)).map(|item| item.id).collect();
+            tracing::info!(count = ids.len(), "run held until the batch's images are all started");
+            self.processor.defer_run(ids, step);
+            return;
+        }
         self.batch.fit_line_modes_to(self.settings.model);
         // Pure filter mode: No model AND line_mode = Off. Skip inference +
         // subprocess entirely. (No model + EdgesOnly still needs TEED,
@@ -353,7 +361,10 @@ impl PrunrApp {
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let batch = &mut self.batch;
         let (initial_items, additional_items_rx) =
-            self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).map(BatchItem::full_run_work));
+            self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).map(|item| {
+                item.mark_running();
+                item.full_run_work()
+            }));
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
         // skip dispatch.
@@ -361,7 +372,8 @@ impl PrunrApp {
             self.processor.clear_admission();
             return;
         }
-        self.dispatch_batch(initial_items, mask_work, add_edge_work, model, jobs, Some(additional_items_rx));
+        let batch = self.dispatch_batch(initial_items, mask_work, add_edge_work, model, jobs, Some(additional_items_rx));
+        self.processor.admission_feeds(batch);
     }
 
     /// Single-item or small-batch fast path — skip admission entirely.
@@ -396,7 +408,7 @@ impl PrunrApp {
         model: prunr_core::ModelKind,
         jobs: usize,
         additional_items_rx: Option<mpsc::Receiver<crate::gui::worker::WorkItem>>,
-    ) {
+    ) -> u64 {
         self.processor.cancels.reset();
 
         let current_settings = self.run_settings();
@@ -429,6 +441,7 @@ impl PrunrApp {
             cancels: self.processor.cancels.clone(),
             additional_items_rx,
         });
+        batch
     }
 
     /// Tell the worker which image is on screen, and whether its run
@@ -448,10 +461,28 @@ impl PrunrApp {
         self.processor.show_first_look(item);
     }
 
-    /// Release an item's memory budget and greedily admit the next fitting items.
+    /// Release an item's memory budget and greedily admit the next
+    /// fitting items; once admission is through, the re-runs it held back
+    /// go.
     pub(super) fn admission_release_and_admit(&mut self, completed_id: u64) {
-        let batch = &mut self.batch;
-        self.processor.release_and_admit(completed_id, |id| batch.find_by_id_mut(id).map(BatchItem::full_run_work));
+        let batch = &self.batch;
+        let admitted = self.processor.release_and_admit(completed_id, |id| batch.find_by_id(id).map(BatchItem::full_run_work));
+        for id in admitted.sent {
+            if let Some(item) = self.batch.find_by_id_mut(id) {
+                item.mark_running();
+            }
+        }
+        for id in admitted.lost {
+            self.end_run_without_result(id, "processing", super::results::RunLost::Unanswered);
+        }
+        self.run_deferred();
+    }
+
+    /// The re-runs held back while admission fed a batch, once it is through.
+    pub(super) fn run_deferred(&mut self) {
+        for (ids, step) in self.processor.take_deferred_runs() {
+            self.process_items(|item| ids.contains(&item.id), step);
+        }
     }
 }
 

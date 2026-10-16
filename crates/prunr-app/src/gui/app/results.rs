@@ -10,7 +10,7 @@ use super::PrunrApp;
 
 /// Why a run gives its image nothing.
 #[derive(Clone, Copy)]
-enum RunLost {
+pub(super) enum RunLost {
     /// A knob change, a stroke or an undo while the run was under way.
     ImageChanged,
     /// The batch ended and the worker never answered for the image.
@@ -227,7 +227,7 @@ impl PrunrApp {
 
     /// The image stops waiting on a run that will give it nothing, and
     /// the user hears why.
-    fn end_run_without_result(&mut self, item_id: u64, run: &str, why: RunLost) {
+    pub(super) fn end_run_without_result(&mut self, item_id: u64, run: &str, why: RunLost) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         if item.job.is_none() {
             return;
@@ -652,7 +652,24 @@ impl PrunrApp {
         };
         let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
         self.processor.cut_times.ended(item_id, landed);
+        self.land_cut(ctx, item_id, is_selected, result, seg, edges, recipe_snapshot);
+        // Every answer the batch took frees the image's share of the RAM
+        // budget, however it landed.
+        self.admission_release_and_admit(item_id);
+    }
 
+    // args are one batch answer's fields, unpacked by its one caller
+    #[allow(clippy::too_many_arguments)]
+    fn land_cut(
+        &mut self,
+        ctx: &egui::Context,
+        item_id: u64,
+        is_selected: bool,
+        result: Result<prunr_core::ProcessResult, String>,
+        seg: Option<crate::gui::worker::CompressedTensor>,
+        edges: Option<crate::gui::worker::CompressedEdgeTensors>,
+        recipe_snapshot: prunr_core::ProcessingRecipe,
+    ) {
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
@@ -660,7 +677,6 @@ impl PrunrApp {
                     item.abandon_job();
                 }
             }
-            self.admission_release_and_admit(item_id);
             self.refresh_batch_progress_status();
             return;
         }
@@ -710,7 +726,6 @@ impl PrunrApp {
             self.sync_selected_batch_textures(ctx);
         }
 
-        self.admission_release_and_admit(item_id);
         self.batch.enforce_tensor_budget();
 
         if crate::gui::memory::under_memory_pressure() {
@@ -772,7 +787,9 @@ impl PrunrApp {
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
     fn on_batch_complete(&mut self, batch: u64) {
-        let never_answered = self.processor.finish_batch(batch);
+        let mut never_answered = self.processor.finish_batch(batch);
+        // The images admission still held for this batch will not run.
+        never_answered.extend(self.processor.end_admission_with(batch));
         let unanswered: Vec<u64> = self.batch.items.iter()
             .filter(|i| never_answered.contains(&i.id) && i.awaits_cut())
             .map(|i| i.id)
@@ -796,6 +813,7 @@ impl PrunrApp {
             self.status.text = msg.clone();
             self.toasts.success(msg);
         }
+        self.run_deferred();
     }
 
     fn on_cancelled(&mut self) {
@@ -1881,6 +1899,37 @@ mod timeline_contract_tests {
             let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
             assert_eq!(shown, Some(true), "{what}: and the result it had");
         }
+    }
+
+    /// An answer for an image that stopped waiting (undone, cancelled)
+    /// still frees its share of the RAM budget: the next image is sent,
+    /// and shows as processing only once it is.
+    #[test]
+    fn an_answer_for_an_image_no_longer_waiting_frees_its_admission() {
+        use crate::gui::item::Engine;
+        use crate::gui::memory::{AdmissionController, ImageMemCost};
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        for id in [1, 2] {
+            let item = push_test_item(&mut app, id);
+            item.dimensions = (4, 4);
+            item.start_job(Some(StepKind::Process), Engine::Segment);
+        }
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 1), (2, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let batch_items = &app.batch;
+        let (first, rx) = app.processor.open_admission(ctrl, |id| batch_items.find_by_id(id).map(crate::gui::item::BatchItem::full_run_work));
+        assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1]);
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+        let batch = app.processor.track_dispatch(recipe, [1]);
+        app.processor.admission_feeds(batch);
+        assert!(!app.batch.items[1].is_cutting(), "2 waits for room, not running");
+        app.batch.items[0].abandon_job();
+        let answer = prunr_core::ProcessResult { rgba_image: (*px(5)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(answer), None, None);
+        assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "1's share lets 2 in");
+        assert!(app.batch.items[1].is_cutting(), "sent, 2 runs");
     }
 
     /// Process, Cancel (selected) mid-run, change a knob, Process again:
