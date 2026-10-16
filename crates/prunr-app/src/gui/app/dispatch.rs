@@ -5,7 +5,6 @@ use std::sync::mpsc;
 
 use crate::gui::item::{BatchItem, Cutter, Engine, ImageSource, KeptRunTier};
 use crate::gui::live_preview::PreviewKind;
-use crate::gui::processor::RunInput;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
@@ -137,7 +136,7 @@ impl PrunrApp {
             self.toasts.error(why);
             return false;
         }
-        let input = start.as_ref().and_then(|s| s.image.load()).map_or_else(|| item.original_run_input(), RunInput::Decoded);
+        let input = item.pixels_from(start.as_ref());
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
         tracing::info!(item_id, ?model_id, ?run_model, ?output_scale, "upscale dispatched");
         if let Some(item) = self.batch.find_by_id_mut(item_id) {

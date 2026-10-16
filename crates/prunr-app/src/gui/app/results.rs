@@ -447,7 +447,7 @@ impl PrunrApp {
         let job = crate::gui::processor::DepthJob {
             item_id: item.id,
             epoch: item.depth_run.epoch,
-            input: item.original_run_input(),
+            input: item.photo_pixels(),
             cpu_only,
             faces: item.faces_found_in_original(),
         };
