@@ -673,16 +673,16 @@ fn face_outline(area: prunr_core::face::FaceArea, img_rect: Rect) -> [Pos2; FACE
     })
 }
 
-/// While the Faces strip or panel is open, the faces found in the shown
-/// image outlined: what Faces redraws, so a face it missed shows by having
-/// none. They fade in as soon as the search finds them, before they are
+/// While Faces and its Outline switch are on, the faces found in the
+/// shown image outlined: what Faces redraws, so a face it missed shows by
+/// having none. They fade in as soon as the search finds them, before they are
 /// redrawn, and glow once; under "Largest" the faces it leaves alone are
 /// faint.
 fn draw_found_faces(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
     use super::effects::{face_arrival, paint_glow_ring, FACE_ARRIVAL_SECS, FACE_FADE_SECS};
     let faces = &item.settings.faces;
     let ctx = ui.ctx();
-    let open = faces.on && app.settings.face_outlines && shows(app.settings.model, Surface::Faces) && super::chip::group_chip_open(ctx, super::faces_chip::ID_SALT);
+    let open = faces.on && app.settings.face_outlines && shows(app.settings.model, Surface::Faces);
     let shown = ctx.animate_bool_with_time(egui::Id::new("found_faces_shown"), open, theme::fade_secs(ctx, FACE_FADE_SECS));
     if shown <= 0.0 {
         return;

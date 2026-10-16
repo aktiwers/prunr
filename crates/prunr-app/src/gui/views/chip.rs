@@ -862,11 +862,6 @@ fn group_chip_id(id_salt: &str) -> egui::Id {
     egui::Id::new(("group_chip", id_salt))
 }
 
-/// Whether the group chip `id_salt` has its strip or panel open.
-pub(super) fn group_chip_open(ctx: &egui::Context, id_salt: &str) -> bool {
-    egui::Popup::is_id_open(ctx, group_chip_id(id_salt))
-}
-
 /// Render a group chip. `body` receives `reset == true` on the frame the
 /// group's Reset was clicked, before any of its rows render. Returns the
 /// body's value while the popover is open.
