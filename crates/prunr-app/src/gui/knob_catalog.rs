@@ -175,6 +175,54 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
     }
 }
 
+/// What a surface's gate reads: the model, the image's line mode and
+/// facts, and whether a run is under way.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GateContext {
+    pub model: SettingsModel,
+    pub line_mode: LineMode,
+    pub facts: crate::gui::capability::ItemFacts,
+    pub processing: bool,
+}
+
+/// Why a shown surface's controls are off right now, `None` when they
+/// work: the one gate the toolbar greys a surface by. Controls that need
+/// the cut-out wait for Process; everything else works on what the image
+/// shows.
+pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static str> {
+    use crate::gui::capability::{check, Need};
+    let ctx = KnobContext {
+        model_uses_seg: g.model.uses_segmentation(),
+        model_is_none: g.model == SettingsModel::None,
+        line_mode: g.line_mode,
+    };
+    let unless = |req: KnobRequirement, why: &'static str| (!knob_enabled(req, ctx)).then_some(why);
+    let needs = |need: Need| check(&g.facts, need, g.model.role()).reason().map(crate::gui::capability::Reason::text);
+    match surface {
+        Surface::Mask => unless(KnobRequirement::MaskProduced, "Sketch is on Whole photo, so nothing is cut out.")
+            .or_else(|| needs(Need::Cutout)),
+        Surface::Decoration => unless(KnobRequirement::MaskProduced, "Sketch is on Whole photo, so nothing is cut out to outline.")
+            .or_else(|| needs(Need::Cutout)),
+        Surface::Effect => unless(KnobRequirement::SubjectPresent, "Sketch is on Whole photo, so there is no subject to restyle.")
+            .or_else(|| needs(Need::Cutout)),
+        Surface::Background => unless(KnobRequirement::TransparencyProduced, "Nothing is transparent in this mode, so there is no background to fill.")
+            .or_else(|| needs(Need::Cutout)),
+        // A knob an upscale reads changed mid-run makes the landing result
+        // stale and drops it.
+        Surface::Upscale => (g.processing && g.model.role() == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it."),
+        Surface::Faces => (g.processing && g.model.role() == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.")
+            .or_else(|| (g.model.role() != ModelRole::Upscale).then(|| needs(Need::ShownImage)).flatten()),
+        Surface::Colorize => g.processing.then_some("Wait for Colorize to finish, or cancel it."),
+        Surface::Lines
+        | Surface::SdChips
+        | Surface::RoremChips
+        | Surface::Brushes
+        | Surface::SelectionStrokes
+        | Surface::FillRegionKnobs
+        | Surface::Depth => None,
+    }
+}
+
 /// Runtime condition under which a knob's chip is enabled.
 /// Declared on each `StaticKnob` via `requirement()` so new knobs
 /// must think about model affinity at definition time.
@@ -462,6 +510,32 @@ fn line_mode_from_flags(uses_seg: bool, uses_edge: bool) -> LineMode {
 
 #[cfg(test)]
 mod tests {
+    /// The toolbar's one gate: cut-out surfaces wait for Process on a
+    /// cut-out model, work on No model's photo, and every surface's
+    /// reason reads as a sentence.
+    #[test]
+    fn surface_gates_follow_what_the_image_shows() {
+        use crate::gui::capability::{Activity, ItemFacts, Shown};
+        use crate::gui::item::Engine;
+        let photo = ItemFacts::photo();
+        let cut = ItemFacts { shown: Shown::Run(Engine::Segment), cutout_mask: true, ..ItemFacts::photo() };
+        let g = |model, facts, processing| GateContext { model, line_mode: LineMode::Off, facts, processing };
+        let cutout_surfaces = [Surface::Mask, Surface::Decoration, Surface::Effect, Surface::Background];
+        for s in cutout_surfaces {
+            assert_eq!(surface_gate(s, &g(SettingsModel::Silueta, photo, false)), Some("Process first."), "{s:?} before Process");
+            assert_eq!(surface_gate(s, &g(SettingsModel::Silueta, cut, false)), None, "{s:?} on a cut-out");
+        }
+        assert_eq!(surface_gate(Surface::Effect, &g(SettingsModel::None, photo, false)), None, "Effect on No model's photo");
+        assert!(surface_gate(Surface::Background, &g(SettingsModel::None, photo, false)).is_some_and(|r| r.starts_with("Nothing is transparent")),
+            "No model with Sketch off has nothing transparent to fill");
+        assert_eq!(surface_gate(Surface::Faces, &g(SettingsModel::Silueta, photo, false)), None, "Faces work before Process");
+        let upscaling = ItemFacts { activity: Activity::Running(Engine::Upscale), ..photo };
+        assert!(surface_gate(Surface::Faces, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some(), "Faces wait for the upscale");
+        assert!(surface_gate(Surface::Upscale, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some());
+        let sketch_whole = GateContext { line_mode: LineMode::EdgesOnly, ..g(SettingsModel::Silueta, cut, false) };
+        assert!(surface_gate(Surface::Mask, &sketch_whole).is_some_and(|r| r.starts_with("Sketch is on Whole photo")));
+    }
+
     use super::*;
 
     #[test]
