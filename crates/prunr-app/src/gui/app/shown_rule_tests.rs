@@ -220,3 +220,17 @@ fn an_erase_off_screen_starts_from_the_parked_result() {
     let source = item.source_for_inpaint().expect("pixels to erase");
     assert_eq!(*source, *shown, "the cut-out, not the photo");
 }
+
+/// Lines run on use on No model's photo, which is its own result; on a
+/// cut-out model they wait for the cut, like the other cut-out knobs.
+#[test]
+fn lines_run_on_use_on_no_models_photo() {
+    for (model, runs) in [(SettingsModel::None, true), (SettingsModel::Silueta, false)] {
+        let mut app = app_in(State::Unprocessed, model);
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        let change = ToolbarChange { auto_dispatch: DispatchKind::SubprocessFullPipeline, commit: true, ..Default::default() };
+        app.apply_toolbar_change(&egui::Context::default(), change, before);
+        assert_eq!(app.batch.items[0].job.is_some(), runs, "{model:?}");
+    }
+}

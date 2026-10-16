@@ -12,6 +12,9 @@ pub(crate) enum Need {
     Cutout,
     /// Lines at every scale the settings draw.
     DrawnLines,
+    /// The run a model's settings re-run: a cut on screen for a cut-out
+    /// model; No model's photo is its own.
+    Processed,
     /// The upscale run the image shows, for Refine.
     KeptUpscale,
     /// The colorize run the image shows, for Strength.
@@ -110,6 +113,12 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
                 _ => Verdict::Never(Reason::ProcessFirst),
             }
         }
+        Need::Processed => match (role, facts.shown.base_run()) {
+            (ModelRole::Filters, _) => check(facts, Need::ShownImage, role),
+            (ModelRole::Cutout, Some(Engine::Segment)) => Verdict::Ready,
+            (ModelRole::Cutout, _) => Verdict::Never(Reason::ProcessFirst),
+            _ => Verdict::Never(Reason::NotForModel),
+        },
         Need::DrawnLines => match facts.lines {
             Lines::Ready => Verdict::Ready,
             Lines::Coming => Verdict::Wait(Reason::LinesComing),
@@ -188,6 +197,14 @@ mod tests {
         assert_eq!(check(&up(false, Activity::Running(Engine::Colorize)), Need::KeptUpscale, Upscale), Verdict::Never(Reason::UpscaleFirst));
         let col = ItemFacts { activity: Activity::Running(Engine::Colorize), ..ItemFacts::photo() };
         assert_eq!(check(&col, Need::KeptColorize, Colorize), Verdict::Wait(Reason::Running));
+    }
+
+    #[test]
+    fn processed_means_a_cut_on_screen_or_no_models_photo() {
+        assert_eq!(check(&ItemFacts::photo(), Need::Processed, Cutout), Verdict::Never(Reason::ProcessFirst));
+        assert_eq!(check(&cut(false), Need::Processed, Cutout), Verdict::Ready, "a cut whose mask is evicted re-runs");
+        assert_eq!(check(&ItemFacts::photo(), Need::Processed, Filters), Verdict::Ready);
+        assert_eq!(check(&ItemFacts { photo: Photo::Decoding, ..ItemFacts::photo() }, Need::Processed, Filters), Verdict::Wait(Reason::Decoding));
     }
 
     #[test]
