@@ -2651,6 +2651,10 @@ mod tests {
         assert!(errors[0].1.contains("13.4 GB"));
     }
 
+    fn test_work(id: u64) -> WorkItem {
+        WorkItem { id, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None }
+    }
+
     #[test]
     fn clear_admission_drops_both_sides_but_leaves_cancels() {
         let mut p = fixture();
@@ -2677,14 +2681,14 @@ mod tests {
         let mut p = fixture();
         let mut ctrl = AdmissionController::with_budget(1);
         ctrl.enqueue([(1, 4), (2, 3), (3, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
-        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
+        let work = |id: u64| Some(test_work(id));
         let (admitted, rx) = p.open_admission(ctrl, work);
-        let admitted: Vec<u64> = admitted.into_iter().map(|w| w.0).collect();
+        let admitted: Vec<u64> = admitted.into_iter().map(|w| w.id).collect();
         assert_eq!(admitted, vec![3], "only the smallest is forced in");
         p.track_dispatch(fixture_recipe(), admitted);
 
         p.release_and_admit(3, work);
-        assert_eq!(rx.try_recv().map(|w| w.0), Ok(2), "the next smallest is sent");
+        assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "the next smallest is sent");
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)), "and counted");
         assert!(p.admission.is_some(), "the batch is still open");
 
@@ -2701,13 +2705,13 @@ mod tests {
         let mut p = fixture();
         let mut ctrl = AdmissionController::with_budget(4);
         ctrl.enqueue([(1, 3), (2, 3), (3, 3)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
-        let (items, _rx) = p.open_admission(ctrl, |id| (id != 1).then(|| (id, Arc::new(Vec::new()), None)));
-        let sent: Vec<u64> = items.iter().map(|w| w.0).collect();
+        let (items, _rx) = p.open_admission(ctrl, |id| (id != 1).then(|| test_work(id)));
+        let sent: Vec<u64> = items.iter().map(|w| w.id).collect();
         assert_eq!(sent, vec![2], "1 fits first but can't be sent; its share lets 2 in");
         p.track_dispatch(fixture_recipe(), sent);
-        let work = |id: u64| Some((id, Arc::new(Vec::new()), None));
+        let work = |id: u64| Some(test_work(id));
         p.release_and_admit(2, work);
-        assert_eq!(_rx.try_recv().map(|w| w.0), Ok(3), "3 goes out behind 2");
+        assert_eq!(_rx.try_recv().map(|w| w.id), Ok(3), "3 goes out behind 2");
         p.release_and_admit(3, work);
         assert!(p.admission.is_none(), "nothing holds the budget: 1's share was given back");
     }

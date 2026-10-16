@@ -1776,11 +1776,11 @@ impl BatchItem {
     /// chained cut, the cut-out it keeps.
     pub(crate) fn job_run_image(&self) -> Option<super::worker::RunImage> {
         let job = self.job.as_ref()?;
-        let start = self.job_input();
+        let start = job.start.as_ref().map(|s| Pixels::Parked(Arc::clone(&s.image)));
         match &job.keep {
             // The decoded photo spares the bridge decoding the file again.
             Some(cutout) => Some(super::worker::RunImage::Kept {
-                start: start.or_else(|| self.source_rgba.clone()),
+                start: start.or_else(|| self.source_rgba.clone().map(Pixels::Resident)),
                 cutout: Arc::clone(cutout),
             }),
             None => start.map(super::worker::RunImage::Start),
@@ -2081,25 +2081,18 @@ impl BatchItem {
 
     /// The pixels the awaited run starts from (`None`: the original),
     /// loaded when the run is sent.
+    #[cfg(test)]
     pub(crate) fn job_input(&self) -> Option<Arc<image::RgbaImage>> {
         self.job.as_ref()?.start.as_ref()?.image.load()
     }
 
     /// What a full run on this image sends: its file and the pixels the
-    /// run starts from; the image shows as processing. `None` when the
-    /// file can't be read: the image fails now rather than wait on a
-    /// run that never starts.
-    pub(crate) fn full_run_work(&mut self) -> Option<super::worker::WorkItem> {
-        let bytes = match self.source.load_bytes() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.fail(load_failed(e));
-                return None;
-            }
-        };
-        let input = self.job_run_image();
+    /// run starts from, read where the run is sent; the image shows as
+    /// processing.
+    pub(crate) fn full_run_work(&mut self) -> super::worker::WorkItem {
+        let image = self.job_run_image();
         self.mark_running();
-        Some((self.id, bytes, input))
+        super::worker::WorkItem { id: self.id, source: self.source.clone(), image }
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -3179,16 +3172,16 @@ mod tests {
         assert_eq!(item.faces_found_in_original(), None, "another photo");
     }
 
-    /// An image whose file is gone when its run would start fails there,
-    /// with nothing left waiting on the run.
+    /// A run's work is handles: its file is read where the run is sent,
+    /// never on the UI thread, so a missing file does not fail it here.
     #[test]
-    fn a_run_on_a_missing_file_fails_instead_of_waiting() {
+    fn a_runs_work_leaves_its_file_unread() {
         let mut item = fixture_item(1);
         item.source = ImageSource::Path(PathBuf::from("/nonexistent/photo.png"));
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        assert!(item.full_run_work().is_none());
-        assert!(matches!(&item.status(), BatchStatus::Error(why) if why.starts_with("Failed to load")), "{:?}", item.status());
-        assert!(item.job.is_none(), "nothing is awaited");
+        let work = item.full_run_work();
+        assert_eq!(work.id, 1);
+        assert!(item.is_cutting(), "{:?}", item.status());
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
