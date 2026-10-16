@@ -76,7 +76,12 @@ impl PrunrApp {
         // run uses none (Sketch on Full), so its settings never drift.
         let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
         let current = item.settings.current_recipe(model).mask;
-        if applied.mask == current {
+        // A re-cut the render door would refuse (no cut-out on screen: an
+        // erase or an upscale shown, the photo after an undo) is not asked
+        // for every frame: the check is done for these settings.
+        let role = self.settings.model.role();
+        let recut = item.verdict(crate::gui::capability::Need::Cutout, role);
+        if applied.mask == current || !recut.allows_request() {
             self.last_drift_check = Some((id, current_settings));
             return;
         }
@@ -189,6 +194,7 @@ impl PrunrApp {
             });
         }
         need(Need::PhotoRender)?;
+        need(Need::ShownImage)?;
         // A photo render without a scale the lines draw would show the
         // image without those lines: it waits for the worker's spare
         // scales, or for a new run when none are coming.
@@ -227,7 +233,11 @@ impl PrunrApp {
                 match &item.source_dyn {
                     Some(wrapped) => (Arc::clone(wrapped), None),
                     None => {
-                        let rgba = item.source_rgba.as_ref().ok_or(Verdict::Wait(Reason::Decoding))?;
+                        let undecoded = match facts.photo {
+                            crate::gui::capability::Photo::Unreadable => Verdict::Never(Reason::Unreadable),
+                            _ => Verdict::Wait(Reason::Decoding),
+                        };
+                        let rgba = item.source_rgba.as_ref().ok_or(undecoded)?;
                         (unwrapped(), Some(OriginalFrom::Photo(Arc::clone(rgba))))
                     }
                 }

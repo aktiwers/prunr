@@ -267,7 +267,14 @@ impl BatchManager {
     /// if any are checked, else the currently-viewed item. Empty when the
     /// batch is empty.
     pub(crate) fn items_to_process(&self) -> Vec<u64> {
-        self.targets(self.selected_idx_clamped()).map(|(_, i)| i.id).collect()
+        self.process_targets().map(|i| i.id).collect()
+    }
+
+    /// The images Process runs on, as `items_to_process` picks them: the
+    /// Process gate reads the same set, so a stale index cannot grey the
+    /// button while the run would go.
+    pub(crate) fn process_targets(&self) -> impl Iterator<Item = &BatchItem> {
+        self.targets(self.selected_idx_clamped()).map(|(_, i)| i)
     }
 
     /// Any item in the action target set satisfies `f`, without
@@ -310,7 +317,7 @@ impl BatchManager {
     /// from the worker are dropped by the job check in `on_batch_item_done`.
     pub(crate) fn abandon_cuts(&mut self) {
         for item in &mut self.items {
-            if item.job.as_ref().is_some_and(|j| j.engine == super::item::Engine::Segment) {
+            if item.awaits_cut() {
                 item.abandon_job();
             }
         }
@@ -354,7 +361,7 @@ impl BatchManager {
     pub(crate) fn progress(&self) -> StatusReport {
         let counts = self.status_counts();
         let total = counts.batch_total();
-        let stage = if counts.processing > 0 {
+        let stage = if self.any_awaiting_cut() {
             format!("Processing {}/{total}", counts.done)
         } else {
             "Finishing up".to_string()

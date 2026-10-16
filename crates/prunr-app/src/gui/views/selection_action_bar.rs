@@ -22,11 +22,31 @@ pub(crate) enum SelectionAction {
     Clear,
 }
 
+impl SelectionAction {
+    pub(crate) const ALL: [Self; 6] = [Self::Restore, Self::Delete, Self::Copy, Self::Cut, Self::Invert, Self::Clear];
+}
+
+/// Why each action can't act now (`None`: it can), from the app's
+/// `selection_action_refusal`, so the buttons grey by the gate the click
+/// goes through.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SelectionGates([Option<&'static str>; 6]);
+
+impl SelectionGates {
+    pub(crate) fn of(refusal: impl Fn(SelectionAction) -> Option<&'static str>) -> Self {
+        Self(SelectionAction::ALL.map(refusal))
+    }
+
+    fn get(&self, action: SelectionAction) -> Option<&'static str> {
+        SelectionAction::ALL.iter().position(|&a| a == action).and_then(|i| self.0[i])
+    }
+}
+
 /// Render the actions; on a `cutout` Restore joins them. The caller lays
 /// them out right-to-left, so the list is in reverse visual order: Delete
 /// (and Restore) end up leftmost. Returns `Some(action)` when one was
 /// clicked this frame.
-pub(crate) fn render_selection_actions(ui: &mut Ui, cutout: bool) -> Option<SelectionAction> {
+pub(crate) fn render_selection_actions(ui: &mut Ui, cutout: bool, gates: SelectionGates) -> Option<SelectionAction> {
     let buttons = [
         (SelectionAction::Clear, ICON_CLOSE.codepoint, "Clear selection", Some(Action::Cancel), TEXT_PRIMARY),
         (SelectionAction::Invert, ICON_FLIP.codepoint, "Invert selection", Some(Action::Invert), TEXT_PRIMARY),
@@ -37,7 +57,8 @@ pub(crate) fn render_selection_actions(ui: &mut Ui, cutout: bool) -> Option<Sele
     let restore = (SelectionAction::Restore, ICON_SETTINGS_BACKUP_RESTORE.codepoint, "Restore selection", None, TEXT_PRIMARY);
     let mut chosen = None;
     for (action, icon, label, shortcut, color) in buttons.into_iter().chain(cutout.then_some(restore)) {
-        if tooltip(icon_action_button(ui, icon, color), label, "", shortcut).clicked() {
+        let clicked = super::chip::gated(ui, gates.get(action), |ui| tooltip(icon_action_button(ui, icon, color), label, "", shortcut).clicked());
+        if clicked {
             chosen = Some(action);
         }
     }

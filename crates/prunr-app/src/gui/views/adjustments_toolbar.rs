@@ -107,6 +107,8 @@ pub(crate) struct ToolbarState<'a> {
     pub has_selection: bool,
     /// The selection corrects the cut-out on screen (Restore is offered).
     pub corrects_cutout: bool,
+    /// Why each selection action can't act now.
+    pub selection_gates: super::selection_action_bar::SelectionGates,
     /// On-disk install state, refreshed on events rather than per frame.
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
@@ -277,7 +279,7 @@ pub(crate) fn render(
             }
 
             if state.has_selection {
-                if let Some(action) = render_selection_actions(ui, state.corrects_cutout) {
+                if let Some(action) = render_selection_actions(ui, state.corrects_cutout, state.selection_gates) {
                     change.selection_action = Some(action);
                 }
             }

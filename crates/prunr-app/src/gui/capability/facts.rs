@@ -81,10 +81,9 @@ impl ItemFacts {
             Some(_) => Activity::Queued,
             None => Activity::Idle,
         };
-        let failed = item.error().is_some();
         let photo = if item.source_rgba.is_some() || item.source_dyn.is_some() {
             Photo::Decoded
-        } else if failed && !item.decode_pending {
+        } else if item.decode_failed {
             Photo::Unreadable
         } else {
             Photo::Decoding
