@@ -83,8 +83,11 @@ impl PrunrApp {
 
     /// Add an image to the batch from a file path whose header was read
     /// (lazy: its bytes are read when used).
-    pub(super) fn add_to_batch_path(&mut self, path: PathBuf, filename: String, dims: (u32, u32)) {
+    pub(super) fn add_to_batch_path(&mut self, path: PathBuf, filename: String, len: usize, dims: (u32, u32)) {
         self.add_to_batch_source(ImageSource::Path(path), dims, filename);
+        if let Some(item) = self.batch.items.last_mut() {
+            item.source_len = len;
+        }
     }
 
     /// Add an image to the batch from raw bytes (clipboard/paste).
@@ -258,9 +261,10 @@ pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Ve
         }
         for path in resolved {
             let name = display_name(&path, UNTITLED);
+            let len = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
             let dims = probe_dims_path(&path);
             // Once the receiver is gone every later send fails too.
-            if tx.send(FileLoad::Image { path, name, dims }).is_err() {
+            if tx.send(FileLoad::Image { path, name, len, dims }).is_err() {
                 break;
             }
         }

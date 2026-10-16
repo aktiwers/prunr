@@ -788,7 +788,7 @@ impl BatchManager {
     pub(crate) fn full_run_costs(&self, ids: &HashSet<u64>) -> Vec<ImageMemCost> {
         self.items.iter()
             .filter(|i| ids.contains(&i.id))
-            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source.estimated_size(), RESIDENT_HISTORY_STEPS))
+            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source_len, RESIDENT_HISTORY_STEPS))
             .collect()
     }
 
