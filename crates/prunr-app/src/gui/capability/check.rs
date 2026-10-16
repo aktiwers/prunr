@@ -61,6 +61,7 @@ pub(crate) enum Reason {
     ColorizeFirst,
     PaintFirst,
     Running,
+    Removed,
 }
 
 impl Reason {
@@ -79,6 +80,7 @@ impl Reason {
             Reason::ColorizeFirst => "Colorize first.",
             Reason::PaintFirst => "Paint the area first.",
             Reason::Running => "Working on this image.",
+            Reason::Removed => "The image was removed.",
         }
     }
 }
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn every_reason_has_text() {
         use Reason::*;
-        for r in [Decoding, Unreadable, NotForModel, ProcessFirst, ProcessAgain, Processing, Queued, LinesComing, LinesNotRun, UpscaleFirst, ColorizeFirst, PaintFirst, Running] {
+        for r in [Decoding, Unreadable, NotForModel, ProcessFirst, ProcessAgain, Processing, Queued, LinesComing, LinesNotRun, UpscaleFirst, ColorizeFirst, PaintFirst, Running, Removed] {
             assert!(r.text().ends_with('.'), "{r:?}");
         }
     }
