@@ -781,7 +781,7 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
     assert!(item.hot_seg_tensor().is_some(), "Silueta's own cut");
 
     item.start_cut(Some(StepKind::Process), Cutter::NoModel);
-    item.chain_start_built(blank());
+    item.chain_start_built(item.job_run().expect("a run"), blank());
     item.result_rgba = Some(blank());
     item.finish_job();
     assert!(item.hot_seg_tensor().is_none(), "No model's pass is not re-cut");

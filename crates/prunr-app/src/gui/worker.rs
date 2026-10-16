@@ -67,6 +67,8 @@ fn is_stalled(
 #[derive(Clone)]
 pub(crate) struct WorkItem {
     pub(crate) id: u64,
+    /// The image's run this is (`BatchItem::job_run`).
+    pub(crate) run: u64,
     pub(crate) source: super::item::ImageSource,
     pub(crate) image: Option<RunImage>,
 }
@@ -450,7 +452,7 @@ pub enum WorkerResult {
     /// its `BatchItemDone`'s edge cache named.
     SpareEdgeScales { item_id: u64, token: u64, landing: SpareLanding },
     /// The image a chained cut starts from, built as it was sent.
-    ChainStart { item_id: u64, image: Arc<image::RgbaImage> },
+    ChainStart { item_id: u64, run: u64, image: Arc<image::RgbaImage> },
     /// Batch `batch` is over.
     BatchComplete { batch: u64 },
     Cancelled,
@@ -1432,7 +1434,7 @@ fn spawn_warm(
 fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc::Sender<WorkerResult>) -> Result<(), Refused> {
     let RunInputs { bytes, start, built } = item.read_inputs().map_err(Refused::Unreadable)?;
     if let Some(image) = built {
-        let _ = res_tx.send(WorkerResult::ChainStart { item_id: item.id, image });
+        let _ = res_tx.send(WorkerResult::ChainStart { item_id: item.id, run: item.run, image });
     }
     let chain_input = start.as_deref().map(|rgba| (rgba, rgba.width(), rgba.height()));
     sub.send_image(item.id, &bytes, chain_input).map_err(|_| Refused::Worker)
@@ -1577,16 +1579,16 @@ mod tests {
         let missing = ImageSource::Path(std::path::PathBuf::from("/nonexistent/photo.png"));
         let file = ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
 
-        let gone = WorkItem { id: 1, source: missing.clone(), image: None }.read_inputs();
+        let gone = WorkItem { id: 1, run: 0, source: missing.clone(), image: None }.read_inputs();
         assert!(gone.is_err_and(|e| e.starts_with("Failed to load")));
 
         let start = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 255]))));
-        let stored = WorkItem { id: 2, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))) };
+        let stored = WorkItem { id: 2, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))) };
         let inputs = stored.read_inputs().expect("reads");
         assert_eq!(inputs.bytes.as_slice(), &[1, 2, 3]);
         assert_eq!(inputs.start.expect("unpacked").get_pixel(0, 0).0, [5, 6, 7, 255]);
 
-        let unreadable = WorkItem { id: 3, source: file.clone(), image: Some(RunImage::Start(Pixels::Source(missing.clone()))) };
+        let unreadable = WorkItem { id: 3, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Source(missing.clone()))) };
         assert!(unreadable.read_inputs().is_err(), "a start that can't be read fails the run, not cut the file instead");
 
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: ModelKind::Silueta }).unwrap();
@@ -1627,7 +1629,7 @@ mod tests {
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
         let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), mask: MaskSettings::default() };
-        let work = |id| WorkItem { id, source: source.clone(), image: None };
+        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));

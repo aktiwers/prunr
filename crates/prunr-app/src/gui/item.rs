@@ -281,6 +281,9 @@ pub(crate) struct SubjectOutline {
 /// engine running it, and where it started (`None`: the original).
 #[derive(Clone)]
 pub(crate) struct Job {
+    /// This run, among every run of every image: what its result names to
+    /// land on it and no other.
+    pub(crate) run: u64,
     pub(crate) version: u64,
     pub(crate) step: Option<StepKind>,
     pub(crate) engine: Engine,
@@ -1839,7 +1842,9 @@ impl BatchItem {
     ) {
         // Only a cut queues for a worker slot; other runs start at once.
         let running = engine != Engine::Segment;
-        self.job = Some(Job { version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.job = Some(Job { run, version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
         self.failure = None;
         self.tile_preview = None;
         self.subject = None;
@@ -1885,8 +1890,8 @@ impl BatchItem {
 
     /// The image a chained cut starts from, built where the run reads its
     /// file: it becomes the step's start, as an earlier image would be.
-    pub(crate) fn chain_start_built(&mut self, image: Arc<image::RgbaImage>) {
-        if let Some(job) = self.job.as_mut().filter(|j| j.keep.is_some()) {
+    pub(crate) fn chain_start_built(&mut self, run: u64, image: Arc<image::RgbaImage>) {
+        if let Some(job) = self.job.as_mut().filter(|j| j.run == run && j.keep.is_some()) {
             let dims = image.dimensions();
             job.start = Some(RunStart { image: super::timeline::Stored::new(image), dims });
         }
@@ -1916,6 +1921,17 @@ impl BatchItem {
     /// an undo, a redo or another step since the run started makes it stale.
     pub(crate) fn job_is_current(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.version == self.timeline.version())
+    }
+
+    /// The awaited run's id.
+    pub(crate) fn job_run(&self) -> Option<u64> {
+        self.job.as_ref().map(|j| j.run)
+    }
+
+    /// The awaited run is `run`: its result is this job's, not an earlier
+    /// run's that an undo left behind.
+    pub(crate) fn awaits_run(&self, run: u64) -> bool {
+        self.job_run() == Some(run)
     }
 
     /// The awaited run will not land (cancelled): the item shows its
@@ -2207,7 +2223,7 @@ impl BatchItem {
     /// run starts from, read where the run is sent. The image shows as
     /// processing once it is sent (`mark_running`).
     pub(crate) fn full_run_work(&self) -> super::worker::WorkItem {
-        super::worker::WorkItem { id: self.id, source: self.source.clone(), image: self.job_run_image() }
+        super::worker::WorkItem { id: self.id, run: self.job_run().unwrap_or_default(), source: self.source.clone(), image: self.job_run_image() }
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale. Single entry
@@ -3585,7 +3601,7 @@ mod tests {
 
         item.start_cut(Some(StepKind::Process), birefnet);
         assert!(matches!(item.job_run_image(), Some(crate::gui::worker::RunImage::Kept { start: None, .. })), "colours from the photo");
-        item.chain_start_built(px(7));
+        item.chain_start_built(item.job_run().expect("a run"), px(7));
         item.result_rgba = Some(px(2));
         item.finish_job();
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(7), "a re-cut redoes it from the built start");

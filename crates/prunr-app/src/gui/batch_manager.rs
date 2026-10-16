@@ -479,6 +479,7 @@ impl BatchManager {
     pub(crate) fn request_filter_only(
         &self,
         item_id: u64,
+        run: u64,
         source: &ImageSource,
         base: Option<super::worker::RunImage>,
         effect: prunr_core::SubjectEffect,
@@ -510,7 +511,7 @@ impl BatchManager {
                 prunr_core::apply_subject_effect(&mut rgba, effect);
                 Ok(Arc::new(rgba))
             })();
-            let _ = tx.send((item_id, result, chain_start));
+            let _ = tx.send((item_id, run, result, chain_start));
         });
     }
 
@@ -1514,9 +1515,9 @@ mod tests {
     fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
-        bm.request_filter_only(7, &source, None, prunr_core::SubjectEffect::default());
+        bm.request_filter_only(7, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 7);
         let rgba = result.expect("default SubjectEffect on a 1x1 source must succeed");
@@ -1532,9 +1533,9 @@ mod tests {
         let source = ImageSource::Path(std::path::PathBuf::from(
             "/nonexistent/prunr-test-missing.png"
         ));
-        bm.request_filter_only(11, &source, None, prunr_core::SubjectEffect::default());
+        bm.request_filter_only(11, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 11);
         assert!(result.is_err(), "missing file must surface as Err, not stall");
