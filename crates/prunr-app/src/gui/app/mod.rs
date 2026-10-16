@@ -1197,14 +1197,14 @@ impl eframe::App for PrunrApp {
         if self.batch.has_pending_work() {
             ctx.request_repaint_after(ASYNC_POLL);
         }
+        // Land finished work, then the live previews it may have queued,
+        // before `ui` renders, so this frame shows the newest results.
+        self.pump_results(ctx);
+        self.pump_live_preview(ctx);
     }
 
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // Land finished work, then the live previews it may have queued,
-        // before rendering, so this frame shows the newest results.
-        self.pump_results(ui.ctx());
-        self.pump_live_preview(ui.ctx());
 
         let panel_frame = egui::Frame {
             fill: theme::BG_SECONDARY,
