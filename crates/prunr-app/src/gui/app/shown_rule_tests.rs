@@ -234,3 +234,25 @@ fn lines_run_on_use_on_no_models_photo() {
         assert_eq!(app.batch.items[0].job.is_some(), runs, "{model:?}");
     }
 }
+
+/// Save writes what the canvas shows: the photo as it is before Process,
+/// the cut-out after, and a parked cut-out for an image off screen.
+#[test]
+fn save_writes_what_the_canvas_shows() {
+    let dir = std::env::temp_dir().join(format!("prunr-save-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = |app: &mut PrunrApp, name: &str| {
+        let path = dir.join(name);
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, path.clone());
+        let outcome = app.batch.bg_io.save_done_rx.recv_timeout(Duration::from_secs(20)).expect("the save reports");
+        assert!(outcome.is_ok(), "{name}: {outcome:?}");
+        image::open(&path).expect("a readable file").to_rgba8()
+    };
+    let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    assert_eq!(saved(&mut app, "photo.png"), *px(10), "the photo as it is");
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    assert_eq!(saved(&mut app, "cut.png"), *px(20), "the cut-out");
+    assert!(app.batch.items[0].park_result());
+    assert_eq!(saved(&mut app, "parked.png"), *px(20), "the parked cut-out, not the photo");
+    let _ = std::fs::remove_dir_all(&dir);
+}
