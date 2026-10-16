@@ -612,6 +612,8 @@ impl prunr_core::ProgressSink for PictureSink {
 /// running dispatch and a user mid-edit is invisible to the recipe.
 pub(crate) struct UpscaleResult {
     pub item_id: u64,
+    /// The image's run it answers.
+    pub run: u64,
     pub result: Result<UpscaleOutput, prunr_core::CoreError>,
     pub recipe: ProcessingRecipe,
 }
@@ -626,6 +628,8 @@ pub(crate) struct UpscaleOutput {
 /// A finished colorize, stamped with the recipe it ran.
 pub(crate) struct ColorizeResult {
     pub item_id: u64,
+    /// The image's run it answers.
+    pub run: u64,
     pub result: Result<ColorizeOutput, prunr_core::CoreError>,
     pub recipe: ProcessingRecipe,
 }
@@ -1691,6 +1695,7 @@ impl Processor {
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
+        run_id: u64,
         input: super::item::Pixels,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
@@ -1752,7 +1757,7 @@ impl Processor {
                 Ok(input) => build_inference_input(&input, recipe.upscale.pre_denoise()),
                 Err(err) => {
                     tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
-                    done.deliver(UpscaleResult { item_id, result: Err(err), recipe });
+                    done.deliver(UpscaleResult { item_id, run: run_id, result: Err(err), recipe });
                     return;
                 }
             };
@@ -1767,7 +1772,7 @@ impl Processor {
                 Ok(engine) => engine,
                 Err(err) => {
                     tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
-                    done.deliver(UpscaleResult { item_id, result: Err(err), recipe });
+                    done.deliver(UpscaleResult { item_id, run: run_id, result: Err(err), recipe });
                     return;
                 }
             };
@@ -1785,7 +1790,7 @@ impl Processor {
                 let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs, None);
                 UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
             });
-            done.deliver(UpscaleResult { item_id, result, recipe });
+            done.deliver(UpscaleResult { item_id, run: run_id, result, recipe });
         });
         Ok(())
     }
@@ -1860,16 +1865,16 @@ impl Processor {
     }
 
     #[cfg(test)]
-    pub(crate) fn land_run_for_test(&self, engine: super::item::Engine, item_id: u64, shown: Arc<image::RgbaImage>, recipe: ProcessingRecipe) {
+    pub(crate) fn land_run_for_test(&self, engine: super::item::Engine, item_id: u64, run_id: u64, shown: Arc<image::RgbaImage>, recipe: ProcessingRecipe) {
         match engine {
             super::item::Engine::Upscale => {
                 let run = super::item::UpscaleCache::new(Arc::clone(&shown), Arc::clone(&shown), None);
-                let _ = self.upscale.tx.send(UpscaleResult { item_id, result: Ok(UpscaleOutput { run, shown }), recipe });
+                let _ = self.upscale.tx.send(UpscaleResult { item_id, run: run_id, result: Ok(UpscaleOutput { run, shown }), recipe });
             }
             super::item::Engine::Colorize => {
                 let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
                 let run = super::item::ColorizeCache::new(Arc::new(vec![0.0; 2 * n]), Arc::clone(&shown));
-                let _ = self.colorize.tx.send(ColorizeResult { item_id, result: Ok(ColorizeOutput { run, shown }), recipe });
+                let _ = self.colorize.tx.send(ColorizeResult { item_id, run: run_id, result: Ok(ColorizeOutput { run, shown }), recipe });
             }
             other => unreachable!("{other:?} is not an upscale or colorize"),
         }
@@ -1877,10 +1882,10 @@ impl Processor {
 
     /// Deliver an upscale or colorize for `item_id` that ended with `err`.
     #[cfg(test)]
-    pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
+    pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, run: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
         match engine {
-            super::item::Engine::Upscale => { let _ = self.upscale.tx.send(UpscaleResult { item_id, result: Err(err), recipe }); }
-            super::item::Engine::Colorize => { let _ = self.colorize.tx.send(ColorizeResult { item_id, result: Err(err), recipe }); }
+            super::item::Engine::Upscale => { let _ = self.upscale.tx.send(UpscaleResult { item_id, run, result: Err(err), recipe }); }
+            super::item::Engine::Colorize => { let _ = self.colorize.tx.send(ColorizeResult { item_id, run, result: Err(err), recipe }); }
             other => unreachable!("{other:?} is not an upscale or colorize"),
         }
     }
@@ -1888,7 +1893,7 @@ impl Processor {
     /// Colorize `input` on a background thread; the result comes back
     /// through `pump_colorize_results`. Refused (logged) when free RAM is
     /// below the model's working set.
-    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
+    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, run_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
         let kind = super::settings::COLORIZER;
         let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
         admitted(descriptor)?;
@@ -1909,7 +1914,7 @@ impl Processor {
             if let Err(err) = &result {
                 tracing::warn!(item_id, %err, "colorize run did not finish");
             }
-            done.deliver(ColorizeResult { item_id, result, recipe });
+            done.deliver(ColorizeResult { item_id, run: run_id, result, recipe });
         });
         Ok(())
     }
@@ -2731,7 +2736,7 @@ mod tests {
     }
 
     fn test_work(id: u64) -> WorkItem {
-        WorkItem { id, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None }
+        WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None }
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 /// An image's No-model result, and the start a chained pass built. A load
 /// or decode failure is an `Err` on the same channel (mapped to
 /// `BatchStatus::Error` in `drain_background_channels`).
-pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
+/// A filter-only pass: the item, its run, the result, and the chained
+/// start built for it.
+pub type FilterOnlyResult = (u64, u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
 
 /// A background picture loaded off the UI thread: the item, the file,
 /// whether the user picked it (it then becomes the background) or a preset
