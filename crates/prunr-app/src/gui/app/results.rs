@@ -842,7 +842,7 @@ impl PrunrApp {
     }
 
     /// Returns whether anything landed on an image this frame.
-    pub(super) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
+    pub(crate) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
         let mut landed = false;
         let mut decode_arrived = false;
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
@@ -967,15 +967,28 @@ impl PrunrApp {
 
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
+        let mut unreadable = 0u32;
         let mut channel_drained = false;
         for _ in 0..FILE_LOAD_DRAIN_PER_FRAME {
             match self.batch.bg_io.file_load_rx.try_recv() {
-                Ok((path, name)) => {
-                    self.add_to_batch_path(path, name);
+                Ok(crate::gui::background_io::FileLoad::Image { path, name, dims: Some(dims) }) => {
+                    self.add_to_batch_path(path, name, dims);
                     loaded_count += 1;
+                }
+                Ok(crate::gui::background_io::FileLoad::Image { path, dims: None, .. }) => {
+                    tracing::warn!(?path, "import skipped: the image's header could not be read");
+                    unreadable += 1;
+                }
+                Ok(crate::gui::background_io::FileLoad::NoImagesInFolder) => {
+                    self.toasts.warning("Dropped folder had no supported images (PNG / JPG / WebP / BMP / SVG).");
                 }
                 Err(_) => { channel_drained = true; break; }
             }
+        }
+        match unreadable {
+            0 => {}
+            1 => self.status_error("Could not load image"),
+            n => self.status_error(&format!("Could not load {n} images")),
         }
         if loaded_count > 0 {
             ctx.request_repaint();
@@ -983,6 +996,8 @@ impl PrunrApp {
             if loaded_count == 1 && channel_drained {
                 self.batch.selected_index = self.batch.items.len() - 1;
                 self.zoom_state.reset();
+                self.show_original = false;
+                self.canvas_switch_id += 1;
                 self.sync_selected_batch_textures(ctx);
             }
             self.auto_process_imported(id_floor);

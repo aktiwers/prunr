@@ -20,6 +20,14 @@ pub struct BgImageLoad {
 /// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
 
+/// An import, read off the UI thread: an image file with its batch name
+/// and size (`None`: its header could not be read), or word that the
+/// folders dropped held no images.
+pub(crate) enum FileLoad {
+    Image { path: std::path::PathBuf, name: String, dims: Option<(u32, u32)> },
+    NoImagesInFolder,
+}
+
 /// A texture built off-thread for upload.
 pub struct TexPrepMsg {
     pub item_id: u64,
@@ -108,8 +116,8 @@ pub struct TexPrepHandles {
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
-    pub file_load_tx: mpsc::Sender<(std::path::PathBuf, String)>,
-    pub file_load_rx: mpsc::Receiver<(std::path::PathBuf, String)>,
+    pub(crate) file_load_tx: mpsc::Sender<FileLoad>,
+    pub(crate) file_load_rx: mpsc::Receiver<FileLoad>,
     /// Thumbnail generation results
     pub thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
     pub thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
