@@ -417,9 +417,9 @@ impl LivePreview {
     /// `snapshot` provides per-item inputs (tensors, settings, original image)
     /// for any dispatches we fire this frame. A dispatch is quick when the
     /// edit has not settled (a drag's in-between frame) and its image is
-    /// larger than a quick frame. A
-    /// render that cannot be built yet waits for a later tick; one that
-    /// never can (`Verdict::Never`) is dropped, so nothing waits for good.
+    /// larger than a quick frame. A render that cannot be built yet waits
+    /// for a later tick; one that never can (`Verdict::Never`) is dropped,
+    /// so nothing waits for good.
     pub(crate) fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
         F: FnMut(u64, PreviewKind) -> Result<DispatchInputs, crate::gui::capability::Verdict>,
@@ -471,9 +471,9 @@ impl LivePreview {
             let mut inputs = match snapshot(id, kind) {
                 Ok(inputs) => inputs,
                 Err(verdict) => {
-                    let never = matches!(verdict, crate::gui::capability::Verdict::Never(_));
-                    tracing::debug!(event = "live_preview_tick_unbuilt", item_id = id, ?kind, ?verdict, "render not built");
-                    if never {
+                    let why = verdict.reason().map(crate::gui::capability::Reason::text);
+                    tracing::debug!(event = "live_preview_tick_unbuilt", item_id = id, ?kind, ?why, "render not built");
+                    if !verdict.allows_request() {
                         self.pending.remove(&id);
                         self.owed.remove(&id);
                     }
@@ -753,6 +753,12 @@ pub struct FacedKey {
 }
 
 impl FacedKey {
+    /// `photo` with these faces blended in.
+    pub(crate) fn blend_into(&self, mut photo: RgbaImage) -> RgbaImage {
+        prunr_core::face::compose_faces_into(&mut photo, &self.faces, self.blend);
+        photo
+    }
+
     pub fn matches(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.faces, &other.faces) && self.blend == other.blend
     }
@@ -958,9 +964,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             None
         }
         Some(FacesInput { key, faced: None }) => {
-            let mut photo = inputs.original.to_rgba8();
-            prunr_core::face::compose_faces_into(&mut photo, &key.faces, key.blend);
-            let faced = Arc::new(DynamicImage::ImageRgba8(photo));
+            let faced = Arc::new(DynamicImage::ImageRgba8(key.blend_into(inputs.original.to_rgba8())));
             inputs.original = Arc::clone(&faced);
             Some(faced)
         }

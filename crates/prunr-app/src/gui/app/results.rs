@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::gui::item::{BatchItem, BatchStatus, Engine};
+use crate::gui::item::{BatchItem, Engine};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::WorkerResult;
@@ -383,23 +383,21 @@ impl PrunrApp {
     /// Restore faces works on what the image shows: the photo before
     /// Process, the result after.
     fn shows_face_result(&self, idx: usize) -> bool {
-        use crate::gui::capability::{check, ItemFacts, Need};
-        let facts = ItemFacts::of(&self.batch.items[idx]);
-        shows(self.settings.model, Surface::Faces) && check(&facts, Need::ShownImage, self.settings.model.role()).is_ready()
+        let role = self.settings.model.role();
+        shows(self.settings.model, Surface::Faces) && self.batch.items[idx].verdict(crate::gui::capability::Need::ShownImage, role).is_ready()
     }
 
     /// Blend the faces again: a Refine re-finish for a shown upscale, the
     /// photo's look before Process (No model's photo is its result), a
     /// re-cut otherwise.
     fn redo_faces_blend(&mut self, idx: usize) {
-        use crate::gui::capability::{ItemFacts, Shown};
+        use crate::gui::knob_catalog::ModelRole;
         use crate::gui::live_preview::PreviewKind;
         let item = &self.batch.items[idx];
         let id = item.id;
-        let photo = ItemFacts::of(item).shown == Shown::Photo && self.settings.model.role() != crate::gui::knob_catalog::ModelRole::Filters;
         if item.kept_upscale().is_some() {
             self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
-        } else if photo {
+        } else if !item.has_result() && self.settings.model.role() != ModelRole::Filters {
             self.processor.live_preview.render_now(id, PreviewKind::Photo);
         } else {
             self.dispatch_brush_rerun(idx);
@@ -497,7 +495,7 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let item = &self.batch.items[idx];
         let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
-        let processed = crate::gui::capability::check(&crate::gui::capability::ItemFacts::of(item), crate::gui::capability::Need::Processed, role).allows_request();
+        let processed = item.verdict(crate::gui::capability::Need::Processed, role).allows_request();
         if reads && processed && shows(self.settings.model, Surface::Effect) {
             self.rerun_photo(idx);
         }
@@ -604,7 +602,7 @@ impl PrunrApp {
         if !self.settings.animations {
             return;
         }
-        let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.status() == BatchStatus::Processing && i.job_is_current());
+        let awaited = self.batch.find_by_id(item_id).is_some_and(|i| i.is_cutting() && i.job_is_current());
         if !self.batch.is_selected(item_id) || !awaited {
             return;
         }
@@ -656,7 +654,7 @@ impl PrunrApp {
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                if item.status() == BatchStatus::Processing {
+                if item.is_cutting() {
                     item.abandon_job();
                 }
             }
@@ -667,7 +665,7 @@ impl PrunrApp {
 
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         // A cancelled run's item already shows its state again.
-        if item.status() != BatchStatus::Processing {
+        if !item.is_cutting() {
             return;
         }
         if !item.job_is_current() {
@@ -752,7 +750,7 @@ impl PrunrApp {
             tracing::info!(item_id, token, outcome, "spare line scales dropped: the kept lines are another run's");
             return;
         }
-        let processed = crate::gui::capability::check(&crate::gui::capability::ItemFacts::of(item), crate::gui::capability::Need::Processed, self.settings.model.role()).allows_request();
+        let processed = item.verdict(crate::gui::capability::Need::Processed, self.settings.model.role()).allows_request();
         let rerun = failed && processed && item.lines_need_a_run();
         tracing::info!(item_id, token, outcome, rerun, "spare line scales landed");
         self.batch.enforce_tensor_budget();
