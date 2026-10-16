@@ -212,57 +212,30 @@ fn merge_into(
     file.models.insert(model_id_key(model_id), mp);
 }
 
-/// Read an existing preset file (v1 auto-migrated to v2) into a
-/// `PresetFile`, or `PresetFile::default()` when the path is absent.
-fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
-    match std::fs::read(path) {
-        Ok(data) => Ok(serde_json::from_slice(&data).ok().and_then(parse_preset_value).unwrap_or_default()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PresetFile::default()),
-        Err(e) => Err(e),
+/// Write a preset off the UI thread, after every config write asked for
+/// before it. "Prunr" is never written.
+pub(crate) fn queue_save(name: &str, file: &PresetFile) {
+    let Ok(path) = writable_path(name) else { return };
+    match serde_json::to_string_pretty(file) {
+        Ok(json) => super::config_writer::write(path, json.into_bytes()),
+        Err(err) => tracing::error!(preset = %name, %err, "preset not saved"),
     }
 }
 
-/// Merge-aware save. Loads the existing file (v1 auto-migrated to v2),
-/// updates the entry for `model_id` via `merge_into`, writes the
-/// merged result. Preserves entries for other model_ids verbatim.
-/// Scheduler bundles within `model_id`'s entry come straight from
-/// `model_preset.sd.schedulers` — the caller is responsible for
-/// carrying over any prior bundles it wants to retain.
-///
-/// If no existing file → behaves like `save` with a single-entry
-/// PresetFile. The "save current as new preset" path skips this
-/// function — it has nothing to merge against.
-pub(crate) fn save_merged(
-    name: &str,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    merge_save_at(&writable_path(name)?, model_id, model_preset)
+/// Remove a preset's file off the UI thread.
+pub(crate) fn queue_delete(name: &str) {
+    if let Some(path) = preset_path(name) {
+        super::config_writer::remove(path);
+    }
 }
 
-fn merge_save_at(
-    path: &std::path::Path,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    let mut file = load_existing_for_merge(path)?;
+/// `model_preset` merged into `file`, the preset as it stands: entries for
+/// other models stay verbatim. Scheduler bundles within `model_id`'s entry
+/// come straight from `model_preset.sd.schedulers`: the caller carries
+/// over any prior bundles it wants to keep.
+pub(crate) fn merged(mut file: PresetFile, model_id: prunr_models::ModelId, model_preset: ModelPreset) -> PresetFile {
     merge_into(&mut file, model_id, model_preset);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    write_preset(path, &file)
-}
-
-/// Remove a preset's file. Silent no-op if the file doesn't exist — caller
-/// already drops the in-memory entry, and we don't want to surface "already
-/// deleted" as an error.
-pub fn delete(name: &str) -> std::io::Result<()> {
-    let Some(path) = preset_path(name) else { return Ok(()); };
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    file
 }
 
 /// Write the curated built-in presets to disk on first run. No-op when the
@@ -448,10 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn delete_prunr_is_noop() {
+    fn prunr_has_no_file_to_delete() {
         // Would be disastrous to delete anything when a user toggles the
-        // Prunr row, so this must be a safe no-op.
-        assert!(delete(PRUNR_PRESET).is_ok());
+        // Prunr row, so it names no file.
+        assert!(preset_path(PRUNR_PRESET).is_none());
     }
 
     // ── Forward-compat tripwires ──────────────────────────────────────
@@ -636,11 +609,18 @@ mod tests {
     // Overwriting a preset on (active_model, active_scheduler) must
     // touch ONLY that model's entry and ONLY that scheduler's bundle.
     // Other models and other scheduler bundles round-trip bytewise.
-    // Tests use `merge_save_at` so they don't write to the
+    // Tests use `overwrite_at` so they don't write to the
     // user's real presets dir.
 
+    /// An overwrite as the app makes it: the preset as loaded, merged,
+    /// written whole.
+    fn overwrite_at(path: &std::path::Path, model_id: prunr_models::ModelId, mp: ModelPreset) -> std::io::Result<()> {
+        let existing = load_from_path(path).unwrap_or_default();
+        write_preset(path, &merged(existing, model_id, mp))
+    }
+
     #[test]
-    fn save_merged_preserves_other_model_entries() {
+    fn overwrite_preserves_other_model_entries() {
         use super::super::brush_state::BrushSettings;
         use super::super::presets::SdPreset;
         use prunr_models::ModelId;
@@ -668,7 +648,7 @@ mod tests {
             brush: BrushSettings::default(),
             sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
         };
-        merge_save_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let silueta_back = reloaded
@@ -684,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_preserves_other_scheduler_bundles_within_sd() {
+    fn overwrite_preserves_other_scheduler_bundles_within_sd() {
         use super::super::brush_state::SdScheduler;
         use super::super::presets::{SdPreset, SdSchedulerBundle};
         use prunr_models::ModelId;
@@ -732,7 +712,7 @@ mod tests {
             schedulers: new_schedulers,
         };
         let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
-        merge_save_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded
@@ -741,12 +721,12 @@ mod tests {
             .expect("SD entry");
         let sd_back = mp_back.sd.as_ref().expect("SD bundle");
 
-        // `save_merged` merges by ModelPreset, not by scheduler — the
+        // `merged` merges by ModelPreset, not by scheduler — the
         // caller decides which scheduler bundles to carry over inside
         // the SdPreset they pass. This test pins the round-trip: the
         // scheduler-bundle map is written exactly as the caller built
         // it, with no silent rewrite. (Cross-MODEL preservation is
-        // pinned by `save_merged_preserves_other_model_entries`.)
+        // pinned by `overwrite_preserves_other_model_entries`.)
         assert_eq!(
             sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied(),
             Some(ddim_bundle_new),
@@ -760,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_creates_file_when_none_exists() {
+    fn overwrite_creates_file_when_none_exists() {
         use prunr_models::ModelId;
 
         let dir = tempfile::tempdir().expect("tmpdir");
@@ -771,7 +751,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        merge_save_at(&path, ModelId::Silueta, mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::Silueta, mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -783,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_handles_v1_file_via_load_path() {
+    fn overwrite_handles_v1_file_via_load_path() {
         use prunr_models::ModelId;
 
         let dir = tempfile::tempdir().expect("tmpdir");
@@ -802,7 +782,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        merge_save_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -821,15 +801,11 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_rejects_prunr_name() {
-        use prunr_models::ModelId;
-        let result = save_merged("Prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("Prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        // Case-insensitive — same shape as `save`.
-        let result = save_merged("prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    fn a_queued_save_rejects_the_prunr_name() {
+        for name in ["Prunr", "prunr"] {
+            let err = writable_path(name).expect_err("Prunr is reserved");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]
@@ -861,7 +837,7 @@ mod tests {
             brush: base.clone(),
             sd: sd_preset_for_save(&base, ModelId::SdV15InpaintFp16),
         };
-        merge_save_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded
