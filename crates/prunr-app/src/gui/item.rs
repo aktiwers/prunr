@@ -1728,8 +1728,18 @@ impl BatchItem {
     /// (source, preview, held image, result) is drawn into it, so a
     /// hand-over between them never moves the image.
     pub(crate) fn frame_size(&self) -> egui::Vec2 {
-        let (w, h) = self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions());
+        let (w, h) = self.shown_dims();
         egui::vec2(w as f32, h as f32)
+    }
+
+    /// The size of what the canvas shows: the result, parked or not (an
+    /// upscale's output size), else the photo.
+    pub(crate) fn shown_dims(&self) -> (u32, u32) {
+        match (&self.result_rgba, &self.timeline.current().result) {
+            (Some(rgba), _) => rgba.dimensions(),
+            (None, Some(stored)) => stored.dims(),
+            (None, None) => self.dimensions,
+        }
     }
 
     /// The image shown until the new one's texture lands.
@@ -2703,7 +2713,9 @@ impl BatchItem {
             self.lens_focus = None;
             return;
         };
-        if self.lens_focus.as_ref().is_some_and(|f| f.is_for(depth, self.result_rgba.as_ref())) {
+        // A parked result is not unpacked to place the focus: it is placed
+        // again once the result's texture build hands the pixels back.
+        if self.result_parked() || self.lens_focus.as_ref().is_some_and(|f| f.is_for(depth, self.result_rgba.as_ref())) {
             return;
         }
         self.lens_focus = Some(LensFocus {
@@ -3345,6 +3357,21 @@ mod tests {
         assert_eq!(item.faces_found_in_original(), None, "a failed search");
         item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
         assert_eq!(item.faces_found_in_original(), None, "another photo");
+    }
+
+    /// The size the canvas shows reads a parked result's stored size, not
+    /// the photo's: an upscale off screen still frames at its output size.
+    #[test]
+    fn a_parked_result_keeps_its_shown_size() {
+        let mut item = fixture_item(1);
+        item.dimensions = (2, 2);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(StepKind::Upscale);
+        assert!(item.park_result());
+        assert!(item.result_rgba.is_none());
+        assert_eq!(item.shown_dims(), (8, 8));
+        assert_eq!(item.frame_size(), egui::vec2(8.0, 8.0));
     }
 
     /// The first decode of a photo keeps what was made from it before:
