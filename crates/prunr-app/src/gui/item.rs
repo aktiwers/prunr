@@ -1189,8 +1189,8 @@ impl BatchItem {
 
     /// The selection the shown step replaced, the base a Confidence
     /// retune of the last stroke merges onto.
-    pub(crate) fn pre_stroke_selection(&self) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.timeline.previous()?.selection.as_ref()?.load()
+    pub(crate) fn pre_stroke_selection(&self) -> Option<Region> {
+        self.timeline.previous()?.selection.clone().map(Region::Stored)
     }
 
     /// Replace the selection within the shown step: a retune of the last
