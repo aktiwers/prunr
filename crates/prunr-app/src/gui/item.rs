@@ -1319,6 +1319,20 @@ impl BatchItem {
         paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile);
     }
 
+    /// Keep the `DynamicImage` a render made of this image's photo, while
+    /// it is still that photo: the start a run redoes from, or the decoded
+    /// source.
+    pub(crate) fn keep_built_original(&mut self, built: super::live_preview::BuiltOriginal) {
+        if built.start {
+            let still_start = self.run_start(Engine::Segment).is_some_and(|s| s.image.holds(&built.rgba));
+            if still_start {
+                self.start_dyn_cache = Some((built.rgba, built.wrapped));
+            }
+        } else if self.source_rgba.as_ref().is_some_and(|src| Arc::ptr_eq(src, &built.rgba)) {
+            self.source_dyn = Some(built.wrapped);
+        }
+    }
+
     /// The photo's look goes once the image is no longer the unprocessed
     /// photo, or Restore faces is off.
     pub(crate) fn settle_photo_look(&mut self) {
