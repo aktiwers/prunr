@@ -738,6 +738,9 @@ pub(crate) struct BatchItem {
     /// True while a background thread is building the result ColorImage.
     pub(crate) result_tex_pending: bool,
     result_tex_request: u64,
+    /// A shown step whose result could not be read for its texture: not
+    /// asked for again while it shows.
+    unreadable_result: Option<super::timeline::StoredImage>,
     /// The transition to the next image after a discrete change (a run,
     /// an edit, an undo). A slider re-cut makes none and swaps at once.
     pub(crate) reveal: Option<Reveal>,
@@ -1564,6 +1567,28 @@ impl BatchItem {
     #[cfg(test)]
     pub(crate) fn shown_result(&self) -> Option<Arc<image::RgbaImage>> {
         self.result_pixels().and_then(|p| p.load())
+    }
+
+    /// A texture's pixels could not be read: the request ends, and a
+    /// result's step is not asked for again while it shows.
+    pub(crate) fn texture_unreadable(&mut self, target: super::background_io::TexTarget) {
+        use super::background_io::TexTarget;
+        match target {
+            TexTarget::Result(request) | TexTarget::LiveResult(request) if request == self.result_tex_request => {
+                self.result_tex_pending = false;
+                self.unreadable_result = self.timeline.current().result.clone();
+            }
+            TexTarget::Source => self.source_tex_pending = false,
+            _ => {}
+        }
+    }
+
+    /// The shown step's result could not be read for its texture.
+    pub(crate) fn result_unreadable(&self) -> bool {
+        match (&self.unreadable_result, &self.timeline.current().result) {
+            (Some(bad), Some(shown)) => Arc::ptr_eq(bad, shown),
+            _ => false,
+        }
     }
 
     /// A parked result a texture build unpacked: held again while the
@@ -2511,6 +2536,7 @@ impl BatchItem {
             photo_look: None,
             source_tex_pending: false,
             result_tex_pending: false,
+            unreadable_result: None,
             result_tex_request: 0,
             reveal: None,
             subject: None,

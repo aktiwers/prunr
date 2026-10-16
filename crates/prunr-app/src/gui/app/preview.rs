@@ -679,7 +679,7 @@ mod landing_tests {
     /// Land the next prepared texture on the item, as the frame loop does.
     fn land_next_texture(app: &mut PrunrApp, ctx: &egui::Context) -> TexTarget {
         let prep = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
-        let texture = ctx.load_texture(prep.name, prep.image, Default::default());
+        let texture = ctx.load_texture(prep.name, prep.image.expect("prepared"), Default::default());
         app.batch.find_by_id_mut(prep.item_id).expect("the item").land_texture(texture, prep.target);
         prep.target
     }
