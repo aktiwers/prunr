@@ -894,6 +894,24 @@ mod tests {
         assert_eq!(unpacked.get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
 
+    /// A packed step that cannot be read ends its texture request instead
+    /// of leaving the image busy, and is not asked for again while it shows.
+    #[test]
+    fn an_unreadable_step_ends_its_texture_request() {
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_tex_pending = true;
+        let target = item.request_result_texture(false);
+        item.texture_unreadable(target);
+        assert!(!item.result_tex_pending && !item.has_pending_work());
+        assert!(item.result_unreadable(), "not asked for again");
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        assert!(!item.result_unreadable(), "another step is asked for");
+    }
+
     /// The step undo returns to keeps its selection and edits unpacked too,
     /// so restoring them reads the held planes.
     #[test]

@@ -162,7 +162,7 @@ impl PrunrApp {
             && !self.batch.items[idx].result_tex_pending
         {
             // A parked result is unpacked by the build, not here.
-            if let Some(pixels) = self.batch.items[idx].result_pixels() {
+            if let Some(pixels) = self.batch.items[idx].result_pixels().filter(|_| !self.batch.items[idx].result_unreadable()) {
                 let switch = self.result_switch_id;
                 self.batch.items[idx].result_tex_pending = true;
                 let target = self.batch.items[idx].request_result_texture(false);
@@ -200,9 +200,11 @@ impl PrunrApp {
             let parked = matches!(pixels, Pixels::Parked(_));
             let rgba = match pixels.read() {
                 Ok(rgba) => rgba,
-                // Nothing lands and the request stays pending: retrying an
-                // unreadable step would only fail again every frame.
-                Err(err) => return tracing::warn!(item_id, %err, "texture not prepared"),
+                Err(err) => {
+                    tracing::warn!(item_id, %err, "texture not prepared");
+                    let _ = handles.tx.send(crate::gui::background_io::TexPrepMsg { item_id, name, image: None, target, unpacked: None });
+                    return ctx.request_repaint();
+                }
             };
             let (w, h) = (rgba.width(), rgba.height());
             let ci = egui::ColorImage::from_rgba_unmultiplied(
@@ -211,7 +213,7 @@ impl PrunrApp {
             );
             tracing::debug!(item_id, waited_ms, convert_ms = queued.elapsed().as_millis() as u64 - waited_ms, "texture prepared");
             let unpacked = parked.then_some(rgba);
-            let _ = handles.tx.send(crate::gui::background_io::TexPrepMsg { item_id, name, image: ci, target, unpacked });
+            let _ = handles.tx.send(crate::gui::background_io::TexPrepMsg { item_id, name, image: Some(ci), target, unpacked });
             ctx.request_repaint();
         });
     }

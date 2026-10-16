@@ -32,7 +32,9 @@ pub(crate) enum FileLoad {
 pub struct TexPrepMsg {
     pub item_id: u64,
     pub name: String,
-    pub image: egui::ColorImage,
+    /// `None`: the pixels could not be read (a packed step whose file is
+    /// gone).
+    pub image: Option<egui::ColorImage>,
     pub target: TexTarget,
     /// A parked result the build unpacked, for the item to hold again.
     pub unpacked: Option<std::sync::Arc<image::RgbaImage>>,

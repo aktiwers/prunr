@@ -866,14 +866,17 @@ impl PrunrApp {
         }
 
         while let Ok(prep) = self.batch.bg_io.tex_prep_rx.try_recv() {
-            let tex = ctx.load_texture(prep.name, prep.image, egui::TextureOptions::default());
-            if let Some(item) = self.batch.find_by_id_mut(prep.item_id) {
-                item.land_texture(tex, prep.target);
-                if let Some(rgba) = prep.unpacked {
-                    item.hold_unpacked_result(rgba);
-                }
-                landed = true;
+            let Some(item) = self.batch.find_by_id_mut(prep.item_id) else { continue };
+            let Some(image) = prep.image else {
+                item.texture_unreadable(prep.target);
+                continue;
+            };
+            let tex = ctx.load_texture(prep.name, image, egui::TextureOptions::default());
+            item.land_texture(tex, prep.target);
+            if let Some(rgba) = prep.unpacked {
+                item.hold_unpacked_result(rgba);
             }
+            landed = true;
         }
 
         // Drain filter-only Process results (model=None path).
