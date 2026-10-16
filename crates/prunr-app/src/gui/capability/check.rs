@@ -1,6 +1,7 @@
 use super::facts::{Activity, ItemFacts, Lines, Photo};
 use crate::gui::item::Engine;
 use crate::gui::knob_catalog::ModelRole;
+use prunr_core::LineMode;
 
 /// What a control or a job needs from the image before it can act.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +11,12 @@ pub(crate) enum Need {
     /// The cut-out's mask under the image on screen: Mask, Outline &
     /// Shadow, a brush re-cut.
     Cutout,
+    /// A subject to restyle: the cut-out, or No model's photo; never
+    /// while Sketch covers the whole photo.
+    Subject,
+    /// Something transparent to fill behind: a cut on screen, or lines
+    /// on No model's photo.
+    Transparency,
     /// Lines at every scale the settings draw.
     DrawnLines,
     /// The run a model's settings re-run: a cut on screen for a cut-out
@@ -71,6 +78,9 @@ pub(crate) enum Reason {
     PaintFirst,
     Running,
     Removed,
+    SketchCoversPhoto,
+    NoSubject,
+    NothingTransparent,
 }
 
 impl Reason {
@@ -90,6 +100,9 @@ impl Reason {
             Reason::PaintFirst => "Paint the area first.",
             Reason::Running => "Working on this image.",
             Reason::Removed => "The image was removed.",
+            Reason::SketchCoversPhoto => "Sketch is on Whole photo, so nothing is cut out.",
+            Reason::NoSubject => "Sketch is on Whole photo, so there is no subject to restyle.",
+            Reason::NothingTransparent => "Nothing is transparent in this mode, so there is no background to fill.",
         }
     }
 }
@@ -102,8 +115,13 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
             (None, Photo::Decoding) => Verdict::Wait(Reason::Decoding),
             (None, Photo::Unreadable) => Verdict::Never(Reason::Unreadable),
         },
+        Need::Cutout if facts.line_mode == LineMode::EdgesOnly => Verdict::Never(Reason::SketchCoversPhoto),
         // No model's photo is its own result: what cut-out controls act on.
         Need::Cutout if role == ModelRole::Filters => Verdict::Ready,
+        Need::Subject if facts.line_mode == LineMode::EdgesOnly => Verdict::Never(Reason::NoSubject),
+        Need::Subject => check(facts, Need::Cutout, role),
+        Need::Transparency if role == ModelRole::Filters && facts.line_mode == LineMode::Off => Verdict::Never(Reason::NothingTransparent),
+        Need::Transparency => check(facts, Need::Processed, role),
         Need::Cutout => {
             if role != ModelRole::Cutout {
                 return Verdict::Never(Reason::NotForModel);
@@ -233,7 +251,7 @@ mod tests {
     #[test]
     fn every_reason_has_text() {
         use Reason::*;
-        for r in [Decoding, Unreadable, NotForModel, ProcessFirst, ProcessAgain, Processing, Queued, LinesComing, LinesNotRun, UpscaleFirst, ColorizeFirst, PaintFirst, Running, Removed] {
+        for r in [Decoding, Unreadable, NotForModel, ProcessFirst, ProcessAgain, Processing, Queued, LinesComing, LinesNotRun, UpscaleFirst, ColorizeFirst, PaintFirst, Running, Removed, SketchCoversPhoto, NoSubject, NothingTransparent] {
             assert!(r.text().ends_with('.'), "{r:?}");
         }
     }

@@ -155,8 +155,8 @@ pub enum Surface {
 }
 
 /// Whether `surface` shows for `model`: only where it has an effect. A
-/// surface that shows but is inactive under another setting (Mask with
-/// Sketch on Full) is greyed with a reason instead, via `knob_enabled`.
+/// surface that shows but cannot act now (Mask with Sketch on Whole
+/// photo, before Process) is greyed with a reason by `surface_gate`.
 pub fn shows(model: SettingsModel, surface: Surface) -> bool {
     use ModelRole::*;
     let role = model.role();
@@ -175,12 +175,11 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
     }
 }
 
-/// What a surface's gate reads: the model, the image's line mode and
-/// facts, and whether a run is under way.
+/// What a surface's gate reads: the model, the image's facts, and
+/// whether a run is under way.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GateContext {
     pub model: SettingsModel,
-    pub line_mode: LineMode,
     pub facts: crate::gui::capability::ItemFacts,
     /// A run is under way anywhere in the app, not only on this image.
     pub processing: bool,
@@ -192,26 +191,15 @@ pub(crate) struct GateContext {
 /// shows.
 pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static str> {
     use crate::gui::capability::{check, Need};
-    let ctx = KnobContext {
-        model_uses_seg: g.model.uses_segmentation(),
-        model_is_none: g.model == SettingsModel::None,
-        line_mode: g.line_mode,
-    };
-    let unless = |req: KnobRequirement, why: &'static str| (!knob_enabled(req, ctx)).then_some(why);
     let role = g.model.role();
     let needs = |need: Need| check(&g.facts, need, role).reason().map(crate::gui::capability::Reason::text);
     // A knob an upscale reads changed mid-run makes the landing result
     // stale and drops it.
     let upscale_lock = (g.processing && role == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.");
     match surface {
-        Surface::Mask => unless(KnobRequirement::MaskProduced, "Sketch is on Whole photo, so nothing is cut out.")
-            .or_else(|| needs(Need::Cutout)),
-        Surface::Decoration => unless(KnobRequirement::MaskProduced, "Sketch is on Whole photo, so nothing is cut out to outline.")
-            .or_else(|| needs(Need::Cutout)),
-        Surface::Effect => unless(KnobRequirement::SubjectPresent, "Sketch is on Whole photo, so there is no subject to restyle.")
-            .or_else(|| needs(Need::Cutout)),
-        Surface::Background => unless(KnobRequirement::TransparencyProduced, "Nothing is transparent in this mode, so there is no background to fill.")
-            .or_else(|| needs(Need::Cutout)),
+        Surface::Mask | Surface::Decoration => needs(Need::Cutout),
+        Surface::Effect => needs(Need::Subject),
+        Surface::Background => needs(Need::Transparency),
         Surface::Upscale => upscale_lock,
         // On an upscaler Faces is a setting of the run; elsewhere it works
         // on the image shown.
@@ -225,78 +213,6 @@ pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static
         | Surface::SelectionStrokes
         | Surface::FillRegionKnobs
         | Surface::Depth => None,
-    }
-}
-
-/// Runtime condition under which a knob's chip is enabled.
-/// Declared on each `StaticKnob` via `requirement()` so new knobs
-/// must think about model affinity at definition time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KnobRequirement {
-    /// Always enabled (when not mid-processing).
-    Always,
-    /// Enabled when the model produces a segmentation mask:
-    /// `model_uses_seg && line_mode != EdgesOnly`.
-    MaskProduced,
-    /// Enabled when a subject channel is present: `line_mode != EdgesOnly`.
-    SubjectPresent,
-    /// Enabled when the output can contain transparency, i.e. not
-    /// (no-model AND line_mode Off) — that combination outputs opaque RGB.
-    TransparencyProduced,
-}
-
-/// Inputs needed to evaluate `KnobRequirement`. Computed once per frame
-/// in the toolbar and passed to `knob_enabled` for each gate.
-#[derive(Clone, Copy, Debug)]
-pub struct KnobContext {
-    pub model_uses_seg: bool,
-    /// True when `SettingsModel::None` is active (filter-only, no AI).
-    pub model_is_none: bool,
-    pub line_mode: LineMode,
-}
-
-/// Returns `true` when `req` is satisfied under `ctx`.
-pub fn knob_enabled(req: KnobRequirement, ctx: KnobContext) -> bool {
-    match req {
-        KnobRequirement::Always => true,
-        KnobRequirement::MaskProduced =>
-            ctx.model_uses_seg && ctx.line_mode != LineMode::EdgesOnly,
-        KnobRequirement::SubjectPresent =>
-            ctx.line_mode != LineMode::EdgesOnly,
-        KnobRequirement::TransparencyProduced =>
-            !(ctx.model_is_none && ctx.line_mode == LineMode::Off),
-    }
-}
-
-impl StaticKnob {
-    /// Which runtime condition gates this knob's chip.
-    pub fn requirement(self) -> KnobRequirement {
-        match self {
-            StaticKnob::Gamma
-            | StaticKnob::Contrast
-            | StaticKnob::EdgeShift
-            | StaticKnob::RefineEdges
-            | StaticKnob::GuidedRadius
-            | StaticKnob::GuidedEpsilon
-            | StaticKnob::Feather
-            | StaticKnob::Decoration => KnobRequirement::MaskProduced,
-
-            StaticKnob::SubjectEffect => KnobRequirement::SubjectPresent,
-
-            StaticKnob::BgEffect
-            | StaticKnob::BgColor
-            | StaticKnob::BgImageFit => KnobRequirement::TransparencyProduced,
-
-            StaticKnob::LineStrength
-            | StaticKnob::EdgeThickness
-            | StaticKnob::EdgeScale
-            | StaticKnob::SolidLineColor
-            | StaticKnob::ComposeMode
-            | StaticKnob::LineStyle
-            | StaticKnob::LineFade
-            | StaticKnob::DepthLook
-            | StaticKnob::Model => KnobRequirement::Always,
-        }
     }
 }
 
@@ -524,7 +440,7 @@ mod tests {
         use crate::gui::item::Engine;
         let photo = ItemFacts::photo();
         let cut = ItemFacts { shown: Shown::Run(Engine::Segment), cutout_mask: true, ..ItemFacts::photo() };
-        let g = |model, facts, processing| GateContext { model, line_mode: LineMode::Off, facts, processing };
+        let g = |model, facts, processing| GateContext { model, facts, processing };
         let cutout_surfaces = [Surface::Mask, Surface::Decoration, Surface::Effect, Surface::Background];
         for s in cutout_surfaces {
             assert_eq!(surface_gate(s, &g(SettingsModel::Silueta, photo, false)), Some("Process first."), "{s:?} before Process");
@@ -537,8 +453,11 @@ mod tests {
         let upscaling = ItemFacts { activity: Activity::Running(Engine::Upscale), ..photo };
         assert!(surface_gate(Surface::Faces, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some(), "Faces wait for the upscale");
         assert!(surface_gate(Surface::Upscale, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some());
-        let sketch_whole = GateContext { line_mode: LineMode::EdgesOnly, ..g(SettingsModel::Silueta, cut, false) };
-        assert!(surface_gate(Surface::Mask, &sketch_whole).is_some_and(|r| r.starts_with("Sketch is on Whole photo")));
+        let whole = |facts: ItemFacts| ItemFacts { line_mode: LineMode::EdgesOnly, ..facts };
+        assert_eq!(surface_gate(Surface::Mask, &g(SettingsModel::Silueta, whole(cut), false)), Some("Sketch is on Whole photo, so nothing is cut out."));
+        assert_eq!(surface_gate(Surface::Effect, &g(SettingsModel::None, whole(photo), false)), Some("Sketch is on Whole photo, so there is no subject to restyle."));
+        assert_eq!(surface_gate(Surface::Background, &g(SettingsModel::Silueta, whole(cut), false)), None, "lines over a cut-out leave a background to fill");
+        assert_eq!(surface_gate(Surface::Background, &g(SettingsModel::None, whole(photo), false)), None, "lines on No model's photo leave the rest transparent");
     }
 
     use super::*;
@@ -547,38 +466,6 @@ mod tests {
     fn every_static_knob_has_a_spec() {
         for k in StaticKnob::ALL {
             let _ = spec(*k);
-        }
-    }
-
-    #[test]
-    fn requirement_assignments_match_catalog_intent() {
-        use KnobRequirement::*;
-        let expected: &[(StaticKnob, KnobRequirement)] = &[
-            (StaticKnob::Gamma, MaskProduced),
-            (StaticKnob::Contrast, MaskProduced),
-            (StaticKnob::EdgeShift, MaskProduced),
-            (StaticKnob::RefineEdges, MaskProduced),
-            (StaticKnob::GuidedRadius, MaskProduced),
-            (StaticKnob::GuidedEpsilon, MaskProduced),
-            (StaticKnob::Feather, MaskProduced),
-            (StaticKnob::SubjectEffect, SubjectPresent),
-            (StaticKnob::BgEffect, TransparencyProduced),
-            (StaticKnob::LineStrength, Always),
-            (StaticKnob::EdgeThickness, Always),
-            (StaticKnob::EdgeScale, Always),
-            (StaticKnob::SolidLineColor, Always),
-            (StaticKnob::ComposeMode, Always),
-            (StaticKnob::LineStyle, Always),
-            (StaticKnob::BgColor, TransparencyProduced),
-            (StaticKnob::BgImageFit, TransparencyProduced),
-            (StaticKnob::Model, Always),
-            (StaticKnob::Decoration, MaskProduced),
-            (StaticKnob::DepthLook, Always),
-            (StaticKnob::LineFade, Always),
-        ];
-        assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
-        for &(knob, req) in expected {
-            assert_eq!(knob.requirement(), req, "{knob:?}");
         }
     }
 
@@ -617,39 +504,6 @@ mod tests {
             for surface in all {
                 assert_eq!(shows(model, surface), shown.contains(&surface), "{model:?} {surface:?}");
             }
-        }
-    }
-
-    #[test]
-    fn knob_enabled_matches_toolbar_boolean_formulas() {
-        use LineMode::*;
-        let cases: &[(bool, bool, LineMode)] = &[
-            // (uses_seg, model_is_none, line_mode)
-            (true,  false, Off),
-            (true,  false, SubjectOutline),
-            (true,  false, EdgesOnly),     // Full lines: no mask is made
-            (false, false, Off),           // inpaint model
-            (false, true,  Off),           // No-model + Off
-            (false, true,  SubjectOutline),
-            (false, true,  EdgesOnly),
-        ];
-        for &(uses_seg, is_none, line_mode) in cases {
-            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode };
-            let expected_mask = uses_seg && line_mode != EdgesOnly;
-            let expected_subject = line_mode != EdgesOnly;
-            let expected_bg = !(is_none && line_mode == Off);
-            assert_eq!(
-                knob_enabled(KnobRequirement::MaskProduced, ctx), expected_mask,
-                "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?}",
-            );
-            assert_eq!(
-                knob_enabled(KnobRequirement::SubjectPresent, ctx), expected_subject,
-                "SubjectPresent {line_mode:?}",
-            );
-            assert_eq!(
-                knob_enabled(KnobRequirement::TransparencyProduced, ctx), expected_bg,
-                "TransparencyProduced is_none={is_none} {line_mode:?}",
-            );
         }
     }
 
