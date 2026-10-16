@@ -109,8 +109,12 @@ impl PrunrApp {
                     item.backdrop_texture = None;
                     return;
                 }
-                let cutout = item.result_rgba.clone().filter(|_| effect.needs_depth());
-                Box::new(move || photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref())))
+                // A parked cut-out is unpacked on the build's thread.
+                let cutout = item.result_pixels().filter(|_| effect.needs_depth());
+                Box::new(move || {
+                    let cutout = cutout.and_then(|c| c.load());
+                    photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
+                })
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,
         };
