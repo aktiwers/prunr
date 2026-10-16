@@ -26,7 +26,7 @@ fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
         app.settings.model = model;
         let item = push_test_item(app, 1);
         item.dimensions = (64, 64);
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         let mut cells = vec![0i8; 64 * 64];
         cells[64 * 10 + 10] = prunr_core::selection::FULL;
         app.batch.select_item(0);
@@ -96,7 +96,7 @@ fn a_window_with_no_room_renders_with_a_brush_on() {
         app.settings.model = SettingsModel::BiRefNetLite;
         let item = push_test_item(app, 1);
         item.dimensions = (64, 64);
-        item.set_status_for_test(BatchStatus::Done);
+        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
         app.batch.select_item(0);
         app.brush_state.enable();
     }

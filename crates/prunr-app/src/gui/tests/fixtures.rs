@@ -32,7 +32,30 @@ pub(crate) fn cut_out(item: &mut BatchItem, model: prunr_core::ModelKind) {
     if item.result_rgba.is_none() {
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(w, h)));
     }
-    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     item.amend();
     item.record_origin(crate::gui::item::Engine::Segment, None, Some(crate::gui::item::Cutter::Model(model)));
+}
+
+/// Put `item` in `status` through the transitions the app makes: Done
+/// lands the run under way on the result it holds, or makes a cut-out
+/// (`cut_out`); Processing is a cut the worker has taken; Error a failed
+/// run; Pending ends any run, leaving what the image shows.
+pub(crate) fn put_in(item: &mut BatchItem, status: crate::gui::item::BatchStatus) {
+    use crate::gui::item::{BatchStatus, Cutter, Engine};
+    match status {
+        BatchStatus::Pending => item.abandon_job(),
+        BatchStatus::Processing => {
+            if !item.job.as_ref().is_some_and(|j| j.engine == Engine::Segment) {
+                item.start_cut(Some(crate::gui::timeline::StepKind::Process), Cutter::Model(prunr_core::ModelKind::Silueta));
+            }
+            item.mark_running();
+        }
+        BatchStatus::Done if item.has_result() => {
+            if item.job.is_some() {
+                item.finish_job();
+            }
+        }
+        BatchStatus::Done => cut_out(item, prunr_core::ModelKind::Silueta),
+        BatchStatus::Error(why) => item.fail(why),
+    }
 }
