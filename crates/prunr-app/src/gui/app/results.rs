@@ -972,6 +972,14 @@ impl PrunrApp {
                 Err(msg) => self.toasts.error(msg),
             };
         }
+        while let Ok(outcome) = self.batch.bg_io.removed_rx.try_recv() {
+            match outcome {
+                Ok(msg) => self.toasts.success(msg),
+                Err(msg) => self.toasts.error(msg),
+            };
+            self.refresh_install_cache();
+            landed = true;
+        }
 
         landed |= self.pump_thumbnail_results(ctx);
         self.batch.compress_history_off_thread();
