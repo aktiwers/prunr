@@ -50,6 +50,13 @@ fn open_answer_imports_the_picked_image() {
     let dir = tempfile::tempdir().unwrap();
     let picked = png_on_disk(dir.path(), "picked.png");
     answer(&mut app, Some(vec![picked]));
+    assert!(app.batch.items.is_empty(), "the file is read off the UI thread");
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    while app.batch.items.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        app.drain_background_channels(&ctx);
+    }
 
     assert_eq!(app.batch.items.len(), 1);
     assert_eq!(app.batch.items[0].filename, "picked.png");
@@ -203,6 +210,29 @@ fn a_second_request_while_one_is_open_is_ignored() {
     assert_eq!(app.batch.bg_io.bg_image_rx.recv_timeout(LANDS_WITHIN).expect("background load").item_id, 1);
     assert_eq!(app.batch.items.len(), 1, "the ignored Open imported nothing");
     assert!(app.batch.bg_io.file_load_rx.try_recv().is_err());
+}
+
+/// A dropped folder expands, and each image's header is read, off the UI
+/// thread; a file that is not an image says so instead of vanishing, and
+/// a folder without images says that.
+#[test]
+fn imports_are_read_off_the_ui_thread_and_say_what_failed() {
+    let mut app = PrunrApp::new_for_test();
+    let dir = tempfile::tempdir().unwrap();
+    png_on_disk(dir.path(), "one.png");
+    std::fs::write(dir.path().join("broken.png"), b"not a png").unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    crate::gui::app::import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![dir.path().to_path_buf()]);
+    crate::gui::app::import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![empty.path().to_path_buf()]);
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    let warned = |app: &PrunrApp| app.toasts.len_for_test() >= 2;
+    while !(app.batch.items.len() == 1 && warned(&app)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        app.drain_background_channels(&ctx);
+    }
+    assert_eq!(app.batch.items.len(), 1, "the image imports");
+    assert!(warned(&app), "the broken file and the empty folder each say so");
 }
 
 #[test]

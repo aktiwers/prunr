@@ -17,7 +17,7 @@ use super::views::selection_action_bar::SelectionAction;
 mod adjustments;
 mod dispatch;
 mod export;
-mod import;
+pub(crate) mod import;
 mod preview;
 mod results;
 mod textures;
@@ -464,8 +464,7 @@ impl PrunrApp {
         // Safety: we're still in `new`, before any worker thread spawns.
         unsafe { std::env::remove_var("PRUNR_OPEN_FILE"); }
         if let Some(path) = preload {
-            let name = import::display_name(&path, import::UNTITLED);
-            let _ = app.batch.bg_io.file_load_tx.send((path, name));
+            import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![path]);
         }
         // Test-harness escape hatch: PRUNR_OPEN_TAB pre-selects a Settings
         // tab and auto-opens the modal at startup. Lets the harness capture
