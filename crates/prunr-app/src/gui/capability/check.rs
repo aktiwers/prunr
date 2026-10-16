@@ -93,6 +93,8 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
             (None, Photo::Decoding) => Verdict::Wait(Reason::Decoding),
             (None, Photo::Unreadable) => Verdict::Never(Reason::Unreadable),
         },
+        // No model's photo is its own result: what cut-out controls act on.
+        Need::Cutout if role == ModelRole::Filters => Verdict::Ready,
         Need::Cutout => {
             if role != ModelRole::Cutout {
                 return Verdict::Never(Reason::NotForModel);
@@ -147,7 +149,7 @@ mod tests {
 
     #[test]
     fn the_cutout_is_there_only_under_a_cut_its_mask_made() {
-        let rows: [(&str, ItemFacts, ModelRole, Verdict); 9] = [
+        let rows: [(&str, ItemFacts, ModelRole, Verdict); 10] = [
             ("unprocessed photo", ItemFacts::photo(), Cutout, Verdict::Never(Reason::ProcessFirst)),
             ("cut with its mask", cut(true), Cutout, Verdict::Ready),
             ("cut, mask evicted", cut(false), Cutout, Verdict::Never(Reason::ProcessAgain)),
@@ -156,7 +158,8 @@ mod tests {
             ("upscale shown, old mask kept", ItemFacts { shown: Shown::Run(Engine::Upscale), cutout_mask: false, ..ItemFacts::photo() }, Cutout, Verdict::Never(Reason::ProcessFirst)),
             ("processing", ItemFacts { activity: Activity::Running(Engine::Segment), ..ItemFacts::photo() }, Cutout, Verdict::Wait(Reason::Processing)),
             ("waiting for a slot", ItemFacts { activity: Activity::Queued, ..cut(true) }, Cutout, Verdict::Wait(Reason::Queued)),
-            ("No model", cut(true), Filters, Verdict::Never(Reason::NotForModel)),
+            ("No model: the photo is the result", ItemFacts::photo(), Filters, Verdict::Ready),
+            ("an upscaler", cut(true), Upscale, Verdict::Never(Reason::NotForModel)),
         ];
         for (name, facts, role, want) in rows {
             assert_eq!(check(&facts, Need::Cutout, role), want, "{name}");
