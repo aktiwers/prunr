@@ -173,6 +173,8 @@ pub struct PreviewResult {
     pub(crate) new_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
     /// The image a quick frame shrank, for the drag's next frames.
     pub(crate) new_quick_photo: Option<QuickPhoto>,
+    /// The `DynamicImage` of the render's photo it built, for the item to keep.
+    pub(crate) new_original: Option<BuiltOriginal>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -541,6 +543,7 @@ impl LivePreview {
                     new_faced: output.built_faced.zip(faced_key),
                     new_depth_photo: output.built_depth_photo,
                     new_quick_photo: output.built_quick_photo,
+                    new_original: output.built_original,
                     applied_mask: mask_recipe,
                     applied_depth,
                     applied_tier2_knobs,
@@ -640,6 +643,10 @@ pub struct DispatchInputs {
     /// size, and the result is not kept for the next one.
     pub quick: bool,
     pub original: Arc<DynamicImage>,
+    /// Where `original` comes from when the item had no `DynamicImage`
+    /// of it yet: the render's thread makes it (a full copy, or an unpack
+    /// first) and hands it back, so the UI thread never does.
+    pub(crate) original_from: Option<OriginalFrom>,
     /// Where the preview starts when that is an earlier result (`None`: the
     /// source), recorded as the step's start on landing.
     pub(crate) start: Option<crate::gui::timeline::RunStart>,
@@ -702,6 +709,7 @@ impl DispatchInputs {
             version,
             quick: false,
             original,
+            original_from: None,
             start: None,
             settings,
             seg_tensor: None,
@@ -726,7 +734,8 @@ impl DispatchInputs {
     /// output has them.
     pub(crate) fn can_be_quick(&self) -> bool {
         let (w, h) = match self.kind {
-            PreviewKind::Mask | PreviewKind::Edge => (self.original.width(), self.original.height()),
+            PreviewKind::Mask | PreviewKind::Edge => self.original_from.as_ref()
+                .map_or((self.original.width(), self.original.height()), OriginalFrom::dims),
             PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
             PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
             PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
@@ -905,6 +914,45 @@ struct RunOutput {
     built_faced: Option<Arc<DynamicImage>>,
     built_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
     built_quick_photo: Option<QuickPhoto>,
+    built_original: Option<BuiltOriginal>,
+}
+
+/// The photo a render draws on, before it is a `DynamicImage`.
+#[derive(Clone)]
+pub(crate) enum OriginalFrom {
+    /// The run's start image, maybe stored compressed; with its size.
+    Start(crate::gui::timeline::StoredImage, (u32, u32)),
+    /// The decoded photo.
+    Photo(Arc<RgbaImage>),
+}
+
+impl OriginalFrom {
+    fn dims(&self) -> (u32, u32) {
+        match self {
+            Self::Start(_, dims) => *dims,
+            Self::Photo(rgba) => rgba.dimensions(),
+        }
+    }
+
+    /// The pixels and their `DynamicImage`; `None` if a stored start can
+    /// no longer be read.
+    fn wrap(&self) -> Option<BuiltOriginal> {
+        let (rgba, start) = match self {
+            Self::Start(stored, _) => (stored.load()?, true),
+            Self::Photo(rgba) => (Arc::clone(rgba), false),
+        };
+        let wrapped = Arc::new(DynamicImage::ImageRgba8((*rgba).clone()));
+        Some(BuiltOriginal { rgba, wrapped, start })
+    }
+}
+
+/// A `DynamicImage` a render made of its photo, and which photo it is.
+#[derive(Clone)]
+pub(crate) struct BuiltOriginal {
+    pub(crate) rgba: Arc<RgbaImage>,
+    pub(crate) wrapped: Arc<DynamicImage>,
+    /// Made from the run's start image, not the decoded photo.
+    pub(crate) start: bool,
 }
 
 /// Runs on a rayon worker thread.
@@ -956,8 +1004,16 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         return RunOutput { rgba: Some(Arc::new(run.render(strength))), ..RunOutput::default() };
     }
 
-    // Faces go into the photo before the mask, the effect and the lines.
     let mut inputs = inputs;
+    let built_original = match inputs.original_from.take() {
+        Some(from) => {
+            let Some(built) = from.wrap() else { return RunOutput::default() };
+            inputs.original = Arc::clone(&built.wrapped);
+            Some(built)
+        }
+        None => None,
+    };
+    // Faces go into the photo before the mask, the effect and the lines.
     let built_faced = match inputs.faces.take() {
         Some(FacesInput { faced: Some(faced), .. }) => {
             inputs.original = faced;
@@ -972,7 +1028,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     if inputs.kind == PreviewKind::Photo {
-        return RunOutput { rgba: Some(Arc::new(inputs.original.to_rgba8())), built_faced, ..RunOutput::default() };
+        return RunOutput { rgba: Some(Arc::new(inputs.original.to_rgba8())), built_faced, built_original, ..RunOutput::default() };
     }
     let full_width = inputs.original.width();
     // A looked photo kept from a full-size render is the one to shrink;
@@ -993,7 +1049,7 @@ fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     }
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let output = run_photo_preview(inputs);
-    RunOutput { built_faced, built_depth_photo, built_quick_photo, ..output }
+    RunOutput { built_faced, built_depth_photo, built_quick_photo, built_original, ..output }
 }
 
 /// The long side a drag's quick frames are made at. A larger image's
@@ -1327,7 +1383,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None,
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None,
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,

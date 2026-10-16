@@ -321,3 +321,23 @@ fn an_undone_cut_is_not_applied_again() {
     let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
     assert!(inputs.is_ok_and(|i| i.seg_tensor.is_none()), "No model renders the photo itself");
 }
+
+/// The render door never copies the photo on the UI thread: the first
+/// render carries where its photo is, the render's thread wraps it, and
+/// the item keeps the wrap for the next tick.
+#[test]
+fn the_render_door_hands_the_photo_over_unwrapped() {
+    use crate::gui::live_preview::{OriginalFrom, PreviewKind};
+    let mut app = app_in(State::Unprocessed, SettingsModel::None);
+    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+    let action = app.settings.brush.cutout_action;
+    let role = crate::gui::knob_catalog::ModelRole::Filters;
+    let first = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::Mask, role, style, action).expect("a render");
+    assert!(matches!(first.original_from, Some(OriginalFrom::Photo(_))), "the photo goes over as it is");
+    assert!(app.batch.items[0].source_dyn.is_none(), "nothing was copied here");
+    let rgba = app.batch.items[0].source_rgba.clone().unwrap();
+    let wrapped = Arc::new(image::DynamicImage::ImageRgba8((*rgba).clone()));
+    app.batch.items[0].keep_built_original(crate::gui::live_preview::BuiltOriginal { rgba, wrapped: Arc::clone(&wrapped), start: false });
+    let next = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::Mask, role, style, action).expect("a render");
+    assert!(next.original_from.is_none() && Arc::ptr_eq(&next.original, &wrapped), "the kept wrap is reused");
+}
