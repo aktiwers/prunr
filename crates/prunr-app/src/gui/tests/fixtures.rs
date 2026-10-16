@@ -26,7 +26,7 @@ pub(crate) fn push_test_item(app: &mut PrunrApp, id: u64) -> &mut BatchItem {
 /// kept, a result on the shown step, and the step recorded as that cut.
 /// Adds no undo step.
 pub(crate) fn cut_out(item: &mut BatchItem, model: prunr_core::ModelKind) {
-    let (w, h) = (8, 8);
+    let (w, h) = if item.dimensions.0 > 1 { item.dimensions } else { (8, 8) };
     let raw = crate::gui::worker::RawSegTensor { data: vec![0.5; (w * h) as usize], height: h, width: w, model };
     item.set_cached_tensor(crate::gui::worker::CompressedTensor::from_raw(raw));
     if item.result_rgba.is_none() {

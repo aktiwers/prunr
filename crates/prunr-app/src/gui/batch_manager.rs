@@ -597,7 +597,7 @@ impl BatchManager {
     /// The items a drag from row `idx` carries: every ticked one when that
     /// row is ticked, else that row; never one still processing.
     pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
-        let free = |b: &&BatchItem| b.status() != BatchStatus::Processing;
+        let free = |b: &&BatchItem| !b.is_running();
         match self.items.get(idx) {
             Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).filter(free).map(|b| b.id).collect(),
             Some(row) => std::iter::once(row).filter(free).map(|b| b.id).collect(),
