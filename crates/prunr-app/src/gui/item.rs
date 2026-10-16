@@ -2294,8 +2294,8 @@ impl BatchItem {
     pub(crate) fn apply_tier_result(
         &mut self,
         result: Result<prunr_core::ProcessResult, String>,
-        raw_seg: Option<super::worker::RawSegTensor>,
-        raw_edges: Option<super::worker::RawEdgeTensors>,
+        seg: Option<super::worker::CompressedTensor>,
+        edges: Option<super::worker::CompressedEdgeTensors>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
     ) -> Option<String> {
         match result {
@@ -2309,10 +2309,10 @@ impl BatchItem {
                 // the seg side). Clobbering it here silently killed live
                 // preview after any tier-2 result — the next gamma tweak had
                 // nothing to postprocess from.
-                if let Some(new) = raw_seg.and_then(super::worker::CompressedTensor::from_raw) {
+                if let Some(new) = seg {
                     self.set_cached_tensor(Some(new));
                 }
-                if let Some(new) = raw_edges.and_then(super::worker::CompressedEdgeTensors::from_raw) {
+                if let Some(new) = edges {
                     self.invalidate_edge_cache();
                     self.cached_edge_tensors = Some(new);
                 }

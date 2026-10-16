@@ -426,11 +426,12 @@ pub enum WorkerResult {
         batch: u64,
         item_id: u64,
         result: Result<ProcessResult, String>,
-        /// Cached segmentation tensor from Tier 1 (for future mask-tier reruns).
-        raw_seg: Option<RawSegTensor>,
+        /// Cached segmentation tensor from Tier 1 (for future mask-tier
+        /// reruns), compressed on the bridge thread.
+        seg: Option<CompressedTensor>,
         /// Multi-scale TEED output — every scale, cached so a switch needs no run.
         /// Only populated when the run used edge detection.
-        raw_edges: Option<RawEdgeTensors>,
+        edges: Option<CompressedEdgeTensors>,
     },
     /// The line scales a run left for after its result, under the token
     /// its `BatchItemDone`'s edge cache named.
@@ -615,8 +616,8 @@ impl BatchRunState {
             batch: self.batch,
             item_id,
             result: Err(error),
-            raw_seg: None,
-            raw_edges: None,
+            seg: None,
+            edges: None,
         }
     }
 
@@ -985,11 +986,11 @@ fn handle_subprocess_event(
             edge_cache: edge_cache_file, spare_scales,
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
-            let raw_seg = read_raw_seg_tensor(
+            let seg = read_raw_seg_tensor(
                 tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.engines.model,
-            );
-            let raw_edges = read_raw_edge_tensors(edge_cache_file.as_ref())
-                .map(|raw| RawEdgeTensors { spare: spare_scales, ..raw });
+            ).and_then(CompressedTensor::from_raw);
+            let edges = read_raw_edge_tensors(edge_cache_file.as_ref())
+                .and_then(|raw| CompressedEdgeTensors::from_raw(RawEdgeTensors { spare: spare_scales, ..raw }));
 
             state.completed.insert(item_id);
             sent.forget(item_id);
@@ -999,7 +1000,7 @@ fn handle_subprocess_event(
 
             let _ = res_tx.send(WorkerResult::BatchItemDone {
                 batch: state.batch,
-                item_id, result, raw_seg, raw_edges,
+                item_id, result, seg, edges,
             });
             ctx.request_repaint();
 
