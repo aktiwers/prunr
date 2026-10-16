@@ -249,7 +249,9 @@ pub(crate) fn render(
         let left = ui.min_rect().width();
         // Right-aligned cluster. Right-to-left layout fills from the right
         // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
-        let right_rect = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Never compact: its width must not depend on the mode it decides,
+        // or the row flips between the two every frame.
+        let right_rect = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| chip::compact_chips(ui, false, |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
@@ -298,7 +300,7 @@ pub(crate) fn render(
                     change.toggle_magic = true;
                 }
             });
-        }).response.rect;
+        })).response.rect;
         let fit = (if compact { full_left } else { left }, right_rect.width());
         if (fit.0 - full_left).abs() > 0.5 || (fit.1 - right).abs() > 0.5 {
             ui.data_mut(|d| d.insert_temp(fit_id, fit));
