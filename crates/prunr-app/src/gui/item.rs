@@ -1117,12 +1117,12 @@ impl BatchItem {
     }
 
     pub(crate) fn is_running(&self) -> bool {
-        self.status() == BatchStatus::Processing || self.job.as_ref().is_some_and(|job| job.engine != Engine::Segment)
+        self.job.as_ref().is_some_and(|job| job.running)
     }
 
     /// True while a run, a decode, a texture or a thumbnail is still to land.
     pub(crate) fn is_busy(&self) -> bool {
-        self.status() == BatchStatus::Processing || self.job.is_some() || self.has_pending_work()
+        self.job.is_some() || self.has_pending_work()
     }
 
     /// True while a background thread owes this item a decode, a texture
@@ -2204,7 +2204,7 @@ impl BatchItem {
     /// on screen. After undoing back to the original the tensor stays
     /// cached, and a re-cut there would bring the undone result back.
     pub(crate) fn shows_cutout(&self) -> bool {
-        self.status() == BatchStatus::Done && self.cached_tensor.is_some()
+        super::capability::ItemFacts::of(self).cutout_mask
     }
 
     /// The cached segmentation is what made the shown step: after an undo

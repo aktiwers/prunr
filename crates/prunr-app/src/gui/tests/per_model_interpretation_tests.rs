@@ -97,15 +97,13 @@ fn app_with_model(model: SettingsModel) -> PrunrApp {
 /// before it: recording it copies no image.
 #[test]
 fn a_stroke_is_one_step_sharing_the_result_before_it() {
-    use crate::gui::item::BatchStatus;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 7);
     item.dimensions = (8, 8);
-    item.set_status_for_test(BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Process);
-    give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 
     app.commit_selection_and_dispatch(7, make_mask(8, 8), StepKind::Stroke);
 
@@ -354,11 +352,10 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
-    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     item.source_rgba = Some(Arc::new(px(0)));
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
-    give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 
     app.commit_selection_and_dispatch(9, make_mask(8, 8), StepKind::Stroke);
     app.batch.items[0].result_rgba = Some(Arc::new(px(2))); // the stroke's re-cut

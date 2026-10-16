@@ -38,6 +38,12 @@ impl Verdict {
         self == Verdict::Ready
     }
 
+    /// Work may be asked for: ready now, or once it waits out its reason
+    /// (the queue keeps a request that waits).
+    pub(crate) fn allows_request(self) -> bool {
+        !matches!(self, Verdict::Never(_))
+    }
+
     /// Why it cannot act now, if it cannot.
     pub(crate) fn reason(self) -> Option<Reason> {
         match self {
