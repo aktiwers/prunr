@@ -40,7 +40,8 @@ fn px(v: u8) -> image::RgbaImage {
 fn preview_inputs(app: &mut PrunrApp, id: u64, filter_only: bool) -> Option<DispatchInputs> {
     let style = app.selection_style();
     let action = app.settings.brush.cutout_action;
-    PrunrApp::build_preview_inputs(&mut app.batch.items, id, PreviewKind::Mask, filter_only, style, action)
+    let role = if filter_only { crate::gui::knob_catalog::ModelRole::Filters } else { crate::gui::knob_catalog::ModelRole::Cutout };
+    PrunrApp::build_preview_inputs(&mut app.batch.items, id, PreviewKind::Mask, role, style, action).ok()
 }
 
 /// A second stroke on the first item: its bottom-right cell joins the
@@ -53,8 +54,7 @@ fn add_corner_stroke(app: &mut PrunrApp) {
 
 /// A processed item: the cut-out is on screen and its tensor is cached.
 fn give_cutout(item: &mut BatchItem) {
-    give_tensor(item);
-    item.status = crate::gui::item::BatchStatus::Done;
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 }
 
 /// The live preview decompresses the segmentation tensor once per drag:
@@ -420,10 +420,10 @@ fn a_recut_for_a_state_left_behind_never_lands() {
     let item = push_test_item(&mut app, 8);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.status = crate::gui::item::BatchStatus::Done;
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
     give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
     let inputs = preview_inputs(&mut app, 8, false).expect("the stroke's re-cut starts");
 
