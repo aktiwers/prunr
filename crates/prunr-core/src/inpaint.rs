@@ -546,14 +546,15 @@ impl LamaSession {
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the seconds-long build.
-        let slot: LamaSlot = {
+        let (slot, idle): (LamaSlot, _) = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            crate::inpaint_sd::sweep_and_log(&mut guard, now, "LaMa: released idle session(s)");
+            let idle = crate::inpaint_sd::sweep_and_log(&mut guard, now, "LaMa: released idle session(s)");
             let entry = guard.entry((id, cpu_only))
                 .or_insert_with(|| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::new()), now));
             entry.touch(now);
-            entry.value.clone()
+            (entry.value.clone(), idle)
         };
+        drop(idle);
 
         // Build outside the cache lock. Concurrent callers block on
         // the OnceLock and receive the same Result — no duplicate

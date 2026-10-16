@@ -344,10 +344,11 @@ pub fn process_inpaint_with(
     use crate::progress::Step;
     // The other quality's bundle goes before the RAM gate counts it: it
     // would be dropped on load anyway, and kept-loaded it filled RAM.
-    drop_other_bundles(
+    let others = take_other_bundles(
         &mut sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner),
         &(id, req.tuning.session_key()),
     );
+    drop(others);
     check_ram_for(id, &mut req.tuning).map_err(CoreError::Inference)?;
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
@@ -1342,57 +1343,79 @@ pub(crate) fn release_all() -> SdCache {
     std::mem::take(&mut *sd_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
-/// Drop entries whose `last_used` is older than `idle` relative to `now`,
-/// returning the count dropped. Generic over `T` so tests can drive the
-/// sweep without spinning up a real ORT session.
-fn sweep_idle<K: std::hash::Hash + Eq, T>(
+/// The entries `gone` picks, taken out of `cache`. They free where the
+/// result drops: after the caller lets go of the cache's lock, so freeing
+/// a session (hundreds of ms) holds no other caller up.
+fn take_where<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, CacheEntry<T>>,
+    mut gone: impl FnMut(&K, &CacheEntry<T>) -> bool,
+) -> Vec<CacheEntry<T>> {
+    let mut out = Vec::new();
+    for (k, e) in std::mem::take(cache) {
+        if gone(&k, &e) {
+            out.push(e);
+        } else {
+            cache.insert(k, e);
+        }
+    }
+    out
+}
+
+/// Entries whose `last_used` is older than `idle` relative to `now`,
+/// taken out. Generic over `T` so tests can drive the sweep without
+/// spinning up a real ORT session.
+fn take_idle<K: std::hash::Hash + Eq, T>(
     cache: &mut HashMap<K, CacheEntry<T>>,
     now: Instant,
     idle: Duration,
-) -> usize {
-    let before = cache.len();
-    cache.retain(|_, e| e.pinned || now.duration_since(e.last_used) < idle);
-    before - cache.len()
+) -> Vec<CacheEntry<T>> {
+    take_where(cache, |_, e| !e.pinned && now.duration_since(e.last_used) >= idle)
 }
 
-/// Release every cached bundle but `keep`'s, pinned or not.
-fn drop_other_bundles<K: std::hash::Hash + Eq, T>(cache: &mut HashMap<K, CacheEntry<T>>, keep: &K) {
-    cache.retain(|k, _| k == keep);
+#[cfg(test)]
+fn sweep_idle<K: std::hash::Hash + Eq, T>(cache: &mut HashMap<K, CacheEntry<T>>, now: Instant, idle: Duration) -> usize {
+    take_idle(cache, now, idle).len()
 }
 
-/// The cache entry for `key`, made with `make` when missing, after
-/// dropping every other entry: one SD bundle is resident at a time, so
-/// "keep loaded" holds the eraser in use, not each one used before.
-/// A dropped bundle a run still holds lives until that run ends.
+/// Every cached bundle but `keep`'s, pinned or not, taken out.
+fn take_other_bundles<K: std::hash::Hash + Eq, T>(cache: &mut HashMap<K, CacheEntry<T>>, keep: &K) -> Vec<CacheEntry<T>> {
+    take_where(cache, |k, _| k != keep)
+}
+
+/// The cache entry for `key`, made with `make` when missing, and every
+/// other entry taken out: one SD bundle is resident at a time, so "keep
+/// loaded" holds the eraser in use, not each one used before. A bundle
+/// taken out that a run still holds lives until that run ends.
 fn admit<K: std::hash::Hash + Eq, T>(
     cache: &mut HashMap<K, CacheEntry<T>>,
     key: K,
     make: impl FnOnce() -> T,
     now: Instant,
     pin: bool,
-) -> &mut CacheEntry<T> {
-    drop_other_bundles(cache, &key);
+) -> (&mut CacheEntry<T>, Vec<CacheEntry<T>>) {
+    let others = take_other_bundles(cache, &key);
     let entry = cache.entry(key).or_insert_with(|| CacheEntry::new(make(), now));
     entry.pinned = pin;
-    entry
+    (entry, others)
 }
 
-/// `sweep_idle` against `crate::IDLE_RELEASE`, logging `what` when it
-/// dropped anything.
+/// The entries idle past `crate::IDLE_RELEASE`, taken out, logging
+/// `what` when there are any. Drop the result after the lock.
+#[must_use = "the idle sessions free where this drops: drop it after the cache's lock"]
 pub(crate) fn sweep_and_log<K: std::hash::Hash + Eq, T>(
     cache: &mut HashMap<K, CacheEntry<T>>,
     now: Instant,
     what: &'static str,
-) {
-    let dropped = sweep_idle(cache, now, crate::IDLE_RELEASE);
-    if dropped > 0 {
+) -> Vec<CacheEntry<T>> {
+    let idle = take_idle(cache, now, crate::IDLE_RELEASE);
+    if !idle.is_empty() {
         tracing::info!(
-            dropped,
+            dropped = idle.len(),
             idle_secs = crate::IDLE_RELEASE.as_secs(),
-            rss_mb = process_rss_mb(),
             "{what}",
         );
     }
+    idle
 }
 
 impl<V, E> CacheEntry<Arc<OnceLock<Result<V, E>>>> {
@@ -1429,8 +1452,8 @@ pub(crate) fn spawn_idle_sweeper<K, T>(
         .name(thread.to_string())
         .spawn(move || loop {
             std::thread::sleep(SWEEP_INTERVAL);
-            let mut guard = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            sweep_and_log(&mut guard, Instant::now(), what);
+            let idle = sweep_and_log(&mut cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner), Instant::now(), what);
+            drop(idle);
         })
         .unwrap_or_else(|e| panic!("spawn {thread} thread: {e}"));
 }
@@ -1450,13 +1473,14 @@ impl SdSession {
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the bundle build.
-        let slot: SdBundleSlot = {
+        let (slot, released): (SdBundleSlot, _) = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            sweep_and_log(&mut guard, now, "SD: released idle session bundle(s)");
-            let entry = admit(&mut guard, (id, key.clone()), || Arc::new(std::sync::OnceLock::new()), now, pin);
+            let idle = sweep_and_log(&mut guard, now, "SD: released idle session bundle(s)");
+            let (entry, others) = admit(&mut guard, (id, key.clone()), || Arc::new(std::sync::OnceLock::new()), now, pin);
             entry.touch(now);
-            entry.value.clone()
+            (entry.value.clone(), (idle, others))
         };
+        drop(released);
 
         // Build outside the cache lock — see `SdBundleSlot` docs.
         slot.get_or_init(|| Self::new_inner(id, key).map(Arc::new))
@@ -3798,7 +3822,8 @@ mod tests {
         let now = Instant::now();
         let mut cache: HashMap<&str, CacheEntry<u8>> = HashMap::new();
         admit(&mut cache, "fast", || 1, now, true);
-        admit(&mut cache, "quality", || 2, now, true);
+        let (_, others) = admit(&mut cache, "quality", || 2, now, true);
+        assert_eq!(others.iter().map(|e| e.value).collect::<Vec<_>>(), vec![1], "taken out, to free after the lock");
         assert_eq!(cache.keys().copied().collect::<Vec<_>>(), vec!["quality"]);
         assert!(cache["quality"].pinned);
         admit(&mut cache, "quality", || 9, now, false);
