@@ -694,6 +694,7 @@ impl PrunrApp {
         if succeeded {
             item.hold_for_reveal();
         }
+        let failure = result.as_ref().err().cloned();
         let backend_update = item.apply_tier_result(result, seg, edges, recipe_snapshot);
         if succeeded {
             item.finish_job();
@@ -701,6 +702,15 @@ impl PrunrApp {
             item.reveal = None;
             item.subject = None;
         }
+        // A re-run that failed on an image still showing a result leaves it
+        // Done; the user hears it failed rather than nothing.
+        if let Some(err) = failure.filter(|_| item.has_result()) {
+            let name = item.filename.clone();
+            tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
+            self.toasts.warning(format!("{name} could not be processed again ({err}). It shows its last result."));
+            self.processor.note_failed_rerun();
+        }
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         // Single completion event — useful for `RUST_LOG=prunr=debug` bug
         // reports (when did inference actually finish?) and as a stable
         // signal for any external observer (e.g. a smoke driver) that a
@@ -799,7 +809,11 @@ impl PrunrApp {
         }
         let counts = self.batch.status_counts();
         let still_processing = self.batch.any_awaiting_cut();
-        if counts.errored > 0 {
+        let failed_reruns = self.processor.take_failed_reruns();
+        if failed_reruns > 0 && counts.errored == 0 {
+            // Each one was toasted as it failed.
+            self.status.text = format!("{} could not be processed again", crate::gui::views::fmt::count(failed_reruns as usize, "image", "images"));
+        } else if counts.errored > 0 {
             let first_err = self.batch.first_error_message().unwrap_or("unknown error");
             let msg = if counts.errored == 1 {
                 format!("Image failed: {first_err}")
@@ -1899,6 +1913,28 @@ mod timeline_contract_tests {
             let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
             assert_eq!(shown, Some(true), "{what}: and the result it had");
         }
+    }
+
+    /// A re-run that fails on an image still showing a result says so,
+    /// leaves the image Done with what it showed, and the batch's end does
+    /// not read as all done.
+    #[test]
+    fn a_failed_rerun_on_a_shown_result_says_so() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        let item = &mut app.batch.items[0];
+        item.start_job(None, Engine::Segment);
+        item.mark_running();
+        app.answer_for_test(&ctx, 1, Err("Failed to load: gone".into()));
+        let item = &app.batch.items[0];
+        assert_eq!(item.status(), BatchStatus::Done, "it still shows its result");
+        assert!(item.job.is_none());
+        assert!(app.toasts.last_for_test().is_some_and(|(kind, text)| kind == "warning" && text.contains("could not be processed again")));
+        let toasts = app.toasts.len_for_test();
+        app.on_batch_complete(u64::MAX);
+        assert_eq!(app.toasts.len_for_test(), toasts, "no \"All done\" after it");
+        assert!(app.status.text.contains("could not be processed again"), "{}", app.status.text);
     }
 
     /// An answer for an image that stopped waiting (undone, cancelled)
