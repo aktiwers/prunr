@@ -126,6 +126,11 @@ impl AdmissionController {
     }
 
     /// True when all items have been admitted and released.
+    /// The images still waiting for room, not admitted.
+    pub(crate) fn pending_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter().map(|c| c.item_id)
+    }
+
     pub fn is_complete(&self) -> bool {
         self.pending.is_empty() && self.admitted.is_empty()
     }

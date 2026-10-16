@@ -794,7 +794,10 @@ impl BatchManager {
 
     /// The work for full runs on the images in `ids`, in batch order.
     pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
-        self.in_set(ids).map(BatchItem::full_run_work).collect()
+        self.in_set(ids).map(|item| {
+            item.mark_running();
+            item.full_run_work()
+        }).collect()
     }
 
 }
