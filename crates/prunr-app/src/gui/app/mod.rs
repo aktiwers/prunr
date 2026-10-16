@@ -669,10 +669,10 @@ impl PrunrApp {
 
     /// Why a Process run can't start on `item`, if it can't.
     pub(crate) fn run_refusal(&self, item: &BatchItem) -> Option<crate::gui::capability::Reason> {
-        use crate::gui::capability::{Need, Reason, Verdict};
+        use crate::gui::capability::{Need, Verdict};
         let role = self.settings.model.role();
-        if !item.is_idle() {
-            return Some(Reason::Running);
+        if let Some(why) = item.verdict(Need::Idle, role).reason() {
+            return Some(why);
         }
         if let Verdict::Never(why) = item.verdict(Need::ShownImage, role) {
             return Some(why);
@@ -760,15 +760,12 @@ impl PrunrApp {
 
     /// Stop whatever run `item_id` is waiting on, so its result cannot land.
     fn cancel_runs_on(&mut self, item_id: u64) {
-        let Some(item) = self.batch.find_by_id(item_id) else { return };
-        if item.job.is_none() {
-            return;
-        }
-        match item.job.as_ref().map(|j| j.engine) {
-            Some(Engine::Erase) => self.cancel_inpaint_for(item_id),
-            Some(Engine::Upscale) => self.processor.cancel_upscale(),
-            Some(Engine::Colorize) => self.processor.cancel_colorize(),
-            Some(Engine::Segment) | None => self.processor.cancels.request_item_cancel(item_id),
+        let Some(engine) = self.batch.find_by_id(item_id).and_then(|i| i.job.as_ref()).map(|j| j.engine) else { return };
+        match engine {
+            Engine::Erase => self.cancel_inpaint_for(item_id),
+            Engine::Upscale => self.processor.cancel_upscale(),
+            Engine::Colorize => self.processor.cancel_colorize(),
+            Engine::Segment => self.processor.cancels.request_item_cancel(item_id),
         }
     }
 
@@ -787,12 +784,11 @@ impl PrunrApp {
 
     /// Why "Try another" can't run now, if it can't: the strip's tooltip.
     pub(crate) fn reroll_refusal(&self) -> Option<&'static str> {
-        use crate::gui::capability::Reason;
         let item = self.batch.selected_item()?;
         if item.reroll().is_none() {
             Some("Erase something first; this generates that fill again.")
-        } else if !item.is_idle() {
-            Some(Reason::Running.text())
+        } else if let Some(why) = item.verdict(crate::gui::capability::Need::Idle, self.settings.model.role()).reason() {
+            Some(why.text())
         } else if self.processor.any_inpaint_in_flight() {
             Some("Wait for the erase to finish, or cancel it.")
         } else {
