@@ -1027,12 +1027,12 @@ impl PrunrApp {
         let mut channel_drained = false;
         for _ in 0..FILE_LOAD_DRAIN_PER_FRAME {
             match self.batch.bg_io.file_load_rx.try_recv() {
-                Ok(crate::gui::background_io::FileLoad::Image { path, name, len, dims: Some(dims) }) => {
-                    self.add_to_batch_path(path, name, len, dims);
+                Ok(crate::gui::background_io::FileLoad::Image { source, name, len, dims: Some(dims) }) => {
+                    self.add_imported(source, name, len, dims);
                     loaded_count += 1;
                 }
-                Ok(crate::gui::background_io::FileLoad::Image { path, dims: None, .. }) => {
-                    tracing::warn!(?path, "import skipped: the image's header could not be read");
+                Ok(crate::gui::background_io::FileLoad::Image { name, dims: None, .. }) => {
+                    tracing::warn!(name, "import skipped: the image's header could not be read");
                     unreadable += 1;
                 }
                 Ok(crate::gui::background_io::FileLoad::NoImagesInFolder) => {
