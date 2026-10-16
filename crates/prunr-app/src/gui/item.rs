@@ -1063,7 +1063,7 @@ impl BatchItem {
         if self.job.as_ref().is_some_and(|j| j.running && j.engine == Engine::Segment) {
             return BatchStatus::Processing;
         }
-        if self.result_rgba.is_some() || self.timeline.current().result.is_some() {
+        if self.has_result() {
             return BatchStatus::Done;
         }
         match &self.failure {
@@ -2195,9 +2195,9 @@ impl BatchItem {
         }
     }
 
-    /// True when the item carries a prior processing result.
+    /// The shown step has a result, on screen or parked in the timeline.
     pub(crate) fn has_result(&self) -> bool {
-        self.result_rgba.is_some()
+        self.result_rgba.is_some() || self.timeline.current().result.is_some()
     }
 
     /// A stroke re-cuts this item from its tensor only while a cut-out is

@@ -630,7 +630,10 @@ impl PrunrApp {
             return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
         }
         if self.settings.model.is_inpaint() {
-            can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(BatchItem::has_painted_region))
+            use crate::gui::capability::{check, ItemFacts, Need};
+            let role = self.settings.model.role();
+            let painted = |it: &BatchItem| check(&ItemFacts::of(it), Need::PaintedRegion, role).is_ready();
+            can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(painted))
         } else {
             // A batch still admitting images into its RAM budget takes the
             // next Process once every one of them is on its way; the worker
