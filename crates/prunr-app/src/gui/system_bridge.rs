@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use prunr_core::ExportFormat;
 
@@ -49,11 +49,34 @@ struct Dialog {
     reply: Option<mpsc::Receiver<Reply>>,
 }
 
+/// What a copy was, so its outcome says the right thing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CopyNote {
+    /// The whole image; `hint` replaces the success message (one of
+    /// several ticked images was copied).
+    Image { hint: Option<String> },
+    Selection,
+    SelectionCut,
+}
+
+/// Where copies go. The platform clipboard lives on its own thread:
+/// handing it an image encodes the whole image (a PNG on Linux), which
+/// must not stall a frame, and on Linux the content lasts only while the
+/// clipboard handle does.
+enum Clipboard {
+    Worker(mpsc::Sender<(Arc<image::RgbaImage>, CopyNote)>),
+    /// A test's: every copy is taken.
+    #[cfg(test)]
+    Accepting,
+    /// A test's: no platform clipboard.
+    #[cfg(test)]
+    Absent,
+}
+
 pub struct SystemBridge {
-    /// `None` on Wayland-without-data-control or headless test envs —
-    /// `copy_image` no-ops gracefully and the caller falls back to a
-    /// "save instead" toast.
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Clipboard,
+    copied_tx: mpsc::Sender<(CopyNote, bool)>,
+    copied_rx: mpsc::Receiver<(CopyNote, bool)>,
     /// The one file dialog asked for or up.
     dialog: Option<Dialog>,
     show: ShowDialog,
@@ -67,7 +90,32 @@ impl Default for SystemBridge {
 
 impl SystemBridge {
     pub fn new() -> Self {
-        Self { clipboard: arboard::Clipboard::new().ok(), dialog: None, show: show_native }
+        let (copied_tx, copied_rx) = mpsc::channel();
+        let (jobs_tx, jobs_rx) = mpsc::channel::<(Arc<image::RgbaImage>, CopyNote)>();
+        let replies = copied_tx.clone();
+        let spawned = std::thread::Builder::new().name("prunr-clipboard".into()).spawn(move || {
+            // `None` on Wayland without data-control or a headless session:
+            // every copy then says so, and the caller suggests saving.
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|err| tracing::warn!(%err, "no system clipboard"))
+                .ok();
+            for (rgba, note) in jobs_rx {
+                let took = clipboard.as_mut().is_some_and(|clipboard| {
+                    let samples = rgba.as_flat_samples();
+                    let image = arboard::ImageData {
+                        width: rgba.width() as usize,
+                        height: rgba.height() as usize,
+                        bytes: std::borrow::Cow::Borrowed(samples.as_slice()),
+                    };
+                    clipboard.set_image(image).is_ok()
+                });
+                let _ = replies.send((note, took));
+            }
+        });
+        if let Err(err) = &spawned {
+            tracing::warn!(%err, "clipboard thread did not start");
+        }
+        Self { clipboard: Clipboard::Worker(jobs_tx), copied_tx, copied_rx, dialog: None, show: show_native }
     }
 
     /// Ask for a file dialog starting in `start_dir`; `false` when it is
@@ -113,31 +161,42 @@ impl SystemBridge {
         Some(DialogAnswer { request, paths })
     }
 
-    /// Copy raw RGBA pixels to the system clipboard. Returns whether the
-    /// clipboard was available — `false` means no platform clipboard
-    /// (callers fall back to a "save instead" suggestion).
-    pub fn copy_image(&mut self, rgba: &image::RgbaImage) -> bool {
-        let Some(clipboard) = self.clipboard.as_mut() else { return false };
-        let samples = rgba.as_flat_samples();
-        let image_data = arboard::ImageData {
-            width: rgba.width() as usize,
-            height: rgba.height() as usize,
-            bytes: std::borrow::Cow::Borrowed(samples.as_slice()),
-        };
-        clipboard.set_image(image_data).is_ok()
+    /// Put `rgba` on the system clipboard, off the UI thread; how it went
+    /// comes back from `take_copy_outcomes`.
+    pub(crate) fn copy_image(&mut self, rgba: Arc<image::RgbaImage>, note: CopyNote) {
+        match &self.clipboard {
+            Clipboard::Worker(jobs) => {
+                if let Err(mpsc::SendError((_, note))) = jobs.send((rgba, note)) {
+                    let _ = self.copied_tx.send((note, false));
+                }
+            }
+            #[cfg(test)]
+            Clipboard::Accepting => { let _ = self.copied_tx.send((note, true)); }
+            #[cfg(test)]
+            Clipboard::Absent => { let _ = self.copied_tx.send((note, false)); }
+        }
+    }
+
+    /// The copies that finished since the last call, and whether the
+    /// clipboard took each.
+    pub(crate) fn take_copy_outcomes(&mut self) -> Vec<(CopyNote, bool)> {
+        self.copied_rx.try_iter().collect()
     }
 }
 
 #[cfg(test)]
 impl SystemBridge {
     /// No native dialog ever shows: a test answers with `answer_for_test`.
+    /// The system clipboard is never touched: copies fail as with none,
+    /// unless a test makes the clipboard accept them.
     pub(crate) fn new_for_test() -> Self {
-        Self { show: |_, _, _, _| None, ..Self::new() }
+        let (copied_tx, copied_rx) = mpsc::channel();
+        Self { clipboard: Clipboard::Absent, copied_tx, copied_rx, dialog: None, show: |_, _, _, _| None }
     }
 
-    /// As on a machine with no platform clipboard.
-    pub(crate) fn drop_clipboard_for_test(&mut self) {
-        self.clipboard = None;
+    /// Copies succeed, as with a platform clipboard.
+    pub(crate) fn accept_copies_for_test(&mut self) {
+        self.clipboard = Clipboard::Accepting;
     }
 
     /// The dialog asked for, and the folder it starts in.

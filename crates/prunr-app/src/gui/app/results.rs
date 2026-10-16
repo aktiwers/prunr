@@ -903,7 +903,13 @@ impl PrunrApp {
         }
 
         while let Ok((rgba, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
-            self.finish_copy(&rgba, hint);
+            self.system.copy_image(rgba, crate::gui::system_bridge::CopyNote::Image { hint });
+        }
+        while let Ok(done) = self.batch.bg_io.selection_edit_rx.try_recv() {
+            self.land_selection_edit(done, ctx);
+        }
+        for (note, took) in self.system.take_copy_outcomes() {
+            self.on_copy_done(note, took);
         }
         // Drain save completion notifications
         while let Ok(outcome) = self.batch.bg_io.save_done_rx.try_recv() {
