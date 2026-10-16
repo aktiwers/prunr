@@ -182,6 +182,7 @@ pub(crate) struct GateContext {
     pub model: SettingsModel,
     pub line_mode: LineMode,
     pub facts: crate::gui::capability::ItemFacts,
+    /// A run is under way anywhere in the app, not only on this image.
     pub processing: bool,
 }
 
@@ -197,7 +198,11 @@ pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static
         line_mode: g.line_mode,
     };
     let unless = |req: KnobRequirement, why: &'static str| (!knob_enabled(req, ctx)).then_some(why);
-    let needs = |need: Need| check(&g.facts, need, g.model.role()).reason().map(crate::gui::capability::Reason::text);
+    let role = g.model.role();
+    let needs = |need: Need| check(&g.facts, need, role).reason().map(crate::gui::capability::Reason::text);
+    // A knob an upscale reads changed mid-run makes the landing result
+    // stale and drops it.
+    let upscale_lock = (g.processing && role == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.");
     match surface {
         Surface::Mask => unless(KnobRequirement::MaskProduced, "Sketch is on Whole photo, so nothing is cut out.")
             .or_else(|| needs(Need::Cutout)),
@@ -207,11 +212,11 @@ pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static
             .or_else(|| needs(Need::Cutout)),
         Surface::Background => unless(KnobRequirement::TransparencyProduced, "Nothing is transparent in this mode, so there is no background to fill.")
             .or_else(|| needs(Need::Cutout)),
-        // A knob an upscale reads changed mid-run makes the landing result
-        // stale and drops it.
-        Surface::Upscale => (g.processing && g.model.role() == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it."),
-        Surface::Faces => (g.processing && g.model.role() == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.")
-            .or_else(|| (g.model.role() != ModelRole::Upscale).then(|| needs(Need::ShownImage)).flatten()),
+        Surface::Upscale => upscale_lock,
+        // On an upscaler Faces is a setting of the run; elsewhere it works
+        // on the image shown.
+        Surface::Faces if role == ModelRole::Upscale => upscale_lock,
+        Surface::Faces => needs(Need::ShownImage),
         Surface::Colorize => g.processing.then_some("Wait for Colorize to finish, or cancel it."),
         Surface::Lines => needs(Need::Processed),
         Surface::SdChips

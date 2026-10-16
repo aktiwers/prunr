@@ -203,9 +203,8 @@ impl PrunrApp {
                 }
             }
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
-                use crate::gui::capability::{check, ItemFacts, Need};
-                let facts = ItemFacts::of(&self.batch.items[idx]);
-                if check(&facts, Need::Processed, self.settings.model.role()).allows_request() {
+                let role = self.settings.model.role();
+                if self.batch.items[idx].verdict(crate::gui::capability::Need::Processed, role).allows_request() {
                     self.process_items(|item| item.id == item_id, None);
                 }
             }
