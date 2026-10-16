@@ -49,9 +49,7 @@ const WHICH: [chip::Choice<bool>; 2] = [
     chip::Choice { value: true, name: "Largest", description: "Only the biggest face: a portrait with people behind", enabled: true },
 ];
 
-/// The Faces chip's strip and panel, which the canvas outlines the
-/// found faces under.
-pub(super) const ID_SALT: &str = "faces";
+const ID_SALT: &str = "faces";
 
 pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
     let mut change = FacesChange::default();
