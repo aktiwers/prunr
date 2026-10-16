@@ -152,12 +152,12 @@ impl PrunrApp {
             let item_id = r.item_id;
             match r.result {
                 Ok(output) => {
-                    if self.land_run(ctx, item_id, output.shown, r.recipe, "upscale", |item| item.land_upscale(output.run)) {
+                    if self.land_run(ctx, item_id, r.run, output.shown, r.recipe, "upscale", |item| item.land_upscale(output.run)) {
                         self.after_result_landed(item_id);
                         tracing::info!(item_id, "upscale result applied");
                     }
                 }
-                Err(err) => self.end_unlanded_run(item_id, Engine::Upscale, err),
+                Err(err) => self.end_unlanded_run(item_id, r.run, Engine::Upscale, err),
             }
         }
         self.dispatch_next_queued_run();
@@ -175,11 +175,11 @@ impl PrunrApp {
             let item_id = r.item_id;
             match r.result {
                 Ok(output) => {
-                    if self.land_run(ctx, item_id, output.shown, r.recipe, "colorize", |item| item.land_colorize(output.run)) {
+                    if self.land_run(ctx, item_id, r.run, output.shown, r.recipe, "colorize", |item| item.land_colorize(output.run)) {
                         tracing::info!(item_id, "colorize result applied");
                     }
                 }
-                Err(err) => self.end_unlanded_run(item_id, Engine::Colorize, err),
+                Err(err) => self.end_unlanded_run(item_id, r.run, Engine::Colorize, err),
             }
         }
         self.dispatch_next_queued_run();
@@ -189,16 +189,26 @@ impl PrunrApp {
     /// Show a finished upscale or colorize on its item, unless the item
     /// has left the state the run started from; `keep` records the step
     /// and keeps the run. Returns whether it landed.
+    // args are the run's answer and how its item keeps it; a struct would
+    // be built at the two call sites only to be taken apart here
+    #[allow(clippy::too_many_arguments)]
     fn land_run(
         &mut self,
         ctx: &egui::Context,
         item_id: u64,
+        run: u64,
         shown: Arc<image::RgbaImage>,
         recipe: prunr_core::ProcessingRecipe,
         tex_kind: &str,
         keep: impl FnOnce(&mut BatchItem),
     ) -> bool {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
+        // A run an undo left behind lands on nothing, not on the run
+        // started since.
+        if !item.awaits_run(run) {
+            tracing::info!(item_id, run, kind = tex_kind, "result of a run no longer awaited dropped");
+            return false;
+        }
         if !item.job_is_current() {
             self.end_stale_run(item_id, tex_kind);
             return false;
@@ -250,10 +260,9 @@ impl PrunrApp {
 
     /// An upscale or colorize ended without a result: its item stops
     /// waiting, and a toast says whether it was cancelled or failed.
-    fn end_unlanded_run(&mut self, item_id: u64, engine: Engine, err: prunr_core::CoreError) {
-        if let Some(item) = self.batch.find_by_id_mut(item_id) {
-            item.job = None;
-            item.tile_preview = None;
+    fn end_unlanded_run(&mut self, item_id: u64, run: u64, engine: Engine, err: prunr_core::CoreError) {
+        if let Some(item) = self.batch.find_by_id_mut(item_id).filter(|i| i.awaits_run(run)) {
+            item.abandon_job();
         }
         let run = engine.label();
         if matches!(err, prunr_core::CoreError::Cancelled) {
@@ -568,9 +577,9 @@ impl PrunrApp {
                 WorkerResult::SpareEdgeScales { item_id, token, landing } => {
                     self.on_spare_edge_scales(item_id, token, landing);
                 }
-                WorkerResult::ChainStart { item_id, image } => {
+                WorkerResult::ChainStart { item_id, run, image } => {
                     if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                        item.chain_start_built(image);
+                        item.chain_start_built(run, image);
                     }
                 }
                 WorkerResult::BatchComplete { batch } => self.on_batch_complete(batch),
@@ -914,11 +923,15 @@ impl PrunrApp {
         // Drain filter-only Process results (model=None path).
         let mut filter_only_arrived = false;
         let mut filtered = Vec::new();
-        while let Ok((item_id, result, chain_start)) = self.batch.bg_io.filter_only_rx.try_recv() {
+        while let Ok((item_id, run, result, chain_start)) = self.batch.bg_io.filter_only_rx.try_recv() {
             filtered.push(item_id);
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if !item.awaits_run(run) {
+                tracing::info!(item_id, run, "filter pass of a run no longer awaited dropped");
+                continue;
+            }
             if let Some(start) = chain_start {
-                item.chain_start_built(start);
+                item.chain_start_built(run, start);
             }
             if !item.job_is_current() {
                 self.end_stale_run(item_id, "filters");
@@ -1581,9 +1594,9 @@ mod timeline_contract_tests {
     #[test]
     fn an_unlanded_run_names_itself_in_its_toast() {
         let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
-        app.end_unlanded_run(1, Engine::Upscale, prunr_core::CoreError::Cancelled);
+        app.end_unlanded_run(1, 0, Engine::Upscale, prunr_core::CoreError::Cancelled);
         assert_eq!(app.toasts.last_for_test(), Some(("info", "Upscale cancelled")));
-        app.end_unlanded_run(1, Engine::Colorize, prunr_core::CoreError::Inference("no memory".into()));
+        app.end_unlanded_run(1, 0, Engine::Colorize, prunr_core::CoreError::Inference("no memory".into()));
         assert_eq!(app.toasts.last_for_test(), Some(("error", "Colorize failed: Inference error: no memory")));
     }
 
@@ -1673,7 +1686,8 @@ mod timeline_contract_tests {
         item.result_texture = Some(old.clone());
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        app.batch.bg_io.filter_only_tx.send((1, Ok(px(5)), None)).unwrap();
+        let run = item.job_run().expect("a run");
+        app.batch.bg_io.filter_only_tx.send((1, run, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
         let item = &app.batch.items[0];
         assert_eq!(shown(&app), Some(5));
@@ -1824,7 +1838,8 @@ mod timeline_contract_tests {
                 let mut app = app_with_processed_item(model);
                 app.batch.items[0].start_job(Some(step), engine);
                 let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
-                app.processor.end_run_for_test(engine, 1, error(), recipe);
+                let run = app.batch.items[0].job_run().expect("a run");
+                app.processor.end_run_for_test(engine, 1, run, error(), recipe);
                 app.pump_upscale_results(&ctx);
                 app.pump_colorize_results(&ctx);
                 let item = &app.batch.items[0];
@@ -1913,6 +1928,48 @@ mod timeline_contract_tests {
             let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
             assert_eq!(shown, Some(true), "{what}: and the result it had");
         }
+    }
+
+    /// A run an undo left behind lands on nothing: neither its result nor
+    /// its cancel touches the run started since, of the same engine or
+    /// another; nor does its chained start.
+    #[test]
+    fn a_left_behind_runs_answer_never_touches_the_next_run() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let recipe = |app: &PrunrApp| app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+        // An upscale's result or cancel, after an undo and a colorize.
+        for cancelled in [false, true] {
+            let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+            app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+            let old = app.batch.items[0].job_run().expect("a run");
+            app.batch.items[0].abandon_job();
+            app.batch.items[0].start_job(Some(StepKind::Colorize), Engine::Colorize);
+            let new = app.batch.items[0].job_run().expect("a run");
+            match cancelled {
+                false => app.processor.land_run_for_test(Engine::Upscale, 1, old, px(7), recipe(&app)),
+                true => app.processor.end_run_for_test(Engine::Upscale, 1, old, prunr_core::CoreError::Cancelled, recipe(&app)),
+            }
+            app.pump_upscale_results(&ctx);
+            assert!(app.batch.items[0].awaits_run(new), "cancelled={cancelled}: the colorize still waits");
+            assert_ne!(shown(&app), Some(7), "and the upscale is not its result");
+        }
+        // A filter pass, after an undo and a new pass.
+        let mut app = app_with_processed_item(SettingsModel::None);
+        app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
+        let old = app.batch.items[0].job_run().expect("a run");
+        app.batch.items[0].abandon_job();
+        app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
+        let new = app.batch.items[0].job_run().expect("a run");
+        app.batch.items[0].chain_start_built(old, px(8));
+        assert!(app.batch.items[0].job.as_ref().is_some_and(|j| j.start.is_none() || j.keep.is_none()));
+        app.batch.bg_io.filter_only_tx.send((1, old, Ok(px(6)), None)).unwrap();
+        app.drain_background_channels(&ctx);
+        assert!(app.batch.items[0].awaits_run(new), "the old pass lands on nothing");
+        app.batch.bg_io.filter_only_tx.send((1, new, Ok(px(5)), None)).unwrap();
+        app.drain_background_channels(&ctx);
+        assert_eq!(shown(&app), Some(5), "the new pass lands");
+        assert!(app.batch.items[0].job.is_none());
     }
 
     /// A re-run that fails on an image still showing a result says so,
@@ -2069,7 +2126,8 @@ mod timeline_contract_tests {
             app.batch.items[0].settings.gamma = 1.8;
             app.batch.items[0].commit(StepKind::Adjust);
             let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
-            app.processor.land_run_for_test(engine, 1, px(7), recipe);
+            let run = app.batch.items[0].job_run().expect("a run");
+            app.processor.land_run_for_test(engine, 1, run, px(7), recipe);
             app.pump_upscale_results(&ctx);
             app.pump_colorize_results(&ctx);
             let item = &app.batch.items[0];
