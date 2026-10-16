@@ -404,7 +404,7 @@ pub(crate) struct DepthResult {
 pub(crate) struct DepthJob {
     pub(crate) item_id: u64,
     pub(crate) epoch: u64,
-    pub(crate) input: RunInput,
+    pub(crate) input: super::item::Pixels,
     pub(crate) cpu_only: bool,
     /// The faces a Faces search already found in this photo; `None`: the
     /// depth thread finds them.
@@ -463,7 +463,7 @@ fn measure_depth(
         (prunr_core::Progress::none(), None)
     };
     let threads = prunr_core::batch::ort_intra_threads(1);
-    let result = input.load()
+    let result = input.read().map_err(prunr_core::CoreError::ImageFormat)
         .and_then(|photo| {
             let engine = ensure_warm_engine(engine_slot, WarmEngineKey { model: kind, cpu_only }, threads)?;
             let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
@@ -636,23 +636,6 @@ fn admitted(descriptor: &prunr_models::ModelDescriptor) -> bool {
         );
     }
     ok
-}
-
-/// What an upscale or colorize starts from: the image, or its source when
-/// it is not decoded yet (Process right after opening a large photo),
-/// which the run's thread decodes instead of the run being skipped.
-pub(crate) enum RunInput {
-    Decoded(Arc<image::RgbaImage>),
-    Source(super::item::ImageSource),
-}
-
-impl RunInput {
-    fn load(self) -> Result<Arc<image::RgbaImage>, prunr_core::CoreError> {
-        match self {
-            RunInput::Decoded(img) => Ok(img),
-            RunInput::Source(source) => source.decode_rgba().map_err(prunr_core::CoreError::ImageFormat),
-        }
-    }
 }
 
 /// The image the upscale model reads: the input, denoised first when
@@ -1610,7 +1593,7 @@ impl Processor {
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
-        input: RunInput,
+        input: super::item::Pixels,
         model_id: prunr_models::ModelId,
         output_scale: prunr_core::OutputScale,
         cpu_only: bool,
@@ -1669,7 +1652,7 @@ impl Processor {
             // Decode and Denoise run before the model: the row-parallel
             // rayon inside apply_denoise must not nest in ORT's thread pool
             // (the pattern that deadlocked apply_background_color, b2306bb).
-            let input_for_inference = match input.load() {
+            let input_for_inference = match input.read().map_err(prunr_core::CoreError::ImageFormat) {
                 Ok(input) => build_inference_input(&input, recipe.upscale.pre_denoise()),
                 Err(err) => {
                     tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
@@ -1808,7 +1791,7 @@ impl Processor {
     /// Colorize `input` on a background thread; the result comes back
     /// through `pump_colorize_results`. Refused (logged) when free RAM is
     /// below the model's working set.
-    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: RunInput, cpu_only: bool, recipe: ProcessingRecipe) {
+    pub(crate) fn dispatch_colorize(&mut self, item_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) {
         let kind = super::settings::COLORIZER;
         let Some(descriptor) = prunr_models::descriptor(kind.into()) else { return };
         if !admitted(descriptor) {
@@ -1821,7 +1804,7 @@ impl Processor {
         let engine_slot = Arc::clone(&self.colorize.warm);
         std::thread::spawn(move || {
             let key = WarmEngineKey { model: kind, cpu_only };
-            let result = input.load().and_then(|input| {
+            let result = input.read().map_err(prunr_core::CoreError::ImageFormat).and_then(|input| {
                 let engine = ensure_warm_engine(&engine_slot, key, intra_threads)?;
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
                 let run = super::item::ColorizeCache::new(Arc::new(plane), input);
@@ -3038,14 +3021,13 @@ mod upscale_dispatch_tests {
     /// upscale thread rather than being skipped.
     #[test]
     fn an_undecoded_upscale_input_decodes_from_its_source() {
-        use super::RunInput;
         let mut png = Vec::new();
         image::DynamicImage::ImageRgba8(grey_image(3, 2, 77)).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(png));
-        let img = RunInput::Source(source).load().expect("decodes");
+        let img = crate::gui::item::Pixels::Source(source).read().expect("decodes");
         assert_eq!((img.dimensions(), img.get_pixel(0, 0).0[0]), ((3, 2), 77));
         let broken = crate::gui::item::ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
-        assert!(RunInput::Source(broken).load().is_err());
+        assert!(crate::gui::item::Pixels::Source(broken).read().is_err());
     }
 
     #[test]

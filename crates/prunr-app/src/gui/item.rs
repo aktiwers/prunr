@@ -474,11 +474,16 @@ pub(crate) enum Pixels {
 
 impl Pixels {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
+        self.read().ok()
+    }
+
+    /// The pixels, or why they could not be read.
+    pub(crate) fn read(&self) -> Result<Arc<image::RgbaImage>, String> {
         match self {
-            Self::Resident(rgba) => Some(Arc::clone(rgba)),
-            Self::Parked(stored) => stored.load(),
-            Self::Wrapped(dynamic) => Some(Arc::new(dynamic.to_rgba8())),
-            Self::Source(source) => source.decode_rgba().ok(),
+            Self::Resident(rgba) => Ok(Arc::clone(rgba)),
+            Self::Parked(stored) => stored.load().ok_or_else(|| "a stored image could not be read".to_string()),
+            Self::Wrapped(dynamic) => Ok(Arc::new(dynamic.to_rgba8())),
+            Self::Source(source) => source.decode_rgba(),
         }
     }
 }
@@ -2037,16 +2042,20 @@ impl BatchItem {
     }
 
     /// The pixels a run of `engine` starts from (`None`: the original).
+    #[cfg(test)]
     pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
         self.run_start(engine).and_then(|s| s.image.load())
     }
 
     /// What an upscale or colorize run of `engine` reads: where its
-    /// timeline says it starts, else the decoded original, else the
-    /// source for the run's thread to decode. Shared via `Arc`: the full
-    /// RGBA would otherwise be deep-cloned (tens of MB at 4K) per run.
-    pub(crate) fn run_input_or_source(&self, engine: Engine) -> super::processor::RunInput {
-        self.run_input(engine).map_or_else(|| self.original_run_input(), super::processor::RunInput::Decoded)
+    /// timeline says it starts, else the photo; loaded on the run's thread.
+    pub(crate) fn run_input_or_source(&self, engine: Engine) -> Pixels {
+        self.pixels_from(self.run_start(engine).as_ref())
+    }
+
+    /// The pixels a run from `start` reads (`None`: the photo).
+    pub(crate) fn pixels_from(&self, start: Option<&RunStart>) -> Pixels {
+        start.map_or_else(|| self.photo_pixels(), |s| Pixels::Parked(Arc::clone(&s.image)))
     }
 
     /// Where the faces are in the original photo, when a Faces search has
@@ -2059,13 +2068,6 @@ impl BatchItem {
         }
         let pending = self.faces_pending.as_ref().filter(|p| original(&p.photo))?;
         pending.found.as_ref().map(|(places, _)| places.to_vec())
-    }
-
-    /// The decoded original, else the source for the run's thread to
-    /// decode.
-    pub(crate) fn original_run_input(&self) -> super::processor::RunInput {
-        self.source_rgba.clone()
-            .map_or_else(|| super::processor::RunInput::Source(self.source.clone()), super::processor::RunInput::Decoded)
     }
 
     /// The size of the image a run of `engine` starts from.
@@ -3466,6 +3468,17 @@ mod tests {
         item.record_origin(Engine::Segment, start, None);
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(3), "the next tweak starts there too");
         assert_eq!(item.run_input(Engine::Upscale).map(|b| b.get_pixel(0, 0).0[0]), Some(4), "a new upscale builds on the effect");
+    }
+
+    /// An upscale or colorize hands its thread the stored start, not the
+    /// unpacked pixels: the UI thread never decompresses a step.
+    #[test]
+    fn an_upscale_reads_its_start_on_its_own_thread() {
+        let mut item = fixture_item(1);
+        land(&mut item, Engine::Segment, Some(StepKind::Process), 3);
+        let input = item.run_input_or_source(Engine::Upscale);
+        assert!(matches!(input, Pixels::Parked(_)), "a handle to the stored step");
+        assert_eq!(input.read().map(|b| b.get_pixel(0, 0).0[0]), Ok(3));
     }
 
     /// Parking releases the working image without a step; the timeline
