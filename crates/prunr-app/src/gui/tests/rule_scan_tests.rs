@@ -74,3 +74,57 @@ fn no_gate_tests_the_working_copy_or_the_status_by_hand() {
     }
     assert!(found.is_empty(), "hand-written gates:\n{}", found.join("\n"));
 }
+
+/// What the render code (`gui/views/`) may not do: it runs every frame
+/// on the UI thread, so file I/O, a decode, an unpack, a blocking wait or
+/// a texture upload there stalls the window. Work like that goes to a
+/// worker and lands through a channel the frame drains.
+const RENDER_BANNED: [(&str, &str); 11] = [
+    ("std::fs::", "a worker (BatchManager.bg_io, disk_queue) and a channel"),
+    ("File::open", "a worker and a channel"),
+    ("ImageReader", "a decode on a worker (request_decode_source)"),
+    ("to_rgba8()", "pixels prepared on a worker"),
+    (".load()", "a handle (Pixels, Region) unpacked where it is used"),
+    ("decompress(", "tensors unpacked on the render thread (Packed)"),
+    ("load_texture(", "drain_background_channels, from a ColorImage built off-thread"),
+    (".recv()", "try_recv()"),
+    ("thread::sleep", "a repaint request"),
+    ("thread::spawn", "an app method or coordinator: views return an intent"),
+    ("is_available(", "HardwareInstallCache (read after installs, not per frame)"),
+];
+
+/// Render-code lines that match a banned pattern and are fine, each with
+/// why: `(file, the line's text, reason)`.
+const RENDER_ALLOWED: [(&str, &str, &str); 2] = [
+    ("gui/views/canvas.rs", "ctx.load_texture(\"checker_dark\"", "a 2 KB checker made once (OnceLock)"),
+    ("gui/views/canvas.rs", "ctx.load_texture(\"checker_light\"", "a 2 KB checker made once (OnceLock)"),
+];
+
+#[test]
+fn the_render_code_does_no_blocking_work() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src.join("gui/views"), &mut files);
+    let mut found = Vec::new();
+    for file in files {
+        let rel = file.strip_prefix(&src).expect("under src").to_string_lossy().replace('\\', "/");
+        if rel.ends_with("_tests.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file).expect("readable source");
+        for (n, line) in production_lines(&source) {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if RENDER_ALLOWED.iter().any(|(f, text, _)| rel == *f && line.contains(text)) {
+                continue;
+            }
+            for (pattern, instead) in RENDER_BANNED {
+                if line.contains(pattern) {
+                    found.push(format!("{rel}:{n}: `{pattern}`: use {instead}"));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "blocking work in the render code:\n{}", found.join("\n"));
+}
