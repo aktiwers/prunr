@@ -2,7 +2,6 @@
 
 use crate::gui::item::Engine;
 use crate::gui::timeline::StepKind;
-use crate::gui::state::AppState;
 use crate::gui::theme;
 use crate::gui::views::adjustments_toolbar;
 use crate::gui::brush_state::Tool;
@@ -55,7 +54,9 @@ impl PrunrApp {
     pub(super) fn render_adjustments_toolbar(&mut self, ui: &mut egui::Ui, panel_frame: egui::Frame) {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let mut toolbar_change = adjustments_toolbar::ToolbarChange::default();
-        let is_processing = self.batch.app_state() == AppState::Processing || self.processor.is_run_in_flight();
+        // A run whose knobs the toolbar shows: a cut of this image, or an
+        // upscale or colorize anywhere (one slot each).
+        let is_processing = self.batch.items[idx].is_cutting() || self.processor.is_run_in_flight();
         // Compared after the toolbar ran: a changed knob or preset is a step.
         let settings_before = self.batch.items[idx].settings;
         adjustments_panel(panel_frame)
@@ -69,10 +70,11 @@ impl PrunrApp {
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
-                // Both brushes author the selection against the source, so
-                // they only need a decoded image; a segmentation correction
-                // waits for the tensor (see `apply_selection_to_active_model`).
-                let brush_available = item.source_rgba.is_some() || item.cached_tensor.is_some();
+                // Both brushes author the selection against the image shown,
+                // so they need only its pixels; a cut-out correction waits
+                // for the cut-out's own need (`apply_selection_to_active_model`).
+                let brush_gate = item.verdict(crate::gui::capability::Need::ShownImage, settings_ref.model.role())
+                    .reason().map(crate::gui::capability::Reason::text);
                 let has_bg_image = item.bg_image.is_some();
                 let bg_image_label = item.bg_image.as_deref()
                     .and_then(|bg| bg.source_path.as_deref())
@@ -85,7 +87,7 @@ impl PrunrApp {
                     .map_or_else(|| item.run_input_dims(Engine::Upscale), |m| item.next_upscale_dims(m));
                 let state = adjustments_toolbar::ToolbarState {
                     magic_brush_active: self.magic_brush_state.is_active(),
-                    brush_available,
+                    brush_gate,
                     processing: is_processing,
                     has_bg_image,
                     bg_image_label,
@@ -146,7 +148,7 @@ impl PrunrApp {
             self.batch.items[idx].clear_bg_image();
             ctx.request_repaint();
         }
-        if let Some(action) = toolbar_change.selection_action {
+        if let Some(action) = toolbar_change.selection_action.filter(|_| self.can_selection_action()) {
             self.handle_selection_action(idx, action, ctx);
         }
         if toolbar_change.toggle_compare {
@@ -182,25 +184,19 @@ impl PrunrApp {
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
         let item_id = self.batch.items[idx].id;
 
-        // Seg live-preview is meaningless in inpaint mode — no seg tensor
-        // to rerun, and the no-tensor fallback would overwrite result_rgba.
-        let seg_preview_active = !self.settings.model.is_inpaint();
         let mut queued = false;
         match dispatch {
             DispatchKind::None => {}
             DispatchKind::Render => {}
+            // The queue's door refuses a render the model has none of.
             DispatchKind::LivePreviewMask => {
-                if seg_preview_active {
-                    let kind = PreviewKind::photo_rerun(self.batch.items[idx].settings.line_mode);
-                    self.processor.live_preview.mark_tweak(item_id, kind);
-                    queued = true;
-                }
+                let kind = PreviewKind::photo_rerun(self.batch.items[idx].settings.line_mode);
+                self.processor.live_preview.mark_tweak(item_id, kind);
+                queued = true;
             }
             DispatchKind::LivePreviewEdge => {
-                if seg_preview_active {
-                    self.processor.live_preview.mark_tweak(item_id, PreviewKind::Edge);
-                    queued = true;
-                }
+                self.processor.live_preview.mark_tweak(item_id, PreviewKind::Edge);
+                queued = true;
             }
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
                 let role = self.settings.model.role();
@@ -248,7 +244,7 @@ impl PrunrApp {
         use crate::gui::knob_catalog::{self, LineModeChange};
         use prunr_core::RequiredTier;
         let item = &self.batch.items[idx];
-        let cached_seg = item.cached_tensor.is_some();
+        let cached_seg = item.shows_cutout();
         let cached_edge = item.cached_edge_tensors.is_some();
 
         let mut dispatch = tc.auto_dispatch;

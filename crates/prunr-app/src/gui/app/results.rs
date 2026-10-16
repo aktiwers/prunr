@@ -112,7 +112,7 @@ impl PrunrApp {
         Self::spawn_tex_prep(
             rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
         );
-        self.batch.request_thumbnail(item_id, &source, Some(&rgba));
+        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&rgba))));
         ctx.request_repaint();
     }
 
@@ -212,7 +212,7 @@ impl PrunrApp {
             Self::tex_name(tex_kind, item_id, Some(self.result_switch_id)),
             target, self.batch.bg_io.tex_prep_handles(), ctx.clone(),
         );
-        self.batch.request_thumbnail(item_id, &source, Some(&shown));
+        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&shown))));
         true
     }
 
@@ -491,10 +491,9 @@ impl PrunrApp {
     /// faded lines that read it. A lens-blur background rebuilds itself,
     /// its texture key holding the map.
     fn after_depth_landed(&mut self, idx: usize) {
-        use crate::gui::knob_catalog::ModelRole;
         let role = self.settings.model.role();
         let item = &self.batch.items[idx];
-        let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
+        let reads = item.settings.photo_reads_depth(role);
         let processed = item.verdict(crate::gui::capability::Need::Processed, role).allows_request();
         if reads && processed && shows(self.settings.model, Surface::Effect) {
             self.rerun_photo(idx);
@@ -1721,6 +1720,9 @@ mod timeline_contract_tests {
         item.invalidate_selection();
         item.finish_job();
         assert!(app.can_reroll_intent());
+        app.batch.items[0].result_tex_pending = true;
+        app.batch.items[0].thumb_pending = true;
+        assert!(app.can_reroll_intent(), "the fill's texture and thumbnail being built is no run");
         app.settings.model = SettingsModel::Inpaint;
         assert!(!app.can_reroll_intent(), "LaMa fills are not generated");
         app.settings.model = SettingsModel::SdInpaint;

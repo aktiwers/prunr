@@ -3,7 +3,6 @@ use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::batch_manager::ProcessButtonLabel;
-use crate::gui::item::BatchStatus;
 use crate::gui::theme;
 
 use super::chip::{popover_header, popup_for, tooltip, with_fill};
@@ -35,7 +34,7 @@ fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
     popup_for(ui, id, &resp, |ui| {
         popover_header(ui, "Save options", None);
         changed |= super::chip::choice_row(ui, "Format", &FORMAT_CHOICES, &mut app.settings.export_format);
-        if app.settings.model.role() == crate::gui::knob_catalog::ModelRole::Cutout {
+        if app.offers_layers() {
             ui.add_space(theme::SPACE_SM);
             changed |= ui.checkbox(&mut app.settings.export_split_layers, "Separate layers").changed();
             super::hint(ui, "Subject, lines and mask as separate PNG files.");
@@ -158,8 +157,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
 
-            let is_batch_processing = app.batch.status_counts().processing > 0;
-            let ticked_processing = app.batch.any_ticked_with_status(BatchStatus::Processing);
+            let is_batch_processing = app.batch.any_awaiting_cut();
+            let ticked_processing = app.batch.ticked_awaiting_cut().next().is_some();
 
             if is_batch_processing {
                 let partial = ticked_processing;
@@ -214,9 +213,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let body: std::borrow::Cow<'static, str> = if inpaint_mode {
+                let refusal = app.process_refusal();
+                let body: std::borrow::Cow<'static, str> = if let Some(why) = refusal {
+                    why.into()
+                } else if inpaint_mode {
                     match label {
-                        _ if !has_processable => "Paint a region first; Process then runs the eraser over it.".into(),
                         ProcessButtonLabel::ProcessSelected(n) | ProcessButtonLabel::ProcessAll(n) if n > 1 => {
                             format!("Run the eraser over the painted regions of the {n} selected images.").into()
                         }

@@ -5,10 +5,9 @@ use std::sync::{mpsc, Arc};
 
 use egui::ViewportCommand;
 
-use super::item::{BatchItem, BatchStatus, Engine};
+use super::item::{BatchItem, Engine};
 use super::timeline::StepKind;
 use super::settings::Settings;
-use super::state::AppState;
 use super::system_bridge::{DialogAnswer, DialogRequest};
 use super::theme;
 use super::worker::{WorkerMessage, WorkerResult, spawn_worker};
@@ -298,17 +297,12 @@ impl PrunrApp {
     /// between surfaces.
     pub(crate) fn perform(&mut self, action: crate::gui::views::shortcuts::Action, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::Action;
-        let app_state = self.batch.app_state();
         // Selection actions share the action bar's gate; Copy without a
         // usable selection is the whole-result copy.
         let selection_idx = self.batch.selected_idx_clamped().filter(|_| self.can_selection_action());
         match action {
             Action::Open => self.handle_open_dialog(),
-            Action::Process => {
-                if matches!(app_state, AppState::Loaded | AppState::Done) {
-                    self.handle_process_intent();
-                }
-            }
+            Action::Process => self.handle_process_intent(),
             Action::Save => {
                 if self.can_save_intent() {
                     self.handle_save_selected();
@@ -616,31 +610,54 @@ impl PrunrApp {
         self.dispatch_next_queued_run();
     }
 
-    /// Toolbar mirror for `handle_process_intent`. `add_enabled(...)` reads
-    /// this so the button's disabled state and the dispatch's gating can't
-    /// drift independently.
+    /// Toolbar mirror for `handle_process_intent`: Process can run when
+    /// nothing refuses it.
     pub fn can_process_intent(&self) -> bool {
+        self.process_refusal().is_none()
+    }
+
+    /// Why Process can't run now, if it can't: the one gate the button
+    /// greys by, its tooltip says and `handle_process_intent` keeps.
+    pub(crate) fn process_refusal(&self) -> Option<&'static str> {
+        let model = self.settings.model;
         // A saved model that is gone from disk: the picker says Get.
-        if !self.hardware_install_cache.has_model(self.settings.model) {
-            return false;
+        if !self.hardware_install_cache.has_model(model) {
+            return Some("Get this model in the Model Store first.");
         }
-        if self.settings.model.is_upscale() {
-            return can_start_run(self.processor.is_upscale_in_flight(), self.batch.any_target_can(|_| true));
-        }
-        if self.settings.model.is_colorize() {
-            return can_start_run(self.processor.is_colorize_in_flight(), self.batch.any_target_can(|_| true));
-        }
-        if self.settings.model.is_inpaint() {
-            let role = self.settings.model.role();
-            let painted = |it: &BatchItem| it.verdict(crate::gui::capability::Need::PaintedRegion, role).is_ready();
-            can_start_run(self.processor.any_inpaint_in_flight(), self.batch.any_target_can(painted))
+        let in_flight = if model.is_upscale() {
+            self.processor.is_upscale_in_flight().then_some("Wait for the upscale to finish, or cancel it.")
+        } else if model.is_colorize() {
+            self.processor.is_colorize_in_flight().then_some("Wait for Colorize to finish, or cancel it.")
+        } else if model.is_inpaint() {
+            self.processor.any_inpaint_in_flight().then_some("Wait for the erase to finish, or cancel it.")
         } else {
             // A batch still admitting images into its RAM budget takes the
             // next Process once every one of them is on its way; the worker
             // queues batches, the budget cannot feed two.
-            !self.processor.admission_still_feeding()
-                && self.batch.any_target_can(|it| !it.is_cutting())
+            self.processor.admission_still_feeding().then_some("Wait for the images to start processing.")
+        };
+        if in_flight.is_some() {
+            return in_flight;
         }
+        if self.batch.any_target_can(|it| self.run_may_start(it)) {
+            None
+        } else if model.is_inpaint() {
+            Some("Paint a region first; Process then runs the eraser over it.")
+        } else {
+            Some("Wait for the run on the image to finish.")
+        }
+    }
+
+    /// Whether a Process run of the active model may start on `item`:
+    /// nothing runs on it, its pixels can be read, and an eraser has a
+    /// painted region. The Process gate, every target list and the queue
+    /// read this, so the button, the shortcut and a queued run agree.
+    pub(crate) fn run_may_start(&self, item: &BatchItem) -> bool {
+        use crate::gui::capability::Need;
+        let role = self.settings.model.role();
+        item.is_idle()
+            && item.verdict(Need::ShownImage, role).allows_request()
+            && (!self.settings.model.is_inpaint() || item.verdict(Need::PaintedRegion, role).is_ready())
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -706,7 +723,7 @@ impl PrunrApp {
                 // The step's image shows its selection as the switch stood
                 // then; the switch may have moved since.
                 let item = &self.batch.items[idx];
-                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) && item.tensor_made_shown_step() {
+                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
                     self.dispatch_brush_rerun(idx);
                 }
                 stepped.push(kind);
@@ -745,7 +762,7 @@ impl PrunrApp {
     /// step is a generated fill, with nothing running on the image.
     pub fn can_reroll_intent(&self) -> bool {
         self.settings.model.generates()
-            && self.batch.selected_item().is_some_and(|i| !i.is_busy() && i.reroll().is_some())
+            && self.batch.selected_item().is_some_and(|i| i.is_idle() && i.reroll().is_some())
     }
 
     /// Fill the shown fill's region again from the image it started on,
@@ -844,7 +861,7 @@ impl PrunrApp {
     }
 
     pub fn handle_cancel_selected(&mut self) {
-        let targets = self.batch.ticked_ids_with_status(BatchStatus::Processing);
+        let targets: Vec<u64> = self.batch.ticked_awaiting_cut().collect();
         if targets.is_empty() {
             return;
         }
@@ -924,7 +941,7 @@ impl PrunrApp {
             self.processor.cancel_faces();
         } else if self.processor.any_inpaint_in_flight() {
             self.processor.cancel_all_inpaints();
-        } else if self.batch.status_counts().processing > 0 {
+        } else if self.batch.any_awaiting_cut() {
             self.handle_cancel_all_and_reset();
         } else if self
             .batch
@@ -1340,22 +1357,6 @@ enum NavDir {
 
 /// A run can start when some image qualifies and no run of its kind is
 /// under way.
-pub(crate) fn can_start_run(is_in_flight: bool, has_target: bool) -> bool {
-    has_target && !is_in_flight
-}
-
-#[cfg(test)]
-mod can_start_run_tests {
-    use super::can_start_run;
-
-    #[test]
-    fn can_start_run_requires_idle_and_a_target() {
-        assert!(can_start_run(false, true),    "happy path: idle + a target");
-        assert!(!can_start_run(true, true),    "already in flight");
-        assert!(!can_start_run(false, false),  "no target");
-    }
-}
-
 #[cfg(test)]
 mod toast_label_tests {
     use super::step_toast;

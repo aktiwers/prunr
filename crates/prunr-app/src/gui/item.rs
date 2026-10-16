@@ -1097,6 +1097,17 @@ impl BatchItem {
         self.job.as_ref().is_some_and(|j| j.running && j.engine == Engine::Segment)
     }
 
+    /// No run of any kind is queued or under way on this image: what
+    /// `Need::Idle` reads, for gates that need no role.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.job.is_none()
+    }
+
+    /// A cut is queued for a worker slot or under way: what Cancel stops.
+    pub(crate) fn awaits_cut(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.engine == Engine::Segment)
+    }
+
     /// Whether `need` is met for this image under a model of `role`.
     pub(crate) fn verdict(&self, need: super::capability::Need, role: super::knob_catalog::ModelRole) -> super::capability::Verdict {
         super::capability::check(&super::capability::ItemFacts::of(self), need, role)
@@ -2214,7 +2225,9 @@ impl BatchItem {
         let Some(tensor) = &self.cached_tensor else { return false };
         match self.shown_cutter() {
             Some(cutter) => cutter == Cutter::Model(tensor.model),
-            None => self.applied_recipe.as_ref().is_some_and(|r| r.inference.model == tensor.model),
+            // A cut step from before cutters were recorded: its recipe
+            // says who, and with none it was this segmentation's.
+            None => self.applied_recipe.as_ref().is_none_or(|r| r.inference.model == tensor.model),
         }
     }
 
@@ -2256,7 +2269,7 @@ impl BatchItem {
     }
 
     /// The shown step's result, on screen or parked.
-    fn result_pixels(&self) -> Option<Pixels> {
+    pub(crate) fn result_pixels(&self) -> Option<Pixels> {
         self.result_rgba.clone().map(Pixels::Resident)
             .or_else(|| self.timeline.current().result.clone().map(Pixels::Parked))
     }
@@ -2288,13 +2301,13 @@ impl BatchItem {
     /// The decoded segmentation tensor for live preview, decoded on the
     /// first call of a drag and shared by the following ticks.
     pub(crate) fn hot_seg_tensor(&mut self) -> Option<Arc<super::live_preview::SegTensor>> {
-        let ct = self.cached_tensor.as_ref()?;
-        // Only the step this segmentation cut is re-cut with it: another
-        // model's cut is that model's, and No model's pass already carries
-        // its cut in its start.
-        if self.shown_cutter().is_some_and(|c| c != Cutter::Model(ct.model)) {
+        // Only the cut this segmentation made is re-cut with it: not the
+        // photo after an undo, an upscale over it, another model's cut, or
+        // No model's pass, which carries its cut in its start.
+        if !self.shows_cutout() {
             return None;
         }
+        let ct = self.cached_tensor.as_ref()?;
         if self.volatile_seg_tensor.is_none() {
             self.volatile_seg_tensor = super::live_preview::decompress_seg(ct).map(Arc::new);
         }

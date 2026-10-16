@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::timeline::StepKind;
-use crate::gui::state::AppState;
 use crate::gui::views::selection_action_bar::SelectionAction;
 use crate::gui::brush_state::Tool;
 use super::PrunrApp;
@@ -187,13 +186,18 @@ impl PrunrApp {
     }
 
     /// Selection actions act on the latest result or, before processing,
-    /// on the source. Shared by the action bar, the keyboard shortcuts and
-    /// the actions themselves.
+    /// on the source: a painted region on an image whose pixels can be
+    /// read, with no run under way that the edit would make stale. Shared
+    /// by the action bar, the keyboard shortcuts and the actions themselves.
     pub(crate) fn can_selection_action(&self) -> bool {
+        use crate::gui::capability::Need;
+        let role = self.settings.model.role();
         shows(self.settings.model, Surface::Brushes)
             && self.batch.selected_item().is_some_and(|i| {
-            i.selection_mask.is_some() && (i.has_result() || i.source_rgba.is_some())
-        })
+                i.is_idle()
+                    && i.verdict(Need::PaintedRegion, role).is_ready()
+                    && i.verdict(Need::ShownImage, role).is_ready()
+            })
     }
 
     /// The selection plus the image a Delete / Copy / Cut acts on.
@@ -253,7 +257,7 @@ impl PrunrApp {
         if !active
             && (item.magic_preencode_refused
                 || !self.processor.sam_sessions_ready()
-                || self.batch.app_state() == AppState::Processing)
+                || !item.is_idle())
         {
             return;
         }

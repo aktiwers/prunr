@@ -188,17 +188,17 @@ impl PrunrApp {
                 ..DispatchInputs::new(kind, version, Arc::new(image::DynamicImage::new_rgba8(0, 0)), item.settings)
             });
         }
+        need(Need::PhotoRender)?;
         // A photo render without a scale the lines draw would show the
         // image without those lines: it waits for the worker's spare
         // scales, or for a new run when none are coming.
         if kind != PreviewKind::Photo && item.lacks_drawn_scales() {
             need(Need::DrawnLines)?;
         }
-        // Only No model renders the photo itself; every other model's Mask
-        // render re-cuts the cut-out on screen, and without one would
-        // publish the plain photo as a result.
+        // A Mask render re-cuts the cut-out on screen; without one it would
+        // publish the plain photo as a result. No model's photo is its own.
         let is_filter_only = role == ModelRole::Filters;
-        if matches!(kind, PreviewKind::Mask) && !is_filter_only {
+        if matches!(kind, PreviewKind::Mask) {
             need(Need::Cutout)?;
         }
         let seg_tensor = item.hot_seg_tensor();
@@ -480,7 +480,7 @@ impl PrunrApp {
                 if let Some(item) = self.batch.find_by_id_mut(item_id) {
                     item.thumb_pending = true;
                 }
-                self.batch.request_thumbnail(item_id, &source, Some(&landed));
+                self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&landed))));
             }
         }
         ctx.request_repaint();

@@ -184,7 +184,9 @@ impl LayerJob {
             source_rgba: item.source_rgba.clone(),
             source: item.source.clone(),
             correction: item.correction_plane(style, action),
-            seg: item.cached_tensor.clone(),
+            // The cut-out's mask only while it made the image shown: after
+            // an undo to the photo there is no subject layer to cut.
+            seg: item.cached_tensor.clone().filter(|_| item.shows_cutout()),
             edges: item.cached_edge_tensors.clone(),
             faces: item.faces_input(super::item::FaceStage::Photo),
             depth: item.depth_source(),
@@ -478,7 +480,7 @@ impl DragKey {
                 action,
                 selection: item.selection_hash,
                 edits: item.edits.as_ref().map(Arc::downgrade),
-                seg: item.cached_tensor.is_some(),
+                seg: item.shows_cutout(),
                 edges: item.cached_edge_tensors.is_some(),
             }),
         }
@@ -714,6 +716,7 @@ mod tests {
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
         assert!(!LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "nothing cached, no layers");
 
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let job = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
@@ -733,6 +736,7 @@ mod tests {
 
         let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let erased_left: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -prunr_core::selection::FULL } else { 0 }).collect();
         item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));

@@ -258,3 +258,66 @@ fn save_writes_what_the_canvas_shows() {
     assert_eq!(saved(&mut app, "parked.png"), *px(20), "the parked cut-out, not the photo");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A run on an image holds edits to it: brushes, Magic Brush and the
+/// selection actions wait, or the step they take makes the run's result
+/// stale and it is dropped.
+#[test]
+fn edits_wait_for_a_run_on_the_image() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    let mut cells = vec![0i8; 64];
+    cells[9] = prunr_core::selection::FULL;
+    app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(8, 8, cells), StepKind::Stroke);
+    assert!(app.batch.items[0].is_idle() && app.can_selection_action());
+    app.batch.items[0].start_erase(None);
+    assert!(!app.batch.items[0].is_idle() && !app.can_selection_action(), "an erase under way");
+    app.batch.items[0].abandon_job();
+    crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
+    assert!(!app.can_selection_action(), "a cut under way");
+}
+
+/// The Process shortcut and the Process button are one gate: with a
+/// ticked image to run, Cmd+R starts it even while the shown one cuts.
+#[test]
+fn the_process_shortcut_does_what_the_button_does() {
+    let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    let item = push_test_item(&mut app, 2);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(px(10));
+    item.ticked = true;
+    crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
+    assert!(app.can_process_intent(), "the ticked image can run");
+    app.perform(crate::gui::views::shortcuts::Action::Process, &egui::Context::default());
+    assert!(app.batch.items[1].awaits_cut(), "Cmd+R started it");
+}
+
+/// Process never starts over a run already on an image: a cut waiting
+/// for its slot keeps its turn, and an erase under way keeps its fill.
+#[test]
+fn process_never_starts_over_a_run_on_the_image() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    app.batch.items[0].start_erase(None);
+    assert!(!app.can_process_intent());
+    app.process_items(|_| true, Some(StepKind::Process));
+    assert_eq!(app.batch.items[0].job.as_ref().map(|j| j.engine), Some(Engine::Erase), "the erase keeps its job");
+}
+
+/// After an undo to the photo the kept segmentation made nothing shown:
+/// No model's preview does not cut the photo with it, and a layers save
+/// has no subject to cut.
+#[test]
+fn an_undone_cut_is_not_applied_again() {
+    let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    item.result_rgba = Some(px(20));
+    item.commit(StepKind::Process);
+    crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+    assert!(item.shows_cutout());
+    assert!(item.undo_step().is_some());
+    assert!(!item.shows_cutout() && item.hot_seg_tensor().is_none(), "the photo shows: the mask made nothing on screen");
+    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+    assert!(!crate::gui::drag_export::LayerJob::of(item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "no subject layer from the undone cut");
+    app.settings.model = SettingsModel::None;
+    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    assert!(inputs.is_ok_and(|i| i.seg_tensor.is_none()), "No model renders the photo itself");
+}
