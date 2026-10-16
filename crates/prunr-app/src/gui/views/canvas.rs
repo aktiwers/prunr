@@ -37,16 +37,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // first via dispatch_inpaint's generation counter, wasting the
     // 5+ minutes of CPU work just performed. The capsule's Cancel is
     // the way out.
-    let inpaint_in_flight_for_selected = app.batch
-        .selected_idx_clamped()
-        .map(|idx| app.batch.items[idx].id)
-        .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
+    // A stroke, a Magic Brush click or a focus pick is a step: one taken
+    // while a run is queued or under way on the image would make that
+    // run's result stale, so they wait for it.
+    let editable = app.batch.selected_item().is_some_and(crate::gui::item::BatchItem::is_idle);
     let app_state = app.batch.app_state();
     let model_has_brushes = shows(app.settings.model, Surface::Brushes);
-    let brush_active = model_has_brushes
-        && app.brush_state.is_enabled()
-        && !inpaint_in_flight_for_selected
-        && matches!(app_state, AppState::Loaded | AppState::Done);
+    let brush_active = model_has_brushes && app.brush_state.is_enabled() && editable;
     // Magic Brush is treated as a brush tool for pan-gate purposes — when
     // it's active and the encoder is ready, left-drag belongs to the
     // brush and pan moves to secondary (right) button, matching Paint
@@ -55,9 +52,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let magic_brush_active = model_has_brushes
         && app.magic_brush_state.is_active()
         && !app.magic_brush_preparing()
-        && matches!(app_state, AppState::Loaded | AppState::Done);
+        && editable;
     // Picking the Depth chip's focus takes the next left click too.
-    let picking_focus = app.picking_depth_focus && matches!(app_state, AppState::Loaded | AppState::Done);
+    let picking_focus = app.picking_depth_focus && editable;
     let any_brush_tool_active = brush_active || magic_brush_active || picking_focus;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
@@ -215,7 +212,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         // Magic Brush click/stroke input. Suppressed during encoder run (silently —
         // clicks while encoder_pending are ignored without a toast).
-        if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
+        if magic_brush_active && !pointer_blocked {
             handle_magic_brush_input(ui, app, canvas_rect);
         }
     }

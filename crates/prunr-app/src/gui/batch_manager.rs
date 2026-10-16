@@ -165,26 +165,22 @@ impl BatchManager {
         self.selected_item().is_some_and(|b| b.id == id)
     }
 
+    /// A cut is queued or under way on some image.
+    pub(crate) fn any_awaiting_cut(&self) -> bool {
+        self.items.iter().any(BatchItem::awaits_cut)
+    }
+
+    /// The ticked images whose cut is queued or under way: what Cancel
+    /// Selected stops, and what its label counts.
+    pub(crate) fn ticked_awaiting_cut(&self) -> impl Iterator<Item = u64> + '_ {
+        self.items.iter().filter(|i| i.ticked && i.awaits_cut()).map(|i| i.id)
+    }
+
     /// IDs of the ticked items.
     pub(crate) fn ticked_ids(&self) -> Vec<u64> {
         self.items.iter().filter(|i| i.ticked).map(|i| i.id).collect()
     }
 
-    /// IDs of ticked items currently in a given status. Used by
-    /// the partial-cancel path to decide which in-flight items to stop.
-    pub(crate) fn ticked_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
-        self.ticked_with_status(status).map(|i| i.id).collect()
-    }
-
-    /// Whether any ticked item is in `status`: the same set
-    /// `ticked_ids_with_status` returns, without collecting it.
-    pub(crate) fn any_ticked_with_status(&self, status: BatchStatus) -> bool {
-        self.ticked_with_status(status).next().is_some()
-    }
-
-    fn ticked_with_status(&self, status: BatchStatus) -> impl Iterator<Item = &BatchItem> {
-        self.items.iter().filter(move |i| i.ticked && i.status() == status)
-    }
 
     /// Tick or untick every item's checkbox.
     pub(crate) fn set_all_ticked(&mut self, ticked: bool) {
@@ -505,14 +501,15 @@ impl BatchManager {
         &self,
         item_id: u64,
         source: &ImageSource,
-        result_rgba: Option<&Arc<image::RgbaImage>>,
+        result: Option<super::item::Pixels>,
     ) {
         let tx = self.bg_io.thumb_tx.clone();
         let slots = self.bg_io.decode_slots.clone();
-        if let Some(rgba) = result_rgba {
-            let rgba = rgba.clone();
+        if let Some(result) = result {
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
+                // A parked result unpacks here, off the UI thread.
+                let Some(rgba) = result.load() else { return };
                 let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                 let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
                 let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
@@ -595,12 +592,12 @@ impl BatchManager {
     }
 
     /// The items a drag from row `idx` carries: every ticked one when that
-    /// row is ticked, else that row; never one still processing.
+    /// row is ticked, else that row. Like Save, a drag writes what each
+    /// image shows, a run under way or not.
     pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
-        let free = |b: &&BatchItem| !b.is_running();
         match self.items.get(idx) {
-            Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).filter(free).map(|b| b.id).collect(),
-            Some(row) => std::iter::once(row).filter(free).map(|b| b.id).collect(),
+            Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).map(|b| b.id).collect(),
+            Some(row) => vec![row.id],
             None => Vec::new(),
         }
     }
@@ -1194,7 +1191,7 @@ mod tests {
         let bm = fixture();
         let result = Arc::new(image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 20, 30, 255])));
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
-        bm.request_thumbnail(7, &source, Some(&result));
+        bm.request_thumbnail(7, &source, Some(crate::gui::item::Pixels::Resident(result)));
 
         let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
@@ -1550,7 +1547,7 @@ mod tests {
     }
 
     /// A drag carries the ticked rows when it starts on one, else its own
-    /// row; never a row still processing.
+    /// row; one with a run under way too, as Save writes it.
     #[test]
     fn a_drag_carries_the_ticked_rows_or_its_own() {
         let mut bm = fixture();
@@ -1562,31 +1559,29 @@ mod tests {
         assert_eq!(bm.drag_targets(0), [0, 2]);
         assert_eq!(bm.drag_targets(1), [1]);
         crate::gui::tests::fixtures::put_in(&mut bm.items[2], BatchStatus::Processing);
-        assert_eq!(bm.drag_targets(0), [0]);
+        assert_eq!(bm.drag_targets(0), [0, 2]);
         crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
-        assert!(bm.drag_targets(1).is_empty());
+        assert_eq!(bm.drag_targets(1), [1], "like Save, a drag writes what the image shows mid-run");
     }
 
-    /// The Cancel button's "Selected" label and the partial-cancel gate
-    /// read the same set.
+    /// Cancel Selected counts a ticked cut waiting for its worker slot
+    /// as well as one under way: both are the user's to stop.
     #[test]
-    fn any_selected_with_status_agrees_with_the_ids() {
+    fn cancel_selected_counts_waiting_and_running_cuts() {
         let mut bm = fixture();
         for id in 0..3 {
             bm.items.push(item_with_cache(id, 0));
         }
         crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
-        let agree = |bm: &BatchManager| {
-            bm.any_ticked_with_status(BatchStatus::Processing)
-                != bm.ticked_ids_with_status(BatchStatus::Processing).is_empty()
-        };
-        assert!(!bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm));
+        bm.items[2].start_cut(Some(crate::gui::timeline::StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
+        assert!(bm.ticked_awaiting_cut().next().is_none());
         bm.items[0].ticked = true;
-        assert!(!bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm), "ticked but not processing");
+        assert!(bm.ticked_awaiting_cut().next().is_none(), "ticked but nothing awaited");
+        bm.items[2].ticked = true;
+        assert_eq!(bm.ticked_awaiting_cut().collect::<Vec<_>>(), [2], "a waiting cut counts");
         bm.set_all_ticked(true);
-        assert!(bm.any_ticked_with_status(BatchStatus::Processing) && agree(&bm));
-        bm.set_all_ticked(false);
-        assert!(bm.items.iter().all(|i| !i.ticked));
+        assert_eq!(bm.ticked_awaiting_cut().collect::<Vec<_>>(), [1, 2]);
+        assert!(bm.any_awaiting_cut());
     }
 
     #[test]

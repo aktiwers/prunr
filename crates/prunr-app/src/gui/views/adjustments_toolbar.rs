@@ -96,7 +96,9 @@ pub struct ToolbarChange {
 /// app from the selected item and the coordinators.
 pub(crate) struct ToolbarState<'a> {
     pub magic_brush_active: bool,
-    pub brush_available: bool,
+    /// Why the brushes can't author a selection yet: the image's pixels
+    /// are not there.
+    pub brush_gate: Option<&'static str>,
     pub processing: bool,
     pub has_bg_image: bool,
     pub bg_image_label: Option<&'a str>,
@@ -172,7 +174,10 @@ pub(crate) fn render(
     let before_line_mode = item_settings.line_mode;
 
     let model_uses_seg = app_settings.model.uses_segmentation();
-    let mask_active = model_uses_seg && item_settings.line_mode != prunr_core::LineMode::EdgesOnly;
+    let mask_active = {
+        use crate::gui::capability::{check, Need, Reason, Verdict};
+        model_uses_seg && check(&state.facts, Need::Cutout, app_settings.model.role()) != Verdict::Never(Reason::SketchCoversPhoto)
+    };
     let gate_ctx = knob_catalog::GateContext {
         model: app_settings.model,
         facts: state.facts,
@@ -255,7 +260,7 @@ pub(crate) fn render(
             render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
-            chip::gated(ui, (!state.can_compare).then_some("Process the image first."), |ui| {
+            chip::gated(ui, (!state.can_compare).then_some(crate::gui::capability::Reason::ProcessFirst.text()), |ui| {
                 let resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_VISIBILITY.codepoint, state.show_original),
                     "Compare",
@@ -280,7 +285,7 @@ pub(crate) fn render(
             // Tool cluster, right-to-left: Paint, Magic. Their settings
             // live in the strip over the canvas while a tool is on.
             let paint_active = brush_state.is_enabled();
-            chip::gated(ui, (!state.brush_available).then_some("Open an image first."), |ui| {
+            chip::gated(ui, state.brush_gate, |ui| {
                 let paint_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
                     "Paint Brush",
