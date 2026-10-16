@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::item::{BatchItem, ImageSource};
+use crate::gui::background_io::FileLoad;
 use crate::gui::system_bridge::{DialogRequest, OPEN_EXTENSIONS};
 use super::PrunrApp;
 
@@ -63,27 +64,7 @@ impl PrunrApp {
         if let Some(first) = paths.first() {
             self.last_open_dir = first.parent().map(|p| p.to_path_buf());
         }
-        if paths.len() == 1 && self.batch.items.is_empty() {
-            // invariant: paths.len() == 1 checked in the guard above.
-            self.handle_open_path(paths.into_iter().next().unwrap());
-        } else {
-            self.queue_file_loads(paths);
-        }
-    }
-
-    /// Send `paths` for lazy loading on a background thread — bytes are
-    /// read on demand, not all into RAM up front.
-    fn queue_file_loads(&self, paths: Vec<PathBuf>) {
-        let tx = self.batch.bg_io.file_load_tx.clone();
-        std::thread::spawn(move || {
-            for path in paths {
-                let name = display_name(&path, UNTITLED);
-                // Once the receiver is gone every later send fails too.
-                if tx.send((path, name)).is_err() {
-                    break;
-                }
-            }
-        });
+        queue_file_loads(&self.batch.bg_io.file_load_tx, paths);
     }
 
     pub fn remove_selected(&mut self) {
@@ -100,9 +81,9 @@ impl PrunrApp {
         }
     }
 
-    /// Add an image to the batch from a file path (lazy — bytes not loaded yet).
-    pub fn add_to_batch_path(&mut self, path: PathBuf, filename: String) {
-        let Some(dims) = probe_dims_path(&path) else { return };
+    /// Add an image to the batch from a file path whose header was read
+    /// (lazy: its bytes are read when used).
+    pub(super) fn add_to_batch_path(&mut self, path: PathBuf, filename: String, dims: (u32, u32)) {
         self.add_to_batch_source(ImageSource::Path(path), dims, filename);
     }
 
@@ -187,20 +168,8 @@ impl PrunrApp {
             return;
         }
 
-        // Expand directories to their immediate image children (one-level —
-        // deeper recursion would surprise users). Cheap I/O; doing it on the
-        // UI thread keeps the toast channel available without a cross-thread
-        // bridge.
-        let (resolved, dropped_empty_dir) = expand_dropped_paths(paths);
-        if dropped_empty_dir && resolved.is_empty() {
-            self.toasts.warning(
-                "Dropped folder had no supported images (PNG / JPG / WebP / BMP / SVG)."
-                    .to_string(),
-            );
-        }
-
-        if !resolved.is_empty() {
-            self.queue_file_loads(resolved);
+        if !paths.is_empty() {
+            queue_file_loads(&self.batch.bg_io.file_load_tx, paths);
         }
 
         // Handle inline bytes immediately (Wayland — already in memory, no I/O)
@@ -226,7 +195,6 @@ impl PrunrApp {
     }
 }
 
-/// Reads only the header, never the pixels.
 /// The batch name of an image loaded by path without being opened on its own.
 pub(super) const UNTITLED: &str = "untitled";
 
@@ -276,6 +244,27 @@ fn expand_dropped_paths(input: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
         }
     }
     (out, any_empty_dir)
+}
+
+/// Import `paths` on a worker: folders expand to their images (one level:
+/// deeper would surprise), and each file's header is read for its size.
+/// Bytes are read when used, not all into RAM up front.
+pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Vec<PathBuf>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let (resolved, dropped_empty_dir) = expand_dropped_paths(paths);
+        if dropped_empty_dir && resolved.is_empty() {
+            let _ = tx.send(FileLoad::NoImagesInFolder);
+        }
+        for path in resolved {
+            let name = display_name(&path, UNTITLED);
+            let dims = probe_dims_path(&path);
+            // Once the receiver is gone every later send fails too.
+            if tx.send(FileLoad::Image { path, name, dims }).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 fn is_supported_image_ext(path: &Path) -> bool {
