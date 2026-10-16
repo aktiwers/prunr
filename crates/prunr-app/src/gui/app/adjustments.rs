@@ -96,6 +96,7 @@ impl PrunrApp {
                     show_original: self.show_original,
                     can_compare,
                     shown_seed: item.shown_seed(),
+                    facts: crate::gui::capability::ItemFacts::of(item),
                     faces_found: Self::face_search(item, crate::gui::item::FaceStage::of(settings_ref.model.role())),
                     picking_depth_focus: self.picking_depth_focus,
                 };

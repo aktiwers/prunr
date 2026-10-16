@@ -7,7 +7,6 @@ use egui_kittest::{Harness, HarnessBuilder};
 use super::fixtures::push_test_item;
 use crate::gui::app::PrunrApp;
 use crate::gui::automation::tree::{readable_name, ControlNode};
-use crate::gui::item::BatchStatus;
 
 pub(super) const HARNESS_SIZE: egui::Vec2 = egui::vec2(1400.0, 900.0);
 
@@ -41,7 +40,7 @@ pub(super) fn loaded_with(setup: impl FnOnce(&mut PrunrApp)) -> Harness<'static,
     let mut h = harness();
     {
         let app = h.state_mut();
-        push_test_item(app, 1).status = BatchStatus::Done;
+        super::fixtures::cut_out(push_test_item(app, 1), prunr_core::ModelKind::Silueta);
         app.batch.select_item(0);
         setup(app);
     }

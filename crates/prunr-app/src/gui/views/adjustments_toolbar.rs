@@ -111,6 +111,8 @@ pub(crate) struct ToolbarState<'a> {
     pub can_compare: bool,
     /// The seed of the generated fill on screen, for Pin seed.
     pub shown_seed: Option<u64>,
+    /// What the shown image is and holds, for the surfaces' gates.
+    pub facts: crate::gui::capability::ItemFacts,
     /// How many faces Restore faces found in the shown photo.
     pub faces_found: super::faces_chip::FoundCount,
     /// The next click on the image sets the Depth chip's focus.
@@ -176,8 +178,13 @@ pub(crate) fn render(
         line_mode: item_settings.line_mode,
     };
     let mask_active = knob_catalog::knob_enabled(StaticKnob::Gamma.requirement(), knob_ctx);
-    let effect_active = knob_catalog::knob_enabled(StaticKnob::SubjectEffect.requirement(), knob_ctx);
-    let bg_active = knob_catalog::knob_enabled(StaticKnob::BgColor.requirement(), knob_ctx);
+    let gate_ctx = knob_catalog::GateContext {
+        model: app_settings.model,
+        line_mode: item_settings.line_mode,
+        facts: state.facts,
+        processing: state.processing,
+    };
+    let gate = |surface| knob_catalog::surface_gate(surface, &gate_ctx);
 
     // The row goes compact (chips show their icon only) when its full
     // left cluster and its right cluster, both measured on earlier
@@ -190,11 +197,10 @@ pub(crate) fn render(
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.processing);
+            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, gate(Surface::Upscale));
         }
         if shows(model, Surface::Colorize) {
-            let reason = state.processing.then_some("Wait for Colorize to finish, or cancel it.");
-            chip::gated(ui, reason, |ui| render_color_strength_chip(ui, item_settings));
+            chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings));
         }
         if shows(model, Surface::SdChips) && super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
             change.brush_settings_committed = true;
@@ -203,8 +209,7 @@ pub(crate) fn render(
             change.brush_settings_committed = true;
         }
         if shows(model, Surface::Mask) {
-            let mask_reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out.");
-            chip::gated(ui, mask_reason, |ui| {
+            chip::gated(ui, gate(Surface::Mask), |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);
             });
         }
@@ -212,16 +217,13 @@ pub(crate) fn render(
             render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
         }
         if shows(model, Surface::Effect) {
-            // Fill works without a mask (filter-only mode); only Full sketch
-            // has no subject to fill.
-            let fill_reason = (!effect_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
-            chip::gated(ui, fill_reason, |ui| {
+            chip::gated(ui, gate(Surface::Effect), |ui| {
                 let changed = super::effect_chip::render(ui, &mut item_settings.effect);
                 aggregate_bool(changed, StaticKnob::SubjectEffect, &mut change);
             });
         }
         if shows(model, Surface::Faces) {
-            chip::gated(ui, super::upscale_toolbar::upscale_run_lock(model, state.processing), |ui| {
+            chip::gated(ui, gate(Surface::Faces), |ui| {
                 render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
             });
         }
@@ -229,15 +231,13 @@ pub(crate) fn render(
             render_depth_chip(ui, item_settings, &state, &mut change);
         }
         if shows(model, Surface::Decoration) {
-            let reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out to outline.");
-            chip::gated(ui, reason, |ui| {
+            chip::gated(ui, gate(Surface::Decoration), |ui| {
                 let changed = render_decoration_chip(ui, &mut item_settings.decoration);
                 aggregate_bool(changed, StaticKnob::Decoration, &mut change);
             });
         }
         if shows(model, Surface::Background) {
-            let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
-            chip::gated(ui, bg_reason, |ui| {
+            chip::gated(ui, gate(Surface::Background), |ui| {
                 let backdrop = item_settings.backdrop();
                 render_background_chip(ui, BgChipState {
                     backdrop,
