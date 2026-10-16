@@ -254,13 +254,6 @@ impl ImageSource {
         }
     }
 
-    /// Estimated compressed file size (for admission cost estimation).
-    pub(crate) fn estimated_size(&self) -> usize {
-        match self {
-            Self::Path(path) => std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0),
-            Self::Bytes(bytes) => bytes.len(),
-        }
-    }
 }
 
 use super::timeline::{store, DocState, Origin, RunStart, StepKind, Timeline};
@@ -711,6 +704,9 @@ pub(crate) struct BatchItem {
     pub(crate) id: u64,
     pub(crate) filename: String,
     pub(crate) source: ImageSource,
+    /// The file's size, read where it was imported (for admission's
+    /// estimate; 0 when not known).
+    pub(crate) source_len: usize,
     pub(crate) dimensions: (u32, u32),
     /// Pre-decoded source RGBA (decoded on background thread for instant switching)
     pub(crate) source_rgba: Option<Arc<image::RgbaImage>>,
@@ -2493,10 +2489,15 @@ impl BatchItem {
         settings: super::item_settings::ItemSettings,
         applied_preset: String,
     ) -> Self {
+        let source_len = match &source {
+            ImageSource::Bytes(bytes) => bytes.len(),
+            ImageSource::Path(_) => 0,
+        };
         Self {
             id,
             filename,
             source,
+            source_len,
             dimensions,
             source_rgba: None,
             source_dyn: None,
@@ -3406,16 +3407,15 @@ mod tests {
     }
 
     #[test]
-    fn image_source_estimated_size_for_bytes_returns_len() {
-        let source = ImageSource::Bytes(Arc::new(vec![0u8; 1234]));
-        assert_eq!(source.estimated_size(), 1234);
+    fn an_in_memory_image_knows_its_size() {
+        let item = BatchItem::new(1, "x".into(), ImageSource::Bytes(Arc::new(vec![0u8; 1234])), (1, 1), ItemSettings::default(), String::new());
+        assert_eq!(item.source_len, 1234);
     }
 
     #[test]
-    fn image_source_path_load_and_size_round_trip() {
+    fn image_source_path_load_round_trip() {
         // Path is the 99%-case variant (file open / drag-drop). Write a temp
-        // file, read it back via load_bytes, and verify estimated_size matches
-        // file metadata.
+        // file and read it back via load_bytes.
         let payload: &[u8] = b"PRUNR-TEST-FIXTURE-CONTENTS-1234567890";
         let mut path = std::env::temp_dir();
         path.push(format!("prunr-item-test-{}.bin", std::process::id()));
@@ -3424,19 +3424,8 @@ mod tests {
         let source = ImageSource::Path(path.clone());
         let loaded = source.load_bytes().expect("Path variant must read the file");
         assert_eq!(&**loaded, payload);
-        assert_eq!(source.estimated_size(), payload.len());
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn image_source_path_estimated_size_zero_on_missing_file() {
-        // Defensive: estimated_size returns 0 (not panic) when the file is
-        // missing — used by AdmissionController; must never fail.
-        let mut path = std::env::temp_dir();
-        path.push(format!("prunr-item-missing-{}-DOES-NOT-EXIST.bin", std::process::id()));
-        let source = ImageSource::Path(path);
-        assert_eq!(source.estimated_size(), 0);
     }
 
     /// Build a distinct MaskArtifact for testing; the tag sets the first cell.
