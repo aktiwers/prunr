@@ -410,7 +410,6 @@ impl PrunrApp {
                     continue;
                 }
                 let new_rgba = r.rgba;
-                item.unpark_result();
                 item.result_rgba = Some(new_rgba.clone());
                 // Mark pending so reconcile_selected doesn't also
                 // spawn its own prep on this same frame.
