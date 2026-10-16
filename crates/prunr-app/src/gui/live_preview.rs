@@ -175,6 +175,8 @@ pub struct PreviewResult {
     pub(crate) new_quick_photo: Option<QuickPhoto>,
     /// The `DynamicImage` of the render's photo it built, for the item to keep.
     pub(crate) new_original: Option<BuiltOriginal>,
+    /// The correction plane the render built, for the item to keep.
+    pub(crate) new_correction: Option<crate::gui::item::BuiltCorrection>,
     /// MaskRecipe snapshot taken when this dispatch was kicked off. The
     /// parent updates `applied_recipe.mask` to match so the recipe-drift
     /// tripwire doesn't immediately re-fire on a result it already
@@ -544,6 +546,7 @@ impl LivePreview {
                     new_depth_photo: output.built_depth_photo,
                     new_quick_photo: output.built_quick_photo,
                     new_original: output.built_original,
+                    new_correction: output.built_correction,
                     applied_mask: mask_recipe,
                     applied_depth,
                     applied_tier2_knobs,
@@ -672,8 +675,9 @@ pub struct DispatchInputs {
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
     /// The item's selection, applied to the segmentation mask before the
     /// resize / refine / feather chain (resampled to tensor resolution
-    /// inline). `None` when nothing is selected.
-    pub correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    /// inline). `None` when nothing is selected. Built on the render's
+    /// thread when not built yet.
+    pub(crate) correction: Option<crate::gui::item::Correction>,
     /// For `PreviewKind::UpscaleTier2` only — the kept upscale run, which
     /// Tier-2 re-finishes. `None` for other kinds.
     pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
@@ -701,6 +705,15 @@ pub(crate) struct DepthInput {
 }
 
 impl DispatchInputs {
+    /// The correction plane; a render resolves a plane still to build
+    /// before it reads one.
+    fn correction_plane(&self) -> Option<&prunr_core::selection::MaskArtifact> {
+        match self.correction.as_ref()? {
+            crate::gui::item::Correction::Ready(plane) => Some(plane),
+            crate::gui::item::Correction::Build(_) => None,
+        }
+    }
+
     /// A `kind` preview of `original` with `settings` and nothing cached,
     /// kept or found yet; callers set what their kind reads.
     pub(crate) fn new(kind: PreviewKind, version: u64, original: Arc<DynamicImage>, settings: ItemSettings) -> Self {
@@ -915,6 +928,7 @@ struct RunOutput {
     built_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
     built_quick_photo: Option<QuickPhoto>,
     built_original: Option<BuiltOriginal>,
+    built_correction: Option<crate::gui::item::BuiltCorrection>,
 }
 
 /// The photo a render draws on, before it is a `DynamicImage`.
@@ -962,8 +976,14 @@ pub(crate) struct BuiltOriginal {
 /// slows accordingly — but the user opted into that cost when they toggled
 /// Refine Edges on, and without running the filter the three refine knobs
 /// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
-fn run_preview(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
+fn run_preview(mut inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
+    let (correction, built_correction) = inputs.correction.take().map(crate::gui::item::Correction::resolve).unzip();
+    inputs.correction = correction.map(crate::gui::item::Correction::Ready);
+    RunOutput { built_correction: built_correction.flatten(), ..render(inputs, cancel) }
+}
+
+fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
 
     // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
     // on the kept upscale run.
@@ -1190,7 +1210,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
         let fresh_base = || {
             // invariant: is_subject_outline → seg_tensor is Some.
             let seg = inputs.seg_tensor.as_ref().unwrap();
-            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
+            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
                 .map_or((None, None), |img| {
                     let arc = Arc::new(img.to_rgba8());
                     (Some(Arc::clone(&arc)), Some(arc))
@@ -1219,7 +1239,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
-                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction.as_deref())
+                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
                 else { return RunOutput::default(); };
                 return RunOutput { rgba: Some(Arc::new(masked.to_rgba8())), ..RunOutput::default() };
             }
@@ -1383,7 +1403,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None,
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None, new_correction: None,
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,

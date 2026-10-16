@@ -165,7 +165,7 @@ pub(crate) struct LayerJob {
     start: Option<super::timeline::StoredImage>,
     source_rgba: Option<Arc<image::RgbaImage>>,
     source: ImageSource,
-    correction: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    correction: Option<super::item::Correction>,
     seg: Option<CompressedTensor>,
     edges: Option<CompressedEdgeTensors>,
     /// The faces Restore faces blends into the photo, as on the canvas.
@@ -183,7 +183,7 @@ impl LayerJob {
             start: item.run_start(super::item::Engine::Segment).map(|s| s.image),
             source_rgba: item.source_rgba.clone(),
             source: item.source.clone(),
-            correction: item.correction_plane(style, action),
+            correction: item.correction(style, action),
             // The cut-out's mask only while it made the image shown: after
             // an undo to the photo there is no subject layer to cut.
             seg: item.cached_tensor.clone().filter(|_| item.shows_cutout()),
@@ -238,7 +238,7 @@ impl LayerSource {
                 .map_err(|err| tracing::warn!(item_id = job.item_id, %err, "layer export: source"))
                 .ok()?,
         };
-        Some(Self { original, correction: job.correction.clone() })
+        Some(Self { original, correction: job.correction.clone().map(|c| c.resolve().0) })
     }
 }
 
