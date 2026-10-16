@@ -562,8 +562,8 @@ impl PrunrApp {
                     self.processor.cut_times.note(item_id, &update, at);
                     self.on_seg_report(item_id, update, ctx);
                 }
-                WorkerResult::BatchItemDone { batch, item_id, result, raw_seg, raw_edges } => {
-                    self.on_batch_item_done(ctx, batch, item_id, result, raw_seg, raw_edges);
+                WorkerResult::BatchItemDone { batch, item_id, result, seg, edges } => {
+                    self.on_batch_item_done(ctx, batch, item_id, result, seg, edges);
                 }
                 WorkerResult::SpareEdgeScales { item_id, token, landing } => {
                     self.on_spare_edge_scales(item_id, token, landing);
@@ -642,8 +642,8 @@ impl PrunrApp {
         batch: u64,
         item_id: u64,
         result: Result<prunr_core::ProcessResult, String>,
-        raw_seg: Option<crate::gui::worker::RawSegTensor>,
-        raw_edges: Option<crate::gui::worker::RawEdgeTensors>,
+        seg: Option<crate::gui::worker::CompressedTensor>,
+        edges: Option<crate::gui::worker::CompressedEdgeTensors>,
     ) {
         let is_selected = self.batch.is_selected(item_id);
         let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
@@ -678,7 +678,7 @@ impl PrunrApp {
         if succeeded {
             item.hold_for_reveal();
         }
-        let backend_update = item.apply_tier_result(result, raw_seg, raw_edges, recipe_snapshot);
+        let backend_update = item.apply_tier_result(result, seg, edges, recipe_snapshot);
         if succeeded {
             item.finish_job();
         } else {
