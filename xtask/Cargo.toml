@@ -11,7 +11,6 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 zstd = { workspace = true }
-dirs = { workspace = true }
 # `dev-models` keeps `include_bytes!` out so xtask can compile before the
 # .zst files exist (xtask is the tool that produces them).
 prunr-models = { path = "../crates/prunr-models", features = ["dev-models"] }
