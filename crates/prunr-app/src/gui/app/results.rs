@@ -229,7 +229,7 @@ impl PrunrApp {
     /// the user hears why.
     fn end_run_without_result(&mut self, item_id: u64, run: &str, why: RunLost) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if item.status() != BatchStatus::Processing && item.job.is_none() {
+        if item.job.is_none() {
             return;
         }
         let name = item.filename.clone();
@@ -497,8 +497,8 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let item = &self.batch.items[idx];
         let reads = (role == ModelRole::Filters && item.settings.depth.is_active()) || item.settings.line_fade() > 0.0;
-        let has_result = item.status() == BatchStatus::Done || role == ModelRole::Filters;
-        if reads && has_result && shows(self.settings.model, Surface::Effect) {
+        let processed = crate::gui::capability::check(&crate::gui::capability::ItemFacts::of(item), crate::gui::capability::Need::Processed, role).allows_request();
+        if reads && processed && shows(self.settings.model, Surface::Effect) {
             self.rerun_photo(idx);
         }
     }
@@ -752,7 +752,8 @@ impl PrunrApp {
             tracing::info!(item_id, token, outcome, "spare line scales dropped: the kept lines are another run's");
             return;
         }
-        let rerun = failed && item.status() == BatchStatus::Done && item.lines_need_a_run();
+        let processed = crate::gui::capability::check(&crate::gui::capability::ItemFacts::of(item), crate::gui::capability::Need::Processed, self.settings.model.role()).allows_request();
+        let rerun = failed && processed && item.lines_need_a_run();
         tracing::info!(item_id, token, outcome, rerun, "spare line scales landed");
         self.batch.enforce_tensor_budget();
         if rerun && self.batch.is_selected(item_id) {
@@ -2096,7 +2097,10 @@ mod depth_tests {
             let mut app = PrunrApp::new_for_test();
             app.settings.model = model;
             let item = push_test_item(&mut app, 1);
-            item.set_status_for_test(status);
+            match status {
+                BatchStatus::Done => crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::BiRefNetLite),
+                other => item.set_status_for_test(other),
+            }
             set(&mut item.settings);
             let epoch = item.depth_run.epoch;
             assert!(item.land_depth(epoch, Ok(map())));
