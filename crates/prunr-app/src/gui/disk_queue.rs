@@ -1,5 +1,6 @@
-//! Settings and preset files, written in the order they were asked for on
-//! one worker, off the UI thread.
+//! Files written and removed in the order they were asked for, on one
+//! worker, off the UI thread: settings, presets, and the undo states
+//! kept on disk once they go.
 
 use std::path::PathBuf;
 use std::sync::{mpsc, OnceLock};
@@ -15,9 +16,9 @@ fn jobs() -> &'static mpsc::Sender<Job> {
     JOBS.get_or_init(|| {
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("config-writer".into())
+            .name("disk-queue".into())
             .spawn(move || rx.into_iter().for_each(run))
-            .map_err(|err| tracing::error!(%err, "config writer did not start"))
+            .map_err(|err| tracing::error!(%err, "disk queue did not start"))
             .ok();
         tx
     })
@@ -27,11 +28,11 @@ fn run(job: Job) {
     match job {
         Job::Write(path, bytes) => {
             if let Err(err) = write_whole(&path, &bytes) {
-                tracing::warn!(?path, %err, "config file not written");
+                tracing::warn!(?path, %err, "file not written");
             }
         }
         Job::Remove(path) => match std::fs::remove_file(&path) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => tracing::warn!(?path, %err, "config file not removed"),
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => tracing::warn!(?path, %err, "file not removed"),
             _ => {}
         },
         Job::Flush(done) => {
