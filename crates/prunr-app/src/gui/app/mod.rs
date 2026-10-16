@@ -758,12 +758,12 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &self.batch.items[idx];
         let Some(reroll) = item.reroll() else { return };
-        let start = match reroll.start.as_ref() {
-            Some(s) => s.image.load(),
-            None => item.decoded_source(),
+        let source = match reroll.start.as_ref() {
+            Some(s) => crate::gui::item::Pixels::Parked(Arc::clone(&s.image)),
+            None => item.photo_pixels(),
         };
-        let (Some(source), Some(region)) = (start, reroll.region.load()) else {
-            tracing::warn!(item_id = item.id, "try another skipped: its start image or region is unavailable");
+        let Some(region) = reroll.region.load() else {
+            tracing::warn!(item_id = item.id, "try another skipped: its region is unavailable");
             return;
         };
         let item_id = item.id;
