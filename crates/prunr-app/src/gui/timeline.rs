@@ -209,7 +209,8 @@ impl<T: Payload> Stored<T> {
         match &*tier {
             Tier::Loaded(v, encoded) if Arc::strong_count(v) == 1 => {
                 let stored = encoded.clone().into_tier();
-                *tier = stored;
+                // The read-back value frees off the UI thread the sweep runs on.
+                super::reclaim::later(std::mem::replace(&mut *tier, stored));
                 None
             }
             Tier::Plain(v) if Arc::strong_count(v) == 1 => {
@@ -427,10 +428,13 @@ impl Timeline {
             self.states[self.cursor] = state;
             return;
         }
-        self.states.truncate(self.cursor + 1);
+        // Dropped states (the redo tail, the oldest past the depth) free
+        // off the UI thread.
+        let redo_tail: Vec<DocState> = self.states.drain(self.cursor + 1..).collect();
+        super::reclaim::later(redo_tail);
         self.states.push_back(state);
         while self.states.len() > TIMELINE_DEPTH {
-            self.states.pop_front();
+            super::reclaim::later(self.states.pop_front());
         }
         self.cursor = self.states.len() - 1;
         self.version += 1;

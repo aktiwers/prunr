@@ -56,11 +56,10 @@ impl PrunrApp {
             item.subject = None;
             // The photo with faces blended in, one image of RAM; the faces
             // themselves (a few MB) stay, so it is rebuilt without a search.
-            item.faced_photo = None;
-            item.face_preview = None;
             // Likewise the photo with the Depth chip's look; the map stays.
-            item.depth_photo = None;
-            item.quick_photo = None;
+            // Freed off the UI thread.
+            item.face_preview = None;
+            crate::gui::reclaim::later((item.faced_photo.take(), item.depth_photo.take(), item.quick_photo.take()));
             // Up to two images; warmed again when the image is shown.
             item.set_on_screen(false);
             // A full-size picture made from the photo; rebuilt when shown.

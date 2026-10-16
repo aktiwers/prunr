@@ -1233,7 +1233,7 @@ impl Processor {
         );
         // Freeing the sessions can take hundreds of ms; the caches are
         // already empty, so it waits on no one.
-        std::thread::spawn(move || drop(released));
+        super::reclaim::later(released);
         self.release_seg_warm();
         self.release_inpaint_subprocess();
     }
@@ -2083,7 +2083,8 @@ impl Processor {
 
     /// Drop the warm Magic Brush sessions; a decode in flight keeps its own.
     pub(crate) fn release_sam_sessions(&self) {
-        *self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let released = self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        super::reclaim::later(released);
     }
 
     pub(crate) fn sam_sessions_ready(&self) -> bool {

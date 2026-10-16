@@ -1079,8 +1079,8 @@ impl BatchItem {
     /// 16K result) while the image is not on screen. AI blend and Color
     /// match rebuild it when next used (0.1-0.3 s); the run itself stays.
     pub(crate) fn drop_upscale_reference(&mut self) {
-        if let Some(run) = self.upscale.as_mut() {
-            run.reference = None;
+        if let Some(reference) = self.upscale.as_mut().and_then(|run| run.reference.take()) {
+            super::reclaim::later(reference);
         }
     }
 
@@ -1092,12 +1092,12 @@ impl BatchItem {
     /// next dispatch may never happen (user may drag a Tier-2 knob first),
     /// and the stale buffer is from the wrong model.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
-        self.upscale = None;
+        super::reclaim::later(self.upscale.take());
     }
 
     /// Clear the kept colorize run, on a model switch and on item error.
     pub(crate) fn invalidate_colorize_cache(&mut self) {
-        self.colorize = None;
+        super::reclaim::later(self.colorize.take());
     }
 
     /// Clear the cached SAM encoder embedding. Called on source image
@@ -1327,7 +1327,8 @@ impl BatchItem {
             self.warm_neighbour_steps();
         } else {
             self.photo_look = None;
-            *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = [None, None];
+            let warm = std::mem::take(&mut *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            super::reclaim::later(warm);
             self.quick.clear();
         }
     }
@@ -2024,7 +2025,7 @@ impl BatchItem {
     /// Refine as that step's own.
     pub(crate) fn land_upscale(&mut self, run: UpscaleCache) {
         self.finish_job_keeping(run.run);
-        self.upscale = Some(run);
+        super::reclaim::later(self.upscale.replace(run));
     }
 
     /// What a run of `model` needs here, measured against the shown step
@@ -2627,11 +2628,8 @@ impl BatchItem {
 
     /// `set_bg_image` for a picture hashed already (off the UI thread).
     pub(crate) fn set_bg_image_hashed(&mut self, img: image::DynamicImage, source_path: Option<PathBuf>, hash: u64) {
-        self.bg_image = Some(Arc::new(BgImage {
-            source_path,
-            image: Arc::new(img),
-            hash,
-        }));
+        let picture = Arc::new(BgImage { source_path, image: Arc::new(img), hash });
+        super::reclaim::later(self.bg_image.replace(picture));
         self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
     }
 

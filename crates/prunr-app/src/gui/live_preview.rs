@@ -577,6 +577,7 @@ impl LivePreview {
                 .get(&done.item_id)
                 .is_some_and(|f| f.generation == done.generation);
             if !is_latest {
+                crate::gui::reclaim::later(done);
                 continue;
             }
             self.in_flight.remove(&done.item_id);
