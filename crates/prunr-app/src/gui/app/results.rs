@@ -110,7 +110,7 @@ impl PrunrApp {
         let source = item.source.clone();
         let target = item.request_result_texture(false);
         Self::spawn_tex_prep(
-            rgba.clone(), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
+            crate::gui::item::Pixels::Resident(Arc::clone(&rgba)), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
         );
         self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&rgba))));
         ctx.request_repaint();
@@ -208,7 +208,7 @@ impl PrunrApp {
         let source = item.source.clone();
         let target = item.request_result_texture(false);
         Self::spawn_tex_prep(
-            Arc::clone(&shown), item_id,
+            crate::gui::item::Pixels::Resident(Arc::clone(&shown)), item_id,
             Self::tex_name(tex_kind, item_id, Some(self.result_switch_id)),
             target, self.batch.bg_io.tex_prep_handles(), ctx.clone(),
         );
@@ -865,10 +865,13 @@ impl PrunrApp {
             self.show_original = false;
         }
 
-        while let Ok((item_id, name, color_image, target)) = self.batch.bg_io.tex_prep_rx.try_recv() {
-            let tex = ctx.load_texture(name, color_image, egui::TextureOptions::default());
-            if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                item.land_texture(tex, target);
+        while let Ok(prep) = self.batch.bg_io.tex_prep_rx.try_recv() {
+            let tex = ctx.load_texture(prep.name, prep.image, egui::TextureOptions::default());
+            if let Some(item) = self.batch.find_by_id_mut(prep.item_id) {
+                item.land_texture(tex, prep.target);
+                if let Some(rgba) = prep.unpacked {
+                    item.hold_unpacked_result(rgba);
+                }
                 landed = true;
             }
         }
@@ -1352,7 +1355,7 @@ mod timeline_contract_tests {
     }
 
     fn shown(app: &PrunrApp) -> Option<u8> {
-        app.batch.items[0].result_rgba.as_ref().map(|r| r.get_pixel(0, 0)[0])
+        app.batch.items[0].shown_result().map(|r| r.get_pixel(0, 0)[0])
     }
 
     fn mask() -> prunr_core::selection::MaskArtifact {
