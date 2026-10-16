@@ -214,7 +214,9 @@ pub(crate) fn render(
             });
         }
         if shows(model, Surface::Lines) {
-            render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+            chip::gated(ui, gate(Surface::Lines), |ui| {
+                render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+            });
         }
         if shows(model, Surface::Effect) {
             chip::gated(ui, gate(Surface::Effect), |ui| {

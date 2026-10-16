@@ -1,6 +1,6 @@
 //! The adjustments toolbar: when it shows, rendering it, and routing its changes.
 
-use crate::gui::item::{BatchStatus, Engine};
+use crate::gui::item::Engine;
 use crate::gui::timeline::StepKind;
 use crate::gui::state::AppState;
 use crate::gui::theme;
@@ -181,7 +181,6 @@ impl PrunrApp {
 
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
         let item_id = self.batch.items[idx].id;
-        let is_done = self.batch.items[idx].status() == BatchStatus::Done;
 
         // Seg live-preview is meaningless in inpaint mode — no seg tensor
         // to rerun, and the no-tensor fallback would overwrite result_rgba.
@@ -204,7 +203,9 @@ impl PrunrApp {
                 }
             }
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
-                if is_done {
+                use crate::gui::capability::{check, ItemFacts, Need};
+                let facts = ItemFacts::of(&self.batch.items[idx]);
+                if check(&facts, Need::Processed, self.settings.model.role()).is_ready() {
                     self.process_items(|item| item.id == item_id, None);
                 }
             }
