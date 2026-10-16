@@ -1609,11 +1609,16 @@ impl BatchItem {
         match result {
             Ok(rgba) => {
                 self.decode_failed = false;
-                self.source_rgba = Some(rgba);
+                // The first decode is the same photo, now in pixels: what
+                // was made from it (depth, selection, embedding) stays.
+                // Only a photo replaced by another invalidates it.
+                let replaced = self.source_rgba.replace(Arc::clone(&rgba)).is_some_and(|old| !Arc::ptr_eq(&old, &rgba));
                 // Live-preview DynamicImage cache is built from source_rgba;
                 // invalidate so the next dispatch rebuilds against the new one.
                 self.source_dyn = None;
-                self.invalidate_source_derived();
+                if replaced {
+                    self.invalidate_source_derived();
+                }
                 true
             }
             Err(msg) => {
@@ -3340,6 +3345,20 @@ mod tests {
         assert_eq!(item.faces_found_in_original(), None, "a failed search");
         item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
         assert_eq!(item.faces_found_in_original(), None, "another photo");
+    }
+
+    /// The first decode of a photo keeps what was made from it before:
+    /// its depth map and selection; a different photo landing drops them.
+    #[test]
+    fn the_first_decode_keeps_what_was_made_from_the_photo() {
+        let mut item = fixture_item(1);
+        item.source_rgba = None;
+        item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
+        item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![1])));
+        assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(1, 1)))));
+        assert!(item.depth.is_some() && item.selection_mask.is_some(), "the same photo, decoded");
+        assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(1, 1)))));
+        assert!(item.depth.is_none() && item.selection_mask.is_none(), "another photo");
     }
 
     /// A run's work is handles: its file is read where the run is sent,
