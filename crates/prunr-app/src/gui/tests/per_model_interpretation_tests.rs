@@ -102,7 +102,7 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 7);
     item.dimensions = (8, 8);
-    item.status = BatchStatus::Done;
+    item.set_status_for_test(BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Process);
     give_tensor(item);
@@ -287,7 +287,7 @@ fn a_stroke_before_the_first_result_undoes_and_redoes() {
 
     app.handle_undo(&ctx);
     assert!(app.batch.items[0].selection_mask.is_none(), "undo reverts the stroke");
-    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending, "and touches no result");
+    assert_eq!(app.batch.items[0].status(), crate::gui::item::BatchStatus::Pending, "and touches no result");
 
     app.handle_redo(&ctx);
     assert!(app.batch.items[0].selection_mask.is_some(), "redo paints it again");
@@ -300,7 +300,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     let mut app = app_with_model(SettingsModel::Inpaint);
     let item = push_test_item(&mut app, 4);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
+    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Erase);
     app.commit_selection_and_dispatch(4, make_mask(8, 8), StepKind::Stroke);
@@ -308,7 +308,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none(), "the region stroke is undone");
-    assert!(item.result_rgba.is_some() && item.status == crate::gui::item::BatchStatus::Done, "the result stays");
+    assert!(item.result_rgba.is_some() && item.status() == crate::gui::item::BatchStatus::Done, "the result stays");
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 5);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
+    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     // History entries may be stored compressed, so compare pixels, not Arcs.
     let before = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
     let recut = image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]));
@@ -335,7 +335,7 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none());
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == before), "the pre-stroke image is back");
-    assert_eq!(item.status, crate::gui::item::BatchStatus::Done);
+    assert_eq!(item.status(), crate::gui::item::BatchStatus::Done);
 
     app.handle_redo(&ctx);
     let item = &app.batch.items[0];
@@ -354,7 +354,7 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
+    item.set_status_for_test(crate::gui::item::BatchStatus::Done);
     item.source_rgba = Some(Arc::new(px(0)));
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
@@ -398,7 +398,7 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_tensor(item);
     // The state after undoing a Process: the tensor stays, the result is gone.
-    item.status = crate::gui::item::BatchStatus::Pending;
+    item.set_status_for_test(crate::gui::item::BatchStatus::Pending);
 
     app.commit_selection_and_dispatch(6, make_mask(8, 8), StepKind::Stroke);
     assert!(!app.processor.live_preview.is_pending_for(6), "a stroke on the original must not re-cut");
@@ -406,7 +406,7 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     app.handle_undo(&ctx);
     app.handle_redo(&ctx);
     assert!(!app.processor.live_preview.is_pending_for(6), "nor may stepping that stroke");
-    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending);
+    assert_eq!(app.batch.items[0].status(), crate::gui::item::BatchStatus::Pending);
 }
 
 /// A re-cut computed for a state the image has left (by undo, redo or
@@ -446,7 +446,7 @@ fn switching_images_keeps_every_undo_step() {
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.status = BatchStatus::Done;
+    item.set_status_for_test(BatchStatus::Done);
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
     item.result_rgba = Some(Arc::new(px(2)));
@@ -466,7 +466,7 @@ fn switching_images_keeps_every_undo_step() {
     let item = &app.batch.items[0];
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "undo shows the first result");
     app.handle_undo(&ctx);
-    assert_eq!(app.batch.items[0].status, BatchStatus::Pending, "and the next undo the original");
+    assert_eq!(app.batch.items[0].status(), BatchStatus::Pending, "and the next undo the original");
 }
 
 /// With Magic Brush on, the shown image and the one before it keep their

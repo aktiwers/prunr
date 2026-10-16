@@ -20,7 +20,7 @@ const NOTHING_WITHIN: Duration = Duration::from_millis(300);
 
 fn done_item(app: &mut PrunrApp, id: u64) -> &mut crate::gui::item::BatchItem {
     let item = push_test_item(app, id);
-    item.status = BatchStatus::Done;
+    item.set_status_for_test(BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))));
     item
 }

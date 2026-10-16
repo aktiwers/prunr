@@ -748,7 +748,7 @@ mod tests {
         use crate::gui::item::{BatchItem, BatchStatus, ImageSource};
         let mut item = BatchItem::new(id, name.to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (4, 4), ItemSettings::default(), String::new());
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([7, 8, 9, 255]))));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         item
     }
 

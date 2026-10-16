@@ -181,7 +181,7 @@ impl PrunrApp {
 
         let dispatch = self.resolve_auto_dispatch(idx, &toolbar_change);
         let item_id = self.batch.items[idx].id;
-        let is_done = self.batch.items[idx].status == BatchStatus::Done;
+        let is_done = self.batch.items[idx].status() == BatchStatus::Done;
 
         // Seg live-preview is meaningless in inpaint mode — no seg tensor
         // to rerun, and the no-tensor fallback would overwrite result_rgba.

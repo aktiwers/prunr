@@ -253,7 +253,7 @@ impl PrunrApp {
             .unwrap_or(super::NO_MODEL_RECIPE_KIND);
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
-            .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
+            .filter(|i| filter(i) && !matches!(i.status(), BatchStatus::Processing))
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
@@ -298,7 +298,7 @@ impl PrunrApp {
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let settings = self.run_settings();
         let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
-            .filter(|i| filter(i) && !matches!(i.status, BatchStatus::Processing))
+            .filter(|i| filter(i) && !matches!(i.status(), BatchStatus::Processing))
             .map(|i| (i.id, i.source.clone()))
             .collect();
         if let Some(shown) = self.batch.selected_idx_clamped() {
@@ -306,8 +306,8 @@ impl PrunrApp {
         }
         for (id, source) in dispatches {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
-            item.status = BatchStatus::Processing;
             item.start_cut(step, Cutter::NoModel);
+            item.mark_running();
             let input = item.job_run_image();
             self.batch.request_filter_only(id, &source, input, settings.effect);
         }
@@ -347,7 +347,6 @@ impl PrunrApp {
         let batch = &mut self.batch;
         let (initial_items, additional_items_rx) =
             self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).and_then(BatchItem::full_run_work));
-        self.batch.mark_waiting(tier1_ids);
 
         // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
         // skip dispatch.
@@ -523,7 +522,7 @@ mod process_targets_tests {
         let process = |app: &mut PrunrApp| {
             let item = &mut app.batch.items[1];
             item.ticked = true;
-            item.status = crate::gui::item::BatchStatus::Pending;
+            item.set_status_for_test(crate::gui::item::BatchStatus::Pending);
             app.process_items(|i| i.ticked, Some(StepKind::Process));
             match rx.try_recv() {
                 Ok(WorkerMessage::BatchProcess { config, .. }) => config.first_look,
@@ -551,14 +550,14 @@ mod process_targets_tests {
             // Both are done under their own settings, with the tensor a mask rerun needs.
             item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
             item.set_cached_tensor(CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 16], height: 4, width: 4, model: prunr_core::ModelKind::Silueta }));
-            item.status = crate::gui::item::BatchStatus::Done;
+            item.set_status_for_test(crate::gui::item::BatchStatus::Done);
             item.ticked = true;
         }
         app.batch.items[0].settings.feather = 3.0;
         app.process_items(|i| i.ticked, Some(StepKind::Process));
         let other = &app.batch.items[1];
         assert_eq!(other.settings.feather, 3.0, "the ticked image took the shown settings");
-        assert_eq!(other.status, crate::gui::item::BatchStatus::Processing, "and reruns under them");
+        assert_eq!(other.status(), crate::gui::item::BatchStatus::Processing, "and reruns under them");
     }
 
     /// Process by another model than the one that cut the image on screen
@@ -629,7 +628,7 @@ mod process_targets_tests {
             item.applied_recipe = Some(item.settings.current_recipe(model));
             item.result_rgba = Some(img.clone());
             item.land_upscale(UpscaleCache::new(img.clone(), img.clone(), None));
-            item.status = BatchStatus::Done;
+            item.set_status_for_test(BatchStatus::Done);
             item.ticked = true;
         }
         // The slot is taken while Process runs, so the queue holds what it
@@ -667,7 +666,7 @@ mod process_targets_tests {
         item.applied_recipe = Some(item.settings.current_recipe(model));
         item.result_rgba = Some(img.clone());
         item.land_colorize(ColorizeCache::new(plane, img));
-        item.status = BatchStatus::Done;
+        item.set_status_for_test(BatchStatus::Done);
         app.process_kept_run_items();
         assert!(app.batch.items[0].job.is_none() && !app.processor.is_colorize_in_flight(), "nothing runs");
     }
