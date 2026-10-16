@@ -390,3 +390,19 @@ fn try_another_waits_for_an_erase_elsewhere() {
     assert_eq!(app.reroll_refusal(), Some("Wait for the erase to finish, or cancel it."));
     assert!(!app.can_reroll_intent(), "one fill at a time");
 }
+
+/// A step recorded or undone on an image off screen keeps its result
+/// parked (packed in the timeline), and the run's start knows its size
+/// without unpacking it.
+#[test]
+fn a_parked_result_stays_parked_through_steps() {
+    let mut app = app_in(State::Cut, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    assert!(item.park_result());
+    item.settings.gamma = 1.3;
+    item.commit(StepKind::Adjust);
+    assert!(item.result_rgba.is_none() && item.has_result(), "the step shares the stored result, still parked");
+    assert!(item.undo_step().is_some());
+    assert!(item.result_rgba.is_none() && item.has_result(), "undone off screen: still parked");
+    assert_eq!(item.run_input_dims(Engine::Upscale), (8, 8), "the stored step knows its size");
+}

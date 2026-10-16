@@ -1210,9 +1210,12 @@ impl BatchItem {
     /// already stores.
     fn snapshot(&self, kind: StepKind) -> DocState {
         let shown = self.timeline.current();
+        // A parked result is the shown step's stored one: the new step
+        // shares it, still packed, instead of unpacking it to store again.
+        let result = if self.result_parked() { shown.result.clone() } else { store(self.result_rgba.as_ref(), shown.result.as_ref()) };
         DocState {
             kind,
-            result: store(self.result_rgba.as_ref(), shown.result.as_ref()),
+            result,
             recipe: self.applied_recipe.clone(),
             selection: store(self.selection_mask.as_ref(), shown.selection.as_ref()),
             selection_hash: self.selection_hash,
@@ -1228,7 +1231,6 @@ impl BatchItem {
 
     /// Record the working copy as a new step.
     pub(crate) fn commit(&mut self, kind: StepKind) {
-        self.unpark_result();
         let state = self.snapshot(kind);
         self.timeline.push(state);
         self.warm_neighbour_steps();
@@ -1279,7 +1281,6 @@ impl BatchItem {
 
     /// Fold the working copy into the shown step: a job it started landed.
     pub(crate) fn amend(&mut self) {
-        self.unpark_result();
         let shown = self.timeline.current();
         let state = DocState { at: shown.at, ..self.snapshot(shown.kind) };
         *self.timeline.current_mut() = state;
@@ -1427,7 +1428,6 @@ impl BatchItem {
     /// preview, is held to reveal it over, and a waiting image is done.
     pub(crate) fn show_result(&mut self, rgba: Arc<image::RgbaImage>) {
         self.hold_tile_preview_for_reveal();
-        self.unpark_result();
         self.take_result(rgba);
         self.failure = None;
     }
@@ -1639,7 +1639,9 @@ impl BatchItem {
         self.faces_changed();
         self.subject = None;
         let shown = self.timeline.current().clone();
-        self.result_rgba = shown.result.as_ref().and_then(|r| r.load());
+        // Off screen the restored step's result stays parked in the
+        // timeline; on screen the neighbour warm-up has it unpacked.
+        self.result_rgba = shown.result.as_ref().filter(|_| self.on_screen).and_then(|r| r.load());
         self.applied_recipe = shown.recipe;
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
         self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
@@ -1660,7 +1662,6 @@ impl BatchItem {
 
     /// Step back one state; returns what the undone step did.
     pub(crate) fn undo_step(&mut self) -> Option<StepKind> {
-        self.unpark_result();
         let undone = self.timeline.undo()?;
         self.restore();
         self.warm_neighbour_steps();
@@ -1669,7 +1670,6 @@ impl BatchItem {
 
     /// Step forward one state; returns what the redone step did.
     pub(crate) fn redo_step(&mut self) -> Option<StepKind> {
-        self.unpark_result();
         let redone = self.timeline.redo()?;
         self.restore();
         self.warm_neighbour_steps();
@@ -1962,10 +1962,8 @@ impl BatchItem {
 
     /// The shown result as a run's start (`None`: the original shows).
     fn shown_start(&self) -> Option<RunStart> {
-        self.timeline.current().result.clone().map(|image| RunStart {
-            image,
-            dims: self.result_rgba.as_ref().map_or(self.dimensions, |r| r.dimensions()),
-        })
+        // The stored step knows its size: a parked result is not the photo's size.
+        self.timeline.current().result.clone().map(|image| RunStart { dims: image.dims(), image })
     }
 
     /// The photo Restore faces works on at `stage`: the shown upscale's
@@ -2214,7 +2212,6 @@ impl BatchItem {
         match result {
             Ok(pr) => {
                 self.reset_result_caches();
-                self.unpark_result();
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.failure = None;
                 self.applied_recipe = Some(recipe_snapshot);
@@ -3335,8 +3332,9 @@ mod tests {
         Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([v, v, v, 255])))
     }
 
+    /// What the image shows, on screen or parked off it.
     fn shown(item: &BatchItem) -> Option<u8> {
-        item.result_rgba.as_ref().map(|r| r.get_pixel(0, 0)[0])
+        item.result_pixels().and_then(|p| p.load()).map(|r| r.get_pixel(0, 0)[0])
     }
 
     #[test]
