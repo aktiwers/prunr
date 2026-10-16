@@ -133,7 +133,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     });
 
     if let Some(intent) = hardware_intent {
-        dispatch_hardware_intent(app, intent);
+        dispatch_hardware_intent(app, intent, ctx);
     }
     // Turning the switch off frees the resident bundle now, not on the
     // next stroke.
@@ -148,7 +148,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     }
 }
 
-fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
+fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, ctx: &egui::Context) {
     match intent {
         HardwareSectionIntent::StartInstall(rt) => app.start_runtime_install(rt),
         HardwareSectionIntent::CancelInstall => {
@@ -157,11 +157,14 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
             }
         }
         HardwareSectionIntent::Uninstall(rt) => {
-            match crate::runtime_install::uninstall(rt) {
-                Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
-                Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
-            };
-            app.refresh_install_cache();
+            let (done, ctx) = (app.batch.bg_io.removed_tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let outcome = crate::runtime_install::uninstall(rt)
+                    .map(|()| format!("{} removed", rt.display_name()))
+                    .map_err(|e| format!("Uninstall failed: {e}"));
+                let _ = done.send(outcome);
+                ctx.request_repaint();
+            });
         }
         HardwareSectionIntent::PreferRuntime(choice) => {
             match crate::runtime_install::prefer(choice) {

@@ -132,6 +132,10 @@ pub struct BackgroundIO {
     /// `Err` when anything failed.
     pub save_done_tx: mpsc::Sender<Result<String, String>>,
     pub save_done_rx: mpsc::Receiver<Result<String, String>>,
+    /// A model or runtime removed off the UI thread: its toast text. The
+    /// installed set is read again when it lands.
+    pub(crate) removed_tx: mpsc::Sender<Result<String, String>>,
+    pub(crate) removed_rx: mpsc::Receiver<Result<String, String>>,
     /// A copy whose background was baked off the UI thread, for the
     /// clipboard, with the note to show once copied.
     pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,
@@ -200,6 +204,7 @@ impl Default for BackgroundIO {
 
 impl BackgroundIO {
     pub fn new() -> Self {
+        let (removed_tx, removed_rx) = mpsc::channel();
         let (file_load_tx, file_load_rx) = mpsc::channel();
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
@@ -215,6 +220,7 @@ impl BackgroundIO {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
+            removed_tx, removed_rx,
             file_load_tx, file_load_rx,
             thumb_tx, thumb_rx,
             decode_tx, decode_rx,
