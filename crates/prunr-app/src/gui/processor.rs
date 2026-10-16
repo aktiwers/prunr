@@ -1069,7 +1069,7 @@ impl Processor {
         &mut self,
         item_id: u64,
         image: super::item::Pixels,
-        correction: std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        correction: super::item::Region,
         tuning: InpaintTuning,
     ) {
         let latest = self.inpaint_latest_generation.entry(item_id).or_insert(0);
@@ -1095,7 +1095,7 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         self.spawn_model(move || {
-            let Some(image) = image.load() else {
+            let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
                 run.end();
                 let _ = tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
                 return;
@@ -1237,7 +1237,7 @@ impl Processor {
         item_id: u64,
         generation: u64,
         image: &super::item::Pixels,
-        correction: &std::sync::Arc<prunr_core::selection::MaskArtifact>,
+        correction: &super::item::Region,
         tuning: &InpaintTuning,
         progress: prunr_core::Progress,
     ) {
@@ -1261,7 +1261,7 @@ impl Processor {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
             };
             if cancelled() { send_cancelled(); return; }
-            let Some(image) = image.load() else {
+            let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
                 return;
             };

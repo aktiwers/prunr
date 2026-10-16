@@ -779,10 +779,7 @@ impl PrunrApp {
             Some(s) => crate::gui::item::Pixels::Parked(Arc::clone(&s.image)),
             None => item.photo_pixels(),
         };
-        let Some(region) = reroll.region.load() else {
-            tracing::warn!(item_id = item.id, "try another skipped: its region is unavailable");
-            return;
-        };
+        let region = crate::gui::item::Region::Stored(Arc::clone(&reroll.region));
         let item_id = item.id;
         let seed = prunr_core::inpaint_sd::fresh_seed();
         if self.settings.brush.sd_seed.is_some() {
