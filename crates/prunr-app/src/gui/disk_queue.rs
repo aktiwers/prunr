@@ -46,10 +46,7 @@ fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".part");
-    std::fs::write(&partial, bytes)?;
-    std::fs::rename(&partial, path)
+    crate::fs_util::write_bytes_replacing(path, bytes)
 }
 
 pub(crate) fn write(path: PathBuf, bytes: Vec<u8>) {
@@ -81,7 +78,8 @@ mod tests {
         super::write(path.clone(), b"second".to_vec());
         super::flush();
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
-        assert!(!dir.path().join("nested").join("settings.json.part").exists());
+        let left: Vec<_> = std::fs::read_dir(dir.path().join("nested")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("settings.json")], "no temp file left");
         super::remove(path.clone());
         super::write(dir.path().join("other.json"), b"x".to_vec());
         super::flush();

@@ -124,7 +124,7 @@ impl DepthExport {
         let depth = self.depth.get(export, None)?;
         let (w, h) = self.dims;
         let bytes = prunr_core::depth::encode_depth_png(&depth, w, h).map_err(|e| e.to_string())?;
-        std::fs::write(folder.join(&self.name), bytes).map_err(|e| e.to_string())
+        crate::fs_util::write_bytes_replacing(&folder.join(&self.name), &bytes).map_err(|e| e.to_string())
     }
 }
 
