@@ -498,6 +498,11 @@ impl SubprocessManager {
         &self.in_flight
     }
 
+    /// Why the subprocess died, once it has.
+    pub fn died(&mut self) -> Option<String> {
+        (!self.is_alive()).then(|| self.crash_reason())
+    }
+
     /// Describe why the subprocess died (for user-facing messages).
     pub fn crash_reason(&mut self) -> String {
         match self.child.try_wait() {

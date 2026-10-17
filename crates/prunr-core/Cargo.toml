@@ -20,8 +20,8 @@ test-utils = []
 prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }
 ort = { workspace = true }
-# The loader ort uses (same version): a runtime is opened and checked
-# here before ort loads it, as ort cannot load a second after a failure.
+# ort's own loader version: ort cannot load a second runtime after a
+# failed load, so each candidate is checked with this first.
 libloading = "0.9"
 ndarray = { workspace = true }
 image = { workspace = true }

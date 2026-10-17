@@ -17,22 +17,26 @@ pub fn write_replacing(
     let part = PathBuf::from(part);
     let file = match std::fs::File::create(&part) {
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && path.is_file() => {
-            let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
-            write(&mut w)?;
-            return w.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all();
+            return write_synced(std::fs::File::create(path)?, write);
         }
         file => file?,
     };
-    let written = (|| {
-        let mut w = std::io::BufWriter::new(file);
-        write(&mut w)?;
-        w.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()
-    })();
-    let result = written.and_then(|()| std::fs::rename(&part, path));
+    let result = write_synced(file, write).and_then(|()| std::fs::rename(&part, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&part);
     }
     result
+}
+
+/// Write into `file` and sync it to disk: a share reports a failed write
+/// only when flushed, and the rename must not land before that.
+fn write_synced(
+    file: std::fs::File,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut w = std::io::BufWriter::new(file);
+    write(&mut w)?;
+    w.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()
 }
 
 /// `bytes` as the whole of `path`, through `write_replacing`.
