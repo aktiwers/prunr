@@ -554,10 +554,12 @@ impl BatchManager {
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
                 // A parked result unpacks here, off the UI thread.
-                let Some(rgba) = result.load() else { return };
-                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
-                let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+                let image = result.load().map(|rgba| {
+                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                    let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
+                    (thumb.width(), thumb.height(), thumb.into_raw())
+                });
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
         } else {
             let source = source.clone();
@@ -575,9 +577,8 @@ impl BatchManager {
                     let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
                 })();
-                if let Some(thumb) = thumb {
-                    let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
-                }
+                let image = thumb.map(|t| (t.width(), t.height(), t.into_raw()));
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
         }
     }
@@ -1326,9 +1327,10 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
         bm.request_thumbnail(7, &source, Some(crate::gui::item::Pixels::Resident(result)));
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
-        assert_eq!(id, 7);
+        assert_eq!(msg.item_id, 7);
+        let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 200x200 fits within 160x160 → scaled to 160x160.
         assert_eq!((w, h), (160, 160));
         assert_eq!(pixels.len(), (w * h * 4) as usize);
@@ -1340,12 +1342,24 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_thumbnail(8, &source, None);
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
-        assert_eq!(id, 8);
+        assert_eq!(msg.item_id, 8);
+        let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 1x1 fits trivially → stays 1x1.
         assert_eq!((w, h), (1, 1));
         assert_eq!(pixels.len(), 4);
+    }
+
+    /// A thumbnail that cannot be made still answers, so its request ends:
+    /// an image that cannot be decoded left the "Preparing" pill up.
+    #[test]
+    fn a_thumbnail_that_cannot_be_made_still_answers() {
+        let bm = fixture();
+        bm.request_thumbnail(9, &ImageSource::Bytes(Arc::new(b"not an image".to_vec())), None);
+        let answer = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2)).expect("no answer: the request never ends");
+        assert_eq!(answer.item_id, 9);
+        assert!(answer.image.is_none());
     }
 
     // ── fit_dimensions (private helper) ─────────────────────────────────

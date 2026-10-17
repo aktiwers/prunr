@@ -276,7 +276,7 @@ fn render_thumbnail_layer(
 /// early-returns on the virtualization check before this is called, so
 /// off-screen rows never trigger a request.
 fn should_request_thumbnail(item: &BatchItem) -> bool {
-    item.thumb_texture.is_none() && !item.thumb_pending
+    item.thumb_texture.is_none() && !item.thumb_pending && !item.thumb_failed
 }
 
 fn request_item_thumbnail(app: &mut PrunrApp, i: usize) {
@@ -630,6 +630,14 @@ mod tests {
     fn should_not_request_when_already_pending() {
         let mut item = fresh_item();
         item.thumb_pending = true;
+        assert!(!should_request_thumbnail(&item));
+    }
+
+    /// A thumbnail that could not be made is not asked for every frame.
+    #[test]
+    fn should_not_request_again_after_a_failure() {
+        let mut item = fresh_item();
+        item.thumb_failed = true;
         assert!(!should_request_thumbnail(&item));
     }
 }

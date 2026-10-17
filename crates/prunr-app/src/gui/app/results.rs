@@ -861,20 +861,17 @@ impl PrunrApp {
         const THUMB_UPLOADS_PER_FRAME: usize = 3;
         let mut uploaded = 0;
         while uploaded < THUMB_UPLOADS_PER_FRAME {
-            let Ok((item_id, tw, th, pixels)) = self.batch.bg_io.thumb_rx.try_recv() else { break };
-            if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                    [tw as usize, th as usize],
-                    &pixels,
-                );
-                item.thumb_texture = Some(ctx.load_texture(
-                    format!("thumb_{item_id}"),
-                    ci,
-                    egui::TextureOptions::LINEAR,
-                ));
-                item.thumb_pending = false;
-                uploaded += 1;
-            }
+            let Ok(msg) = self.batch.bg_io.thumb_rx.try_recv() else { break };
+            let Some(item) = self.batch.find_by_id_mut(msg.item_id) else { continue };
+            item.thumb_pending = false;
+            let Some((tw, th, pixels)) = msg.image else {
+                // Not asked again until a result can make one.
+                item.thumb_failed = true;
+                continue;
+            };
+            let ci = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
+            item.thumb_texture = Some(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
+            uploaded += 1;
         }
         if uploaded == THUMB_UPLOADS_PER_FRAME {
             ctx.request_repaint();
