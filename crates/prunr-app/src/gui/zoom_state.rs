@@ -39,6 +39,13 @@ impl ZoomState {
         self.frame = Some((item, size));
     }
 
+    /// Zoom to `zoom` about `cursor` (from the canvas centre, in screen
+    /// points): the image point under the cursor stays under it.
+    pub fn zoom_about(&mut self, cursor: egui::Vec2, zoom: f32) {
+        self.pan_offset = cursor - (cursor - self.pan_offset) * (zoom / self.zoom);
+        self.zoom = zoom;
+    }
+
     /// Reset to default state, requesting fit-to-window on next frame.
     pub fn reset(&mut self) {
         self.pan_offset = egui::Vec2::ZERO;
@@ -72,5 +79,22 @@ mod tests {
         let before = z.zoom;
         z.follow_frame(2, source);
         assert_eq!(z.zoom, before, "another image is not rescaled here");
+    }
+
+    /// Scroll-zoom keeps the image point under the cursor where it is, at
+    /// any zoom: at an upscale's small fit zoom one notch threw the image
+    /// far off centre.
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor() {
+        let cursor = egui::vec2(300.0, 200.0);
+        for (zoom, pan) in [(1.0, egui::Vec2::ZERO), (0.16, egui::Vec2::ZERO), (0.16, egui::vec2(-40.0, 25.0)), (3.0, egui::vec2(10.0, -10.0))] {
+            let mut z = ZoomState { zoom, pan_offset: pan, ..ZoomState::default() };
+            let under = (cursor - z.pan_offset) / z.zoom;
+            for factor in [1.1, 1.1, 1.0 / 1.1, 2.0] {
+                z.zoom_about(cursor, z.zoom * factor);
+                let now = (cursor - z.pan_offset) / z.zoom;
+                assert!((now - under).length() < 1e-3, "from {zoom} at {pan:?}: {under:?} moved to {now:?}");
+            }
+        }
     }
 }
