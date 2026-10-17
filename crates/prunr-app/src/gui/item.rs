@@ -734,6 +734,8 @@ pub(crate) struct BatchItem {
     pub(crate) source_texture: Option<super::image_texture::ImageTexture>,
     pub(crate) thumb_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_pending: bool,
+    /// The thumbnail could not be made from what the image has.
+    pub(crate) thumb_failed: bool,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
     /// `source_dyn` for a live preview that starts from an earlier result:
     /// a `DynamicImage` wrapping that start, so drag ticks don't re-clone
@@ -1552,6 +1554,7 @@ impl BatchItem {
         self.result_rgba = Some(rgba);
         self.result_tex_pending = true;
         self.thumb_pending = true;
+        self.thumb_failed = false;
         self.quick.clear();
     }
 
@@ -2453,6 +2456,7 @@ impl BatchItem {
         self.result_tex_request += 1;
         self.thumb_texture = None;
         self.thumb_pending = false;
+        self.thumb_failed = false;
         self.source_tex_pending = false;
         self.result_tex_pending = false;
         self.decode_pending = false;
@@ -2686,6 +2690,7 @@ impl BatchItem {
             source_texture: None,
             thumb_texture: None,
             thumb_pending: false,
+            thumb_failed: false,
             result_rgba: None,
             start_dyn_cache: None,
             result_texture: None,
