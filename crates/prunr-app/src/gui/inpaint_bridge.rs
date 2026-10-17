@@ -242,6 +242,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 }
             }
         }
+        end_if_dead(&mut sub_state, &mut inflight_generations, &res_tx);
 
         if let SubState::Ready(s) = &mut sub_state {
             if idle_release_due(s.in_flight_items().is_empty(), last_used.elapsed(), keep_loaded) {
@@ -444,11 +445,29 @@ fn send_or_fail(
     }
 }
 
+/// A worker that died (killed for memory, crashed) ends the strokes it
+/// had, with why, and the next stroke starts a new one. Its last events
+/// are drained first, so a fill it finished still lands.
+fn end_if_dead(
+    sub_state: &mut SubState,
+    inflight_generations: &mut HashMap<u64, u64>,
+    res_tx: &mpsc::Sender<InpaintBridgeResult>,
+) {
+    let SubState::Ready(s) = sub_state else { return };
+    if s.is_alive() {
+        return;
+    }
+    let reason = s.crash_reason();
+    tracing::warn!(%reason, in_flight = inflight_generations.len(), "eraser worker ended");
+    *sub_state = SubState::Idle;
+    fail_inflight(inflight_generations, res_tx, &format!("The eraser stopped: {reason}. Erase again."));
+}
+
 /// End every in-flight stroke with `error`.
 fn fail_inflight(
     inflight_generations: &mut HashMap<u64, u64>,
     res_tx: &mpsc::Sender<InpaintBridgeResult>,
-    error: &'static str,
+    error: &str,
 ) {
     for (item_id, _generation) in inflight_generations.drain() {
         let _ = res_tx.send(InpaintBridgeResult::Error { item_id, error: error.into() });
@@ -475,5 +494,32 @@ mod tests {
         assert!(!idle_release_due(true, long, true), "kept loaded: stays");
         assert!(!idle_release_due(false, long, false), "a fill in flight: stays");
         assert!(!idle_release_due(true, Duration::from_secs(1), false), "not idle long enough");
+    }
+
+    /// A worker that dies mid-stroke ends the stroke with why, and the
+    /// next stroke starts a new worker: the stroke stayed busy for good.
+    #[test]
+    fn a_worker_that_dies_ends_its_strokes() {
+        let child = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .arg("--list")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a stand-in worker");
+        let mut state = SubState::Ready(SubprocessManager::for_test(child));
+        let mut inflight = HashMap::from([(7, 3)]);
+        let (tx, rx) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(state, SubState::Ready(_)) && Instant::now() < deadline {
+            end_if_dead(&mut state, &mut inflight, &tx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(state, SubState::Idle), "the next stroke starts a new worker");
+        assert!(inflight.is_empty());
+        match rx.try_recv() {
+            Ok(InpaintBridgeResult::Error { item_id: 7, error }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
+            _ => panic!("the stroke did not end"),
+        }
     }
 }
