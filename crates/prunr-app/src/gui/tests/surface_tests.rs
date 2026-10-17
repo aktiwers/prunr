@@ -616,9 +616,19 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
             app.batch.select_item(0);
             app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
         }
+        // A texture built off the UI thread asks for a frame at once when
+        // it lands; the pace is measured once that work is done.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         h.run_steps(3);
-        let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
-        assert!(delay >= std::time::Duration::from_millis(15), "{status:?}: the next frame is asked for {delay:?} ahead");
+        while h.state().quiet_background_work().is_some() && std::time::Instant::now() < deadline {
+            h.step();
+        }
+        h.run_steps(2);
+        for _ in 0..3 {
+            h.step();
+            let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            assert!(delay >= std::time::Duration::from_millis(15), "{status:?}: the next frame is asked for {delay:?} ahead");
+        }
     }
 }
 
