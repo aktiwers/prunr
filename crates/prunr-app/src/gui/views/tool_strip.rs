@@ -65,14 +65,13 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
             // The width the strip takes in one row, measured last frame:
             // past the room, the region knobs go on a second row. Measured
             // in both layouts alike, so the choice settles.
-            let fit_id = Id::new(("tool_strip_fit", tool.title()));
+            let fit_id = fit_id(tool);
             let one_row = ui.ctx().data(|d| d.get_temp::<f32>(fit_id));
             let frame_margin = theme::pill_frame().total_margin().sum().x;
             let two_rows = one_row.is_some_and(|w| w + frame_margin > available);
             let fill_knobs = shows(facts.model, Surface::FillRegionKnobs);
             let mut dots = None;
-            let mut measured = 0.0;
-            let strip_rect = theme::pill_frame().show(ui, |ui| {
+            let framed = theme::pill_frame().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
                 ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
                 let first = ui.horizontal(|ui| {
@@ -102,14 +101,15 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         strip.try_another = chip::tooltip(resp, "Try another", "Generate this fill again with a new seed. Undo brings the previous one back.", None).clicked();
                     }
                 }).response.rect.width();
-                measured = first;
-                if fill_knobs && two_rows {
-                    let second = ui.horizontal(|ui| region_knobs(ui, brush));
-                    change.committed |= second.inner;
-                    measured += ui.spacing().item_spacing.x + second.response.rect.width();
+                if !(fill_knobs && two_rows) {
+                    return first;
                 }
-            }).response.rect;
-            ui.ctx().data_mut(|d| d.insert_temp(fit_id, measured));
+                let second = ui.horizontal(|ui| region_knobs(ui, brush));
+                change.committed |= second.inner;
+                first + ui.spacing().item_spacing.x + second.response.rect.width()
+            });
+            let strip_rect = framed.response.rect;
+            ui.ctx().data_mut(|d| d.insert_temp(fit_id, framed.inner));
             if let Some(dots) = dots {
                 chip::flyout_under(Id::new(("tool_strip_more", tool.title())), &dots, strip_rect, |ui| {
                     change.merge(panel(ui, tool, brush, facts));
@@ -118,6 +118,11 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
         });
     strip.brush.action_changed = brush.cutout_action != action_before;
     strip
+}
+
+/// Where the strip keeps its one-row width between frames.
+pub(crate) fn fit_id(tool: Tool) -> Id {
+    Id::new(("tool_strip_fit", tool.title()))
 }
 
 /// The button's text: icon and words, built once.
