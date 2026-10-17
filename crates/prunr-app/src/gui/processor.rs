@@ -1701,7 +1701,6 @@ impl Processor {
         run_id: u64,
         input: super::item::Pixels,
         model_id: prunr_models::ModelId,
-        output_scale: prunr_core::OutputScale,
         cpu_only: bool,
         recipe: ProcessingRecipe,
     ) -> Result<(), String> {
@@ -1714,6 +1713,7 @@ impl Processor {
         };
         admitted(descriptor)?;
 
+        let output_scale = recipe.upscale.output_scale;
         let scale_factor = output_scale.factor();
 
         let cache_model_kind = match prunr_core::ModelKind::try_from(model_id) {

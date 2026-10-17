@@ -568,7 +568,7 @@ impl PrunrApp {
     /// for an older click lands on nothing.
     pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, reading: prunr_core::MaskReading, for_hash: u64) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if !item.retunable_decode().is_some_and(|ld| ld.committed_hash == for_hash) {
+        if item.retunable_decode().is_none_or(|ld| ld.committed_hash != for_hash) {
             return;
         }
         let changed = item.replace_selection_in_place(merged, hash);

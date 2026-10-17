@@ -138,10 +138,10 @@ struct Moments {
 impl Moments {
     fn push(&mut self, v: [f32; 3]) {
         self.n += 1.0;
-        for i in 0..3 {
-            let d = f64::from(v[i]) - self.mean[i];
-            self.mean[i] += d / self.n;
-            self.m2[i] += d * (f64::from(v[i]) - self.mean[i]);
+        for ((value, mean), m2) in v.iter().zip(&mut self.mean).zip(&mut self.m2) {
+            let d = f64::from(*value) - *mean;
+            *mean += d / self.n;
+            *m2 += d * (f64::from(*value) - *mean);
         }
     }
 
@@ -417,14 +417,15 @@ mod tests {
     fn apply_color_match_is_the_serial_two_pass_transfer() {
         fn serial(target: &mut RgbaImage, source: &RgbaImage) {
             let lab = |img: &RgbaImage| img.pixels().map(|p| srgb_to_lab(p.0[0], p.0[1], p.0[2])).collect::<Vec<_>>();
-            let stats = |v: &[(f32, f32, f32)], f: fn(&(f32, f32, f32)) -> f32| {
+            type Channel = fn(&(f32, f32, f32)) -> f32;
+            let stats = |v: &[(f32, f32, f32)], f: Channel| {
                 let n = v.len() as f64;
                 let mean = v.iter().map(|p| f(p) as f64).sum::<f64>() / n;
                 let var = v.iter().map(|p| (f(p) as f64 - mean).powi(2)).sum::<f64>() / n;
                 (mean as f32, var.sqrt() as f32)
             };
             let (s, t) = (lab(source), lab(target));
-            let ch: [fn(&(f32, f32, f32)) -> f32; 3] = [|p| p.0, |p| p.1, |p| p.2];
+            let ch: [Channel; 3] = [|p| p.0, |p| p.1, |p| p.2];
             let (ss, ts) = (ch.map(|f| stats(&s, f)), ch.map(|f| stats(&t, f)));
             for (px, l) in target.pixels_mut().zip(&t) {
                 let v = [l.0, l.1, l.2];
