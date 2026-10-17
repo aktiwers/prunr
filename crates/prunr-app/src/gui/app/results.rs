@@ -1935,7 +1935,8 @@ mod timeline_contract_tests {
         use crate::gui::worker::{CompressedTensor, RawSegTensor};
         use crate::gui::item_settings::ItemSettings;
         use prunr_core::ModelKind;
-        let change: [(&str, fn(&mut ItemSettings)); 2] = [
+        type Edit = fn(&mut ItemSettings);
+        let change: [(&str, Edit); 2] = [
             ("mask knob", |s| s.feather = 3.0),
             ("lines added", |s| s.line_mode = prunr_core::LineMode::SubjectOutline),
         ];

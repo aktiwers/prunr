@@ -106,6 +106,9 @@ pub(crate) enum RunImage {
 /// The error an image fails with when the start it runs from is unreadable.
 const START_UNREADABLE: &str = "The image to process could not be read";
 
+/// A run's start, and for a chained cut the start built for it.
+type ResolvedStart = (Option<Arc<image::RgbaImage>>, Option<Arc<image::RgbaImage>>);
+
 impl RunImage {
     /// What the run starts from (`None`: its file) and, for a chained cut,
     /// the start built for it here; `file` is read only when that start's
@@ -116,7 +119,7 @@ impl RunImage {
         &self,
         item_id: u64,
         file: impl FnOnce() -> Result<Arc<Vec<u8>>, String>,
-    ) -> Result<(Option<Arc<image::RgbaImage>>, Option<Arc<image::RgbaImage>>), String> {
+    ) -> Result<ResolvedStart, String> {
         let load = |start: &super::item::Pixels| start.load().ok_or_else(|| START_UNREADABLE.to_string());
         match self {
             RunImage::Start(start) => Ok((Some(load(start)?), None)),
@@ -889,9 +892,9 @@ fn spawn_and_initial_burst(
     let mut sent_count = 0;
     while sent_count < burst {
         match send_next(&mut sub, state, &mut sent, None, res_tx, ctx) {
-            Sent::Sent => sent_count += 1,
-            Sent::Unreadable => {}
-            Sent::Held | Sent::Nothing => break,
+            SendOutcome::Sent => sent_count += 1,
+            SendOutcome::Unreadable => {}
+            SendOutcome::Held | SendOutcome::Nothing => break,
         }
     }
     Some(InitialBurst { sub, sent, engines })
@@ -1141,7 +1144,7 @@ fn admit_next_item(
 }
 
 /// What `send_next` did.
-enum Sent {
+enum SendOutcome {
     Sent,
     /// The next work's inputs could not be read: it failed and went no further.
     Unreadable,
@@ -1160,7 +1163,7 @@ fn send_next(
     admitted: Option<&super::processor::CancelRegistry>,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) -> Sent {
+) -> SendOutcome {
     let cached = [
         (Lane::Tier2, SubprocessManager::send_repostprocess as SendCached),
         (Lane::AddEdge, SubprocessManager::send_add_edge_inference),
@@ -1174,15 +1177,15 @@ fn send_next(
         return match send_cached(sub, &work, send) {
             Ok(()) => {
                 ids.push(work.item_id);
-                Sent::Sent
+                SendOutcome::Sent
             }
             Err(Refused::Unreadable(err)) => {
                 report_failed(work.item_id, err, state, res_tx, ctx);
-                Sent::Unreadable
+                SendOutcome::Unreadable
             }
             Err(Refused::Worker) => {
                 pending.push_front(work);
-                Sent::Held
+                SendOutcome::Held
             }
         };
     }
@@ -1191,20 +1194,20 @@ fn send_next(
         None => match (admitted, state.additional_rx.as_ref().and_then(|rx| rx.try_recv().ok())) {
             (Some(cancels), Some(item)) if cancels.is_cancelled(item.id) => {
                 report_cancelled(item.id, state, res_tx, ctx);
-                return Sent::Nothing;
+                return SendOutcome::Nothing;
             }
             (Some(_), Some(item)) => (item, false),
-            _ => return Sent::Nothing,
+            _ => return SendOutcome::Nothing,
         },
     };
     match send_item_to_sub(sub, &item, res_tx) {
         Ok(()) => {
             sent.items.push(item);
-            Sent::Sent
+            SendOutcome::Sent
         }
         Err(Refused::Unreadable(err)) => {
             report_failed(item.id, err, state, res_tx, ctx);
-            Sent::Unreadable
+            SendOutcome::Unreadable
         }
         Err(Refused::Worker) => {
             if from_pending {
@@ -1212,7 +1215,7 @@ fn send_next(
             } else {
                 state.admit(item);
             }
-            Sent::Held
+            SendOutcome::Held
         }
     }
 }

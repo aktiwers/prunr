@@ -153,7 +153,7 @@ impl PrunrApp {
         item.start_job_at(Some(StepKind::Upscale), Engine::Upscale, start);
         let run = item.job_run().unwrap_or_default();
         // A refused run leaves no job: the image would wait on nothing.
-        if let Err(why) = self.processor.dispatch_upscale(item_id, run, input, run_model, output_scale, self.settings.cpu_only(), recipe) {
+        if let Err(why) = self.processor.dispatch_upscale(item_id, run, input, run_model, self.settings.cpu_only(), recipe) {
             self.batch.find_by_id_mut(item_id).map(BatchItem::abandon_job);
             self.toasts.error(format!("Upscale not started: {why}"));
             return false;
