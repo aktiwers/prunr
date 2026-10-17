@@ -200,7 +200,7 @@ fn writable_path(name: &str) -> std::io::Result<PathBuf> {
 fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)
+    crate::fs_util::write_bytes_replacing(path, json.as_bytes())
 }
 
 fn merge_into(
