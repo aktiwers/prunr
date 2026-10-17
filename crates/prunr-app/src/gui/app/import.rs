@@ -37,7 +37,7 @@ impl PrunrApp {
     }
 
     pub fn handle_open_path(&mut self, path: PathBuf) {
-        let Some(dims) = probe_dims_path(&path) else {
+        let Some(dims) = prunr_core::image_dimensions_from_path(&path) else {
             self.status_error("Could not load image");
             return;
         };
@@ -47,7 +47,7 @@ impl PrunrApp {
 
     /// Open an image from raw bytes; an empty name reads as "image".
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
-        let Some(dims) = probe_dims_bytes(&bytes) else {
+        let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else {
             self.status_error("Could not load image");
             return;
         };
@@ -94,7 +94,7 @@ impl PrunrApp {
 
     /// Add an image to the batch from raw bytes (clipboard/paste).
     pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String) {
-        let Some(dims) = probe_dims_bytes(&bytes) else { return };
+        let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else { return };
         self.add_to_batch_source(ImageSource::Bytes(Arc::new(bytes)), dims, filename);
     }
 
@@ -193,24 +193,6 @@ pub(super) fn display_name(path: &Path, fallback: &str) -> String {
     path.file_name().and_then(|n| n.to_str()).unwrap_or(fallback).to_string()
 }
 
-fn probe_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
-}
-
-/// Reads only the header, so the file is never loaded into RAM.
-fn probe_dims_path(path: &Path) -> Option<(u32, u32)> {
-    let file = std::fs::File::open(path).ok()?;
-    image::ImageReader::new(std::io::BufReader::new(file))
-        .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
-}
-
 /// Resolve a list of dropped paths: directories expand to their immediate
 /// supported-image children (no recursion). Returns `(resolved_paths,
 /// any_dir_was_empty)` — the second flag drives a "no images in folder"
@@ -248,7 +230,7 @@ pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Ve
         for path in resolved {
             let name = display_name(&path, UNTITLED);
             let len = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
-            let dims = probe_dims_path(&path);
+            let dims = prunr_core::image_dimensions_from_path(&path);
             // Once the receiver is gone every later send fails too.
             if tx.send(FileLoad::Image { source: ImageSource::Path(path), name, len, dims }).is_err() {
                 break;
@@ -264,7 +246,7 @@ fn queue_bytes_loads(tx: &std::sync::mpsc::Sender<FileLoad>, dropped: Vec<(Arc<[
     std::thread::spawn(move || {
         for (bytes, name) in dropped {
             let bytes = Arc::new(bytes.to_vec());
-            let dims = probe_dims_bytes(&bytes);
+            let dims = prunr_core::image_dimensions_from_bytes(&bytes);
             let name = if name.is_empty() { "image".into() } else { name };
             let load = FileLoad::Image { len: bytes.len(), source: ImageSource::Bytes(bytes), name, dims };
             if tx.send(load).is_err() {

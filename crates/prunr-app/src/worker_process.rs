@@ -232,12 +232,7 @@ fn spare_skipped(cancel: &DispatchCancel, stopping: &AtomicBool, on_screen: &Sho
 
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
 fn pixel_weight(image_bytes: &[u8]) -> usize {
-    // Read dimensions from header without full decode
-    let dims = image::ImageReader::new(std::io::Cursor::new(image_bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|r| r.into_dimensions().ok());
-    match dims {
+    match prunr_core::image_dimensions_from_bytes(image_bytes) {
         Some((w, h)) => ((w as usize * h as usize) / 1_000_000).max(1),
         None => 4, // conservative fallback (~4MP)
     }

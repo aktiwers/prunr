@@ -271,6 +271,30 @@ fn a_background_answered_after_its_image_was_removed_loads_nothing() {
     assert!(app.batch.bg_io.bg_image_rx.recv_timeout(NOTHING_WITHIN).is_err());
 }
 
+/// An SVG the Open dialog offers is opened, sized as it renders, and
+/// decodes: every one was rejected as "Could not load image".
+#[test]
+fn an_svg_opens_like_any_image() {
+    let mut harness = harness();
+    let dir = tempfile::tempdir().unwrap();
+    let svg = dir.path().join("logo.svg");
+    std::fs::write(&svg, br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="red"/></svg>"#).unwrap();
+    click(&mut harness, "Open");
+    harness.state_mut().system.answer_for_test(Some(vec![svg]));
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    while harness.state().batch.items.is_empty() && std::time::Instant::now() < deadline {
+        harness.step();
+    }
+    assert_eq!(harness.state().batch.items.len(), 1, "the SVG is in the batch");
+    assert_eq!(harness.state().batch.items[0].dimensions, (40, 20));
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    let decoded = |h: &egui_kittest::Harness<'_, PrunrApp>| h.state().batch.items[0].source_rgba.as_ref().map(|r| r.dimensions());
+    while decoded(&harness).is_none() && !harness.state().batch.items[0].decode_failed && std::time::Instant::now() < deadline {
+        harness.step();
+    }
+    assert_eq!(decoded(&harness), Some((40, 20)), "it decodes for the canvas");
+}
+
 /// The whole frame loop: the toolbar's Open asks, frames keep running
 /// while the dialog is up, and the answer lands through `logic()`.
 #[test]

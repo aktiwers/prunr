@@ -438,7 +438,7 @@ impl BatchManager {
             // The `DynamicImage` (~50 MB at 4 K RGBA) and the encoded
             // bytes both drop before the channel send, so concurrent
             // decodes don't pile up DynamicImage + RGBA per thread.
-            let result = bytes().and_then(|bytes| match image::load_from_memory(&bytes) {
+            let result = bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
                 Ok(img) => Ok(Arc::new(img.to_rgba8())),
                 Err(e) => Err(format!("decode failed: {e}")),
             });
@@ -572,7 +572,7 @@ impl BatchManager {
                 // ~50 MB co-resident).
                 let thumb = (|| -> Option<image::RgbaImage> {
                     let bytes = source.load_bytes().ok()?;
-                    let img = image::load_from_memory(&bytes).ok()?;
+                    let img = prunr_core::load_image_from_bytes(&bytes).ok()?;
                     drop(bytes);
                     let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
