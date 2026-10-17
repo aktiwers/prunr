@@ -333,7 +333,12 @@ mod tests {
         use prunr_core::ort_runtime::{DylibSource, DYLIB_NAME};
         let store = Path::new("/data/prunr/runtimes");
         let openvino = store.join(RuntimeId::OpenVino.install_subdir()).join(DYLIB_NAME);
-        assert_eq!(RuntimeChoice::of_library(&openvino, DylibSource::RuntimeStore), Some(RuntimeChoice::Store(RuntimeId::OpenVino)));
+        let offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino);
+        assert_eq!(
+            RuntimeChoice::of_library(&openvino, DylibSource::RuntimeStore),
+            offered.then_some(RuntimeChoice::Store(RuntimeId::OpenVino)),
+            "an install Settings does not offer is no choice",
+        );
         assert_eq!(RuntimeChoice::of_library(&store.join("onnxruntime-1.24.1-linux-x64").join(DYLIB_NAME), DylibSource::RuntimeStore), None);
         assert_eq!(RuntimeChoice::of_library(Path::new("/opt/prunr/runtime").join(DYLIB_NAME).as_path(), DylibSource::Bundled), Some(RuntimeChoice::BuiltIn));
         assert_eq!(RuntimeChoice::of_library(&openvino, DylibSource::EnvVar), None);

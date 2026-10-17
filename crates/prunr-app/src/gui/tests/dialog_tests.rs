@@ -285,6 +285,11 @@ fn open_button_asks_and_the_frame_loop_lands_the_answer() {
     let dir = tempfile::tempdir().unwrap();
     let picked = png_on_disk(dir.path(), "picked.png");
     harness.state_mut().system.answer_for_test(Some(vec![picked]));
+    // The file loads on a worker; frames run until it lands.
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    while harness.state().batch.items.is_empty() && std::time::Instant::now() < deadline {
+        harness.step();
+    }
     settle(&mut harness);
 
     assert_eq!(harness.state().batch.items.len(), 1);
