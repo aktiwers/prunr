@@ -161,9 +161,7 @@ impl PrunrApp {
     /// On Windows/macOS: calls the `drag` crate with PNG temp files.
     /// On Linux: a one-time fallback toast, no files written (winit and the
     /// drag crate conflict on Linux).
-    pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame) {
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let _ = frame;
+    pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame, ctx: &egui::Context) {
         if !crate::gui::drag_export::DRAG_OUT_SUPPORTED {
             if !self.drag_export.linux_notified {
                 self.drag_export.linux_notified = true;
@@ -174,47 +172,47 @@ impl PrunrApp {
             }
             return;
         }
+        // The drag waits for files not written ahead yet, on workers, and
+        // starts once they are in: writing them here held the frame.
+        self.drag_export.begin(ids);
+        self.continue_drag_out(frame, ctx);
+    }
+
+    /// A drag waiting for its files: starts once they are all written,
+    /// while the button is still held; until then the cursor says it is
+    /// working. Let go first, and there is no drag.
+    pub(super) fn continue_drag_out(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
         use crate::gui::drag_export::{DragFiles, DragKey};
+        use crate::gui::drag_export_state::DragReady;
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let _ = frame;
         let spec = self.drag_spec();
-        // Files not written ahead are written now, in parallel, while the
-        // writes ahead still running finish.
-        let mut ahead: Vec<(usize, u64, DragKey)> = Vec::new();
-        let mut fresh: Vec<(usize, DragFiles)> = Vec::new();
-        for (slot, id) in ids.iter().enumerate() {
-            let Some(item) = self.batch.find_by_id(*id) else { continue };
-            let key = DragKey::of(item, spec);
-            if self.drag_export.has_current(*id, &key) {
-                ahead.push((slot, *id, key));
-            } else {
-                fresh.push((slot, DragFiles::of(item, spec)));
+        let batch = &self.batch;
+        let ready = self.drag_export.poll_start(
+            |id| batch.find_by_id(id).map(|item| DragKey::of(item, spec)),
+            |id| batch.find_by_id(id).map(|item| DragFiles::of(item, spec)),
+        );
+        let held = ctx.input(|i| i.pointer.any_down());
+        let (ids, paths) = match ready {
+            DragReady::Idle => return,
+            DragReady::Waiting if held => {
+                ctx.set_cursor_icon(egui::CursorIcon::Progress);
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                return;
             }
-        }
-        let mut written: Vec<Option<std::io::Result<Vec<PathBuf>>>> = ids.iter().map(|_| None).collect();
-        let (slots, jobs): (Vec<usize>, Vec<DragFiles>) = fresh.into_iter().unzip();
-        for (slot, result) in slots.into_iter().zip(crate::gui::drag_export::write_all(jobs)) {
-            written[slot] = Some(result);
-        }
-        // A write ahead that failed or went stale meanwhile is written now,
-        // with the rest of the misses.
-        let mut missed: Vec<(usize, DragFiles)> = Vec::new();
-        for (slot, id, key) in ahead {
-            match self.drag_export.take_written(id, &key) {
-                Some(paths) => written[slot] = Some(Ok(paths)),
-                None => missed.extend(self.batch.find_by_id(id).map(|item| (slot, DragFiles::of(item, spec)))),
+            DragReady::Waiting => {
+                self.drag_export.cancel_start();
+                return;
             }
-        }
-        let (slots, jobs): (Vec<usize>, Vec<DragFiles>) = missed.into_iter().unzip();
-        for (slot, result) in slots.into_iter().zip(crate::gui::drag_export::write_all(jobs)) {
-            written[slot] = Some(result);
-        }
-        let mut paths: Vec<PathBuf> = Vec::with_capacity(ids.len());
-        for result in written.into_iter().flatten() {
-            match result {
-                Ok(mut ps) => paths.append(&mut ps),
-                Err(e) => { self.toasts.error(format!("Drag export failed: {e}")); }
+            DragReady::Ready { ids, paths, failed } => {
+                for id in failed {
+                    let name = self.batch.find_by_id(id).map_or("an image", |i| i.filename.as_str()).to_string();
+                    self.toasts.error(format!("Drag export failed for {name}"));
+                }
+                (ids, paths)
             }
-        }
-        if paths.is_empty() {
+        };
+        if paths.is_empty() || !held {
             return;
         }
 
@@ -245,7 +243,6 @@ impl PrunrApp {
                 self.toasts.error(format!("Drag failed: {e}"));
             }
         }
-
     }
 
     /// Write the drag files of the thumbnail under the pointer (and the

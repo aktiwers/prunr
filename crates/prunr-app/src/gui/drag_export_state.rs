@@ -77,6 +77,25 @@ pub(crate) struct DragExportState {
     /// checked: nothing is due until the pointer moves to another one.
     /// An edit made while it rests there is written by the drag itself.
     settled: Option<u64>,
+    /// A drag out waiting for its files, written on workers: it starts
+    /// once they are all written, if the button is still held.
+    starting: Option<StartingDrag>,
+}
+
+/// The images a drag takes, and those whose files it asked a write for.
+struct StartingDrag {
+    ids: Vec<u64>,
+    asked: HashSet<u64>,
+}
+
+/// Where a drag waiting for its files stands.
+pub(crate) enum DragReady {
+    /// No drag is waiting.
+    Idle,
+    Waiting,
+    /// Every write has landed: the images dragged, their files, and the
+    /// images whose write failed.
+    Ready { ids: Vec<u64>, paths: Vec<PathBuf>, failed: Vec<u64> },
 }
 
 impl DragExportState {
@@ -89,6 +108,7 @@ impl DragExportState {
             hover: None,
             prewritten: HashMap::new(),
             settled: None,
+            starting: None,
         }
     }
 
@@ -210,6 +230,59 @@ impl DragExportState {
         let paths = paths?;
         self.prewritten.insert(id, Prewrite { key: prewrite.key, files: PrewriteFiles::Written(paths.clone()) });
         Some(paths)
+    }
+
+    /// A drag of `ids` waits for their files: each not written for its
+    /// current state is written on a worker; `poll_start` says when they
+    /// are all in.
+    pub(crate) fn begin(&mut self, ids: Vec<u64>) {
+        self.starting = Some(StartingDrag { ids, asked: HashSet::new() });
+    }
+
+    /// The waiting drag's files, once every write has landed. An image
+    /// whose files are not current is written (once): `key_of` / `files_of`
+    /// give its state and its files now.
+    pub(crate) fn poll_start(
+        &mut self,
+        key_of: impl Fn(u64) -> Option<DragKey>,
+        files_of: impl Fn(u64) -> Option<DragFiles>,
+    ) -> DragReady {
+        let Some(mut drag) = self.starting.take() else { return DragReady::Idle };
+        let (mut paths, mut failed, mut waiting) = (Vec::new(), Vec::new(), false);
+        for &id in &drag.ids {
+            let Some(key) = key_of(id) else { continue };
+            if self.is_writing(id) {
+                waiting = true;
+            } else if self.has_current(id, &key) {
+                // Finished: taking it waits for nothing.
+                match self.take_written(id, &key) {
+                    Some(mut written) => paths.append(&mut written),
+                    None => failed.push(id),
+                }
+            } else if !drag.asked.contains(&id) {
+                // `writers()` at a time: each write holds a baked copy of
+                // its image.
+                if self.writes_running() < writers() {
+                    drag.asked.insert(id);
+                    if let Some(files) = files_of(id) {
+                        self.prewrite(id, key, files);
+                    }
+                }
+                waiting = true;
+            } else {
+                failed.push(id);
+            }
+        }
+        if waiting {
+            self.starting = Some(drag);
+            return DragReady::Waiting;
+        }
+        DragReady::Ready { ids: drag.ids, paths, failed }
+    }
+
+    /// The button was let go before the files were in: no drag.
+    pub(crate) fn cancel_start(&mut self) {
+        self.starting = None;
     }
 
     /// Clear active drag-out state (used on drag end, error, and Linux fallback).

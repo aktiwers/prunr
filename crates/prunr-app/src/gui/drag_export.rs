@@ -431,20 +431,6 @@ impl DragFiles {
     }
 }
 
-/// Write each item's files, `writers()` at a time (each write holds a
-/// baked copy of its image); the results come back in the order given.
-pub(crate) fn write_all(jobs: Vec<DragFiles>) -> Vec<std::io::Result<Vec<PathBuf>>> {
-    use rayon::prelude::*;
-    let depth = ExportDepth::default();
-    match rayon::ThreadPoolBuilder::new().num_threads(super::drag_export_state::writers()).build() {
-        Ok(pool) => pool.install(|| jobs.par_iter().map(|job| job.write(&depth)).collect()),
-        Err(err) => {
-            tracing::warn!(%err, "drag writer pool failed to start; writing one at a time");
-            jobs.iter().map(|job| job.write(&depth)).collect()
-        }
-    }
-}
-
 /// What a drag's files were made from, to tell whether files written
 /// earlier still show the item. Images are held weakly: the key keeps no
 /// pixels alive, and a live weak handle keeps its address from reuse.
@@ -867,20 +853,38 @@ mod tests {
         }
     }
 
-    /// Files the drag still needs are written in parallel, in the order
-    /// asked.
+    /// A drag waits for the files it still needs, written on workers, and
+    /// gets them in the order of its images; one whose write failed is
+    /// named, and the drag goes on with the rest.
     #[test]
-    fn files_missing_at_the_drag_are_written_in_order() {
+    fn a_drag_waits_for_its_files_and_takes_them_in_order() {
         use crate::gui::brush_state::CutoutAction;
+        use crate::gui::drag_export_state::{DragExportState, DragReady};
+        use crate::gui::item::{BatchItem, ImageSource};
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
         let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
-        let items: Vec<_> = (200..206).map(|id| processed_item(id, &format!("order{id}.jpg"))).collect();
-        let written = write_all(items.iter().map(|i| DragFiles::of(i, spec)).collect());
-        for (result, item) in written.into_iter().zip(&items) {
-            let paths = result.expect("written");
-            assert!(paths[0].ends_with(format!("order{}.prunr.png", item.id)));
-            let _ = std::fs::remove_file(&paths[0]);
+        let mut items: Vec<_> = (200..204).map(|id| processed_item(id, &format!("order{id}.jpg"))).collect();
+        let gone = ImageSource::Path(PathBuf::from("/nonexistent/prunr-drag-order-gone.png"));
+        items.push(BatchItem::new(299, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new()));
+        let find = |id: u64| items.iter().find(|i| i.id == id);
+        let mut state = DragExportState::new();
+        state.begin(items.iter().map(|i| i.id).collect());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let (ids, paths, failed) = loop {
+            match state.poll_start(|id| find(id).map(|i| DragKey::of(i, spec)), |id| find(id).map(|i| DragFiles::of(i, spec))) {
+                DragReady::Ready { ids, paths, failed } => break (ids, paths, failed),
+                DragReady::Waiting => assert!(std::time::Instant::now() < deadline, "the writes land"),
+                DragReady::Idle => panic!("a drag is waiting"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert_eq!(ids.len(), 5);
+        assert_eq!(failed, vec![299], "the unreadable one is named");
+        for (path, item) in paths.iter().zip(&items) {
+            assert!(path.ends_with(format!("order{}.prunr.png", item.id)), "{path:?}");
+            let _ = std::fs::remove_file(path);
         }
+        assert!(matches!(state.poll_start(|_| None, |_| None), DragReady::Idle), "the drag has its files");
     }
 }
 
