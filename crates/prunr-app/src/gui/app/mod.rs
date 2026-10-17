@@ -131,9 +131,7 @@ pub struct PrunrApp {
     /// where `requires_license_acceptance() && !has_accepted_license`;
     /// cleared on Accept (then `start_download`) or Cancel.
     pub(crate) pending_license_request: Option<prunr_models::ModelId>,
-    /// Notes made while the app was built, shown on the first frame (egui
-    /// is not ready before): a saved model that now needs a download, a
-    /// runtime that would not load.
+    /// Shown on the first frame: egui is not ready while the app is built.
     pub(crate) pending_first_toasts: Vec<String>,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
@@ -1424,17 +1422,13 @@ fn save_screenshots(images: Vec<std::sync::Arc<egui::ColorImage>>) {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let path = dir.join(format!("{stamp}.png"));
-        let partial = dir.join(format!("{stamp}.png.part"));
         let [w, h] = image.size;
         let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
         let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {
             tracing::warn!("screenshot dims mismatch — skipping");
             continue;
         };
-        let saved = rgba.save_with_format(&partial, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())
-            .and_then(|()| std::fs::rename(&partial, &path).map_err(|e| e.to_string()));
-        match saved {
+        match crate::fs_util::save_image_replacing(&path, &rgba) {
             Ok(()) => tracing::info!(?path, "screenshot saved"),
             Err(e) => tracing::warn!(%e, ?path, "screenshot save failed"),
         }
