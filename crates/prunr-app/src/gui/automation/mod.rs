@@ -50,6 +50,8 @@ pub enum Request {
     /// Turn the wheel over a control, `lines` up (positive) or down: what
     /// brings a row below a list's fold into view.
     Scroll { name: String, lines: f32 },
+    /// Turn the wheel at a window position (points): zoom the canvas there.
+    ScrollAt { x: f32, y: f32, lines: f32 },
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
     Key { chord: String },
     Type { text: String },
@@ -156,6 +158,17 @@ impl Automation {
         self.tree.snapshot().ok_or_else(|| "no frame rendered yet".to_string())
     }
 
+    /// One wheel turn of `lines` at `pos`, the pointer moved there first.
+    fn wheel_at(&mut self, pos: egui::Pos2, lines: f32) {
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, lines),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
+    }
+
     /// The one control named `name`, with its centre.
     fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
         let root = self.snapshot()?;
@@ -212,14 +225,12 @@ impl Automation {
             }
             Request::Scroll { name, lines } => {
                 let (target, pos) = self.target(&name)?;
-                let wheel = egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Line,
-                    delta: egui::vec2(0.0, lines),
-                    phase: egui::TouchPhase::Move,
-                    modifiers: egui::Modifiers::NONE,
-                };
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
+                self.wheel_at(pos, lines);
                 (4, Response::ok(target))
+            }
+            Request::ScrollAt { x, y, lines } => {
+                self.wheel_at(egui::pos2(x, y), lines);
+                (4, Response::ok(()))
             }
             Request::Release => {
                 let (pos, modifiers) = self.held_at.take().ok_or("nothing is held")?;
@@ -359,6 +370,8 @@ mod tests {
         assert!(matches!(req, Request::Click { ref name, secondary: false } if name == "Settings"));
         let req: Request = serde_json::from_str(r#"{"cmd":"scroll","name":"Silueta","lines":-5}"#).unwrap();
         assert!(matches!(req, Request::Scroll { ref name, lines } if name == "Silueta" && lines == -5.0));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll_at","x":600,"y":400,"lines":2}"#).unwrap();
+        assert!(matches!(req, Request::ScrollAt { x, y, lines } if x == 600.0 && y == 400.0 && lines == 2.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"wait"}"#).unwrap();
         assert!(matches!(req, Request::Wait { frames: 1 }));
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"explode"}"#).is_err());
