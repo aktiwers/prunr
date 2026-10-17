@@ -142,14 +142,21 @@ pub struct TexPrepHandles {
     pub slots: Arc<DecodeSlots>,
 }
 
+/// A thumbnail built off the UI thread: its RGBA pixels and size, or
+/// `None` when the image could not be read for one.
+pub struct ThumbMsg {
+    pub item_id: u64,
+    pub image: Option<(u32, u32, Vec<u8>)>,
+}
+
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
     pub(crate) file_load_tx: mpsc::Sender<FileLoad>,
     pub(crate) file_load_rx: mpsc::Receiver<FileLoad>,
     /// Thumbnail generation results
-    pub thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
-    pub thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
+    pub thumb_tx: mpsc::Sender<ThumbMsg>,
+    pub thumb_rx: mpsc::Receiver<ThumbMsg>,
     /// Pre-decoded source images for instant canvas switching
     pub decode_tx: mpsc::Sender<DecodeResult>,
     pub decode_rx: mpsc::Receiver<DecodeResult>,
