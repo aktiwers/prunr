@@ -31,12 +31,20 @@ pub(crate) enum FileLoad {
     NoImagesInFolder,
 }
 
-/// Where an uploaded texture lands, and the parked result its build
-/// unpacked.
-pub(crate) struct TexLanding {
-    pub(crate) item_id: u64,
-    pub(crate) target: TexTarget,
-    pub(crate) unpacked: Option<std::sync::Arc<image::RgbaImage>>,
+/// Where an uploaded texture lands.
+pub(crate) enum TexLanding {
+    /// An image texture, with the parked result its build unpacked.
+    Image { item_id: u64, target: TexTarget, unpacked: Option<std::sync::Arc<image::RgbaImage>> },
+    /// A whole selection overlay: the mask it shows and the feathered
+    /// plane it was built from.
+    Selection {
+        item_id: u64,
+        key: SelectionTextureKey,
+        shown: Arc<prunr_core::selection::MaskArtifact>,
+        feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    },
+    /// The picture behind the result, for `key`.
+    Backdrop { item_id: u64, key: u64 },
 }
 
 /// A texture built off-thread for upload.
@@ -72,7 +80,7 @@ pub(crate) struct SelectionTextureResult {
 pub(crate) enum SelectionImage {
     /// The whole overlay, and the feathered plane it was built from when
     /// the style feathers (so actions can reuse it).
-    Full { image: egui::ColorImage, feathered: Option<Arc<prunr_core::selection::MaskArtifact>> },
+    Full { image: crate::gui::image_texture::PreparedImage, feathered: Option<Arc<prunr_core::selection::MaskArtifact>> },
     /// The pixels that differ from the texture showing `base_hash`,
     /// to upload at `pos` into that texture.
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
@@ -166,8 +174,8 @@ pub struct BackgroundIO {
     /// image. Drain calls `ctx.load_texture` with the bg-specific
     /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
     /// The `to_rgba8()` copy (~32 MB on a 4K bg) stays off the UI thread.
-    pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<egui::ColorImage>)>,
-    pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<egui::ColorImage>)>,
+    pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
+    pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
     /// Bounds simultaneous background jobs to `available_parallelism()`.
@@ -283,14 +291,14 @@ impl BackgroundIO {
             let (image, shown) = match style.shown_region(&mask) {
                 Some(reach) => {
                     let image = patch_from(base, &reach)
-                        .unwrap_or_else(|| SelectionImage::Full { image: build_selection_image(&reach, style), feathered: None });
+                        .unwrap_or_else(|| SelectionImage::Full { image: prepared(build_selection_image(&reach, style)), feathered: None });
                     (image, reach)
                 }
                 None => {
                     let image = patch_from(base, &mask).unwrap_or_else(|| {
                         let feathered = style.feather(&mask, source.as_deref());
                         let shown = feathered.as_ref().unwrap_or(&mask);
-                        SelectionImage::Full { image: build_selection_image(shown, style), feathered }
+                        SelectionImage::Full { image: prepared(build_selection_image(shown, style)), feathered }
                     });
                     (image, mask)
                 }
@@ -413,6 +421,11 @@ impl SelectionStyle {
 
 /// ACCENT-tinted image (Erase's red when `style.erase`): each cell at the fill alpha scaled by its
 /// coverage, so a feathered edge or a faint stroke shows as such, and
+/// An overlay cut into tiles on the thread that built it.
+fn prepared(image: egui::ColorImage) -> crate::gui::image_texture::PreparedImage {
+    crate::gui::image_texture::PreparedImage::from_color_image(image)
+}
+
 /// the outline band stamped over it.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
@@ -517,7 +530,8 @@ mod tests {
         let wait = std::time::Duration::from_secs(10);
         io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, None, ctx.clone());
         let first = io.selection_texture_rx.recv_timeout(wait).expect("the first build");
-        let SelectionImage::Full { image: full_a, .. } = first.image else { panic!("a first build is whole") };
+        let SelectionImage::Full { .. } = first.image else { panic!("a first build is whole") };
+        let full_a = build_selection_image(&first.shown, style);
         assert_eq!(first.shown.cells(), style.shown_region(&a).expect("an eraser").cells(), "the texture remembers the reach it drew");
         io.request_selection_visualization(1, Arc::clone(&b), (2, style), None, Some((1, Arc::clone(&first.shown))), ctx);
         let second = io.selection_texture_rx.recv_timeout(wait).expect("the second build");

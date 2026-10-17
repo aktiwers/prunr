@@ -36,6 +36,8 @@ pub(crate) struct ImageTexture {
 pub(crate) struct Tile<T> {
     pub(crate) part: Rect,
     pub(crate) texture_uv: Rect,
+    /// Where the texture's first pixel is in the image.
+    pub(crate) origin: [usize; 2],
     pub(crate) texture: T,
 }
 
@@ -43,7 +45,7 @@ impl ImageTexture {
     /// A texture uploaded whole: a small image.
     pub(crate) fn single(handle: TextureHandle) -> Self {
         let unit = crate::gui::views::effects::UNIT_UV;
-        Self { size: handle.size(), tiles: Arc::from([Tile { part: unit, texture_uv: unit, texture: handle }]) }
+        Self { size: handle.size(), tiles: Arc::from([Tile { part: unit, texture_uv: unit, origin: [0, 0], texture: handle }]) }
     }
 
     pub(crate) fn size_vec2(&self) -> egui::Vec2 {
@@ -62,13 +64,77 @@ impl ImageTexture {
 
 
     pub(crate) fn tiles(&self) -> impl Iterator<Item = Tile<TextureId>> + '_ {
-        self.tiles.iter().map(|t| Tile { part: t.part, texture_uv: t.texture_uv, texture: t.texture.id() })
+        self.tiles.iter().map(|t| Tile { part: t.part, texture_uv: t.texture_uv, origin: t.origin, texture: t.texture.id() })
     }
 
     /// The image in `rect`, tinted.
     pub(crate) fn paint(&self, painter: &egui::Painter, rect: Rect, tint: Color32) {
-        for tile in self.tiles() {
-            painter.image(tile.texture, part_of(rect, tile.part), tile.texture_uv, tint);
+        self.paint_region(painter, rect, crate::gui::views::effects::UNIT_UV, tint);
+    }
+
+    /// `region` of the image (0..1; past 1 it repeats the image) in
+    /// `rect`, tinted.
+    pub(crate) fn paint_region(&self, painter: &egui::Painter, rect: Rect, region: Rect, tint: Color32) {
+        for (screen, texture, uv) in self.region_pieces(rect, region) {
+            painter.image(texture, screen, uv, tint);
+        }
+    }
+
+    /// What `paint_region` draws: each piece's screen rect, texture and
+    /// texture coordinates.
+    fn region_pieces(&self, rect: Rect, region: Rect) -> Vec<(Rect, TextureId, Rect)> {
+        let mut pieces = Vec::new();
+        if region.width() <= 0.0 || region.height() <= 0.0 {
+            return pieces;
+        }
+        let to_screen = |p: egui::Pos2| rect.lerp_inside(egui::vec2((p.x - region.min.x) / region.width(), (p.y - region.min.y) / region.height()));
+        // Each repeat of the image the region reaches, then each tile in it.
+        for cy in region.min.y.floor() as i32..region.max.y.ceil() as i32 {
+            for cx in region.min.x.floor() as i32..region.max.x.ceil() as i32 {
+                let offset = egui::vec2(cx as f32, cy as f32);
+                let cell = region.intersect(Rect::from_min_size(offset.to_pos2(), egui::vec2(1.0, 1.0)));
+                for tile in self.tiles() {
+                    let shown = cell.intersect(tile.part.translate(offset));
+                    if shown.width() <= 0.0 || shown.height() <= 0.0 {
+                        continue;
+                    }
+                    let in_tile = |p: egui::Pos2| {
+                        let local = p - offset;
+                        tile.texture_uv.lerp_inside(egui::vec2(
+                            (local.x - tile.part.min.x) / tile.part.width(),
+                            (local.y - tile.part.min.y) / tile.part.height(),
+                        ))
+                    };
+                    let screen = Rect::from_min_max(to_screen(shown.min), to_screen(shown.max));
+                    pieces.push((screen, tile.texture, Rect::from_min_max(in_tile(shown.min), in_tile(shown.max))));
+                }
+            }
+        }
+        pieces
+    }
+
+    /// Write `patch`, whose first pixel is at `pos` in the image, into
+    /// the tiles it overlaps.
+    pub(crate) fn set_partial(&self, pos: [usize; 2], patch: &egui::ColorImage, options: TextureOptions) {
+        let [pw, ph] = patch.size;
+        for tile in self.tiles.iter() {
+            let [tw, th] = tile.texture.size();
+            let x0 = pos[0].max(tile.origin[0]);
+            let y0 = pos[1].max(tile.origin[1]);
+            let x1 = (pos[0] + pw).min(tile.origin[0] + tw);
+            let y1 = (pos[1] + ph).min(tile.origin[1] + th);
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            let (w, h) = (x1 - x0, y1 - y0);
+            let mut pixels = Vec::with_capacity(w * h);
+            for row in y0..y1 {
+                let start = (row - pos[1]) * pw + (x0 - pos[0]);
+                pixels.extend_from_slice(&patch.pixels[start..start + w]);
+            }
+            let local = [x0 - tile.origin[0], y0 - tile.origin[1]];
+            // A handle's clone writes the same texture.
+            tile.texture.clone().set_partial(local, egui::ColorImage::new([w, h], pixels), options);
         }
     }
 }
@@ -94,6 +160,39 @@ impl PreparedImage {
     pub(crate) fn from_rgba(rgba: &image::RgbaImage) -> Self {
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         let raw = rgba.as_raw();
+        Self::cut(w, h, |[x0, y0], [gw, gh]| {
+            if (gw, gh) == (w, h) {
+                return egui::ColorImage::from_rgba_unmultiplied([w, h], raw);
+            }
+            let mut pixels = Vec::with_capacity(gw * gh * 4);
+            for row in y0..y0 + gh {
+                let start = (row * w + x0) * 4;
+                pixels.extend_from_slice(&raw[start..start + gw * 4]);
+            }
+            egui::ColorImage::from_rgba_unmultiplied([gw, gh], &pixels)
+        })
+    }
+
+    /// The tiles of an image already in egui's pixels.
+    pub(crate) fn from_color_image(image: egui::ColorImage) -> Self {
+        let [w, h] = image.size;
+        if w <= TILE_SIDE && h <= TILE_SIDE {
+            let unit = crate::gui::views::effects::UNIT_UV;
+            return Self { size: [w, h], tiles: vec![Tile { part: unit, texture_uv: unit, origin: [0, 0], texture: image }] };
+        }
+        Self::cut(w, h, |[x0, y0], [gw, gh]| {
+            let mut pixels = Vec::with_capacity(gw * gh);
+            for row in y0..y0 + gh {
+                let start = row * w + x0;
+                pixels.extend_from_slice(&image.pixels[start..start + gw]);
+            }
+            egui::ColorImage::new([gw, gh], pixels)
+        })
+    }
+
+    /// Cut a `w`×`h` image into tiles; `texture(origin, size)` makes the
+    /// pixels of the texture starting at `origin`.
+    fn cut(w: usize, h: usize, texture: impl Fn([usize; 2], [usize; 2]) -> egui::ColorImage) -> Self {
         let mut tiles = Vec::new();
         // An image that fits one texture is one tile, without overlap.
         let step = |len: usize| if len <= TILE_SIDE { TILE_SIDE } else { TILE_STEP };
@@ -105,16 +204,7 @@ impl PreparedImage {
                 let (gx0, gy0) = (x0.saturating_sub(1), y0.saturating_sub(1));
                 let (gx1, gy1) = ((x0 + tw + 1).min(w), (y0 + th + 1).min(h));
                 let (gw, gh) = (gx1 - gx0, gy1 - gy0);
-                let texture = if (gw, gh) == (w, h) {
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], raw)
-                } else {
-                    let mut pixels = Vec::with_capacity(gw * gh * 4);
-                    for row in gy0..gy1 {
-                        let start = (row * w + gx0) * 4;
-                        pixels.extend_from_slice(&raw[start..start + gw * 4]);
-                    }
-                    egui::ColorImage::from_rgba_unmultiplied([gw, gh], &pixels)
-                };
+                let texture = texture([gx0, gy0], [gw, gh]);
                 let part = Rect::from_min_max(
                     egui::pos2(x0 as f32 / w as f32, y0 as f32 / h as f32),
                     egui::pos2((x0 + tw) as f32 / w as f32, (y0 + th) as f32 / h as f32),
@@ -123,7 +213,7 @@ impl PreparedImage {
                     egui::pos2((x0 - gx0) as f32 / gw as f32, (y0 - gy0) as f32 / gh as f32),
                     egui::pos2((x0 + tw - gx0) as f32 / gw as f32, (y0 + th - gy0) as f32 / gh as f32),
                 );
-                tiles.push(Tile { part, texture_uv, texture });
+                tiles.push(Tile { part, texture_uv, origin: [gx0, gy0], texture });
             }
         }
         Self { size: [w, h], tiles }
@@ -174,7 +264,7 @@ impl<T> Uploads<T> {
                 spent += tile.texture.pixels.len() * 4;
                 let name = format!("{}#{}", upload.name, upload.done.len());
                 let texture = ctx.load_texture(name, tile.texture, options);
-                upload.done.push(Tile { part: tile.part, texture_uv: tile.texture_uv, texture });
+                upload.done.push(Tile { part: tile.part, texture_uv: tile.texture_uv, origin: tile.origin, texture });
             }
             if upload.left.len() > 0 {
                 break;
@@ -213,6 +303,38 @@ mod tests {
         assert_eq!(first.texture_uv, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(TILE_STEP as f32 / (TILE_STEP + 1) as f32, 1.0)));
         assert!(prepared.tiles.iter().all(|t| t.texture.size[0] <= TILE_SIDE), "no texture past the limit");
         assert_eq!(PreparedImage::from_rgba(&image::RgbaImage::new(4, 4)).tiles.len(), 1);
+    }
+
+    /// A patch is written into each tile it overlaps, at the tile's own
+    /// coordinates, overlap pixels included.
+    #[test]
+    fn a_patch_lands_in_every_tile_it_overlaps() {
+        let ctx = egui::Context::default();
+        let w = TILE_STEP + 4;
+        let mut uploads = Uploads::default();
+        uploads.push("sel".into(), PreparedImage::from_color_image(egui::ColorImage::new([w, 2], vec![Color32::BLACK; w * 2])), ());
+        let (texture, ()) = uploads.pump(&ctx, TextureOptions::LINEAR).pop().expect("uploaded");
+        let _ = ctx.tex_manager().write().take_delta();
+        texture.set_partial([TILE_STEP - 2, 0], &egui::ColorImage::new([4, 1], vec![Color32::WHITE; 4]), TextureOptions::LINEAR);
+        let set: Vec<_> = ctx.tex_manager().write().take_delta().set.into_iter().map(|(_, d)| (d.pos, d.image.size())).collect();
+        assert_eq!(set, vec![(Some([TILE_STEP - 2, 0]), [3, 1]), (Some([0, 0]), [3, 1])], "the first tile to its overlap pixel, the second from its own");
+    }
+
+    /// A region past the image repeats it; a region inside it draws only
+    /// the tiles it reaches, each at its share of the screen.
+    #[test]
+    fn a_region_repeats_past_the_image_and_crops_inside_it() {
+        let ctx = egui::Context::default();
+        let one = ImageTexture::single(ctx.load_texture("one", egui::ColorImage::new([4, 4], vec![Color32::RED; 16]), TextureOptions::LINEAR));
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 50.0));
+        let repeated = one.region_pieces(screen, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(2.0, 1.0)));
+        assert_eq!(repeated.iter().map(|p| p.0).collect::<Vec<_>>(), vec![
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(50.0, 50.0)),
+            Rect::from_min_max(egui::pos2(50.0, 0.0), egui::pos2(100.0, 50.0)),
+        ], "two copies side by side");
+        let cropped = one.region_pieces(screen, Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 1.0)));
+        assert_eq!(cropped.len(), 1);
+        assert_eq!(cropped[0].2, Rect::from_min_max(egui::pos2(0.25, 0.0), egui::pos2(0.75, 1.0)), "the middle half of the texture");
     }
 
     /// A frame uploads within its budget (at least one tile); an image

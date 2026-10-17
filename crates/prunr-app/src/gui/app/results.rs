@@ -912,17 +912,8 @@ impl PrunrApp {
                 item.texture_unreadable(prep.target);
                 continue;
             };
-            let landing = crate::gui::background_io::TexLanding { item_id: prep.item_id, target: prep.target, unpacked: prep.unpacked };
+            let landing = crate::gui::background_io::TexLanding::Image { item_id: prep.item_id, target: prep.target, unpacked: prep.unpacked };
             self.batch.bg_io.uploads.push(prep.name, image, landing);
-        }
-        // A large image uploads a few tiles per frame and lands whole.
-        for (tex, landing) in self.batch.bg_io.uploads.pump(ctx, egui::TextureOptions::default()) {
-            let Some(item) = self.batch.find_by_id_mut(landing.item_id) else { continue };
-            item.land_texture(tex, landing.target);
-            if let Some(rgba) = landing.unpacked {
-                item.hold_unpacked_result(rgba);
-            }
-            landed = true;
         }
 
         // Drain filter-only Process results (model=None path).
@@ -993,21 +984,13 @@ impl PrunrApp {
         // allowed here — this drain runs from `logic()`, not a render
         // closure. A result for a mask that has since changed is dropped;
         // `ensure_selection_texture` already requested the current one.
-        let mut feathered_landed = Vec::new();
+        let mut to_upload = Vec::new();
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
             let item_id = result.item_id;
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            let load = |image| ctx.load_texture(format!("selection_{item_id}"), image, egui::TextureOptions::LINEAR);
-            if item.land_selection_texture(result, load) {
-                feathered_landed.push(item_id);
-            }
+            item.land_selection_texture(result, |image, landing| to_upload.push((format!("selection_{item_id}"), image, landing)));
         }
 
-        // A feathered selection that just landed changes what the cut-out
-        // applies; re-cut with it.
-        for id in feathered_landed {
-            self.recut_with_selection(id);
-        }
 
         while let Ok(load) = self.batch.bg_io.bg_image_rx.try_recv() {
             self.land_bg_image(load);
@@ -1017,13 +1000,45 @@ impl PrunrApp {
 
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
-        while let Ok((item_id, key, ci)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+        while let Ok((item_id, key, image)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if item.land_backdrop(key, ci, ctx) {
-                landed = true;
-            } else {
+            if !item.land_backdrop(key, image, |image, landing| to_upload.push((format!("backdrop_{key:x}"), image, landing))) {
                 ctx.request_repaint();
             }
+        }
+        for (name, image, landing) in to_upload {
+            self.batch.bg_io.uploads.push(name, image, landing);
+        }
+
+        // Large pictures upload a few tiles per frame and land whole.
+        let mut feathered_landed = Vec::new();
+        for (texture, landing) in self.batch.bg_io.uploads.pump(ctx, egui::TextureOptions::LINEAR) {
+            use crate::gui::background_io::TexLanding;
+            match landing {
+                TexLanding::Image { item_id, target, unpacked } => {
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    item.land_texture(texture, target);
+                    if let Some(rgba) = unpacked {
+                        item.hold_unpacked_result(rgba);
+                    }
+                    landed = true;
+                }
+                TexLanding::Selection { item_id, key, shown, feathered } => {
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    if item.install_selection_texture(texture, key, shown, feathered) {
+                        feathered_landed.push(item_id);
+                    }
+                }
+                TexLanding::Backdrop { item_id, key } => {
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    landed |= item.install_backdrop(key, texture);
+                }
+            }
+        }
+        // A feathered selection that just landed changes what the cut-out
+        // applies; re-cut with it.
+        for id in feathered_landed {
+            self.recut_with_selection(id);
         }
 
         let id_floor = self.batch.next_id;

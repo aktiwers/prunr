@@ -192,9 +192,9 @@ pub(crate) fn paint_working(painter: &Painter, rect: Rect, t: f32) {
 
 /// The same light shaped by `mask` (a selection overlay texture): the
 /// brushed region breathes and the sheen stays inside it.
-pub(crate) fn paint_working_masked(painter: &Painter, rect: Rect, mask: TextureId, t: f32) {
+pub(crate) fn paint_working_masked(painter: &Painter, rect: Rect, mask: &crate::gui::image_texture::ImageTexture, t: f32) {
     let s = breath(t);
-    paint_mesh(painter, rect, mask, |u, v, _| Color32::WHITE.gamma_multiply(0.35 + 0.35 * s + 0.6 * sheen(t, u, v)));
+    paint_textured(painter, rect, mask, |u, v| Color32::WHITE.gamma_multiply(0.35 + 0.35 * s + 0.6 * sheen(t, u, v)));
 }
 
 /// `to` arriving where `from` was, at `p` (0..1), along a soft edge with a

@@ -123,7 +123,7 @@ impl PrunrApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
-            let ci = build().map(|rgba| egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()));
+            let ci = build().map(|rgba| crate::gui::image_texture::PreparedImage::from_rgba(&rgba));
             let _ = tx.send((item_id, key, ci));
             ctx.request_repaint();
         });
