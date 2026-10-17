@@ -1677,7 +1677,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
         let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::UpscaleTier2, app.settings.model.role(), style, app.settings.brush.cutout_action);
+        let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::UpscaleTier2, app.settings.model.role(), style, app.settings.brush.cutout_action);
         assert!(inputs.is_ok_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
     }
@@ -2608,12 +2608,12 @@ mod spare_scales_tests {
         app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
         let (style, action) = (app.selection_style(), app.settings.brush.cutout_action);
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, app.settings.model.role(), style, action);
+            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), style, action);
             assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Wait(_))), "{kind:?} waits for Fine");
         }
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, kind, app.settings.model.role(), style, action);
+            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), style, action);
             assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some() || i.packed.primary == Some(Fine)), "{kind:?} renders with Fine once it lands");
         }
     }

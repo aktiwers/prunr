@@ -109,9 +109,10 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
-        let batch_items = &mut self.batch.items;
+        let batch = &mut self.batch;
         let wait = self.processor.live_preview.tick(|id, kind| {
-            Self::build_preview_inputs(batch_items, id, kind, role, style, action)
+            let item = batch.find_by_id_mut(id).ok_or(crate::gui::capability::Verdict::Never(crate::gui::capability::Reason::Removed))?;
+            Self::build_preview_inputs(item, kind, role, style, action)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -154,8 +155,7 @@ impl PrunrApp {
     /// of a drag session pays the ~15ms / 48 MB clone to wrap `source_rgba`
     /// in a `DynamicImage`, every subsequent dispatch is just an `Arc::clone`.
     pub(crate) fn build_preview_inputs(
-        items: &mut [BatchItem],
-        id: u64,
+        item: &mut BatchItem,
         kind: PreviewKind,
         role: crate::gui::knob_catalog::ModelRole,
         style: crate::gui::background_io::SelectionStyle,
@@ -164,7 +164,6 @@ impl PrunrApp {
         use crate::gui::capability::{check, ItemFacts, Need, Reason, Verdict};
         use crate::gui::knob_catalog::ModelRole;
         use crate::gui::live_preview::{DispatchInputs, OriginalFrom, PreviewKind};
-        let item = items.iter_mut().find(|b| b.id == id).ok_or(Verdict::Never(Reason::Removed))?;
         let facts = ItemFacts::of(item);
         let need = |need| match check(&facts, need, role) {
             Verdict::Ready => Ok(()),
