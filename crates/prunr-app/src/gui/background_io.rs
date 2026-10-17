@@ -170,8 +170,10 @@ pub struct BackgroundIO {
     pub(crate) removed_rx: mpsc::Receiver<Result<String, String>>,
     /// A copy whose background was baked off the UI thread, for the
     /// clipboard, with the note to show once copied.
-    pub copy_ready_tx: mpsc::Sender<(Arc<image::RgbaImage>, Option<String>)>,
-    pub copy_ready_rx: mpsc::Receiver<(Arc<image::RgbaImage>, Option<String>)>,
+    /// A copy's image made off the UI thread (`None`: it could not be
+    /// read), with the note to show once copied.
+    pub copy_ready_tx: mpsc::Sender<(Option<Arc<image::RgbaImage>>, Option<String>)>,
+    pub copy_ready_rx: mpsc::Receiver<(Option<Arc<image::RgbaImage>>, Option<String>)>,
     /// Selection Delete / Cut / Copy made off the UI thread.
     pub(crate) selection_edit_tx: mpsc::Sender<SelectionEditDone>,
     pub(crate) selection_edit_rx: mpsc::Receiver<SelectionEditDone>,

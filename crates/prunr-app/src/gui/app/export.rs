@@ -301,9 +301,8 @@ impl PrunrApp {
         }
         let tx = self.batch.bg_io.copy_ready_tx.clone();
         std::thread::spawn(move || {
-            if let Some(rgba) = result.load() {
-                let _ = tx.send((bg.bake(&rgba, &ExportDepth::default()), multi_hint));
-            }
+            let image = result.load().map(|rgba| bg.bake(&rgba, &ExportDepth::default()));
+            let _ = tx.send((image, multi_hint));
         });
     }
 
