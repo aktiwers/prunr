@@ -1002,6 +1002,7 @@ impl BatchItem {
     /// while only selecting), at full resolution. The selection is the
     /// feathered plane once the overlay has built it (its landing re-cuts
     /// again). Built once per change of its inputs.
+    #[cfg(test)]
     pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
         self.correction(style, action).map(|c| {
             let (plane, built) = c.resolve();
@@ -1040,27 +1041,23 @@ impl BatchItem {
         *self.correction_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(built);
     }
 
-    /// Fold the selection into the edits as `action` says and clear it:
-    /// what was restored or erased stays, and the next strokes start a new
-    /// area. False when there was no selection.
+    /// Fold the selection into the edits as `action` says and clear it,
+    /// here and now, as the selection queue does off the UI thread: the
+    /// same edit and the same landing. False when there was no selection.
+    #[cfg(test)]
     pub(crate) fn bake_selection(&mut self, style: super::background_io::SelectionStyle, action: CutoutAction) -> bool {
+        use super::selection_queue::{apply, SelectionOp};
         if self.selection_mask.is_none() {
             return false;
         }
-        if action != CutoutAction::Select {
-            self.edits = self.correction_plane(style, action);
-        }
-        self.selection_mask = None;
-        self.selection_hash = None;
-        self.selection_texture = None;
-        self.drop_correction_cache();
-        true
+        let made = apply(&SelectionOp::Bake { action, feathered: self.feathered_selection(style) }, &self.selection_state());
+        self.land_selection_state(made, None, StepKind::Selection)
     }
 
     /// The current selection feathered as `style` says, once the overlay
     /// has built it. Only the feather matters: a change of tint or fill
     /// keeps the plane.
-    fn feathered_selection(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+    pub(crate) fn feathered_selection(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
         let (hash, texture) = (self.selection_hash?, self.selection_texture.as_ref()?);
         let (built_hash, built_style) = texture.key;
         (built_hash == hash && built_style.edge_feather_px == style.edge_feather_px)
@@ -1259,13 +1256,45 @@ impl BatchItem {
     /// (Paint strokes, Magic Brush candidates, Invert) goes through here.
     /// Returns `false` and changes nothing when `mask` is byte-identical
     /// to the current selection: a no-op stroke must not be a step.
+    #[cfg(test)]
     pub(crate) fn commit_selection_mask(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, kind: StepKind) -> bool {
         let hash = mask.content_hash();
-        if self.selection_hash == Some(hash) {
+        let made = super::selection_queue::SelState { selection: Some(mask), edits: self.edits.clone() };
+        self.land_selection_state(made, Some(hash), kind)
+    }
+
+    /// The selection and the cut-out's edits, as a selection edit reads
+    /// and makes them.
+    pub(crate) fn selection_state(&self) -> super::selection_queue::SelState {
+        super::selection_queue::SelState { selection: self.selection_mask.clone(), edits: self.edits.clone() }
+    }
+
+    /// A selection edit made off the UI thread lands: the selection (with
+    /// its content `hash`) and edits it made, as one undo step of `kind`.
+    /// False, and nothing changes, when it made what is already shown.
+    pub(crate) fn land_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>, kind: StepKind) -> bool {
+        let same_edits = match (&made.edits, &self.edits) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        let same_selection = match made.selection {
+            Some(_) => hash == self.selection_hash,
+            None => self.selection_mask.is_none(),
+        };
+        if same_selection && same_edits {
             return false;
         }
-        self.selection_mask = Some(mask);
-        self.selection_hash = Some(hash);
+        let cleared = made.selection.is_none();
+        self.selection_mask = made.selection;
+        self.selection_hash = hash;
+        self.edits = made.edits;
+        if cleared {
+            self.selection_texture = None;
+            self.selection_tex_pending = None;
+            self.last_decode = None;
+        }
+        self.drop_correction_cache();
         self.commit(kind);
         true
     }

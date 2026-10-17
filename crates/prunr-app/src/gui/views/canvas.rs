@@ -301,10 +301,9 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask);
-
-        tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
-        app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);
+        tracing::info!(item_id, "brush stroke committed; merging into the selection");
+        let op = crate::gui::selection_queue::SelectionOp::Merge(std::sync::Arc::new(stroke_mask));
+        app.queue_selection_op(item_id, op, crate::gui::selection_queue::AfterLanding::Nothing);
     }
 }
 

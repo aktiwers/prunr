@@ -59,3 +59,14 @@ pub(crate) fn put_in(item: &mut BatchItem, status: crate::gui::item::BatchStatus
         BatchStatus::Error(why) => item.fail(why),
     }
 }
+
+/// Land every selection edit queued so far, as frames would.
+pub(crate) fn settle_selection_edits(app: &mut crate::gui::app::PrunrApp) {
+    let ctx = egui::Context::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.batch.selection_queue.any_pending() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        app.land_selection_edits(&ctx);
+    }
+    assert!(!app.batch.selection_queue.any_pending(), "the selection edits land");
+}

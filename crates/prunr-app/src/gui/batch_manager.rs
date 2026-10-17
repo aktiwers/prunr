@@ -75,6 +75,8 @@ pub(crate) struct BatchManager {
     last_history_sweep: std::time::Instant,
     /// A move of undo states to disk is running.
     demoting: Arc<std::sync::atomic::AtomicBool>,
+    /// Selection edits made off the UI thread, in order per image.
+    pub(crate) selection_queue: super::selection_queue::SelectionQueue,
 }
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -149,6 +151,7 @@ impl BatchManager {
             bg_io: BackgroundIO::new(),
             last_history_sweep: std::time::Instant::now(),
             demoting: Arc::default(),
+            selection_queue: super::selection_queue::SelectionQueue::new(None),
         }
     }
 
@@ -660,6 +663,7 @@ impl BatchManager {
     ///
     /// Returns `false` if the item was not found or the mask is
     /// byte-identical to the current selection (nothing mutated).
+    #[cfg(test)]
     pub(crate) fn commit_selection(
         &mut self,
         item_id: u64,
@@ -682,22 +686,6 @@ impl BatchManager {
         was_present
     }
 
-    /// On a cut-out: fold the selection into the edits as `action` says
-    /// (see `BatchItem::bake_selection`), one undo step. True when there
-    /// was a selection.
-    pub(crate) fn bake_selection(
-        &mut self,
-        item_id: u64,
-        style: super::background_io::SelectionStyle,
-        action: super::brush_state::CutoutAction,
-    ) -> bool {
-        let Some(item) = self.find_by_id_mut(item_id) else { return false };
-        let baked = item.bake_selection(style, action);
-        if baked {
-            item.commit(super::timeline::StepKind::Selection);
-        }
-        baked
-    }
 
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
@@ -761,7 +749,7 @@ impl BatchManager {
 
     /// Whether any image has a decode, thumbnail or texture on its way.
     pub(crate) fn has_pending_work(&self) -> bool {
-        self.items.iter().any(BatchItem::has_pending_work)
+        self.items.iter().any(BatchItem::has_pending_work) || self.selection_queue.any_pending()
     }
 
     /// Sort the images in `ids` by the run a `step` by `cutter` needs

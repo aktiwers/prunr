@@ -6,6 +6,8 @@ use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::timeline::StepKind;
 use crate::gui::views::selection_action_bar::SelectionAction;
 use crate::gui::brush_state::Tool;
+use crate::gui::item::BatchItem;
+use crate::gui::selection_queue::{AfterLanding, SelectionOp};
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -86,8 +88,9 @@ impl PrunrApp {
     /// mask and fire the per-model dispatch rule. The commit drops the old
     /// texture, so `ensure_selection_texture` rebuilds it next frame.
     ///
-    /// Every call site that authors a selection (Paint Brush, Magic Brush,
-    /// Invert) calls THIS method.
+    /// Tests set a selection this way; the app's authors go through
+    /// `queue_selection_op`.
+    #[cfg(test)]
     pub(crate) fn commit_selection_and_dispatch(
         &mut self,
         item_id: u64,
@@ -98,6 +101,51 @@ impl PrunrApp {
             return;
         }
         self.apply_selection_to_active_model(item_id);
+    }
+
+    /// Make a selection edit off the UI thread, in order with the image's
+    /// other edits; it lands through `land_selection_edits`. Every author
+    /// (Paint Brush, Magic Brush, Invert, a fold into the cut-out) goes
+    /// through here.
+    pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding) {
+        let Some(current) = self.batch.find_by_id(item_id).map(BatchItem::selection_state) else { return };
+        self.batch.selection_queue.push(item_id, op, after, current);
+    }
+
+    /// The selection edits made since the last frame land, in order: each
+    /// on the selection it was built from, as one step; one whose base
+    /// the image has left goes back in the queue against what it shows
+    /// now. Undo / redo held for the queue run once it is empty.
+    pub(crate) fn land_selection_edits(&mut self, ctx: &egui::Context) {
+        use crate::gui::selection_queue::SelectionOp;
+        for done in self.batch.selection_queue.take_done() {
+            let item_id = done.item_id;
+            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if !item.selection_state().same(&done.base) {
+                tracing::info!(item_id, "selection edit made on a selection since changed; made again");
+                self.queue_selection_op(item_id, done.op, done.after);
+                continue;
+            }
+            let kind = match done.op {
+                SelectionOp::Merge(_) => StepKind::Stroke,
+                SelectionOp::Invert | SelectionOp::Bake { .. } => StepKind::Selection,
+            };
+            let changed = item.land_selection_state(done.made, done.hash, kind);
+            match done.after {
+                AfterLanding::MagicDecode { output, mode, reading } => {
+                    item.last_decode = item.selection_hash.map(|committed_hash| crate::gui::item::LastDecode { output, mode, committed_hash, reading });
+                }
+                AfterLanding::ByDepth => item.last_decode = None,
+                AfterLanding::Nothing => {}
+            }
+            if changed {
+                self.apply_selection_to_active_model(item_id);
+            }
+            ctx.request_repaint();
+        }
+        for action in self.batch.selection_queue.take_deferred() {
+            self.perform(action, ctx);
+        }
     }
 
     /// Dispatch a selection action (Delete / Copy / Cut / Invert / Clear).
@@ -139,10 +187,8 @@ impl PrunrApp {
                 SelectionAction::Copy | SelectionAction::Invert => None,
             };
             if let Some(fold) = fold {
-                let style = self.selection_style();
-                if self.batch.bake_selection(item_id, style, fold) {
-                    self.apply_selection_to_active_model(item_id);
-                }
+                let feathered = self.batch.items[idx].feathered_selection(self.selection_style());
+                self.queue_selection_op(item_id, SelectionOp::Bake { action: fold, feathered }, AfterLanding::Nothing);
                 ctx.request_repaint();
                 return;
             }
@@ -155,9 +201,9 @@ impl PrunrApp {
             SelectionAction::Copy => self.start_selection_edit(idx, SelectionEdit::Copy(crate::gui::system_bridge::CopyNote::Selection)),
             SelectionAction::Cut => self.start_selection_edit(idx, SelectionEdit::CopyAndCut),
             SelectionAction::Invert => {
-                let Some(mask) = self.batch.items[idx].selection_mask.clone() else { return };
-                let inverted = mask.invert();
-                self.commit_selection_and_dispatch(item_id, inverted, StepKind::Selection);
+                if self.batch.items[idx].selection_mask.is_some() {
+                    self.queue_selection_op(item_id, SelectionOp::Invert, AfterLanding::Nothing);
+                }
                 ctx.request_repaint();
             }
             SelectionAction::Clear => {
@@ -187,6 +233,10 @@ impl PrunrApp {
         }
         let role = self.settings.model.role();
         let item = self.batch.selected_item()?;
+        // Every action reads the selection the edits under way will change.
+        if self.batch.selection_queue.is_pending(item.id) {
+            return Some(Reason::FinishingSelection.text());
+        }
         if item.selection_mask.is_none() {
             return Some(Reason::PaintFirst.text());
         }
@@ -428,7 +478,7 @@ impl PrunrApp {
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
     /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     pub(super) fn pump_sam_results(&mut self, ctx: &egui::Context) {
-        use crate::gui::processor::{merge_stroke, DecodedSelection};
+        use crate::gui::processor::DecodedSelection;
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -455,36 +505,12 @@ impl PrunrApp {
             }
             match result.result {
                 Ok(DecodedSelection::Fresh { mask, output }) => {
-                    let existing = self.batch
-                        .find_by_id(result.item_id)
-                        .and_then(|i| i.selection_mask.clone());
-                    let started = std::time::Instant::now();
-                    let final_mask = merge_stroke(existing, mask);
-                    let merged = started.elapsed();
-                    tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask committed");
-                    self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
-                    tracing::debug!(
-                        item_id = result.item_id,
-                        merge_ms = merged.as_millis() as u64,
-                        commit_ms = (started.elapsed() - merged).as_millis() as u64,
-                        "SAM selection merged and committed on the UI thread"
-                    );
-                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                        item.last_decode = item.selection_hash.map(|committed_hash| crate::gui::item::LastDecode {
-                            output, mode: result.mode, committed_hash,
-                            reading: result.reading,
-                        });
-                    }
+                    tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask queued");
+                    let after = AfterLanding::MagicDecode { output, mode: result.mode, reading: result.reading };
+                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), after);
                 }
                 Ok(DecodedSelection::ByDepth(mask)) => {
-                    let existing = self.batch
-                        .find_by_id(result.item_id)
-                        .and_then(|i| i.selection_mask.clone());
-                    let final_mask = merge_stroke(existing, mask);
-                    self.commit_selection_and_dispatch(result.item_id, final_mask, StepKind::Stroke);
-                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                        item.last_decode = None;
-                    }
+                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::ByDepth);
                 }
                 Ok(DecodedSelection::Retuned { merged, hash }) => {
                     self.magic_brush_state.rethreshold_in_flight = false;
