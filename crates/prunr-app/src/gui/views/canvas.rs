@@ -74,10 +74,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         let new_zoom = (app.zoom_state.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
                         if let Some(cursor) = i.pointer.hover_pos() {
                             if canvas_rect.contains(cursor) {
-                                let cursor_rel = cursor - canvas_rect.center();
-                                app.zoom_state.pan_offset =
-                                    cursor_rel / app.zoom_state.zoom - cursor_rel / new_zoom + app.zoom_state.pan_offset;
-                                app.zoom_state.zoom = new_zoom;
+                                app.zoom_state.zoom_about(cursor - canvas_rect.center(), new_zoom);
                             }
                         }
                     }
