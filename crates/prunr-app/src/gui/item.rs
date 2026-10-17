@@ -1569,6 +1569,14 @@ impl BatchItem {
         if live { TexTarget::LiveResult(self.result_tex_request) } else { TexTarget::Result(self.result_tex_request) }
     }
 
+    /// The result texture goes with the image off screen; one still being
+    /// made no longer lands.
+    pub(crate) fn release_result_texture(&mut self) {
+        self.result_texture = None;
+        self.result_tex_pending = false;
+        self.result_tex_request += 1;
+    }
+
     /// A prepared texture lands on the side it was made for; a result's
     /// reveals over what was held.
     pub(crate) fn land_texture(&mut self, tex: super::image_texture::ImageTexture, target: super::background_io::TexTarget) {
@@ -1751,6 +1759,43 @@ impl BatchItem {
                     self.backdrop_tex_pending = None;
                 }
                 false
+            }
+        }
+    }
+
+    /// An upload on its way is still worth finishing: what it lands on
+    /// still waits for it. A parked result is no longer asked for (its
+    /// request moved on when it was released).
+    pub(crate) fn wants_upload(&self, landing: &super::background_io::TexLanding) -> bool {
+        use super::background_io::{TexLanding, TexTarget};
+        match landing {
+            TexLanding::Image { target, .. } => match *target {
+                TexTarget::Source => self.source_tex_pending,
+                TexTarget::Result(request) | TexTarget::LiveResult(request) => request == self.result_tex_request,
+                TexTarget::QuickFrame(generation) => self.quick.wants(generation),
+                TexTarget::PhotoLook => self.on_screen,
+            },
+            TexLanding::Selection { key, .. } => self.selection_tex_pending == Some(*key),
+            TexLanding::Backdrop { key, .. } => self.backdrop_key() == Some(*key),
+        }
+    }
+
+    /// An upload was dropped part-way: the request it answered ends, so
+    /// the next check asks again if the item still needs one. (An image's
+    /// request already moved on, or it was never pending.)
+    pub(crate) fn upload_dropped(&mut self, landing: &super::background_io::TexLanding) {
+        use super::background_io::TexLanding;
+        match landing {
+            TexLanding::Image { .. } => {}
+            TexLanding::Selection { key, .. } => {
+                if self.selection_tex_pending == Some(*key) {
+                    self.selection_tex_pending = None;
+                }
+            }
+            TexLanding::Backdrop { key, .. } => {
+                if self.backdrop_tex_pending == Some(*key) {
+                    self.backdrop_tex_pending = None;
+                }
             }
         }
     }
@@ -3337,7 +3382,7 @@ mod tests {
             queued.map(|(image, landing)| {
                 let mut uploads = crate::gui::image_texture::Uploads::default();
                 uploads.push("selection".into(), image, landing);
-                let (texture, landing) = uploads.pump(&ctx, egui::TextureOptions::LINEAR).pop().expect("uploaded");
+                let (texture, landing) = uploads.pump(&ctx, |_| true).landed.pop().expect("uploaded");
                 let TexLanding::Selection { key, shown, feathered, .. } = landing else { panic!("a selection") };
                 item.install_selection_texture(texture, key, shown, feathered)
             })
