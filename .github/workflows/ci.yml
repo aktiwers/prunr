@@ -70,8 +70,11 @@ jobs:
 
       - name: Restore model cache
         id: cache-models
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
+          # The .zst files are the same bytes on every OS: one platform's
+          # download serves the rest.
+          enableCrossOsArchive: true
           # Cache only the bundled .zst files — the raw .onnx are
           # ~2× larger and never read at build time. Halves cache
           # upload/restore time and keeps us further from the 10 GB
@@ -84,7 +87,8 @@ jobs:
 
       - name: Fetch models (cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
-        timeout-minutes: 20
+        # The Windows runners download slowest; 20 min was not enough there.
+        timeout-minutes: 40
         run: cargo xtask fetch-models
 
       - name: Compress models to .zst (if needed)
@@ -96,6 +100,17 @@ jobs:
               zstd -19 "$f" -o "$f.zst"
             fi
           done
+
+      # Saved here, not when the job ends: a cache saved only by a job that
+      # passes is never saved by one failing later, which then misses (and
+      # downloads everything) on every run.
+      - name: Save model cache
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          enableCrossOsArchive: true
+          path: models/*.zst
+          key: ${{ steps.cache-models.outputs.cache-primary-key }}
 
       # --workspace is required because `default-members` in the root
       # Cargo.toml excludes xtask (see comment there). Without --workspace,
