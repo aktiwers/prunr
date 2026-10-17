@@ -783,10 +783,7 @@ fn run_batch_with_retry(
                 crate::subprocess::protocol::cleanup_seg_pipeline_temps();
             }
             EventLoopOutcome::Crashed(reason) => {
-                let should_retry = handle_crash_and_retry(&mut state, sent, reason, &mut sub, res_tx, ctx);
-                if !should_retry {
-                    return None;
-                }
+                handle_crash_and_retry(&mut state, sent, reason, &mut sub, res_tx, ctx);
             }
             EventLoopOutcome::Finished => {
                 if finalize_or_continue(&mut state, res_tx, ctx) {
@@ -1334,10 +1331,9 @@ fn cancel_subprocess(
     ctx.request_repaint();
 }
 
-/// Post-crash: re-queue in-flight Tier 1 work, error out in-flight Tier 2
-/// (tensor data already consumed by IPC), halve `max_jobs`, and either
-/// continue (return `true`) or bail if we were already at 1 job (return
-/// `false` after emitting terminal errors + `BatchComplete`).
+/// Post-crash: error out in-flight Tier 2 (tensor data already consumed by
+/// IPC), and either re-queue in-flight Tier 1 work with half the jobs or,
+/// at one job, fail the image that crashed it. The batch goes on.
 fn handle_crash_and_retry(
     state: &mut BatchRunState,
     mut sent: SentWork,
@@ -1345,7 +1341,7 @@ fn handle_crash_and_retry(
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
-) -> bool {
+) {
     // Tier 2 + AddEdge can't be re-queued — their tensor data is owned by the
     // IPC temp file, already cleaned up. Parent errors the item so a follow-up
     // Process runs the full pipeline.
@@ -1369,30 +1365,55 @@ fn handle_crash_and_retry(
     for item in late {
         state.admit(item);
     }
-    for item in re_queued.into_iter().rev() {
-        state.pending.push_front(item);
-    }
-
-    let old_jobs = state.max_jobs;
-    state.max_jobs = (state.max_jobs / 2).max(1);
 
     sub.kill();
     crate::subprocess::protocol::cleanup_seg_pipeline_temps();
 
-    if old_jobs == 1 {
-        let err_msg = format!("{crash_reason} \u{2014} try a smaller model");
-        emit_pending_errors(state, &err_msg, res_tx);
-        let _ = res_tx.send(state.complete_event());
-        ctx.request_repaint();
-        return false;
+    match on_crash(state.max_jobs) {
+        OnCrash::FailInFlight => {
+            let error = crash_message(&crash_reason);
+            for item in re_queued {
+                let _ = res_tx.send(state.item_failed(item.id, error.clone()));
+                state.completed.insert(item.id);
+            }
+            ctx.request_repaint();
+        }
+        OnCrash::RetryWith(jobs) => {
+            for item in re_queued.into_iter().rev() {
+                state.pending.push_front(item);
+            }
+            state.max_jobs = jobs;
+            let _ = res_tx.send(WorkerResult::SubprocessRetry {
+                reduced_jobs: jobs,
+                re_queued_count: re_count,
+            });
+            ctx.request_repaint();
+        }
     }
+}
 
-    let _ = res_tx.send(WorkerResult::SubprocessRetry {
-        reduced_jobs: state.max_jobs,
-        re_queued_count: re_count,
-    });
-    ctx.request_repaint();
-    true
+/// What a worker crash does to the images it was running.
+#[derive(Debug, PartialEq)]
+enum OnCrash {
+    /// Run them again with fewer jobs: one of them, or running them
+    /// together, crashed it.
+    RetryWith(usize),
+    /// At one job the image it ran is the cause: it fails, the batch
+    /// goes on with a new worker.
+    FailInFlight,
+}
+
+fn on_crash(jobs: usize) -> OnCrash {
+    if jobs <= 1 { OnCrash::FailInFlight } else { OnCrash::RetryWith(jobs / 2) }
+}
+
+/// The message an image a crash failed shows.
+fn crash_message(reason: &str) -> String {
+    if reason.contains("out of memory") {
+        format!("{reason} \u{2014} try a smaller model")
+    } else {
+        reason.to_string()
+    }
 }
 
 /// Emit `BatchItemDone(Err)` for every pending Tier 1 + Tier 2 item that
@@ -1662,6 +1683,17 @@ mod tests {
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
+    }
+
+    /// A crash halves the jobs and runs the images again; at one job the
+    /// image it ran is the cause and fails alone, not the whole batch.
+    #[test]
+    fn a_crash_at_one_job_fails_only_the_image_it_ran() {
+        assert_eq!(super::on_crash(4), super::OnCrash::RetryWith(2));
+        assert_eq!(super::on_crash(2), super::OnCrash::RetryWith(1));
+        assert_eq!(super::on_crash(1), super::OnCrash::FailInFlight);
+        assert!(super::crash_message("Process killed by OS (out of memory)").ends_with("try a smaller model"));
+        assert_eq!(super::crash_message("Process crashed (segmentation fault)"), "Process crashed (segmentation fault)");
     }
 
     /// Work goes out up to the job limit; the memory pause holds it back
