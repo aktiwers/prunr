@@ -1,4 +1,5 @@
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use crate::gui::image_texture::ImageTexture;
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
 
 use crate::gui::app::PrunrApp;
@@ -711,10 +712,10 @@ fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchI
 
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
-fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
+fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &ImageTexture, tint: Color32) {
     match item.reveal_progress().filter(|_| theme::motion(ui.ctx())) {
         Some((from, p, order)) => {
-            super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p, order);
+            super::effects::paint_reveal(ui.painter(), img_rect, from, texture, p, order);
             // The subject's outline is gone by the time the cut-out has
             // grown halfway out from it.
             if let Some(subject) = item.subject.as_ref() {
@@ -723,9 +724,7 @@ fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item:
             }
             ui.ctx().request_repaint();
         }
-        None => {
-            ui.painter().image(texture.id(), img_rect, super::effects::UNIT_UV, tint);
-        }
+        None => texture.paint(ui.painter(), img_rect, tint),
     }
 }
 
@@ -789,12 +788,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let wiggle_y = (t * 1.1).cos() * 1.5;
         let wiggle_offset = app.zoom_state.pan_offset + Vec2::new(wiggle_x, wiggle_y);
         let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom * wiggle_zoom, wiggle_offset);
-        ui.painter().image(
-            texture.id(),
-            img_rect,
-            super::effects::UNIT_UV,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 140),
-        );
+        texture.paint(ui.painter(), img_rect, Color32::from_rgba_unmultiplied(255, 255, 255, 140));
 
         let sweep_x = ((t * 0.6).fract()) * (img_rect.width() + 80.0) - 40.0 + img_rect.min.x;
         let shimmer_rect = Rect::from_min_max(
@@ -823,14 +817,14 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
 
 /// What the canvas shows while a run works: the image being edited, the
 /// newest result, whatever the run reads; the photo before there is one.
-fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&egui::TextureHandle> {
+fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&ImageTexture> {
     item.result_texture.as_ref().or(item.source_texture.as_ref())
 }
 
 /// What the canvas shows for a result. Until a new result's texture
 /// lands, the image it reveals over stays: the one it replaces, or the
 /// run's tile preview. A drag's quick frame shows in place of the result.
-fn done_texture(item: &crate::gui::item::BatchItem) -> Option<&egui::TextureHandle> {
+fn done_texture(item: &crate::gui::item::BatchItem) -> Option<&ImageTexture> {
     item.held_texture().or(item.quick.texture()).or(item.result_texture.as_ref())
 }
 
@@ -844,12 +838,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             // covers the same area instead of a quarter of it.
             let frame = item.map_or(texture.size_vec2(), |i| i.frame_size());
             let img_rect = compute_img_rect(canvas_rect, frame, app.zoom_state.zoom, app.zoom_state.pan_offset);
-            ui.painter().image(
-                texture.id(),
-                img_rect,
-                super::effects::UNIT_UV,
-                Color32::WHITE,
-            );
+            texture.paint(ui.painter(), img_rect, Color32::WHITE);
             // The selection is authored against the source, so it shows
             // while comparing too.
             if let Some(it) = item {
@@ -1049,11 +1038,11 @@ mod tests {
         let ctx = egui::Context::default();
         let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
         let mut item = BatchItem::new_for_test();
-        item.source_texture = Some(tex("photo"));
+        item.source_texture = Some(tex("photo").into());
         assert_eq!(processing_texture(&item).map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
 
         item.land_cut_for_test(Cutter::Model(prunr_core::ModelKind::Silueta), std::sync::Arc::new(image::RgbaImage::new(1, 1)));
-        item.result_texture = Some(tex("cut-out"));
+        item.result_texture = Some(tex("cut-out").into());
         item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta));
         assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
         assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
@@ -1069,14 +1058,14 @@ mod tests {
         let shown = |item: &BatchItem| done_texture(item).map(|t| t.id());
         let mut item = BatchItem::new_for_test();
         let result = tex("result");
-        item.result_texture = Some(result.clone());
+        item.result_texture = Some(result.clone().into());
         assert_eq!(shown(&item), Some(result.id()));
         let frame = tex("frame");
         item.quick.expect(1);
-        item.quick.land(frame.clone(), 1);
+        item.quick.land(frame.clone().into(), 1);
         assert_eq!(shown(&item), Some(frame.id()), "the frame, not the result");
         let held = tex("held");
-        item.reveal = Some(Reveal::Held(held.clone()));
+        item.reveal = Some(Reveal::Held(held.clone().into()));
         assert_eq!(shown(&item), Some(held.id()));
     }
 

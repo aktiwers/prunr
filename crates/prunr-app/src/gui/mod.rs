@@ -34,6 +34,7 @@ pub mod automation;
 pub(crate) mod capability;
 pub(crate) mod disk_queue;
 pub(crate) mod reclaim;
+pub(crate) mod image_texture;
 
 #[cfg(test)]
 mod tests;

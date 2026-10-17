@@ -209,11 +209,7 @@ impl PrunrApp {
                     return ctx.request_repaint();
                 }
             };
-            let (w, h) = (rgba.width(), rgba.height());
-            let ci = egui::ColorImage::from_rgba_unmultiplied(
-                [w as usize, h as usize],
-                rgba.as_flat_samples().as_slice(),
-            );
+            let ci = crate::gui::image_texture::PreparedImage::from_rgba(&rgba);
             tracing::debug!(item_id, waited_ms, convert_ms = queued.elapsed().as_millis() as u64 - waited_ms, "texture prepared");
             let unpacked = parked.then_some(rgba);
             let _ = handles.tx.send(crate::gui::background_io::TexPrepMsg { item_id, name, image: Some(ci), target, unpacked });

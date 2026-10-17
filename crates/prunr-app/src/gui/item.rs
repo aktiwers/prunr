@@ -261,10 +261,10 @@ use super::timeline::{store, DocState, Origin, RunStart, StepKind, Timeline};
 /// A transition to a new image: first the image on screen is held while
 /// the new one's texture is built, then the new one reveals over it.
 pub(crate) enum Reveal {
-    Held(egui::TextureHandle),
+    Held(super::image_texture::ImageTexture),
     /// The image revealed over, the start, and where the reveal starts
     /// (the subject, when one was found; corner to corner otherwise).
-    Running(egui::TextureHandle, std::time::Instant, Option<Arc<[f32]>>),
+    Running(super::image_texture::ImageTexture, std::time::Instant, Option<Arc<[f32]>>),
 }
 
 /// The subject a background-removal run found, outlined on the image
@@ -720,7 +720,7 @@ pub(crate) struct BatchItem {
     /// ~48MB memcpy clone. Cleared whenever `source_rgba` is re-populated
     /// (re-decode) so the cache can't go stale.
     pub(crate) source_dyn: Option<Arc<image::DynamicImage>>,
-    pub(crate) source_texture: Option<egui::TextureHandle>,
+    pub(crate) source_texture: Option<super::image_texture::ImageTexture>,
     pub(crate) thumb_texture: Option<egui::TextureHandle>,
     pub(crate) thumb_pending: bool,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
@@ -729,13 +729,13 @@ pub(crate) struct BatchItem {
     /// the full RGBA buffer. Keyed by the start's Arc (`Arc::ptr_eq`), so a
     /// new start misses; cleared when previews start from the source.
     pub(crate) start_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
-    pub(crate) result_texture: Option<egui::TextureHandle>,
+    pub(crate) result_texture: Option<super::image_texture::ImageTexture>,
     /// A drag's newest quick frame, shown in place of the result until
     /// the full-size render lands; never the result itself.
     pub(crate) quick: super::live_preview::QuickFrames,
     /// The unprocessed photo with restored faces, shown in its place; not
     /// a result. One texture while Restore faces is on before Process.
-    pub(crate) photo_look: Option<egui::TextureHandle>,
+    pub(crate) photo_look: Option<super::image_texture::ImageTexture>,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
@@ -1484,7 +1484,7 @@ impl BatchItem {
     /// reveals over it. Without one, the shown image is held as usual.
     pub(crate) fn hold_tile_preview_for_reveal(&mut self) {
         match self.tile_preview.take() {
-            Some(preview) => self.reveal = Some(Reveal::Held(preview)),
+            Some(preview) => self.reveal = Some(Reveal::Held(super::image_texture::ImageTexture::single(preview))),
             None => self.hold_for_reveal(),
         }
     }
@@ -1538,7 +1538,7 @@ impl BatchItem {
 
     /// A prepared texture lands on the side it was made for; a result's
     /// reveals over what was held.
-    pub(crate) fn land_texture(&mut self, tex: egui::TextureHandle, target: super::background_io::TexTarget) {
+    pub(crate) fn land_texture(&mut self, tex: super::image_texture::ImageTexture, target: super::background_io::TexTarget) {
         use super::background_io::TexTarget;
         match target {
             TexTarget::Source => {
@@ -1744,7 +1744,7 @@ impl BatchItem {
     }
 
     /// The image shown until the new one's texture lands.
-    pub(crate) fn held_texture(&self) -> Option<&egui::TextureHandle> {
+    pub(crate) fn held_texture(&self) -> Option<&super::image_texture::ImageTexture> {
         match &self.reveal {
             Some(Reveal::Held(t)) => Some(t),
             _ => None,
@@ -1753,7 +1753,7 @@ impl BatchItem {
 
     /// A reveal under way: the image it reveals over, and how far it has
     /// come (0..1). A finished one is dropped by `settle_reveal`.
-    pub(crate) fn reveal_progress(&self) -> Option<(&egui::TextureHandle, f32, Option<&[f32]>)> {
+    pub(crate) fn reveal_progress(&self) -> Option<(&super::image_texture::ImageTexture, f32, Option<&[f32]>)> {
         let Some(Reveal::Running(from, at, order)) = &self.reveal else { return None };
         let p = (at.elapsed().as_secs_f64() / super::views::effects::REVEAL_SECS) as f32;
         (p < 1.0).then_some((from, p, order.as_deref()))
@@ -3156,7 +3156,7 @@ mod tests {
         let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let mut item = fixture_item(1);
         let old = tex("old");
-        item.result_texture = Some(old.clone());
+        item.result_texture = Some(old.clone().into());
         crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Pending);
         item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays");
@@ -3164,7 +3164,7 @@ mod tests {
         assert_eq!(item.status(), BatchStatus::Done);
         let new = tex("new");
         let target = item.request_result_texture(false);
-        item.land_texture(new.clone(), target);
+        item.land_texture(new.clone().into(), target);
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(new.id()));
         assert!(!item.result_tex_pending);
         assert!(matches!(item.reveal, Some(Reveal::Running(..))), "the new result reveals over the old");
@@ -3187,13 +3187,13 @@ mod tests {
         assert!(item.undo_step().is_some());
         let restored = item.request_result_texture(false);
         let shown = tex("restored");
-        item.land_texture(shown.clone(), restored);
-        item.land_texture(tex("dragged"), dragged);
+        item.land_texture(shown.clone().into(), restored);
+        item.land_texture(tex("dragged").into(), dragged);
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(shown.id()), "the undone render lands no more");
 
         let stale = item.request_result_texture(false);
         assert!(item.undo_step().is_some());
-        item.land_texture(tex("stale"), stale);
+        item.land_texture(tex("stale").into(), stale);
         assert!(item.result_texture.is_none(), "the original has no result to show");
     }
 
@@ -3207,11 +3207,11 @@ mod tests {
         let frame = tex("frame");
         let put_up = |item: &mut BatchItem| {
             item.quick.expect(4);
-            item.quick.land(frame.clone(), 4);
+            item.quick.land(frame.clone().into(), 4);
             assert!(item.quick.texture().is_some());
         };
         let mut item = fixture_item(1);
-        item.result_texture = Some(tex("result"));
+        item.result_texture = Some(tex("result").into());
         item.commit(StepKind::Adjust);
         put_up(&mut item);
         assert!(item.undo_step().is_some());

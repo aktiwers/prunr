@@ -31,13 +31,21 @@ pub(crate) enum FileLoad {
     NoImagesInFolder,
 }
 
+/// Where an uploaded texture lands, and the parked result its build
+/// unpacked.
+pub(crate) struct TexLanding {
+    pub(crate) item_id: u64,
+    pub(crate) target: TexTarget,
+    pub(crate) unpacked: Option<std::sync::Arc<image::RgbaImage>>,
+}
+
 /// A texture built off-thread for upload.
-pub struct TexPrepMsg {
+pub(crate) struct TexPrepMsg {
     pub item_id: u64,
     pub name: String,
-    /// `None`: the pixels could not be read (a packed step whose file is
-    /// gone).
-    pub image: Option<egui::ColorImage>,
+    /// Its tiles; `None`: the pixels could not be read (a packed step
+    /// whose file is gone).
+    pub image: Option<crate::gui::image_texture::PreparedImage>,
     pub target: TexTarget,
     /// A parked result the build unpacked, for the item to hold again.
     pub unpacked: Option<std::sync::Arc<image::RgbaImage>>,
@@ -114,7 +122,7 @@ impl Drop for DecodeSlotGuard {
 /// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
 #[derive(Clone)]
 pub struct TexPrepHandles {
-    pub tx: mpsc::Sender<TexPrepMsg>,
+    pub(crate) tx: mpsc::Sender<TexPrepMsg>,
     pub slots: Arc<DecodeSlots>,
 }
 
@@ -145,8 +153,11 @@ pub struct BackgroundIO {
     pub(crate) selection_edit_tx: mpsc::Sender<SelectionEditDone>,
     pub(crate) selection_edit_rx: mpsc::Receiver<SelectionEditDone>,
     /// Pre-built ColorImages ready for GPU upload.
-    pub tex_prep_tx: mpsc::Sender<TexPrepMsg>,
-    pub tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
+    pub(crate) tex_prep_tx: mpsc::Sender<TexPrepMsg>,
+    pub(crate) tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
+    /// Prepared textures uploading a few tiles per frame, with what each
+    /// lands on.
+    pub(crate) uploads: crate::gui::image_texture::Uploads<TexLanding>,
     /// Filter-only (model=None) Process results — keeps the UI thread free
     /// while load + decode + `apply_subject_effect` runs per item.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
@@ -229,6 +240,7 @@ impl BackgroundIO {
             copy_ready_tx, copy_ready_rx,
             selection_edit_tx, selection_edit_rx,
             tex_prep_tx, tex_prep_rx,
+            uploads: Default::default(),
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             bg_image_tx, bg_image_rx,
