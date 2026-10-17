@@ -289,15 +289,32 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
     ri::pick_wheel_for_host(urls)
 }
 
+/// Extract into a hidden folder beside the install and move it into place
+/// once whole: an install cut short (a full disk, the app closed) leaves
+/// the runtime that was there, or none, never half of one to load.
 fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
-    let target_dir = rt.checked_install_dir()?;
-    if target_dir.exists() {
-        std::fs::remove_dir_all(&target_dir)
-            .map_err(|e| format!("clean install dir: {e}"))?;
+    extract_into_place(bytes, &rt.checked_install_dir()?)
+}
+
+fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String> {
+    let name = target_dir.file_name().ok_or("install dir has no name")?.to_string_lossy().into_owned();
+    let staging = target_dir.with_file_name(format!(".{name}.staging"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
     }
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("create install dir: {e}"))?;
-    ri::extract_wheel(bytes, &target_dir)
+    std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
+    let library = match ri::extract_wheel(bytes, &staging) {
+        Ok(library) => library,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if target_dir.exists() {
+        std::fs::remove_dir_all(target_dir).map_err(|e| format!("clean install dir: {e}"))?;
+    }
+    std::fs::rename(&staging, target_dir).map_err(|e| format!("move install into place: {e}"))?;
+    Ok(target_dir.join(library.file_name().ok_or("extracted library has no name")?))
 }
 
 #[cfg(test)]
@@ -342,6 +359,20 @@ mod tests {
         assert_eq!(RuntimeChoice::of_library(&store.join("onnxruntime-1.24.1-linux-x64").join(DYLIB_NAME), DylibSource::RuntimeStore), None);
         assert_eq!(RuntimeChoice::of_library(Path::new("/opt/prunr/runtime").join(DYLIB_NAME).as_path(), DylibSource::Bundled), Some(RuntimeChoice::BuiltIn));
         assert_eq!(RuntimeChoice::of_library(&openvino, DylibSource::EnvVar), None);
+    }
+
+    /// A download that will not extract leaves the install that was there
+    /// and no half-made folder for the runtime picker to find.
+    #[test]
+    fn a_broken_download_leaves_the_old_install() {
+        let store = tempfile::tempdir().unwrap();
+        let target = store.path().join("openvino-1.24.1-linux-x64");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("libonnxruntime.so"), b"the working one").unwrap();
+        assert!(extract_into_place(b"not a zip", &target).is_err());
+        assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"the working one");
+        let left: Vec<_> = std::fs::read_dir(store.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
     }
 
     #[test]

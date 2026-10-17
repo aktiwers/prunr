@@ -34,7 +34,7 @@ impl PrunrApp {
     /// pictures, Magic Brush masks, faces, depth maps, downloads and the
     /// runtime install.
     pub(super) fn pump_results(&mut self, ctx: &egui::Context) {
-        if let Some(msg) = self.pending_onboarding_toast.take() {
+        for msg in std::mem::take(&mut self.pending_first_toasts) {
             self.toasts.info(msg);
         }
         // The SD eraser's reports and result come through its bridge. A
