@@ -214,7 +214,7 @@ pub(crate) struct QuickFrames {
     /// The newest quick frame drained (0: none); only its texture is
     /// taken, and the one before it stays up until it lands.
     generation: u64,
-    texture: Option<egui::TextureHandle>,
+    texture: Option<crate::gui::image_texture::ImageTexture>,
     /// A full-size render was applied after the frame: it goes when that
     /// render's texture lands.
     superseded: bool,
@@ -228,7 +228,7 @@ impl QuickFrames {
     }
 
     /// A quick frame's texture lands: kept when it is the newest drained.
-    pub(crate) fn land(&mut self, texture: egui::TextureHandle, generation: u64) {
+    pub(crate) fn land(&mut self, texture: crate::gui::image_texture::ImageTexture, generation: u64) {
         if generation == self.generation {
             self.texture = Some(texture);
         }
@@ -261,7 +261,7 @@ impl QuickFrames {
     }
 
     /// The frame to draw in place of the result, when one is up.
-    pub(crate) fn texture(&self) -> Option<&egui::TextureHandle> {
+    pub(crate) fn texture(&self) -> Option<&crate::gui::image_texture::ImageTexture> {
         self.texture.as_ref()
     }
 }
@@ -1828,10 +1828,10 @@ mod tests {
         let mut q = QuickFrames::default();
         q.expect(5);
         q.expect(7);
-        q.land(tex("5"), 5);
+        q.land(tex("5").into(), 5);
         assert_eq!(shown(&q), None, "an older frame's texture is dropped");
         let seven = tex("7");
-        q.land(seven.clone(), 7);
+        q.land(seven.clone().into(), 7);
         assert_eq!(shown(&q), Some(seven.id()));
         q.settle(true);
         assert_eq!(shown(&q), Some(seven.id()), "kept while the drag goes on");
@@ -1844,10 +1844,10 @@ mod tests {
         q.supersede();
         q.result_landed();
         assert_eq!(shown(&q), None, "the render's texture took over");
-        q.land(tex("9"), 9);
+        q.land(tex("9").into(), 9);
         assert_eq!(shown(&q), None, "a texture landing after the render is dropped");
         q.expect(11);
-        q.land(tex("11"), 11);
+        q.land(tex("11").into(), 11);
         q.settle(false);
         assert_eq!(shown(&q), None, "a drag ended with no render coming");
     }

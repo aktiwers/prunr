@@ -912,9 +912,14 @@ impl PrunrApp {
                 item.texture_unreadable(prep.target);
                 continue;
             };
-            let tex = ctx.load_texture(prep.name, image, egui::TextureOptions::default());
-            item.land_texture(tex, prep.target);
-            if let Some(rgba) = prep.unpacked {
+            let landing = crate::gui::background_io::TexLanding { item_id: prep.item_id, target: prep.target, unpacked: prep.unpacked };
+            self.batch.bg_io.uploads.push(prep.name, image, landing);
+        }
+        // A large image uploads a few tiles per frame and lands whole.
+        for (tex, landing) in self.batch.bg_io.uploads.pump(ctx, egui::TextureOptions::default()) {
+            let Some(item) = self.batch.find_by_id_mut(landing.item_id) else { continue };
+            item.land_texture(tex, landing.target);
+            if let Some(rgba) = landing.unpacked {
                 item.hold_unpacked_result(rgba);
             }
             landed = true;
@@ -1227,12 +1232,12 @@ mod faces_tests {
         let texture = || ctx.load_texture("result", egui::ColorImage::new([8, 8], vec![egui::Color32::BLACK; 64]), egui::TextureOptions::LINEAR);
         let item = &mut app.batch.items[0];
         let target = item.request_result_texture(true);
-        item.land_texture(texture(), target);
+        item.land_texture(texture().into(), target);
         assert!(item.face_preview_texture().is_some(), "a result without the faces leaves them shown");
         item.settle_faced(Engine::Segment, true);
         assert!(item.face_preview_texture().is_some(), "until its texture lands");
         let target = item.request_result_texture(true);
-        item.land_texture(texture(), target);
+        item.land_texture(texture().into(), target);
         assert!(item.face_preview_texture().is_none(), "the blended result shows them now");
     }
 
@@ -1691,7 +1696,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::None);
         let old = ctx.load_texture("old", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let item = &mut app.batch.items[0];
-        item.result_texture = Some(old.clone());
+        item.result_texture = Some(old.clone().into());
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
         let run = item.job_run().expect("a run");
@@ -2414,12 +2419,12 @@ mod first_look_tests {
         let order = Arc::clone(&own.order);
 
         let held = ctx.load_texture("held", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
-        app.batch.items[0].source_texture = Some(held);
+        app.batch.items[0].source_texture = Some(held.into());
         let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(8, 8), active_provider: "CPU".into() };
         app.answer_for_test(&ctx, 1, Ok(result));
         let landed = ctx.load_texture("result", egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4]), Default::default());
         let target = app.batch.items[0].request_result_texture(false);
-        app.batch.items[0].land_texture(landed, target);
+        app.batch.items[0].land_texture(landed.into(), target);
         let item = &mut app.batch.items[0];
         let Some(Reveal::Running(_, at, Some(reveal_order))) = &mut item.reveal else { panic!("the cut-out reveals from the outline") };
         assert!(Arc::ptr_eq(reveal_order, &order), "from the model's own outline");
