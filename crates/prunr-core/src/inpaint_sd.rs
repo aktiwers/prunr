@@ -742,6 +742,9 @@ enum RegionPlan {
     Tiles(Vec<TileWindow>),
 }
 
+/// A window's (x, y, w, h) in the image.
+type Window = (u32, u32, u32, u32);
+
 impl RegionPlan {
     fn tile_count(&self) -> u32 {
         match self {
@@ -752,7 +755,7 @@ impl RegionPlan {
 
     /// Each window the region runs as, in order: its (x, y, w, h), and
     /// the tile it blends back as (`None` for a crop, pasted as is).
-    fn windows(&self) -> Vec<((u32, u32, u32, u32), Option<&TileWindow>)> {
+    fn windows(&self) -> Vec<(Window, Option<&TileWindow>)> {
         match self {
             Self::Crop { x, y, w, h } => vec![((*x, *y, *w, *h), None)],
             Self::Tiles(tiles) => tiles.iter().map(|t| ((t.x, t.y, t.w, t.h), Some(t))).collect(),
