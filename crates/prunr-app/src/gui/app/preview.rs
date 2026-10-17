@@ -681,7 +681,7 @@ mod landing_tests {
         let prep = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
         let mut uploads = crate::gui::image_texture::Uploads::default();
         uploads.push(prep.name, prep.image.expect("prepared"), ());
-        let (texture, ()) = uploads.pump(ctx, Default::default()).pop().expect("a small image uploads in one frame");
+        let (texture, ()) = uploads.pump(ctx, |_| true).landed.pop().expect("a small image uploads in one frame");
         app.batch.find_by_id_mut(prep.item_id).expect("the item").land_texture(texture, prep.target);
         prep.target
     }

@@ -47,6 +47,14 @@ pub(crate) enum TexLanding {
     Backdrop { item_id: u64, key: u64 },
 }
 
+impl TexLanding {
+    pub(crate) fn item_id(&self) -> u64 {
+        match *self {
+            Self::Image { item_id, .. } | Self::Selection { item_id, .. } | Self::Backdrop { item_id, .. } => item_id,
+        }
+    }
+}
+
 /// A texture built off-thread for upload.
 pub(crate) struct TexPrepMsg {
     pub item_id: u64,
