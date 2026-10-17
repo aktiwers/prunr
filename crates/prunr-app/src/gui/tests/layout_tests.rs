@@ -4,6 +4,10 @@
 
 use super::fixtures::push_test_item;
 use super::harness::{click, harness_sized, names, settle, tree};
+use egui_kittest::Harness;
+
+use crate::gui::app::PrunrApp;
+use crate::gui::brush_state::Tool;
 use crate::gui::item::BatchStatus;
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme::MIN_WINDOW_SIZE;
@@ -18,8 +22,8 @@ const MODELS: [SettingsModel; 4] = [
     SettingsModel::RealEsrganUpscale,
 ];
 
-/// What is wrong with the toolbar at `width` for `model`, if anything.
-fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
+/// The window at `width` with one processed 64×64 image, selected.
+fn with_a_done_image(width: f32, model: SettingsModel) -> Harness<'static, PrunrApp> {
     let mut harness = harness_sized(egui::vec2(width, MIN_WINDOW_SIZE[1]));
     {
         let app = harness.state_mut();
@@ -27,38 +31,48 @@ fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
         let item = push_test_item(app, 1);
         item.dimensions = (64, 64);
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
-        let mut cells = vec![0i8; 64 * 64];
-        cells[64 * 10 + 10] = prunr_core::selection::FULL;
         app.batch.select_item(0);
-        app.batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells), crate::gui::timeline::StepKind::Stroke);
     }
+    harness
+}
+
+/// The named controls `keep` picks, with their rects.
+fn controls(harness: &Harness<'_, PrunrApp>, keep: impl Fn(&[f32; 4]) -> bool) -> Vec<(String, [f32; 4])> {
+    tree(harness)
+        .iter()
+        .filter(|n| n.is_control())
+        .filter_map(|n| Some((n.name.clone().unwrap_or_default(), n.rect?)))
+        .filter(|(_, r)| r[2] > r[0] && keep(r))
+        .collect()
+}
+
+/// The first two of `controls` that overlap, if any.
+fn first_overlap(controls: &[(String, [f32; 4])]) -> Option<String> {
+    controls.iter().enumerate().find_map(|(i, (a, ra))| {
+        controls[i + 1..].iter().find_map(|(b, rb)| {
+            let w = ra[2].min(rb[2]) - ra[0].max(rb[0]);
+            let h = ra[3].min(rb[3]) - ra[1].max(rb[1]);
+            (w > 1.0 && h > 1.0).then(|| format!("{a:?} overlaps {b:?}"))
+        })
+    })
+}
+
+/// What is wrong with the toolbar at `width` for `model`, if anything.
+fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
+    let mut harness = with_a_done_image(width, model);
+    let mut cells = vec![0i8; 64 * 64];
+    cells[64 * 10 + 10] = prunr_core::selection::FULL;
+    harness.state_mut().batch.commit_selection(1, prunr_core::selection::MaskArtifact::from_cells(64, 64, cells), crate::gui::timeline::StepKind::Stroke);
     settle(&mut harness);
     // Upscale has no brush.
     if names(&harness).iter().any(|n| n == "Paint Brush") {
         click(&mut harness, "Paint Brush");
     }
-    let root = tree(&harness);
-    let bars: Vec<(String, [f32; 4])> = root
-        .iter()
-        .filter(|n| n.is_control())
-        .filter_map(|n| Some((n.name.clone().unwrap_or_default(), n.rect?)))
-        .filter(|(_, r)| r[3] <= TOOLBAR_BOTTOM && r[2] > r[0])
-        .collect();
-    for (name, r) in &bars {
-        if r[2] > width {
-            return Some(format!("{name:?} ends at {} past {width}", r[2]));
-        }
+    let bars = controls(&harness, |r| r[3] <= TOOLBAR_BOTTOM);
+    if let Some((name, r)) = bars.iter().find(|(_, r)| r[2] > width) {
+        return Some(format!("{name:?} ends at {} past {width}", r[2]));
     }
-    for (i, (a, ra)) in bars.iter().enumerate() {
-        for (b, rb) in &bars[i + 1..] {
-            let w = ra[2].min(rb[2]) - ra[0].max(rb[0]);
-            let h = ra[3].min(rb[3]) - ra[1].max(rb[1]);
-            if w > 1.0 && h > 1.0 {
-                return Some(format!("{a:?} overlaps {b:?}"));
-            }
-        }
-    }
-    None
+    first_overlap(&bars)
 }
 
 #[test]
@@ -146,58 +160,40 @@ fn the_toolbar_layout_settles_at_every_width() {
 
 
 /// What is wrong with the brush strip at `width` for `model` and `tool`:
-/// a control past the canvas (under the sidebar) or two overlapping.
-fn strip_clash(width: f32, model: SettingsModel, tool: &str) -> Option<String> {
-    let mut harness = harness_sized(egui::vec2(width, MIN_WINDOW_SIZE[1]));
-    {
-        let app = harness.state_mut();
-        app.settings.model = model;
-        let item = push_test_item(app, 1);
-        item.dimensions = (64, 64);
-        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
-        app.batch.select_item(0);
-    }
+/// a control past the canvas (under the sidebar), two overlapping, or a
+/// layout that does not settle.
+fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
+    let mut harness = with_a_done_image(width, model);
     settle(&mut harness);
-    if !names(&harness).iter().any(|n| n == tool) {
+    let title = match tool {
+        Tool::Paint => "Paint Brush",
+        Tool::Magic => "Magic Brush",
+    };
+    if !names(&harness).iter().any(|n| n == title) {
         return None;
     }
-    click(&mut harness, tool);
+    click(&mut harness, title);
     harness.run_steps(4);
-    let fit_id = egui::Id::new(("tool_strip_fit", tool));
-    let fit = |h: &egui_kittest::Harness<'_, crate::gui::app::PrunrApp>| h.ctx.data(|d| d.get_temp::<f32>(fit_id));
+    let fit = |h: &Harness<'_, PrunrApp>| h.ctx.data(|d| d.get_temp::<f32>(crate::gui::views::tool_strip::fit_id(tool)));
     let settled = fit(&harness);
+    if settled.is_none() {
+        return Some("the strip measured nothing".to_string());
+    }
     for _ in 0..4 {
         harness.run_steps(1);
         if fit(&harness) != settled {
             return Some(format!("the strip keeps re-laying out: {settled:?} then {:?}", fit(&harness)));
         }
     }
-    let root = tree(&harness);
-    let rect_of = |name: &str| root.iter().find(|n| n.name.as_deref() == Some(name)).and_then(|n| n.rect);
+    let all = controls(&harness, |_| true);
+    let rect_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, r)| *r);
     let canvas_right = rect_of("Select All")?[0];
-    let more = format!("More {tool} settings");
-    let strip_top = rect_of(&more)?[1] - 60.0;
-    let strip: Vec<(String, [f32; 4])> = root
-        .iter()
-        .filter(|n| n.is_control())
-        .filter_map(|n| Some((n.name.clone().unwrap_or_default(), n.rect?)))
-        .filter(|(_, r)| r[1] >= TOOLBAR_BOTTOM && r[1] >= strip_top && r[3] <= strip_top + 200.0 && r[0] < canvas_right && r[2] > r[0])
-        .collect();
-    for (name, r) in &strip {
-        if r[2] > canvas_right {
-            return Some(format!("{name:?} ends at {} under the sidebar at {canvas_right}", r[2]));
-        }
+    let strip_top = rect_of(&format!("More {title} settings"))?[1] - 60.0;
+    let strip = controls(&harness, |r| r[1] >= TOOLBAR_BOTTOM && r[1] >= strip_top && r[3] <= strip_top + 200.0 && r[0] < canvas_right);
+    if let Some((name, r)) = strip.iter().find(|(_, r)| r[2] > canvas_right) {
+        return Some(format!("{name:?} ends at {} under the sidebar at {canvas_right}", r[2]));
     }
-    for (i, (a, ra)) in strip.iter().enumerate() {
-        for (b, rb) in &strip[i + 1..] {
-            let w = ra[2].min(rb[2]) - ra[0].max(rb[0]);
-            let h = ra[3].min(rb[3]) - ra[1].max(rb[1]);
-            if w > 1.0 && h > 1.0 {
-                return Some(format!("{a:?} overlaps {b:?}"));
-            }
-        }
-    }
-    None
+    first_overlap(&strip)
 }
 
 /// The brush strip stays on the canvas at every width, and its layout
@@ -207,9 +203,9 @@ fn the_brush_strip_stays_on_the_canvas_at_every_width() {
     let mut clashes = Vec::new();
     for width in (MIN_WINDOW_SIZE[0] as u32..=1400).step_by(50) {
         for model in MODELS {
-            for tool in ["Paint Brush", "Magic Brush"] {
+            for tool in [Tool::Paint, Tool::Magic] {
                 if let Some(clash) = strip_clash(width as f32, model, tool) {
-                    clashes.push(format!("{model:?} {tool} at {width}: {clash}"));
+                    clashes.push(format!("{model:?} {tool:?} at {width}: {clash}"));
                 }
             }
         }
