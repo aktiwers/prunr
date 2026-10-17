@@ -321,7 +321,7 @@ fn an_undone_cut_is_not_applied_again() {
     let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
     assert!(!crate::gui::drag_export::LayerJob::of(item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "no subject layer from the undone cut");
     app.settings.model = SettingsModel::None;
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
     assert!(inputs.is_ok_and(|i| i.seg_tensor.is_none()), "No model renders the photo itself");
 }
 
@@ -335,13 +335,13 @@ fn the_render_door_hands_the_photo_over_unwrapped() {
     let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
     let action = app.settings.brush.cutout_action;
     let role = crate::gui::knob_catalog::ModelRole::Filters;
-    let first = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::Mask, role, style, action).expect("a render");
+    let first = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::Mask, role, style, action).expect("a render");
     assert!(matches!(first.original_from, Some(OriginalFrom::Photo(_))), "the photo goes over as it is");
     assert!(app.batch.items[0].source_dyn.is_none(), "nothing was copied here");
     let rgba = app.batch.items[0].source_rgba.clone().unwrap();
     let wrapped = Arc::new(image::DynamicImage::ImageRgba8((*rgba).clone()));
     app.batch.items[0].keep_built_original(crate::gui::live_preview::BuiltOriginal { rgba, wrapped: Arc::clone(&wrapped), start: false });
-    let next = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, PreviewKind::Mask, role, style, action).expect("a render");
+    let next = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::Mask, role, style, action).expect("a render");
     assert!(next.original_from.is_none() && Arc::ptr_eq(&next.original, &wrapped), "the kept wrap is reused");
 }
 
@@ -367,7 +367,7 @@ fn an_unreadable_photo_is_not_decoded_again() {
     app.ensure_source_decoded(0);
     assert!(!app.batch.items[0].decode_pending, "no second decode");
     let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-    let inputs = PrunrApp::build_preview_inputs(&mut app.batch.items, 1, crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
     assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Never(_))), "refused for good, so the busy pill goes");
 }
 
