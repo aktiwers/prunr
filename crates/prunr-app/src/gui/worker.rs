@@ -667,6 +667,11 @@ impl SentWork {
         self.len() == 0
     }
 
+    /// Work the worker runs now; owed spare scales hold no job slot.
+    fn working(&self) -> usize {
+        self.len() - self.spares.len()
+    }
+
     /// Only spare scales are owed: losing the worker now loses no image,
     /// so it is no crash to retry or to run fewer jobs after.
     fn only_spares(&self) -> bool {
@@ -893,7 +898,7 @@ fn spawn_and_initial_burst(
     while sent_count < burst {
         match send_next(&mut sub, state, &mut sent, None, res_tx, ctx) {
             SendOutcome::Sent => sent_count += 1,
-            SendOutcome::Unreadable => {}
+            SendOutcome::Failed => {}
             SendOutcome::Held | SendOutcome::Nothing => break,
         }
     }
@@ -970,8 +975,9 @@ fn run_event_loop(
                 subprocess_finished = true;
                 continue;
             }
-            handle_subprocess_event(event, sub, state, sent, cancels, res_tx, ctx);
+            handle_subprocess_event(event, state, sent, res_tx, ctx);
         }
+        top_up(sub, state, sent, cancels, res_tx, ctx);
 
         // If everything drained and no more coming, mark finished.
         if sent.is_empty() && matches!(poll_additional_items(state), WaitAction::Complete) {
@@ -986,10 +992,8 @@ fn run_event_loop(
 /// `SubprocessManager` internally.
 fn handle_subprocess_event(
     event: SubprocessEvent,
-    sub: &mut SubprocessManager,
     state: &mut BatchRunState,
     sent: &mut SentWork,
-    cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
@@ -1021,8 +1025,6 @@ fn handle_subprocess_event(
                 item_id, result, seg, edges,
             });
             ctx.request_repaint();
-
-            admit_next_item(sub, state, sent, cancels, res_tx, ctx);
         }
         SubprocessEvent::ImageError { item_id, error } => {
             state.completed.insert(item_id);
@@ -1125,10 +1127,20 @@ fn read_raw_edge_tensors(file: Option<&EdgeCacheFile>) -> Option<RawEdgeTensors>
     Some(RawEdgeTensors { tensors, height: file.height, width: file.width, spare: None })
 }
 
-/// After an ImageDone, pull one more item into the subprocess if RSS allows.
-/// Prefers Tier 2 (no inference), then Tier 1 pending, then the admission
-/// overflow channel.
-fn admit_next_item(
+/// How much more work to send now. Up to the job limit; the memory pause
+/// holds new work back only while some is running, as the worker reports
+/// its memory when work ends: with none running the pause would never lift.
+fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
+    if paused && working > 0 {
+        return 0;
+    }
+    max_jobs.saturating_sub(working)
+}
+
+/// Keep the worker busy: after any event (an image done, failed or
+/// cancelled), send pending work up to the job limit. Prefers Tier 2 (no
+/// inference), then Tier 1 pending, then the admission overflow channel.
+fn top_up(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
     sent: &mut SentWork,
@@ -1137,17 +1149,20 @@ fn admit_next_item(
     ctx: &egui::Context,
 ) {
     drop_cancelled_pending(state, cancels, res_tx, ctx);
-    if sub.should_pause_admission() {
-        return;
+    while room_to_send(sent.working(), state.max_jobs, sub.should_pause_admission()) > 0 {
+        match send_next(sub, state, sent, Some(cancels), res_tx, ctx) {
+            SendOutcome::Sent | SendOutcome::Failed => {}
+            SendOutcome::Held | SendOutcome::Nothing => break,
+        }
     }
-    send_next(sub, state, sent, Some(cancels), res_tx, ctx);
 }
 
 /// What `send_next` did.
 enum SendOutcome {
     Sent,
-    /// The next work's inputs could not be read: it failed and went no further.
-    Unreadable,
+    /// The next work could not be read or handed over: it failed and went
+    /// no further.
+    Failed,
     /// The worker refused it; it stays at the front to retry.
     Held,
     Nothing,
@@ -1181,9 +1196,15 @@ fn send_next(
             }
             Err(Refused::Unreadable(err)) => {
                 report_failed(work.item_id, err, state, res_tx, ctx);
-                SendOutcome::Unreadable
+                SendOutcome::Failed
             }
-            Err(Refused::Worker) => {
+            // A live worker that cannot take it (a full temp disk) would
+            // refuse it again forever: it fails. A dead one is the crash path's.
+            Err(Refused::Worker(err)) if sub.is_alive() => {
+                report_failed(work.item_id, err, state, res_tx, ctx);
+                SendOutcome::Failed
+            }
+            Err(Refused::Worker(_)) => {
                 pending.push_front(work);
                 SendOutcome::Held
             }
@@ -1207,9 +1228,13 @@ fn send_next(
         }
         Err(Refused::Unreadable(err)) => {
             report_failed(item.id, err, state, res_tx, ctx);
-            SendOutcome::Unreadable
+            SendOutcome::Failed
         }
-        Err(Refused::Worker) => {
+        Err(Refused::Worker(err)) if sub.is_alive() => {
+            report_failed(item.id, err, state, res_tx, ctx);
+            SendOutcome::Failed
+        }
+        Err(Refused::Worker(_)) => {
             if from_pending {
                 state.pending.push_front(item);
             } else {
@@ -1229,7 +1254,8 @@ enum Lane {
 /// Why work did not reach the worker.
 enum Refused {
     Unreadable(String),
-    Worker,
+    /// Handing it over failed (a temp file, the pipe), with why.
+    Worker(String),
 }
 
 fn drop_cancelled_pending(
@@ -1440,7 +1466,7 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
         let _ = res_tx.send(WorkerResult::ChainStart { item_id: item.id, run: item.run, image });
     }
     let chain_input = start.as_deref().map(|rgba| (rgba, rgba.width(), rgba.height()));
-    sub.send_image(item.id, &bytes, chain_input).map_err(|_| Refused::Worker)
+    sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
 }
 
 type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &[u8], MaskSettings) -> Result<(), String>;
@@ -1463,7 +1489,7 @@ fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendC
         height: work.tensor.height,
         width: work.tensor.width,
     };
-    send(sub, work.item_id, &tensor, work.tensor.model, &bytes, work.mask).map_err(|_| Refused::Worker)
+    send(sub, work.item_id, &tensor, work.tensor.model, &bytes, work.mask).map_err(Refused::Worker)
 }
 
 #[cfg(test)]
@@ -1636,6 +1662,19 @@ mod tests {
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
+    }
+
+    /// Work goes out up to the job limit; the memory pause holds it back
+    /// only while some runs, or a batch whose running images all failed
+    /// would wait for a memory report that never comes.
+    #[test]
+    fn work_is_sent_up_to_the_limit_and_the_pause_needs_running_work() {
+        assert_eq!(super::room_to_send(0, 2, false), 2, "the batch's first images");
+        assert_eq!(super::room_to_send(1, 2, false), 1, "one finished or failed: one more");
+        assert_eq!(super::room_to_send(2, 2, false), 0);
+        assert_eq!(super::room_to_send(1, 2, true), 0, "paused while one runs");
+        assert_eq!(super::room_to_send(0, 2, true), 2, "nothing running: the pause cannot lift itself");
+        assert_eq!(super::room_to_send(3, 2, false), 0, "fewer jobs after a crash");
     }
 
     #[test]
