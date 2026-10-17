@@ -41,7 +41,7 @@ fn preview_inputs(app: &mut PrunrApp, id: u64, filter_only: bool) -> Option<Disp
     let style = app.selection_style();
     let action = app.settings.brush.cutout_action;
     let role = if filter_only { crate::gui::knob_catalog::ModelRole::Filters } else { crate::gui::knob_catalog::ModelRole::Cutout };
-    PrunrApp::build_preview_inputs(&mut app.batch.items, id, PreviewKind::Mask, role, style, action).ok()
+    PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(id).expect("the item"), PreviewKind::Mask, role, style, action).ok()
 }
 
 /// A second stroke on the first item: its bottom-right cell joins the
