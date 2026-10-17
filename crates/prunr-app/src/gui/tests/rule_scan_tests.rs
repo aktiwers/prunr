@@ -31,7 +31,7 @@ const BANNED: [(&str, &str); 18] = [
     ("j.engine == super::item::Engine::Segment", "awaits_cut()"),
 ];
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(super) fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("source dir") {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
@@ -43,12 +43,15 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The lines of `source` before its first inline `#[cfg(test)]` module
-/// (`mod name {`); a `mod name;` declaration is not one.
-fn production_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
+/// (`mod name {`, other attributes between allowed); a `mod name;`
+/// declaration is not one.
+pub(super) fn production_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let lines: Vec<&str> = source.lines().collect();
-    let end = lines.windows(2)
-        .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].trim_start().starts_with("mod ") && w[1].trim_end().ends_with('{'))
-        .unwrap_or(lines.len());
+    let opens_test_module = |at: usize| {
+        lines[at].trim() == "#[cfg(test)]"
+            && lines[at + 1..].iter().find(|l| !l.trim_start().starts_with("#[")).is_some_and(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with('{'))
+    };
+    let end = (0..lines.len()).find(|&at| opens_test_module(at)).unwrap_or(lines.len());
     lines.into_iter().take(end).enumerate().map(|(i, l)| (i + 1, l))
 }
 
