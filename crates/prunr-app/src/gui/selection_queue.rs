@@ -61,6 +61,13 @@ pub(crate) enum AfterLanding {
     ByDepth,
 }
 
+/// What the worker is sent: an edit, or word that an image's chain is
+/// done (nothing pending), so its last output is let go.
+enum Msg {
+    Job(Job),
+    Forget(u64),
+}
+
 /// An edit for the worker.
 struct Job {
     item_id: u64,
@@ -82,50 +89,80 @@ pub(crate) struct Done {
 }
 
 pub(crate) struct SelectionQueue {
-    tx: mpsc::Sender<Job>,
+    tx: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Done>,
     /// Edits sent per image and not landed yet.
     pending: HashMap<u64, u32>,
-    /// Undo / redo asked for while edits were pending, replayed in order
-    /// once the queue is empty: an undo then undoes the stroke just made.
-    deferred: Vec<super::views::shortcuts::Action>,
+    /// Undo / redo asked for while the images it acts on had edits
+    /// pending, with those images, replayed in order once they have none:
+    /// an undo then undoes the stroke just made.
+    deferred: Vec<(super::views::shortcuts::Action, Vec<u64>)>,
+    /// Woken when an edit is made; set once the window exists.
+    repaint: Arc<std::sync::OnceLock<egui::Context>>,
 }
 
 impl SelectionQueue {
-    pub(crate) fn new(ctx: Option<egui::Context>) -> Self {
-        let (tx, jobs) = mpsc::channel::<Job>();
+    pub(crate) fn new() -> Self {
+        let (tx, jobs) = mpsc::channel::<Msg>();
         let (done_tx, rx) = mpsc::channel();
+        let repaint: Arc<std::sync::OnceLock<egui::Context>> = Arc::default();
+        let wake = Arc::clone(&repaint);
         std::thread::Builder::new()
             .name("selection-edits".into())
             .spawn(move || {
+                // Each image's last output while its chain runs (12 MB a
+                // plane at 12 MP): dropped when the chain is done.
                 let mut last: HashMap<u64, SelState> = HashMap::new();
-                for job in jobs {
+                for msg in jobs {
+                    let job = match msg {
+                        Msg::Job(job) => job,
+                        Msg::Forget(item_id) => {
+                            last.remove(&item_id);
+                            continue;
+                        }
+                    };
                     let base = job.base.unwrap_or_else(|| last.get(&job.item_id).cloned().unwrap_or_default());
                     let made = apply(&job.op, &base);
                     let hash = made.selection.as_ref().map(|s| s.content_hash());
                     last.insert(job.item_id, made.clone());
                     let _ = done_tx.send(Done { item_id: job.item_id, op: job.op, after: job.after, base, made, hash });
-                    if let Some(ctx) = &ctx {
+                    if let Some(ctx) = wake.get() {
                         ctx.request_repaint();
                     }
                 }
             })
             .map_err(|err| tracing::error!(%err, "selection edit thread did not start"))
             .ok();
-        Self { tx, rx, pending: HashMap::new(), deferred: Vec::new() }
+        Self { tx, rx, pending: HashMap::new(), deferred: Vec::new(), repaint }
+    }
+
+    /// Wake `ctx` whenever an edit is made.
+    pub(crate) fn wake(&self, ctx: &egui::Context) {
+        let _ = self.repaint.set(ctx.clone());
     }
 
     /// Queue `op` on the image showing `current`; it builds on the image's
     /// edits still pending, if any.
     pub(crate) fn push(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, current: SelState) {
-        let count = self.pending.entry(item_id).or_default();
-        let base = (*count == 0).then_some(current);
-        *count += 1;
-        let _ = self.tx.send(Job { item_id, op, after, base });
+        let chained = self.pending.get(&item_id).is_some_and(|&n| n > 0);
+        self.send(item_id, op, after, (!chained).then_some(current));
+    }
+
+    /// Queue `op` again, on `current`, the state the image shows now: an
+    /// edit made on a state the image has left. The edits still pending
+    /// for it chain on this one in turn, so the queue settles.
+    pub(crate) fn rebase(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, current: SelState) {
+        self.send(item_id, op, after, Some(current));
+    }
+
+    fn send(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, base: Option<SelState>) {
+        *self.pending.entry(item_id).or_default() += 1;
+        let _ = self.tx.send(Msg::Job(Job { item_id, op, after, base }));
     }
 
     /// The edits made since the last frame, in order; each is no longer
-    /// pending (one that goes back in the queue is pushed again).
+    /// pending (one that goes back in the queue is pushed again). An
+    /// image left with none pending has its chain let go.
     pub(crate) fn take_done(&mut self) -> Vec<Done> {
         let done: Vec<Done> = self.rx.try_iter().collect();
         for d in &done {
@@ -133,6 +170,7 @@ impl SelectionQueue {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
                     self.pending.remove(&d.item_id);
+                    let _ = self.tx.send(Msg::Forget(d.item_id));
                 }
             }
         }
@@ -147,14 +185,16 @@ impl SelectionQueue {
         !self.pending.is_empty()
     }
 
-    /// Hold `action` until the queue is empty.
-    pub(crate) fn defer(&mut self, action: super::views::shortcuts::Action) {
-        self.deferred.push(action);
+    /// Hold `action` on the images `ids` until they have no edits pending.
+    pub(crate) fn defer(&mut self, action: super::views::shortcuts::Action, ids: Vec<u64>) {
+        self.deferred.push((action, ids));
     }
 
-    /// The actions held, once nothing is pending.
-    pub(crate) fn take_deferred(&mut self) -> Vec<super::views::shortcuts::Action> {
-        if self.any_pending() { Vec::new() } else { std::mem::take(&mut self.deferred) }
+    /// The held actions whose images are done, in the order held; one
+    /// waiting holds the ones after it too.
+    pub(crate) fn take_deferred(&mut self) -> Vec<(super::views::shortcuts::Action, Vec<u64>)> {
+        let ready = self.deferred.iter().take_while(|(_, ids)| !ids.iter().any(|id| self.is_pending(*id))).count();
+        self.deferred.drain(..ready).collect()
     }
 }
 
@@ -173,6 +213,10 @@ pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
         },
         SelectionOp::Bake { action, feathered } => {
             let Some(selection) = base.selection.clone() else { return base.clone() };
+            // A blank selection folds in nothing: the edits stay as they are.
+            if selection.is_blank() {
+                return SelState { selection: None, edits: base.edits.clone() };
+            }
             let edits = match action {
                 CutoutAction::Select => base.edits.clone(),
                 action => {
@@ -208,7 +252,7 @@ mod tests {
     #[test]
     fn quick_strokes_build_on_each_other_in_order() {
         use prunr_core::selection::FULL;
-        let mut queue = SelectionQueue::new(None);
+        let mut queue = SelectionQueue::new();
         let first = plane(&[FULL, 0, 0]);
         let second = plane(&[0, 0, FULL]);
         queue.push(1, SelectionOp::Merge(Arc::clone(&first)), AfterLanding::Nothing, SelState::default());
@@ -223,6 +267,22 @@ mod tests {
         assert!(!queue.is_pending(1) && !queue.any_pending());
     }
 
+    /// Once an image has nothing pending, the worker lets its chain go:
+    /// it holds none of the image's planes.
+    #[test]
+    fn a_done_chain_holds_no_planes() {
+        let mut queue = SelectionQueue::new();
+        queue.push(1, SelectionOp::Invert, AfterLanding::Nothing, SelState { selection: Some(plane(&[0, 0])), edits: None });
+        let done = wait(&mut queue, 1);
+        let made = done[0].made.selection.clone().expect("inverted");
+        drop(done);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(&made) > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(Arc::strong_count(&made), 1, "the worker let it go");
+    }
+
     /// Bake folds the selection into the edits and clears it; Select
     /// keeps the edits as they were.
     #[test]
@@ -233,17 +293,22 @@ mod tests {
         assert!(erased.selection.is_none() && erased.edits.is_some());
         let kept = apply(&SelectionOp::Bake { action: CutoutAction::Select, feathered: None }, &base);
         assert!(kept.selection.is_none() && kept.edits.is_none());
+        let edits = plane(&[-FULL, 0]);
+        let blank = SelState { selection: Some(plane(&[0, 0])), edits: Some(Arc::clone(&edits)) };
+        let folded = apply(&SelectionOp::Bake { action: CutoutAction::Erase, feathered: None }, &blank);
+        assert!(folded.selection.is_none() && folded.edits.is_some_and(|e| Arc::ptr_eq(&e, &edits)), "a blank selection folds in nothing");
     }
 
     /// Undo asked for while a stroke is pending waits for the queue.
     #[test]
     fn an_action_waits_for_the_queue() {
         use super::super::views::shortcuts::Action;
-        let mut queue = SelectionQueue::new(None);
+        let mut queue = SelectionQueue::new();
         queue.push(1, SelectionOp::Invert, AfterLanding::Nothing, SelState { selection: Some(plane(&[0])), edits: None });
-        queue.defer(Action::Undo);
-        assert!(queue.take_deferred().is_empty(), "held while pending");
+        queue.defer(Action::Undo, vec![1]);
+        queue.defer(Action::Redo, vec![2]);
+        assert!(queue.take_deferred().is_empty(), "held while its image is pending, and the one after it too");
         wait(&mut queue, 1);
-        assert_eq!(queue.take_deferred(), vec![Action::Undo]);
+        assert_eq!(queue.take_deferred(), vec![(Action::Undo, vec![1]), (Action::Redo, vec![2])]);
     }
 }

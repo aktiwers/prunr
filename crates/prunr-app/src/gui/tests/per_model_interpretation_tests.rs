@@ -166,10 +166,10 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
-    let Ok(DecodedSelection::Retuned { merged, hash }) = result.result else {
+    let Ok(DecodedSelection::Retuned { merged, hash, for_hash }) = result.result else {
         panic!("re-threshold decodes without a session");
     };
-    app.apply_rethreshold(9, merged, hash, result.reading);
+    app.apply_rethreshold(9, merged, hash, result.reading, for_hash);
 
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
@@ -854,4 +854,38 @@ fn an_edit_on_a_changed_selection_is_made_again() {
     super::fixtures::settle_selection_edits(&mut app);
     let merged = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
     assert!(merged[3] != 0 && merged[2 * 8 + 2] != 0, "the stroke landed on the new selection");
+}
+
+/// A stroke that adds nothing still hands the image its planes, so the
+/// next stroke queued on it lands without being made again; strokes
+/// queued on a selection changed under them all land, the queue settles.
+#[test]
+fn strokes_settle_on_no_op_and_changed_selections() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    app.batch.select_item(0);
+    let stroke = |x: usize| {
+        let mut cells = vec![0i8; 64];
+        cells[x] = prunr_core::selection::FULL;
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
+    };
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    let steps = app.batch.items[0].timeline.undo_steps();
+    // The same stroke again adds nothing; one queued after it builds on it.
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(6)), AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "one step: the second stroke");
+    // Three strokes, and the selection changes under them.
+    for x in [10, 11, 12] {
+        app.queue_selection_op(1, SelectionOp::Merge(stroke(x)), AfterLanding::Nothing);
+    }
+    app.batch.items[0].commit_selection_mask(stroke(40), StepKind::Selection);
+    super::fixtures::settle_selection_edits(&mut app);
+    let cells = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
+    assert!([10, 11, 12, 40].iter().all(|&x| cells[x] != 0), "every stroke landed on the new selection");
 }

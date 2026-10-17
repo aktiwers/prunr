@@ -1283,6 +1283,10 @@ impl BatchItem {
             None => self.selection_mask.is_none(),
         };
         if same_selection && same_edits {
+            // Nothing new to show: the image takes the planes all the same,
+            // so an edit queued on this one finds the base it was built on.
+            self.selection_mask = made.selection;
+            self.edits = made.edits;
             return false;
         }
         let cleared = made.selection.is_none();

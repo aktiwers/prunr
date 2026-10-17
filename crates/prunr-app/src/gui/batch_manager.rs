@@ -151,7 +151,7 @@ impl BatchManager {
             bg_io: BackgroundIO::new(),
             last_history_sweep: std::time::Instant::now(),
             demoting: Arc::default(),
-            selection_queue: super::selection_queue::SelectionQueue::new(None),
+            selection_queue: super::selection_queue::SelectionQueue::new(),
         }
     }
 
