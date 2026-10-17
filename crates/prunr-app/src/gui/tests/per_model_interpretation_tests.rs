@@ -611,6 +611,8 @@ fn delete_on_a_cutout_keeps_the_erase_and_undo_returns_the_selection() {
     let selection = app.batch.items[0].selection_mask.clone();
 
     app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+    assert!(app.batch.items[0].selection_mask.is_some(), "folded off the UI thread");
+    super::fixtures::settle_selection_edits(&mut app);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none(), "a new area starts");
     let edits = item.edits.as_ref().expect("the erase is kept");
@@ -632,9 +634,11 @@ fn restore_wins_over_an_earlier_erase() {
     cutout_with_selection(&mut app, 8);
     let ctx = egui::Context::default();
     app.handle_selection_action(0, SelectionAction::Delete, &ctx);
+    super::fixtures::settle_selection_edits(&mut app);
     let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
     app.batch.items[0].commit_selection_mask(std::sync::Arc::new(selection), StepKind::Stroke);
     app.handle_selection_action(0, SelectionAction::Restore, &ctx);
+    super::fixtures::settle_selection_edits(&mut app);
     let edits = app.batch.items[0].edits.as_ref().expect("edits");
     assert!(edits.cells()[2 * 8 + 2] > 0);
 }
@@ -696,7 +700,7 @@ fn the_correction_cache_lets_go_after_a_bake_and_off_screen() {
     item.correction_plane(style, CutoutAction::Restore).unwrap();
     assert!(item.bake_selection(style, CutoutAction::Restore));
     let baked = item.edits.as_ref().unwrap();
-    assert_eq!(std::sync::Arc::strong_count(baked), 1, "baked: the cache holds no plane");
+    assert_eq!(std::sync::Arc::strong_count(baked), 2, "baked: the working copy and its step, the cache none");
 }
 
 /// A step's image shows its selection as the switch stood then; an undo
@@ -797,4 +801,57 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
     assert!(item.hot_seg_tensor().is_none(), "another model's cut");
     item.record_origin(Engine::Segment, None, None);
     assert!(item.hot_seg_tensor().is_some(), "a step whose cutter is not known is re-cut as before");
+}
+
+/// Selection edits run off the UI thread in order: two strokes queued
+/// before either lands build on each other and land as two steps; a run
+/// waits for them; an undo pressed meanwhile undoes the last stroke once
+/// it has landed.
+#[test]
+fn queued_strokes_land_in_order_and_an_undo_waits_for_them() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    app.batch.select_item(0);
+    let stroke = |x: usize| {
+        let mut cells = vec![0i8; 64];
+        cells[x] = prunr_core::selection::FULL;
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
+    };
+    let steps = app.batch.items[0].timeline.undo_steps();
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(0)), AfterLanding::Nothing);
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(9)), AfterLanding::Nothing);
+    assert_eq!(app.run_refusal(&app.batch.items[0]), Some(crate::gui::capability::Reason::FinishingSelection), "a run waits");
+    app.handle_undo(&ctx);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "the undo waits too");
+    super::fixtures::settle_selection_edits(&mut app);
+    app.land_selection_edits(&ctx);
+    let item = &app.batch.items[0];
+    assert_eq!(item.timeline.undo_steps(), steps + 1, "two strokes landed, then the undo took the second back");
+    let cells = item.selection_mask.as_ref().expect("the first stroke").cells();
+    assert!(cells[0] != 0 && cells[9] == 0);
+}
+
+/// An edit made on a selection the image has since left goes back in
+/// the queue against what it shows now: the stroke is not lost.
+#[test]
+fn an_edit_on_a_changed_selection_is_made_again() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    app.batch.select_item(0);
+    let mut cells = vec![0i8; 64];
+    cells[3] = prunr_core::selection::FULL;
+    app.queue_selection_op(1, SelectionOp::Merge(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))), AfterLanding::Nothing);
+    // The selection changes while the stroke is being merged.
+    app.batch.items[0].commit_selection_mask(make_mask(8, 8).into(), StepKind::Selection);
+    super::fixtures::settle_selection_edits(&mut app);
+    let merged = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
+    assert!(merged[3] != 0 && merged[2 * 8 + 2] != 0, "the stroke landed on the new selection");
 }

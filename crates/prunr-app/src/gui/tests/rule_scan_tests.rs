@@ -128,3 +128,43 @@ fn the_render_code_does_no_blocking_work() {
     }
     assert!(found.is_empty(), "blocking work in the render code:\n{}", found.join("\n"));
 }
+
+/// Changing the selection is a full-resolution pass: it goes through the
+/// selection queue (`PrunrApp::queue_selection_op`), in order, off the UI
+/// thread. The edits themselves live in the queue, the merge in
+/// processor.rs (also run by the Magic Brush retune job) and the landing
+/// in item.rs.
+const SELECTION_OWNERS: [&str; 3] = ["gui/selection_queue.rs", "gui/processor.rs", "gui/item.rs"];
+
+const SELECTION_BANNED: [&str; 4] = ["merge_stroke(", "commit_selection_mask(", "bake_selection(", ".invert()"];
+
+/// Lines outside the owners that may use a banned call, with why.
+const SELECTION_ALLOWED: [(&str, &str, &str); 1] = [
+    ("gui/batch_manager.rs", ".is_some_and(|item| item.commit_selection_mask(", "BatchManager::commit_selection, a #[cfg(test)] helper"),
+];
+
+#[test]
+fn selection_edits_go_through_the_queue() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src.join("gui"), &mut files);
+    let mut found = Vec::new();
+    for file in files {
+        let rel = file.strip_prefix(&src).expect("under src").to_string_lossy().replace('\\', "/");
+        if SELECTION_OWNERS.contains(&rel.as_str()) || rel.starts_with("gui/tests/") || rel.ends_with("_tests.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file).expect("readable source");
+        for (n, line) in production_lines(&source) {
+            if line.trim_start().starts_with("//") || SELECTION_ALLOWED.iter().any(|(f, text, _)| rel == *f && line.contains(text)) {
+                continue;
+            }
+            for pattern in SELECTION_BANNED {
+                if line.contains(pattern) {
+                    found.push(format!("{rel}:{n}: `{pattern}`: use queue_selection_op"));
+                }
+            }
+        }
+    }
+    assert!(found.is_empty(), "selection edits outside the queue:\n{}", found.join("\n"));
+}

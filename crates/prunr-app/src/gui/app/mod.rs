@@ -675,6 +675,10 @@ impl PrunrApp {
         if let Some(why) = item.verdict(Need::Idle, role).reason() {
             return Some(why);
         }
+        // A run reads the selection the edits under way will change.
+        if self.batch.selection_queue.is_pending(item.id) {
+            return Some(crate::gui::capability::Reason::FinishingSelection);
+        }
         if let Verdict::Never(why) = item.verdict(Need::ShownImage, role) {
             return Some(why);
         }
@@ -716,11 +720,20 @@ impl PrunrApp {
     /// state back on their timelines. A run still going on one is cancelled
     /// first: its result belongs to the state being left.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
+        // A stroke still being merged is undone once it has landed.
+        if self.batch.selection_queue.any_pending() {
+            self.batch.selection_queue.defer(crate::gui::views::shortcuts::Action::Undo);
+            return;
+        }
         self.step_targets(ctx, BatchItem::undo_step, "undone", "Nothing to undo");
     }
 
     /// Mirror of `handle_undo`.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
+        if self.batch.selection_queue.any_pending() {
+            self.batch.selection_queue.defer(crate::gui::views::shortcuts::Action::Redo);
+            return;
+        }
         self.step_targets(ctx, BatchItem::redo_step, "redone", "Nothing to redo");
     }
 

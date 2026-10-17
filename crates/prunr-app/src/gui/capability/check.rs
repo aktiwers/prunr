@@ -84,6 +84,9 @@ pub(crate) enum Reason {
     SketchCoversPhoto,
     NoSubject,
     NothingTransparent,
+    /// A selection edit (a stroke, Invert, a fold into the cut-out) is
+    /// still being made.
+    FinishingSelection,
 }
 
 impl Reason {
@@ -106,6 +109,7 @@ impl Reason {
             Reason::SketchCoversPhoto => "Sketch is on Whole photo, so nothing is cut out.",
             Reason::NoSubject => "Sketch is on Whole photo, so there is no subject to restyle.",
             Reason::NothingTransparent => "Nothing is transparent in this mode, so there is no background to fill.",
+            Reason::FinishingSelection => "Finishing the selection.",
         }
     }
 }
