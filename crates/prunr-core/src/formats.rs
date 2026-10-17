@@ -15,7 +15,9 @@ fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u
     let src = ImageRef::new(w, h, src, pixel).expect("buffer matches its dimensions");
     let mut dst = Image::new(dst_w, dst_h, pixel);
     let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
-    Resizer::new().resize(&src, &mut dst, Some(&options)).expect("resize failed");
+    // The resizer fails only on mismatched pixel types or a bad crop:
+    // both images share `pixel` and no crop is asked.
+    Resizer::new().resize(&src, &mut dst, Some(&options)).expect("same pixel type, no crop");
     dst.into_vec()
 }
 
@@ -463,6 +465,22 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every size in, every size out, an empty one included: resizing
+    /// never panics. A zero side gave the resizer an empty image.
+    #[test]
+    fn a_resize_to_or_from_an_empty_size_does_not_panic() {
+        for (src, dst) in [((4, 4), (0, 0)), ((4, 4), (0, 3)), ((4, 4), (3, 0)), ((0, 0), (3, 3)), ((0, 4), (0, 0)), ((4, 4), (1, 1))] {
+            let rgba = RgbaImage::new(src.0, src.1);
+            let out = resize_rgba(&rgba, dst.0, dst.1, ResizeFilter::Lanczos3);
+            assert_eq!(out.dimensions(), dst, "{src:?} -> {dst:?}");
+            let gray = resize_gray_lanczos3(&GrayImage::new(src.0, src.1), dst.0, dst.1);
+            assert_eq!(gray.dimensions(), dst);
+            let rgb = resize_rgb_image_lanczos3(&image::RgbImage::new(src.0, src.1), dst.0, dst.1);
+            assert_eq!(rgb.dimensions(), dst);
+        }
+    }
+
     #[test]
     fn a_16_bit_grey_png_keeps_every_value() {
         let img = image::ImageBuffer::from_fn(7, 3, |x, y| image::Luma([(x * 9000 + y * 300) as u16]));
