@@ -759,6 +759,77 @@ mod tests {
         }
     }
 
+    /// What a settings field's tier is pinned by: a row of the knob table,
+    /// or why it has none.
+    #[derive(Debug, Clone, Copy)]
+    enum TierRow {
+        Knob(StaticKnob),
+        Elsewhere(&'static str),
+    }
+
+    /// Every `ItemSettings` field, each with its row. The destructure has
+    /// no `..`: a new field does not compile until it is listed here.
+    macro_rules! settings_fields {
+        ($($field:ident => $row:expr),* $(,)?) => {{
+            let crate::gui::item_settings::ItemSettings { $($field: _),* } = crate::gui::item_settings::ItemSettings::default();
+            type Changed = fn(&crate::gui::item_settings::ItemSettings, &crate::gui::item_settings::ItemSettings) -> bool;
+            vec![$((stringify!($field), $row, (|a, b| a.$field != b.$field) as Changed)),*]
+        }};
+    }
+
+    /// A new settings field joins the tier table, or says where its tier
+    /// is tested; every knob in the table changes the field it claims.
+    #[test]
+    fn every_settings_field_has_a_tier_row() {
+        use StaticKnob as K;
+        use TierRow::{Elsewhere, Knob};
+        let fields = settings_fields! {
+            gamma => Knob(K::Gamma),
+            contrast => Knob(K::Contrast),
+            edge_shift => Knob(K::EdgeShift),
+            refine_edges => Knob(K::RefineEdges),
+            guided_radius => Knob(K::GuidedRadius),
+            guided_epsilon => Knob(K::GuidedEpsilon),
+            feather => Knob(K::Feather),
+            line_mode => Elsewhere("line_mode_cache_impact_matches_recipe_diff: every pair of modes"),
+            line_strength => Knob(K::LineStrength),
+            solid_line_color => Knob(K::SolidLineColor),
+            edge_thickness => Knob(K::EdgeThickness),
+            edge_scale => Knob(K::EdgeScale),
+            bg => Knob(K::BgColor),
+            compose_mode => Knob(K::ComposeMode),
+            line_style => Knob(K::LineStyle),
+            effect => Knob(K::SubjectEffect),
+            decoration => Knob(K::Decoration),
+            bg_effect => Knob(K::BgEffect),
+            input_transform => Elsewhere("input_transform_cache_impact_matches_recipe_diff"),
+            bg_image_hash => Elsewhere("core recipe test bg_image_hash_change_composite_only"),
+            bg_image_fit => Knob(K::BgImageFit),
+            output_scale => Elsewhere("core recipe upscale tier tests: a scale change reruns the upscale"),
+            pre_denoise => Elsewhere("core recipe upscale tier tests: Tier 1 of the upscaler"),
+            sharpen => Elsewhere("core recipe test sharpen_change_returns_upscale_tier2"),
+            ai_blend => Elsewhere("core recipe test ai_blend_change_returns_upscale_tier2"),
+            color_match => Elsewhere("core recipe test color_match_toggle_returns_upscale_tier2"),
+            faces => Elsewhere("a face pass on the shown image, not a recipe tier"),
+            color_strength_pct => Elsewhere("core recipe test colorize_strength_change_returns_colorize_tier2"),
+            depth => Knob(K::DepthLook),
+            line_fade_pct => Knob(K::LineFade),
+        };
+        let base = crate::gui::item_settings::ItemSettings { line_mode: LineMode::SubjectOutline, ..Default::default() };
+        for (field, row, changed) in &fields {
+            match row {
+                Knob(knob) => assert!(changed(&base, &mutate_static(*knob, base)), "{knob:?} does not change {field}"),
+                Elsewhere(why) => assert!(!why.trim().is_empty(), "{field}: say where its tier is tested"),
+            }
+        }
+        for knob in StaticKnob::ALL.iter().filter(|k| !matches!(k, StaticKnob::Model)) {
+            assert!(
+                fields.iter().any(|(_, row, _)| matches!(row, Knob(k) if k == knob)),
+                "{knob:?} claims no settings field",
+            );
+        }
+    }
+
     #[test]
     fn line_mode_cache_impact_matches_recipe_diff() {
         use prunr_core::ModelKind;
