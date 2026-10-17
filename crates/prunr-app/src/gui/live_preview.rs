@@ -227,13 +227,14 @@ impl QuickFrames {
         self.superseded = false;
     }
 
-    /// A quick frame's texture lands: kept when it is the newest drained.
+    /// A texture of `generation` is still worth uploading.
     pub(crate) fn wants(&self, generation: u64) -> bool {
         generation == self.generation
     }
 
+    /// A quick frame's texture lands: kept when it is the newest drained.
     pub(crate) fn land(&mut self, texture: crate::gui::image_texture::ImageTexture, generation: u64) {
-        if generation == self.generation {
+        if self.wants(generation) {
             self.texture = Some(texture);
         }
     }

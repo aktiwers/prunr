@@ -227,13 +227,15 @@ impl PreparedImage {
 
 }
 
-/// Prepared images waiting for their tiles to upload, oldest first, each
-/// with what its landing needs (`T`).
+/// One frame's uploads: the images whose last tile went up, and those
+/// dropped as no longer wanted.
 pub(crate) struct Pumped<T> {
     pub(crate) landed: Vec<(ImageTexture, T)>,
     pub(crate) dropped: Vec<T>,
 }
 
+/// Prepared images waiting for their tiles to upload, oldest first, each
+/// with what its landing needs (`T`).
 pub(crate) struct Uploads<T> {
     queue: VecDeque<Upload<T>>,
     budget: usize,
@@ -242,6 +244,8 @@ pub(crate) struct Uploads<T> {
 struct Upload<T> {
     name: String,
     options: TextureOptions,
+    /// One texture uploaded to wrap around.
+    repeats: bool,
     left: std::vec::IntoIter<Tile<egui::ColorImage>>,
     size: [usize; 2],
     done: Vec<Tile<TextureHandle>>,
@@ -261,9 +265,9 @@ impl<T> Uploads<T> {
 
     pub(crate) fn push_with(&mut self, name: String, image: PreparedImage, landing: T, options: TextureOptions) {
         let size = image.size;
-        self.queue.push_back(Upload { name, options, left: image.tiles.into_iter(), size, done: Vec::new(), landing });
+        let repeats = options.wrap_mode == egui::TextureWrapMode::Repeat && image.tiles.len() == 1;
+        self.queue.push_back(Upload { name, options, repeats, left: image.tiles.into_iter(), size, done: Vec::new(), landing });
     }
-
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
@@ -298,8 +302,7 @@ impl<T> Uploads<T> {
             }
             // just checked: the front upload has no tiles left
             let Some(upload) = self.queue.pop_front() else { break };
-            let repeats = upload.options.wrap_mode == egui::TextureWrapMode::Repeat && upload.done.len() == 1;
-            finished.push((ImageTexture { size: upload.size, tiles: upload.done.into(), repeats }, upload.landing));
+            finished.push((ImageTexture { size: upload.size, tiles: upload.done.into(), repeats: upload.repeats }, upload.landing));
             if spent >= self.budget {
                 break;
             }
