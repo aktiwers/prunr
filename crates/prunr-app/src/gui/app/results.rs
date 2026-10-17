@@ -1003,12 +1003,7 @@ impl PrunrApp {
         // was built) is dropped; the next kick builds the current one.
         while let Ok((item_id, key, image)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            let options = if item.backdrop_repeats() {
-                egui::TextureOptions { wrap_mode: egui::TextureWrapMode::Repeat, ..egui::TextureOptions::LINEAR }
-            } else {
-                egui::TextureOptions::LINEAR
-            };
-            if !item.land_backdrop(key, image, |image, landing| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
+            if !item.land_backdrop(key, image, |image, landing, options| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
                 ctx.request_repaint();
             }
         }

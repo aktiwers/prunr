@@ -213,6 +213,17 @@ pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
     h.finish()
 }
 
+/// Mixed into a backdrop's key when it tiles: the tiled picture is
+/// uploaded to wrap around, the others clamp at the edge.
+const TILED_BACKDROP: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// Clear a pending texture request if it is still the one for `key`.
+fn clear_if<K: PartialEq>(pending: &mut Option<K>, key: K) {
+    if pending.as_ref() == Some(&key) {
+        *pending = None;
+    }
+}
+
 /// The error an image shows when its source can't be read.
 pub(crate) fn load_failed(e: impl std::fmt::Display) -> String {
     format!("Failed to load: {e}")
@@ -1747,11 +1758,16 @@ impl BatchItem {
         &mut self,
         key: u64,
         image: Option<super::image_texture::PreparedImage>,
-        upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding),
+        upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding, egui::TextureOptions),
     ) -> bool {
         match image.filter(|_| self.backdrop_key() == Some(key)) {
             Some(image) => {
-                upload(image, super::background_io::TexLanding::Backdrop { item_id: self.id, key });
+                let options = if self.backdrop_repeats() {
+                    egui::TextureOptions { wrap_mode: egui::TextureWrapMode::Repeat, ..egui::TextureOptions::LINEAR }
+                } else {
+                    egui::TextureOptions::LINEAR
+                };
+                upload(image, super::background_io::TexLanding::Backdrop { item_id: self.id, key }, options);
                 true
             }
             None => {
@@ -1787,16 +1803,8 @@ impl BatchItem {
         use super::background_io::TexLanding;
         match landing {
             TexLanding::Image { .. } => {}
-            TexLanding::Selection { key, .. } => {
-                if self.selection_tex_pending == Some(*key) {
-                    self.selection_tex_pending = None;
-                }
-            }
-            TexLanding::Backdrop { key, .. } => {
-                if self.backdrop_tex_pending == Some(*key) {
-                    self.backdrop_tex_pending = None;
-                }
-            }
+            TexLanding::Selection { key, .. } => clear_if(&mut self.selection_tex_pending, *key),
+            TexLanding::Backdrop { key, .. } => clear_if(&mut self.backdrop_tex_pending, *key),
         }
     }
 
@@ -2809,9 +2817,8 @@ impl BatchItem {
         };
         // A lens blur is made with the depth map, focused on the result's subject.
         Some(match backdrop {
-            // A tiled picture is uploaded to wrap around; the others clamp
-            // at the edge, or the far edge bleeds into the near one.
-            _ if self.backdrop_repeats() => key ^ 0x9e37_79b9_7f4a_7c15,
+            // Clamped, the far edge would bleed into the near one.
+            _ if self.backdrop_repeats() => key ^ TILED_BACKDROP,
             Backdrop::Effect(effect) if effect.needs_depth() => {
                 let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
                 let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
