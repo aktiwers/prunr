@@ -33,6 +33,8 @@ impl PrunrApp {
             match self.run_refusal(&self.batch.items[idx]) {
                 None => with_region.push(idx),
                 Some(Reason::PaintFirst) => without += 1,
+                // Its stroke is landing: it runs once it has.
+                Some(Reason::FinishingSelection) => with_region.push(idx),
                 // Busy or unreadable images wait out of this run.
                 Some(_) => {}
             }
@@ -45,10 +47,19 @@ impl PrunrApp {
     pub(super) fn dispatch_next_queued_run(&mut self) {
         // An image gone from the batch, or one without a run, passes its
         // turn on: nothing else would call this again for the rest.
-        while let Some(item_id) = self.processor.next_queued_run() {
+        // Each queued image gets one turn per call.
+        for _ in 0..self.processor.queued_run_count() {
+            let Some(item_id) = self.processor.next_queued_run() else { return };
+            // Its selection is still being made: it waits at the back, and
+            // the selection's landing calls this again.
+            let refusal = self.batch.find_by_id(item_id).map(|i| self.run_refusal(i));
+            if refusal == Some(Some(crate::gui::capability::Reason::FinishingSelection)) {
+                self.processor.requeue_run(item_id);
+                continue;
+            }
             // Its image changed while it waited (a run started on it, its
             // region was cleared): it passes its turn.
-            if !self.batch.find_by_id(item_id).is_some_and(|i| self.run_may_start(i)) {
+            if refusal != Some(None) {
                 continue;
             }
             if let Some(shown) = self.batch.selected_idx_clamped() {

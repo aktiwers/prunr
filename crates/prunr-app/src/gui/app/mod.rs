@@ -273,6 +273,7 @@ impl PrunrApp {
         app.pending_onboarding_toast = onboarding_toast;
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
+        app.batch.selection_queue.wake(&cc.egui_ctx);
         app
     }
 
@@ -720,33 +721,47 @@ impl PrunrApp {
     /// state back on their timelines. A run still going on one is cancelled
     /// first: its result belongs to the state being left.
     pub fn handle_undo(&mut self, ctx: &egui::Context) {
-        // A stroke still being merged is undone once it has landed.
-        if self.batch.selection_queue.any_pending() {
-            self.batch.selection_queue.defer(crate::gui::views::shortcuts::Action::Undo);
-            return;
-        }
-        self.step_targets(ctx, BatchItem::undo_step, "undone", "Nothing to undo");
+        self.step_or_hold(ctx, crate::gui::views::shortcuts::Action::Undo);
     }
 
     /// Mirror of `handle_undo`.
     pub fn handle_redo(&mut self, ctx: &egui::Context) {
-        if self.batch.selection_queue.any_pending() {
-            self.batch.selection_queue.defer(crate::gui::views::shortcuts::Action::Redo);
+        self.step_or_hold(ctx, crate::gui::views::shortcuts::Action::Redo);
+    }
+
+    /// Undo / redo the targeted images; while any of them has a selection
+    /// edit being made, held until it has landed (an undo right after a
+    /// stroke undoes that stroke), for those same images.
+    fn step_or_hold(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action) {
+        let ids: Vec<u64> = self.batch.targeted_indices().into_iter().map(|i| self.batch.items[i].id).collect();
+        if ids.iter().any(|&id| self.batch.selection_queue.is_pending(id)) {
+            self.batch.selection_queue.defer(action, ids);
             return;
         }
-        self.step_targets(ctx, BatchItem::redo_step, "redone", "Nothing to redo");
+        self.step_items(ctx, action, &ids);
+    }
+
+    /// Undo / redo the images `ids`.
+    pub(super) fn step_items(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action, ids: &[u64]) {
+        use crate::gui::views::shortcuts::Action;
+        let (step, verb, nothing): (fn(&mut BatchItem) -> Option<StepKind>, _, _) = match action {
+            Action::Redo => (BatchItem::redo_step, "redone", "Nothing to redo"),
+            _ => (BatchItem::undo_step, "undone", "Nothing to undo"),
+        };
+        self.step_targets(ctx, ids, step, verb, nothing);
     }
 
     fn step_targets(
         &mut self,
         ctx: &egui::Context,
+        ids: &[u64],
         step: fn(&mut BatchItem) -> Option<StepKind>,
         verb: &str,
         nothing: &str,
     ) {
         let mut stepped = Vec::new();
-        for idx in self.batch.targeted_indices() {
-            let id = self.batch.items[idx].id;
+        for &id in ids {
+            let Some(idx) = self.batch.index_of(id) else { continue };
             let preset_before = self.batch.items[idx].settings.bg_image_hash;
             self.cancel_runs_on(id);
             self.processor.live_preview.cancel(id);

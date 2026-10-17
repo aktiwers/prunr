@@ -118,12 +118,21 @@ impl PrunrApp {
     /// now. Undo / redo held for the queue run once it is empty.
     pub(crate) fn land_selection_edits(&mut self, ctx: &egui::Context) {
         use crate::gui::selection_queue::SelectionOp;
+        let style = self.selection_style();
+        let mut landed = false;
         for done in self.batch.selection_queue.take_done() {
+            landed = true;
             let item_id = done.item_id;
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.selection_state().same(&done.base) {
                 tracing::info!(item_id, "selection edit made on a selection since changed; made again");
-                self.queue_selection_op(item_id, done.op, done.after);
+                let current = item.selection_state();
+                // A fold reads the feathered plane of the selection it folds.
+                let op = match done.op {
+                    SelectionOp::Bake { action, .. } => SelectionOp::Bake { action, feathered: item.feathered_selection(style) },
+                    op => op,
+                };
+                self.batch.selection_queue.rebase(item_id, op, done.after, current);
                 continue;
             }
             let kind = match done.op {
@@ -131,20 +140,25 @@ impl PrunrApp {
                 SelectionOp::Invert | SelectionOp::Bake { .. } => StepKind::Selection,
             };
             let changed = item.land_selection_state(done.made, done.hash, kind);
+            // A click that added nothing leaves the last retunable one as it was.
             match done.after {
-                AfterLanding::MagicDecode { output, mode, reading } => {
+                AfterLanding::MagicDecode { output, mode, reading } if changed => {
                     item.last_decode = item.selection_hash.map(|committed_hash| crate::gui::item::LastDecode { output, mode, committed_hash, reading });
                 }
-                AfterLanding::ByDepth => item.last_decode = None,
-                AfterLanding::Nothing => {}
+                AfterLanding::ByDepth if changed => item.last_decode = None,
+                _ => {}
             }
             if changed {
                 self.apply_selection_to_active_model(item_id);
             }
             ctx.request_repaint();
         }
-        for action in self.batch.selection_queue.take_deferred() {
-            self.perform(action, ctx);
+        for (action, ids) in self.batch.selection_queue.take_deferred() {
+            self.step_items(ctx, action, &ids);
+        }
+        // A queued run that waited for its image's selection goes now.
+        if landed {
+            self.dispatch_next_queued_run();
         }
     }
 
@@ -294,6 +308,7 @@ impl PrunrApp {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         if self.batch.items[idx].timeline.version() != version {
             tracing::info!(item_id, "selection cut dropped: the image changed while it was made");
+            self.toasts.warning("The image changed while the area was being cut, so it was not cut. Try again.");
             return;
         }
         self.publish_result(item_id, Arc::new(cut), "edit", ctx);
@@ -512,9 +527,9 @@ impl PrunrApp {
                 Ok(DecodedSelection::ByDepth(mask)) => {
                     self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::ByDepth);
                 }
-                Ok(DecodedSelection::Retuned { merged, hash }) => {
+                Ok(DecodedSelection::Retuned { merged, hash, for_hash }) => {
                     self.magic_brush_state.rethreshold_in_flight = false;
-                    self.apply_rethreshold(result.item_id, merged, hash, result.reading);
+                    self.apply_rethreshold(result.item_id, merged, hash, result.reading, for_hash);
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
@@ -533,7 +548,7 @@ impl PrunrApp {
         let want = self.settings.brush.magic_reading();
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
-        let Some((output, mode, reading)) = item.retunable_decode().map(|ld| (Arc::clone(&ld.output), ld.mode, ld.reading)) else { return };
+        let Some((output, mode, reading, for_hash)) = item.retunable_decode().map(|ld| (Arc::clone(&ld.output), ld.mode, ld.reading, ld.committed_hash)) else { return };
         if reading == want {
             return;
         }
@@ -542,16 +557,18 @@ impl PrunrApp {
         let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
         self.processor.dispatch_sam_rethreshold(crate::gui::processor::SamRethresholdRequest {
             item_id, output, mode,
-            source_dims, reading: want, base,
+            source_dims, reading: want, base, for_hash,
         });
         self.magic_brush_state.rethreshold_in_flight = true;
     }
 
     /// Swap the last stroke's selection for its re-thresholded version,
     /// replaced in place so the stroke's undo entry stays the one entry.
-    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, reading: prunr_core::MaskReading) {
+    /// Only while the stroke it retunes is still the last one: a retune
+    /// for an older click lands on nothing.
+    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, reading: prunr_core::MaskReading, for_hash: u64) {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if item.retunable_decode().is_none() {
+        if !item.retunable_decode().is_some_and(|ld| ld.committed_hash == for_hash) {
             return;
         }
         let changed = item.replace_selection_in_place(merged, hash);

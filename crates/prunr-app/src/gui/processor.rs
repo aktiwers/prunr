@@ -335,7 +335,7 @@ pub(crate) enum DecodedSelection {
     Fresh { mask: prunr_core::selection::MaskArtifact, output: Arc<prunr_core::sam::SamDecoderOutput> },
     /// A re-threshold: already merged onto the pre-stroke selection and
     /// hashed on the pool, ready to replace the stroke's selection.
-    Retuned { merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64 },
+    Retuned { merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, for_hash: u64 },
     /// A click with Depth on: the depth band's mask, still to be merged,
     /// with no logits to re-threshold.
     ByDepth(prunr_core::selection::MaskArtifact),
@@ -363,6 +363,9 @@ pub(crate) struct SamRethresholdRequest {
     pub(crate) reading: prunr_core::MaskReading,
     /// The selection the stroke was merged onto, read on the job's thread.
     pub(crate) base: Option<super::item::Region>,
+    /// The selection the retuned click committed: the retune replaces it
+    /// only while it is still that click's.
+    pub(crate) for_hash: u64,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
@@ -1950,6 +1953,17 @@ impl Processor {
         q.waiting = ids.into();
     }
 
+    pub(crate) fn queued_run_count(&self) -> usize {
+        self.run_queue().waiting.len()
+    }
+
+    /// `item_id`, taken off the queue, waits at the back again.
+    pub(crate) fn requeue_run(&self, item_id: u64) {
+        let mut q = self.run_queue();
+        q.started = q.started.saturating_sub(1);
+        q.waiting.push_back(item_id);
+    }
+
     /// The next queued image, to dispatch now; none while a run is in
     /// flight or the queue is empty.
     pub(crate) fn next_queued_run(&self) -> Option<u64> {
@@ -2135,7 +2149,7 @@ impl Processor {
             let hash = merged.content_hash();
             let _ = tx.send(SamDecoderResult {
                 item_id: req.item_id, mode: req.mode, reading: req.reading,
-                result: Ok(DecodedSelection::Retuned { merged, hash }),
+                result: Ok(DecodedSelection::Retuned { merged, hash, for_hash: req.for_hash }),
             });
         });
     }
