@@ -62,17 +62,29 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
         .show(ui.ctx(), |ui| {
             let available = (canvas_rect.width() - 2.0 * TOP_INSET).max(0.0);
             ui.set_max_width(available);
+            // The width the strip takes in one row, measured last frame:
+            // past the room, the region knobs go on a second row. Measured
+            // in both layouts alike, so the choice settles.
+            let fit_id = Id::new(("tool_strip_fit", tool.title()));
+            let one_row = ui.ctx().data(|d| d.get_temp::<f32>(fit_id));
+            let frame_margin = theme::pill_frame().total_margin().sum().x;
+            let two_rows = one_row.is_some_and(|w| w + frame_margin > available);
+            let fill_knobs = shows(facts.model, Surface::FillRegionKnobs);
             let mut dots = None;
+            let mut measured = 0.0;
             let strip_rect = theme::pill_frame().show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
-                    ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
+                ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+                ui.spacing_mut().slider_width = ((available - FIXED_WIDTH) / 3.0).clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
+                let first = ui.horizontal(|ui| {
                     ui.label(RichText::new(tool.title()).strong().color(theme::TEXT_PRIMARY));
                     ui.separator();
                     change.committed |= match tool {
                         Tool::Paint => paint_knobs(ui, brush, facts.model),
                         Tool::Magic => magic_knobs(ui, brush, facts.model),
                     };
+                    if fill_knobs && !two_rows {
+                        change.committed |= region_knobs(ui, brush);
+                    }
                     ui.separator();
                     dots = Some(chip::tooltip(
                         chip::icon_square_button(ui, ICON_MORE_HORIZ.codepoint, theme::TEXT_PRIMARY, theme::BG_SECONDARY),
@@ -89,8 +101,15 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         let resp = chip::named(resp, "Try another");
                         strip.try_another = chip::tooltip(resp, "Try another", "Generate this fill again with a new seed. Undo brings the previous one back.", None).clicked();
                     }
-                });
+                }).response.rect.width();
+                measured = first;
+                if fill_knobs && two_rows {
+                    let second = ui.horizontal(|ui| region_knobs(ui, brush));
+                    change.committed |= second.inner;
+                    measured += ui.spacing().item_spacing.x + second.response.rect.width();
+                }
             }).response.rect;
+            ui.ctx().data_mut(|d| d.insert_temp(fit_id, measured));
             if let Some(dots) = dots {
                 chip::flyout_under(Id::new(("tool_strip_more", tool.title())), &dots, strip_rect, |ui| {
                     change.merge(panel(ui, tool, brush, facts));
@@ -124,11 +143,13 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
         committed |= chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit;
         committed |= chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent).commit;
     }
-    if shows(model, Surface::FillRegionKnobs) {
-        committed |= brush_chip::expand_region_row(ui, s).commit;
-        committed |= brush_chip::feather_row(ui, s).commit;
-    }
     committed
+}
+
+/// How far a filled region reaches past the stroke, and its soft edge.
+fn region_knobs(ui: &mut Ui, s: &mut BrushSettings) -> bool {
+    let expand = brush_chip::expand_region_row(ui, s).commit;
+    brush_chip::feather_row(ui, s).commit | expand
 }
 
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
@@ -139,10 +160,5 @@ fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
         committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     }
     let depth = chip::inline_switch(ui, "By depth", &mut s.magic_depth);
-    committed |= depth.commit;
-    if shows(model, Surface::FillRegionKnobs) {
-        committed |= brush_chip::expand_region_row(ui, s).commit;
-        committed |= brush_chip::feather_row(ui, s).commit;
-    }
-    committed
+    committed | depth.commit
 }
