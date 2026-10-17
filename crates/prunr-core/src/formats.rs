@@ -152,20 +152,9 @@ fn rasterize_svg(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     use resvg::tiny_skia::{Pixmap, Transform};
     use resvg::usvg::{Options, Tree};
 
-    let opts = Options::default();
-    let tree = Tree::from_data(bytes, &opts)
+    let tree = Tree::from_data(bytes, &Options::default())
         .map_err(|e| CoreError::ImageFormat(format!("SVG parse error: {e}")))?;
-    let size = tree.size();
-    let intrinsic_w = size.width().ceil().max(1.0) as u32;
-    let intrinsic_h = size.height().ceil().max(1.0) as u32;
-    let max_dim = intrinsic_w.max(intrinsic_h);
-    let scale = if max_dim > LARGE_IMAGE_LIMIT {
-        LARGE_IMAGE_LIMIT as f32 / max_dim as f32
-    } else {
-        1.0
-    };
-    let render_w = ((intrinsic_w as f32) * scale).round().max(1.0) as u32;
-    let render_h = ((intrinsic_h as f32) * scale).round().max(1.0) as u32;
+    let (render_w, render_h, scale) = svg_render_size(&tree);
 
     let mut pixmap = Pixmap::new(render_w, render_h)
         .ok_or_else(|| CoreError::ImageFormat("SVG render: invalid dimensions".into()))?;
@@ -179,6 +168,41 @@ fn rasterize_svg(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     let img = RgbaImage::from_raw(render_w, render_h, rgba)
         .ok_or_else(|| CoreError::ImageFormat("SVG render: buffer size mismatch".into()))?;
     Ok(DynamicImage::ImageRgba8(img))
+}
+
+/// The size an SVG renders at, and its scale: its intrinsic size, capped
+/// at `LARGE_IMAGE_LIMIT` so `<svg width="100000">` cannot blow memory.
+fn svg_render_size(tree: &resvg::usvg::Tree) -> (u32, u32, f32) {
+    let size = tree.size();
+    let intrinsic_w = size.width().ceil().max(1.0) as u32;
+    let intrinsic_h = size.height().ceil().max(1.0) as u32;
+    let max_dim = intrinsic_w.max(intrinsic_h);
+    let scale = if max_dim > LARGE_IMAGE_LIMIT { LARGE_IMAGE_LIMIT as f32 / max_dim as f32 } else { 1.0 };
+    let render_w = ((intrinsic_w as f32) * scale).round().max(1.0) as u32;
+    let render_h = ((intrinsic_h as f32) * scale).round().max(1.0) as u32;
+    (render_w, render_h, scale)
+}
+
+/// The size `bytes` decode to, read without decoding a raster's pixels;
+/// an SVG is parsed, not rendered. `None` when it is no image.
+pub fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
+    if looks_like_svg(bytes) {
+        let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
+        let (w, h, _) = svg_render_size(&tree);
+        return Some((w, h));
+    }
+    ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+}
+
+/// The size the file at `path` decodes to: a raster's header only, so the
+/// file is never loaded; an SVG (by extension, as `load_image_from_path`)
+/// is read and parsed.
+pub fn image_dimensions_from_path(path: &Path) -> Option<(u32, u32)> {
+    if has_svg_extension(path) {
+        return std::fs::read(path).ok().and_then(|bytes| image_dimensions_from_bytes(&bytes));
+    }
+    let file = std::fs::File::open(path).ok()?;
+    ImageReader::new(std::io::BufReader::new(file)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
 /// Convert premultiplied RGBA bytes (resvg/tiny_skia output) to straight RGBA.
@@ -558,6 +582,24 @@ mod tests {
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="16" viewBox="0 0 32 16">
   <rect width="32" height="16" fill="rgb(255,0,0)"/>
 </svg>"#;
+
+    /// An SVG's size is read as it would render, matching the decode; a
+    /// raster's from its header; anything else is no image.
+    #[test]
+    fn image_dimensions_read_svgs_and_rasters_alike() {
+        assert_eq!(image_dimensions_from_bytes(SAMPLE_SVG), Some((32, 16)));
+        let decoded = load_image_from_bytes(SAMPLE_SVG).unwrap();
+        assert_eq!(image_dimensions_from_bytes(SAMPLE_SVG), Some((decoded.width(), decoded.height())));
+        let huge = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="50000"></svg>"#;
+        assert_eq!(image_dimensions_from_bytes(huge), Some((LARGE_IMAGE_LIMIT, LARGE_IMAGE_LIMIT / 2)));
+        let png = encode_rgba_png(&RgbaImage::new(5, 3)).unwrap();
+        assert_eq!(image_dimensions_from_bytes(&png), Some((5, 3)));
+        assert_eq!(image_dimensions_from_bytes(b"not an image"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logo.svg");
+        std::fs::write(&path, SAMPLE_SVG).unwrap();
+        assert_eq!(image_dimensions_from_path(&path), Some((32, 16)));
+    }
 
     #[test]
     fn looks_like_svg_detects_xml_prologue() {

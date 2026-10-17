@@ -1006,15 +1006,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     let mut load_fail_count = 0usize;
 
     for (idx, input) in args.inputs.iter().enumerate() {
-        match std::fs::File::open(input)
-            .ok()
-            .and_then(|f| {
-                image::ImageReader::new(std::io::BufReader::new(f))
-                    .with_guessed_format()
-                    .ok()
-                    .and_then(|r| r.into_dimensions().ok())
-            })
-        {
+        match prunr_core::image_dimensions_from_path(input) {
             Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
                 && prunr_core::exceeds_large_image_limit(w, h) =>
             {
