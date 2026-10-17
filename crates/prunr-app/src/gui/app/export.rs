@@ -368,7 +368,7 @@ fn write_composite(
     measure: &ExportDepth,
 ) -> Result<(), String> {
     let bytes = format.encode(&bg.bake(rgba, measure)).map_err(|e| e.to_string())?;
-    std::fs::write(path, &bytes).map_err(|e| e.to_string())
+    crate::fs_util::write_bytes_replacing(path, &bytes).map_err(|e| e.to_string())
 }
 
 /// The toast after a multi-file save; an error when any file failed.
@@ -418,7 +418,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
                 }
             }
             for (name, bytes) in files {
-                match std::fs::write(folder.join(name), &bytes) {
+                match crate::fs_util::write_bytes_replacing(&folder.join(name), &bytes) {
                     Ok(()) => saved += 1,
                     Err(_) => failed += 1,
                 }

@@ -472,7 +472,7 @@ fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
         let written = check_overwrite(&out, args.force)
             .and_then(|()| depth.for_file(input))
             .and_then(|(map, (w, h))| prunr_core::depth::encode_depth_png(&map, w, h).map_err(|e| format!("encode failed: {e}")))
-            .and_then(|bytes| std::fs::write(&out, bytes).map_err(|e| format!("failed to save {}: {e}", out.display())));
+            .and_then(|bytes| prunr_app::fs_util::write_bytes_replacing(&out, &bytes).map_err(|e| format!("failed to save {}: {e}", out.display())));
         match written {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out.display()),
             Ok(()) => {}
@@ -800,7 +800,7 @@ fn run_each_input(
         let result = image::open(input)
             .map_err(|e| format!("failed to read {}: {e}", input.display()))
             .and_then(|img| run(img.into_rgba8()))
-            .and_then(|out| out.save(&out_path).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
+            .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
         match result {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
             Ok(()) => {}
@@ -866,7 +866,7 @@ fn run_inpaint(args: &Cli) -> i32 {
         }
     };
     let result = finalize_inpaint(&raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0);
-    if let Err(e) = result.save(&out_path) {
+    if let Err(e) = prunr_app::fs_util::save_image_replacing(&out_path, &result) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;
     }
@@ -1126,7 +1126,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                         continue;
                     }
                 };
-                match std::fs::write(&out_path, &png_bytes) {
+                match prunr_app::fs_util::write_bytes_replacing(&out_path, &png_bytes) {
                     Ok(_) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {

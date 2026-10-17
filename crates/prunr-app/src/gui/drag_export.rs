@@ -334,18 +334,13 @@ fn write_layer(
     Ok(Some(path))
 }
 
-/// Write `path` through a sibling temp file renamed into place, so an app
-/// still reading an earlier drop of the same name never sees half a file.
+/// Write `path` whole, so an app still reading an earlier drop of the
+/// same name never sees half a file.
 fn write_atomically(
     path: &Path,
     encode: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), prunr_core::CoreError>,
 ) -> std::io::Result<()> {
-    let part = path.with_extension("part");
-    let mut w = std::io::BufWriter::new(std::fs::File::create(&part)?);
-    encode(&mut w).map_err(|e| std::io::Error::other(e.to_string()))?;
-    std::io::Write::flush(&mut w)?;
-    drop(w);
-    std::fs::rename(&part, path)
+    crate::fs_util::write_replacing(path, |w| encode(w).map_err(|e| std::io::Error::other(e.to_string())))
 }
 
 /// One item's composite drag file: the result with its background baked
