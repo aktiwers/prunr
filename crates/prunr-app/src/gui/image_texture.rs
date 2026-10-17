@@ -223,6 +223,11 @@ impl PreparedImage {
 
 /// Prepared images waiting for their tiles to upload, oldest first, each
 /// with what its landing needs (`T`).
+pub(crate) struct Pumped<T> {
+    pub(crate) landed: Vec<(ImageTexture, T)>,
+    pub(crate) dropped: Vec<T>,
+}
+
 pub(crate) struct Uploads<T> {
     queue: VecDeque<Upload<T>>,
     budget: usize,
@@ -230,6 +235,7 @@ pub(crate) struct Uploads<T> {
 
 struct Upload<T> {
     name: String,
+    options: TextureOptions,
     left: std::vec::IntoIter<Tile<egui::ColorImage>>,
     size: [usize; 2],
     done: Vec<Tile<TextureHandle>>,
@@ -244,9 +250,14 @@ impl<T> Default for Uploads<T> {
 
 impl<T> Uploads<T> {
     pub(crate) fn push(&mut self, name: String, image: PreparedImage, landing: T) {
-        let size = image.size;
-        self.queue.push_back(Upload { name, left: image.tiles.into_iter(), size, done: Vec::new(), landing });
+        self.push_with(name, image, landing, TextureOptions::LINEAR);
     }
+
+    pub(crate) fn push_with(&mut self, name: String, image: PreparedImage, landing: T, options: TextureOptions) {
+        let size = image.size;
+        self.queue.push_back(Upload { name, options, left: image.tiles.into_iter(), size, done: Vec::new(), landing });
+    }
+
 
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
@@ -254,8 +265,18 @@ impl<T> Uploads<T> {
     }
 
     /// Upload this frame's tiles; the images whose last tile went up come
-    /// back, in the order they were pushed.
-    pub(crate) fn pump(&mut self, ctx: &egui::Context, options: TextureOptions) -> Vec<(ImageTexture, T)> {
+    /// back, in the order they were pushed. Those no longer `wanted` (the
+    /// image off screen, a newer one asked for) are dropped first, tiles
+    /// and all, and come back in `dropped` so their requests can end.
+    pub(crate) fn pump(&mut self, ctx: &egui::Context, wanted: impl Fn(&T) -> bool) -> Pumped<T> {
+        let mut dropped = Vec::new();
+        for upload in std::mem::take(&mut self.queue) {
+            if wanted(&upload.landing) {
+                self.queue.push_back(upload);
+            } else {
+                dropped.push(upload.landing);
+            }
+        }
         let mut spent = 0;
         let mut finished = Vec::new();
         while let Some(upload) = self.queue.front_mut() {
@@ -263,7 +284,7 @@ impl<T> Uploads<T> {
                 let Some(tile) = upload.left.next() else { break };
                 spent += tile.texture.pixels.len() * 4;
                 let name = format!("{}#{}", upload.name, upload.done.len());
-                let texture = ctx.load_texture(name, tile.texture, options);
+                let texture = ctx.load_texture(name, tile.texture, upload.options);
                 upload.done.push(Tile { part: tile.part, texture_uv: tile.texture_uv, origin: tile.origin, texture });
             }
             if upload.left.len() > 0 {
@@ -279,7 +300,7 @@ impl<T> Uploads<T> {
         if !self.queue.is_empty() {
             ctx.request_repaint();
         }
-        finished
+        Pumped { landed: finished, dropped }
     }
 }
 
@@ -313,7 +334,7 @@ mod tests {
         let w = TILE_STEP + 4;
         let mut uploads = Uploads::default();
         uploads.push("sel".into(), PreparedImage::from_color_image(egui::ColorImage::new([w, 2], vec![Color32::BLACK; w * 2])), ());
-        let (texture, ()) = uploads.pump(&ctx, TextureOptions::LINEAR).pop().expect("uploaded");
+        let (texture, ()) = uploads.pump(&ctx, |_| true).landed.pop().expect("uploaded");
         let _ = ctx.tex_manager().write().take_delta();
         texture.set_partial([TILE_STEP - 2, 0], &egui::ColorImage::new([4, 1], vec![Color32::WHITE; 4]), TextureOptions::LINEAR);
         let set: Vec<_> = ctx.tex_manager().write().take_delta().set.into_iter().map(|(_, d)| (d.pos, d.image.size())).collect();
@@ -351,10 +372,26 @@ mod tests {
         let mut frames = 0;
         while !uploads.is_empty() {
             frames += 1;
-            landed.extend(uploads.pump(&ctx, TextureOptions::default()).into_iter().map(|(t, n)| (n, t.tiles.len(), t.size)));
+            landed.extend(uploads.pump(&ctx, |_| true).landed.into_iter().map(|(t, n)| (n, t.tiles.len(), t.size)));
             assert!(frames < 10);
         }
         assert!(frames > 1, "not all in one frame");
         assert_eq!(landed, vec![(1, 3, [3 * TILE_STEP, 1]), (2, 1, [2, 2])]);
+    }
+
+    /// An upload no longer wanted is dropped part-way, behind the front
+    /// or at it, and comes back as dropped.
+    #[test]
+    fn an_unwanted_upload_is_dropped_before_its_next_tile() {
+        let ctx = egui::Context::default();
+        let mut uploads = Uploads { budget: 1, ..Uploads::default() };
+        uploads.push("old".into(), PreparedImage::from_rgba(&image::RgbaImage::new((3 * TILE_STEP) as u32, 1)), 1);
+        uploads.push("other".into(), PreparedImage::from_rgba(&image::RgbaImage::new(2, 2)), 2);
+        let first = uploads.pump(&ctx, |_| true);
+        assert!(first.landed.is_empty() && first.dropped.is_empty(), "one tile of the old one");
+        let next = uploads.pump(&ctx, |&n| n != 1);
+        let landed: Vec<u32> = next.landed.into_iter().map(|(_, n)| n).collect();
+        assert_eq!((landed, next.dropped), (vec![2], vec![1]), "the half-uploaded one is gone");
+        assert!(uploads.is_empty());
     }
 }

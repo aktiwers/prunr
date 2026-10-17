@@ -1013,7 +1013,17 @@ impl PrunrApp {
 
         // Large pictures upload a few tiles per frame and land whole.
         let mut feathered_landed = Vec::new();
-        for (texture, landing) in self.batch.bg_io.uploads.pump(ctx, egui::TextureOptions::LINEAR) {
+        let mut uploads = std::mem::take(&mut self.batch.bg_io.uploads);
+        let pumped = uploads.pump(ctx, |landing| {
+            self.batch.find_by_id(landing.item_id()).is_some_and(|i| i.wants_upload(landing))
+        });
+        self.batch.bg_io.uploads = uploads;
+        for landing in pumped.dropped {
+            if let Some(item) = self.batch.find_by_id_mut(landing.item_id()) {
+                item.upload_dropped(&landing);
+            }
+        }
+        for (texture, landing) in pumped.landed {
             use crate::gui::background_io::TexLanding;
             match landing {
                 TexLanding::Image { item_id, target, unpacked } => {

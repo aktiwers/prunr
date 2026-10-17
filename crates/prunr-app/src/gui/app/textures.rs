@@ -72,8 +72,7 @@ impl PrunrApp {
                 item.magic_brush_embedding = None;
             }
             if item.park_result() {
-                item.result_texture = None;
-                item.result_tex_pending = false;
+                item.release_result_texture();
             }
         }
     }
