@@ -271,6 +271,10 @@ mod tests {
     /// still a run the progress pill can follow.
     #[test]
     fn the_first_look_reports_the_subject_before_the_runs_own_model_starts() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
         use crate::types::ModelKind;
         let look = crate::subject::first_look_engine(1).expect("the first-look model loads");
@@ -296,6 +300,10 @@ mod tests {
     /// and then it reports no subject and the run's own model never starts.
     #[test]
     fn a_cancel_stops_the_first_look_unreported() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         use crate::progress::{ProgressSink, ProgressUpdate, RecordingSink};
         use crate::types::ModelKind;
         use std::sync::atomic::{AtomicBool, Ordering};
