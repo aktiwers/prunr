@@ -141,13 +141,7 @@ impl SubprocessManager {
             .stderr(Stdio::inherit()) // child errors visible in parent console
             .spawn()
             .map_err(|e| format!("Failed to spawn worker: {e}"))?;
-
-        let child_stdin = child.stdin.take()
-            .ok_or("Failed to capture worker stdin")?;
-        let child_stdout = child.stdout.take()
-            .ok_or("Failed to capture worker stdout")?;
-
-        let mut stdin_writer = BufWriter::new(child_stdin);
+        let (mut stdin_writer, event_rx) = attach(&mut child)?;
 
         // Send Init command — flush immediately so the child's blocking
         // `read_message` sees it without waiting for the buffer to fill.
@@ -159,33 +153,6 @@ impl SubprocessManager {
             edge_scales,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
         flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
-
-        // Spawn reader thread for non-blocking stdout consumption
-        let (event_tx, event_rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("subprocess-reader".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(child_stdout);
-                loop {
-                    match read_message::<_, SubprocessEvent>(&mut reader) {
-                        Ok(Some(evt)) => {
-                            if event_tx.send(ReaderEvent::Event(evt)).is_err() {
-                                break; // parent dropped receiver
-                            }
-                        }
-                        Ok(None) => {
-                            // Child stdout closed (clean exit or crash)
-                            let _ = event_tx.send(ReaderEvent::Disconnected);
-                            break;
-                        }
-                        Err(_) => {
-                            let _ = event_tx.send(ReaderEvent::Disconnected);
-                            break;
-                        }
-                    }
-                }
-            })
-            .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
 
         // Wait for Ready or InitError. The seg/edge subprocess loads
         // engine pools at Init (CoreML first-run compilation alone can
@@ -232,10 +199,12 @@ impl SubprocessManager {
             }
         };
 
-        // Calculate RSS limits from available system RAM
-        let (rss_limit, rss_resume) = current_rss_thresholds();
+        Ok((Self::ready(child, stdin_writer, event_rx), active_provider))
+    }
 
-        Ok((Self {
+    fn ready(child: Child, stdin_writer: BufWriter<std::process::ChildStdin>, event_rx: mpsc::Receiver<ReaderEvent>) -> Self {
+        let (rss_limit, rss_resume) = current_rss_thresholds();
+        Self {
             child,
             stdin_writer,
             event_rx,
@@ -244,7 +213,15 @@ impl SubprocessManager {
             rss_resume,
             rss_paused: false,
             rss_update_count: 0,
-        }, active_provider))
+        }
+    }
+
+    /// A manager around any piped child, taken as ready: a stand-in worker
+    /// a test can let die.
+    #[cfg(test)]
+    pub(crate) fn for_test(mut child: Child) -> Self {
+        let (stdin_writer, event_rx) = attach(&mut child).expect("a piped child");
+        Self::ready(child, stdin_writer, event_rx)
     }
 
     /// Send an image for processing. Writes bytes to a temp file first.
@@ -559,6 +536,28 @@ impl Drop for SubprocessManager {
         // app shutdown / panic unwinding and must not stall.
         let _ = self.shutdown_with_timeout(std::time::Duration::from_secs(1));
     }
+}
+
+/// Take `child`'s pipes: its stdin to write commands to, and its stdout
+/// read on a thread into events, ending with `Disconnected`.
+fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mpsc::Receiver<ReaderEvent>), String> {
+    let child_stdin = child.stdin.take().ok_or("Failed to capture worker stdin")?;
+    let child_stdout = child.stdout.take().ok_or("Failed to capture worker stdout")?;
+    let (event_tx, event_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("subprocess-reader".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(child_stdout);
+            // A closed stdout (clean exit or crash) or garbage ends it.
+            while let Ok(Some(evt)) = read_message::<_, SubprocessEvent>(&mut reader) {
+                if event_tx.send(ReaderEvent::Event(evt)).is_err() {
+                    return; // parent dropped receiver
+                }
+            }
+            let _ = event_tx.send(ReaderEvent::Disconnected);
+        })
+        .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
+    Ok((BufWriter::new(child_stdin), event_rx))
 }
 
 /// (rss_limit, rss_resume) derived from the current system available
