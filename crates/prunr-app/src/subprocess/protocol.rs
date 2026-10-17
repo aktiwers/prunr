@@ -537,6 +537,134 @@ mod tests {
         assert_eq!(value, &decoded);
     }
 
+    /// Each command's index in `COMMANDS`. No wildcard: a new command
+    /// does not compile until it is named here, and its index fails
+    /// `every_message_round_trips` until it has a sample.
+    fn command_index(command: &SubprocessCommand) -> usize {
+        match command {
+            SubprocessCommand::Init { .. } => 0,
+            SubprocessCommand::ProcessImage { .. } => 1,
+            SubprocessCommand::RePostProcess { .. } => 2,
+            SubprocessCommand::AddEdgeInference { .. } => 3,
+            SubprocessCommand::Inpaint { .. } => 4,
+            SubprocessCommand::CancelItem { .. } => 5,
+            SubprocessCommand::Configure { .. } => 6,
+            SubprocessCommand::Shutdown => 7,
+        }
+    }
+    const COMMANDS: usize = 8;
+
+    /// Each event's index in `EVENTS`, as for commands.
+    fn event_index(event: &SubprocessEvent) -> usize {
+        match event {
+            SubprocessEvent::Ready { .. } => 0,
+            SubprocessEvent::Report { .. } => 1,
+            SubprocessEvent::ImageDone { .. } => 2,
+            SubprocessEvent::SpareEdgeScales { .. } => 3,
+            SubprocessEvent::ImageError { .. } => 4,
+            SubprocessEvent::InpaintDone { .. } => 5,
+            SubprocessEvent::InpaintError { .. } => 6,
+            SubprocessEvent::RssUpdate { .. } => 7,
+            SubprocessEvent::Finished => 8,
+            SubprocessEvent::InitError { .. } => 9,
+        }
+    }
+    const EVENTS: usize = 10;
+
+    fn command_samples() -> Vec<SubprocessCommand> {
+        let path = || PathBuf::from("/tmp/prunr-sample");
+        vec![
+            SubprocessCommand::Init {
+                model: ModelKind::Silueta,
+                jobs: 1,
+                mask: MaskSettings::default(),
+                cpu_only: false,
+                line_mode: LineMode::Off,
+                edge: EdgeSettings::default(),
+                ipc_dir: path(),
+                inpaint_only: false,
+                line_fade_pct: 0,
+                edge_scales: InferredScales::Drawn,
+            },
+            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: None },
+            SubprocessCommand::RePostProcess {
+                item_id: 1,
+                tensor_path: path(),
+                tensor_height: 2,
+                tensor_width: 2,
+                model: ModelKind::Silueta,
+                original_image_path: path(),
+                mask: MaskSettings::default(),
+            },
+            SubprocessCommand::AddEdgeInference {
+                item_id: 1,
+                image_path: path(),
+                seg_tensor_path: path(),
+                seg_tensor_height: 2,
+                seg_tensor_width: 2,
+                model: ModelKind::Silueta,
+                mask: MaskSettings::default(),
+            },
+            SubprocessCommand::Inpaint {
+                item_id: 1,
+                model_id: prunr_models::ModelId::LaMaFp32,
+                image_path: path(),
+                mask_path: path(),
+                sd_req: None,
+                feather_px: 0.0,
+                sharpen: 0.0,
+            },
+            SubprocessCommand::CancelItem { item_id: 1 },
+            SubprocessCommand::Configure { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default(), first_look: None, on_screen: None },
+            SubprocessCommand::Shutdown,
+        ]
+    }
+
+    fn event_samples() -> Vec<SubprocessEvent> {
+        let path = || PathBuf::from("/tmp/prunr-sample");
+        vec![
+            SubprocessEvent::Ready { active_provider: "CPU".into() },
+            SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::Denoising) },
+            SubprocessEvent::ImageDone {
+                item_id: 1,
+                result_path: path(),
+                width: 2,
+                height: 2,
+                active_provider: "CPU".into(),
+                tensor_cache_path: None,
+                tensor_cache_height: None,
+                tensor_cache_width: None,
+                edge_cache: None,
+                spare_scales: None,
+            },
+            SubprocessEvent::SpareEdgeScales { item_id: 1, token: 1, outcome: SpareOutcome::Skipped },
+            SubprocessEvent::ImageError { item_id: 1, error: "failed".into() },
+            SubprocessEvent::InpaintDone { item_id: 1, rgba_path: path(), width: 2, height: 2, fill_scale: 1.0 },
+            SubprocessEvent::InpaintError { item_id: 1, error: "failed".into() },
+            SubprocessEvent::RssUpdate { rss_bytes: 1 },
+            SubprocessEvent::Finished,
+            SubprocessEvent::InitError { error: "failed".into() },
+        ]
+    }
+
+    /// Every command and event the worker and the app trade has a sample
+    /// that survives the wire.
+    #[test]
+    fn every_message_round_trips() {
+        let mut commands = [false; COMMANDS];
+        for command in command_samples() {
+            roundtrip(&command);
+            commands[command_index(&command)] = true;
+        }
+        let mut events = [false; EVENTS];
+        for event in event_samples() {
+            roundtrip(&event);
+            events[event_index(&event)] = true;
+        }
+        assert!(commands.iter().all(|&c| c), "a command without a sample: {commands:?}");
+        assert!(events.iter().all(|&e| e), "an event without a sample: {events:?}");
+    }
+
     #[test]
     fn command_init_roundtrip() {
         roundtrip(&SubprocessCommand::Init {
