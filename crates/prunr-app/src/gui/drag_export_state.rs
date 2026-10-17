@@ -82,11 +82,15 @@ pub(crate) struct DragExportState {
     starting: Option<StartingDrag>,
 }
 
-/// The images a drag takes, and those whose files it asked a write for.
+/// The images a drag takes, and how many writes it asked for each.
 struct StartingDrag {
     ids: Vec<u64>,
-    asked: HashSet<u64>,
+    asked: HashMap<u64, u8>,
 }
+
+/// Writes a waiting drag asks per image: one whose image keeps changing
+/// while it is written is named failed after these, not waited on forever.
+const DRAG_WRITE_TRIES: u8 = 3;
 
 /// Where a drag waiting for its files stands.
 pub(crate) enum DragReady {
@@ -236,12 +240,13 @@ impl DragExportState {
     /// current state is written on a worker; `poll_start` says when they
     /// are all in.
     pub(crate) fn begin(&mut self, ids: Vec<u64>) {
-        self.starting = Some(StartingDrag { ids, asked: HashSet::new() });
+        self.starting = Some(StartingDrag { ids, asked: HashMap::new() });
     }
 
     /// The waiting drag's files, once every write has landed. An image
-    /// whose files are not current is written (once): `key_of` / `files_of`
-    /// give its state and its files now.
+    /// whose files are not current is written: again when it changed while
+    /// written, never after a write failed. `key_of` / `files_of` give its
+    /// state and its files now.
     pub(crate) fn poll_start(
         &mut self,
         key_of: impl Fn(u64) -> Option<DragKey>,
@@ -259,18 +264,24 @@ impl DragExportState {
                     Some(mut written) => paths.append(&mut written),
                     None => failed.push(id),
                 }
-            } else if !drag.asked.contains(&id) {
+            } else {
+                let tries = drag.asked.get(&id).copied().unwrap_or(0);
+                // A failed write leaves no files; a stale one leaves the
+                // files of the state it was asked for.
+                let write_failed = tries > 0 && !self.prewritten.contains_key(&id);
+                if write_failed || tries >= DRAG_WRITE_TRIES {
+                    failed.push(id);
+                    continue;
+                }
                 // `writers()` at a time: each write holds a baked copy of
                 // its image.
                 if self.writes_running() < writers() {
-                    drag.asked.insert(id);
+                    drag.asked.insert(id, tries + 1);
                     if let Some(files) = files_of(id) {
                         self.prewrite(id, key, files);
                     }
                 }
                 waiting = true;
-            } else {
-                failed.push(id);
             }
         }
         if waiting {

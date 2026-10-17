@@ -886,5 +886,39 @@ mod tests {
         }
         assert!(matches!(state.poll_start(|_| None, |_| None), DragReady::Idle), "the drag has its files");
     }
+
+    /// An image changed while the drag wrote it is written again for its
+    /// new state, not named failed.
+    #[test]
+    fn a_drag_writes_again_an_image_changed_while_written() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::drag_export_state::{DragExportState, DragReady};
+        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
+        let before = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let after = DragSpec { split: true, ..before };
+        let item = processed_item(310, "changed310.jpg");
+        assert!(!DragKey::of(&item, before).matches(&DragKey::of(&item, after)));
+        let polls = std::cell::Cell::new(0);
+        let spec = || if polls.get() == 0 { before } else { after };
+        let mut state = DragExportState::new();
+        state.begin(vec![310]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let (paths, failed) = loop {
+            let ready = state.poll_start(|_| Some(DragKey::of(&item, spec())), |_| Some(DragFiles::of(&item, spec())));
+            polls.set(polls.get() + 1);
+            match ready {
+                DragReady::Ready { paths, failed, .. } => break (paths, failed),
+                DragReady::Waiting => assert!(std::time::Instant::now() < deadline, "the writes land"),
+                DragReady::Idle => panic!("a drag is waiting"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert!(failed.is_empty(), "written again, not failed");
+        assert!(!paths.is_empty());
+        assert!(state.has_current(310, &DragKey::of(&item, after)), "for the new state");
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
