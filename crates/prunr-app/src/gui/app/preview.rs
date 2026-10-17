@@ -467,15 +467,12 @@ impl PrunrApp {
                 (item.id, item.source.clone(), r.is_final, new_rgba)
             };
             // On the drag-settled result only, regenerate the sidebar
-            // thumbnail. Unlike nulling `thumb_texture` + letting the
-            // sidebar re-request, we call request_thumbnail directly while
-            // the old texture remains displayed — `pump_thumbnail_results`
-            // swaps it atomically when the new thumb arrives, so the user
-            // never sees a spinner-gap. Mid-drag results skip this entirely
-            // (is_final false) to avoid regenerating thumbs every debounce.
+            // thumbnail, the old one shown until the new one lands. Mid-drag
+            // results skip this (is_final false) so a drag does not make a
+            // thumbnail per render.
             if is_final {
                 if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                    item.thumb_pending = true;
+                    item.thumb.asked();
                 }
                 self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&landed))));
             }
@@ -700,7 +697,7 @@ mod landing_tests {
             assert!(item.timeline.current().result.as_ref().is_some_and(|r| r.holds(&result)), "{kind:?}: so does its step");
             assert_eq!(item.applied_recipe, recipe, "{kind:?}: and the recipe that made it");
             assert_eq!(item.timeline.version(), version, "{kind:?}");
-            assert!(!item.thumb_pending && !item.result_tex_pending, "{kind:?}: no thumbnail or result texture");
+            assert!(!item.thumb.is_pending() && !item.result_tex_pending, "{kind:?}: no thumbnail or result texture");
             assert_eq!(land_next_texture(&mut app, &ctx), TexTarget::QuickFrame(3), "{kind:?}: the frame's own texture");
             assert!(app.batch.items[0].quick.texture().is_some(), "{kind:?}: shown");
 
@@ -711,7 +708,7 @@ mod landing_tests {
             assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &settled)), "{kind:?}: a settled render is the result");
             assert!(item.timeline.current().result.as_ref().is_some_and(|r| r.holds(&settled)), "{kind:?}: of the shown step");
             assert_ne!(item.applied_recipe, recipe, "{kind:?}: made with the settings it rendered");
-            assert!(item.thumb_pending && item.result_tex_pending, "{kind:?}: its thumbnail and texture follow");
+            assert!(item.thumb.is_pending() && item.result_tex_pending, "{kind:?}: its thumbnail and texture follow");
             assert!(item.quick.texture().is_some(), "{kind:?}: the frame stays until that texture lands");
             assert!(matches!(land_next_texture(&mut app, &ctx), TexTarget::LiveResult(_)), "{kind:?}");
             assert!(app.batch.items[0].quick.texture().is_none(), "{kind:?}: then goes");

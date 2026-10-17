@@ -224,6 +224,58 @@ fn clear_if<K: PartialEq>(pending: &mut Option<K>, key: K) {
     }
 }
 
+/// The sidebar thumbnail: the one shown, and whether a new one is being
+/// made. The one shown stays while a new one is made, so a result never
+/// blinks to a spinner.
+#[derive(Default)]
+pub(crate) struct Thumbnail {
+    texture: Option<egui::TextureHandle>,
+    build: ThumbBuild,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum ThumbBuild {
+    #[default]
+    Idle,
+    Pending,
+    /// It could not be made from what the image has; not asked for again
+    /// until the image has something new.
+    Failed,
+}
+
+impl Thumbnail {
+    pub(crate) fn texture(&self) -> Option<&egui::TextureHandle> {
+        self.texture.as_ref()
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.build == ThumbBuild::Pending
+    }
+
+    /// None shown, none on its way, and none that failed.
+    pub(crate) fn wanted(&self) -> bool {
+        self.texture.is_none() && self.build == ThumbBuild::Idle
+    }
+
+    /// A new one is on its way; the one shown stays until it lands.
+    pub(crate) fn asked(&mut self) {
+        self.build = ThumbBuild::Pending;
+    }
+
+    pub(crate) fn landed(&mut self, texture: egui::TextureHandle) {
+        self.texture = Some(texture);
+        self.build = ThumbBuild::Idle;
+    }
+
+    pub(crate) fn failed(&mut self) {
+        self.build = ThumbBuild::Failed;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// The error an image shows when its source can't be read.
 pub(crate) fn load_failed(e: impl std::fmt::Display) -> String {
     format!("Failed to load: {e}")
@@ -732,10 +784,7 @@ pub(crate) struct BatchItem {
     /// (re-decode) so the cache can't go stale.
     pub(crate) source_dyn: Option<Arc<image::DynamicImage>>,
     pub(crate) source_texture: Option<super::image_texture::ImageTexture>,
-    pub(crate) thumb_texture: Option<egui::TextureHandle>,
-    pub(crate) thumb_pending: bool,
-    /// The thumbnail could not be made from what the image has.
-    pub(crate) thumb_failed: bool,
+    pub(crate) thumb: Thumbnail,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
     /// `source_dyn` for a live preview that starts from an earlier result:
     /// a `DynamicImage` wrapping that start, so drag ticks don't re-clone
@@ -1261,7 +1310,7 @@ impl BatchItem {
     /// or a thumbnail.
     pub(crate) fn has_pending_work(&self) -> bool {
         self.result_tex_pending || self.source_tex_pending || self.decode_pending
-            || self.thumb_pending || self.backdrop_tex_pending.is_some()
+            || self.thumb.is_pending() || self.backdrop_tex_pending.is_some()
             || self.selection_tex_pending.is_some()
     }
 
@@ -1553,8 +1602,7 @@ impl BatchItem {
     fn take_result(&mut self, rgba: Arc<image::RgbaImage>) {
         self.result_rgba = Some(rgba);
         self.result_tex_pending = true;
-        self.thumb_pending = true;
-        self.thumb_failed = false;
+        self.thumb.asked();
         self.quick.clear();
     }
 
@@ -2454,9 +2502,7 @@ impl BatchItem {
         self.result_texture = None;
         // A result texture still being made is of the result this drops.
         self.result_tex_request += 1;
-        self.thumb_texture = None;
-        self.thumb_pending = false;
-        self.thumb_failed = false;
+        self.thumb.clear();
         self.source_tex_pending = false;
         self.result_tex_pending = false;
         self.decode_pending = false;
@@ -2688,9 +2734,7 @@ impl BatchItem {
             source_rgba: None,
             source_dyn: None,
             source_texture: None,
-            thumb_texture: None,
-            thumb_pending: false,
-            thumb_failed: false,
+            thumb: Thumbnail::default(),
             result_rgba: None,
             start_dyn_cache: None,
             result_texture: None,
@@ -3225,14 +3269,14 @@ mod tests {
         // touch cached_tensor — that would kill live preview after any
         // Tier 2 rerun (the tier-2 worker doesn't return a fresh tensor).
         let mut item = fixture_item(1);
-        item.thumb_pending = true;
+        item.thumb.asked();
         item.source_tex_pending = true;
         item.result_tex_pending = true;
         item.decode_pending = true;
         item.reset_result_caches();
         assert!(item.result_texture.is_none());
-        assert!(item.thumb_texture.is_none());
-        assert!(!item.thumb_pending);
+        assert!(item.thumb.texture().is_none());
+        assert!(!item.thumb.is_pending());
         assert!(!item.source_tex_pending);
         assert!(!item.result_tex_pending);
         assert!(!item.decode_pending);
@@ -3295,7 +3339,7 @@ mod tests {
         crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Pending);
         item.show_result(Arc::new(image::RgbaImage::new(2, 2)));
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(old.id()), "the old texture stays");
-        assert!(item.result_tex_pending && item.thumb_pending, "and a new one and thumbnail are on their way");
+        assert!(item.result_tex_pending && item.thumb.is_pending(), "and a new one and thumbnail are on their way");
         assert_eq!(item.status(), BatchStatus::Done);
         let new = tex("new");
         let target = item.request_result_texture(false);
