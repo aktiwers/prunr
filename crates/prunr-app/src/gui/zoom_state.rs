@@ -39,9 +39,11 @@ impl ZoomState {
         self.frame = Some((item, size));
     }
 
-    /// Zoom to `zoom` about `cursor` (from the canvas centre, in screen
-    /// points): the image point under the cursor stays under it.
+    /// Zoom to `zoom` (held within the zoom range) about `cursor` (from the
+    /// canvas centre, in screen points): the image point under the cursor
+    /// stays under it.
     pub fn zoom_about(&mut self, cursor: egui::Vec2, zoom: f32) {
+        let zoom = zoom.clamp(crate::gui::theme::ZOOM_MIN, crate::gui::theme::ZOOM_MAX);
         self.pan_offset = cursor - (cursor - self.pan_offset) * (zoom / self.zoom);
         self.zoom = zoom;
     }
