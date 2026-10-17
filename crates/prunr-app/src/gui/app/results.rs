@@ -949,8 +949,12 @@ impl PrunrApp {
             self.after_result_landed(item_id);
         }
 
-        while let Ok((rgba, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
-            self.system.copy_image(rgba, crate::gui::system_bridge::CopyNote::Image { hint });
+        while let Ok((image, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
+            let note = crate::gui::system_bridge::CopyNote::Image { hint };
+            match image {
+                Some(rgba) => self.system.copy_image(rgba, note),
+                None => self.on_copy_done(note, false),
+            }
         }
         self.land_selection_edits(ctx);
         while let Ok(done) = self.batch.bg_io.selection_edit_rx.try_recv() {
