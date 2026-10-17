@@ -612,7 +612,7 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
             let item = push_test_item(app, 1);
             crate::gui::tests::fixtures::put_in(item, status.clone());
             item.source_texture = Some(photo.clone().into());
-            item.thumb_texture = Some(photo);
+            item.thumb.landed(photo);
             app.batch.select_item(0);
             app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
         }

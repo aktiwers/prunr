@@ -251,13 +251,13 @@ fn render_thumbnail_layer(
         request_item_thumbnail(app, i);
         needs_repaint = true;
     }
-    if app.batch.items[i].thumb_texture.is_none() && app.batch.items[i].thumb_pending {
+    if app.batch.items[i].thumb.texture().is_none() && app.batch.items[i].thumb.is_pending() {
         draw_loading_spinner(ui, item_rect);
         needs_repaint = true;
     }
     // Compute fade unconditionally so the animation bookkeeping stays in sync
     // whether or not the texture is available yet.
-    let has_thumb = app.batch.items[i].thumb_texture.is_some();
+    let has_thumb = app.batch.items[i].thumb.texture().is_some();
     let fade = ui.ctx().animate_bool_with_time(
         egui::Id::new(("thumb_fade", app.batch.items[i].id)),
         has_thumb,
@@ -276,11 +276,11 @@ fn render_thumbnail_layer(
 /// early-returns on the virtualization check before this is called, so
 /// off-screen rows never trigger a request.
 fn should_request_thumbnail(item: &BatchItem) -> bool {
-    item.thumb_texture.is_none() && !item.thumb_pending && !item.thumb_failed
+    item.thumb.wanted()
 }
 
 fn request_item_thumbnail(app: &mut PrunrApp, i: usize) {
-    app.batch.items[i].thumb_pending = true;
+    app.batch.items[i].thumb.asked();
     let item_id = app.batch.items[i].id;
     app.batch.request_thumbnail(
         item_id,
@@ -320,7 +320,7 @@ fn paint_thumbnail(
     is_dragging_out: bool,
     fade: f32,
 ) {
-    let Some(ref thumb_tex) = item.thumb_texture else {
+    let Some(thumb_tex) = item.thumb.texture() else {
         return;
     };
     let tex_size = thumb_tex.size_vec2();
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn should_not_request_when_already_pending() {
         let mut item = fresh_item();
-        item.thumb_pending = true;
+        item.thumb.asked();
         assert!(!should_request_thumbnail(&item));
     }
 
@@ -637,7 +637,9 @@ mod tests {
     #[test]
     fn should_not_request_again_after_a_failure() {
         let mut item = fresh_item();
-        item.thumb_failed = true;
+        item.thumb.asked();
+        item.thumb.failed();
         assert!(!should_request_thumbnail(&item));
+        assert!(!item.thumb.is_pending(), "a failed one is no longer on its way");
     }
 }

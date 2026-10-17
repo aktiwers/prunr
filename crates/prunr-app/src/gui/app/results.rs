@@ -863,14 +863,12 @@ impl PrunrApp {
         while uploaded < THUMB_UPLOADS_PER_FRAME {
             let Ok(msg) = self.batch.bg_io.thumb_rx.try_recv() else { break };
             let Some(item) = self.batch.find_by_id_mut(msg.item_id) else { continue };
-            item.thumb_pending = false;
             let Some((tw, th, pixels)) = msg.image else {
-                // Not asked again until a result can make one.
-                item.thumb_failed = true;
+                item.thumb.failed();
                 continue;
             };
             let ci = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
-            item.thumb_texture = Some(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
+            item.thumb.landed(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
             uploaded += 1;
         }
         if uploaded == THUMB_UPLOADS_PER_FRAME {
@@ -1837,7 +1835,7 @@ mod timeline_contract_tests {
         item.finish_job();
         assert!(app.can_reroll_intent());
         app.batch.items[0].result_tex_pending = true;
-        app.batch.items[0].thumb_pending = true;
+        app.batch.items[0].thumb.asked();
         assert!(app.can_reroll_intent(), "the fill's texture and thumbnail being built is no run");
         app.settings.model = SettingsModel::Inpaint;
         assert!(!app.can_reroll_intent(), "LaMa fills are not generated");
