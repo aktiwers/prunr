@@ -115,7 +115,9 @@ tempfile = "3"
 strip = true
 lto = "fat"
 opt-level = 3
-panic = "abort"
+# Unwind, not abort: a panic in a model run fails that run, and the app,
+# with every open image and its undo history, stays up.
+panic = "unwind"
 codegen-units = 1
 
 # Profiling profile: release-grade codegen with debug symbols kept so

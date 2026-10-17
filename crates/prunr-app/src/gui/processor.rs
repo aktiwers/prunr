@@ -441,7 +441,7 @@ impl DepthQueue {
             let mut faces = prunr_core::face::LazyFaceFinder::default();
             for job in job_rx {
                 let (item_id, epoch) = (job.item_id, job.epoch);
-                let result = measure_depth(&engine_slot, &progress, job, &mut faces);
+                let result = caught(|| measure_depth(&engine_slot, &progress, job, &mut faces)).unwrap_or_else(Err);
                 if let Err(err) = &result {
                     tracing::warn!(item_id, %err, "depth run failed");
                 }
@@ -450,6 +450,18 @@ impl DepthQueue {
         });
         Self { jobs, done, warm }
     }
+}
+
+/// Run `f`; a panic in it (a model or driver bug) becomes its message, so
+/// the run it was fails instead of the app.
+fn caught<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        let why = payload.downcast_ref::<&str>().map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        tracing::error!(%why, "a model run panicked");
+        "The model stopped unexpectedly. Try again; if it repeats, try another model.".to_string()
+    })
 }
 
 /// Measure one photo on the warm engine, with the faces in it for Auto
@@ -979,7 +991,10 @@ impl Processor {
     /// runs none.
     fn spawn_model(&self, job: impl FnOnce() + Send + 'static) {
         if self.runs_models {
-            rayon::spawn(job);
+            // rayon aborts the process on a job's panic.
+            rayon::spawn(move || {
+                let _ = caught(job);
+            });
         }
     }
 
@@ -1121,23 +1136,20 @@ impl Processor {
         }
         let tx = self.inpaint_tx.clone();
         self.spawn_model(move || {
-            let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
-                run.end();
-                let _ = tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
-                return;
-            };
-            preview_the_photo(&progress, &image);
-            let mask = tuning.fill_region(&correction, image.dimensions());
-            // This path only sees LaMa / Big-LaMa / MI-GAN.
-            let outcome = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress);
-            if outcome.is_ok() {
+            let fill = caught(|| {
+                let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
+                    return Err(prunr_core::CoreError::ImageFormat("the image could not be read".into()));
+                };
+                preview_the_photo(&progress, &image);
+                let mask = tuning.fill_region(&correction, image.dimensions());
+                // This path only sees LaMa / Big-LaMa / MI-GAN.
+                let filled = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress)?;
                 progress.step(prunr_core::Step::Blending);
-            }
-            let outcome = outcome.map(|filled| (prunr_core::inpaint_blend::finalize_inpaint(
-                &filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen,
-            ), filled.scale));
+                let rgba = prunr_core::inpaint_blend::finalize_inpaint(&filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen);
+                Ok((rgba, filled.scale))
+            });
             run.end();
-            let outcome = match outcome {
+            let outcome = match fill.unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why))) {
                 Ok((rgba, fill_scale)) => InpaintOutcome::Done { rgba, fill_scale, generation },
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
@@ -1753,46 +1765,39 @@ impl Processor {
         let run_options_for_thread = Arc::clone(run_options);
 
         std::thread::spawn(move || {
-            // Decode and Denoise run before the model: the row-parallel
-            // rayon inside apply_denoise must not nest in ORT's thread pool
-            // (the pattern that deadlocked apply_background_color, b2306bb).
-            let input_for_inference = match input.read().map_err(prunr_core::CoreError::ImageFormat) {
-                Ok(input) => build_inference_input(&input, recipe.upscale.pre_denoise()),
-                Err(err) => {
+            let result = caught(|| {
+                // Decode and Denoise run before the model: the row-parallel
+                // rayon inside apply_denoise must not nest in ORT's thread pool
+                // (the pattern that deadlocked apply_background_color, b2306bb).
+                let input = input.read().map_err(prunr_core::CoreError::ImageFormat).inspect_err(|err| {
                     tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
-                    done.deliver(UpscaleResult { item_id, run: run_id, result: Err(err), recipe });
-                    return;
-                }
-            };
-            // Session construction runs here, not on the GUI thread: a cold
-            // EP (OpenVINO compiles the graph) can take tens of seconds and
-            // the window must stay responsive so Cancel is reachable. The
-            // thread holds its own Arc, so a model swap that evicts the slot
-            // mid-run never invalidates this session.
-            let engine_for_thread = match ensure_warm_engine(
-                &engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only }, intra_threads,
-            ) {
-                Ok(engine) => engine,
-                Err(err) => {
-                    tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed");
-                    done.deliver(UpscaleResult { item_id, run: run_id, result: Err(err), recipe });
-                    return;
-                }
-            };
-            let result = prunr_core::upscale::upscale_rgba_with_engine(
-                &input_for_inference,
-                &engine_for_thread,
-                model_id,
-                scale_factor,
-                &progress,
-                Some(&run_options_for_thread),
-            )
-            .map(|raw| {
-                let raw = Arc::new(raw);
-                let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
-                let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs, None);
-                UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
-            });
+                })?;
+                let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
+                // Session construction runs here, not on the GUI thread: a cold
+                // EP (OpenVINO compiles the graph) can take tens of seconds and
+                // the window must stay responsive so Cancel is reachable. The
+                // thread holds its own Arc, so a model swap that evicts the slot
+                // mid-run never invalidates this session.
+                let engine_for_thread = ensure_warm_engine(
+                    &engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only }, intra_threads,
+                )
+                .inspect_err(|err| tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed"))?;
+                prunr_core::upscale::upscale_rgba_with_engine(
+                    &input_for_inference,
+                    &engine_for_thread,
+                    model_id,
+                    scale_factor,
+                    &progress,
+                    Some(&run_options_for_thread),
+                )
+                .map(|raw| {
+                    let raw = Arc::new(raw);
+                    let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
+                    let (shown, reference) = super::live_preview::finish_upscale(&raw, &input_for_inference, None, &knobs, None);
+                    UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
+                })
+            })
+            .unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why)));
             done.deliver(UpscaleResult { item_id, run: run_id, result, recipe });
         });
         Ok(())
@@ -1907,13 +1912,14 @@ impl Processor {
         let engine_slot = Arc::clone(&self.colorize.warm);
         std::thread::spawn(move || {
             let key = WarmEngineKey { model: kind, cpu_only };
-            let result = input.read().map_err(prunr_core::CoreError::ImageFormat).and_then(|input| {
+            let result = caught(|| input.read().map_err(prunr_core::CoreError::ImageFormat).and_then(|input| {
                 let engine = ensure_warm_engine(&engine_slot, key, intra_threads)?;
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
                 let run = super::item::ColorizeCache::new(Arc::new(plane), input);
                 let shown = Arc::new(run.render(recipe.colorize.strength()));
                 Ok(ColorizeOutput { run, shown })
-            });
+            }))
+            .unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why)));
             if let Err(err) = &result {
                 tracing::warn!(item_id, %err, "colorize run did not finish");
             }
@@ -2024,8 +2030,8 @@ impl Processor {
         let tx = self.sam_encoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            let result = ensure_sam_sessions(&sessions)
-                .and_then(|s| run_sam_encoder_inline(&s, &source));
+            let result = caught(|| ensure_sam_sessions(&sessions).and_then(|s| run_sam_encoder_inline(&s, &source)))
+                .unwrap_or_else(Err);
             let _ = tx.send(SamEncoderResult { item_id, result });
         });
         Ok(())
@@ -2047,12 +2053,12 @@ impl Processor {
             .into_progress()
             .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
-            let search = std::panic::AssertUnwindSafe(|| {
+            let result = caught(|| {
                 photo.load()
                     .ok_or_else(|| "the photo is no longer there".to_string())
                     .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, blend, &progress).map_err(|e| e.to_string()))
-            });
-            let result = std::panic::catch_unwind(search).unwrap_or_else(|_| Err("the face model stopped unexpectedly".to_string()));
+            })
+            .unwrap_or_else(Err);
             if let Some(run) = run {
                 run.end();
             }
@@ -2117,7 +2123,7 @@ impl Processor {
         self.spawn_model(move || {
             let (w, h) = req.source_dims;
             let started = std::time::Instant::now();
-            let result = ensure_sam_sessions(&sessions)
+            let result = caught(|| ensure_sam_sessions(&sessions)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
                     let decoded = started.elapsed();
@@ -2129,7 +2135,8 @@ impl Processor {
                         "SAM decoder ran"
                     );
                     DecodedSelection::Fresh { mask, output: Arc::new(out) }
-                });
+                }))
+                .unwrap_or_else(Err);
             let _ = tx.send(SamDecoderResult {
                 item_id: req.item_id, mode: req.mode, reading: req.reading, result,
             });
@@ -2334,6 +2341,25 @@ pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_s
             ..base
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod panic_tests {
+    /// A panic in a model run becomes that run's error; a run that
+    /// returns is untouched. On the pool, a panicking job no longer takes
+    /// the process down.
+    #[test]
+    fn a_panic_in_a_model_run_fails_the_run_not_the_app() {
+        assert_eq!(super::caught(|| 7), Ok(7));
+        let failed = super::caught(|| -> u32 { panic!("a driver bug") });
+        assert!(failed.unwrap_err().starts_with("The model stopped unexpectedly"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        rayon::spawn(move || {
+            let result = super::caught(|| -> u32 { panic!("on the pool") });
+            let _ = tx.send(result.is_err());
+        });
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
     }
 }
 
