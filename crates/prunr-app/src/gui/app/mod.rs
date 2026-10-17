@@ -1258,12 +1258,14 @@ impl eframe::App for PrunrApp {
         // Consume pending drag-out (sidebar set this when a drag escaped the sidebar).
         // Runs after sidebar renders so the user sees the drag cursor leave the area.
         if let Some(ids) = self.drag_export.pending.take() {
-            self.initiate_drag_out(ids, frame);
+            self.initiate_drag_out(ids, frame, ui.ctx());
             // Clear egui's internal drag state — the OS drag session has taken over.
             // Without this, egui keeps showing the DnD crosshair cursor because it
             // still thinks an internal drag is in progress.
             ui.ctx().stop_dragging();
         }
+        // A drag waiting for its files starts once they are written.
+        self.continue_drag_out(frame, ui.ctx());
         // A dialog asked for while rendering shows from the next `logic()`.
         if self.system.dialog_unshown() {
             ui.ctx().request_repaint();
