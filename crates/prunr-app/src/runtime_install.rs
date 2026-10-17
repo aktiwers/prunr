@@ -264,7 +264,7 @@ fn run_install(
     let bytes = ri::download_wheel(&wheel, &mut hooks)?;
 
     let _ = tx.send(InstallEvent::Extracting);
-    let install_dir = prepare_and_extract(&bytes, rt)?;
+    let install_dir = extract_into_place(&bytes, &rt.checked_install_dir()?)?;
     // The runtime just installed is the one the user wants next start.
     if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
         tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
@@ -292,10 +292,6 @@ fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
 /// Extract into a hidden folder beside the install and move it into place
 /// once whole: an install cut short (a full disk, the app closed) leaves
 /// the runtime that was there, or none, never half of one to load.
-fn prepare_and_extract(bytes: &[u8], rt: RuntimeId) -> Result<PathBuf, String> {
-    extract_into_place(bytes, &rt.checked_install_dir()?)
-}
-
 fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String> {
     let name = target_dir.file_name().ok_or("install dir has no name")?.to_string_lossy().into_owned();
     let staging = target_dir.with_file_name(format!(".{name}.staging"));
@@ -303,13 +299,9 @@ fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String
         std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
     }
     std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
-    let library = match ri::extract_wheel(bytes, &staging) {
-        Ok(library) => library,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-    };
+    let library = ri::extract_wheel(bytes, &staging).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging);
+    })?;
     if target_dir.exists() {
         std::fs::remove_dir_all(target_dir).map_err(|e| format!("clean install dir: {e}"))?;
     }

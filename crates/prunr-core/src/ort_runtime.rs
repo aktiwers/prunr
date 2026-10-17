@@ -131,43 +131,50 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
 const PRELOAD_BESIDE_RUNTIME: &[&str] = if cfg!(windows) { &["DirectML.dll"] } else { &[] };
 
 fn init() -> Result<DylibSource, String> {
-    let candidates = match env_override() {
-        Some(path) if !path.is_file() => return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display())),
-        // An explicit runtime is the one tried: no other stands in for it.
-        Some(path) => vec![(path, DylibSource::EnvVar)],
-        None => runtime_candidates(prunr_models::runtime_store_dir().as_deref(), bundled_dylib(), BUILT_IN_HAS_GPU),
-    };
-    if candidates.is_empty() {
-        return Err(not_found());
-    }
-    // ort loads once per process: after a failed load its library cell
-    // reads as loaded and holds nothing (ort 2.0.0-rc.13, std OnceLock).
-    // So each candidate is opened and checked here, and ort is handed the
-    // first that passes.
-    let Loaded { at, candidate: (path, source), failures } = load_first(&candidates, probe_runtime)?;
+    let candidates = candidates()?;
+    // After a failed load ort's library cell reads as loaded and holds
+    // nothing, so ort is called once: each candidate is opened and checked
+    // here, and ort gets the first that passes.
+    let ((path, source), failures) = load_first(&candidates, probe_runtime)?;
     load_runtime(path)?;
-    if at > 0 {
-        let instead = match source {
-            DylibSource::Bundled => "the built-in runtime",
-            _ => "another installed runtime",
-        };
+    if !failures.is_empty() {
         tracing::warn!(failures = %failures.join("; "), %source, "runtime fallback");
-        let _ = FELL_BACK.set(format!("The chosen runtime would not load, so Prunr uses {instead}. Install it again in Settings."));
+        let _ = FELL_BACK.set(match source {
+            DylibSource::Bundled => "The chosen runtime would not load, so Prunr uses the built-in one. Install it again in Settings.",
+            _ => "The chosen runtime would not load, so Prunr uses another installed one. Install it again in Settings.",
+        });
     }
     tracing::info!(path = %path.display(), %source, "ORT runtime loaded");
     let _ = LOADED.set(path.clone());
     Ok(*source)
 }
 
+/// Every runtime to try, in order. `ORT_DYLIB_PATH` names the only one:
+/// an explicit runtime has no stand-in.
+fn candidates() -> Result<Vec<(PathBuf, DylibSource)>, String> {
+    let candidates = match env_override() {
+        Some(path) if !path.is_file() => return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display())),
+        Some(path) => vec![(path, DylibSource::EnvVar)],
+        None => runtime_candidates(prunr_models::runtime_store_dir().as_deref(), bundled_dylib(), BUILT_IN_HAS_GPU),
+    };
+    if candidates.is_empty() {
+        return Err(not_found());
+    }
+    Ok(candidates)
+}
+
 /// Whether `path` opens as an ONNX Runtime: the library loads and has its
-/// entry point. It is closed again; ort opens it for real.
+/// entry point. The one that passes stays open, so ort's open of it finds
+/// it loaded.
 fn probe_runtime(path: &Path) -> Result<(), String> {
     // SAFETY: opening a library runs its initialisers; the candidates are
     // the runtimes the app ships or installed, the ones ort would load.
     let lib = unsafe { libloading::Library::new(path) }.map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: the symbol is looked up, never called.
     let entry = unsafe { lib.get::<unsafe extern "C" fn() -> *const std::ffi::c_void>(b"OrtGetApiBase") };
-    entry.map(|_| ()).map_err(|e| format!("{}: {e}", path.display()))
+    entry.map_err(|e| format!("{}: {e}", path.display()))?;
+    std::mem::forget(lib);
+    Ok(())
 }
 
 fn load_runtime(path: &Path) -> Result<(), String> {
@@ -181,21 +188,16 @@ fn load_runtime(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The runtime that loaded: its place among the candidates, and why each
-/// before it failed.
-struct Loaded<'a> {
-    at: usize,
-    candidate: &'a (PathBuf, DylibSource),
-    failures: Vec<String>,
-}
-
-/// The first of `candidates` that `load` takes; every failure joined when
-/// none does.
-fn load_first(candidates: &[(PathBuf, DylibSource)], mut load: impl FnMut(&Path) -> Result<(), String>) -> Result<Loaded<'_>, String> {
+/// The first of `candidates` that `load` takes, with why each before it
+/// failed; every failure joined when none does.
+fn load_first(
+    candidates: &[(PathBuf, DylibSource)],
+    mut load: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<(&(PathBuf, DylibSource), Vec<String>), String> {
     let mut failures = Vec::new();
-    for (at, candidate) in candidates.iter().enumerate() {
+    for candidate in candidates {
         match load(&candidate.0) {
-            Ok(()) => return Ok(Loaded { at, candidate, failures }),
+            Ok(()) => return Ok((candidate, failures)),
             Err(why) => {
                 tracing::warn!(path = %candidate.0.display(), %why, "runtime did not load");
                 failures.push(why);
@@ -205,11 +207,11 @@ fn load_first(candidates: &[(PathBuf, DylibSource)], mut load: impl FnMut(&Path)
     Err(failures.join("; "))
 }
 
-static FELL_BACK: OnceLock<String> = OnceLock::new();
+static FELL_BACK: OnceLock<&'static str> = OnceLock::new();
 
 /// Why the runtime loaded is not the chosen one, when it fell back.
 pub fn fallback_note() -> Option<&'static str> {
-    FELL_BACK.get().map(String::as_str)
+    FELL_BACK.get().copied()
 }
 
 /// A runtime without `name` beside it (the CPU build) needs none.
@@ -225,13 +227,7 @@ fn preload_beside(runtime: &Path, name: &str) {
 }
 
 pub fn resolve_dylib_path() -> Result<(PathBuf, DylibSource), String> {
-    if let Some(path) = env_override() {
-        if !path.is_file() {
-            return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display()));
-        }
-        return Ok((path, DylibSource::EnvVar));
-    }
-    pick_runtime(prunr_models::runtime_store_dir().as_deref(), bundled_dylib(), BUILT_IN_HAS_GPU).ok_or_else(not_found)
+    candidates()?.into_iter().next().ok_or_else(not_found)
 }
 
 fn not_found() -> String {
@@ -307,10 +303,6 @@ fn write_preferred(root: &Path, subdir: &str) -> Result<(), String> {
 /// `built_in` one beside the executable: the preferred one when it is
 /// there, else the built-in one first when `built_in_first`, else the
 /// store's first install by name.
-fn pick_runtime(store_root: Option<&Path>, built_in: Option<PathBuf>, built_in_first: bool) -> Option<(PathBuf, DylibSource)> {
-    runtime_candidates(store_root, built_in, built_in_first).into_iter().next()
-}
-
 /// Every runtime there is to load, in the order to try them: the
 /// preferred one, then the built-in one first when `built_in_first`, else
 /// the store's installs by name, then the rest.
@@ -330,13 +322,9 @@ fn runtime_candidates(store_root: Option<&Path>, built_in: Option<PathBuf>, buil
         }
     });
     let installs = installs.into_iter().map(|(_, p)| (p, DylibSource::RuntimeStore));
-    let in_order: Vec<_> = if built_in_first {
-        built_in.into_iter().chain(installs).collect()
-    } else {
-        installs.chain(built_in).collect()
-    };
-    let mut candidates: Vec<_> = preferred.into_iter().collect();
-    for candidate in in_order {
+    let (first, then) = if built_in_first { (built_in, None) } else { (None, built_in) };
+    let mut candidates: Vec<(PathBuf, DylibSource)> = Vec::new();
+    for candidate in preferred.into_iter().chain(first).chain(installs).chain(then) {
         if !candidates.iter().any(|(p, _)| *p == candidate.0) {
             candidates.push(candidate);
         }
@@ -461,7 +449,7 @@ mod tests {
     }
 
     fn picked(root: &Path, built_in: Option<&Path>, built_in_first: bool) -> Option<PathBuf> {
-        pick_runtime(Some(root), built_in.map(Path::to_path_buf), built_in_first).map(|(p, _)| p)
+        runtime_candidates(Some(root), built_in.map(Path::to_path_buf), built_in_first).into_iter().next().map(|(p, _)| p)
     }
 
     #[test]
@@ -508,7 +496,7 @@ mod tests {
         write_preferred(root.path(), PREFER_BUILT_IN).unwrap();
         assert_eq!(picked(root.path(), Some(&built_in), false), Some(built_in.clone()), "built in, as picked");
         assert_eq!(picked(root.path(), None, false), openvino, "built in picked but absent (a dev build)");
-        assert_eq!(pick_runtime(Some(root.path()), Some(built_in), true).map(|(_, s)| s.to_string()), Some("bundled".to_string()));
+        assert_eq!(runtime_candidates(Some(root.path()), Some(built_in), true).first().map(|(_, s)| s.to_string()), Some("bundled".to_string()));
     }
 
     #[test]
@@ -530,9 +518,9 @@ mod tests {
         let store = PathBuf::from("/store/openvino/lib");
         let built_in = PathBuf::from("/app/lib");
         let candidates = vec![(store.clone(), DylibSource::RuntimeStore), (built_in.clone(), DylibSource::Bundled)];
-        let loaded = load_first(&candidates, |p| if p == store { Err("truncated".into()) } else { Ok(()) }).unwrap();
-        assert_eq!((loaded.at, &loaded.candidate.0, loaded.candidate.1), (1, &built_in, DylibSource::Bundled));
-        assert_eq!(loaded.failures, vec!["truncated".to_string()]);
+        let ((path, source), failures) = load_first(&candidates, |p| if p == store { Err("truncated".into()) } else { Ok(()) }).unwrap();
+        assert_eq!((path, *source), (&built_in, DylibSource::Bundled));
+        assert_eq!(failures, vec!["truncated".to_string()]);
         let none = load_first(&candidates, |p| Err(format!("bad {}", p.display()))).err();
         assert_eq!(none.as_deref(), Some("bad /store/openvino/lib; bad /app/lib"));
     }

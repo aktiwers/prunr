@@ -890,15 +890,7 @@ fn spawn_and_initial_burst(
     configure(&mut sub, state);
 
     let mut sent = SentWork::default();
-    let burst = state.max_jobs.min(total_pending);
-    let mut sent_count = 0;
-    while sent_count < burst {
-        match send_next(&mut sub, state, &mut sent, None, res_tx, ctx) {
-            SendOutcome::Sent => sent_count += 1,
-            SendOutcome::Failed => {}
-            SendOutcome::Held | SendOutcome::Nothing => break,
-        }
-    }
+    top_up(&mut sub, state, &mut sent, cancels, res_tx, ctx);
     Some(InitialBurst { sub, sent, engines })
 }
 
@@ -948,8 +940,8 @@ fn run_event_loop(
 
         // Real-crash check first so a segfault is reported as such rather
         // than masked by the watchdog firing on the same silence.
-        if !sub.is_alive() {
-            return EventLoopOutcome::Crashed(sub.crash_reason());
+        if let Some(reason) = sub.died() {
+            return EventLoopOutcome::Crashed(reason);
         }
 
         if is_stalled(last_event_at.elapsed(), sent.len(), HANG_TIMEOUT) {
@@ -1134,9 +1126,7 @@ fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
     max_jobs.saturating_sub(working)
 }
 
-/// Keep the worker busy: after any event (an image done, failed or
-/// cancelled), send pending work up to the job limit. Prefers Tier 2 (no
-/// inference), then Tier 1 pending, then the admission overflow channel.
+/// Send pending work up to the job limit.
 fn top_up(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
@@ -1147,7 +1137,7 @@ fn top_up(
 ) {
     drop_cancelled_pending(state, cancels, res_tx, ctx);
     while room_to_send(sent.working(), state.max_jobs, sub.should_pause_admission()) > 0 {
-        match send_next(sub, state, sent, Some(cancels), res_tx, ctx) {
+        match send_next(sub, state, sent, cancels, res_tx, ctx) {
             SendOutcome::Sent | SendOutcome::Failed => {}
             SendOutcome::Held | SendOutcome::Nothing => break,
         }
@@ -1166,13 +1156,13 @@ enum SendOutcome {
 }
 
 /// Send the next pending work to the worker: cached-tensor work first,
-/// then full runs, then (with `admitted`'s cancels) an image the memory
-/// controller admitted since. Its inputs are read here, off the UI thread.
+/// then full runs, then an image the memory controller admitted since
+/// (unless cancelled). Its inputs are read here, off the UI thread.
 fn send_next(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
     sent: &mut SentWork,
-    admitted: Option<&super::processor::CancelRegistry>,
+    cancels: &super::processor::CancelRegistry,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> SendOutcome {
@@ -1186,22 +1176,16 @@ fn send_next(
             Lane::AddEdge => (&mut state.pending_add_edge, &mut sent.add_edge_ids),
         };
         let Some(work) = pending.pop_front() else { continue };
-        return match send_cached(sub, &work, send) {
+        return match send_cached(sub, &work, send).map_err(|refusal| failure(refusal, sub)) {
             Ok(()) => {
                 ids.push(work.item_id);
                 SendOutcome::Sent
             }
-            Err(Refused::Unreadable(err)) => {
+            Err(Some(err)) => {
                 report_failed(work.item_id, err, state, res_tx, ctx);
                 SendOutcome::Failed
             }
-            // A live worker that cannot take it (a full temp disk) would
-            // refuse it again forever: it fails. A dead one is the crash path's.
-            Err(Refused::Worker(err)) if sub.is_alive() => {
-                report_failed(work.item_id, err, state, res_tx, ctx);
-                SendOutcome::Failed
-            }
-            Err(Refused::Worker(_)) => {
+            Err(None) => {
                 pending.push_front(work);
                 SendOutcome::Held
             }
@@ -1209,29 +1193,25 @@ fn send_next(
     }
     let (item, from_pending) = match state.pending.pop_front() {
         Some(item) => (item, true),
-        None => match (admitted, state.additional_rx.as_ref().and_then(|rx| rx.try_recv().ok())) {
-            (Some(cancels), Some(item)) if cancels.is_cancelled(item.id) => {
+        None => match state.additional_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            Some(item) if cancels.is_cancelled(item.id) => {
                 report_cancelled(item.id, state, res_tx, ctx);
                 return SendOutcome::Nothing;
             }
-            (Some(_), Some(item)) => (item, false),
-            _ => return SendOutcome::Nothing,
+            Some(item) => (item, false),
+            None => return SendOutcome::Nothing,
         },
     };
-    match send_item_to_sub(sub, &item, res_tx) {
+    match send_item_to_sub(sub, &item, res_tx).map_err(|refusal| failure(refusal, sub)) {
         Ok(()) => {
             sent.items.push(item);
             SendOutcome::Sent
         }
-        Err(Refused::Unreadable(err)) => {
+        Err(Some(err)) => {
             report_failed(item.id, err, state, res_tx, ctx);
             SendOutcome::Failed
         }
-        Err(Refused::Worker(err)) if sub.is_alive() => {
-            report_failed(item.id, err, state, res_tx, ctx);
-            SendOutcome::Failed
-        }
-        Err(Refused::Worker(_)) => {
+        Err(None) => {
             if from_pending {
                 state.pending.push_front(item);
             } else {
@@ -1246,6 +1226,16 @@ fn send_next(
 enum Lane {
     Tier2,
     AddEdge,
+}
+
+/// Why refused work fails (`Some`), or `None` to hold it: a live worker
+/// that cannot take it (a full temp disk) would refuse it again forever,
+/// while work a dead one refused is the crash path's to run again.
+fn failure(refusal: Refused, sub: &mut SubprocessManager) -> Option<String> {
+    match refusal {
+        Refused::Unreadable(err) => Some(err),
+        Refused::Worker(err) => sub.is_alive().then_some(err),
+    }
 }
 
 /// Why work did not reach the worker.
@@ -1373,10 +1363,8 @@ fn handle_crash_and_retry(
         OnCrash::FailInFlight => {
             let error = crash_message(&crash_reason);
             for item in re_queued {
-                let _ = res_tx.send(state.item_failed(item.id, error.clone()));
-                state.completed.insert(item.id);
+                report_failed(item.id, error.clone(), state, res_tx, ctx);
             }
-            ctx.request_repaint();
         }
         OnCrash::RetryWith(jobs) => {
             for item in re_queued.into_iter().rev() {
