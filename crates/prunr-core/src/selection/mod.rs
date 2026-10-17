@@ -106,13 +106,19 @@ fn scan_flags(cells: &[i8]) -> (bool, bool) {
 
 /// How a newer stroke cell lands on an existing one: zero leaves the
 /// existing cell, same sign keeps the stronger magnitude (painting twice
-/// does not double up), opposite sign lets the newer stroke win.
+/// does not double up), opposite sign moves it toward the newer stroke by
+/// that stroke's strength, as paint would: a full stroke flips it, a
+/// soft edge only nudges it.
 #[inline]
 fn merge_cell(existing: i8, newer: i8) -> i8 {
     match newer {
         0 => existing,
-        n if n > 0 => existing.max(n),
-        n => existing.min(n),
+        n if (n > 0) == (existing > 0) || existing == 0 => if n > 0 { existing.max(n) } else { existing.min(n) },
+        n => {
+            let weight = f32::from(n.unsigned_abs()) / f32::from(FULL as u8);
+            let moved = f32::from(existing) + (f32::from(n) - f32::from(existing)) * weight;
+            moved.round().clamp(-f32::from(FULL as u8), f32::from(FULL as u8)) as i8
+        }
     }
 }
 
@@ -266,16 +272,10 @@ impl MaskArtifact {
         self.map_with(other, merge_cell)
     }
 
-    /// `stroke` combined with this selection. On a cut-out (`signed`) a
-    /// stroke's sign is its direction, restore or erase, and the newer
-    /// one wins where it lands. Elsewhere the selection is only how much
-    /// is selected: an Add stroke grows it and a Subtract stroke carves it
-    /// away. It is kept negative there, so it reads as an erase if a
-    /// background-removal model later uses it.
-    pub fn merge_stroke(&self, stroke: &Self, signed: bool) -> Result<Self, SelectionError> {
-        if signed {
-            return self.add_mask(stroke);
-        }
+    /// `stroke` combined with this selection, which is only how much is
+    /// selected: an Add stroke grows it and a Subtract stroke carves it
+    /// away. It is kept negative, so as it is it reads as an erase.
+    pub fn merge_stroke(&self, stroke: &Self) -> Result<Self, SelectionError> {
         self.map_with(stroke, |a, b| {
             let held = a.unsigned_abs();
             let mag = if b >= 0 { held.max(b as u8) } else { held.saturating_sub(b.unsigned_abs()) };
@@ -283,10 +283,14 @@ impl MaskArtifact {
         })
     }
 
-    /// Region inversion: `FULL - |v|`, signed by `mode`.
-    pub fn invert(&self, mode: BrushMode) -> Self {
-        let sign = mode.sign();
-        self.map(|v| sign * (FULL - v.unsigned_abs() as i8))
+    /// The same area as a restore: every cell's amount, made positive.
+    pub fn as_restore(&self) -> Self {
+        self.map(|v| v.unsigned_abs().min(FULL as u8) as i8)
+    }
+
+    /// Region inversion: `FULL - |v|`, kept negative like any selection.
+    pub fn invert(&self) -> Self {
+        self.map(|v| -(FULL - v.unsigned_abs() as i8))
     }
 
     /// Stable content hash: SipHash-1-3 (`DefaultHasher`) over fixed
@@ -335,12 +339,41 @@ impl MaskArtifact {
         self.scale_alpha(rgba, |c| 1.0 - c);
     }
 
-    /// Returns a copy of `source` with alpha scaled by coverage — pixels
-    /// outside the selection become transparent. Basis of clipboard Copy/Cut.
-    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> image::RgbaImage {
-        let mut out = source.clone();
-        self.scale_alpha(&mut out, |c| c);
-        out
+    /// The selected part of `source` (a plane of its size): cropped to
+    /// the selection's bounds, alpha scaled by coverage. What clipboard
+    /// Copy and Cut carry; `None` when nothing is selected.
+    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> Option<image::RgbaImage> {
+        let r = self.bounds()?;
+        let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
+        self.crop(r).scale_alpha(&mut out, |c| c);
+        Some(out)
+    }
+
+    /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
+    pub fn bounds(&self) -> Option<CellRect> {
+        if self.is_blank() {
+            return None;
+        }
+        self.bounds_where(|v| v != 0)
+    }
+
+    /// The bounding rectangle of the cells `pred` accepts; `None` when it
+    /// accepts none.
+    pub fn bounds_where(&self, pred: impl Fn(i8) -> bool + Sync) -> Option<CellRect> {
+        let w = self.width as usize;
+        if w == 0 {
+            return None;
+        }
+        self.data
+            .par_chunks(w)
+            .enumerate()
+            .filter_map(|(y, row)| {
+                let x0 = row.iter().position(|&v| pred(v))? as u32;
+                // the row has an accepted cell, found just above
+                let x1 = row.iter().rposition(|&v| pred(v)).unwrap_or(0) as u32;
+                Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
+            })
+            .reduce_with(CellRect::union)
     }
 
     /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
@@ -410,10 +443,10 @@ impl MaskArtifact {
         self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| alpha[i] = corrected_alpha(alpha[i], g));
     }
 
-    /// The plane a first stroke makes on an empty selection: the stroke
-    /// itself on a cut-out, its Add part kept as an erase elsewhere.
-    pub fn into_selection(self, signed: bool) -> Self {
-        if signed { self } else { self.map(|b| if b > 0 { -b } else { 0 }) }
+    /// The plane a first stroke makes on an empty selection: its Add part,
+    /// kept negative.
+    pub fn into_selection(self) -> Self {
+        self.map(|b| if b > 0 { -b } else { 0 })
     }
 }
 
@@ -427,21 +460,25 @@ mod tests {
     }
 
 
-    /// On a cut-out the newer stroke's direction wins; on a selection Add
-    /// grows it, Subtract carves it away, and what stays is stored as an
-    /// erase.
     #[test]
-    fn a_stroke_merges_by_direction_on_a_cutout_and_by_amount_elsewhere() {
+    fn a_selection_as_a_restore_keeps_its_amounts_positive() {
+        let selection = mask(4, 1, vec![-127, -60, 0, 40]);
+        assert_eq!(selection.as_restore().cells(), &[127, 60, 0, 40]);
+    }
+
+    /// Add grows a selection, Subtract carves it away, and what stays is
+    /// stored as an erase.
+    #[test]
+    fn a_stroke_merges_by_amount() {
         let held = mask(4, 1, vec![-127, -127, -60, 0]);
         let add = mask(4, 1, vec![0, 100, 100, 127]);
         let sub = mask(4, 1, vec![-127, -100, 0, -127]);
-        assert_eq!(held.merge_stroke(&add, true).unwrap().cells(), &[-127, 100, 100, 127], "restore wins where it lands");
-        assert_eq!(held.merge_stroke(&add, false).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
-        assert_eq!(held.merge_stroke(&sub, false).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
-        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub, false).unwrap().has_selected_region(), "nothing to carve");
+        assert_eq!(held.merge_stroke(&add).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
+        assert_eq!(held.merge_stroke(&sub).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
+        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub).unwrap().has_selected_region(), "nothing to carve");
         for stroke in [add, sub] {
-            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke, false).unwrap();
-            assert_eq!(stroke.into_selection(false), first, "a first stroke equals merging onto nothing");
+            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke).unwrap();
+            assert_eq!(stroke.into_selection(), first, "a first stroke equals merging onto nothing");
         }
     }
 
@@ -523,13 +560,13 @@ mod tests {
     }
 
     #[test]
-    fn add_mask_opposite_sign_lets_newer_stroke_win() {
-        // An Add stroke painted over a Subtract region restores it, and
-        // vice versa.
-        let existing = mask(2, 1, vec![-100, 80]);
-        let newer = mask(2, 1, vec![30, -10]);
+    fn add_mask_opposite_sign_moves_toward_the_newer_stroke_by_its_strength() {
+        // A full restore over an erase flips it; a faint one (a soft brush
+        // edge, a feathered rim) only nudges it, as paint would.
+        let existing = mask(4, 1, vec![-100, 80, -127, 127]);
+        let newer = mask(4, 1, vec![30, -10, 127, -127]);
         let r = existing.add_mask(&newer).unwrap();
-        assert_eq!(r.cells(), &[30, -10]);
+        assert_eq!(r.cells(), &[-69, 73, 127, -127]);
     }
 
     #[test]
@@ -541,10 +578,9 @@ mod tests {
     }
 
     #[test]
-    fn invert_flips_coverage_with_requested_sign() {
+    fn invert_flips_coverage_and_keeps_it_negative() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
-        assert_eq!(m.invert(BrushMode::Subtract).cells(), &[-127, -63, 0, -95]);
-        assert_eq!(m.invert(BrushMode::Add).cells(), &[127, 63, 0, 95]);
+        assert_eq!(m.invert().cells(), &[-127, -63, 0, -95]);
     }
 
     #[test]
@@ -584,7 +620,7 @@ mod tests {
         let a = MaskArtifact::new_empty(4, 4);
         let b = MaskArtifact::new_empty(2, 8);
         assert!(matches!(
-            a.merge_stroke(&b, false),
+            a.merge_stroke(&b),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
     }
@@ -613,11 +649,26 @@ mod tests {
     fn copy_to_rgba_keeps_selected_alpha_and_clears_the_rest() {
         let m = mask(2, 2, vec![FULL, 0, 0, -FULL]);
         let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([10u8, 20, 30, 200]));
-        let out = m.copy_to_rgba(&source);
+        let out = m.copy_to_rgba(&source).expect("a selection");
         assert_eq!(out.get_pixel(0, 0).0[3], 200);
         assert_eq!(out.get_pixel(1, 0).0[3], 0);
         assert_eq!(out.get_pixel(0, 1).0[3], 0);
         assert_eq!(out.get_pixel(1, 1).0[3], 200);
+    }
+
+    #[test]
+    fn copy_to_rgba_carries_only_the_selections_bounds() {
+        let mut cells = vec![0; 5 * 4];
+        cells[5 + 1] = FULL;
+        cells[2 * 5 + 3] = FULL / 2;
+        let source = image::RgbaImage::from_fn(5, 4, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let out = mask(5, 4, cells).copy_to_rgba(&source).expect("a selection");
+        assert_eq!(out.dimensions(), (3, 2), "columns 1-3, rows 1-2");
+        assert_eq!(out.get_pixel(0, 0).0, [1, 1, 0, 255], "the selected pixel, where it was in the bounds");
+        assert_eq!(out.get_pixel(2, 1).0[..2], [3, 2], "the half-selected one");
+        assert!(out.get_pixel(2, 1).0[3] > 100 && out.get_pixel(2, 1).0[3] < 155);
+        assert_eq!(out.get_pixel(1, 0).0[3], 0, "an unselected pixel inside the bounds is clear");
+        assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
     }
 
     /// A soft stroke keeps hardness, strength and direction in the plane

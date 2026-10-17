@@ -9,9 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{Event, InputState, Key};
 
-use super::kv_row;
 use crate::gui::knob_catalog::ModelRole;
-use crate::gui::theme;
 
 const MOD_NAME: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
@@ -28,23 +26,18 @@ pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
     match (role.edits_cutout(), mac) {
         (false, true) => "Click or stroke an object to add it to the selection; Alt takes it away.",
         (false, false) => "Click or stroke an object to add it to the selection; Alt or Ctrl takes it away.",
-        (true, true) => "Click or stroke an object to restore it; Alt erases it.",
-        (true, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
+        (true, true) => "Click or stroke an object to select it; Alt takes it away. Restore, Erase or Select in the strip says what the selection does.",
+        (true, false) => "Click or stroke an object to select it; Alt or Ctrl takes it away. Restore, Erase or Select in the strip says what the selection does.",
     }
 }
 
-/// The bottom-left hint while a brush is on: what Shift and Alt do for
-/// this model. A background-removal cut-out is restored or erased; any
-/// other selection is added to or subtracted from.
-pub(crate) fn modifier_hints(role: ModelRole) -> (&'static str, &'static str) {
-    let mac = cfg!(target_os = "macos");
-    match (role.edits_cutout(), mac) {
-        (false, true) => ("Shift = add", "Alt = subtract"),
-        (false, false) => ("Shift = add", "Alt/Ctrl = subtract"),
-        (true, true) => ("Shift = restore", "Alt = erase"),
-        (true, false) => ("Shift = restore", "Alt/Ctrl = erase"),
-    }
-}
+/// The bottom-left hint while a brush is on: what Shift and Alt do to
+/// the selection, on every model.
+pub(crate) const MODIFIER_HINTS: (&str, &str) = if cfg!(target_os = "macos") {
+    ("Shift = add", "Alt = remove")
+} else {
+    ("Shift = add", "Alt/Ctrl = remove")
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -155,9 +148,6 @@ impl Chord {
 /// include them, so a press under them is neither captured nor a command.
 fn foreign_modifier_held(m: &egui::Modifiers) -> bool {
     m.alt || (m.ctrl && !m.command)
-}
-
-impl Chord {
 }
 
 impl Mods {
@@ -470,6 +460,8 @@ fn key_name(key: Key) -> &'static str {
         Key::Space => "Space",
         Key::Num0 => "0",
         Key::Num1 => "1",
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
         other => other.name(),
     }
 }
@@ -500,35 +492,9 @@ pub fn label(action: Action) -> &'static str {
     row(action).label
 }
 
-/// Returns true if the modal should close.
-pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
-        ctx, "shortcuts", "Keyboard shortcuts",
-        [theme::SHORTCUT_OVERLAY_WIDTH, theme::SHORTCUT_OVERLAY_HEIGHT],
-        |ui| {
-            ui.vertical(|ui| {
-                ui.add_space(theme::SPACE_SM);
-                render_shortcut_grid(ui);
-            });
-        },
-    )
-}
-
-/// Two-column key/action grid. Used by the F1 overlay and the Settings
-/// Hotkeys tab.
-pub fn render_shortcut_grid(ui: &mut egui::Ui) {
-    egui::Grid::new("shortcuts_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_SM])
-        .show(ui, |ui| {
-            let bindings = current(ui.ctx());
-            for s in SHORTCUTS {
-                kv_row(ui, bindings.display(s.action), s.label, theme::TEXT_PRIMARY);
-            }
-            for (gesture, what) in GESTURES {
-                kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
-            }
-        });
+/// The mouse gestures, for the Hotkeys tab's list below the keys.
+pub fn gestures() -> &'static [(&'static str, &'static str)] {
+    GESTURES
 }
 
 #[cfg(test)]

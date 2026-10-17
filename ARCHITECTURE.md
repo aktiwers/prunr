@@ -25,7 +25,6 @@ crates/
     subprocess/            # IPC protocol, framing, parent-side manager
     gui/                   # egui app: coordinators, views/, automation/, tests/
 xtask/                     # fetch-models, install-runtime, golden diffs
-scripts/                   # Model export/conversion, prunrctl.py
 packaging/                 # AUR, Homebrew
 assets/                    # Icon, Info.plist, .desktop
 ```
@@ -34,17 +33,19 @@ assets/                    # Icon, Info.plist, .desktop
 
 ## GUI Coordinators
 
-`PrunrApp` (`gui/app.rs`) is a **coordinator, not an owner**: it holds UI visibility flags, view state with no other home, and the domain coordinators below. The coordinators don't know about each other; cross-domain work (a finished image updating the batch, the history and admission) is orchestrated on `PrunrApp`.
+`PrunrApp` (`gui/app/`, one file per concern: dispatch, results, preview, tools, import, export, textures, adjustments) is a **coordinator, not an owner**: it holds UI visibility flags, view state with no other home, and the domain coordinators below. The coordinators don't know about each other; cross-domain work (a finished image updating the batch, the history and admission) is orchestrated on `PrunrApp`.
 
 | Coordinator        | Owns                                                                                                   |
 |--------------------|--------------------------------------------------------------------------------------------------------|
 | `BatchManager`     | Batch items, selection, `BackgroundIO` (decode, thumbnail, texture-prep, save channels), memory governance, progress counts |
-| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, SAM 2 sessions, the shared progress slot |
+| `Processor`        | Every dispatch: worker IPC and admission, live preview, cancellation, eraser (in-process and the SD bridge), upscale, colorize, the depth queue, SAM 2.1 sessions, the shared progress slot, and the run queue that takes ticked images one at a time through the single upscale / colorize slot |
 | `BrushState` / `MagicBrushState` | Tool on/off and the in-progress stroke; brush settings live once on `settings.brush` for both |
 | `DownloadManager`  | On-demand model downloads, one at a time                                                                |
 | `DragExportState`  | OS drag-out lifecycle, shared with the drag crate's callback thread                                     |
-| `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard)                                     |
+| `SystemBridge`     | The only importer of `rfd` (file dialogs) and `arboard` (clipboard). One file dialog at a time: a surface asks, `logic()` shows it parented to the window and drains the answer, which carries image ids so it resumes the action that asked; while it is up it counts as a modal |
 | `Automation`       | The control socket; `None` unless `PRUNR_CONTROL_PORT` is set                                          |
+
+**Who decides what.** A decision about one image is a method on `BatchItem` (how much of a run it needs, what a landed decode, texture, overlay or result does to it, whether a run's result still fits the state it started from); a loop over the batch is a method on `BatchManager` (classify a batch, prepare its work, mark what waits); admission and the streams to the workers are on `Processor`. `PrunrApp` routes between them and owns nothing a coordinator could. Process targets the ticked images for every model: cut-outs as one admitted batch, upscales, colorize and erasers one after the other.
 
 **Frame loop.** `logic()` drains channels, handles input, then runs `reconcile_selected`, one idempotent step that tops up the selected image's lazy state (decoded source, textures, Magic Brush embedding) and, on a selection change, frees the other items' results. `ui()` only renders. Wayland drops other threads' wake-ups while the window is idle, so the UI thread polls every 50 ms while work is pending.
 
@@ -60,7 +61,7 @@ Every popover, panel and dialog is one of five kinds, chosen by how the user wor
 | Flyout | `chip::flyout_for` / `GroupChip { live: true }`; its chip, Escape or another chip closes it; fades while a slider is held | Knobs that change the image while open: Mask, Sketch, Effect, Background, Refine, the strip's full panels |
 | Popover | `chip::popup_for`; a click outside or a pick closes it | Set-and-go choices: Model, Preset, Quality, Scale, Prompt, Advanced, Help |
 | Modal | `theme::standard_modal_window`, listed in `PrunrApp::open_modals` | Rare and global: Settings, Model Store, licence, runtime prompt, help references, Save preset |
-| Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, toasts |
+| Status | Painted on the canvas | Progress capsule and tile map, the Loading Magic Brush pill, the Rendering / Preparing pill once quiet background work (a preview, a thumbnail, a texture) has run for a second with nothing else to show for it, toasts |
 
 The canvas stays live under strips and flyouts; only a popover holds it still, so the click that dismisses one is not also a stroke. Escape does one thing per press: close the open popup, else the top-most modal, else cancel a run, else clear the selection. `gui/tests/surface_tests.rs` pins these contracts.
 
@@ -70,11 +71,11 @@ Tests and outside tools drive the app through **the control tree**: the AccessKi
 
 **In tests**, `egui_kittest` runs the real `PrunrApp` without a display; tests find controls by name, click, step frames and assert on state. `gui/tests/tree_tests.rs` renders every surface and fails on any nameless control, so the naming rule enforces itself.
 
-**At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost (client: `scripts/prunrctl.py`). Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
+**At run time**, `PRUNR_CONTROL_PORT=<port>` opens a line-JSON socket on localhost. Clicks, drags and keys are injected as egui input, one batch per frame, and the reply waits until those frames have run, so the app reacts exactly as to a user. `intent` goes through `PrunrApp::perform`; `state` is a serde dump; `open` and `screenshot` reuse the app's own paths. The window must be receiving frames: with the output powered off a Wayland compositor sends no frame callbacks and nothing answers.
 
 ## Progress
 
-Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have.
+Every long-running pipeline takes a `prunr_core::Progress` handle. It names its steps from one table of user words (`Step`), counts at two levels (outer: crops, passes; inner: tiles, steps, images), lays out the tiles it works on, and checks cancel on the same handle. Listeners implement `ProgressSink`: the subprocess sends each report as one `Report` event, in order with its results; the GUI folds reports into one `DispatchProgress` through a run-scoped sink, so a replaced run's late reports never land; the CLI sets its spinner text. The capsule and tile map draw that snapshot without knowing the pipeline, so a new model needs no widget work. `progress::check_contract` is the shape every finished run must have. Pictures (finished tiles, a step's estimate) travel apart from the counts and are made only while the run's result can still land; each names where it sits in the photo, so the result later reveals over the preview they build.
 
 Time left runs from the moment the count first moves, so model loading and graph compiles never inflate it.
 
@@ -84,11 +85,14 @@ ONNX Runtime's memory use is unpredictable, and its arena and GPU contexts hold 
 
 | Work | Runs in | Lifetime |
 |------|---------|----------|
-| Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup and used by the first batch if its config matches; later batches spawn their own child; shut down when the batch ends or on model switch |
+| Segmentation + edges (Process, CLI) | seg worker subprocess | pre-warmed at startup; a batch reuses the warm worker when its model, processor and pool size fit and sends it the run's mask and Sketch settings (`Configure`, engines built on first need); the worker stays warm 5 min after a batch, 1 min after a model whose working memory stays loaded (BiRefNet: 5.5 GB); released on model switch, Cancel or a crash, and the newly picked cut-out model loaded once it has stayed picked 1 s |
 | SD erases | inpaint-only worker subprocess (no seg engines) | spawned on first SD erase; killed after 5 min idle, on model switch, or on Cancel |
 | LaMa / MI-GAN erases, SAM, live preview | in-process, rayon | sessions cached; LaMa released after 5 min idle |
-| Upscale | in-process, one thread per run | engine kept warm until model or hardware change |
+| Upscale, colorize | in-process, one thread per run | engine kept warm until model or hardware change |
+| Depth maps | in-process, one queue thread, photos one at a time | engine kept warm until model or hardware change; the ~1 MB map stays on the item until its photo changes |
 | Filters only (no model) | background thread per item | — |
+
+**First look.** A slow cut-out (BiRefNet, U2Net) on the image on screen first runs Silueta, on the CPU, and reports its subject through the run's progress, so the canvas outlines the subject in about a second instead of at the end. It runs before the slow model rather than beside it: measured on a 4-core CPU, the outline lands at 1.1 s instead of 2.9 s and the run ends sooner. The app sets which image is on screen and the worker settles it as each run starts (`Configure` carries it; the bridge re-sends it when it changes mid-batch), so background images of a batch never run Silueta. Silueta's session lives in the seg worker beside the slow model's, loaded on first need and let go when first looks go off (Animations off, or the model timed under 2 s per image on its provider this session).
 
 SD has its own process because its multi-GB bundle is the likeliest OOM and a UNet step can't be interrupted: Cancel kills the process so RAM frees at once, and a watchdog kills it if free system RAM drops below 1 GB mid-erase.
 
@@ -103,7 +107,7 @@ Length-prefixed bincode frames over the child's stdin/stdout (`subprocess/protoc
 
 Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
 
-Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item reverts to Pending, not Error, so its caches survive.
+Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item shows its own state again (its result, or the photo), not an error, so its caches survive.
 
 ## Threading Model
 
@@ -114,6 +118,7 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 | `prunr-inpaint-bridge` | Owns the SD worker; spawns it on a helper thread so Cancel works during Init |
 | `subprocess-reader` | One per child; blocking reads of child stdout |
 | `prunr-control` | Only with `PRUNR_CONTROL_PORT`: local JSON socket; requests are answered on the UI thread |
+| `file-dialog` | One per open file dialog: waits for the user's answer and wakes the frame loop. The dialog itself starts on the UI thread, which macOS needs for its sheet |
 | Upscale | Builds the session off the UI thread (a cold OpenVINO compile takes tens of seconds); Cancel terminates the running ORT call |
 | Background I/O | Short-lived: file listing, decode, thumbnails, texture prep, history spill, save, downloads. Decode-heavy ones share a slot pool capped at the core count so a big batch doesn't stack per-image peaks |
 | rayon global pool | Live preview, LaMa / MI-GAN, SAM |
@@ -122,8 +127,10 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 
 | Backend | Engines | ORT intra-op threads |
 |---------|---------|----------------------|
-| CPU | parallel-jobs setting | `num_cpus / engines` |
+| CPU (OpenVINO included: it runs on the host CPU here) | parallel-jobs setting for Silueta and U2Net; 1 for BiRefNet, whose single run fills every core (a second engine only doubled RAM) | `num_cpus / engines` |
 | GPU | `min(jobs, 2)` (VRAM) | same |
+
+`batch::engine_pool_size` is the one rule; the worker builds by it and the admission estimate reads it.
 
 The ORT CPU arena is off to lower the baseline; the subprocess absorbs any OOM. Jobs share a 64-unit semaphore weighted by megapixels, so small images run in parallel, a 40 MP image runs nearly alone, and FIFO order keeps small arrivals from starving it.
 
@@ -137,21 +144,22 @@ Each `BatchItem` keeps the `ProcessingRecipe` that produced its result (`applied
 
 | Tier | When | Work |
 |------|------|------|
-| `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes DexiNed's input | Full inference |
-| `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | DexiNed only |
-| `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), or lines turned off | Postprocess the cached seg tensor |
-| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style) | Re-threshold the cached DexiNed tensor |
+| `FullPipeline` | Model, segmentation on/off, or a line-mode switch that changes TEED's input | Full inference |
+| `AddEdgeInference` | Lines turned on, or `InputTransform` changed, with the seg tensor cached | TEED only |
+| `MaskRerun` | Mask knobs (incl. fill style, bg effect, brush correction), the Depth chip's look, or lines turned off | Postprocess the cached seg tensor (the look re-renders the photo from the kept depth map) |
+| `EdgeRerun` | Line knobs (strength, colour, thickness, scale, compose mode, style, fade with distance) | Re-threshold the cached TEED tensor |
 | `UpscaleRerun` / `UpscaleTier2` | Upscale knobs before / after the model | See [Upscale](#upscale) |
+| `ColorizeTier2` | Colorize Strength (a colorizer change is a model change) | Re-render the kept colour plane at the new strength |
 | `CompositeOnly` | Background colour or image | Render-time only |
 | `Skip` | Nothing output-relevant | None |
 
 The recipe of an in-flight batch lives on `Processor` (`InFlightBatch`), not on the item, so a result landing after a settings edit is stamped with what actually ran.
 
-**Two tensor caches.** The seg tensor and the DexiNed tensors are separate zstd-compressed fields on the item, so a model swap invalidates only one and a line-mode change only the other; both share a 512 MB budget, evicted in batch order, the selected item exempt.
+**Two tensor caches.** The seg tensor and the TEED tensors are separate zstd-compressed fields on the item, so a model swap invalidates only one and a line-mode change only the other; both share a 512 MB budget, evicted in batch order, the selected item exempt.
 
 **Batch vs interactive Tier 2.** Batch reruns go through the subprocess (a mask rerun with lines on takes the AddEdge path so the outline is recomposed; edge reruns run the full pipeline). Interactive reruns of the selected item run in-process; see [Live Preview](#live-preview).
 
-**What each model shows.** A model has a role (cut-out, filters, erase, upscale), and `knob_catalog::shows(model, Surface)` is the one table of which chips and brush controls appear for it: only those that act on that model's image. Dispatch routing stays on the role and model predicates. The toolbar, the brush strip and panels, the selection overlay and the selection actions all read it; a test renders the toolbar for every model against the table. A control that is shown but idle under another setting (Mask while Sketch is Full) is greyed with its reason instead.
+**What each model shows.** A model has a role (cut-out, filters, erase, upscale, colorize), and `knob_catalog::shows(model, Surface)` is the one table of which chips and brush controls appear for it: only those that act on that model's image. Dispatch routing stays on the role and model predicates. The toolbar, the brush strip and panels, the selection overlay and the selection actions all read it; a test renders the toolbar for every model against the table. A control that is shown but idle under another setting (Mask while Sketch is Full) is greyed with its reason instead.
 
 **Two sources of tier truth, one test.** `resolve_tier` compares whole recipes; `gui/knob_catalog.rs` maps each toolbar knob to `(tier, cache impact, dispatch)`, with context-aware specs for knobs whose cost depends on what is cached (Off → Subject outline is a live recompose with the edge tensor warm, an AddEdge run otherwise). A test mutates every knob and asserts the two agree.
 
@@ -167,11 +175,11 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 |---|---|---|
 | `ComposeMode` | How subject α and edge α combine (Subject outline mode) | EdgeRerun |
 | `LineStyle` | Edge colouring (solid, gradients, rainbow, noise, DualScale, …) | EdgeRerun |
-| `FillStyle` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
+| `SubjectEffect` | RGB transform of the masked subject (desaturate, duotone, halftone, …) | MaskRerun |
 | `BgEffect` | Source-derived backdrop baked into transparent areas | MaskRerun |
-| `InputTransform` | Transform of DexiNed's input | AddEdgeInference |
+| `InputTransform` | Transform of TEED's input | AddEdgeInference |
 
-`DualScale` draws the Fine and Bold DexiNed scales at once. The Bold tensor is decompressed only while it is on, and never replaces the hot active-scale tensor, so the next edge tweak still hits the cache.
+`DualScale` draws the Fine and Bold TEED scales at once. The Bold tensor is decompressed only while it is on, and never replaces the hot active-scale tensor, so the next edge tweak still hits the cache.
 
 ### Selection and brushes
 
@@ -183,7 +191,7 @@ Five per-item enums sit on top of the AI output, applied in one `postprocess →
 |---|---|---|
 | Background removal | Restore or Erase on the cut-out | At once, by an in-process mask rerun from the cached seg tensor, but only while a cut-out is on screen (`BatchItem::shows_cutout`); otherwise the selection waits for the next result |
 | Eraser | Add to / subtract from the region to fill | On Process, since a run costs seconds to minutes |
-| Upscale | Not offered: the brushes and selection actions are hidden, since an upscale covers the whole image | — |
+| Upscale, Colorize | Not offered: the brushes and selection actions are hidden, since both cover the whole image | — |
 
 **Correction.** `MaskArtifact::apply_to_alpha` runs last, on the full-resolution mask after edge refinement and feather (Erase scales toward 0, Restore lifts toward 1, by magnitude): a stroke is exact intent, and refining it would pull it onto nearby image edges. The plane it gets is the selection at the photo's own size (`BatchItem::correction_plane`), feathered by the selection Feather once the overlay has built that plane off the UI thread; its landing re-cuts once more. The overlay draws the same plane by coverage, so what it shows is what the cut-out gets.
 
@@ -199,9 +207,11 @@ Each image has one timeline (`gui/timeline.rs`): the states it has been in and a
 
 **Jobs bind to a version.** The timeline's version changes on every step, undo and redo. A run (Process, erase, upscale) notes it at dispatch and lands only if it still matches: as its own step, or, when a knob change or preset asked for it, folded into that step. A live-preview re-cut carries the version the same way and fills in the shown step. A result for a state the image has left is dropped, and undo asks a running job to stop. Switching images releases the working result; the timeline holds it.
 
-### Magic Brush (SAM 2)
+**A result that cannot land ends its run.** When a result arrives for a state the image has left (a knob change, a stroke, an undo while the run was under way), the image stops waiting, the user hears why, and under streamed admission its share of the budget is released; when a batch completes, any image the worker never answered is ended the same way. Nothing is ever left "processing" with nothing in flight.
 
-SAM 2 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
+### Magic Brush (SAM 2.1)
+
+SAM 2.1 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
 
 **Encoder.** The selected image is encoded in the background once its source is decoded and it has stayed on screen for 250 ms (paging past images must not queue an encode each; an encode cannot be cancelled), even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB), dropped when the source changes. The shown image keeps its embedding, and with the tool on so does the one shown before it, so flipping between two stays instant; a refused speculative encode is not retried. Until the shown image has an embedding the tool reads as Preparing and holds clicks.
 
@@ -214,11 +224,15 @@ Eraser models are on-demand downloads. The region is `MaskArtifact::region_mask`
 | Family | Runs | Why |
 |---|---|---|
 | LaMa, Big-LaMa, MI-GAN | In-process on rayon (`prunr_core::inpaint`) | Under 1 GB |
-| Stable Diffusion 1.5 / LCM | Inpaint-only subprocess (`gui/inpaint_bridge.rs`), spawned on first use, dropped after 5 min idle | Multi-GB; an OOM must kill the worker, not the GUI |
+| Stable Diffusion 1.5 / LCM, RORem | Inpaint-only subprocess (`gui/inpaint_bridge.rs`), spawned on first use, dropped after 5 min idle | Multi-GB; an OOM must kill the worker, not the GUI |
+
+**Fill scale.** Every eraser fills the hole at the size its model likes (`FillScale::Auto`: a hole's long side near 400 px, so a large region fills at half or quarter resolution and is resampled back); the footer reports what ran. Full resolution tiles a large hole and shows the seams, so Auto is the default and Full suits small regions only.
 
 **LaMa family.** 512 px tiles with 64 px feathered overlap; empty masks return before the session loads. Tiles run sequentially on one session (ORT already uses every core; do not parallelise). Sessions try GPU EPs through the same compatibility cache as seg models and are released after 5 min idle or on a model switch.
 
 **Stable Diffusion.** CLIP, VAE, the 9-channel UNet and five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC) are in `inpaint_sd.rs`, checked against Diffusers. The UNet always gets a binary mask, as SD 1.5 was trained on. Free RAM picks one tall crop up to 768 px or 512² tiles (see [SD RAM policy](#sd-ram-policy)); CPU fallback is refused. Inside the worker, sessions are dropped after each stroke unless "Keep the Stable Diffusion eraser loaded" is on (~16 GB resident); the worker itself stays until 5 min idle.
+
+**RORem** is SDXL distilled to four LCM steps for object removal: its prompt is baked into the export, so it takes no prompt or guidance, only Steps (2–8; fewer are a faster rough draft, more change the fill about as much as a new seed does) and the shared seed. Its sessions run without ONNX Runtime's memory-pattern planning, a registry fact (`SdSpec::lean_sessions`) measured on it as the same speed at 15 GB peak instead of 21.7; SD 1.5 keeps ORT's default until measured. The bench's `PRUNR_SD_*` overrides (`SdTuning::with_env_overrides`) are part of the session key.
 
 **Cancel and progress.** The `Progress` handle carries the cancel flag, checked between tiles and SD steps (ORT has no per-op cancel), and reports the masked tiles, crops and denoising steps.
 
@@ -270,7 +284,7 @@ One gate, `prunr_core::inpaint_sd::check_ram_for`, run by the process that runs 
 ### Segmentation batch
 
 ```
-UI      resolve_tier per item → skip | RePostProcess (cached tensor) | DexiNed-only | full pipeline
+UI      resolve_tier per item → skip | RePostProcess (cached tensor) | TEED-only | full pipeline
         archive results, snapshot dispatch recipe, admit full-pipeline items
 bridge  inputs / tensors / chain input → IPC temp files → commands
 worker  ImageDone { result, tensor + edge cache paths }
@@ -281,11 +295,15 @@ A crash or 60 s of silence triggers [Crash retry](#crash-retry).
 
 ### Starting image
 
-There is no switch for what a run reads; the undo timeline decides. Each step records the engine that made it and the image that run started from (`Origin`). A run of that same engine redoes the step from that image, so a re-cut or a second upscale never stacks on its own output; any other engine builds on the shown result, and the eraser always does, since each erase adds to the last. A hand edit (Delete, Cut) has no origin, so the next run keeps it. `BatchItem::run_input` is the one place this is decided; Process, the live preview, filter-only runs and upscale all ask it. A segmentation run that starts from an earlier result always runs the full pipeline, since the cached tensor never saw those pixels.
+There is no switch for what a run reads; the undo timeline decides. Each step records the engine that made it and the image that run started from (`Origin`). A run of that same engine redoes the step from that image, so a re-cut never stacks on its own output; any other engine builds on the shown result, and the eraser always does, since each erase adds to the last. The upscaler is the one exception: with its settings unchanged since the shown upscale, Process enlarges that upscale again, while a changed Scale or upscaler redoes it (`BatchItem::next_upscale_start`). A hand edit (Delete, Cut) has no origin, so the next run keeps it. `BatchItem::run_start` is the one place the rule lives; Process, the live preview, filter-only runs and upscale all ask it. A segmentation run that starts from an earlier result always runs the full pipeline, since the cached tensor never saw those pixels.
+
+One exception, by design: Process with another cut-out model (or No model) than the one that cut the shown step builds on that cut-out, so a second model only takes more away and undo is how to start over. Its start is the shown step's own colours seen through the shown cut-out's transparency, not the shown pixels, so an effect, lines or faces are applied once; the worker bridge builds it, where the file is decoded anyway, and it becomes the step's start. A cut never shows what its start hides (`keep_hidden`, before brush edits, so Restore still wins). A cached segmentation re-cuts only the step its model cut, never No model's pass, whose start already carries the cut.
 
 ### CLI
 
-`main.rs` routes `--worker`, `--doctor`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+`main.rs` routes `--worker`, `--doctor`, `bench`, `--open <path>` and plain inputs. `--inpaint` runs LaMa in-process; every other input, single or batch, goes to a `prunr --worker` subprocess by path, so the parent never holds image bytes (only `--large-image downscale` rewrites oversized inputs to a temp file). Crashes halve the jobs and retry. Exit code: 0 all ok, 1 all failed, 2 partial.
+
+`prunr bench` (`prunr_app::bench`) runs each installed model in-process through the app's own entry points, once CPU-only and once through the EP ladder, one session at a time, released before the next model. Every session records a `SessionPick` (provider, weights, each provider that failed on the way), so the report says where a model landed and why. The report is rewritten after every step: one a crash left behind names the step it crashed in.
 
 ## Inference Pipeline
 
@@ -347,9 +365,27 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 - **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms. OpenVINO checks only between tiles, so its tiles are capped at 256: on an HD 530 a cancel lands in 11 s instead of 51 s, for 5 % more run time.
 - **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
 
-## Edge Detection (DexiNed)
+## Colorize (DDColor)
 
-`EdgeEngine` owns its own DexiNed session. Input is 640×480 BGR with mean subtraction, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
+Colorize is its own role (`ModelRole::Colorize`), not a filter: the picker shows DDColor, the toolbar shows a Strength chip and nothing that cuts out. `prunr_core::colorize` runs the model at 512² on the photo's lightness and keeps the predicted colour planes (`ColorizeCache` on the item's step, like a kept upscale run); Strength (0–150 %) scales them against the photo's own colour in a live re-render (`ColorizeTier2`), so the model runs once per photo. Colorize shares the single run slot with upscale and goes through the same run queue for ticked images.
+
+## Depth
+
+Depth Anything V2 Small measures a photo once (518 px long side, ~0.5 s) into a `DepthMap` kept on the item; every depth feature reads that map, and a photo with no map asks the depth queue on `Processor` for one (epoch-tagged, so a late map for an earlier source is dropped). Readers:
+
+| Feature | Where | How |
+|---|---|---|
+| Lens blur, Point / Tilt-shift | Depth chip (No model); Background → Lens blur (cut-outs) | Blur grows with distance from the focus depth (or the band); the cut-out's own subject sets the focus behind a cut-out. `blur::blur_rgba` is a parallel three-box Gaussian (24 MP in 0.5 s); the Blurred photo background and Refine's Sharpen use it too |
+| Fog, Aerial perspective | Depth chip | Haze thickening with distance; far parts turn cooler and paler |
+| Fade with distance | Sketch | `line_fade_pct` on the edge recipe: lines lighten by depth (an `EdgeRerun`) |
+| By depth | Magic Brush | The click's depth ± Range selects a band of the scene, ground included |
+| Depth map | Save options, `--depth-map` | 16-bit PNG, white = near |
+
+The depth look re-renders the photo in the live preview (`MaskRerun` for a cut-out, the photo rerun under No model), never the model, so a drag costs a re-render and no inference. While a slider is held the look is made at 2048 px on the long side and resampled back (`DepthLook::apply_quick`, 0.5 s instead of 2.9 s at 24 MP); the render on release is full size.
+
+## Edge Detection (TEED)
+
+`EdgeEngine` owns its own TEED session (58 k parameters). Input is 640×480 BGR with mean subtraction, whatever the photo's aspect, alpha flattened onto white, after the user's input transform (Grayscale, Contrast boost, Posterize).
 
 | `LineMode` | Label | Behaviour |
 |------------|-------|-----------|
@@ -357,7 +393,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 | `EdgesOnly` | Full | Skip segmentation; lines of the whole image |
 | `SubjectOutline` | Subject | Segment first, then draw lines over the masked subject |
 
-**One inference, four scales.** `Fine`, `Balanced`, `Bold` and `Fused` are DexiNed's `block0`, `block3`, `block5` and `block_cat`, and `EdgeEngine::new` rejects any other output layout. All four tensors are kept zstd-compressed on the item, so a scale switch costs a decompress (`EdgeRerun`), never an inference.
+**Two runs, three scales.** `Bold` and `Fused` are TEED's `out_3` and `block_cat` from the 640×480 run; `Fine` is `block_cat` from a second run at 1280×960, so its lines are half as wide. TEED's sigmoid floor is not 0 (≈ 0.44 on `block_cat`), so each plane is stretched min..max to 0..1 as TEED's own inference does, with the range floored so a flat image does not stretch its noise into lines; the cached planes hold these probabilities. A run makes the scales its lines draw (with the one sharing their run) and sends its result; for the image on screen the worker then makes the rest from the photo it kept resized, and the app adds them under a token so a later run's lines never take them. Fine is about three quarters of the detector's time, so a result that does not draw it no longer waits for it. The scales are kept zstd-compressed on the item, so a scale switch costs a decompress (`EdgeRerun`); a scale the item lacks (a background image of a batch) runs the lines again.
 
 **Live-preview plane caches.** A Lines tweak redoes only the stage whose inputs changed:
 
@@ -376,21 +412,23 @@ Edge planes are kept per scale: Bold, for the dual-scale style, and the newest o
 `ort` (2.0.0-rc.13) is built with `load-dynamic`: no ONNX Runtime is linked in. `prunr_core::ort_runtime` resolves `libonnxruntime` once per process, first hit wins:
 
 1. `ORT_DYLIB_PATH` (developer override; set but missing is an error, never a fall-through)
-2. **Runtime Store**: `<data>/prunr/runtimes/<name>-<ver>-<rid>/` (first entry by name that holds the dylib)
-3. **Bundled**: `<exe>/runtime/` (macOS `.app`: `Frameworks/` via rpath)
+2. **Preferred**: the runtime `<data>/prunr/runtimes/preferred` names, a Runtime Store install (`runtimes/<name>-<ver>-<rid>/`) or `built-in`. One process loads one runtime and no wheel carries another's EP, so the choice is a file every process reads (GUI, worker, CLI); installing a runtime makes it the preferred one, and Settings › Hardware picks among what can load
+3. **Without a preference**: on Windows the bundled runtime (the DirectML build) before the store's first entry by name; elsewhere the store before the bundled one
+4. **Bundled** is `<exe>/runtime/` or `<exe>/`; in a macOS `.app`, `Contents/Frameworks/`
 
 Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
 
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
-| Linux / Windows | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA / DirectML builds via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
-| macOS | ORT 1.20.0 built from source with CoreML (no PyPI wheel has it) | built in |
+| Linux | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| Windows | DirectML ORT 1.24.1 (PyPI `onnxruntime-directml`: `onnxruntime.dll` + `DirectML.dll`, +23.5 MB over the CPU build) | built in; OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| macOS (arm64, 14+) | ORT 1.24.1 PyPI wheel, which carries CoreML | built in |
 
-Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. On Linux, an Intel iGPU without OpenVINO triggers a first-launch install prompt (14-day snooze). GPU detection reads `/sys/class/drm`, so it needs no graphics context; Windows detection is a stub, so the prompt never fires there.
+Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers OpenVINO for an Intel iGPU, unless the built-in DirectML already has a graphics card to run on. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context.
 
 ### EP ladder
 
-Each session walks a ladder of the GPU EPs the loaded runtime actually has compiled in (`is_available`), registering one EP per attempt so the log names the winner and a crashing EP cannot abort the CPU fallback. If every GPU EP fails the engine retries CPU-only.
+Each session walks a ladder of the GPU EPs the loaded runtime actually has compiled in (`is_available`), registering one EP per attempt so the log names the winner and a crashing EP cannot abort the CPU fallback. If every GPU EP fails the engine retries CPU-only. Every EP is built in one place, `EpKind::provider`, set to fail its registration: ort's default logs the failure and commits on the CPU, under the GPU's name. A failed registration is a fact about the machine, so it moves to the next EP without an `ep_compat` record.
 
 | Platform | Ladder |
 |---|---|
@@ -398,18 +436,20 @@ Each session walks a ladder of the GPU EPs the loaded runtime actually has compi
 | Windows | OpenVINO → CUDA → DirectML → CPU |
 | macOS | CoreML → CPU |
 
-OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machines don't have an OpenVINO runtime loaded, so they fall through to CUDA. OpenVINO's thread pool is capped to the rayon budget to avoid oversubscription. `force_cpu` (Settings, CLI) skips the ladder.
+CoreML compiles ML Programs (the format fp16 graphs need). A CoreML session swaps ORT's log sink for one that keeps CoreML's own `GetCapability` summary and logs it on commit as `partitions`, `nodes` and `coreml_nodes`: every partition edge is a CPU↔GPU round trip, so these counts are the data for deciding per model whether CoreML pays.
+
+OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machines don't have an OpenVINO runtime loaded, so they fall through to CUDA. OpenVINO's thread pool is capped to the rayon budget to avoid oversubscription. `cpu_only` (Settings, CLI) skips the ladder.
 
 ### Per-(model, EP) compatibility filter
 
 Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVINO + Silueta):
 
 1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles).
-2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session commit fails. Keyed on the app version, so an upgrade retries everything. `prunr --clear-ep-cache` wipes it.
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Keyed on the app version, so an upgrade retries everything; `prunr --clear-ep-cache` wipes it.
 
 ### Compiled-model cache
 
-`<data>/prunr/ep_cache/<ep>/<model>-<version>-v<format>/` holds the compiled artefact so the second session build skips graph optimisation: ORT's optimised graph for CPU and CUDA, CoreML's compiled model on macOS. OpenVINO and DirectML are not cached (OpenVINO re-keys its cache every launch and rewrote ~3 GB per build for no speedup; DirectML relies on the OS shader cache). The format version is bumped with every `ort` upgrade because cached graphs are not portable across ORT versions. A commit that fails on a cached graph deletes the cache file instead of marking the EP incompatible. Stale versions are collected at session build; model uninstall and a Settings button clear it.
+`<data>/prunr/ep_cache/<ep>/<model>-<version>-ort<runtime>-v<format>/` (macOS: under `~/Library/Caches/prunr/`) holds the compiled artefact so the second session build skips graph optimisation: ORT's optimised graph for CPU and CUDA, CoreML's compiled model on macOS. OpenVINO and DirectML are not cached (OpenVINO re-keys its cache every launch and rewrote ~3 GB per build for no speedup; DirectML relies on the OS shader cache). The format version is bumped with every `ort` upgrade because cached graphs are not portable across ORT versions. A commit that fails on a cached graph deletes the cache file instead of marking the EP incompatible. Stale versions are collected at session build; model uninstall and a Settings button clear it.
 
 ### Model variants
 
@@ -417,7 +457,11 @@ Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVIN
 
 ## GUI State Machine
 
-`AppState` (Empty / Loaded / Processing / Done) is derived each frame from the selected item's `BatchStatus`, never stored: no item is Empty, Pending and Error read as Loaded. Cancel returns in-flight items to Pending; removing the last item returns to Empty.
+Nothing about an image's progress is stored. `BatchStatus` is derived from the undo timeline and the item's job: a cut under way is Processing, a result on the shown step (on screen or parked) is Done, a failure with nothing to show is Error, otherwise Pending. `AppState` (Empty / Loaded / Processing / Done) is derived in turn from the selected item's status. Undo, cancel and parking therefore cannot leave a stale state behind.
+
+**One answer to "may this run".** `gui/capability` derives an image's facts (what it shows: the photo, a run's output or a hand edit; whether a run is queued or under way; which caches it holds) and answers each need as Ready, Wait or Never with a reason. The toolbar greys a surface by the same answer (`knob_catalog::surface_gate`) that the live-preview queue checks at its door, so a control the dispatch would refuse is never live, and a render that can never be built leaves the queue instead of waiting for good.
+
+**Process is for big-model output.** The cut-out, Upscale, Colorize and the erasers run on Process. Controls that need that output (Mask, Outline & Shadow, Effect and Background on a cut-out model, Refine, Strength) wait for it, greyed with "Process first."; everything else (Faces, Depth, Magic Brush, brushes, Lines on No model) works on what the canvas shows. Exports write what the canvas shows: a result, or the photo with its restored faces.
 
 ## Canvas & Texture Lifecycle
 
@@ -454,6 +498,7 @@ A drag is one PNG matching the canvas, background baked in like Save and Copy. W
 | `settings.json`, `presets/*.json` | `{config_dir}/prunr/` |
 | On-demand models | `{data_dir}/prunr/models/` |
 | Runtime Store, compiled-model cache, EP compatibility | `{data_dir}/prunr/runtimes/`, `ep_cache/`, `ep_compat.json` |
+| Compiled-model cache on macOS | `~/Library/Caches/prunr/ep_cache/`: CoreML can fail to open a compiled model under a path with a space |
 
 Directories come from `dirs` (`~/.config` and `~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows). Settings hold user choices only, hotkey overrides and accepted model licenses included; CPU forcing and the active backend reset every launch. Old files load through serde defaults and a v1 migration.
 
@@ -463,12 +508,12 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 
 | Source | Models |
 |--------|--------|
-| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, DexiNed |
-| `MultiPartBundled` | SAM 2 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (with an fp16 sibling for GPU EPs) |
-| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD; restrictive licenses need an explicit accept |
+| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED, the YuNet face finder (0.2 MB, so faces are found without a face model) |
+| `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
+| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts); restrictive licenses need an explicit accept |
 
-`resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once and on-demand files are read once per process; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
+`resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once; on-demand files are read at each load and dropped once the session has copied them, so a model used once doesn't hold its file's size for the rest of the run; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. In the GUI every surface says the same thing about a model that isn't installed (`views::get_model`: "Get <model> · <size>", from the registry) and opens the Store on that model's section; a chip whose model is missing shows "Get" on its face, and the Model picker lists every model, downloaded or not. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
 
 Our exports live on this repo's GitHub releases (`models-v1`, `lcm-inpaint-v1.0.1`, `taesd-v1.0.0`) under versioned names, so a URL an old build knows never changes; a fixed export gets a new name. SD 1.5 Inpaint comes from Hugging Face.
 
@@ -492,7 +537,7 @@ Windows release builds use the GUI subsystem so no empty console opens; CLI mode
 
 Release profile: fat LTO, one codegen unit, `panic = "abort"`, stripped. Rust is pinned to 1.92.0 in `rust-toolchain.toml` and the workflows so clippy `-D warnings` does not drift.
 
-CI on pushes to master: clippy, then build and test with `dev-models` on Linux, macOS (x86_64, aarch64) and Windows. Only Linux installs ONNX Runtime and sets `PRUNR_REQUIRE_ORT`, so its inference tests fail instead of soft-skipping.
+CI on pushes to master: clippy, then build and test with `dev-models` on Linux, macOS (x86_64, aarch64) and Windows. Only Linux installs ONNX Runtime and sets `PRUNR_REQUIRE_ORT`, so its inference tests fail instead of soft-skipping. macOS arm64 stages the runtime the release ships and runs `cargo xtask probe-load-dynamic --require-ep CoreMLExecutionProvider` on it: it must load under our `ort`, carry CoreML and run a model.
 
 A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 
@@ -502,9 +547,9 @@ A `v*` tag builds and publishes; `workflow_dispatch` builds without publishing.
 | macos-aarch64 | `.dmg`, `.tar.gz` |
 | windows-x86_64 | `.zip`, Inno Setup `.exe` |
 
-Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Linux and Windows stage the CPU wheel with `cargo xtask install-runtime` (the in-app store's code) into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS builds ORT with CoreML and ships it in `Contents/Frameworks/`.
+Each artifact ships an ONNX Runtime so a clean machine needs no Runtime Store install. Every platform stages Microsoft's wheel with `cargo xtask install-runtime` (the in-app store's code): Linux the CPU one and Windows the DirectML one into `<exe dir>/runtime/`, hence `/usr/bin/runtime/` in the `.deb` / `.rpm`; macOS the arm64 one, which carries CoreML, into `Contents/Frameworks/`. The DirectML build runs on the CPU too: without a DirectX 12 GPU (VM, remote desktop) DirectML fails to register, `available_gpu_eps` drops it after a one-time probe, and every session is a CPU one from the same DLL. The macOS wheel sets the Mac floor: its minimum macOS (14.0) is the app's `LSMinimumSystemVersion` and the binary's deployment target.
 
-The workspace `version` is the app version; packages take theirs from the tag. ORT versions pinned in the workflow YAML are mirrored in Rust consts, and a test fails when they differ.
+The workspace `version` is the app version; packages take theirs from the tag. The ORT version pinned in the workflow YAML is mirrored in a Rust const, and a test fails when they differ.
 
 ## Key Dependencies
 

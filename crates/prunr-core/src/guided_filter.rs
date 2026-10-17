@@ -8,11 +8,11 @@
 use image::{GrayImage, RgbaImage};
 use rayon::prelude::*;
 
-/// Minimum number of pixels to justify rayon overhead for the lookup pass.
-const PAR_LOOKUP_THRESHOLD: usize = 64 * 64;
+/// Minimum number of pixels to justify rayon overhead in the box filter.
+const PAR_THRESHOLD: usize = 64 * 64;
 
-/// Minimum number of rows/cols to justify rayon for prefix-sum passes.
-const PAR_PREFIX_THRESHOLD: usize = 256;
+/// Rows per parallel band of the box filter's column pass.
+const BAND_ROWS: usize = 64;
 
 /// Refine an alpha mask using a guided filter.
 pub fn guided_filter_alpha(
@@ -57,7 +57,7 @@ pub fn guided_filter_alpha(
         });
 
     // --- Box filter calls 1-4 in parallel ---
-    // Four integral scratches alive at once is the peak of the whole
+    // Four row-sum scratches alive at once is the peak of the whole
     // filter. Do NOT pair them to save planes: measured slower (an open
     // RAM-for-speed trade, see ARCHITECTURE.md).
     let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
@@ -117,7 +117,8 @@ pub fn guided_filter_alpha(
     out
 }
 
-/// O(1) box filter using integral image (two-pass parallel prefix sums).
+/// O(1)-per-pixel box mean, windows clipped at the borders and averaged
+/// over the pixels they cover.
 ///
 /// Returns a newly-allocated output buffer. For inner-loop callers that
 /// run many filters in sequence, use [`box_filter_into`] to reuse a
@@ -128,166 +129,87 @@ pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     out
 }
 
+/// Three box passes of `radius` over `buf`, close to a Gaussian; the
+/// result is left in `buf`. `scratch` is grown to `buf`'s length and
+/// reused as each pass's output.
+pub(crate) fn box_blur3_into(buf: &mut Vec<f32>, w: u32, h: u32, radius: u32, scratch: &mut Vec<f32>) {
+    scratch.resize(buf.len(), 0.0);
+    for _ in 0..3 {
+        box_filter_into(buf, w, h, radius, scratch);
+        std::mem::swap(buf, scratch);
+    }
+}
+
 /// Buffer-reusing variant: writes the filtered result into `dst` (which
-/// must equal `src.len()`). The integral-image scratch is still
-/// allocated internally; lifting that requires a `box_filter_with_scratch`
-/// — not yet justified.
+/// must equal `src.len()`). One `src`-sized scratch holds the row sums.
+///
+/// Two sliding-window passes (rows, then columns) with f64 running sums.
+/// Do NOT go back to an f32 integral image: its sums grow with the area
+/// (~1e11 for squared 0-255 values over a 1500 px region), where f32
+/// steps by thousands, and the guided filters' mean(g²) − mean(g)² turned
+/// into noise that painted garbage pixels along erase seams.
 pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mut [f32]) {
-    let w = w as usize;
-    let h = h as usize;
-    let n = w * h;
-    let r = radius as i64;
-
-    // --- Build integral image via two separable passes ---
-    // Pass 1: horizontal prefix sums (each row independent)
-    let mut integral = vec![0.0f32; n];
-
-    let do_par_rows = h >= PAR_PREFIX_THRESHOLD;
-
-    if do_par_rows {
-        integral
-            .par_chunks_mut(w)
-            .zip(src.par_chunks(w))
-            .for_each(|(dst_row, src_row)| {
-                let mut acc = 0.0f32;
-                for (&s, d) in src_row.iter().zip(dst_row.iter_mut()) {
-                    acc += s;
-                    *d = acc;
-                }
-            });
-    } else {
-        for y in 0..h {
-            let base = y * w;
-            let mut acc = 0.0f32;
-            for x in 0..w {
-                acc += src[base + x];
-                integral[base + x] = acc;
-            }
-        }
+    let (w, h, r) = (w as usize, h as usize, radius as usize);
+    debug_assert_eq!(dst.len(), src.len(), "box_filter_into: dst.len() must equal src.len()");
+    if w == 0 || h == 0 {
+        return;
     }
 
-    // Pass 2: vertical prefix sums.
-    // Process columns in chunks (e.g., 32) to improve cache locality: walking
-    // down N columns at once keeps those N horizontal accumulators in L1.
-    const COL_CHUNK: usize = 32;
-    let do_par_cols = w >= PAR_PREFIX_THRESHOLD;
-
-    if do_par_cols {
-        // SAFETY: each chunk of columns accesses disjoint horizontal slices
-        // of the 1D integral buffer. No two parallel iterations touch the same element.
-        let integral_ptr_val = integral.as_mut_ptr() as usize;
-
-        (0..w)
-            .into_par_iter()
-            .chunks(COL_CHUNK)
-            .for_each(|chunk| {
-                let ptr = integral_ptr_val as *mut f32;
-                for y in 1..h {
-                    let row_off = y * w;
-                    let prev_off = (y - 1) * w;
-                    for &x in &chunk {
-                        unsafe {
-                            let cur = ptr.add(row_off + x);
-                            let prev = ptr.add(prev_off + x);
-                            *cur += *prev;
-                        }
-                    }
-                }
-            });
-    } else {
-        for cx in (0..w).step_by(COL_CHUNK) {
-            let end = (cx + COL_CHUNK).min(w);
-            for y in 1..h {
-                let row_off = y * w;
-                let prev_off = (y - 1) * w;
-                for x in cx..end {
-                    integral[row_off + x] += integral[prev_off + x];
-                }
+    // Pass 1: each pixel's sum over its row window.
+    let mut row_sums = vec![0.0f32; w * h];
+    let row_pass = |(out, row): (&mut [f32], &[f32])| {
+        let mut acc: f64 = row[..(r + 1).min(w)].iter().map(|&v| f64::from(v)).sum();
+        for x in 0..w {
+            out[x] = acc as f32;
+            if x + r + 1 < w {
+                acc += f64::from(row[x + r + 1]);
             }
-        }
-    }
-
-    // --- Lookup pass (embarrassingly parallel) ---
-    debug_assert_eq!(dst.len(), n, "box_filter_into: dst.len() must equal src.len()");
-
-    let get = |x: i64, y: i64| -> f32 {
-        if x < 0 || y < 0 {
-            return 0.0;
-        }
-        let x = (x as usize).min(w - 1);
-        let y = (y as usize).min(h - 1);
-        integral[y * w + x]
-    };
-
-    let do_par_lookup = n >= PAR_LOOKUP_THRESHOLD;
-
-    let inv_area = 1.0 / ((2 * r + 1) as f32).powi(2);
-
-    let process_row = |y: usize, row: &mut [f32]| {
-        let yi = y as i64;
-        let y1 = (yi - r - 1).max(-1);
-        let y2 = (yi + r).min(h as i64 - 1);
-
-        // Fast path for interior pixels (fully contained box)
-        let x_start = (r + 1) as usize;
-        let x_end = w.saturating_sub(r as usize);
-
-        if yi > r && yi < (h as i64 - r) && x_start < x_end {
-            // Margin pixels (left)
-            for (x, slot) in row.iter_mut().enumerate().take(x_start) {
-                let xi = x as i64;
-                let x1 = (xi - r - 1).max(-1);
-                let x2 = (xi + r).min(w as i64 - 1);
-                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                *slot = sum / area.max(1.0);
-            }
-
-            // Interior fast path: no boundary checks, no area re-calc.
-            // The enclosing `yi > r` guard forces y1 = yi - r - 1 ≥ 0,
-            // so row_y1 is always a valid row offset — no Option needed.
-            let row_y2 = y2 as usize * w;
-            let row_y1 = y1 as usize * w;
-
-            for (x, slot) in row.iter_mut().enumerate().take(x_end).skip(x_start) {
-                let xi = x as i64;
-                let x2 = (xi + r) as usize;
-                let x1 = (xi - r - 1) as usize;
-                let sum = integral[row_y2 + x2] - integral[row_y2 + x1]
-                    - integral[row_y1 + x2] + integral[row_y1 + x1];
-                *slot = sum * inv_area;
-            }
-
-            // Margin pixels (right)
-            for (x, slot) in row.iter_mut().enumerate().take(w).skip(x_end) {
-                let xi = x as i64;
-                let x1 = (xi - r - 1).max(-1);
-                let x2 = (xi + r).min(w as i64 - 1);
-                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                *slot = sum / area.max(1.0);
-            }
-        } else {
-            // Fully slow row (top/bottom margins)
-            for (x, slot) in row.iter_mut().enumerate().take(w) {
-                let xi = x as i64;
-                let x1 = (xi - r - 1).max(-1);
-                let x2 = (xi + r).min(w as i64 - 1);
-                let area = (x2 - x1) as f32 * (y2 - y1) as f32;
-                let sum = get(x2, y2) - get(x1, y2) - get(x2, y1) + get(x1, y1);
-                *slot = sum / area.max(1.0);
+            if x >= r {
+                acc -= f64::from(row[x - r]);
             }
         }
     };
-
-    if do_par_lookup {
-        dst.par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row)| process_row(y, row));
+    if w * h >= PAR_THRESHOLD {
+        row_sums.par_chunks_mut(w).zip(src.par_chunks(w)).for_each(row_pass);
     } else {
-        dst.chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row)| process_row(y, row));
+        row_sums.chunks_mut(w).zip(src.chunks(w)).for_each(row_pass);
+    }
+
+    // Pass 2: slide down the columns of row sums, a band of rows at a
+    // time so bands run in parallel; each band starts its running sums
+    // afresh, so drift never spans more than one band.
+    let band = BAND_ROWS.max(4 * r);
+    let column_pass = |(bi, out): (usize, &mut [f32])| {
+        let y0 = bi * band;
+        let mut acc = vec![0.0f64; w];
+        for y in y0.saturating_sub(r)..(y0 + r + 1).min(h) {
+            for (a, &v) in acc.iter_mut().zip(&row_sums[y * w..(y + 1) * w]) {
+                *a += f64::from(v);
+            }
+        }
+        for (j, out_row) in out.chunks_mut(w).enumerate() {
+            let y = y0 + j;
+            let rows = ((y + r).min(h - 1) + 1 - y.saturating_sub(r)) as f64;
+            for (x, (o, &a)) in out_row.iter_mut().zip(&acc).enumerate() {
+                let cols = ((x + r).min(w - 1) + 1 - x.saturating_sub(r)) as f64;
+                *o = (a / (rows * cols)) as f32;
+            }
+            if y + r + 1 < h {
+                for (a, &v) in acc.iter_mut().zip(&row_sums[(y + r + 1) * w..(y + r + 2) * w]) {
+                    *a += f64::from(v);
+                }
+            }
+            if y >= r {
+                for (a, &v) in acc.iter_mut().zip(&row_sums[(y - r) * w..(y - r + 1) * w]) {
+                    *a -= f64::from(v);
+                }
+            }
+        }
+    };
+    if w * h >= PAR_THRESHOLD {
+        dst.par_chunks_mut(band * w).enumerate().for_each(column_pass);
+    } else {
+        dst.chunks_mut(band * w).enumerate().for_each(column_pass);
     }
 }
 
@@ -295,6 +217,34 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
 mod tests {
     use super::*;
     use image::{Luma, Rgba};
+
+    /// A guided filter takes variance as mean(g²) − mean(g)². On a big
+    /// region of large values (0-255 squared) that difference must stay
+    /// exact to a fraction of a level, or a flat photo reads as a wildly
+    /// varying one and the filter paints garbage.
+    #[test]
+    fn box_means_stay_exact_over_a_large_region_of_large_values() {
+        let (w, h) = (1500u32, 1500u32);
+        let g: Vec<f32> = (0..w * h).map(|i| 190.0 + ((i % w) * 7 + (i / w) * 13) as f32 % 5.0).collect();
+        let gg: Vec<f32> = g.iter().map(|v| v * v).collect();
+        let (mean, mean_sq) = (box_filter(&g, w, h, 6), box_filter(&gg, w, h, 6));
+        for (i, (m, msq)) in mean.iter().zip(&mean_sq).enumerate() {
+            let var = msq - m * m;
+            assert!((-0.5..=4.5).contains(&var), "pixel {i}: variance {var}, data spans 0..4");
+        }
+    }
+
+    /// Windows are clipped at the borders and averaged over the pixels
+    /// they cover.
+    #[test]
+    fn box_means_average_what_the_window_covers() {
+        let src: Vec<f32> = (0..20).map(|v| v as f32).collect();
+        let out = box_filter(&src, 5, 4, 1);
+        let at = |x: usize, y: usize| out[y * 5 + x];
+        assert!((at(0, 0) - (0.0 + 1.0 + 5.0 + 6.0) / 4.0).abs() < 1e-5);
+        assert!((at(2, 1) - (1.0 + 2.0 + 3.0 + 6.0 + 7.0 + 8.0 + 11.0 + 12.0 + 13.0) / 9.0).abs() < 1e-5);
+        assert!((at(4, 3) - (13.0 + 14.0 + 18.0 + 19.0) / 4.0).abs() < 1e-5);
+    }
 
     #[test]
     fn test_guided_filter_preserves_dimensions() {
@@ -333,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn box_blur3_is_three_box_passes() {
+        let (w, h) = (23u32, 17u32);
+        let data: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 251) as f32).collect();
+        let want = box_filter(&box_filter(&box_filter(&data, w, h, 2), w, h, 2), w, h, 2);
+        let (mut buf, mut scratch) = (data, Vec::new());
+        box_blur3_into(&mut buf, w, h, 2, &mut scratch);
+        assert_eq!(buf, want);
+    }
+
+    #[test]
     fn test_box_filter_uniform_is_identity() {
         let data = vec![0.5f32; 16];
         let out = box_filter(&data, 4, 4, 1);
@@ -358,8 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parallel_box_filter_matches_sequential() {
-        // Generate a non-trivial image and verify parallel results match
+    fn box_filter_stays_within_input_range() {
         let w = 200u32;
         let h = 150u32;
         let n = (w * h) as usize;
@@ -400,11 +359,8 @@ mod tests {
         out
     }
 
-    /// Pins the interior fast-path against brute-force reference on a grid
-    /// big enough to exercise all three lookup regions (left margin, interior,
-    /// right margin) AND all three row regions (top margin, interior, bottom
-    /// margin). 16×16 + r=2 gives x_start=3, x_end=14 — interior is 11×11
-    /// pixels of fast path, surrounded by 2-wide margin in every direction.
+    /// Against the brute-force reference on a grid where windows are
+    /// clipped at every border and a 12×12 interior is not clipped at all.
     #[test]
     fn test_box_filter_interior_fast_path_matches_brute_force() {
         let (w, h, r) = (16u32, 16u32, 2u32);
@@ -420,9 +376,8 @@ mod tests {
         }
     }
 
-    /// Same brute-force check on a wider image so the column-chunked
-    /// vertical prefix sum (COL_CHUNK = 32) walks a full chunk plus a
-    /// partial chunk in the same pass.
+    /// Same brute-force check on a wider-than-tall image with a larger
+    /// radius, so the row and column windows clip differently.
     #[test]
     fn test_box_filter_chunked_vertical_pass_matches_brute_force() {
         let (w, h, r) = (48u32, 24u32, 3u32);

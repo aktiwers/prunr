@@ -1,4 +1,4 @@
-//! Phase 23-07: invoke the `prunr` CLI binary across a representative
+//! Invoke the `prunr` CLI binary across a representative
 //! flag matrix and verify each combination produces a valid output PNG.
 //!
 //! NOT a Cartesian product — picks the corners of the user-visible

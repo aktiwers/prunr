@@ -2,17 +2,19 @@
 //!
 //! Every EP that supports caching its compiled IR (OpenVINO model
 //! cache, CoreML mlmodelc cache, ORT graph optimization for CPU /
-//! CUDA) gets a directory under `<data>/prunr/ep_cache/<ep>/<key>/`,
-//! where `<key>` is `<model_stable_name>-<model_version>-v<format>`.
+//! CUDA) gets a directory under `<cache root>/<ep>/<key>/` (see
+//! [`cache_root`]), where `<key>` is
+//! `<model_stable_name>-<model_version>-ort<runtime>-v<format>`.
 //! Bumping any component invalidates the cache automatically.
 //!
 //! EP names match `OrtEngine::active_provider()`'s output (`"OpenVINO"`,
 //! `"CUDA"`, `"CoreML"`, `"DirectML"`, `"CPU"`) and the existing
-//! `ep_compat.json` cache keys — strings rather than an enum because
-//! the rest of the codebase already treats EP identity as a string.
+//! `ep_compat.json` cache keys — strings rather than `EpKind` because
+//! the CPU provider has no `EpKind`.
 
 use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
+use crate::engine::Weights;
 
 /// Cache format version. Bump when the cache layout changes OR when
 /// the `ort` crate version bumps — cached optimized graphs and EP
@@ -29,29 +31,72 @@ const CACHE_FORMAT_VERSION: u32 = 1;
 /// 16 has plenty of headroom while still terminating.
 const MAX_WALK_DEPTH: u32 = 16;
 
-/// Root cache directory: `<data>/prunr/ep_cache/`. Returns `None` on
-/// platforms where `data_dir()` itself is unavailable; callers fall
-/// back to no-cache rather than erroring out.
+/// Root cache directory: `<data>/prunr/ep_cache/`, on macOS
+/// `~/Library/Caches/prunr/ep_cache/`. Returns `None` when the OS gives
+/// no such dir; callers fall back to no-cache rather than erroring out.
 pub fn cache_root() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(root) = tests::temp_root() {
         return Some(root);
     }
-    prunr_models::data_dir().map(|d| d.join("ep_cache"))
+    root_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"))
+}
+
+/// macOS keeps the cache out of `Application Support`: CoreML opens
+/// its compiled model through a file URL that a space in the path can
+/// turn into nil (microsoft/onnxruntime#33306).
+fn root_in(prunr_data_dir: Option<PathBuf>, os_cache_dir: Option<PathBuf>, macos: bool) -> Option<PathBuf> {
+    if macos {
+        os_cache_dir.map(|d| d.join("prunr").join("ep_cache"))
+    } else {
+        prunr_data_dir.map(|d| d.join("ep_cache"))
+    }
+}
+
+/// Where macOS kept the cache before it moved to `Caches`: nothing
+/// reads it any more.
+fn retired_root_in(prunr_data_dir: Option<PathBuf>, macos: bool) -> Option<PathBuf> {
+    prunr_data_dir.filter(|_| macos).map(|d| d.join("ep_cache"))
+}
+
+/// Remove the cache macOS kept under `Application Support` before it
+/// moved (up to a few GB of compiled models). Returns the bytes freed;
+/// nothing to do once it is gone. Run off the UI thread.
+pub fn remove_retired_root() -> u64 {
+    let Some(old) = retired_root_in(prunr_models::data_dir(), cfg!(target_os = "macos")) else { return 0 };
+    if !old.exists() {
+        return 0;
+    }
+    let bytes = walk_dir_size(&old, 0).unwrap_or(0);
+    match std::fs::remove_dir_all(&old) {
+        Ok(()) => {
+            tracing::info!(dir = %old.display(), bytes, "removed the retired EP cache");
+            bytes
+        }
+        Err(e) => {
+            tracing::warn!(%e, dir = %old.display(), "failed to remove the retired EP cache");
+            0
+        }
+    }
 }
 
 /// Pure path builder — no filesystem side effects. Use this from any
-/// read-only check (`cache_populated_for`, prewarm decisions). Callers
-/// that actually need the directory to exist should use
-/// `cache_dir_for` instead, which creates it.
+/// read-only check. Callers that actually need the directory to exist
+/// should use `cache_dir_for` instead, which creates it.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
-    let descriptor = prunr_models::descriptor(id)?;
-    let key = format!(
-        "{}-{}-v{}",
-        id.stable_name(), descriptor.version, CACHE_FORMAT_VERSION,
-    );
+    let key = cache_key(id, crate::ort_runtime::runtime_tag())?;
     Some(root.join(ep_name.to_ascii_lowercase()).join(key))
+}
+
+/// `<model>-<version>-ort<runtime tag>-v<format>`: an optimized graph is
+/// tied to the ORT build that wrote it.
+fn cache_key(id: ModelId, runtime: Option<&str>) -> Option<String> {
+    let descriptor = prunr_models::descriptor(id)?;
+    Some(format!(
+        "{}-{}-ort{}-v{}",
+        id.stable_name(), descriptor.version, runtime.unwrap_or("unknown"), CACHE_FORMAT_VERSION,
+    ))
 }
 
 /// Per-`(model, ep)` cache directory, **created** if missing. Use
@@ -67,13 +112,115 @@ pub fn cache_dir_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`.
-/// **No filesystem side effects** — mirrors the `cache_path_for` /
-/// `cache_dir_for` split. Read sites poll this and `fs::read` the path
-/// directly; write sites must call `cache_dir_for` first to ensure the
-/// parent directory exists.
-pub fn optimized_model_path(id: ModelId, ep_name: &str) -> Option<PathBuf> {
-    cache_path_for(id, ep_name).map(|d| d.join("optimized.onnx"))
+/// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`
+/// built from `weights`: each copy of the weights optimizes to a graph
+/// of its own. **No filesystem side effects** — mirrors the
+/// `cache_path_for` / `cache_dir_for` split. Read sites poll this and
+/// `fs::read` the path directly; write sites must call `cache_dir_for`
+/// first to ensure the parent directory exists.
+pub fn optimized_model_path(id: ModelId, ep_name: &str, weights: Weights) -> Option<PathBuf> {
+    cache_path_for(id, ep_name).map(|d| d.join(optimized_file_name(weights)))
+}
+
+fn optimized_file_name(weights: Weights) -> &'static str {
+    match weights {
+        Weights::Fp32 => "optimized-fp32.onnx",
+        Weights::Fp16 => "optimized-fp16.onnx",
+        Weights::Int8 => "optimized-int8.onnx",
+    }
+}
+
+/// The optimized graph every copy of the weights once shared: it holds
+/// whichever copy built first, so no session can trust it.
+const SHARED_GRAPH_FILE: &str = "optimized.onnx";
+
+/// An optimized graph a session is writing for `path`. ORT writes it in
+/// place while the session builds, so it goes to a file of its own and
+/// is renamed onto `path` once the session built: another session (a
+/// second worker, a parallel test) loading the cache meanwhile never
+/// reads half a graph, and a build that dies leaves no broken cache.
+/// Dropped unpublished, the draft is removed.
+pub struct GraphDraft {
+    draft: PathBuf,
+    path: PathBuf,
+}
+
+/// A draft left by a build that died is older than any build takes.
+const ABANDONED_DRAFT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+impl GraphDraft {
+    /// A draft for `path`, named for this process and build; drafts an
+    /// earlier build abandoned beside it are removed.
+    pub fn for_path(path: &Path) -> Self {
+        static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let build = BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = path.file_name().map_or_else(Default::default, |n| n.to_string_lossy().into_owned());
+        let draft = path.with_file_name(format!("{name}.{}-{build}.draft", std::process::id()));
+        if let Some(dir) = path.parent() {
+            remove_abandoned_drafts(dir, &name);
+        }
+        Self { draft, path: path.to_path_buf() }
+    }
+
+    /// Where ORT writes the graph.
+    pub fn draft(&self) -> &Path {
+        &self.draft
+    }
+
+    /// The session built: its graph becomes the cache.
+    pub fn publish(self) {
+        if let Err(e) = std::fs::rename(&self.draft, &self.path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(cache = %self.path.display(), %e, "optimized graph not cached");
+            }
+        }
+    }
+}
+
+impl Drop for GraphDraft {
+    fn drop(&mut self) {
+        // After `publish` the draft is gone and this finds nothing.
+        let _ = std::fs::remove_file(&self.draft);
+    }
+}
+
+/// A cache miss: `builder` writes its optimized graph to a draft of
+/// `path`, published once the session builds. When ORT refuses the
+/// path the build goes on uncached.
+pub(crate) fn attach_draft(
+    builder: ort::session::builder::SessionBuilder,
+    path: &Path,
+    model_id: ModelId,
+    ep_name: &str,
+    part: Option<&str>,
+) -> (ort::session::builder::SessionBuilder, Option<GraphDraft>) {
+    let draft = GraphDraft::for_path(path);
+    match builder.with_optimized_model_path(draft.draft()) {
+        Ok(builder) => {
+            tracing::debug!(?model_id, ep = %ep_name, part, path = %path.display(), "cache miss (writing optimized graph)");
+            (builder, Some(draft))
+        }
+        Err(e) => {
+            tracing::warn!(?model_id, ep = %ep_name, part, %e, "with_optimized_model_path failed; cache disabled for this build");
+            (e.recover(), None)
+        }
+    }
+}
+
+fn remove_abandoned_drafts(dir: &Path, name: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{name}.");
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(file) = file.to_str() else { continue };
+        let abandoned = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > ABANDONED_DRAFT);
+        if file.starts_with(&prefix) && file.ends_with(".draft") && abandoned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Per-part variant of `cache_path_for` — isolates each bundle part so
@@ -99,18 +246,6 @@ pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> 
     cache_path_for_part(id, ep_name, part).map(|d| d.join("optimized.onnx"))
 }
 
-/// True when the cache for `(id, ep_name)` exists on disk and is
-/// non-empty. Read-only — never creates a directory as a side
-/// effect. The EP itself validates contents on load; this check is
-/// just "should we skip the prewarm work?".
-pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
-    let Some(dir) = cache_path_for(id, ep_name) else { return false };
-    if !dir.is_dir() { return false; }
-    std::fs::read_dir(&dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false)
-}
-
 /// On session-build entry, sweep stale cache entries for the same
 /// `(model, ep)` pair. A stale entry shares this model's `stable_name`
 /// but has a different `version` or `CACHE_FORMAT_VERSION` — i.e. an
@@ -125,6 +260,7 @@ pub fn cache_populated_for(id: ModelId, ep_name: &str) -> bool {
 /// process gets a cache miss and rebuilds cold rather than crashing.
 pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
     let Some(current_path) = cache_path_for(id, ep_name) else { return };
+    remove_shared_graph(&current_path);
     let Some(ep_dir) = current_path.parent().map(Path::to_path_buf) else { return };
     let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else { return };
     let our_prefix = format!("{}-", id.stable_name());
@@ -158,6 +294,15 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
                 "gc: failed to remove stale cache entry",
             ),
         }
+    }
+}
+
+fn remove_shared_graph(entry: &Path) {
+    let path = entry.join(SHARED_GRAPH_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::info!(cache = %path.display(), "gc: removed the optimized graph all weights shared"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(cache = %path.display(), %e, "gc: failed to remove the shared optimized graph"),
     }
 }
 
@@ -222,8 +367,8 @@ pub fn clear_all() -> u64 {
     bytes
 }
 
-/// Recursive directory size with depth bound. Used only by `clear_all`
-/// for the bytes-reclaimed report. Skips entries beyond
+/// Recursive directory size with depth bound, for the bytes-reclaimed
+/// reports. Skips entries beyond
 /// `MAX_WALK_DEPTH` so a symlink loop terminates instead of stack-
 /// overflowing.
 fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
@@ -249,17 +394,115 @@ mod tests {
     /// cache), so they still must not interleave with each other.
     static DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// One temp directory per test process, in place of the real cache
-    /// root for every `cache_root()` call made under `cfg(test)`.
+    /// One directory per test process, in place of the real cache root
+    /// for every `cache_root()` call made under `cfg(test)`. A static is
+    /// never dropped, so a `TempDir` here leaked each run's optimized
+    /// graphs (up to ~450 MB) into the system temp dir, which on Linux is
+    /// often RAM. It lives beside the test binary instead, and each run
+    /// removes the directories of test processes that have ended.
     pub(super) fn temp_root() -> Option<PathBuf> {
-        static ROOT: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
-        ROOT.get_or_init(|| tempfile::tempdir().ok()).as_ref().map(|d| d.path().join("ep_cache"))
+        static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            let base = std::env::current_exe().ok()?.parent()?.parent()?.join("test-ep-cache");
+            remove_ended_runs(&base);
+            let own = base.join(std::process::id().to_string());
+            std::fs::create_dir_all(&own).ok()?;
+            Some(own.join("ep_cache"))
+        }).clone()
+    }
+
+    fn remove_ended_runs(base: &Path) {
+        let Ok(entries) = std::fs::read_dir(base) else { return };
+        for entry in entries.flatten() {
+            let ended = entry.file_name().to_str().and_then(|pid| pid.parse::<u32>().ok())
+                .is_some_and(|pid| !process_runs(pid));
+            if ended {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    /// Whether `pid` is a running process. Only Linux can tell cheaply;
+    /// elsewhere every directory is kept (CI machines are thrown away).
+    fn process_runs(pid: u32) -> bool {
+        if cfg!(target_os = "linux") {
+            Path::new("/proc").join(pid.to_string()).exists()
+        } else {
+            true
+        }
+    }
+
+    /// A draft becomes the cache only when published; one dropped (a
+    /// failed build) leaves nothing, and a reader never sees it.
+    #[test]
+    fn a_graph_is_cached_only_once_its_session_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("optimized.onnx");
+        let failed = GraphDraft::for_path(&path);
+        std::fs::write(failed.draft(), b"half a gra").unwrap();
+        assert!(!path.exists(), "a reader sees no cache while it is written");
+        drop(failed);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "a failed build leaves nothing");
+        let built = GraphDraft::for_path(&path);
+        let other = GraphDraft::for_path(&path);
+        assert_ne!(built.draft(), other.draft(), "two builds write apart");
+        std::fs::write(built.draft(), b"graph").unwrap();
+        built.publish();
+        assert_eq!(std::fs::read(&path).unwrap(), b"graph");
+        drop(other);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
+    }
+
+    /// Only macOS has a retired cache, and it is never the live one.
+    #[test]
+    fn the_retired_cache_is_macos_application_support_only() {
+        let data = PathBuf::from("/Users/a/Library/Application Support/prunr");
+        let caches = PathBuf::from("/Users/a/Library/Caches");
+        assert_eq!(retired_root_in(Some(data.clone()), true), Some(data.join("ep_cache")));
+        assert_ne!(retired_root_in(Some(data.clone()), true), root_in(Some(data.clone()), Some(caches.clone()), true));
+        assert_eq!(retired_root_in(Some(data.clone()), false), None, "elsewhere that is the live cache");
+        assert_eq!(root_in(Some(data.clone()), Some(caches), false), Some(data.join("ep_cache")));
+    }
+
+    /// A graph ORT optimized is tied to that ORT build: one made by an
+    /// older runtime loaded into a newer one ran the upscalers 33% slower
+    /// until rebuilt. Each runtime gets its own cache entry.
+    #[test]
+    fn the_cache_key_names_the_runtime_that_built_it() {
+        use crate::ort_runtime::tag_for;
+        let old = tag_for(Some("1.24.1"), 30_000_000, 1_700_000_000);
+        let same_name_new_file = tag_for(None, 31_000_000, 1_760_000_000);
+        let other_build = tag_for(None, 30_000_000, 1_760_000_000);
+        assert_ne!(cache_key(ModelId::Silueta, Some(&old)), cache_key(ModelId::Silueta, Some(&same_name_new_file)));
+        assert_ne!(same_name_new_file, other_build, "a build whose info names no version still differs");
+        assert!(old.starts_with("1.24.1-"), "{old}");
+    }
+
+    #[test]
+    fn the_runtime_version_is_read_from_the_build_info() {
+        let info = "ORT Build Info: git-branch=rel-1.24.1, git-commit-id=abc, build type=Release";
+        assert_eq!(crate::ort_runtime::runtime_version_from_info(info).as_deref(), Some("1.24.1"));
+        assert_eq!(crate::ort_runtime::runtime_version_from_info("no branch here"), None);
+    }
+
+    #[test]
+    fn the_macos_cache_path_has_no_space_for_coreml_to_trip_on() {
+        let home = Path::new("/Users/ada");
+        let data = Some(home.join("Library/Application Support/prunr"));
+        let caches = Some(home.join("Library/Caches"));
+        let mac = root_in(data, caches, true).unwrap();
+        assert!(!mac.to_string_lossy().contains(' '), "{mac:?}");
+
+        let linux = root_in(Some("/home/ada/.local/share/prunr".into()), Some("/home/ada/.cache".into()), false);
+        assert_eq!(linux, Some(PathBuf::from("/home/ada/.local/share/prunr/ep_cache")));
     }
 
     #[test]
     fn tests_never_touch_the_real_cache() {
         let root = cache_root().unwrap();
-        assert!(root.starts_with(std::env::temp_dir()), "{root:?}");
+        let real = root_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"));
+        assert_ne!(Some(&root), real.as_ref());
+        assert!(root.ends_with(PathBuf::from(std::process::id().to_string()).join("ep_cache")), "one per test run: {root:?}");
     }
 
     /// Cross-EP collision would corrupt a load if e.g. CPU-optimized
@@ -308,23 +551,6 @@ mod tests {
             "cache key must contain CACHE_FORMAT_VERSION; got {key:?}");
     }
 
-    /// Read-only check must not create the cache directory. Pre-fix
-    /// `cache_populated_for` indirected through `cache_dir_for` which
-    /// `create_dir_all`'d every poll — every prewarm decision was
-    /// silently `mkdir`-ing an empty directory.
-    #[test]
-    fn cache_populated_does_not_create_directory() {
-        let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(path) = cache_path_for(ModelId::DexiNed, "CPU") else { return };
-        let _ = std::fs::remove_dir_all(&path);
-        let exists_before = path.exists();
-        let populated = cache_populated_for(ModelId::DexiNed, "CPU");
-        let exists_after = path.exists();
-        assert!(!populated);
-        assert_eq!(exists_before, exists_after,
-            "cache_populated_for must be read-only");
-    }
-
     /// Stale-entry GC must remove sibling dirs from older versions /
     /// older `CACHE_FORMAT_VERSION`s, leave the current entry alone,
     /// and never touch other models' caches.
@@ -341,7 +567,7 @@ mod tests {
         let stale = ep_root.join(format!("{}-0.0.1-v0", ModelId::LaMaFp32.stable_name()));
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("dummy"), b"x").unwrap();
-        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::DexiNed.stable_name()));
+        let other_dir = ep_root.join(format!("{}-1.0.0-v1", ModelId::Teed.stable_name()));
         std::fs::create_dir_all(&other_dir).unwrap();
         std::fs::write(other_dir.join("dummy"), b"x").unwrap();
 
@@ -382,21 +608,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&other);
     }
 
-    /// True only when the directory exists AND has at least one entry.
-    /// Empty directory still reports false so the prewarm doesn't
-    /// skip a missing-IR case (e.g. partial wipe via `rm -rf` on a
-    /// subdir of the cache root).
+    /// FP32, FP16 and INT8 weights optimize to different graphs: a hit
+    /// on one copy's path must never hand a session another copy's graph.
     #[test]
-    fn cache_populated_distinguishes_empty_from_nonempty() {
+    fn each_copy_of_the_weights_caches_its_own_graph() {
+        let Some(_) = cache_root() else { return };
+        let paths = [Weights::Fp32, Weights::Fp16, Weights::Int8]
+            .map(|w| optimized_model_path(ModelId::Silueta, "CPU", w).unwrap());
+        assert_ne!(paths[0], paths[1]);
+        assert_ne!(paths[0], paths[2]);
+        assert_ne!(paths[1], paths[2]);
+        assert!(paths.iter().all(|p| p.parent() == cache_path_for(ModelId::Silueta, "CPU").as_deref()));
+        assert!(paths.iter().all(|p| p.file_name().unwrap() != SHARED_GRAPH_FILE));
+    }
+
+    /// The graph all copies shared may hold any of them, so the sweep at
+    /// session build drops it and leaves each copy's own graph.
+    #[test]
+    fn gc_removes_the_graph_every_copy_shared() {
         let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(dir) = cache_dir_for(ModelId::Migan, "CPU") else { return };
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(!cache_populated_for(ModelId::Migan, "CPU"),
-            "empty dir must report unpopulated");
-        std::fs::write(dir.join("optimized.onnx"), b"placeholder").unwrap();
-        assert!(cache_populated_for(ModelId::Migan, "CPU"),
-            "dir with content must report populated");
+        let Some(dir) = cache_dir_for(ModelId::Silueta, "CPU") else { return };
+        let shared = dir.join(SHARED_GRAPH_FILE);
+        let own = optimized_model_path(ModelId::Silueta, "CPU", Weights::Int8).unwrap();
+        std::fs::write(&shared, b"int8 graph").unwrap();
+        std::fs::write(&own, b"int8 graph").unwrap();
+        gc_stale_for_model(ModelId::Silueta, "CPU");
+        assert!(!shared.exists(), "the shared graph is dropped");
+        assert!(own.exists(), "each copy's own graph stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

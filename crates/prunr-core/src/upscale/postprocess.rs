@@ -1,121 +1,12 @@
-//! Tier-2 postprocess operations applied to the cached `upscale_raw`
-//! RGBA buffer. Pure functions operating in-place; they do NOT
-//! re-allocate the image (the caller's RAM accounting depends on
-//! this).
+//! Refine's steps after the model: sharpen, AI blend, Reinhard Lab
+//! colour match. Straight sRGB u8 in and out, f32 math in between.
 //!
-//! All operate on STRAIGHT (un-premultiplied) sRGB u8 per
-//! CLAUDE.md ## Numerical & color invariants. Internal math uses
-//! f32 working buffers; clamp+cast at the u8 boundary.
-//!
-//! Reinhard Lab (not LMS) for color match, with proper IEC 61966-2-1
-//! linearisation and D65 XYZ→Lab pipeline.
+//! Colour match works in Lab, not LMS, with IEC 61966-2-1
+//! linearisation and a D65 XYZ→Lab pipeline.
 
 use image::RgbaImage;
 
-// ── sRGB ↔ linear helpers ──────────────────────────────────────────────────
-
-/// sRGB encoded → linear-light (IEC 61966-2-1).
-#[inline(always)]
-fn srgb_to_linear(v: f32) -> f32 {
-    if v <= 0.04045 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Linear-light → sRGB encoded (IEC 61966-2-1 inverse).
-#[inline(always)]
-fn linear_to_srgb(v: f32) -> f32 {
-    let v = v.clamp(0.0, 1.0);
-    if v <= 0.003_130_8 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-// ── CIE XYZ ↔ Lab (D65) ──────────────────────────────────────────────────
-
-/// Linear sRGB → CIE XYZ D65.
-/// Bradford-adapted D65 matrix from IEC 61966-2-1.
-#[inline(always)]
-fn linear_rgb_to_xyz(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let x = 0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b;
-    let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b;
-    let z = 0.019_333_9 * r + 0.119_192 * g + 0.950_304_1 * b;
-    (x, y, z)
-}
-
-/// CIE XYZ D65 → linear sRGB.
-#[inline(always)]
-fn xyz_to_linear_rgb(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
-    let r =  3.240_454_2 * x - 1.537_138_5 * y - 0.498_531_4 * z;
-    let g = -0.969_266 * x + 1.876_010_8 * y + 0.041_556_0 * z;
-    let b =  0.055_643_4 * x - 0.204_025_9 * y + 1.057_225_2 * z;
-    (r, g, b)
-}
-
-const D65_X: f32 = 0.950_489;
-const D65_Y: f32 = 1.000_000;
-const D65_Z: f32 = 1.088_84;
-
-#[inline(always)]
-fn lab_f(t: f32) -> f32 {
-    // CIE standard cube-root nonlinearity
-    const DELTA: f32 = 6.0 / 29.0;
-    const DELTA3: f32 = DELTA * DELTA * DELTA;           // ≈ 0.008856
-    const INV3DELTA2: f32 = 1.0 / (3.0 * DELTA * DELTA); // ≈ 7.787
-    if t > DELTA3 {
-        t.cbrt()
-    } else {
-        INV3DELTA2 * t + (4.0 / 29.0)
-    }
-}
-
-#[inline(always)]
-fn lab_f_inv(t: f32) -> f32 {
-    const DELTA: f32 = 6.0 / 29.0;
-    if t > DELTA {
-        t * t * t
-    } else {
-        3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
-    }
-}
-
-/// sRGB u8 pixel → CIE Lab (L in [0,100], a/b unbounded typical ±128).
-#[inline(always)]
-fn srgb_to_lab(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let (lr, lg, lb) = (
-        srgb_to_linear(r as f32 / 255.0),
-        srgb_to_linear(g as f32 / 255.0),
-        srgb_to_linear(b as f32 / 255.0),
-    );
-    let (x, y, z) = linear_rgb_to_xyz(lr, lg, lb);
-    let fx = lab_f(x / D65_X);
-    let fy = lab_f(y / D65_Y);
-    let fz = lab_f(z / D65_Z);
-    let l = 116.0 * fy - 16.0;
-    let a = 500.0 * (fx - fy);
-    let b_lab = 200.0 * (fy - fz);
-    (l, a, b_lab)
-}
-
-/// CIE Lab → sRGB u8, clamped.
-#[inline(always)]
-fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
-    let fy = (l + 16.0) / 116.0;
-    let fx = a / 500.0 + fy;
-    let fz = fy - b_lab / 200.0;
-    let x = lab_f_inv(fx) * D65_X;
-    let y = lab_f_inv(fy) * D65_Y;
-    let z = lab_f_inv(fz) * D65_Z;
-    let (lr, lg, lb) = xyz_to_linear_rgb(x, y, z);
-    let r = (linear_to_srgb(lr) * 255.0).clamp(0.0, 255.0) as u8;
-    let g = (linear_to_srgb(lg) * 255.0).clamp(0.0, 255.0) as u8;
-    let b = (linear_to_srgb(lb) * 255.0).clamp(0.0, 255.0) as u8;
-    (r, g, b)
-}
+use crate::color::{lab_to_srgb, srgb_to_lab};
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -131,15 +22,16 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
         return src.clone();
     }
     // reused as the result, pixel by pixel after reading its blur value
-    let mut out = image::imageops::fast_blur(src, sigma.max(0.3));
-    for (o, p) in out.pixels_mut().zip(src.pixels()) {
+    use rayon::prelude::*;
+    let mut out = crate::blur::blur_rgba(src, sigma.max(0.3));
+    out.as_mut().par_chunks_exact_mut(4).zip(src.as_raw().par_chunks_exact(4)).for_each(|(o, p)| {
         for c in 0..3 {
-            let (v, bv) = (p.0[c] as f32, o.0[c] as f32);
-            let mixed = if strength > 0.0 { v + strength * (v - bv) } else { v - strength * (bv - v) };
-            o.0[c] = mixed.round().clamp(0.0, 255.0) as u8;
+            let (v, bv) = (p[c] as f32, o[c] as f32);
+            let mixed = v + strength * (v - bv);
+            o[c] = mixed.round().clamp(0.0, 255.0) as u8;
         }
-        o.0[3] = p.0[3];
-    }
+        o[3] = p[3];
+    });
     out
 }
 
@@ -162,18 +54,13 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
     if (w - 1.0).abs() < f32::EPSILON {
         return;
     }
-    let n = (img.width() * img.height()) as usize;
-    let n = n.min((bicubic_source.width() * bicubic_source.height()) as usize);
-    let src_raw = bicubic_source.as_raw();
-    let raw = img.as_mut();
-    for i in 0..n {
+    use rayon::prelude::*;
+    img.as_mut().par_chunks_exact_mut(4).zip(bicubic_source.as_raw().par_chunks_exact(4)).for_each(|(px, src)| {
         for c in 0..3usize {
-            let ai = raw[i * 4 + c] as f32;
-            let src = src_raw[i * 4 + c] as f32;
-            raw[i * 4 + c] = (ai * w + src * (1.0 - w)).clamp(0.0, 255.0) as u8;
+            px[c] = (px[c] as f32 * w + src[c] as f32 * (1.0 - w)).clamp(0.0, 255.0) as u8;
         }
         // channel 3 (alpha): from the AI input unchanged
-    }
+    });
 }
 
 /// Reinhard Lab-space mean+stddev color transfer. Snaps `target`'s
@@ -186,76 +73,183 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
 /// Variance guard: `stddev.max(1e-6)` before division. Without
 /// this, a uniform-color source (stddev = 0) produces NaN pixels.
 ///
-/// Alpha unchanged.
+/// Alpha unchanged. Rows run in parallel and the statistics are folded
+/// as they go, so no Lab copy of either image is kept: no working set
+/// beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
-    let src_n = (source.width() * source.height()) as usize;
-    let mut src_l = Vec::with_capacity(src_n);
-    let mut src_a = Vec::with_capacity(src_n);
-    let mut src_b = Vec::with_capacity(src_n);
+    use rayon::prelude::*;
+    let s = LabStats::of(source);
+    let t = LabStats::of(target);
+    let scale = |i: usize| s.std[i] / t.std[i].max(1e-6);
+    let (kl, ka, kb) = (scale(0), scale(1), scale(2));
+    target.as_mut().par_chunks_exact_mut(4).for_each(|px| {
+        let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
+        let (ro, go, bo) = lab_to_srgb(
+            (l - t.mean[0]) * kl + s.mean[0],
+            (a - t.mean[1]) * ka + s.mean[1],
+            (b - t.mean[2]) * kb + s.mean[2],
+        );
+        px[..3].copy_from_slice(&[ro, go, bo]);
+    });
+}
 
-    let src_raw = source.as_raw();
-    for i in 0..src_n {
-        let (l, a, b) = srgb_to_lab(src_raw[i * 4], src_raw[i * 4 + 1], src_raw[i * 4 + 2]);
-        src_l.push(l);
-        src_a.push(a);
-        src_b.push(b);
-    }
+/// Pixels per partial sum in `LabStats::of`.
+const STATS_CHUNK_PIXELS: usize = 64 * 1024;
 
-    let (s_mean_l, s_std_l) = mean_std(&src_l);
-    let (s_mean_a, s_std_a) = mean_std(&src_a);
-    let (s_mean_b, s_std_b) = mean_std(&src_b);
-    // free ~3 × src_n × 4 bytes before allocating the target Lab buffers
-    drop(src_l);
-    drop(src_a);
-    drop(src_b);
+/// Mean and population standard deviation of an image's L, a and b.
+struct LabStats {
+    mean: [f32; 3],
+    std: [f32; 3],
+}
 
-    let tgt_n = (target.width() * target.height()) as usize;
-    let mut tgt_l = Vec::with_capacity(tgt_n);
-    let mut tgt_a_ch = Vec::with_capacity(tgt_n);
-    let mut tgt_b_ch = Vec::with_capacity(tgt_n);
-
-    let tgt_raw_ro = target.as_raw();
-    for i in 0..tgt_n {
-        let (l, a, b) = srgb_to_lab(tgt_raw_ro[i * 4], tgt_raw_ro[i * 4 + 1], tgt_raw_ro[i * 4 + 2]);
-        tgt_l.push(l);
-        tgt_a_ch.push(a);
-        tgt_b_ch.push(b);
-    }
-
-    let (t_mean_l, t_std_l) = mean_std(&tgt_l);
-    let (t_mean_a, t_std_a) = mean_std(&tgt_a_ch);
-    let (t_mean_b, t_std_b) = mean_std(&tgt_b_ch);
-
-    let raw = target.as_mut();
-    for i in 0..tgt_n {
-        let l_new = (tgt_l[i] - t_mean_l) * (s_std_l / t_std_l.max(1e-6)) + s_mean_l;
-        let a_new = (tgt_a_ch[i] - t_mean_a) * (s_std_a / t_std_a.max(1e-6)) + s_mean_a;
-        let b_new = (tgt_b_ch[i] - t_mean_b) * (s_std_b / t_std_b.max(1e-6)) + s_mean_b;
-        let (ro, go, bo) = lab_to_srgb(l_new, a_new, b_new);
-        raw[i * 4] = ro;
-        raw[i * 4 + 1] = go;
-        raw[i * 4 + 2] = bo;
-        // raw[i * 4 + 3]: alpha unchanged
+impl LabStats {
+    fn of(img: &RgbaImage) -> Self {
+        use rayon::prelude::*;
+        // Fixed chunks merged in order: rayon's own splits follow thread
+        // scheduling, and a different merge order could move a pixel on a
+        // rounding edge by a level between two runs of the same image.
+        let moments = img.as_raw()
+            .par_chunks(STATS_CHUNK_PIXELS * 4)
+            .map(|chunk| chunk.chunks_exact(4).fold(Moments::default(), |mut m, px| {
+                let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
+                m.push([l, a, b]);
+                m
+            }))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .fold(Moments::default(), Moments::merge);
+        Self {
+            mean: moments.mean.map(|v| v as f32),
+            std: std::array::from_fn(|i| if moments.n == 0.0 { 0.0 } else { (moments.m2[i] / moments.n).sqrt() as f32 }),
+        }
     }
 }
 
-/// Compute mean and population standard deviation of a slice.
-fn mean_std(vals: &[f32]) -> (f32, f32) {
-    if vals.is_empty() {
-        return (0.0, 0.0);
+/// Running count, mean and sum of squared deviations per channel
+/// (Welford), mergeable across threads (Chan et al.): as exact as the
+/// two-pass mean then variance, in one pass.
+#[derive(Default, Clone, Copy)]
+struct Moments {
+    n: f64,
+    mean: [f64; 3],
+    m2: [f64; 3],
+}
+
+impl Moments {
+    fn push(&mut self, v: [f32; 3]) {
+        self.n += 1.0;
+        for ((value, mean), m2) in v.iter().zip(&mut self.mean).zip(&mut self.m2) {
+            let d = f64::from(*value) - *mean;
+            *mean += d / self.n;
+            *m2 += d * (f64::from(*value) - *mean);
+        }
     }
-    let n = vals.len() as f64;
-    let mean = vals.iter().map(|&v| v as f64).sum::<f64>() / n;
-    let variance = vals.iter().map(|&v| {
-        let d = v as f64 - mean;
-        d * d
-    }).sum::<f64>() / n;
-    (mean as f32, variance.sqrt() as f32)
+
+    fn merge(a: Self, b: Self) -> Self {
+        let n = a.n + b.n;
+        if n == 0.0 {
+            return a;
+        }
+        let mut out = Self { n, ..a };
+        for i in 0..3 {
+            let d = b.mean[i] - a.mean[i];
+            out.mean[i] = a.mean[i] + d * b.n / n;
+            out.m2[i] = a.m2[i] + b.m2[i] + d * d * a.n * b.n / n;
+        }
+        out
+    }
+}
+
+/// What Refine applies after the model: Sharpen, AI blend toward the
+/// plain enlargement, Color match to the input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Refine {
+    pub sharpen: f32,
+    pub sharpen_sigma: f32,
+    pub ai_blend: f32,
+    pub color_match: bool,
+}
+
+impl Refine {
+    pub fn of_recipe(r: &crate::UpscaleRecipe) -> Self {
+        Self { sharpen: r.sharpen(), sharpen_sigma: r.output_scale.sharpen_sigma(), ai_blend: r.ai_blend(), color_match: r.color_match }
+    }
+
+    fn blends(&self) -> bool {
+        self.ai_blend < 1.0 - f32::EPSILON
+    }
+
+    /// AI blend and Color match compare against the upscaled image's input.
+    fn needs_reference(&self) -> bool {
+        self.blends() || self.color_match
+    }
+
+    fn change_nothing(&self) -> bool {
+        self.sharpen == 0.0 && !self.needs_reference()
+    }
+}
+
+/// The upscale result to show, from the model's raw output and `input`, the
+/// image the model read: Refine's knobs applied after the model. AI blend
+/// and Color match compare against `input` enlarged to the output size,
+/// reused from `reference` when it already is that size and built (and
+/// returned for caching) otherwise. With every knob at its default the raw
+/// output is shown as is, not copied.
+///
+/// Order: AI blend, then Sharpen (it sharpens what the blend left), then
+/// Color match (global statistics last).
+///
+/// Peak working set besides `raw`: the result, a blur buffer while AI
+/// blend and Sharpen are both on, and the enlarged input for AI blend or
+/// Color match (1-3 × w·h·4 bytes).
+pub fn refine(
+    raw: &std::sync::Arc<RgbaImage>,
+    input: &RgbaImage,
+    reference: Option<std::sync::Arc<RgbaImage>>,
+    knobs: &Refine,
+) -> (std::sync::Arc<RgbaImage>, Option<std::sync::Arc<RgbaImage>>) {
+    use std::sync::Arc;
+    if knobs.change_nothing() {
+        return (Arc::clone(raw), reference);
+    }
+    let reference = knobs.needs_reference().then(|| {
+        reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
+            Arc::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom))
+        })
+    });
+    let blend = reference.as_deref().filter(|_| knobs.blends());
+    let mut shown = match blend {
+        Some(reference) => {
+            let mut blended = (**raw).clone();
+            apply_ai_blend(&mut blended, reference, knobs.ai_blend);
+            if knobs.sharpen == 0.0 { blended } else { sharpened(&blended, knobs.sharpen, knobs.sharpen_sigma) }
+        }
+        None => sharpened(raw, knobs.sharpen, knobs.sharpen_sigma),
+    };
+    if let Some(reference) = reference.as_deref().filter(|_| knobs.color_match) {
+        apply_color_match(&mut shown, reference);
+    }
+    (Arc::new(shown), reference)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With every knob at its default the model's output is shown as is,
+    /// not copied; AI blend at 0 shows the plain enlargement of the input.
+    #[test]
+    fn refine_leaves_the_output_alone_at_defaults_and_blends_toward_the_input() {
+        use std::sync::Arc;
+        let raw = Arc::new(RgbaImage::from_pixel(4, 4, image::Rgba([200, 200, 200, 255])));
+        let input = RgbaImage::from_pixel(2, 2, image::Rgba([40, 40, 40, 255]));
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        let (shown, reference) = refine(&raw, &input, None, &off);
+        assert!(Arc::ptr_eq(&shown, &raw) && reference.is_none());
+        let (shown, reference) = refine(&raw, &input, None, &Refine { ai_blend: 0.0, ..off });
+        assert_eq!(shown.get_pixel(1, 1).0, [40, 40, 40, 255]);
+        assert!(reference.is_some_and(|r| r.dimensions() == (4, 4)), "the enlarged input comes back for reuse");
+    }
     use image::{Rgba, RgbaImage};
 
     fn make_image(w: u32, h: u32, fill: [u8; 4]) -> RgbaImage {
@@ -403,6 +397,53 @@ mod tests {
     }
 
     // ── apply_color_match ────────────────────────────────────────────────
+
+    /// The same images give the same pixels on every run, whatever
+    /// threads the statistics were split over.
+    #[test]
+    fn apply_color_match_is_the_same_on_every_run() {
+        let source = RgbaImage::from_fn(700, 500, |x, y| image::Rgba([(x % 200) as u8 + 30, (y % 180) as u8 + 40, ((x * y) % 97) as u8 + 100, 255]));
+        let target = RgbaImage::from_fn(900, 700, |x, y| image::Rgba([((x + y) % 256) as u8, (x % 180) as u8, (y % 220) as u8 + 20, 255]));
+        let run = || { let mut t = target.clone(); apply_color_match(&mut t, &source); t };
+        let first = run();
+        for _ in 0..8 {
+            assert!(run() == first, "a run differs from the first");
+        }
+    }
+
+    /// The parallel transfer is the two-pass serial one it replaced, to
+    /// within one level from summation order.
+    #[test]
+    fn apply_color_match_is_the_serial_two_pass_transfer() {
+        fn serial(target: &mut RgbaImage, source: &RgbaImage) {
+            let lab = |img: &RgbaImage| img.pixels().map(|p| srgb_to_lab(p.0[0], p.0[1], p.0[2])).collect::<Vec<_>>();
+            type Channel = fn(&(f32, f32, f32)) -> f32;
+            let stats = |v: &[(f32, f32, f32)], f: Channel| {
+                let n = v.len() as f64;
+                let mean = v.iter().map(|p| f(p) as f64).sum::<f64>() / n;
+                let var = v.iter().map(|p| (f(p) as f64 - mean).powi(2)).sum::<f64>() / n;
+                (mean as f32, var.sqrt() as f32)
+            };
+            let (s, t) = (lab(source), lab(target));
+            let ch: [Channel; 3] = [|p| p.0, |p| p.1, |p| p.2];
+            let (ss, ts) = (ch.map(|f| stats(&s, f)), ch.map(|f| stats(&t, f)));
+            for (px, l) in target.pixels_mut().zip(&t) {
+                let v = [l.0, l.1, l.2];
+                let m: [f32; 3] = std::array::from_fn(|i| (v[i] - ts[i].0) * (ss[i].1 / ts[i].1.max(1e-6)) + ss[i].0);
+                let (r, g, b) = lab_to_srgb(m[0], m[1], m[2]);
+                px.0[..3].copy_from_slice(&[r, g, b]);
+            }
+        }
+        let source = RgbaImage::from_fn(300, 200, |x, y| image::Rgba([(x % 200) as u8 + 30, (y + 40) as u8, ((x * y) % 97) as u8 + 100, 255]));
+        let target = RgbaImage::from_fn(640, 480, |x, y| image::Rgba([((x + y) % 256) as u8, (x % 180) as u8, (y % 220) as u8 + 20, (x % 256) as u8]));
+        let (mut want, mut got) = (target.clone(), target.clone());
+        serial(&mut want, &source);
+        apply_color_match(&mut got, &source);
+        let worst = want.as_raw().iter().zip(got.as_raw()).map(|(a, b)| a.abs_diff(*b)).max();
+        assert!(worst <= Some(1), "worst channel difference {worst:?}");
+        assert!(got.pixels().zip(target.pixels()).all(|(a, b)| a.0[3] == b.0[3]), "alpha unchanged");
+    }
+
 
     #[test]
     fn apply_color_match_uniform_source_no_nan() {

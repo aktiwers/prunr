@@ -9,7 +9,7 @@
 //! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
 //! invalidate the right textures and schedule live-preview reruns.
 
-use egui::{RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use egui_material_icons::icons::*;
 
 use super::selection_action_bar::{render_selection_actions, SelectionAction};
@@ -18,15 +18,16 @@ use super::shortcuts::Action;
 use crate::gui::brush_state::BrushState;
 use crate::gui::item_settings::{Backdrop, ItemSettings};
 use crate::gui::knob_catalog::{
-    self, shows, CacheImpact, DispatchKind, KnobContext, KnobRequirement, LineModeChange, StaticKnob, Surface,
+    self, shows, CacheImpact, DispatchKind, LineModeChange, StaticKnob, Surface,
 };
 use crate::gui::settings::{Settings, SettingsModel};
 use crate::gui::theme;
 use crate::gui::views::{chip, fmt, hint, preset_dropdown};
+use crate::gui::views::effects::paint_rounded_mesh;
 use prunr_core::{EdgeScale, LineMode};
 
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
-use super::{differs, installed_models, model_info};
+use super::{differs, model_info, variant_index};
 
 /// Summary of what a toolbar render cycle changed.
 ///
@@ -35,7 +36,7 @@ use super::{differs, installed_models, model_info};
 /// good after a line_mode toggle — only the edge tensor is stale then).
 /// Keeping unrelated caches alive means the user's next mask/edge tweak
 /// can still live-preview without a full Process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ToolbarChange {
     /// Any chip signalled a committed value (slider released, toggle
     /// flipped, color picked). Flushes pending debounced previews.
@@ -66,7 +67,7 @@ pub struct ToolbarChange {
     pub render_repaint: bool,
     /// Brush popover settled a change AND `app_settings.brush` was synced.
     pub brush_settings_committed: bool,
-    /// Set when the user clicked "More models…" or a not-yet-installed
+    /// Set when the user clicked "Get more models" or a not-yet-installed
     /// dropdown entry. `filter = None` means "show everything"; the
     /// dropdown's not-installed click pre-filters to the entry's category.
     pub open_model_store: Option<ModelStoreRequest>,
@@ -85,23 +86,41 @@ pub struct ToolbarChange {
     pub(crate) toggle_magic: bool,
     /// User clicked the Compare toggle (show the original over the result).
     pub(crate) toggle_compare: bool,
+    /// What the Faces chip changed.
+    pub(crate) faces: super::faces_chip::FacesChange,
+    /// The Depth chip's "Set focus" was clicked.
+    pub(crate) pick_depth_focus: bool,
 }
 
 /// Read-only per-frame facts the toolbar renders against. Built by the
 /// app from the selected item and the coordinators.
 pub(crate) struct ToolbarState<'a> {
     pub magic_brush_active: bool,
-    pub brush_available: bool,
+    /// Why the brushes can't author a selection yet: the image's pixels
+    /// are not there.
+    pub brush_gate: Option<&'static str>,
     pub processing: bool,
     pub has_bg_image: bool,
     pub bg_image_label: Option<&'a str>,
     /// `(w, h)` of the image the next upscale starts from.
     pub source_dims: (u32, u32),
     pub has_selection: bool,
+    /// The selection corrects the cut-out on screen (Restore is offered).
+    pub corrects_cutout: bool,
+    /// Why each selection action can't act now.
+    pub selection_gates: super::selection_action_bar::SelectionGates,
     /// On-disk install state, refreshed on events rather than per frame.
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
     pub can_compare: bool,
+    /// The seed of the generated fill on screen, for Pin seed.
+    pub shown_seed: Option<u64>,
+    /// What the shown image is and holds, for the surfaces' gates.
+    pub facts: crate::gui::capability::ItemFacts,
+    /// How many faces Restore faces found in the shown photo.
+    pub faces_found: super::faces_chip::FoundCount,
+    /// The next click on the image sets the Depth chip's focus.
+    pub picking_depth_focus: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,27 +128,23 @@ pub struct ModelStoreRequest {
     pub filter: Option<prunr_models::ModelCategory>,
 }
 
-impl Default for ToolbarChange {
-    fn default() -> Self {
-        Self {
-            commit: false,
-            model_changed: false,
-            preset_applied: false,
-            line_mode_from: None,
-            input_transform_changed: false,
-            cache_impact: CacheImpact::Nothing,
-            auto_dispatch: DispatchKind::None,
-            render_repaint: false,
-            brush_settings_committed: false,
-            open_model_store: None,
-            pick_bg_image: false,
-            clear_bg_image: false,
-            selection_action: None,
-            toggle_paint: false,
-            toggle_magic: false,
-            toggle_compare: false,
-        }
+/// The Faces chip; a missing face model opens the Model Store on Faces.
+pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, outlines: &mut bool, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let faces = super::faces_chip::render(ui, &mut item_settings.faces, outlines, state.installed, state.faces_found);
+    if faces.open_store {
+        change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Face) });
     }
+    change.faces = faces;
+}
+
+/// The Depth chip; a missing depth model opens the Model Store on Depth.
+fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let depth = super::depth_chip::render(ui, &mut item_settings.depth, state.installed.depth, state.picking_depth_focus);
+    if depth.open_store {
+        change.open_model_store = Some(super::get_model::store_request(super::depth_chip::DEPTH_MODEL));
+    }
+    change.pick_depth_focus |= depth.pick_focus;
+    aggregate_knob(depth.look, StaticKnob::DepthLook, change);
 }
 
 // Starting values for knobs whose factory default is "off": the slider
@@ -161,69 +176,93 @@ pub(crate) fn render(
     let before_line_mode = item_settings.line_mode;
 
     let model_uses_seg = app_settings.model.uses_segmentation();
-    let knob_ctx = KnobContext {
-        model_uses_seg,
-        model_is_none: matches!(app_settings.model, SettingsModel::None),
-        line_mode: item_settings.line_mode,
+    let mask_active = {
+        use crate::gui::capability::{check, Need, Reason, Verdict};
+        model_uses_seg && check(&state.facts, Need::Cutout, app_settings.model.role()) != Verdict::Never(Reason::SketchCoversPhoto)
     };
-    let mask_active = knob_catalog::knob_enabled(KnobRequirement::MaskProduced, knob_ctx);
-    let fill_style_active = knob_catalog::knob_enabled(KnobRequirement::SubjectPresent, knob_ctx);
-    let bg_active = knob_catalog::knob_enabled(KnobRequirement::TransparencyProduced, knob_ctx);
+    let gate_ctx = knob_catalog::GateContext {
+        model: app_settings.model,
+        facts: state.facts,
+        processing: state.processing,
+    };
+    let gate = |surface| knob_catalog::surface_gate(surface, &gate_ctx);
 
-    ui.horizontal(|ui| {
+    // The row goes compact (chips show their icon only) when its full
+    // left cluster and its right cluster, both measured on earlier
+    // frames, would not fit side by side.
+    let fit_id = egui::Id::new("toolbar_fit");
+    let (full_left, right) = ui.data(|d| d.get_temp::<(f32, f32)>(fit_id)).unwrap_or_default();
+    let compact = full_left + right + theme::SPACE_MD > ui.available_width();
+    ui.horizontal(|ui| chip::compact_chips(ui, compact, |ui| {
         render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, state.processing);
+            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, gate(Surface::Upscale));
         }
-        if shows(model, Surface::SdChips) {
-            let outcome = super::eraser_chip::render(ui, app_settings, state.installed);
-            if outcome.committed {
-                change.brush_settings_committed = true;
-            }
+        if shows(model, Surface::Colorize) {
+            chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings));
+        }
+        if shows(model, Surface::SdChips) && super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
+            change.brush_settings_committed = true;
+        }
+        if shows(model, Surface::RoremChips) && super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed) {
+            change.brush_settings_committed = true;
         }
         if shows(model, Surface::Mask) {
-            let mask_reason = (!mask_active).then_some("Sketch is on Whole photo, so nothing is cut out.");
-            chip::gated(ui, mask_reason, |ui| {
+            chip::gated(ui, gate(Surface::Mask), |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);
             });
         }
         if shows(model, Surface::Lines) {
-            render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+            chip::gated(ui, gate(Surface::Lines), |ui| {
+                render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
+            });
         }
         if shows(model, Surface::Effect) {
-            // Fill works without a mask (filter-only mode); only Full sketch
-            // has no subject to fill.
-            let fill_reason = (!fill_style_active).then_some("Sketch is on Whole photo, so there is no subject to restyle.");
-            chip::gated(ui, fill_reason, |ui| {
-                let changed = render_fill_style_chip(ui, &mut item_settings.fill_style);
-                aggregate_bool(changed, StaticKnob::FillStyle, &mut change);
+            chip::gated(ui, gate(Surface::Effect), |ui| {
+                let changed = super::effect_chip::render(ui, &mut item_settings.effect);
+                aggregate_bool(changed, StaticKnob::SubjectEffect, &mut change);
+            });
+        }
+        if shows(model, Surface::Faces) {
+            chip::gated(ui, gate(Surface::Faces), |ui| {
+                render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
+            });
+        }
+        if shows(model, Surface::Depth) {
+            render_depth_chip(ui, item_settings, &state, &mut change);
+        }
+        if shows(model, Surface::Decoration) {
+            chip::gated(ui, gate(Surface::Decoration), |ui| {
+                let changed = render_decoration_chip(ui, &mut item_settings.decoration);
+                aggregate_bool(changed, StaticKnob::Decoration, &mut change);
             });
         }
         if shows(model, Surface::Background) {
-            let bg_reason = (!bg_active).then_some("Nothing is transparent in this mode, so there is no background to fill.");
-            chip::gated(ui, bg_reason, |ui| {
+            chip::gated(ui, gate(Surface::Background), |ui| {
                 let backdrop = item_settings.backdrop();
                 render_background_chip(ui, BgChipState {
                     backdrop,
                     bg: &mut item_settings.bg,
                     bg_effect: &mut item_settings.bg_effect,
                     bg_image_fit: &mut item_settings.bg_image_fit,
-                    default_color: BG_COLOR_FALLBACK,
                     has_bg_image: state.has_bg_image,
                     bg_image_label: state.bg_image_label,
                 }, &mut change);
             });
         }
 
+        let left = ui.min_rect().width();
         // Right-aligned cluster. Right-to-left layout fills from the right
         // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Never compact: its width must not depend on the mode it decides,
+        // or the row flips between the two every frame.
+        let right_rect = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| chip::compact_chips(ui, false, |ui| {
             render_reset_preset_cluster(ui, app_settings, item_settings, &mut presets, &mut change);
             ui.separator();
 
-            chip::gated(ui, (!state.can_compare).then_some("Process the image first."), |ui| {
+            chip::gated(ui, (!state.can_compare).then_some(crate::gui::capability::Reason::ProcessFirst.text()), |ui| {
                 let resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_VISIBILITY.codepoint, state.show_original),
                     "Compare",
@@ -240,7 +279,7 @@ pub(crate) fn render(
             }
 
             if state.has_selection {
-                if let Some(action) = render_selection_actions(ui) {
+                if let Some(action) = render_selection_actions(ui, state.corrects_cutout, state.selection_gates) {
                     change.selection_action = Some(action);
                 }
             }
@@ -248,7 +287,7 @@ pub(crate) fn render(
             // Tool cluster, right-to-left: Paint, Magic. Their settings
             // live in the strip over the canvas while a tool is on.
             let paint_active = brush_state.is_enabled();
-            chip::gated(ui, (!state.brush_available).then_some("Open an image first."), |ui| {
+            chip::gated(ui, state.brush_gate, |ui| {
                 let paint_resp = chip::tooltip(
                     chip::icon_toggle_button(ui, ICON_BRUSH.codepoint, paint_active),
                     "Paint Brush",
@@ -268,59 +307,13 @@ pub(crate) fn render(
                     change.toggle_magic = true;
                 }
             });
-        });
-    });
-
-    // Model-change hooks: fire regardless of which row is active.
-    // Drop any cached LaMa sessions on model change — fires for
-    // every direction (LaMa→LaMa-FP32, LaMa→SD, Silueta→LaMa, …)
-    // so the previous backend's ~700 MB–2 GB resident set isn't
-    // pinned across the user's "I'm done with that tool" signal.
-    // Safe because in-flight strokes hold their own Arc — we only
-    // drop the cache's ref. Rebuild on next paint is 5–15 s
-    // (well below user perception threshold for an explicit
-    // model switch).
-    if change.model_changed {
-        prunr_core::inpaint::release_all_lama_sessions();
-    }
-
-    // Inpaint mode: paint is the only input — auto-enable brush so
-    // the user doesn't have to click two buttons. Settings stays
-    // pinned subtract-equivalent (mode picker is hidden in the
-    // popover anyway when Inpaint is active). Pre-warm the LaMa /
-    // MI-GAN session in the background so the first stroke doesn't
-    // pay the 5-10 s zstd-decompress + ORT-session-build cost.
-    //
-    // SD-family models are NOT prewarmed here. They run in the
-    // dedicated `inpaint_only` subprocess via `inpaint_bridge`, so
-    // building an `SdSession` in this (GUI) process loads ~9 GB
-    // into RAM that no dispatch path will ever read — the GUI
-    // never calls `process_inpaint_with` for SD models. The
-    // observable bug: GUI process bloats to 15 GB on model
-    // switch, then the subprocess loads its own 9 GB on first
-    // stroke → ~24 GB peak → memory-pressure abort on any
-    // 16 GB box.
-    if change.model_changed && app_settings.model.is_inpaint() {
-        if !brush_state.is_enabled() {
-            brush_state.toggle();
+        })).response.rect;
+        let fit = (if compact { full_left } else { left }, right_rect.width());
+        if (fit.0 - full_left).abs() > 0.5 || (fit.1 - right).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(fit_id, fit));
+            ui.ctx().request_repaint();
         }
-        let raw_id = app_settings.model.to_model_id();
-        let in_process = matches!(
-            raw_id,
-            Some(prunr_models::ModelId::LaMaFp32)
-                | Some(prunr_models::ModelId::BigLaMa)
-                | Some(prunr_models::ModelId::Migan)
-        );
-        if in_process {
-            if let Some(id) = raw_id {
-                rayon::spawn(move || {
-                    if let Err(e) = prunr_core::inpaint::prewarm(id) {
-                        tracing::warn!(?id, %e, "Inpaint prewarm failed");
-                    }
-                });
-            }
-        }
-    }
+    }));
 
     // Line-mode transition: record the signal + cache impact (deterministic
     // in `(from, to)`). The dispatcher owns dispatch resolution — folding a
@@ -340,9 +333,10 @@ pub(crate) fn render(
     change
 }
 
-const LINES_POPOVER_WIDTH: f32 = 560.0;
-const LINES_LEFT_COLUMN_WIDTH: f32 = 260.0;
-const LINES_COLOR_LIST_WIDTH: f32 = 170.0;
+const LINES_PANEL_WIDTH: f32 = 460.0;
+const FILTER_COUNT: usize = prunr_core::InputTransform::ALL.len();
+const STYLE_COUNT: usize = prunr_core::LineStyle::ALL.len();
+const COMPOSE_COUNT: usize = prunr_core::ComposeMode::ALL.len();
 
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
@@ -364,6 +358,7 @@ const LINES_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::LineStyle), differs: |s, d| s.line_style != d.line_style, reset: |s, d| s.line_style = d.line_style },
     chip::Field { knob: Some(StaticKnob::SolidLineColor), differs: |s, d| s.solid_line_color != d.solid_line_color, reset: |s, d| s.solid_line_color = d.solid_line_color },
     chip::Field { knob: None, differs: |s, d| s.input_transform != d.input_transform, reset: |s, d| s.input_transform = d.input_transform },
+    chip::Field { knob: Some(StaticKnob::LineFade), differs: |s, d| s.line_fade_pct != d.line_fade_pct, reset: |s, d| s.line_fade_pct = d.line_fade_pct },
 ];
 
 /// Put a group back to its defaults and dispatch every knob that changed.
@@ -374,7 +369,35 @@ fn reset_group(fields: &[chip::Field<ItemSettings>], s: &mut ItemSettings, d: &I
     }
 }
 
-/// The five mask stages, in the order the pipeline applies them.
+fn mask_gamma(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)), StaticKnob::Gamma, change);
+}
+
+fn mask_shift(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
+    let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
+    if shift.changed {
+        s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
+    }
+    aggregate_knob(shift, StaticKnob::EdgeShift, change);
+}
+
+fn mask_refine(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange, inline: bool) {
+    let r = if inline {
+        chip::inline_switch(ui, "Refine edges", &mut s.refine_edges)
+    } else {
+        chip::toggle_row(ui, "Refine edges", &mut s.refine_edges)
+    };
+    aggregate_knob(r, StaticKnob::RefineEdges, change);
+}
+
+fn mask_feather(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(
+        chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
+        StaticKnob::Feather, change,
+    );
+}
+
 fn render_mask_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
@@ -393,63 +416,59 @@ fn render_mask_group(
         width: theme::POPOVER_WIDTH,
         live: true,
     };
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            reset_group(MASK_FIELDS, s, d, change);
+    chip::strip_chip(ui, group, "All mask settings", chip::PanelHeader::RESET, |ui, part| match part {
+        chip::Part::Quick => {
+            mask_gamma(ui, s, change);
+            mask_shift(ui, s, change);
+            mask_refine(ui, s, change, true);
+            mask_feather(ui, s, change);
         }
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Gamma", &mut s.gamma, 0.01..=10.0, true, |v| fmt::plain(v, 2)),
-            StaticKnob::Gamma, change,
-        );
-        hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the photo.");
-        ui.add_space(theme::SPACE_XS);
-
-
-        let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
-        let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
-        if shift.changed {
-            s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
-        }
-        aggregate_knob(shift, StaticKnob::EdgeShift, change);
-        hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(chip::toggle_row(ui, "Refine edges", &mut s.refine_edges), StaticKnob::RefineEdges, change);
-        hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
-        if s.refine_edges {
-            let mut radius = s.guided_radius as u32;
-            let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
-            s.guided_radius = radius.min(255) as u8;
-            aggregate_knob(r, StaticKnob::GuidedRadius, change);
-            hint(ui, "How far from the edge refinement looks for hair and detail.");
-            egui::CollapsingHeader::new("Advanced").id_salt("refine_advanced").show(ui, |ui| {
-                let mut detail = detail_from_epsilon(s.guided_epsilon);
-                let d = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
-                if d.changed {
-                    s.guided_epsilon = epsilon_from_detail(detail);
-                }
-                aggregate_knob(d, StaticKnob::GuidedEpsilon, change);
-                hint(ui, "Higher follows finer color edges.");
+        chip::Part::Full { reset } => {
+            if reset {
+                reset_group(MASK_FIELDS, s, d, change);
+            }
+            hint(ui, "Five steps, each on the one above.");
+            chip::step(ui, 1, true, |ui| {
+                mask_gamma(ui, s, change);
+                hint(ui, "How hard the mask cuts. Above 1 removes more; below 1 keeps more of the photo.");
+            });
+            chip::step(ui, 2, true, |ui| {
+                mask_shift(ui, s, change);
+                hint(ui, "Grow (+) or shrink (\u{2212}) the cut-out's edge.");
+            });
+            chip::step(ui, 3, s.refine_edges, |ui| {
+                mask_refine(ui, s, change, false);
+                hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
+                ui.add_enabled_ui(s.refine_edges, |ui| {
+                    let mut radius = s.guided_radius as u32;
+                    let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
+                    s.guided_radius = radius.min(255) as u8;
+                    aggregate_knob(r, StaticKnob::GuidedRadius, change);
+                    let mut detail = detail_from_epsilon(s.guided_epsilon);
+                    let dt = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
+                    if dt.changed {
+                        s.guided_epsilon = epsilon_from_detail(detail);
+                    }
+                    aggregate_knob(dt, StaticKnob::GuidedEpsilon, change);
+                    hint(ui, "Edge width: how far from the edge refinement looks. Detail: higher follows finer color edges.");
+                });
+            });
+            chip::step(ui, 4, s.feather > 0.0, |ui| {
+                mask_feather(ui, s, change);
+                hint(ui, "Soften the mask edge.");
+            });
+            chip::step(ui, 5, s.contrast > 0.0, |ui| {
+                aggregate_knob(
+                    chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
+                    StaticKnob::Contrast, change,
+                );
+                hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
+            });
+            ui.add_space(theme::SPACE_SM);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                hint(ui, "Pipeline diagram: F3");
             });
         }
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Feather", &mut s.feather, 0.0..=10.0, false, |v| fmt::off_or(v, 0.05, |v| fmt::px(v, 1))),
-            StaticKnob::Feather, change,
-        );
-        hint(ui, "Soften the mask edge.");
-        ui.add_space(theme::SPACE_XS);
-
-        aggregate_knob(
-            chip::slider_row_f32(ui, "Contrast", &mut s.contrast, 0.0..=1.0, false, fmt::percent),
-            StaticKnob::Contrast, change,
-        );
-        hint(ui, "Sharpen the edge of the cut-out. 100% is a hard edge.");
-        ui.add_space(theme::SPACE_SM);
-
-        hint(ui, "Press F3 for the pipeline diagram.");
     });
 }
 
@@ -488,8 +507,16 @@ fn epsilon_from_detail(detail: f32) -> f32 {
     10f32.powf(-2.0 - 4.0 * detail.clamp(0.0, 1.0))
 }
 
-/// Sketch mode plus every line knob, in processing order; the line color
-/// list sits in its own column.
+const LINE_SWATCHES: [chip::Swatch; 5] = [
+    chip::Swatch { name: "Black", rgb: [0x11, 0x11, 0x11] },
+    chip::Swatch { name: "White", rgb: [0xf2, 0xf2, 0xf2] },
+    chip::Swatch { name: "Plum", rgb: [0x7b, 0x2d, 0x8e] },
+    chip::Swatch { name: "Blue", rgb: [0x2b, 0x5f, 0xb8] },
+    chip::Swatch { name: "Rust", rgb: [0xb8, 0x45, 0x2b] },
+];
+
+/// Sketch mode plus every line knob: the mode and the two line knobs on
+/// the strip, the rest in the panel in processing order.
 fn render_lines_group(
     ui: &mut Ui,
     s: &mut ItemSettings,
@@ -497,7 +524,6 @@ fn render_lines_group(
     subject_available: bool,
     change: &mut ToolbarChange,
 ) {
-    use prunr_core::{ComposeMode, InputTransform, LineStyle};
     let on = s.line_mode != LineMode::Off;
     let tuned = on && chip::tuned_count(LINES_FIELDS, s, d) > 0;
     let group = chip::GroupChip {
@@ -507,159 +533,186 @@ fn render_lines_group(
         summary: mode_label(s.line_mode),
         tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
         tuned,
-        width: if on { LINES_POPOVER_WIDTH } else { theme::POPOVER_WIDTH },
+        width: LINES_PANEL_WIDTH,
         live: true,
     };
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            // The mode transition is recorded by the caller after the render.
-            s.line_mode = d.line_mode;
-            reset_group(LINES_FIELDS, s, d, change);
-            mark_input_transform_change(change);
-        }
-
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(LINES_LEFT_COLUMN_WIDTH);
-                ui.set_max_width(LINES_LEFT_COLUMN_WIDTH);
-
-                let modes = [LineMode::Off, LineMode::SubjectOutline, LineMode::EdgesOnly].map(|m| {
-                    let enabled = m != LineMode::SubjectOutline || subject_available;
-                    chip::Choice {
-                        value: m,
-                        name: mode_label(m),
-                        description: if enabled { mode_description(m) } else { "Needs a background-removal model to find the subject" },
-                        enabled,
-                    }
-                });
-                // The caller records the mode transition after the render.
-                chip::choice_row(ui, "Sketch", &modes, &mut s.line_mode);
-                if !on {
-                    hint(ui, "Off: no lines are drawn.");
-                    return;
+    chip::strip_chip(ui, group, "All line settings", chip::PanelHeader::RESET, |ui, part| match part {
+        chip::Part::Quick => {
+            let modes = [LineMode::Off, LineMode::EdgesOnly, LineMode::SubjectOutline].map(|m| {
+                let enabled = m != LineMode::SubjectOutline || subject_available;
+                chip::Choice {
+                    value: m,
+                    name: mode_label(m),
+                    description: if enabled { mode_description(m) } else { "Needs a background-removal model to find the subject" },
+                    enabled,
                 }
-                ui.add_space(theme::SPACE_XS);
-                chip::section_label(ui, "Pre-filter");
-                let mut filter_changed = false;
-                ui.horizontal_wrapped(|ui| {
-                    for option in InputTransform::ALL {
-                        let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.input_transform);
-                        if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                            s.input_transform = *option;
-                            filter_changed = true;
-                        }
-                    }
-                });
-                // Steps, not sliders: each pick reruns the line detector once.
-                match &mut s.input_transform {
-                    InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
-                    InputTransform::ContrastBoost { percent } => {
-                        filter_changed |= chip::choice_row(ui, "Contrast", &CONTRAST_STEPS, percent);
-                    }
-                    InputTransform::Posterize { levels } => {
-                        filter_changed |= chip::choice_row(ui, "Levels", &LEVEL_STEPS, levels);
-                    }
-                }
-                if filter_changed {
-                    mark_input_transform_change(change);
-                }
-                hint(ui, "Applied to the image before the lines are traced. Requires reprocessing.");
-                ui.add_space(theme::SPACE_XS);
-
-                // Dual scale draws Fine and Bold itself, so the scale has no effect.
-                let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
-                let scales = [EdgeScale::Fine, EdgeScale::Balanced, EdgeScale::Bold, EdgeScale::Fused].map(|sc| chip::Choice {
-                    value: sc,
-                    name: scale_label(sc),
-                    description: scale_description(sc),
-                    enabled: scale_active,
-                });
-                let scale_changed = chip::choice_row(ui, "Scale", &scales, &mut s.edge_scale);
-                aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
-                if !scale_active {
-                    hint(ui, "Dual scale draws Fine and Bold itself.");
-                }
-                ui.add_space(theme::SPACE_XS);
-
-                aggregate_knob(
-                    chip::slider_row_f32(ui, "Line detail", &mut s.line_strength, 0.0..=1.0, false, |v| fmt::plain(v, 2)),
-                    StaticKnob::LineStrength, change,
-                );
-                hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
-                ui.add_space(theme::SPACE_XS);
-
-                let mut thickness = s.edge_thickness as u32;
-                let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
-                s.edge_thickness = thickness.min(255) as u8;
-                aggregate_knob(t, StaticKnob::EdgeThickness, change);
-                ui.add_space(theme::SPACE_XS);
-
-                if s.line_mode == LineMode::SubjectOutline {
-                    let compositions = [
-                        ComposeMode::LinesOnly, ComposeMode::SubjectFilled, ComposeMode::Engraving,
-                        ComposeMode::Ghost,
-                    ].map(|c| chip::Choice { value: c, name: compose_label(c), description: compose_description(c), enabled: true });
-                    let changed = chip::choice_row(ui, "Composition", &compositions, &mut s.compose_mode);
-                    aggregate_bool(changed, StaticKnob::ComposeMode, change);
-                    // Lines in the photo's own colors vanish on a filled subject.
-                    if changed && s.compose_mode == ComposeMode::SubjectFilled && lines_in_photo_colors(s) {
-                        s.solid_line_color = Some([0, 0, 0]);
-                        aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                    }
-                    ui.add_space(theme::SPACE_XS);
-                }
-
             });
-
-            if !on {
+            // The caller records the mode transition after the render.
+            chip::choice_buttons(ui, &modes, &mut s.line_mode);
+            if s.line_mode != LineMode::Off {
+                line_detail(ui, s, change);
+                line_width(ui, s, change);
+            }
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                // The mode transition is recorded by the caller after the render.
+                s.line_mode = d.line_mode;
+                reset_group(LINES_FIELDS, s, d, change);
+                mark_input_transform_change(change);
+            }
+            if s.line_mode == LineMode::Off {
+                hint(ui, "Off: no lines are drawn.");
                 return;
             }
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_min_width(LINES_COLOR_LIST_WIDTH);
-                chip::section_label(ui, "Line color");
-                let is_solid = matches!(s.line_style, LineStyle::Solid);
-                if chip::picker_row(ui, lines_in_photo_colors(s), "Original", "the photo's own colors").clicked() {
-                    s.line_style = LineStyle::Solid;
-                    s.solid_line_color = None;
-                    aggregate_bool(true, StaticKnob::LineStyle, change);
-                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                }
-                if chip::picker_row(ui, is_solid && s.solid_line_color.is_some(), "Solid color", "one color for every line").clicked() {
-                    s.line_style = LineStyle::Solid;
-                    s.solid_line_color = Some(LINE_COLOR_FALLBACK);
-                    aggregate_bool(true, StaticKnob::LineStyle, change);
-                    aggregate_bool(true, StaticKnob::SolidLineColor, change);
-                }
-                for option in &LineStyle::ALL[1..] {
-                    let selected = std::mem::discriminant(option) == std::mem::discriminant(&s.line_style);
-                    if chip::picker_row(ui, selected, option.name(), line_style_description(option)).clicked() && !selected {
-                        s.line_style = *option;
-                        aggregate_bool(true, StaticKnob::LineStyle, change);
-                    }
-                }
-                ui.add_space(theme::SPACE_XS);
-                if is_solid {
-                    if let Some(rgb) = s.solid_line_color.as_mut() {
-                        let changed = rgb_picker_row(ui, "Color", rgb);
-                        aggregate_bool(changed, StaticKnob::SolidLineColor, change);
-                    }
-                } else {
-                    let changed = line_style_params(ui, &mut s.line_style);
-                    aggregate_bool(changed, StaticKnob::LineStyle, change);
-                }
-            });
-        });
+            lines_panel(ui, s, change);
+        }
     });
 }
 
-fn compose_label(mode: prunr_core::ComposeMode) -> &'static str {
-    use prunr_core::ComposeMode;
-    match mode {
-        ComposeMode::LinesOnly => "Lines only",
-        ComposeMode::SubjectFilled => "Subject filled",
-        ComposeMode::Engraving => "Engraving",
-        ComposeMode::Ghost => "Ghost",
+fn line_detail(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    aggregate_knob(
+        chip::slider_row_f32(ui, "Line detail", &mut s.line_strength, 0.0..=1.0, false, |v| fmt::plain(v, 2)),
+        StaticKnob::LineStrength, change,
+    );
+}
+
+fn line_width(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    let mut thickness = s.edge_thickness as u32;
+    let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
+    s.edge_thickness = thickness.min(255) as u8;
+    aggregate_knob(t, StaticKnob::EdgeThickness, change);
+}
+
+fn lines_panel(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    use prunr_core::{ComposeMode, InputTransform, LineStyle};
+    // Dual scale draws Fine and Bold itself, so the scale has no effect.
+    let scale_active = !matches!(s.line_style, LineStyle::DualScale { .. });
+    let scales = EdgeScale::ALL.map(|sc| chip::Choice {
+        value: sc,
+        name: scale_label(sc),
+        description: scale_description(sc),
+        enabled: scale_active,
+    });
+    let scale_changed = chip::choice_row(ui, "Scale", &scales, &mut s.edge_scale);
+    aggregate_bool(scale_changed, StaticKnob::EdgeScale, change);
+    if !scale_active {
+        hint(ui, "Dual scale draws Fine and Bold itself.");
+    }
+    line_detail(ui, s, change);
+    hint(ui, "Lower keeps bold outlines only; higher adds fine texture.");
+    line_width(ui, s, change);
+    let faded = chip::slider_row_pct(ui, "Fade with distance", &mut s.line_fade_pct, |v| fmt::off_or(v, 0.005, fmt::percent));
+    aggregate_knob(faded, StaticKnob::LineFade, change);
+    hint(ui, "Lines lighten the farther away they are. Uses the depth model.");
+
+    if s.line_mode == LineMode::SubjectOutline {
+        let compositions: [_; COMPOSE_COUNT] = std::array::from_fn(|i| {
+            let c = ComposeMode::ALL[i];
+            chip::Choice { value: c, name: c.name(), description: compose_description(c), enabled: true }
+        });
+        let changed = chip::dropdown(ui, "Composition", &compositions, &mut s.compose_mode);
+        aggregate_bool(changed, StaticKnob::ComposeMode, change);
+        // Lines in the photo's own colors vanish on a filled subject.
+        if changed && s.compose_mode == ComposeMode::SubjectFilled && lines_in_photo_colors(s) {
+            s.solid_line_color = Some([0, 0, 0]);
+            aggregate_bool(true, StaticKnob::SolidLineColor, change);
+        }
+    }
+
+    chip::panel_section(ui, "Pre-filter", Some("Requires reprocessing."));
+    let filters: [_; FILTER_COUNT] = std::array::from_fn(|i| chip::Choice {
+        value: i,
+        name: InputTransform::ALL[i].name(),
+        description: "",
+        enabled: true,
+    });
+    let mut picked = variant_index(InputTransform::ALL, &s.input_transform);
+    let mut filter_changed = false;
+    if chip::dropdown(ui, "Filter", &filters, &mut picked) {
+        s.input_transform = InputTransform::ALL[picked];
+        filter_changed = true;
+    }
+    // Steps, not sliders: each pick reruns the line detector once.
+    match &mut s.input_transform {
+        InputTransform::None | InputTransform::Grayscale | InputTransform::Smooth => {}
+        InputTransform::ContrastBoost { percent } => {
+            filter_changed |= chip::choice_row(ui, "Contrast", &CONTRAST_STEPS, percent);
+        }
+        InputTransform::Posterize { levels } => {
+            filter_changed |= chip::choice_row(ui, "Levels", &LEVEL_STEPS, levels);
+        }
+    }
+    if filter_changed {
+        mark_input_transform_change(change);
+    }
+
+    chip::panel_section(ui, "Line color", None);
+    line_color(ui, s, change);
+}
+
+/// The line color: swatch dots and a custom one for a solid color,
+/// the photo's own colors, or one of the multi-color styles.
+fn line_color(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
+    use prunr_core::LineStyle;
+    let is_solid = matches!(s.line_style, LineStyle::Solid);
+    let solid = s.solid_line_color.filter(|_| is_solid);
+    let custom_id = ui.id().with("custom_line_color");
+    let mut custom_open = ui.data(|d| d.get_temp::<bool>(custom_id).unwrap_or(false));
+    let set_solid = |s: &mut ItemSettings, rgb: Option<[u8; 3]>, change: &mut ToolbarChange| {
+        s.line_style = LineStyle::Solid;
+        s.solid_line_color = rgb;
+        aggregate_bool(true, StaticKnob::LineStyle, change);
+        aggregate_bool(true, StaticKnob::SolidLineColor, change);
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if let Some(rgb) = chip::swatch_dots(ui, &LINE_SWATCHES, solid) {
+            set_solid(s, Some(rgb), change);
+            custom_open = false;
+        }
+        let is_preset = solid.is_some_and(|c| LINE_SWATCHES.iter().any(|sw| sw.rgb == c));
+        let custom_rgb = solid.unwrap_or(LINE_COLOR_FALLBACK);
+        if chip::custom_color_dot(ui, custom_rgb, custom_open || (solid.is_some() && !is_preset)).clicked() {
+            custom_open = !custom_open;
+            if solid.is_none() {
+                set_solid(s, Some(custom_rgb), change);
+            }
+        }
+        ui.add_space(theme::SPACE_XS);
+        let own = lines_in_photo_colors(s);
+        let text = RichText::new("or the photo's own colors").size(theme::FONT_SIZE_SECONDARY).color(if own { theme::GLOW } else { theme::TEXT_SECONDARY });
+        if ui.add(egui::Button::new(text).frame(false)).clicked() && !own {
+            set_solid(s, None, change);
+            custom_open = false;
+        }
+    });
+    if custom_open && matches!(s.line_style, LineStyle::Solid) {
+        if let Some(rgb) = s.solid_line_color.as_mut() {
+            let changed = chip::rgb_picker(ui, rgb);
+            aggregate_bool(changed, StaticKnob::SolidLineColor, change);
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(custom_id, custom_open));
+
+    let styles: [_; STYLE_COUNT] = std::array::from_fn(|i| chip::Choice {
+        value: i,
+        name: LineStyle::ALL[i].name(),
+        description: line_style_description(&LineStyle::ALL[i]),
+        enabled: true,
+    });
+    let mut style_idx = variant_index(LineStyle::ALL, &s.line_style);
+    if chip::dropdown(ui, "Style", &styles, &mut style_idx) {
+        s.line_style = LineStyle::ALL[style_idx];
+        if style_idx == 0 && s.solid_line_color.is_none() {
+            s.solid_line_color = Some(LINE_COLOR_FALLBACK);
+        }
+        aggregate_bool(true, StaticKnob::LineStyle, change);
+        aggregate_bool(true, StaticKnob::SolidLineColor, change);
+    }
+    if !matches!(s.line_style, LineStyle::Solid) {
+        let changed = line_style_params(ui, &mut s.line_style);
+        aggregate_bool(changed, StaticKnob::LineStyle, change);
     }
 }
 
@@ -700,12 +753,12 @@ fn mark_preset_apply(acc: &mut ToolbarChange) {
 
 /// Flag an `InputTransform` change. Dispatch is deferred to the caller's
 /// `resolve_auto_dispatch`, which has item state (cached_seg) for the
-/// precise AddEdgeInference vs FullPipeline choice. Cache impact is the
-/// same in both warm and cold paths (EdgeCache), so we fold it here.
+/// precise AddEdgeInference vs FullPipeline choice. The cache impact does
+/// not depend on that choice, so it is folded here.
 fn mark_input_transform_change(acc: &mut ToolbarChange) {
     acc.input_transform_changed = true;
     acc.commit = true;
-    acc.cache_impact = acc.cache_impact.union(CacheImpact::EdgeCache);
+    acc.cache_impact = acc.cache_impact.union(knob_catalog::input_transform_spec(false).cache_impact);
 }
 
 fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
@@ -714,16 +767,16 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     match style {
         LineStyle::Solid => {}
         LineStyle::GradientY { top, bottom } => {
-            changed |= rgb_picker_row(ui, "Top", top);
-            changed |= rgb_picker_row(ui, "Bottom", bottom);
+            changed |= chip::color_row(ui, "Top", top);
+            changed |= chip::color_row(ui, "Bottom", bottom);
         }
         LineStyle::GradientX { left, right } => {
-            changed |= rgb_picker_row(ui, "Left", left);
-            changed |= rgb_picker_row(ui, "Right", right);
+            changed |= chip::color_row(ui, "Left", left);
+            changed |= chip::color_row(ui, "Right", right);
         }
         LineStyle::RadialGradient { center, inner, outer } => {
-            changed |= rgb_picker_row(ui, "Inner", inner);
-            changed |= rgb_picker_row(ui, "Outer", outer);
+            changed |= chip::color_row(ui, "Inner", inner);
+            changed |= chip::color_row(ui, "Outer", outer);
             changed |= chip::slider_row(ui, "Center X", &mut center[0], 0..=255).changed;
             changed |= chip::slider_row(ui, "Center Y", &mut center[1], 0..=255).changed;
         }
@@ -731,139 +784,85 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
             changed |= chip::slider_row(ui, "Cycles", cycles, 1..=10).changed;
         }
         LineStyle::DualScale { fine_color, bold_color } => {
-            changed |= rgb_picker_row(ui, "Fine (detail)", fine_color);
-            changed |= rgb_picker_row(ui, "Bold (structure)", bold_color);
+            changed |= chip::color_row(ui, "Fine (detail)", fine_color);
+            changed |= chip::color_row(ui, "Bold (structure)", bold_color);
         }
     }
     changed
 }
 
-/// Effect picker ("Fill style" in settings and code). Variant list + inline
-/// param editor; "None" heads the list, so the header has no reset.
-fn render_fill_style_chip(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
-    use prunr_core::FillStyle;
-    let accent = !matches!(style, FillStyle::None);
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_FORMAT_PAINT.codepoint, style.name(), accent),
-        "Effect",
-        "Restyle the subject's colors, or the whole photo with No model.",
-        None,
-    );
-
-    let popup_id = ui.make_persistent_id("fill_style_popup");
+/// The Outline & Shadow chip: a sticker outline and a shadow under the
+/// cut-out. Returns true when a knob moved.
+fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
+    let value = match (d.has_outline(), d.has_shadow()) {
+        (false, false) => "Off",
+        (true, false) => "Outline",
+        (false, true) => "Shadow",
+        (true, true) => "Outline + shadow",
+    };
+    let on = d.has_outline() || d.has_shadow();
+    let group = chip::GroupChip {
+        id_salt: "decoration",
+        icon: ICON_BORDER_OUTER.codepoint,
+        label: "Outline & Shadow",
+        summary: value,
+        tooltip: "A sticker outline and a shadow under the cut-out.",
+        tuned: on,
+        width: DECORATION_PANEL_WIDTH,
+        live: true,
+    };
     let mut changed = false;
-    chip::flyout_for(popup_id, &resp, |ui| {
-        // Wider popover so the variant list sits next to the parameter column
-        // instead of stacking above it — otherwise 4-stop GradientMap makes
-        // the popover taller than most screens.
-        ui.set_min_width(FILL_STYLE_POPOVER_WIDTH);
-        chip::popover_header(ui, "Effect", None);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(FILL_STYLE_LIST_WIDTH);
-                for option in FillStyle::ALL {
-                    let selected = std::mem::discriminant(option) == std::mem::discriminant(style);
-                    if ui.selectable_label(selected, option.name()).clicked() && !selected {
-                        *style = *option;
-                        changed = true;
-                    }
-                }
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                if fill_style_params(ui, style) {
-                    changed = true;
-                }
-            });
-        });
+    let header = chip::PanelHeader { note: "", reset: "Back to none" };
+    chip::strip_chip_faced(ui, group, value, "All outline and shadow settings", header, |ui, part| match part {
+        chip::Part::Quick => {
+            changed |= outline_width(ui, "Outline", d);
+            changed |= chip::choice_buttons(ui, &SHADOW_KINDS, &mut d.shadow);
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                *d = prunr_core::Decoration::default();
+                changed = true;
+            }
+            chip::panel_section(ui, "Outline", None);
+            changed |= outline_width(ui, "Width", d);
+            if d.has_outline() {
+                changed |= chip::color_row(ui, "Color", &mut d.outline_color);
+            }
+            chip::panel_section(ui, "Shadow", None);
+            changed |= chip::choice_row(ui, "Kind", &SHADOW_KINDS, &mut d.shadow);
+            if d.shadow != prunr_core::ShadowKind::Off {
+                changed |= chip::slider_row_f32(ui, "Opacity", &mut d.shadow_opacity, 0.0..=1.0, false, fmt::percent).changed;
+                changed |= chip::slider_row_f32(ui, "Blur", &mut d.shadow_blur, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+            }
+            if d.shadow == prunr_core::ShadowKind::Drop {
+                changed |= chip::slider_row_f32(ui, "Distance", &mut d.shadow_distance, 0.0..=128.0, false, |v| fmt::px(v, 0)).changed;
+            }
+        }
     });
     changed
 }
 
-const FILL_STYLE_POPOVER_WIDTH: f32 = 560.0;
-const FILL_STYLE_LIST_WIDTH: f32 = 140.0;
-const GRADIENT_MAP_COL_WIDTH: f32 = 190.0;
+const DECORATION_PANEL_WIDTH: f32 = 400.0;
 
-fn fill_style_params(ui: &mut Ui, style: &mut prunr_core::FillStyle) -> bool {
-    use prunr_core::FillStyle;
-    let mut changed = false;
-    match style {
-        FillStyle::None | FillStyle::Desaturate | FillStyle::Invert | FillStyle::Sepia => {
-            ui.label(RichText::new("No parameters.").color(theme::TEXT_SECONDARY)
-                .size(theme::FONT_SIZE_MONO));
-        }
-        FillStyle::Threshold { level } => {
-            changed |= chip::slider_row(ui, "Level", level, 0..=255).changed;
-        }
-        FillStyle::Posterize { levels } => {
-            changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
-        }
-        FillStyle::Solarize { pivot } => {
-            changed |= chip::slider_row(ui, "Pivot", pivot, 0..=255).changed;
-        }
-        FillStyle::HueShift { degrees } => {
-            changed |= chip::slider_row(ui, "Degrees", degrees, -180..=180).changed;
-        }
-        FillStyle::Saturate { percent } => {
-            changed |= chip::slider_row(ui, "Percent", percent, 0..=300).changed;
-        }
-        FillStyle::ColorSplash { keep_hue, tolerance } => {
-            changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
-            changed |= chip::slider_row(ui, "Tolerance (degrees)", tolerance, 0..=180).changed;
-            chip::kept_hues(ui, *keep_hue, *tolerance);
-        }
-        FillStyle::Pixelate { block_size } => {
-            changed |= chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed;
-        }
-        FillStyle::Duotone { dark, light } => {
-            changed |= rgb_picker_row(ui, "Dark", dark);
-            changed |= rgb_picker_row(ui, "Light", light);
-        }
-        FillStyle::CrossProcess { shadow, highlight } => {
-            changed |= rgb_picker_row(ui, "Shadow", shadow);
-            changed |= rgb_picker_row(ui, "Highlight", highlight);
-        }
-        FillStyle::Halftone { dot_spacing } => {
-            changed |= chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed;
-        }
-        FillStyle::GradientMap { stops } => {
-            // 2×2 grid keeps the 4-stop popover within one screen height; a
-            // linear stack would exceed the viewport on most displays.
-            let [s0, s1, s2, s3] = stops;
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Shadow", s0);
-                });
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Dark mid", s1);
-                });
-            });
-            ui.add_space(theme::SPACE_XS);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Light mid", s2);
-                });
-                ui.vertical(|ui| {
-                    ui.set_max_width(GRADIENT_MAP_COL_WIDTH);
-                    changed |= rgb_picker_row(ui, "Highlight", s3);
-                });
-            });
-        }
-    }
-    changed
+const SHADOW_KINDS: [chip::Choice<prunr_core::ShadowKind>; 3] = [
+    chip::Choice { value: prunr_core::ShadowKind::Off, name: "No shadow", description: "", enabled: true },
+    chip::Choice { value: prunr_core::ShadowKind::Soft, name: "Soft", description: "A soft shade all around, as if lit from the front", enabled: true },
+    chip::Choice { value: prunr_core::ShadowKind::Drop, name: "Drop", description: "A shadow falling below the subject", enabled: true },
+];
+
+fn outline_width(ui: &mut Ui, label: &str, d: &mut prunr_core::Decoration) -> bool {
+    chip::slider_row_f32(ui, label, &mut d.outline_width, 0.0..=prunr_core::Decoration::MAX_OUTLINE_PX, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).changed
 }
+
 
 /// The backgrounds a user can choose, read from `ItemSettings::backdrop`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BgKind { Transparent, Solid, Image, BlurredSource, DesaturatedSource }
+enum BgKind { Transparent, Solid, Image, BlurredSource, LensBlur, DesaturatedSource }
 
 impl BgKind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Transparent, Self::Solid, Self::Image,
-        Self::BlurredSource, Self::DesaturatedSource,
+        Self::BlurredSource, Self::LensBlur, Self::DesaturatedSource,
     ];
 
     fn name(self) -> &'static str {
@@ -872,7 +871,17 @@ impl BgKind {
             Self::Solid => "Solid color",
             Self::Image => "Image",
             Self::BlurredSource => "Blurred photo",
+            Self::LensBlur => "Lens blur",
             Self::DesaturatedSource => "Black & white photo",
+        }
+    }
+
+    /// The name under its tile.
+    fn short_name(self) -> &'static str {
+        match self {
+            Self::BlurredSource => "Blurred",
+            Self::DesaturatedSource => "Black & white",
+            kind => kind.name(),
         }
     }
 
@@ -884,13 +893,12 @@ impl BgKind {
             Backdrop::Image(_) => Self::Image,
             Backdrop::Effect(BgEffect::BlurredSource { .. }) => Self::BlurredSource,
             Backdrop::Effect(BgEffect::DesaturatedSource) => Self::DesaturatedSource,
+            Backdrop::Effect(BgEffect::LensBlur { .. }) => Self::LensBlur,
             Backdrop::Effect(BgEffect::None) => Self::Transparent,
         }
     }
 }
 
-/// Unified Background chip: one control for "what fills the transparent
-/// area behind the subject" — solid color or a source-derived effect.
 /// Editable + display state for the background chip. Grouped because the
 /// chip needs three live-edit fields plus image-availability metadata —
 /// past the param-count alarm without this grouping.
@@ -899,11 +907,12 @@ struct BgChipState<'a> {
     bg: &'a mut Option<[u8; 4]>,
     bg_effect: &'a mut prunr_core::BgEffect,
     bg_image_fit: &'a mut prunr_core::BgImageFit,
-    default_color: [u8; 4],
     has_bg_image: bool,
     bg_image_label: Option<&'a str>,
 }
 
+/// Unified Background chip: one control for "what fills the transparent
+/// area behind the subject" — solid color or a source-derived effect.
 fn render_background_chip(
     ui: &mut Ui,
     state: BgChipState<'_>,
@@ -914,107 +923,191 @@ fn render_background_chip(
         bg,
         bg_effect,
         bg_image_fit,
-        default_color,
         has_bg_image,
         bg_image_label,
     } = state;
     use prunr_core::BgEffect;
 
     let current = BgKind::of(backdrop);
-    let accent = current != BgKind::Transparent;
-    let resp = chip::tooltip(
-        chip::chip_button(ui, ICON_PALETTE.codepoint, current.name(), accent),
-        "Background",
-        "What fills the transparent area behind the subject: a solid color, an image, or a blurred or black-and-white copy of the photo.",
-    None,
-);
-
-    let popup_id = ui.make_persistent_id("background_popup");
-    chip::flyout_for(popup_id, &resp, |ui| {
-        ui.set_min_width(BACKGROUND_POPOVER_WIDTH);
-        chip::popover_header(ui, "Background", None);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(BACKGROUND_LIST_WIDTH);
+    let solid = bg.filter(|_| current == BgKind::Solid).map(|c| [c[0], c[1], c[2]]);
+    let group = chip::GroupChip {
+        id_salt: "background",
+        icon: ICON_PALETTE.codepoint,
+        label: "Background",
+        summary: current.name(),
+        tooltip: "What fills the transparent area behind the subject: a solid color, an image, or a blurred, lens-blurred or black-and-white copy of the photo.",
+        tuned: current != BgKind::Transparent,
+        width: BACKGROUND_PANEL_WIDTH,
+        live: true,
+    };
+    let header = chip::PanelHeader { note: "", reset: "Back to transparent" };
+    let pick = |kind: BgKind, bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
+        // The picture lives on the item and loads off the UI thread; it
+        // replaces the background when it lands.
+        if kind == BgKind::Image {
+            change.pick_bg_image = true;
+            return;
+        }
+        apply_bg_kind(bg, bg_effect, kind);
+        if has_bg_image {
+            // Any other kind drops the image so the new choice owns the
+            // background alone.
+            change.clear_bg_image = true;
+        }
+        aggregate_bool(true, StaticKnob::BgColor, change);
+    };
+    let set_color = |rgb: [u8; 3], bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
+        pick(BgKind::Solid, bg, bg_effect, change);
+        *bg = Some([rgb[0], rgb[1], rgb[2], 255]);
+    };
+    chip::strip_chip_faced(ui, group, current.name(), "All background settings", header, |ui, part| match part {
+        chip::Part::Quick => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if chip::painted_dot(ui, "Transparent", current == BgKind::Transparent, paint_checker).clicked()
+                    && current != BgKind::Transparent
+                {
+                    pick(BgKind::Transparent, bg, bg_effect, change);
+                }
+                if let Some(rgb) = chip::swatch_dots(ui, &BG_SWATCHES, solid) {
+                    set_color(rgb, bg, bg_effect, change);
+                }
+            });
+            let mut kind = current;
+            if chip::choice_buttons(ui, &BG_QUICK_KINDS, &mut kind) {
+                pick(kind, bg, bg_effect, change);
+            }
+        }
+        chip::Part::Full { reset } => {
+            if reset {
+                pick(BgKind::Transparent, bg, bg_effect, change);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let shown = solid.unwrap_or([BG_COLOR_FALLBACK[0], BG_COLOR_FALLBACK[1], BG_COLOR_FALLBACK[2]]);
                 for kind in BgKind::ALL {
                     let selected = kind == current;
-                    if ui.selectable_label(selected, kind.name()).clicked() && !selected {
-                        // The picture lives on the item and loads off the UI
-                        // thread; it replaces the background when it lands.
-                        if matches!(kind, BgKind::Image) {
-                            change.pick_bg_image = true;
-                            continue;
-                        }
-                        apply_bg_kind(bg, bg_effect, kind, default_color);
-                        if has_bg_image {
-                            // Picking any non-image kind drops the image so
-                            // the new choice owns the bg surface alone.
-                            change.clear_bg_image = true;
-                        }
-                        aggregate_bool(true, StaticKnob::BgColor, change);
+                    let resp = chip::swatch_tile(ui, kind.short_name(), selected, BG_TILE, true, |painter, rect| {
+                        paint_bg_tile(painter, rect, kind, shown);
+                    });
+                    if resp.clicked() && (!selected || kind == BgKind::Image) {
+                        pick(kind, bg, bg_effect, change);
                     }
                 }
             });
-            ui.separator();
-            ui.vertical(|ui| {
-                match current {
-                    BgKind::Transparent => {
-                        hint(ui, "No background; the exported PNG keeps its transparency.");
-                    }
-                    BgKind::Solid => {
-                        if let Some(rgba) = bg.as_mut() {
-                            let mut rgb = [rgba[0], rgba[1], rgba[2]];
-                            if chip::rgb_picker(ui, &mut rgb) {
-                                *rgba = [rgb[0], rgb[1], rgb[2], 255];
-                                aggregate_bool(true, StaticKnob::BgColor, change);
-                            }
-                            hint(ui, "One color fills the transparent area on screen and in the export.");
+            match current {
+                BgKind::Transparent => {
+                    hint(ui, "No background; the exported PNG keeps its transparency.");
+                }
+                BgKind::Solid => {
+                    chip::panel_section(ui, "Solid color", None);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if let Some(rgb) = chip::swatch_dots(ui, &BG_SWATCHES, solid) {
+                            set_color(rgb, bg, bg_effect, change);
+                        }
+                        if let Some([r, g, b]) = solid {
+                            ui.label(RichText::new(format!("#{r:02X}{g:02X}{b:02X}")).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+                        }
+                    });
+                    if let Some(rgba) = bg.as_mut() {
+                        let mut rgb = [rgba[0], rgba[1], rgba[2]];
+                        if chip::color_row(ui, "Custom color", &mut rgb) {
+                            *rgba = [rgb[0], rgb[1], rgb[2], 255];
+                            aggregate_bool(true, StaticKnob::BgColor, change);
                         }
                     }
-                    BgKind::Image => {
-                        if let Some(label) = bg_image_label {
-                            ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-                            ui.add_space(theme::SPACE_XS);
-                        }
+                }
+                BgKind::Image => {
+                    chip::panel_section(ui, "Image", bg_image_label);
+                    ui.horizontal(|ui| {
                         if chip::button(ui, chip::ButtonKind::Secondary, "Choose image\u{2026}").clicked() {
                             change.pick_bg_image = true;
                         }
-                        if has_bg_image
-                            && chip::button(ui, chip::ButtonKind::Secondary, "Remove image").clicked()
-                        {
+                        if has_bg_image && chip::button(ui, chip::ButtonKind::Secondary, "Remove image").clicked() {
                             change.clear_bg_image = true;
                         }
-                        if has_bg_image {
-                            ui.add_space(theme::SPACE_XS);
-                            ui.label(RichText::new("Fit").color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-                            for fit in prunr_core::BgImageFit::ALL {
-                                let selected = *fit == *bg_image_fit;
-                                if ui.selectable_label(selected, fit.name()).clicked() && !selected {
-                                    *bg_image_fit = *fit;
-                                    aggregate_bool(true, StaticKnob::BgImageFit, change);
-                                }
-                            }
+                    });
+                    if has_bg_image {
+                        let fits: [_; FIT_COUNT] = std::array::from_fn(|i| {
+                            let f = prunr_core::BgImageFit::ALL[i];
+                            chip::Choice { value: f, name: f.name(), description: "", enabled: true }
+                        });
+                        if chip::choice_row(ui, "Fit", &fits, bg_image_fit) {
+                            aggregate_bool(true, StaticKnob::BgImageFit, change);
                         }
-                        hint(ui, "The image fills the transparent area on screen and in the export.");
-                    }
-                    BgKind::BlurredSource => {
-                        if let BgEffect::BlurredSource { radius } = bg_effect {
-                            let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
-                            aggregate_bool(r.changed, StaticKnob::BgEffect, change);
-                        }
-                        hint(ui, "A blurred copy of the photo fills the transparent area.");
-                    }
-                    BgKind::DesaturatedSource => {
-                        hint(ui, "A black-and-white copy of the photo fills the transparent area.");
                     }
                 }
-            });
-        });
+                BgKind::BlurredSource => {
+                    if let BgEffect::BlurredSource { radius } = bg_effect {
+                        chip::panel_section(ui, "Blurred photo", None);
+                        let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
+                        aggregate_bool(r.changed, StaticKnob::BgEffect, change);
+                    }
+                }
+                BgKind::LensBlur => {
+                    if let BgEffect::LensBlur { amount_pct } = bg_effect {
+                        chip::panel_section(ui, "Lens blur", None);
+                        let r = chip::slider_row_pct(ui, "Blur amount", amount_pct, fmt::percent);
+                        aggregate_knob(r, StaticKnob::BgEffect, change);
+                        hint(ui, "Focused on the subject; the farther something is behind it, the softer. Uses the depth model.");
+                    }
+                }
+                BgKind::DesaturatedSource => {
+                    hint(ui, "A black-and-white copy of the photo fills the transparent area.");
+                }
+            }
+        }
     });
 }
 
-const BACKGROUND_POPOVER_WIDTH: f32 = 480.0;
-const BACKGROUND_LIST_WIDTH: f32 = 150.0;
+const BACKGROUND_PANEL_WIDTH: f32 = 400.0;
+const BG_TILE: egui::Vec2 = egui::vec2(66.0, 42.0);
+const FIT_COUNT: usize = prunr_core::BgImageFit::ALL.len();
+
+const BG_SWATCHES: [chip::Swatch; 4] = [
+    chip::Swatch { name: "White", rgb: [0xff, 0xff, 0xff] },
+    chip::Swatch { name: "Black", rgb: [0x00, 0x00, 0x00] },
+    chip::Swatch { name: "Cream", rgb: [0xe9, 0xe2, 0xd6] },
+    chip::Swatch { name: "Plum", rgb: [0x7b, 0x2d, 0x8e] },
+];
+
+const BG_QUICK_KINDS: [chip::Choice<BgKind>; 3] = [
+    chip::Choice { value: BgKind::Image, name: "Image", description: "A picture of your choice", enabled: true },
+    chip::Choice { value: BgKind::BlurredSource, name: "Blurred", description: "A blurred copy of the photo", enabled: true },
+    chip::Choice { value: BgKind::LensBlur, name: "Lens blur", description: "The photo blurred more the farther it is behind the subject", enabled: true },
+];
+
+fn checker(u: f32, v: f32, cells: f32) -> Color32 {
+    let (light, dark) = theme::CHECKER_DARK_MODE;
+    if ((u * cells).floor() as i32 + (v * cells).floor() as i32) % 2 == 0 { light } else { dark }
+}
+
+fn paint_checker(painter: &egui::Painter, rect: egui::Rect) {
+    paint_rounded_mesh(painter, rect, rect.width() / 2.0, |u, v| checker(u, v, 3.0));
+}
+
+/// A background kind's tile: what it puts behind the subject.
+fn paint_bg_tile(painter: &egui::Painter, rect: egui::Rect, kind: BgKind, solid: [u8; 3]) {
+    const RADIUS: f32 = 10.0;
+    let [r, g, b] = solid;
+    let sky = Color32::from_rgb(0x8f, 0xb8, 0xde);
+    let field = Color32::from_rgb(0x5f, 0x8a, 0x4a);
+    match kind {
+        BgKind::Transparent => paint_rounded_mesh(painter, rect, RADIUS, |u, v| checker(u, v * BG_TILE.y / BG_TILE.x, 6.0)),
+        BgKind::Solid => {
+            painter.rect_filled(rect, RADIUS, Color32::from_rgb(r, g, b));
+        }
+        BgKind::Image => paint_rounded_mesh(painter, rect, RADIUS, |_, v| if v < 0.6 { sky } else { field }),
+        BgKind::BlurredSource => paint_rounded_mesh(painter, rect, RADIUS, |u, v| sky.lerp_to_gamma(field, (v * 0.8 + u * 0.2).clamp(0.0, 1.0))),
+        BgKind::DesaturatedSource => paint_rounded_mesh(painter, rect, RADIUS, |_, v| Color32::from_gray(200).lerp_to_gamma(Color32::from_gray(90), v)),
+        // Soft sky above a sharp near field: blur grows with distance.
+        BgKind::LensBlur => paint_rounded_mesh(painter, rect, RADIUS, |u, v| {
+            let near = v > 0.6 && ((u * 8.0) as i32 + (v * 8.0) as i32) % 2 == 0;
+            if near { field.lerp_to_gamma(Color32::WHITE, 0.25) } else { sky.lerp_to_gamma(field, (v * 0.9).clamp(0.0, 1.0)) }
+        }),
+    }
+}
 
 /// Set the two bg fields to `kind` alone: the background is one choice.
 /// Solid keeps a colour picked earlier, or starts from the default.
@@ -1022,7 +1115,6 @@ fn apply_bg_kind(
     bg: &mut Option<[u8; 4]>,
     bg_effect: &mut prunr_core::BgEffect,
     kind: BgKind,
-    default_color: [u8; 4],
 ) {
     use prunr_core::BgEffect;
     match kind {
@@ -1031,7 +1123,7 @@ fn apply_bg_kind(
             *bg_effect = BgEffect::None;
         }
         BgKind::Solid => {
-            if bg.is_none() { *bg = Some(default_color); }
+            if bg.is_none() { *bg = Some(BG_COLOR_FALLBACK); }
             *bg_effect = BgEffect::None;
         }
         BgKind::BlurredSource => {
@@ -1042,19 +1134,16 @@ fn apply_bg_kind(
             *bg = None;
             *bg_effect = BgEffect::DesaturatedSource;
         }
+        BgKind::LensBlur => {
+            *bg = None;
+            *bg_effect = BgEffect::LensBlur { amount_pct: 50 };
+        }
         // Image bg lives on BatchItem, not on these two ItemSettings fields —
         // the chip emits `change.pick_bg_image` and skips this fn for Image.
         BgKind::Image => unreachable!("Image kind is handled via change.pick_bg_image, not apply_bg_kind"),
     }
 }
 
-/// Label + inline color picker on two stacked rows. Thin wrapper over
-/// `chip::rgb_picker` — the label is purely visual context so the user
-/// knows which color they're editing.
-fn rgb_picker_row(ui: &mut Ui, label: &str, rgb: &mut [u8; 3]) -> bool {
-    ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-    chip::rgb_picker(ui, rgb)
-}
 
 /// Reset-to-default-preset button + preset dropdown.
 pub(super) fn render_reset_preset_cluster(
@@ -1072,9 +1161,7 @@ pub(super) fn render_reset_preset_cluster(
     );
     if reset_resp.clicked() {
         let reset_target = app_settings.default_preset.clone();
-        let resolved = app_settings.resolve_active_preset(None);
-        *item_settings = resolved.item_settings;
-        app_settings.brush = resolved.brush;
+        app_settings.apply_preset(&reset_target, item_settings);
         *presets.applied = reset_target;
         change.brush_settings_committed = true;
         mark_preset_apply(change);
@@ -1087,9 +1174,62 @@ pub(super) fn render_reset_preset_cluster(
     }
 }
 
+/// The toolbar of the empty window: only the model picker, so a model
+/// can be chosen or downloaded before the first image.
+pub(crate) fn render_model_only(
+    ui: &mut Ui,
+    app_settings: &mut Settings,
+    installed: crate::gui::hardware_cache::HardwareInstallCache,
+) -> ToolbarChange {
+    let mut change = ToolbarChange::default();
+    ui.horizontal(|ui| render_model_dropdown(ui, app_settings, false, true, installed, &mut change));
+    change
+}
+
+/// Room for egui's gap between a chip and the popup under it.
+const POPUP_GAP: f32 = 4.0;
+
+/// The picker's last row: its title and description.
+const MORE_MODELS: (&str, &str) = ("Get more models", "Open the Model Store");
+
+fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
+    let default_pct = ItemSettings::default().color_strength_pct;
+    let tuned = s.color_strength_pct != default_pct;
+    let summary = fmt::percent(s.color_strength());
+    let group = chip::GroupChip {
+        id_salt: "color_strength",
+        icon: ICON_PALETTE.codepoint,
+        label: "Strength",
+        summary: &summary,
+        tooltip: "Color strength. 0 = grey, 1 = as predicted.",
+        tuned,
+        width: theme::POPOVER_WIDTH,
+        live: true,
+    };
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            s.color_strength_pct = default_pct;
+        }
+        let mut v = s.color_strength();
+        if chip::slider_row_f32(ui, "Color", &mut v, 0.0..=prunr_core::colorize::STRENGTH_MAX, false, fmt::percent).changed {
+            s.set_color_strength(v);
+        }
+    });
+}
+
+fn role_caption(role: crate::gui::knob_catalog::ModelRole) -> &'static str {
+    use crate::gui::knob_catalog::ModelRole;
+    match role {
+        ModelRole::Cutout => "BACKGROUND REMOVAL",
+        ModelRole::Erase => "ERASER",
+        ModelRole::Upscale => "UPSCALE",
+        ModelRole::Colorize => "COLORIZE",
+        ModelRole::Filters => "",
+    }
+}
+
 /// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
-/// sets `change.model_changed` + `commit` when the selection flips so caller
-/// can invalidate tensor caches and fire a fresh Tier 1.
+/// sets `change.model_changed` + `commit` when the selection flips.
 pub(super) fn render_model_dropdown(
     ui: &mut Ui,
     app_settings: &mut Settings,
@@ -1099,13 +1239,15 @@ pub(super) fn render_model_dropdown(
     change: &mut ToolbarChange,
 ) {
     let prev_model = app_settings.model;
-    // Always enabled (except mid-processing) so the user can flip to
-    // `No model` from any mode — previously gated on mask_active, which
-    // made the dropdown unreachable in EdgesOnly.
+    // Enabled in every mode (except mid-processing), Whole-photo lines
+    // included, so the user can always flip to `No model`.
     let enabled = !processing;
     ui.add_enabled_ui(enabled, |ui| {
         let info = model_info(app_settings.model);
-        let resp = chip::chip_button(ui, info.icon, info.name, false);
+        // A saved model that is no longer on disk says so on the face.
+        let missing = !installed.has_model(app_settings.model);
+        let face: std::borrow::Cow<str> = if missing { format!("{} \u{00b7} {}", info.name, super::get_model::BADGE).into() } else { info.name.into() };
+        let resp = chip::menu_chip_button(ui, info.icon, &face);
         // The chip is always named "Model"; the hint says what this one does.
         use crate::gui::knob_catalog::ModelRole;
         let body = match app_settings.model.role() {
@@ -1113,36 +1255,84 @@ pub(super) fn render_model_dropdown(
             ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and download size.",
             ModelRole::Erase => "Removes what you paint over and fills the area in. Paint with the brush, then Process.",
             ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",
+            ModelRole::Colorize => "Colors a black-and-white photo. Process, then set Strength.",
             ModelRole::Filters => "No model runs: only the effect, lines and background apply to the photo.",
         };
         let resp = chip::tooltip(resp, "Model", body, None);
         let pop_id = egui::Id::new("adjustments_model_popup");
         chip::popup_for(ui, pop_id, &resp, |ui| {
-            chip::popover_header(ui, "Model", None);
-            for variant in installed_models(installed) {
-                if variant == SettingsModel::None {
-                    ui.separator();
+            // A model not downloaded yet shows "Get" and its size; picking
+            // it opens the Model Store on its section.
+            let rows: Vec<_> = SettingsModel::ALL.iter().copied()
+                .filter(|v| *v != SettingsModel::None)
+                .chain(std::iter::once(SettingsModel::None))
+                .map(|variant| {
+                    let missing = variant.to_model_id().filter(|_| !installed.has_model(variant));
+                    let blurb = match missing {
+                        Some(id) => std::borrow::Cow::Borrowed(super::get_model::badge_and_size(id)),
+                        None => super::model_blurb(variant),
+                    };
+                    (variant, missing, blurb)
+                })
+                .collect();
+            // As wide as its longest row, so no blank band runs down the right;
+            // measured once per set of installed models, not every frame.
+            let width_id = pop_id.with("width");
+            let cached = ui.data(|d| d.get_temp::<(crate::gui::hardware_cache::HardwareInstallCache, f32)>(width_id));
+            let width = match cached.filter(|(for_installed, _)| *for_installed == installed) {
+                Some((_, width)) => width,
+                None => {
+                    let width = rows.iter()
+                        .map(|(variant, _, blurb)| chip::choice_list_row_width(ui, model_info(*variant).name, blurb))
+                        .fold(chip::choice_list_row_width(ui, MORE_MODELS.0, MORE_MODELS.1), f32::max);
+                    ui.data_mut(|d| d.insert_temp(width_id, (installed, width)));
+                    width
                 }
-                let advisory = variant
-                    .to_model_id()
+            };
+            ui.set_width(width);
+            // The list runs down to the window's bottom edge and scrolls
+            // past it. The room is measured from the chip, where the list
+            // opens below it: measured from wherever the popup sits, a list
+            // placed beside the chip would size itself to stay there. The
+            // popup's area also keeps last frame's size as its limit, so
+            // the height is set, not left to grow.
+            let frame = ui.spacing().menu_margin.sum().y;
+            let room = (ui.ctx().content_rect().bottom() - resp.rect.bottom() - frame - POPUP_GAP - theme::SPACE_MD).max(160.0);
+            ui.set_max_height(room);
+            egui::ScrollArea::vertical().max_height(room).auto_shrink([false, true]).show(ui, |ui| {
+            ui.set_width(width);
+            let mut role = None;
+            for (variant, missing, blurb) in rows {
+                if variant == SettingsModel::None {
+                    ui.add_space(theme::SPACE_XS);
+                    ui.separator();
+                } else if role != Some(variant.role()) {
+                    role = Some(variant.role());
+                    chip::panel_section(ui, role_caption(variant.role()), None);
+                }
+                let advisory = variant.to_model_id()
                     .and_then(prunr_models::descriptor)
-                    .and_then(|d| d.hardware_advisory(&app_settings.active_backend));
+                    .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
-                let row = chip::picker_row(ui, app_settings.model == variant, info.name, info.blurb);
+                let row = chip::choice_list_row(ui, info.icon, info.name, &blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,
                 };
                 if row.clicked() {
-                    app_settings.model = variant;
+                    match missing {
+                        Some(id) => change.open_model_store = Some(super::get_model::store_request(id)),
+                        None => app_settings.model = variant,
+                    }
                     egui::Popup::close_id(ui.ctx(), pop_id);
                 }
             }
-            ui.separator();
-            if chip::button(ui, chip::ButtonKind::Secondary, "More models…").clicked() {
+            let more = chip::choice_list_row(ui, ICON_DOWNLOAD.codepoint, MORE_MODELS.0, MORE_MODELS.1, false, chip::LIST_ACTION_FILL);
+            if more.clicked() {
                 change.open_model_store = Some(ModelStoreRequest::default());
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }
+            });
         });
     });
 
@@ -1155,7 +1345,10 @@ pub(super) fn render_model_dropdown(
             app_settings.parallel_jobs = max;
         }
         change.model_changed = true;
-        aggregate_bool(true, StaticKnob::Model, change);
+        // Not the Model knob's cache impact: the old model's cut-out stays
+        // on screen and the brushes correct it from its segmentation. The
+        // next Process drops that once it runs the new model.
+        change.commit = true;
     }
 }
 

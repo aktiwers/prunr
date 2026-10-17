@@ -29,12 +29,30 @@ pub mod download_manager;
 pub mod hardware_cache;
 pub mod env_overrides;
 pub mod dispatch_progress;
+pub(crate) mod first_look;
 pub mod automation;
+pub(crate) mod capability;
+pub(crate) mod disk_queue;
+pub(crate) mod reclaim;
+pub(crate) mod image_texture;
+pub(crate) mod selection_queue;
 
 #[cfg(test)]
 mod tests;
 
 pub fn run() -> eframe::Result {
+    // The GPU provider probe (DirectML starts a device) and the hardware
+    // profile (DXGI lists the adapters on Windows) run while the window
+    // opens; `PrunrApp::new` and the first frame read what they found.
+    let probes: [(&str, fn()); 2] = [
+        ("provider-probe", || { let _ = prunr_core::OrtEngine::detect_active_provider(); }),
+        ("hardware-probe", || { let _ = crate::hardware::profile(); }),
+    ];
+    for (name, probe) in probes {
+        if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(probe) {
+            tracing::warn!(%e, name, "could not start the probe; it runs on first use");
+        }
+    }
     let icon = {
         let png_bytes = include_bytes!("../../../../assets/prunr-256.png");
         let img = image::load_from_memory(png_bytes).expect("Failed to decode app icon");

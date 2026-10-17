@@ -76,19 +76,21 @@ fn capsule_text(ui: &egui::Ui, painter: &Painter, progress: &DispatchProgress, m
     text
 }
 
-/// Paint the tile map and the capsule. Returns `true` when Cancel was
+/// Paint the tile map and the capsule; finished tiles show their part of
+/// `preview` when the run sends one. Returns `true` when Cancel was
 /// clicked this frame.
 pub(crate) fn render(
     ui: &mut egui::Ui,
     canvas_rect: Rect,
     img_rect: Option<Rect>,
     progress: &DispatchProgress,
+    preview: Option<egui::TextureId>,
 ) -> bool {
     let cancelling = progress.cancelling;
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     if let Some(img_rect) = img_rect {
-        paint_tile_map(&painter, img_rect, progress, t);
+        paint_tile_map(&painter, img_rect, progress, preview, theme::motion_clock(ui.ctx()));
     }
 
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);
@@ -107,9 +109,9 @@ pub(crate) fn render(
         Vec2::new(width, CAPSULE_HEIGHT),
     );
     let radius = CAPSULE_HEIGHT / 2.0;
-    let shadow = Shadow { offset: [0, 14], blur: 36, spread: 0, color: Color32::from_black_alpha(128) };
+    let shadow = theme::glass_shadow();
     painter.add(shadow.as_shape(capsule, radius as u8));
-    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { theme::OVERLAY_CAPSULE_BORDER };
+    let border = if cancelling { theme::CAUTION.gamma_multiply(0.35) } else { theme::HAIRLINE };
     painter.rect(capsule, radius, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, border), StrokeKind::Inside);
 
     let ring_center = Pos2::new(capsule.left() + CAPSULE_PAD_LEFT + RING_RADIUS + RING_STROKE / 2.0, capsule.center().y);
@@ -157,16 +159,28 @@ pub(crate) fn render(
 /// A small pill beside the cursor (or mid-canvas when the cursor is
 /// elsewhere) for a wait the user started by picking a tool.
 pub(crate) fn render_loading_pill(ui: &egui::Ui, canvas_rect: Rect, cursor: Option<Pos2>, label: &str) {
+    paint_pill(ui, canvas_rect, label, |size| cursor.map_or(canvas_rect.center() - size / 2.0, |c| c + Vec2::new(18.0, 4.0)));
+}
+
+/// The same pill at the bottom of the canvas, clear of the strips and
+/// popovers along its top, for work that goes on with nothing to show.
+pub(crate) fn render_working_pill(ui: &egui::Ui, canvas_rect: Rect, label: &str) {
+    paint_pill(ui, canvas_rect, label, |size| Pos2::new(canvas_rect.center().x - size.x / 2.0, canvas_rect.max.y - size.y - WORKING_PILL_INSET));
+}
+
+/// Room between the working pill and the canvas's bottom edge.
+const WORKING_PILL_INSET: f32 = 24.0;
+
+fn paint_pill(ui: &egui::Ui, canvas_rect: Rect, label: &str, place: impl FnOnce(Vec2) -> Pos2) {
     let t = ui.ctx().input(|i| i.time) as f32;
     let painter = ui.painter().with_clip_rect(canvas_rect);
     let text = single_line(&painter, label.to_string(), SUBTITLE_SIZE, theme::TEXT_PRIMARY, f32::INFINITY);
     let size = Vec2::new(9.0 + 16.0 + 8.0 + text.size().x + 12.0, 30.0);
-    let anchor = cursor.map_or(canvas_rect.center() - size / 2.0, |c| c + Vec2::new(18.0, 4.0));
-    let min = anchor.clamp(canvas_rect.min, (canvas_rect.max - size).max(canvas_rect.min));
+    let min = place(size).clamp(canvas_rect.min, (canvas_rect.max - size).max(canvas_rect.min));
     let pill = Rect::from_min_size(min, size);
     let shadow = Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(115) };
     painter.add(shadow.as_shape(pill, 15));
-    painter.rect(pill, 15.0, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, theme::OVERLAY_CAPSULE_BORDER), StrokeKind::Inside);
+    painter.rect(pill, 15.0, theme::OVERLAY_CAPSULE_FILL, Stroke::new(1.0, theme::HAIRLINE), StrokeKind::Inside);
     paint_ring(&painter, Pos2::new(pill.left() + 9.0 + 8.0, pill.center().y), 6.0, 2.0, None, t, theme::ACCENT_BRIGHT);
     painter.galley(Pos2::new(pill.left() + 33.0, pill.center().y - text.size().y / 2.0), text, theme::TEXT_PRIMARY);
 }
@@ -177,12 +191,21 @@ fn single_line(painter: &Painter, text: String, size: f32, color: Color32, max_w
     painter.layout_job(job)
 }
 
-/// Dim the tiles still to come, light the one running, leave done ones clear.
-fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress, t: f32) {
+/// Dim the tiles still to come; show the running one, under working
+/// light, and the done ones from `preview`, or clear without one.
+/// Cells an earlier layout finished stay as they were.
+fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress, preview: Option<egui::TextureId>, t: f32) {
     let to_screen = |r: &prunr_core::TileRect| Rect::from_min_size(
         img_rect.min + Vec2::new(r.x * img_rect.width(), r.y * img_rect.height()),
         Vec2::new(r.w * img_rect.width(), r.h * img_rect.height()),
     );
+    let show_preview = |cell: &prunr_core::TileRect| {
+        if let Some(texture) = preview {
+            let uv = Rect::from_min_size(Pos2::new(cell.x, cell.y), Vec2::new(cell.w, cell.h));
+            painter.image(texture, to_screen(cell), uv, Color32::WHITE);
+        }
+    };
+    progress.finished.iter().for_each(show_preview);
     for (cell, state) in progress.tiles.iter().zip(progress.tile_states.iter()) {
         let r = to_screen(cell);
         match state {
@@ -190,10 +213,11 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
                 painter.rect(r, 0.0, theme::TILE_WAITING, Stroke::new(0.5, theme::TILE_GRID), StrokeKind::Inside);
             }
             TileState::Running => {
+                show_preview(cell);
                 super::effects::paint_working(painter, r, t);
                 super::effects::paint_working_frame(painter, r);
             }
-            TileState::Done => {}
+            TileState::Done => show_preview(cell),
         }
     }
 }
@@ -201,7 +225,7 @@ fn paint_tile_map(painter: &Painter, img_rect: Rect, progress: &DispatchProgress
 /// A ring filled to `fraction` from twelve o'clock, or a turning arc
 /// when there is nothing to count yet.
 fn paint_ring(painter: &Painter, center: Pos2, radius: f32, width: f32, fraction: Option<f32>, t: f32, color: Color32) {
-    painter.circle_stroke(center, radius, Stroke::new(width, theme::PROGRESS_RING_TRACK));
+    painter.circle_stroke(center, radius, Stroke::new(width, theme::RAIL));
     let (start, sweep) = match fraction {
         Some(f) => (-FRAC_PI_2, f * TAU),
         None => (t * TAU * 0.8, 0.28 * TAU),

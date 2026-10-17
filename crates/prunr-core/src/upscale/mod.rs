@@ -5,10 +5,10 @@ mod tiling;
 mod alpha;
 pub mod postprocess;
 
-pub use postprocess::{sharpened, apply_ai_blend, apply_color_match};
+pub use postprocess::{sharpened, apply_ai_blend, apply_color_match, refine, Refine};
 
 pub use alpha::upscale_alpha_lanczos3;
-pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
+pub use tiling::{peak_bytes, plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
 
 use std::sync::Arc;
 
@@ -16,13 +16,12 @@ use crate::progress::Progress;
 
 use half::f16;
 use image::{RgbImage, RgbaImage};
-use ort::{inputs, value::Tensor};
+use ort::{inputs, value::{DynValue, Tensor}};
 use ort::session::{NoSelectedOutputs, RunOptions};
 use ort::value::TensorElementType;
 
 use crate::CoreError;
 use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
-use crate::types::ModelKind;
 
 /// Shared `RunOptions` handle used by callers that want to terminate a
 /// running upscale session mid-tile. The owning thread holds the `Arc`
@@ -40,9 +39,7 @@ pub type UpscaleRunOptions = RunOptions<NoSelectedOutputs>;
 /// shape-mismatch (observed against 4xNomos8kSCHAT-L: Level3 panics with
 /// `Attempting to get index by a name which does not exist:
 /// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
-/// Exposed `pub` so the Processor's warm-engine cache can derive the
-/// same level without duplicating the branch.
-pub fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
+pub(crate) fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
     if descriptor.tile_size_multiple.is_some() {
         GraphOptimizationLevel::Level2
     } else {
@@ -165,7 +162,7 @@ fn run_upscale_native(
     let input_name = knobs.input_name;
     // Probe the actual loaded session's input dtype. The REGISTRY's
     // `knobs.is_fp16` flag describes the MAIN ONNX URL; when the engine
-    // promoted to an fp16 sibling via `optimized_variant_bytes`, the
+    // loaded the fp16 sibling on a GPU, the
     // graph expects fp16 inputs even though the REGISTRY knob still
     // reads false. Without this probe the dispatch would feed fp32
     // tensors into an fp16 graph and ORT errors with "Unexpected input
@@ -183,7 +180,6 @@ fn run_upscale_native(
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
-        let pixel_count = (padded_w * padded_h) as usize;
         let shape = [1, 3, padded_h as usize, padded_w as usize];
 
         let out_h = padded_h * ns;
@@ -191,53 +187,23 @@ fn run_upscale_native(
         let plane = (out_w * out_h) as usize;
         let mut packed = vec![0u8; 3 * plane];
 
-        // The two branches keep the f16/f32 buffers + tensor scoped to
-        // the relevant arm so the unused dtype's buffer doesn't sit
-        // allocated during inference. When `terminate` is Some, the
-        // session.run is wired through RunOptions so another thread can
-        // abort the running tile — on EPs that honour it (CPU does;
-        // OpenVINO only returns at the tile boundary).
-        if is_fp16 {
-            let mut input_data = vec![f16::ZERO; 3 * pixel_count];
-            for (i, p) in rgb_tile.pixels().enumerate() {
-                let [r, g, b] = p.0;
-                input_data[i] = f16::from_f32(r as f32 * INV_255);
-                input_data[pixel_count + i] = f16::from_f32(g as f32 * INV_255);
-                input_data[2 * pixel_count + i] = f16::from_f32(b as f32 * INV_255);
-            }
-            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
-                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
-            let tensor = Tensor::from_array(arr)
-                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
-            engine.with_session(|session| {
-                let outputs = match terminate {
-                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
-                    None => session.run(inputs![input_name => &tensor]),
-                }
-                .map_err(classify_run_error)?;
-                pack_output(&outputs[0], plane, &mut packed, is_fp16)
-            })?;
+        // Only the session's dtype gets a buffer. When `terminate` is
+        // Some, the session.run is wired through RunOptions so another
+        // thread can abort the running tile — on EPs that honour it (CPU
+        // does; OpenVINO only returns at the tile boundary).
+        let tensor = if is_fp16 {
+            chw_tensor(rgb_tile, shape, |v| f16::from_f32(v * INV_255))?
         } else {
-            let mut input_data = vec![0.0_f32; 3 * pixel_count];
-            for (i, p) in rgb_tile.pixels().enumerate() {
-                let [r, g, b] = p.0;
-                input_data[i] = r as f32 * INV_255;
-                input_data[pixel_count + i] = g as f32 * INV_255;
-                input_data[2 * pixel_count + i] = b as f32 * INV_255;
+            chw_tensor(rgb_tile, shape, |v| v * INV_255)?
+        };
+        engine.with_session(|session| {
+            let outputs = match terminate {
+                Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
+                None => session.run(inputs![input_name => &tensor]),
             }
-            let arr = ndarray::Array4::from_shape_vec(shape, input_data)
-                .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
-            let tensor = Tensor::from_array(arr)
-                .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))?;
-            engine.with_session(|session| {
-                let outputs = match terminate {
-                    Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
-                    None => session.run(inputs![input_name => &tensor]),
-                }
-                .map_err(classify_run_error)?;
-                pack_output(&outputs[0], plane, &mut packed, is_fp16)
-            })?;
-        }
+            .map_err(classify_run_error)?;
+            pack_output(&outputs[0], plane, &mut packed, is_fp16)
+        })?;
 
         RgbImage::from_raw(out_w, out_h, packed).ok_or_else(|| {
             CoreError::Inference("upscale: from_raw failed (packed length mismatch)".into())
@@ -246,6 +212,27 @@ fn run_upscale_native(
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
     upscale_tiled(input, ns, cfg, run_tile, progress)
+}
+
+/// `rgb` as a planar CHW tensor of `shape`, each channel value mapped
+/// through `convert`.
+fn chw_tensor<T>(rgb: &RgbImage, shape: [usize; 4], convert: impl Fn(f32) -> T) -> Result<DynValue, CoreError>
+where
+    T: ort::value::PrimitiveTensorElementType + std::fmt::Debug + Clone + Default + 'static,
+{
+    let pixel_count = shape[2] * shape[3];
+    let mut data = vec![T::default(); 3 * pixel_count];
+    for (i, p) in rgb.pixels().enumerate() {
+        let [r, g, b] = p.0;
+        data[i] = convert(r as f32);
+        data[pixel_count + i] = convert(g as f32);
+        data[2 * pixel_count + i] = convert(b as f32);
+    }
+    let arr = ndarray::Array4::from_shape_vec(shape, data)
+        .map_err(|e| CoreError::Inference(format!("upscale: input shape: {e}")))?;
+    Tensor::from_array(arr)
+        .map(|t| t.into_dyn())
+        .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))
 }
 
 /// Map an ORT run-time error to a `CoreError`. ORT reports a session
@@ -282,9 +269,7 @@ pub fn upscale_rgba_with_engine(
     progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError> {
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
+    let descriptor = prunr_models::descriptor(model_id)
         .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
 
     let knobs = upscale_knobs(descriptor)?;
@@ -310,9 +295,7 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     out
 }
 
-/// Convenience wrapper: constructs an engine internally then delegates to
-/// `upscale_rgba_with_engine`. Preserves the existing public API for
-/// callers that don't need the warm-engine cache (CLI, tests).
+/// Builds its own engine; for callers without a warm engine (CLI, tests).
 ///
 /// Peak working-set RAM (additive to the `upscale_tiled` accumulators
 /// documented in `tiling.rs`):
@@ -330,19 +313,7 @@ pub fn upscale_rgba(
     intra_threads: usize,
     progress: &Progress,
 ) -> Result<RgbaImage, CoreError> {
-    let descriptor = prunr_models::REGISTRY
-        .iter()
-        .find(|d| d.id == model_id)
-        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
-
-    let level = pick_optimization_level(descriptor);
-
-    let model_kind = ModelKind::try_from(model_id).map_err(|id| {
-        CoreError::Inference(format!(
-            "{id:?} has no ModelKind mapping — upscale dispatch requires a seg/upscale variant"
-        ))
-    })?;
-    let engine = OrtEngine::new_with_optimization_level(model_kind, intra_threads, level)?;
+    let engine = OrtEngine::for_model(model_id, intra_threads, false)?;
     upscale_rgba_with_engine(input, &engine, model_id, scale, progress, None)
 }
 
@@ -386,18 +357,14 @@ mod tests {
     /// session due to Level3 shape baking during graph optimisation.
     #[test]
     fn pick_optimization_level_uses_level2_for_hat_family() {
-        let nomos = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::Nomos8kSchatL)
+        let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
             .expect("Nomos8kSchatL registered");
         assert!(
             matches!(pick_optimization_level(nomos), GraphOptimizationLevel::Level2),
             "Nomos8kSchatL must use Level2 (has tile_size_multiple)"
         );
 
-        let esrgan = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX4Plus)
+        let esrgan = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX4Plus)
             .expect("RealEsrganX4Plus registered");
         assert!(
             matches!(pick_optimization_level(esrgan), GraphOptimizationLevel::Level3),
@@ -405,11 +372,6 @@ mod tests {
         );
     }
 
-    /// `is_fp16` selects the output-extraction dtype in `pack_output`.
-    /// A regression that flipped Nomos8kSCHAT-L's flag to `false` (or
-    /// RealESRGAN's to `true`) would surface as a runtime ORT
-    /// "Unexpected input data type" panic on the first dispatch —
-    /// caught here at compile-time-of-the-test instead.
     #[test]
     fn fit_to_scale_resamples_to_every_offered_factor() {
         let input = RgbaImage::from_pixel(4, 6, image::Rgba([10, 20, 30, 200]));
@@ -424,11 +386,14 @@ mod tests {
         assert_eq!(fit_to_scale(native2, &input, 4).dimensions(), (16, 24));
     }
 
+    /// `is_fp16` selects the output-extraction dtype in `pack_output`.
+    /// A regression that flipped Nomos8kSCHAT-L's flag to `false` (or
+    /// RealESRGAN's to `true`) would surface as a runtime ORT
+    /// "Unexpected input data type" panic on the first dispatch —
+    /// caught here at compile-time-of-the-test instead.
     #[test]
     fn upscale_knobs_fp16_matches_export() {
-        let nomos = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::Nomos8kSchatL)
+        let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
             .expect("Nomos8kSchatL registered");
         let nomos_knobs = upscale_knobs(nomos).expect("Nomos8kSchatL has upscale knobs");
         assert!(
@@ -440,9 +405,7 @@ mod tests {
             "Nomos8kSchatL (Phhofm HAT-L) names the input tensor `input`"
         );
 
-        let esrgan = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX4Plus)
+        let esrgan = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX4Plus)
             .expect("RealEsrganX4Plus registered");
         let esrgan_knobs = upscale_knobs(esrgan).expect("RealEsrganX4Plus has upscale knobs");
         assert!(
@@ -455,15 +418,11 @@ mod tests {
         );
     }
 
-    // ── Two-pass scheduler tests ──────────────────────────────────────────────
-
     /// x2plus knobs match the x4plus export convention (same RRDB architecture,
     /// same export script → same tensor names and dtype).
     #[test]
     fn x2plus_knobs_fp16_false_and_input_data() {
-        let x2 = prunr_models::REGISTRY
-            .iter()
-            .find(|d| d.id == prunr_models::ModelId::RealEsrganX2Plus)
+        let x2 = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX2Plus)
             .expect("RealEsrganX2Plus registered");
         let knobs = upscale_knobs(x2).expect("RealEsrganX2Plus has upscale knobs");
         assert!(!knobs.is_fp16, "x2plus exports fp32 — must NOT pack f16 tensors");

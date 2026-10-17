@@ -18,7 +18,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         let app_state = app.batch.app_state();
         let counts = app.batch.status_counts();
-        let batch_processing = counts.processing > 0;
+        let batch_processing = app.batch.any_awaiting_cut();
         let batch_done_count = counts.done;
         // Only count items involved in processing (not idle Pending items)
         let batch_total = counts.batch_total();
@@ -26,12 +26,15 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         // The canvas capsule carries the step and counts; this text is
         // the terse fallback for eyes off the canvas, without counters.
+        let running = |step: prunr_core::Step| format!("{}\u{2026}", step.label());
         let status_text = if app.processor.is_upscale_in_flight() {
-            "Upscaling\u{2026}".to_string()
+            running(prunr_core::Step::Upscaling)
+        } else if app.processor.is_colorize_in_flight() {
+            running(prunr_core::Step::Colorizing)
         } else if inpaint_busy {
             // Eraser dispatch lives outside the seg-pipeline status track,
             // so check it first — otherwise the "All done" branch wins.
-            "Erasing\u{2026}".to_string()
+            running(prunr_core::Step::Erasing)
         } else if batch_processing {
             format!("Processing {batch_done_count}/{batch_total} images...")
         } else if batch_total >= 2 && batch_done_count == batch_total {
@@ -41,10 +44,10 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         } else {
             match app_state {
                 AppState::Empty | AppState::Loaded => {
-                    if app.status.is_temporary {
+                    if app.status.is_temporary() {
                         app.status.text.clone()
                     } else {
-                        "Ready".to_string()
+                        crate::gui::status_state::READY.to_string()
                     }
                 }
                 AppState::Processing => {
@@ -63,7 +66,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.label(
                 RichText::new(format!("{depth} undo"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
         }
@@ -73,7 +76,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             ui.label(
                 RichText::new(format!("{pct}%"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
 
@@ -102,15 +105,15 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             // selection. Sits in the statusbar center (between the left
             // status text and the right metadata) — only visible when the
             // progress bar isn't occupying that slot.
-            let selected_count = app.batch.selected_count();
-            if selected_count >= 2 {
+            let ticked_count = app.batch.ticked_count();
+            if ticked_count >= 2 {
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
                     RichText::new(
                         "Live editing applies to the viewed image only \u{2014} \
                          click Process to apply to all selected."
                     )
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
                 );
             }
@@ -119,17 +122,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            // `force_cpu` overrides the detected backend so the toggle reflects
-            // the override instantly, not after the next batch reinit.
-            let backend_display = if app.settings.force_cpu {
-                "CPU (forced)"
-            } else {
-                &app.settings.active_backend
-            };
+            let backend_display = if app.settings.cpu_only() { "CPU only" } else { &app.settings.active_backend };
             ui.label(
                 RichText::new(format!("Backend: {backend_display}"))
                     .monospace()
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
 
@@ -147,16 +144,24 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             // result if there is one (so an upscale's 4× output reads
             // correctly), otherwise the source dimensions captured at decode.
             if let Some(item) = app.batch.selected_item() {
-                let (w, h) = item.result_rgba
-                    .as_ref()
-                    .map(|r| r.dimensions())
-                    .unwrap_or(item.dimensions);
+                let (w, h) = item.shown_dims();
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
                     RichText::new(format!("{w}×{h}"))
                         .size(theme::FONT_SIZE_BODY)
                         .color(theme::TEXT_SECONDARY),
                 );
+                let erase_scale = item.timeline.current().origin.as_ref()
+                    .filter(|o| o.engine == crate::gui::item::Engine::Erase)
+                    .and_then(|o| o.fill_scale);
+                if let Some(scale) = erase_scale {
+                    ui.add_space(theme::SPACE_SM);
+                    ui.label(
+                        RichText::new(format!("Fill {}", super::fmt::percent(scale)))
+                            .size(theme::FONT_SIZE_BODY)
+                            .color(theme::TEXT_SECONDARY),
+                    ).on_hover_text("How large the eraser filled its region. 100% is full size; Auto shrinks a large region to fit the model.");
+                }
             }
         });
     });

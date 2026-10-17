@@ -1,15 +1,12 @@
-//! Per-model interpretation boundary tests.
+//! Brushes and selections against the app: which active model re-cuts on a
+//! committed selection (`LivePreview::is_pending_for`), how strokes sit on
+//! the undo timeline, the live preview's tensor reuse, the Magic Brush
+//! retune and embedding cache, the cut-out switch (Restore / Erase /
+//! Select) and its correction cache, and what a model switch leaves
+//! correctable.
 //!
-//! Each test commits a known selection on a fixture BatchItem under a specific
-//! active-model category and asserts the dispatch side-effect (or lack thereof)
-//! via `LivePreview::is_pending_for`, which returns true when
-//! `dispatch_brush_rerun` called `mark_tweak` for the item.
-//!
-//! Limitation: `SettingsModel` has no Sam2HieraSmall variant (the Selection-
-//! category model is not user-selectable as a top-level mode). The
-//! ModelCategory::Selection arm is therefore verified via code inspection.
-//! `SettingsModel::None` covers the no-model path, which is the closest
-//! testable proxy for "no active model".
+//! The Magic Brush's model (Sam21HieraSmall) is not a `SettingsModel`: it
+//! is never the active model, so it has no row in the per-model table.
 
 
 use crate::gui::app::PrunrApp;
@@ -18,41 +15,75 @@ use crate::gui::timeline::StepKind;
 
 use super::fixtures::push_test_item;
 use crate::gui::item::BatchItem;
-use crate::gui::worker::{CompressedTensor, TensorCache};
+use crate::gui::live_preview::{DispatchInputs, PreviewKind};
+use crate::gui::worker::{CompressedTensor, RawSegTensor};
 
 /// A segmentation result exists for the item: the correction has a tensor
 /// to apply to.
 fn give_tensor(item: &mut BatchItem) {
-    let cache = TensorCache { data: vec![0.5; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta };
+    give_tensor_of(item, prunr_core::ModelKind::Silueta);
+}
+
+/// An 8×8 segmentation tensor made by `model`.
+fn give_tensor_of(item: &mut BatchItem, model: prunr_core::ModelKind) {
+    let cache = RawSegTensor { data: vec![0.5; 64], height: 8, width: 8, model };
     item.set_cached_tensor(CompressedTensor::from_raw(cache));
+}
+
+/// An 8×8 opaque grey image of value `v`.
+fn px(v: u8) -> image::RgbaImage {
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]))
+}
+
+/// The live preview's mask inputs for `id`, at the app's current selection
+/// style and cut-out action.
+fn preview_inputs(app: &mut PrunrApp, id: u64, filter_only: bool) -> Option<DispatchInputs> {
+    let style = app.selection_style();
+    let action = app.settings.brush.cutout_action;
+    let role = if filter_only { crate::gui::knob_catalog::ModelRole::Filters } else { crate::gui::knob_catalog::ModelRole::Cutout };
+    PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(id).expect("the item"), PreviewKind::Mask, role, style, action).ok()
+}
+
+/// A second stroke on the first item: its bottom-right cell joins the
+/// selection.
+fn add_corner_stroke(app: &mut PrunrApp) {
+    let corner = prunr_core::selection::MaskArtifact::from_cells(8, 8, (0..64).map(|i| if i == 63 { prunr_core::selection::FULL } else { 0 }).collect());
+    let more = crate::gui::processor::merge_stroke(app.batch.items[0].selection_mask.clone(), corner);
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(more), StepKind::Stroke);
 }
 
 /// A processed item: the cut-out is on screen and its tensor is cached.
 fn give_cutout(item: &mut BatchItem) {
-    give_tensor(item);
-    item.status = crate::gui::item::BatchStatus::Done;
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 }
 
-/// The live preview decompresses the segmentation tensor once per drag:
-/// consecutive dispatch inputs share one plane, and replacing the cached
-/// tensor drops it.
+/// The live preview unpacks the segmentation tensor once per drag, on the
+/// render's thread: the first tick sends it packed, the render's unpacked
+/// copy is kept, and the next ticks share that one plane until the cached
+/// tensor changes.
 #[test]
 fn preview_inputs_reuse_the_decompressed_tensor_until_it_changes() {
-    use crate::gui::live_preview::PreviewKind;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 3);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.on_screen = true;
     give_cutout(item);
-    let first = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style) }
-        .expect("inputs").seg_tensor.expect("tensor");
-    let second = { let style = app.selection_style(); crate::gui::app::PrunrApp::build_preview_inputs(&mut app.batch.items, 3, PreviewKind::Mask, false, style) }
-        .expect("inputs").seg_tensor.expect("tensor");
-    assert!(Arc::ptr_eq(&first, &second), "second tick must reuse the hot tensor");
+    let first = preview_inputs(&mut app, 3, false).expect("inputs");
+    assert!(first.seg_tensor.is_none(), "nothing unpacked on the UI thread");
+    let packed = first.packed.seg.expect("sent packed");
+    let unpacked = Arc::new(crate::gui::live_preview::decompress_seg(&packed).expect("unpacks"));
+    let render = |seg: &Arc<_>| crate::gui::live_preview::Unpacked { seg: Some((packed.clone(), Arc::clone(seg))), edge: None };
+    app.batch.items[0].keep_unpacked(render(&unpacked));
+    let second = preview_inputs(&mut app, 3, false).expect("inputs");
+    assert!(second.packed.seg.is_none());
+    assert!(second.seg_tensor.is_some_and(|s| Arc::ptr_eq(&s, &unpacked)), "the next tick reuses the render's copy");
     let item = app.batch.find_by_id_mut(3).unwrap();
     item.set_cached_tensor(None);
     assert!(item.volatile_seg_tensor.is_none());
+    item.keep_unpacked(render(&unpacked));
+    assert!(item.volatile_seg_tensor.is_none(), "a copy of a tensor no longer cached is not kept");
 }
 
 fn make_mask(w: u32, h: u32) -> prunr_core::selection::MaskArtifact {
@@ -76,15 +107,13 @@ fn app_with_model(model: SettingsModel) -> PrunrApp {
 /// before it: recording it copies no image.
 #[test]
 fn a_stroke_is_one_step_sharing_the_result_before_it() {
-    use crate::gui::item::BatchStatus;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 7);
     item.dimensions = (8, 8);
-    item.status = BatchStatus::Done;
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Process);
-    give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 
     app.commit_selection_and_dispatch(7, make_mask(8, 8), StepKind::Stroke);
 
@@ -137,10 +166,10 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
-    let Ok(DecodedSelection::Retuned { merged, hash }) = result.result else {
+    let Ok(DecodedSelection::Retuned { merged, hash, for_hash }) = result.result else {
         panic!("re-threshold decodes without a session");
     };
-    app.apply_rethreshold(9, merged, hash, result.reading);
+    app.apply_rethreshold(9, merged, hash, result.reading, for_hash);
 
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
@@ -151,7 +180,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!((ld.reading.confidence - 0.9).abs() < 1e-6);
     // The retuned selection keeps only the right-hand columns.
     let sel = item.selection_mask.as_ref().unwrap();
-    assert!(sel.cells()[7] == prunr_core::selection::FULL && sel.cells()[0] == 0);
+    assert!(sel.cells()[7] != 0 && sel.cells()[0] == 0);
 
     // The speck switch retunes the last stroke the same way.
     app.magic_brush_state.rethreshold_in_flight = false;
@@ -162,120 +191,28 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!(app.magic_brush_state.rethreshold_in_flight, "flipping Remove specks retunes the last stroke");
 }
 
-// ── Segmentation → the re-cut fires at once ─────────────────────────────────
-
+/// A stroke committed under each active model: segmentation re-cuts at
+/// once; the eraser, upscale and colorize wait for the user's Process, and
+/// with no model nothing runs.
 #[test]
-fn bg_removal_fires_rerun_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::BiRefNetLite);
-
-    let item = push_test_item(&mut app, 1);
-    item.dimensions = (64, 64);
-    give_cutout(item);
-    let item_id = 1u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        app.processor.live_preview.is_pending_for(item_id),
-        "a stroke on a background-removal model must queue the re-cut"
-    );
-}
-
-// ── Inpaint → no auto-dispatch ───────────────────────────────────────────────
-
-#[test]
-fn inpaint_does_not_auto_dispatch_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::Inpaint);
-
-    let item = push_test_item(&mut app, 3);
-    item.dimensions = (64, 64);
-    let item_id = 3u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Inpaint must not auto-dispatch on stroke commit — user clicks Process"
-    );
-}
-
-// ── Upscale → no auto-dispatch ───────────────────────────────────────────────
-
-#[test]
-fn upscale_does_not_auto_dispatch_on_selection_commit() {
-    let mut app = app_with_model(SettingsModel::RealEsrganUpscale);
-
-    let item = push_test_item(&mut app, 4);
-    item.dimensions = (64, 64);
-    let item_id = 4u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Upscale must not auto-dispatch on stroke commit"
-    );
-}
-
-// ── No model → no auto-dispatch ──────────────────────────────────────────────
-
-#[test]
-fn no_model_loaded_does_not_dispatch() {
-    let mut app = app_with_model(SettingsModel::None);
-
-    let item = push_test_item(&mut app, 5);
-    item.dimensions = (64, 64);
-    let item_id = 5u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "No-model mode must not dispatch on stroke commit"
-    );
-}
-
-// ── Selection category → no auto-dispatch ────────────────────────────────────
-//
-// Sam2HieraSmall (ModelCategory::Selection) is not user-selectable via
-// SettingsModel — it's an internal Magic Brush model dispatched by the canvas,
-// not a top-level user-facing mode. There is no SettingsModel::Sam2 variant, so
-// this category is not reachable through the settings path.
-//
-// The match arm `Some(ModelCategory::Selection) => {}` exists in
-// `apply_selection_to_active_model` and is verified here by confirming that
-// when the model maps to None (the closest reachable proxy), no dispatch fires.
-// Identical no-dispatch behaviour is what the Selection arm enforces; this test
-// pins the contract so a future SettingsModel::Sam2 variant cannot drift it.
-#[test]
-fn selection_category_arm_exists_no_dispatch() {
-    // Verify apply_selection_to_active_model with SettingsModel::None (which
-    // produces category=None, handled by the last match arm alongside Upscale
-    // and EdgeDetection) does not dispatch. This is the same behavior the
-    // Selection arm enforces. The arm itself prevents future regressions if a
-    // SettingsModel::Sam2 variant is added later.
-    let mut app = app_with_model(SettingsModel::None);
-
-    let item = push_test_item(&mut app, 6);
-    item.dimensions = (64, 64);
-    let item_id = 6u64;
-
-    let mask = make_mask(64, 64);
-    app.batch.commit_selection(item_id, mask, StepKind::Stroke);
-    app.apply_selection_to_active_model(item_id);
-
-    assert!(
-        !app.processor.live_preview.is_pending_for(item_id),
-        "Selection-category (or no-model) must not auto-dispatch on stroke commit"
-    );
+fn a_selection_commit_recuts_only_under_a_segmentation_model() {
+    for (model, has_cutout, recuts) in [
+        (SettingsModel::BiRefNetLite, true, true),
+        (SettingsModel::Inpaint, false, false),
+        (SettingsModel::RealEsrganUpscale, false, false),
+        (SettingsModel::ColorizeDdcolor, false, false),
+        (SettingsModel::None, false, false),
+    ] {
+        let mut app = app_with_model(model);
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (64, 64);
+        if has_cutout {
+            give_cutout(item);
+        }
+        app.batch.commit_selection(1, make_mask(64, 64), StepKind::Stroke);
+        app.apply_selection_to_active_model(1);
+        assert_eq!(app.processor.live_preview.is_pending_for(1), recuts, "{model:?}");
+    }
 }
 
 // ── Regression: Paint Brush BG-removal immediate-feedback ────────────────────
@@ -358,7 +295,7 @@ fn a_stroke_before_the_first_result_undoes_and_redoes() {
 
     app.handle_undo(&ctx);
     assert!(app.batch.items[0].selection_mask.is_none(), "undo reverts the stroke");
-    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending, "and touches no result");
+    assert_eq!(app.batch.items[0].status(), crate::gui::item::BatchStatus::Pending, "and touches no result");
 
     app.handle_redo(&ctx);
     assert!(app.batch.items[0].selection_mask.is_some(), "redo paints it again");
@@ -371,7 +308,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     let mut app = app_with_model(SettingsModel::Inpaint);
     let item = push_test_item(&mut app, 4);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
     item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     item.commit(StepKind::Erase);
     app.commit_selection_and_dispatch(4, make_mask(8, 8), StepKind::Stroke);
@@ -379,7 +316,7 @@ fn an_eraser_stroke_undo_keeps_the_result() {
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none(), "the region stroke is undone");
-    assert!(item.result_rgba.is_some() && item.status == crate::gui::item::BatchStatus::Done, "the result stays");
+    assert!(item.has_result() && item.status() == crate::gui::item::BatchStatus::Done, "the result stays");
 }
 
 #[test]
@@ -389,7 +326,7 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     let mut app = app_with_model(SettingsModel::Silueta);
     let item = push_test_item(&mut app, 5);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Done);
     // History entries may be stored compressed, so compare pixels, not Arcs.
     let before = image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
     let recut = image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]));
@@ -405,8 +342,8 @@ fn a_stroke_undo_brings_the_stored_result_back() {
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.selection_mask.is_none());
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == before), "the pre-stroke image is back");
-    assert_eq!(item.status, crate::gui::item::BatchStatus::Done);
+    assert!(item.shown_result().is_some_and(|r| *r == before), "the pre-stroke image is back");
+    assert_eq!(item.status(), crate::gui::item::BatchStatus::Done);
 
     app.handle_redo(&ctx);
     let item = &app.batch.items[0];
@@ -422,15 +359,13 @@ fn a_stroke_undo_brings_the_stored_result_back() {
 fn a_process_run_with_a_kept_selection_undoes_in_order() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
-    item.status = crate::gui::item::BatchStatus::Done;
     item.source_rgba = Some(Arc::new(px(0)));
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
-    give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
 
     app.commit_selection_and_dispatch(9, make_mask(8, 8), StepKind::Stroke);
     app.batch.items[0].result_rgba = Some(Arc::new(px(2))); // the stroke's re-cut
@@ -448,7 +383,7 @@ fn a_process_run_with_a_kept_selection_undoes_in_order() {
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(2)), "undoing the run brings back the corrected image it replaced");
+    assert!(item.shown_result().is_some_and(|r| *r == px(2)), "undoing the run brings back the corrected image it replaced");
     assert!(item.selection_mask.is_some(), "the selection belongs to the stroke, not the run");
 
     app.handle_undo(&ctx);
@@ -470,7 +405,7 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     give_tensor(item);
     // The state after undoing a Process: the tensor stays, the result is gone.
-    item.status = crate::gui::item::BatchStatus::Pending;
+    crate::gui::tests::fixtures::put_in(item, crate::gui::item::BatchStatus::Pending);
 
     app.commit_selection_and_dispatch(6, make_mask(8, 8), StepKind::Stroke);
     assert!(!app.processor.live_preview.is_pending_for(6), "a stroke on the original must not re-cut");
@@ -478,48 +413,31 @@ fn a_stroke_after_undoing_the_result_does_not_bring_it_back() {
     app.handle_undo(&ctx);
     app.handle_redo(&ctx);
     assert!(!app.processor.live_preview.is_pending_for(6), "nor may stepping that stroke");
-    assert_eq!(app.batch.items[0].status, crate::gui::item::BatchStatus::Pending);
+    assert_eq!(app.batch.items[0].status(), crate::gui::item::BatchStatus::Pending);
 }
 
 /// A re-cut computed for a state the image has left (by undo, redo or
 /// another step) never lands: its result is for a state no longer shown.
 #[test]
 fn a_recut_for_a_state_left_behind_never_lands() {
-    use crate::gui::live_preview::{PreviewKind, PreviewResult};
+    use crate::gui::live_preview::PreviewResult;
     use std::sync::Arc;
     let ctx = egui::Context::default();
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
     let item = push_test_item(&mut app, 8);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.status = crate::gui::item::BatchStatus::Done;
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
-    give_tensor(item);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
     app.commit_selection_and_dispatch(8, make_mask(8, 8), StepKind::Stroke);
-    let inputs = { let style = app.selection_style(); PrunrApp::build_preview_inputs(&mut app.batch.items, 8, PreviewKind::Mask, false, style) }
-        .expect("the stroke's re-cut starts");
+    let inputs = preview_inputs(&mut app, 8, false).expect("the stroke's re-cut starts");
 
     app.handle_undo(&ctx);
-    let landed = PreviewResult {
-        item_id: 8,
-        rgba: std::sync::Arc::new(px(9)),
-        kind: PreviewKind::Mask,
-        generation: 0,
-        version: inputs.version,
-        start: None,
-        new_edge: None,
-        new_bold: None,
-        new_masked_base: None,
-        new_reference: None,
-        applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
-        applied_tier2_knobs: None,
-        is_final: true,
-    };
+    let landed = PreviewResult { version: inputs.version, ..PreviewResult::mask_for_test(8, std::sync::Arc::new(px(9))) };
     app.apply_completed_previews(&ctx, vec![landed]);
     let item = &app.batch.items[0];
-    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "the undone stroke's re-cut does not land");
+    assert!(item.shown_result().is_some_and(|r| *r == px(1)), "the undone stroke's re-cut does not land");
     assert!(app.batch.items[0].timeline.can_redo(), "and the redo step is intact");
 }
 
@@ -531,11 +449,9 @@ fn switching_images_keeps_every_undo_step() {
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::BiRefNetLite);
-    let px = |v: u8| image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]));
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(px(0)));
-    item.status = BatchStatus::Done;
     item.result_rgba = Some(Arc::new(px(1)));
     item.commit(StepKind::Process);
     item.result_rgba = Some(Arc::new(px(2)));
@@ -549,13 +465,13 @@ fn switching_images_keeps_every_undo_step() {
     assert!(app.batch.items[0].result_rgba.is_none(), "the background result is released");
     app.batch.select_item(0);
     app.sync_selected_batch_textures(&ctx);
-    assert!(app.batch.items[0].result_rgba.as_ref().is_some_and(|r| **r == px(2)), "and back on return");
+    assert!(app.batch.items[0].shown_result().is_some_and(|r| *r == px(2)), "and back on return");
 
     app.handle_undo(&ctx);
     let item = &app.batch.items[0];
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(1)), "undo shows the first result");
     app.handle_undo(&ctx);
-    assert_eq!(app.batch.items[0].status, BatchStatus::Pending, "and the next undo the original");
+    assert_eq!(app.batch.items[0].status(), BatchStatus::Pending, "and the next undo the original");
 }
 
 /// With Magic Brush on, the shown image and the one before it keep their
@@ -592,6 +508,7 @@ fn the_drift_check_never_recuts_a_result_that_used_no_mask() {
     for (model, line_mode) in [
         (SettingsModel::Silueta, prunr_core::LineMode::EdgesOnly),
         (SettingsModel::RealEsrganUpscale, prunr_core::LineMode::Off),
+        (SettingsModel::ColorizeDdcolor, prunr_core::LineMode::Off),
     ] {
         let mut app = app_with_model(model);
         let item = push_test_item(&mut app, 7);
@@ -605,4 +522,370 @@ fn the_drift_check_never_recuts_a_result_that_used_no_mask() {
         app.recipe_drift_tripwire();
         assert!(!app.processor.live_preview.is_pending_for(7), "{model:?} {line_mode:?}: no mask was applied, nothing to re-apply");
     }
+}
+
+/// A cut-out with a selection on it, nothing queued yet.
+fn cutout_with_selection(app: &mut PrunrApp, id: u64) {
+    use std::sync::Arc;
+    let item = push_test_item(app, id);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    give_cutout(item);
+    item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+    item.commit(StepKind::Process);
+    let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
+    item.commit_selection_mask(Arc::new(selection), StepKind::Stroke);
+}
+
+/// The switch says what the selection does to the cut-out: Restore
+/// brings it back, Erase removes it, Select leaves the cut-out alone.
+#[test]
+fn the_switch_says_what_the_selection_does() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 4);
+    let style = app.selection_style();
+    let item = &app.batch.items[0];
+    let at = |action| item.correction_plane(style, action).map(|p| p.cells()[2 * 8 + 2]);
+    assert!(at(CutoutAction::Restore).is_some_and(|v| v > 0), "restored");
+    assert!(at(CutoutAction::Erase).is_some_and(|v| v < 0), "erased");
+    assert_eq!(at(CutoutAction::Select), None, "only selected");
+}
+
+/// Switching Restore / Erase applies the current selection anew, on
+/// every image with one: an image off screen is dragged, copied and
+/// saved with its result too.
+#[test]
+fn switching_the_action_recuts_every_selection() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::views::brush_chip::BrushChipOutcome;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 5);
+    cutout_with_selection(&mut app, 6);
+    cutout_with_selection(&mut app, 7);
+    let style = app.selection_style();
+    app.batch.items[2].bake_selection(style, CutoutAction::Restore);
+    app.batch.select_item(0);
+    assert!(!app.processor.live_preview.is_pending_for(5));
+    app.settings.brush.cutout_action = CutoutAction::Erase;
+    app.apply_brush_change(BrushChipOutcome { action_changed: true, ..Default::default() });
+    assert!(app.processor.live_preview.is_pending_for(5), "the re-cut is queued");
+    assert!(app.processor.live_preview.is_pending_for(6), "off screen too");
+    assert!(!app.processor.live_preview.is_pending_for(7), "edits alone do not follow the switch");
+}
+
+/// A re-cut landing on an image off screen leaves it as it was left:
+/// result parked in the timeline, no texture, no decompressed tensor.
+#[test]
+fn a_recut_landing_off_screen_keeps_the_image_parked() {
+    use crate::gui::live_preview::PreviewResult;
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 3);
+    let inputs = preview_inputs(&mut app, 3, false).expect("the re-cut starts");
+    let packed = inputs.packed.seg.clone().expect("sent packed");
+    app.batch.items[0].set_on_screen(false);
+    let unpacked = crate::gui::live_preview::Unpacked {
+        seg: Some((packed.clone(), Arc::new(crate::gui::live_preview::decompress_seg(&packed).expect("unpacks")))),
+        edge: None,
+    };
+    let landed = PreviewResult { version: inputs.version, unpacked, ..PreviewResult::mask_for_test(3, Arc::new(px(9))) };
+    app.apply_completed_previews(&ctx, vec![landed]);
+    let item = &mut app.batch.items[0];
+    assert!(item.result_rgba.is_none(), "parked");
+    assert!(!item.result_tex_pending, "no texture for an image off screen");
+    assert!(item.volatile_seg_tensor.is_none() && item.source_dyn.is_none(), "working copies released");
+    item.unpark_result();
+    assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(9)), "the re-cut is what comes back");
+}
+
+/// Delete folds the selection into the cut-out's edits as one step and
+/// starts a new area; Undo brings the selection back and the edits away.
+#[test]
+fn delete_on_a_cutout_keeps_the_erase_and_undo_returns_the_selection() {
+    use crate::gui::views::selection_action_bar::SelectionAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 6);
+    let selection = app.batch.items[0].selection_mask.clone();
+
+    app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+    assert!(app.batch.items[0].selection_mask.is_some(), "folded off the UI thread");
+    super::fixtures::settle_selection_edits(&mut app);
+    let item = &app.batch.items[0];
+    assert!(item.selection_mask.is_none(), "a new area starts");
+    let edits = item.edits.as_ref().expect("the erase is kept");
+    assert!(edits.cells()[2 * 8 + 2] < 0 && edits.cells()[0] == 0);
+    assert_eq!(item.timeline.undo_steps(), 3, "the run, the stroke and the fold");
+
+    let item = &mut app.batch.items[0];
+    item.undo_step();
+    assert!(item.edits.is_none(), "undo takes the erase away");
+    assert_eq!(item.selection_mask.as_ref().map(|m| m.content_hash()), selection.map(|m| m.content_hash()));
+}
+
+/// Restore on the selection brings the area back on top of an earlier
+/// erase: the newer edit wins where it lands.
+#[test]
+fn restore_wins_over_an_earlier_erase() {
+    use crate::gui::views::selection_action_bar::SelectionAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 8);
+    let ctx = egui::Context::default();
+    app.handle_selection_action(0, SelectionAction::Delete, &ctx);
+    super::fixtures::settle_selection_edits(&mut app);
+    let selection = crate::gui::processor::merge_stroke(None, make_mask(8, 8));
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(selection), StepKind::Stroke);
+    app.handle_selection_action(0, SelectionAction::Restore, &ctx);
+    super::fixtures::settle_selection_edits(&mut app);
+    let edits = app.batch.items[0].edits.as_ref().expect("edits");
+    assert!(edits.cells()[2 * 8 + 2] > 0);
+}
+
+/// The correction is built once per change of its inputs: a second
+/// dispatch with the same edits and selection reuses the plane.
+#[test]
+fn the_correction_is_built_once() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    let style = app.selection_style();
+    let item = &mut app.batch.items[0];
+    item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let first = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let second = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    let erase = item.correction_plane(style, CutoutAction::Erase).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &erase), "another action builds anew");
+}
+
+/// A live render on a cut-out with edits and a selection hands its thread
+/// the correction's inputs, not a plane built on the UI thread; the
+/// plane the render built is kept, so the next render reads it.
+#[test]
+fn a_render_builds_the_correction_on_its_own_thread() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::item::Correction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    app.settings.brush.cutout_action = CutoutAction::Restore;
+    app.batch.items[0].edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let dispatched = preview_inputs(&mut app, 10, false).and_then(|i| i.correction);
+    assert!(matches!(dispatched, Some(Correction::Build(_))), "the render gets the inputs");
+    let style = app.selection_style();
+    let item = &app.batch.items[0];
+    let Some(Correction::Build(inputs)) = item.correction(style, CutoutAction::Restore) else { panic!("built off the UI thread") };
+    let (plane, built) = Correction::Build(inputs).resolve();
+    item.keep_built_correction(built.expect("a build"));
+    let Some(Correction::Ready(kept)) = item.correction(style, CutoutAction::Restore) else { panic!("the build is kept") };
+    assert!(std::sync::Arc::ptr_eq(&plane, &kept));
+}
+
+/// The cached correction (up to three full-size planes) goes once it
+/// cannot be hit again: the selection baked, or the image off screen.
+#[test]
+fn the_correction_cache_lets_go_after_a_bake_and_off_screen() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 10);
+    let style = app.selection_style();
+    let item = &mut app.batch.items[0];
+    item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
+    let plane = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let held_edits = std::sync::Arc::clone(item.edits.as_ref().unwrap());
+    item.drop_hot_tensors();
+    assert_eq!(std::sync::Arc::strong_count(&held_edits), 2, "off screen: the cache holds no edits");
+    assert_eq!(std::sync::Arc::strong_count(&plane), 1, "off screen: the cache holds no plane");
+    item.correction_plane(style, CutoutAction::Restore).unwrap();
+    assert!(item.bake_selection(style, CutoutAction::Restore));
+    let baked = item.edits.as_ref().unwrap();
+    assert_eq!(std::sync::Arc::strong_count(baked), 2, "baked: the working copy and its step, the cache none");
+}
+
+/// A step's image shows its selection as the switch stood then; an undo
+/// back onto a live selection re-applies it as the switch stands now.
+#[test]
+fn undo_onto_a_selection_reapplies_the_current_action() {
+    use crate::gui::brush_state::CutoutAction;
+    let mut app = app_with_model(SettingsModel::Silueta);
+    app.settings.brush.cutout_action = CutoutAction::Erase;
+    cutout_with_selection(&mut app, 11);
+    add_corner_stroke(&mut app);
+    app.settings.brush.cutout_action = CutoutAction::Restore;
+
+    app.handle_undo(&egui::Context::default());
+    assert!(app.batch.items[0].selection_mask.is_some());
+    assert!(app.processor.live_preview.is_pending_for(11), "the selection is re-applied as Restore");
+}
+
+/// An undo to a step another model made does not re-cut it from the
+/// cached segmentation, which would rewrite that step with this model's
+/// cut-out.
+#[test]
+fn undo_onto_another_models_step_does_not_recut_it() {
+    let mut app = app_with_model(SettingsModel::Silueta);
+    cutout_with_selection(&mut app, 12);
+    add_corner_stroke(&mut app);
+    app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::U2net));
+    app.batch.items[0].commit(StepKind::Process);
+    app.batch.items[0].applied_recipe = Some(app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta));
+    // The tensor stays U2net's, as after reprocessing with another model.
+    give_tensor_of(&mut app.batch.items[0], prunr_core::ModelKind::U2net);
+    app.handle_undo(&egui::Context::default());
+    assert!(!app.processor.live_preview.is_pending_for(12));
+}
+
+/// Switching model leaves the cut-out on screen, so the brushes still
+/// correct it: Escape folds a live Erase into the edits, and the next
+/// run re-applies them, whichever model makes it.
+#[test]
+fn a_model_switch_keeps_the_shown_cutout_correctable() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::tests::harness::{click, harness, settle};
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.settings.model = SettingsModel::Silueta;
+        app.settings.brush.cutout_action = CutoutAction::Erase;
+        cutout_with_selection(app, 13);
+        app.batch.select_item(0);
+    }
+    settle(&mut h);
+    click(&mut h, "Model");
+    let row = format!("BiRefNet\n{}", crate::gui::views::model_blurb(SettingsModel::BiRefNetLite));
+    click(&mut h, &row);
+    assert_eq!(h.state().settings.model, SettingsModel::BiRefNetLite);
+    let item = &h.state().batch.items[0];
+    assert!(item.corrects_cutout(SettingsModel::BiRefNetLite), "the Silueta cut-out is still on screen");
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    let item = &h.state().batch.items[0];
+    assert!(item.selection_mask.is_none(), "Escape folded the selection");
+    assert!(item.edits.is_some(), "into the edits the next run re-applies");
+}
+
+/// A cached segmentation re-cuts only the step it cut. No model's pass on
+/// a cut-out already holds the cut in its start, and re-cutting it squared
+/// its edges' transparency; a tweak of that pass keeps it a pass. Another
+/// model's cut is never re-cut with it either.
+#[test]
+fn the_cached_segmentation_recuts_only_the_step_it_cut() {
+    use crate::gui::item::{Cutter, Engine};
+    use crate::gui::live_preview::PreviewResult;
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let blank = || Arc::new(image::RgbaImage::new(8, 8));
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 4);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(blank());
+    give_tensor(item);
+    item.land_cut_for_test(Cutter::Model(prunr_core::ModelKind::Silueta), blank());
+    assert!(item.hot_seg_tensor().is_some(), "Silueta's own cut");
+
+    item.start_cut(Some(StepKind::Process), Cutter::NoModel);
+    item.chain_start_built(item.job_run().expect("a run"), blank());
+    item.result_rgba = Some(blank());
+    item.finish_job();
+    assert!(item.hot_seg_tensor().is_none(), "No model's pass is not re-cut");
+
+    let inputs = preview_inputs(&mut app, 4, true).expect("the pass re-renders");
+    assert!(inputs.seg_tensor.is_none());
+    let landed = PreviewResult { version: inputs.version, start: inputs.start.clone(), ..PreviewResult::mask_for_test(4, blank()) };
+    app.apply_completed_previews(&ctx, vec![landed]);
+    let item = &mut app.batch.items[0];
+    assert!(item.hot_seg_tensor().is_none(), "still a pass after its tweak");
+
+    item.record_origin(Engine::Segment, None, Some(Cutter::Model(prunr_core::ModelKind::BiRefNetLite)));
+    assert!(item.hot_seg_tensor().is_none(), "another model's cut");
+    item.record_origin(Engine::Segment, None, None);
+    assert!(item.hot_seg_tensor().is_some(), "a step whose cutter is not known is re-cut as before");
+}
+
+/// Selection edits run off the UI thread in order: two strokes queued
+/// before either lands build on each other and land as two steps; a run
+/// waits for them; an undo pressed meanwhile undoes the last stroke once
+/// it has landed.
+#[test]
+fn queued_strokes_land_in_order_and_an_undo_waits_for_them() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let ctx = egui::Context::default();
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+    app.batch.select_item(0);
+    let stroke = |x: usize| {
+        let mut cells = vec![0i8; 64];
+        cells[x] = prunr_core::selection::FULL;
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
+    };
+    let steps = app.batch.items[0].timeline.undo_steps();
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(0)), AfterLanding::Nothing);
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(9)), AfterLanding::Nothing);
+    assert_eq!(app.run_refusal(&app.batch.items[0]), Some(crate::gui::capability::Reason::FinishingSelection), "a run waits");
+    app.handle_undo(&ctx);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "the undo waits too");
+    super::fixtures::settle_selection_edits(&mut app);
+    app.land_selection_edits(&ctx);
+    let item = &app.batch.items[0];
+    assert_eq!(item.timeline.undo_steps(), steps + 1, "two strokes landed, then the undo took the second back");
+    let cells = item.selection_mask.as_ref().expect("the first stroke").cells();
+    assert!(cells[0] != 0 && cells[9] == 0);
+}
+
+/// An edit made on a selection the image has since left goes back in
+/// the queue against what it shows now: the stroke is not lost.
+#[test]
+fn an_edit_on_a_changed_selection_is_made_again() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    app.batch.select_item(0);
+    let mut cells = vec![0i8; 64];
+    cells[3] = prunr_core::selection::FULL;
+    app.queue_selection_op(1, SelectionOp::Merge(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))), AfterLanding::Nothing);
+    // The selection changes while the stroke is being merged.
+    app.batch.items[0].commit_selection_mask(make_mask(8, 8).into(), StepKind::Selection);
+    super::fixtures::settle_selection_edits(&mut app);
+    let merged = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
+    assert!(merged[3] != 0 && merged[2 * 8 + 2] != 0, "the stroke landed on the new selection");
+}
+
+/// A stroke that adds nothing still hands the image its planes, so the
+/// next stroke queued on it lands without being made again; strokes
+/// queued on a selection changed under them all land, the queue settles.
+#[test]
+fn strokes_settle_on_no_op_and_changed_selections() {
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    use std::sync::Arc;
+    let mut app = app_with_model(SettingsModel::None);
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (8, 8);
+    app.batch.select_item(0);
+    let stroke = |x: usize| {
+        let mut cells = vec![0i8; 64];
+        cells[x] = prunr_core::selection::FULL;
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
+    };
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    let steps = app.batch.items[0].timeline.undo_steps();
+    // The same stroke again adds nothing; one queued after it builds on it.
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
+    app.queue_selection_op(1, SelectionOp::Merge(stroke(6)), AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "one step: the second stroke");
+    // Three strokes, and the selection changes under them.
+    for x in [10, 11, 12] {
+        app.queue_selection_op(1, SelectionOp::Merge(stroke(x)), AfterLanding::Nothing);
+    }
+    app.batch.items[0].commit_selection_mask(stroke(40), StepKind::Selection);
+    super::fixtures::settle_selection_edits(&mut app);
+    let cells = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
+    assert!([10, 11, 12, 40].iter().all(|&x| cells[x] != 0), "every stroke landed on the new selection");
 }

@@ -1,10 +1,7 @@
 //! Shared host-detection + PyPI-wheel install logic for ORT runtimes.
 //!
 //! Used by `xtask install-runtime` (build-side CLI) and the GUI Settings →
-//! Hardware → Install button. Before this crate, both sites independently
-//! implemented `host_rid`, wheel-name token mapping, SHA256 verification,
-//! and wheel repackaging — divergence on the next OpenVINO release would
-//! have silently installed wrong files in one path.
+//! Hardware → Install button.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -14,11 +11,12 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 /// Single source of truth for the ONNX Runtime version we ship + offer
-/// for runtime-store install. The pykeio/ort `api-23` feature is
-/// forward-compatible across ORT 1.17+ so this isn't load-bearing for
-/// linkage; it IS load-bearing for "the bundled CPU runtime and the
-/// runtime-store OpenVINO upgrade are at matching versions" — drift
-/// would surprise a user upgrading via Settings → Hardware.
+/// for runtime-store install. The pykeio/ort `api-23` feature refuses
+/// a runtime older than 1.23 at load. The macOS wheel's minimum OS is
+/// the Mac app's floor (`LSMinimumSystemVersion`, 14.0 for 1.24), so a
+/// bump checks that too. Drift between the bundled runtime and a
+/// runtime-store upgrade would surprise a user upgrading via
+/// Settings → Hardware.
 ///
 /// **Upper bound:** pykeio/ort tracks ABI v23 across ORT 1.x. ORT 2.0+
 /// is expected to bump the ABI; bumping this past the 1.x line without
@@ -28,18 +26,8 @@ use sha2::{Digest, Sha256};
 /// confirm — see CLAUDE.md `## Verify before bundling / wiring`.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
 
-/// Version of ONNX Runtime we build from source on macOS to enable the
-/// CoreML EP (no PyPI wheel ships this). Diverges from
-/// `PINNED_ORT_VERSION` on purpose: the CPU-only runtime ships at a
-/// newer release while the CoreML build is held back to the last
-/// version we have a known-good CMake recipe for. Mirrored in
-/// `.github/workflows/release.yml` as the `MACOS_ORT_VERSION` workflow
-/// env var; the `release_yml_macos_ort_matches_const` test asserts they
-/// stay in sync.
-pub const MACOS_CORE_ML_ORT_VERSION: &str = "1.20.0";
-
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
-/// for unsupported platforms; `host_pypi_token` rejects those explicitly.
+/// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "linux-x64" }
     else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
@@ -51,23 +39,35 @@ pub fn host_rid() -> &'static str {
     else { "unknown" }
 }
 
-/// PyPI wheel filename token for the host platform.
-pub fn host_pypi_token() -> Option<&'static str> {
-    Some(match host_rid() {
-        "linux-x64" => "manylinux_2_28_x86_64",
-        "linux-arm64" => "manylinux_2_28_aarch64",
-        "windows-x64" => "win_amd64",
-        "windows-arm64" => "win_arm64",
-        "macos-arm64" => "macosx_11_0_arm64",
-        // Intel Mac. PyPI's onnxruntime wheels use the 10.15 deployment
-        // target on x86_64 (the `macosx_10_15_x86_64` filename token);
-        // `host_rid` already returns `"macos-x64"` for this case, so the
-        // arm has to be present here for the GUI install button + xtask
-        // CLI to actually find a wheel instead of bailing with
-        // "unsupported host platform".
-        "macos-x64" => "macosx_10_15_x86_64",
-        _ => return None,
-    })
+/// Whether a wheel's platform tag runs on `rid`. A macOS tag carries
+/// the wheel's minimum OS, which moves between ORT releases
+/// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
+/// only its arch is fixed.
+fn tag_fits(tag: &str, rid: &str) -> bool {
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let macos = |arch: &str| tag.strip_prefix("macosx_")
+        .and_then(|t| t.strip_suffix(arch))
+        .and_then(|t| t.strip_suffix('_'))
+        .and_then(|version| version.split_once('_'))
+        .is_some_and(|(major, minor)| number(major) && number(minor));
+    match rid {
+        "linux-x64" => tag == "manylinux_2_28_x86_64",
+        "linux-arm64" => tag == "manylinux_2_28_aarch64",
+        "windows-x64" => tag == "win_amd64",
+        "windows-arm64" => tag == "win_arm64",
+        "macos-arm64" => macos("arm64"),
+        "macos-x64" => macos("x86_64"),
+        _ => false,
+    }
+}
+
+/// A wheel filename's platform tags: its last `-` field, which may
+/// join several with `.` (`manylinux_2_27_x86_64.manylinux_2_28_x86_64`).
+fn platform_tags(filename: &str) -> impl Iterator<Item = &str> {
+    filename.strip_suffix(".whl")
+        .and_then(|stem| stem.rsplit('-').next())
+        .into_iter()
+        .flat_map(|field| field.split('.'))
 }
 
 /// Install-dir name: `<short>-<version>-<rid>`. Locked — existing
@@ -103,9 +103,10 @@ pub struct WheelInfo {
 /// Pick the right wheel for the host platform. Prefers cp313, falls
 /// back to any cp tag.
 pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, String> {
-    let host_token = host_pypi_token().ok_or_else(||
-        format!("unsupported host platform `{}`", host_rid())
-    )?;
+    pick_wheel(urls, host_rid())
+}
+
+fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String> {
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
         // Reject sdists / non-wheel artifacts up front so a future PyPI
@@ -113,7 +114,7 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
         // filename can't slip through to `extract_wheel` (which would
         // fail at `ZipArchive::new` with a confusing error).
         if !name.ends_with(".whl") { return None; }
-        if !name.contains(host_token) { return None; }
+        if !platform_tags(name).any(|tag| tag_fits(tag, rid)) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
         Some(WheelInfo {
             url: u["url"].as_str()?.to_string(),
@@ -122,7 +123,7 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
         })
     });
     pick(true).or_else(|| pick(false)).ok_or_else(||
-        format!("no wheel for host platform `{}`", host_rid()),
+        format!("no wheel for host platform `{rid}`"),
     )
 }
 
@@ -175,11 +176,15 @@ impl<'a> DownloadHooks<'a> {
     }
 }
 
-/// Wraps `download_wheel_attempt` in up to 3 tries with exponential
-/// backoff. Transient errors (network timeout, 5xx, broken connection,
-/// SHA256 mismatch) retry; fatal errors (404, user cancel) fail fast.
-/// Mirrors the same policy as the model `download_manager` so users see
-/// consistent retry behaviour across runtime + model installs.
+/// Retry policy the app's downloads share, so runtime and model installs
+/// give up after the same number of tries.
+pub const DOWNLOAD_ATTEMPTS: u32 = 3;
+pub const DOWNLOAD_BACKOFF_BASE_MS: u64 = 500;
+
+/// Wraps `download_wheel_attempt` in `DOWNLOAD_ATTEMPTS` tries with
+/// exponential backoff. Transient errors (network timeout, 5xx, broken
+/// connection, SHA256 mismatch) retry; fatal errors (404, user cancel)
+/// fail fast.
 ///
 /// The SHA verification happens INSIDE the attempt (not after `download_wheel`
 /// returns). A transient corruption — CDN edge cache delivering a partial
@@ -188,7 +193,7 @@ impl<'a> DownloadHooks<'a> {
 /// retry loop give it ~3 chances before escalating.
 pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
     let cancel = Arc::clone(&hooks.cancel);
-    retry_with_backoff(&cancel, 3, 500, |attempt| {
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |attempt| {
         if attempt > 0 {
             tracing::info!(attempt, url = %info.url, "retrying wheel download");
         }
@@ -201,7 +206,7 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
 }
 
 /// Implemented by error types whose values distinguish transient
-/// (network blip, 5xx) from fatal (4xx, sha mismatch, user cancel).
+/// errors from fatal ones; each implementor decides which is which.
 /// `retry_with_backoff` consults `is_retryable` to decide between retry
 /// and fail-fast; on cancel during the backoff sleep it constructs a
 /// fresh value via `cancelled()` so each error type picks its own
@@ -211,15 +216,31 @@ pub trait Retryable {
     fn cancelled() -> Self;
 }
 
+/// A failed download attempt: what to tell the user, and whether another
+/// attempt could succeed. Every downloader (runtime wheels, on-demand
+/// models, xtask's model fetch) shares it.
 #[derive(Debug)]
-struct DlError {
-    message: String,
+pub struct DlError {
+    pub message: String,
     retryable: bool,
 }
 
 impl DlError {
-    fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
-    fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+    pub fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
+    pub fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+
+    /// A response that was not a success: a 5xx is the server's passing
+    /// trouble and is worth another attempt; anything else (a 4xx: bad
+    /// URL, gone file) fails at once.
+    pub fn for_status(status: reqwest::StatusCode, msg: impl Into<String>) -> Self {
+        if status.is_server_error() { Self::transient(msg) } else { Self::fatal(msg) }
+    }
+}
+
+impl std::fmt::Display for DlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Retryable for DlError {
@@ -254,13 +275,9 @@ fn download_wheel_attempt(
     let response = client.get(&info.url).send()
         .map_err(|e| DlError::transient(format!("connect: {e}")))?;
 
-    // 4xx is the user/server contract being wrong (bad URL, gone wheel) —
-    // retrying won't help. 5xx is server transient. Anything not 2xx is
-    // an error at this stage.
     let status = response.status();
     if !status.is_success() {
-        let msg = format!("HTTP {status}");
-        return Err(if status.is_server_error() { DlError::transient(msg) } else { DlError::fatal(msg) });
+        return Err(DlError::for_status(status, format!("HTTP {status}")));
     }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
@@ -270,7 +287,7 @@ fn download_wheel_attempt(
     let mut last_pct: u64 = u64::MAX;
     loop {
         if hooks.cancel.load(Ordering::Relaxed) {
-            return Err(DlError::fatal("cancelled"));
+            return Err(DlError::cancelled());
         }
         let n = match response.read(&mut chunk) {
             Ok(n) => n,
@@ -361,45 +378,48 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
             .map_err(|e| format!("extract {}: {e}", dest.display()))?;
     }
 
-    let dylib = target_dir.join(dylib_name());
+    let dylib = target_dir.join(DYLIB_NAME);
     if !dylib.is_file() {
         return Err(format!(
-            "{} missing after extract — wheel layout may have changed",
-            dylib_name(),
+            "{DYLIB_NAME} missing after extract — wheel layout may have changed",
         ));
     }
     Ok(target_dir.to_path_buf())
 }
 
-pub fn dylib_name() -> &'static str {
-    if cfg!(windows) { "onnxruntime.dll" }
-    else if cfg!(target_os = "macos") { "libonnxruntime.dylib" }
-    else { "libonnxruntime.so" }
-}
+pub const DYLIB_NAME: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Both `release.yml` (Linux + Windows staging steps) and `ci.yml`
-    /// (Linux ORT runtime install for the e2e test) hard-code the same
+    /// Both `release.yml` (the runtime each artifact ships) and `ci.yml`
+    /// (Linux install for the e2e test, macOS smoke test) hard-code the same
     /// version this const carries. Cargo doesn't link CI YAML, so drift
     /// would silently ship mismatched bundled-CPU vs runtime-store
     /// runtimes (release) or run e2e tests against a stale runtime
     /// (ci). This test reads both YAMLs and asserts every
-    /// `install-runtime onnxruntime <ver>` invocation matches the const.
+    /// `install-runtime onnxruntime[-directml] <ver>` invocation matches
+    /// the const.
     /// Counts each file's occurrences too — drift in just one of two
     /// release.yml call sites would be silently accepted by a plain
     /// `contains` check.
     #[test]
     fn yaml_pins_match_const() {
-        // (path, expected occurrence count)
-        let cases: &[(&str, usize)] = &[
-            ("/../../.github/workflows/release.yml", 2), // Linux + Windows staging
-            ("/../../.github/workflows/ci.yml",      1), // Linux ORT install before tests
+        // (path, package, expected occurrence count)
+        let cases: &[(&str, &str, usize)] = &[
+            ("/../../.github/workflows/release.yml", "onnxruntime", 1),          // Linux + macOS staging
+            ("/../../.github/workflows/release.yml", "onnxruntime-directml", 1), // Windows staging
+            ("/../../.github/workflows/ci.yml", "onnxruntime", 2),               // Linux install before tests, macOS smoke test
         ];
-        let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
-        for (rel, expected) in cases {
+        for (rel, package, expected) in cases {
+            let needle = format!("install-runtime {package} {PINNED_ORT_VERSION}");
             let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
             let yml = std::fs::read_to_string(&abs)
                 .unwrap_or_else(|e| panic!("read {abs}: {e}"));
@@ -411,45 +431,6 @@ mod tests {
             );
         }
     }
-    /// `release.yml` builds a custom ORT with CoreML on macOS — the
-    /// version is the workflow env var `MACOS_ORT_VERSION`, used to
-    /// drive the cache key + the `git clone --branch v<ver>` step.
-    /// Bumping `MACOS_CORE_ML_ORT_VERSION` here without bumping the
-    /// YAML (or vice versa) silently produces release artifacts at the
-    /// wrong version. This test also asserts the cache key + git clone
-    /// references go through `${{ env.MACOS_ORT_VERSION }}` rather than
-    /// hard-coded literals — without that interpolation a future
-    /// version bump would only update one of the two call sites and
-    /// the test would still pass.
-    #[test]
-    fn release_yml_macos_ort_matches_const() {
-        let abs = format!(
-            "{}/../../.github/workflows/release.yml",
-            env!("CARGO_MANIFEST_DIR"),
-        );
-        let yml = std::fs::read_to_string(&abs)
-            .unwrap_or_else(|e| panic!("read {abs}: {e}"));
-        let expected_decl = format!(
-            "MACOS_ORT_VERSION: '{}'",
-            MACOS_CORE_ML_ORT_VERSION,
-        );
-        assert!(
-            yml.contains(&expected_decl),
-            "release.yml is missing the workflow env declaration `{expected_decl}` — \
-             update the workflow to match the const, or vice versa.",
-        );
-        assert!(
-            yml.contains("ort-coreml-${{ env.MACOS_ORT_VERSION }}-macos-aarch64"),
-            "release.yml ORT cache key must use ${{{{ env.MACOS_ORT_VERSION }}}} \
-             so a version bump only needs to touch the env block + the const.",
-        );
-        assert!(
-            yml.contains("git clone --depth 1 --branch \"v${MACOS_ORT_VERSION}\""),
-            "release.yml ORT git clone must reference ${{MACOS_ORT_VERSION}} \
-             so the cloned tag matches the cache key automatically.",
-        );
-    }
-
     use serde_json::json;
 
     #[test]
@@ -461,39 +442,90 @@ mod tests {
         ), "unexpected rid: {r}");
     }
 
-    /// Contract: every rid that `host_rid` produces (other than the
-    /// catch-all `"unknown"`) must have a matching arm in
-    /// `host_pypi_token`. Otherwise users on that platform get a
-    /// confusing "unsupported host platform" from `pick_wheel_for_host`
-    /// despite `host_rid` agreeing the platform is supported.
+    /// Every 1.24.1 wheel on PyPI, as its JSON lists them.
+    const ORT_1_24_1_WHEELS: &[&str] = &[
+        "onnxruntime-1.24.1-cp311-cp311-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-win_amd64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-win_amd64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-win_amd64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-win_amd64.whl",
+    ];
+
+    fn urls_for(filenames: &[&str]) -> Vec<serde_json::Value> {
+        filenames.iter().map(|f| json!({
+            "filename": f, "url": format!("https://example.com/{f}"),
+            "digests": {"sha256": "aa".repeat(32)}, "size": 0,
+        })).collect()
+    }
+
     #[test]
-    fn every_supported_rid_has_a_pypi_token() {
-        for rid in [
-            "linux-x64", "linux-arm64",
-            "windows-x64", "windows-arm64",
-            "macos-arm64", "macos-x64",
+    fn picks_each_platforms_cp313_wheel_from_the_pinned_release() {
+        let urls = urls_for(ORT_1_24_1_WHEELS);
+        for (rid, expected) in [
+            ("linux-x64", "cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"),
+            ("linux-arm64", "cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"),
+            ("windows-x64", "cp313-cp313-win_amd64.whl"),
+            ("macos-arm64", "cp313-cp313-macosx_14_0_arm64.whl"),
         ] {
-            let token = match rid {
-                "linux-x64" => "manylinux_2_28_x86_64",
-                "linux-arm64" => "manylinux_2_28_aarch64",
-                "windows-x64" => "win_amd64",
-                "windows-arm64" => "win_arm64",
-                "macos-arm64" => "macosx_11_0_arm64",
-                "macos-x64" => "macosx_10_15_x86_64",
-                _ => unreachable!(),
-            };
-            // Compile-time check the arm exists for current host.
-            if host_rid() == rid {
-                assert_eq!(host_pypi_token(), Some(token), "rid {rid}");
-            }
+            let pick = pick_wheel(&urls, rid).unwrap_or_else(|e| panic!("{rid}: {e}"));
+            assert!(pick.url.ends_with(expected), "{rid} picked {}", pick.url);
         }
-        // Final guard: host's own rid produces Some(token), which is
-        // the actual contract `pick_wheel_for_host` depends on.
-        if host_rid() != "unknown" {
-            assert!(host_pypi_token().is_some(),
-                "host_rid()={} but host_pypi_token() is None — pick_wheel_for_host will reject this host",
-                host_rid());
+        // 1.24 dropped Intel macOS and has no Windows-on-Arm wheel.
+        assert!(pick_wheel(&urls, "macos-x64").is_err());
+        assert!(pick_wheel(&urls, "windows-arm64").is_err());
+    }
+
+    #[test]
+    fn macos_wheels_match_whatever_minimum_os_they_carry() {
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.19.2-cp312-cp312-macosx_11_0_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.31.0-cp313-cp313-macosx_15_0_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-x64", "onnxruntime-1.19.2-cp312-cp312-macosx_10_15_x86_64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_ok(), "{rid} rejected {filename}");
         }
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-win_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_x_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_err(), "{rid} took {filename}");
+        }
+    }
+
+    /// Every rid `host_rid` names has wheels it accepts; without one,
+    /// that platform's install fails with "unsupported host platform".
+    #[test]
+    fn every_supported_rid_accepts_its_own_wheels() {
+        for (rid, tag) in [
+            ("linux-x64", "manylinux_2_28_x86_64"),
+            ("linux-arm64", "manylinux_2_28_aarch64"),
+            ("windows-x64", "win_amd64"),
+            ("windows-arm64", "win_arm64"),
+            ("macos-arm64", "macosx_14_0_arm64"),
+            ("macos-x64", "macosx_13_0_x86_64"),
+        ] {
+            let urls = urls_for(&[&format!("onnxruntime-1.0.0-cp313-cp313-{tag}.whl")]);
+            assert!(pick_wheel(&urls, rid).is_ok(), "{rid} accepts no {tag} wheel");
+        }
+        assert!(pick_wheel(&urls_for(ORT_1_24_1_WHEELS), "unknown").is_err());
     }
 
     #[test]
@@ -522,28 +554,26 @@ mod tests {
 
     #[test]
     fn pick_wheel_prefers_cp313() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![
-            json!({"filename": format!("ort-cp310-cp310-{token}.whl"),
+            json!({"filename": "ort-cp310-cp310-win_amd64.whl",
                    "url": "https://example.com/cp310.whl",
                    "digests": {"sha256": "aa".repeat(32)}, "size": 80_000_000}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
                    "url": "https://example.com/cp313.whl",
                    "digests": {"sha256": "bb".repeat(32)}, "size": 80_000_000}),
         ];
-        let pick = pick_wheel_for_host(&urls).expect("pick");
+        let pick = pick_wheel(&urls, "windows-x64").expect("pick");
         assert_eq!(pick.url, "https://example.com/cp313.whl");
     }
 
     #[test]
     fn pick_wheel_falls_back_to_any_cp_tag() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![json!({
-            "filename": format!("ort-cp311-cp311-{token}.whl"),
+            "filename": "ort-cp311-cp311-win_amd64.whl",
             "url": "https://example.com/cp311.whl",
             "digests": {"sha256": "cc".repeat(32)}, "size": 0,
         })];
-        let pick = pick_wheel_for_host(&urls).expect("fallback");
+        let pick = pick_wheel(&urls, "windows-x64").expect("fallback");
         assert_eq!(pick.url, "https://example.com/cp311.whl");
     }
 
@@ -554,7 +584,7 @@ mod tests {
             "url": "https://example.com/wrong.whl",
             "digests": {"sha256": "dd".repeat(32)}, "size": 0,
         })];
-        assert!(pick_wheel_for_host(&urls).is_err());
+        assert!(pick_wheel(&urls, "windows-x64").is_err());
     }
 
     /// PyPI's URL list also includes the source distribution
@@ -564,16 +594,15 @@ mod tests {
     /// to parse a tarball as a zip and fail with a confusing error.
     #[test]
     fn pick_wheel_skips_sdist_even_with_matching_token() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![
-            json!({"filename": format!("ort-{token}.tar.gz"),
+            json!({"filename": "ort-win_amd64.tar.gz",
                    "url": "https://example.com/sdist.tar.gz",
                    "digests": {"sha256": "ee".repeat(32)}, "size": 0}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
                    "url": "https://example.com/cp313.whl",
                    "digests": {"sha256": "ff".repeat(32)}, "size": 0}),
         ];
-        let pick = pick_wheel_for_host(&urls).expect("wheel pick should succeed");
+        let pick = pick_wheel(&urls, "windows-x64").expect("wheel pick should succeed");
         assert_eq!(pick.url, "https://example.com/cp313.whl",
             "must skip sdist and pick the .whl");
     }
@@ -598,6 +627,36 @@ mod tests {
             repackage_target_filename("onnxruntime/capi/libonnxruntime.dylib").as_deref(),
             Some("libonnxruntime.dylib"),
         );
+    }
+
+    /// The Windows release ships the DirectML runtime as its default:
+    /// both DLLs staged from the DirectML wheel, side by side in
+    /// `<exe>/runtime/` in the zip and in the installer.
+    #[test]
+    fn release_yml_ships_the_directml_runtime_on_windows() {
+        let abs = format!("{}/../../.github/workflows/release.yml", env!("CARGO_MANIFEST_DIR"));
+        let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
+        for line in [
+            format!("cargo xtask install-runtime onnxruntime-directml {PINNED_ORT_VERSION} --stage-to runtime-stage"),
+            "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/".to_string(),
+            "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/".to_string(),
+            "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+            "Source: \"runtime-stage\\DirectML.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+        ] {
+            assert!(yml.contains(&line), "release.yml no longer has `{line}`");
+        }
+    }
+
+    /// The DirectML wheel's `onnxruntime.dll` delay-loads `DirectML.dll`
+    /// from its own folder; without it there the system's older copy loads.
+    #[test]
+    fn repackage_keeps_the_directml_dll_beside_the_runtime() {
+        for name in ["DirectML.dll", "onnxruntime.dll"] {
+            assert_eq!(
+                repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(),
+                Some(name),
+            );
+        }
     }
 
     #[test]
@@ -647,6 +706,22 @@ mod tests {
         });
         assert_eq!(r.expect("eventual success"), 42);
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn only_a_server_error_status_is_worth_retrying() {
+        use reqwest::StatusCode;
+        for (status, retry) in [
+            (StatusCode::INTERNAL_SERVER_ERROR, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::FORBIDDEN, false),
+            (StatusCode::MOVED_PERMANENTLY, false),
+        ] {
+            let e = DlError::for_status(status, format!("HTTP {status}"));
+            assert_eq!(e.is_retryable(), retry, "{status}");
+            assert_eq!(e.to_string(), format!("HTTP {status}"));
+        }
     }
 
     #[test]

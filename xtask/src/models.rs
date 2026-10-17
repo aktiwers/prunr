@@ -38,13 +38,20 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
         sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
     },
-    // DexiNed is exported from PyTorch weights via scripts/export_dexined.py
-    // and hosted on prunr's own releases (separate tag from app versions).
+    // TEED (MIT, Xavier Soria Poma) exported from the BIPED checkpoint and
+    // hosted on prunr's own releases (separate tag from app versions).
     ModelSpec {
-        id: prunr_models::ModelId::DexiNed,
-        name: "dexined.onnx",
-        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/dexined.onnx",
-        sha256: "cba9193b1e3fbcb5bd196001a9aae13bafaa309442f6cb074330c426cc61ec5a",
+        id: prunr_models::ModelId::Teed,
+        name: "teed.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/teed.onnx",
+        sha256: "8aab32bf7b9da0a4f03108c7f5dd9b9799e22601f212249659ea3ab1d59a5a1a",
+    },
+    // YuNet (MIT, OpenCV Zoo), pinned to the zoo commit it was taken from.
+    ModelSpec {
+        id: prunr_models::ModelId::YuNet,
+        name: "face_detection_yunet_2026may.onnx",
+        url: "https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+        sha256: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
     },
     // LaMa for the Eraser tool. OnDemand: distributed via Model Store at
     // runtime. Dev-mode uses `models/lama_fp32.onnx`; this xtask also
@@ -103,6 +110,25 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
         sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
     },
+    // Own dynamic-shape export: Phhofm's published ONNX is fixed at 256×256.
+    ModelSpec {
+        id: prunr_models::ModelId::FourXNomos2RealPlksr,
+        name: "4xNomos2_realplksr_dysample.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos2_realplksr_dysample.onnx",
+        sha256: "ec435c52cfc68bdf9b3e4b757bdd8078ce5daea70ff439a7e68de1a17262e24d",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::DdcolorTiny,
+        name: "ddcolor_paper_tiny.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/ddcolor_paper_tiny.onnx",
+        sha256: "5b4396ff19dbc9729a39fbebd6d7857dee6ff58a35d8820467efa168ecf7b17b",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::DepthAnythingV2Small,
+        name: "depth_anything_v2_small.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/depth_anything_v2_small.onnx",
+        sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    },
     // Phhofm's official Nomos8k release IS fp16 (single file, no fp32
     // sibling) — `UpscaleModelKnobs::is_fp16: true` drives runtime
     // dispatch. Filename is `4xNomos8kSCHAT-L.onnx` with no `_fp16`
@@ -113,24 +139,24 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos8kSCHAT-L.onnx",
         sha256: "919dff28836ff10fef2d5462e5b82c951211abf24f05196b0a6e2c24f20ed1de",
     },
-    // SAM 2 Hiera Small — bundled (MultiPartBundled) so each file ships
+    // SAM 2.1 Hiera Small — bundled (MultiPartBundled) so each file ships
     // as a zstd-compressed `include_bytes!` blob in the release binary.
     // Two rows share the same ModelId because the model is a single
-    // logical entry with two parts; `ondemand_target` returns None for
+    // logical entry with two parts; `download_path` is None for
     // MultiPartBundled, so xtask fetches + compresses but does not mirror
-    // to the user data dir. URLs are HuggingFace upstream (vietanhdev's
-    // ONNX exports of Meta's SAM 2 Hiera Small).
+    // to the user data dir. Exported from Meta's checkpoint with
+    // vietanhdev/samexporter (opset 17), mirrored on models-v1.
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.encoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.encoder.onnx",
-        sha256: "f6a7c74dee5b2e71cce3f0475b778f0f28fa3e6c3646c79027302123d2197f40",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.encoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.encoder.onnx",
+        sha256: "d15d9f152326e95f788a6122343b1f055cbae4b689dba041a90548782dbdd4e2",
     },
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.decoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.decoder.onnx",
-        sha256: "e07f799d2afe8640ef21f47096ad154d9289bb53041191499ebbea8933ef047b",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.decoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.decoder.onnx",
+        sha256: "f059fb650ec6cd7c512f9fa59bcd76469cb24359969ad3898dfd85a81e13d92e",
     },
 ];
 

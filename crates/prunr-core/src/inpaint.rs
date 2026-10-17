@@ -6,20 +6,20 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use image::{GrayImage, RgbaImage};
 use ndarray::Array4;
 use ort::{inputs, session::{Session, builder::GraphOptimizationLevel}, value::Tensor};
 
-use crate::engine::{apply_ort_graph_cache, EpKind};
+use crate::engine::{apply_ort_graph_cache, cached_graph, EpKind, EpSite, Miss, SessionPick, Weights};
 use crate::progress::{Progress, Step, TileRect, Unit};
 use crate::types::CoreError;
 
 /// LaMa input/output side length in pixels.
 pub const TILE: u32 = 512;
-/// Overlap between adjacent tiles in pixels. Half the tile to stay safe
-/// on the corners; the feather blend tapers within this region.
+/// Overlap between adjacent tiles in pixels: context both tiles share,
+/// which the feather blend tapers across.
 pub const OVERLAP: u32 = 64;
 
 /// 5-tap separable Gaussian for `sharpen_inpainted`'s unsharp-mask blur
@@ -40,38 +40,65 @@ pub(crate) struct Bbox {
     pub h: u32,
 }
 
-/// Eagerly initialise the inpaint session for `id` in the background so
-/// the first stroke doesn't pay the ~5-10s session-build latency.
-/// Idempotent — repeated calls for the same id are no-ops.
-pub fn prewarm(id: prunr_models::ModelId) -> Result<(), CoreError> {
-    if id.is_sd_family() {
-        return crate::inpaint_sd::prewarm(id);
+impl Bbox {
+    pub(crate) fn area(&self) -> usize {
+        (self.w as usize) * (self.h as usize)
     }
-    LamaSession::get(id).map(|_| ())
+
+    /// This box clipped to `rect` (x, y, w, h), which it must overlap.
+    pub(crate) fn within(self, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+        let (x0, y0) = (self.x.max(x), self.y.max(y));
+        let (x1, y1) = ((self.x + self.w).min(x + w), (self.y + self.h).min(y + h));
+        debug_assert!(x1 > x0 && y1 > y0, "{self:?} does not overlap {:?}", (x, y, w, h));
+        (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+}
+
+/// Eagerly initialise the inpaint session for `id` in the background so
+/// the first stroke doesn't pay its build: ~5-10 s for LaMa, 10-30 s for
+/// the four sessions of a Stable Diffusion bundle (built at the default
+/// tuning). Idempotent — repeated calls for the same id are no-ops.
+pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreError> {
+    if id.is_sd_family() {
+        crate::inpaint_sd::load_bundle(id, &crate::inpaint_sd::SdTuning::default()).map(drop)
+    } else {
+        load_lama(id, cpu_only).map(drop)
+    }
 }
 
 /// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
 /// of single-pixel 4-connected morphology — fine for the small values
-/// the GUI exposes (±16 px max). px == 0 returns a clone unchanged.
+/// the GUI exposes. px == 0 returns a clone unchanged.
+///
+/// Works on the mask's bbox (plus `px` when dilating): nothing farther
+/// than `px` from the mask can change, so the result is bit-identical
+/// to a full-image pass. Peak RAM: the output plus two bbox buffers.
 pub fn grow_mask(mask: &GrayImage, px: i32) -> GrayImage {
     if px == 0 {
         return mask.clone();
     }
-    let iters = px.unsigned_abs() as usize;
+    let (w, h) = mask.dimensions();
+    let iters = px.unsigned_abs();
     let dilate = px > 0;
-    let mut current = mask.clone();
+    let mut out = GrayImage::new(w, h);
+    let Some(b) = mask_bbox(mask, 128, if dilate { iters } else { 0 }) else {
+        return out;
+    };
+    let mut current = image::imageops::crop_imm(mask, b.x, b.y, b.w, b.h).to_image();
+    let mut next = GrayImage::new(b.w, b.h);
     for _ in 0..iters {
-        current = morphology_step(&current, dilate);
+        morphology_step_into(&current, &mut next, dilate);
+        std::mem::swap(&mut current, &mut next);
     }
-    current
+    image::imageops::replace(&mut out, &current, b.x as i64, b.y as i64);
+    out
 }
 
-fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
+fn morphology_step_into(mask: &GrayImage, out: &mut GrayImage, dilate: bool) {
     let (w, h) = mask.dimensions();
     let w_us = w as usize;
     let h_us = h as usize;
     let raw = mask.as_raw();
-    let mut out = GrayImage::new(w, h);
     let buf = out.as_mut();
     for y in 0..h_us {
         for x in 0..w_us {
@@ -94,7 +121,6 @@ fn morphology_step(mask: &GrayImage, dilate: bool) -> GrayImage {
             buf[y * w_us + x] = if bit { 255 } else { 0 };
         }
     }
-    out
 }
 
 /// For each pixel, the distance to the nearest mask==0 pixel (0.0 if
@@ -109,8 +135,7 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
 /// the blur without disturbing source pixels outside the mask.
 ///
 /// `amount` in [0.0, 2.0]. 0.0 leaves `image` unchanged. 0.3-0.7 is
-/// the practical range; higher introduces visible halos. Operates
-/// in-place by allocating a fresh RGBA and returning it.
+/// the practical range; higher introduces visible halos.
 ///
 /// Algorithm: `out = src + amount * (src - blur(src))`, applied only
 /// to pixels where `mask > 127`. Blur is a separable 5-tap Gaussian
@@ -134,8 +159,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
         );
         return image.clone();
     }
-    // No mask>127 pixels → nothing to sharpen. Bypasses the temp f32
-    // allocation entirely (was a ~150 MB no-op on full-image masks at 4K).
+    // No mask>127 pixels → nothing to sharpen; skip the temp f32 buffer.
     let Some(bbox) = mask_bbox(mask, 128, SHARPEN_MARGIN) else {
         return image.clone();
     };
@@ -157,7 +181,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
             for c in 0..3 {
                 let mut sum = 0.0;
                 for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
-                    let xi = (global_x as isize + k as isize - 2)
+                    let xi = (global_x as isize + k as isize - SHARPEN_MARGIN as isize)
                         .clamp(0, img_w as isize - 1) as usize;
                     sum += kv * src[(global_y * img_w + xi) * 4 + c] as f32;
                 }
@@ -169,16 +193,11 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
     // Output starts as image clone. Pixels outside the bbox are
     // mask <= 127 by definition (bbox covers all mask >= 128) — they
     // stay as source. Vertical blur + sharpen overrides bbox-masked
-    // pixels. Rows are write-disjoint → parallelise via SendMutPtr,
-    // same pattern as `inpaint_blend::composite_channel`.
+    // pixels. Rows are write-disjoint → parallelise via SendMutPtr.
     let mut out = image.clone();
     let out_raw = out.as_mut();
     let msk_raw = mask.as_raw();
-    #[derive(Clone, Copy)]
-    struct SendMutPtr(*mut u8);
-    unsafe impl Send for SendMutPtr {}
-    unsafe impl Sync for SendMutPtr {}
-    let dp = SendMutPtr(out_raw.as_mut_ptr());
+    let dp = crate::math::SendMutPtr(out_raw.as_mut_ptr());
     (0..bbox_h).into_par_iter().for_each(|by| {
         let global_y = bbox_y + by;
         for bx in 0..bbox_w {
@@ -195,7 +214,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                     // region by `SHARPEN_MARGIN`, so the clamped index
                     // points at the same source pixel a full-image
                     // variant's clamp would have hit.
-                    let by_kernel = (by as isize + k as isize - 2)
+                    let by_kernel = (by as isize + k as isize - SHARPEN_MARGIN as isize)
                         .clamp(0, bbox_h as isize - 1) as usize;
                     blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
@@ -208,9 +227,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                 unsafe { *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8; }
             }
         }
-        // Force whole-struct capture of `dp` (Rust 2021 disjoint
-        // capture would otherwise grab `dp.0: *mut u8` alone, which
-        // isn't Sync — same pattern as `guided_filter::box_filter`).
+        // Capture `dp` whole: its raw-pointer field alone is not Sync.
         let _ = &dp;
     });
     out
@@ -221,12 +238,13 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
 /// the mask is all-zero (no work). SD-family ids dispatch to the
 /// `inpaint_sd` module which has its own multi-model pipeline.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(image, mask, id, None, &Progress::none())
+    process_inpaint_with(image, mask, id, None, false, &Progress::none()).map(|f| f.rgba)
 }
 
 /// Same as `process_inpaint` but takes optional SD-specific tuning
 /// (prompt / negative prompt / guidance_scale / steps) and the run's
-/// progress handle. Cancel is checked between LaMa tiles and between
+/// progress handle. `cpu_only` keeps every session off the GPU providers
+/// (for SD it overrides the request's tuning). Cancel is checked between LaMa tiles and between
 /// SD UNet steps — ORT has no per-op cancel hook so worst-case latency
 /// on cancel is one tile (LaMa) or one UNet step (SD).
 pub fn process_inpaint_with(
@@ -234,8 +252,9 @@ pub fn process_inpaint_with(
     mask: &GrayImage,
     id: prunr_models::ModelId,
     sd_req: Option<crate::inpaint_sd::SdInpaintRequest>,
+    cpu_only: bool,
     progress: &Progress,
-) -> Result<RgbaImage, CoreError> {
+) -> Result<Filled, CoreError> {
     if image.dimensions() != mask.dimensions() {
         return Err(CoreError::Inference(format!(
             "inpaint: dim mismatch — image {:?} vs mask {:?}",
@@ -246,25 +265,204 @@ pub fn process_inpaint_with(
     // Short-circuit before the 200 MB session load — empty masks are
     // common during live preview when the user hasn't started painting.
     if mask_is_empty(mask) {
-        return Ok(image.clone());
+        return Ok(Filled::full(image.clone()));
     }
     if id.is_sd_family() {
         // The SD pipeline gates RAM itself; LaMa / MI-GAN need < 1 GB.
-        let req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
-            num_inference_steps: 20,
+        let mut req = sd_req.unwrap_or_else(|| crate::inpaint_sd::SdInpaintRequest {
             tuning: crate::inpaint_sd::plan_tuning(false, crate::inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         });
+        req.tuning.cpu_only = cpu_only;
         return crate::inpaint_sd::process_inpaint_with(image, mask, id, req, progress);
     }
+    process_lama(image, mask, id, cpu_only, FillScale::Auto, progress)
+}
+
+/// A fill, and the scale its region was filled at: 1 is full size; with
+/// several regions, the smallest of their scales.
+pub struct Filled {
+    pub rgba: RgbaImage,
+    pub scale: f32,
+}
+
+impl Filled {
+    pub fn full(rgba: RgbaImage) -> Self {
+        Self { rgba, scale: 1.0 }
+    }
+}
+
+/// How large an eraser fills a hole. LaMa works in 512 px tiles and SD
+/// in one crop of up to 768 px: a hole much wider than that leaves parts
+/// of the model's input with no photo in them (LaMa fills those flat
+/// grey; SD fills each tile on its own, a patchwork). Filling a
+/// scaled-down copy keeps the whole hole in view of its surroundings, a
+/// little softer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FillScale {
+    /// Full size while a region fits the model (`Fit`), else shrunk to fit.
+    #[default]
+    Auto,
+    Full,
+    Half,
+    Quarter,
+}
+
+/// The largest region, in working pixels, a model fills at full size
+/// with photo around it to go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fit {
+    pub long: u32,
+    pub short: u32,
+}
+
+/// LaMa: room for 64 px of photo on each side within one tile.
+pub const LAMA_FIT: Fit = Fit { long: TILE - 2 * OVERLAP, short: TILE - 2 * OVERLAP };
+
+impl FillScale {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Full, Self::Half, Self::Quarter];
+
+    /// The factor a `w` × `h` region is filled at.
+    pub fn factor(self, (w, h): (u32, u32), fit: Fit) -> f32 {
+        match self {
+            Self::Auto => {
+                let (long, short) = (w.max(h).max(1), w.min(h).max(1));
+                (fit.long as f32 / long as f32).min(fit.short as f32 / short as f32).min(1.0)
+            }
+            Self::Full => 1.0,
+            Self::Half => 0.5,
+            Self::Quarter => 0.25,
+        }
+    }
+}
+
+impl std::fmt::Display for FillScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Full => "full",
+            Self::Half => "half",
+            Self::Quarter => "quarter",
+        })
+    }
+}
+
+impl std::str::FromStr for FillScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL.into_iter()
+            .find(|v| v.to_string().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown fill scale '{s}' (expected: auto, full, half, quarter)"))
+    }
+}
+
+/// LaMa, Big-LaMa or MI-GAN fill of `mask` (255 = fill) at `scale`
+/// (see `fill_at_scale`).
+pub fn process_lama(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    id: prunr_models::ModelId,
+    cpu_only: bool,
+    scale: FillScale,
+    progress: &Progress,
+) -> Result<Filled, CoreError> {
+    if mask_is_empty(mask) {
+        return Ok(Filled::full(image.clone()));
+    }
     progress.step(Step::LoadingModel);
-    let session = LamaSession::get(id)?;
-    tile_compose(image, mask, progress, |tile_rgba, tile_mask| {
+    let session = LamaSession::get(id, cpu_only)?;
+    fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
             tile_rgba.clone()
         })
-    })
+    }))
+}
+
+/// Fill `mask` through `fill` at `scale`, region by region: each region
+/// (nearby pieces grouped) `scale` shrinks is filled on its own, scaled down;
+/// the rest in one full-size pass. A small mark far from a large one
+/// stays sharp. `fill` reports through the handle it is given, which
+/// places a scaled-down crop's tiles where the crop sits in the photo.
+pub(crate) fn fill_at_scale(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    scale: FillScale,
+    fit: Fit,
+    progress: &Progress,
+    mut fill: impl FnMut(&RgbaImage, &GrayImage, &Progress) -> Result<RgbaImage, CoreError>,
+) -> Result<Filled, CoreError> {
+    if scale == FillScale::Full {
+        return Ok(Filled::full(fill(image, mask, progress)?));
+    }
+    let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
+        .map(|r| {
+            let r = r.to_bbox();
+            (r, scale.factor((r.w, r.h), fit))
+        })
+        .filter(|&(_, f)| f < 1.0)
+        .collect();
+    if shrunk.is_empty() {
+        return Ok(Filled::full(fill(image, mask, progress)?));
+    }
+    let smallest = shrunk.iter().map(|&(_, f)| f).fold(1.0f32, f32::min);
+    let mut out = image.clone();
+    let mut rest = mask.clone();
+    let width = mask.width() as usize;
+    for (region, factor) in shrunk {
+        fill_scaled_down(&mut out, mask, region, factor, progress, &mut fill)?;
+        for y in region.y as usize..(region.y + region.h) as usize {
+            let row = y * width + region.x as usize;
+            rest.as_mut()[row..row + region.w as usize].fill(0);
+        }
+    }
+    if !mask_is_empty(&rest) {
+        out = fill(&out, &rest, progress)?;
+    }
+    Ok(Filled { rgba: out, scale: smallest })
+}
+
+/// Fill the part of `mask` inside `hole` through `fill` at `factor` < 1,
+/// in place: the hole and `OVERLAP` working pixels of photo around it
+/// (on Auto, one LaMa tile in all), scaled down, filled, scaled back up
+/// and pasted inside the hole only. Other holes in the crop stay holes,
+/// so the object being erased next door is never read as photo.
+///
+/// Peak working set for a hole of side L: the crop around it and its
+/// fill scaled back up, each about (L + 2·64/factor)² RGBA; the scaled
+/// copies are one tile.
+fn fill_scaled_down(
+    out: &mut RgbaImage,
+    mask: &GrayImage,
+    hole: Bbox,
+    factor: f32,
+    progress: &Progress,
+    fill: &mut impl FnMut(&RgbaImage, &GrayImage, &Progress) -> Result<RgbaImage, CoreError>,
+) -> Result<(), CoreError> {
+    let margin = (OVERLAP as f32 / factor).ceil() as u32;
+    let (x0, y0) = (hole.x.saturating_sub(margin), hole.y.saturating_sub(margin));
+    let (x1, y1) = ((hole.x + hole.w + margin).min(mask.width()), (hole.y + hole.h + margin).min(mask.height()));
+    let crop = Bbox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    let small = |side: u32| ((side as f32 * factor).round() as u32).max(1);
+    let (sw, sh) = (small(crop.w), small(crop.h));
+    let crop_rgba = image::imageops::crop_imm(out, crop.x, crop.y, crop.w, crop.h).to_image();
+    let small_rgba = crate::formats::resize_rgba(&crop_rgba, sw, sh, crate::formats::ResizeFilter::Lanczos3);
+    drop(crop_rgba);
+    let crop_mask = image::imageops::crop_imm(mask, crop.x, crop.y, crop.w, crop.h).to_image();
+    // Any coverage stays a hole, so nothing of the object survives the shrink.
+    let mut small_mask = crate::formats::resize_gray_lanczos3(&crop_mask, sw, sh);
+    small_mask.pixels_mut().for_each(|p| p.0[0] = if p.0[0] > 0 { 255 } else { 0 });
+    let small_fill = fill(&small_rgba, &small_mask, &progress.within((crop.x, crop.y, crop.w, crop.h), mask.dimensions()))?;
+    let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
+    // Only this hole: another one's pixels in the crop get their own fill.
+    let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
+    for (x, y, m) in crop_mask.enumerate_pixels() {
+        let (px, py) = (crop.x + x, crop.y + y);
+        if m.0[0] >= 128 && in_hole(px, py) {
+            out.put_pixel(px, py, *filled.get_pixel(x, y));
+        }
+    }
+    Ok(())
 }
 
 /// One LaMa session per process — see `LamaSession::get`. Tiles run
@@ -274,130 +472,99 @@ struct LamaSession {
     session: Mutex<Session>,
     image_input_name: String,
     mask_input_name: String,
+    pick: SessionPick,
 }
 
-/// Idle-release window for LaMa sessions. Mirrors `SD_IDLE_RELEASE_SECS`
-/// in `inpaint_sd.rs`. A 5-minute window balances "user might paint
-/// again any second" against "session is hundreds of MB to a few GB
-/// after EP compile and the OS should get it back if they switched
-/// away or moved on to bg removal."
-const LAMA_IDLE_RELEASE_SECS: u64 = 300;
+/// Load `id`'s LaMa-family session (or find it loaded) and say where it
+/// runs. `process_lama` with the same `cpu_only` uses this session.
+pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPick, CoreError> {
+    LamaSession::get(id, cpu_only).map(|s| s.pick.clone())
+}
 
-/// Background sweeper interval. 60 s gives reclaim within ~1 minute of
-/// the idle threshold.
-const LAMA_SWEEP_INTERVAL_SECS: u64 = 60;
 
-/// Per-id deferred session — same shape as `SdBundleSlot`. Outer
-/// `Arc<OnceLock>` closes the build race between two concurrent
+
+/// Per-id deferred session. The outer `Arc<OnceLock>` closes the build
+/// race between two concurrent
 /// `get()` callers (e.g. a prewarm racing the first stroke).
 type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
-type LamaCache = HashMap<prunr_models::ModelId, crate::inpaint_sd::CacheEntry<LamaSlot>>;
+/// Keyed by model and "CPU only", so a session built under one choice is
+/// never handed out under the other.
+type LamaCache = HashMap<(prunr_models::ModelId, bool), crate::inpaint_sd::CacheEntry<LamaSlot>>;
 
 fn lama_cache() -> &'static Mutex<LamaCache> {
     static CACHE: OnceLock<Mutex<LamaCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Drop every cached LaMa session immediately. In-flight callers keep
-/// their own `Arc<LamaSession>` so the cache clear is safe; once the
-/// dispatch finishes, the last Arc goes away and the ORT session
-/// frees. Called by the GUI when the user switches inpaint models —
-/// keeping the previous backend cached for 5 min after they've
-/// committed to a different tool wastes ~700 MB–2 GB on the model
-/// they're no longer using.
-pub fn release_all_lama_sessions() {
-    let cache = lama_cache();
-    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dropped = guard.len();
-    guard.clear();
-    if dropped > 0 {
-        tracing::info!(
-            dropped,
-            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
-            "LaMa: cache cleared on model switch",
-        );
+/// Drop every cached eraser session, LaMa-class and Stable Diffusion,
+/// kept ones too. In-flight callers keep their own `Arc` of the session,
+/// so the clear is safe; once the dispatch finishes, the last Arc goes
+/// and the ORT session frees. Called by the GUI when the user switches
+/// models — keeping the previous backend cached for 5 min after they've
+/// committed to a different tool wastes ~700 MB–2 GB (LaMa) or ~16 GB
+/// (SD) on a model they're no longer using.
+///
+/// The caches are empty when this returns; the sessions free where the
+/// result is dropped, so a caller that must not wait hundreds of
+/// milliseconds on the free drops it on another thread.
+pub fn release_all() -> ReleasedSessions {
+    let lama = std::mem::take(&mut *lama_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    if !lama.is_empty() {
+        tracing::info!(dropped = lama.len(), "LaMa: cache cleared on model switch");
     }
+    ReleasedSessions { _lama: lama, _sd: crate::inpaint_sd::release_all() }
+}
+
+/// Eraser sessions taken out of their caches; dropping it frees them.
+#[must_use = "dropping it frees the sessions; drop it where the wait does not matter"]
+pub struct ReleasedSessions {
+    _lama: LamaCache,
+    _sd: crate::inpaint_sd::SdCache,
 }
 
 fn ensure_lama_sweeper_running() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("lama-idle-sweeper".to_string())
-            .spawn(|| {
-                let interval = Duration::from_secs(LAMA_SWEEP_INTERVAL_SECS);
-                let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
-                loop {
-                    std::thread::sleep(interval);
-                    let cache = lama_cache();
-                    let mut guard = cache.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let dropped = crate::inpaint_sd::sweep_idle(
-                        &mut guard, Instant::now(), idle,
-                    );
-                    if dropped > 0 {
-                        tracing::info!(
-                            dropped,
-                            idle_secs = LAMA_IDLE_RELEASE_SECS,
-                            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
-                            "LaMa: background sweeper released idle session(s)",
-                        );
-                    }
-                }
-            })
-            .expect("spawn lama-idle-sweeper thread");
+        crate::inpaint_sd::spawn_idle_sweeper(
+            "lama-idle-sweeper",
+            lama_cache,
+            "LaMa: background sweeper released idle session(s)",
+        );
     });
 }
 
 impl LamaSession {
     /// Per-id cache. Each LamaSession is built once on first use, kept
-    /// in an `Arc`, and released after `LAMA_IDLE_RELEASE_SECS` of no
-    /// `get()` calls. Mirrors `SdSession::get` so both inpaint backends
-    /// have the same lifecycle: in-flight callers hold their own Arc
-    /// (no use-after-free), the cache drops its ref on idle, the OS
-    /// reclaims the underlying ORT session.
-    ///
-    /// Pre-fix this was `Box::leak`'d to a `&'static`, which meant the
-    /// session lived for the whole process lifetime — a single LaMa
-    /// stroke pinned ~700 MB–2 GB of resident RAM until shutdown.
-    fn get(id: prunr_models::ModelId) -> Result<Arc<LamaSession>, CoreError> {
+    /// in an `Arc`, and released after `crate::IDLE_RELEASE` of no
+    /// `get()` calls: in-flight callers hold their own Arc (no
+    /// use-after-free), the cache drops its ref on idle, the OS reclaims
+    /// the underlying ORT session.
+    fn get(id: prunr_models::ModelId, cpu_only: bool) -> Result<Arc<LamaSession>, CoreError> {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
         let now = Instant::now();
-        let idle = Duration::from_secs(LAMA_IDLE_RELEASE_SECS);
 
         // Cache lock held only for the HashMap lookup and at most one
         // Arc<OnceLock> allocation — never for the seconds-long build.
-        let slot: LamaSlot = {
+        let (slot, idle): (LamaSlot, _) = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let dropped = crate::inpaint_sd::sweep_idle(&mut guard, now, idle);
-            if dropped > 0 {
-                tracing::info!(
-                    dropped,
-                    idle_secs = LAMA_IDLE_RELEASE_SECS,
-                    rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
-                    "LaMa: released idle session(s)",
-                );
-            }
-            let entry = guard.entry(id)
+            let idle = crate::inpaint_sd::sweep_and_log(&mut guard, now, "LaMa: released idle session(s)");
+            let entry = guard.entry((id, cpu_only))
                 .or_insert_with(|| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::new()), now));
-            // Don't refresh last_used on Err entries — sticky failures
-            // shouldn't keep refreshing their idle timer (mirrors SD).
-            if !matches!(entry.value.get(), Some(Err(_))) {
-                entry.last_used = now;
-            }
-            entry.value.clone()
+            entry.touch(now);
+            (entry.value.clone(), idle)
         };
+        drop(idle);
 
         // Build outside the cache lock. Concurrent callers block on
         // the OnceLock and receive the same Result — no duplicate
         // session gets built.
-        slot.get_or_init(|| Self::new_inner(id).map(Arc::new))
+        slot.get_or_init(|| Self::new_inner(id, cpu_only).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
     }
 
-    fn new_inner(id: prunr_models::ModelId) -> Result<LamaSession, String> {
+    fn new_inner(id: prunr_models::ModelId, cpu_only: bool) -> Result<LamaSession, String> {
         let bytes = prunr_models::resolve_bytes(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let bytes = bytes.as_ref();
@@ -409,23 +576,15 @@ impl LamaSession {
             .unwrap_or(4)
             .max(1);
 
-        // Try GPU EPs first; fall back to CPU on any failure. Mirrors
-        // `OrtEngine`'s one-EP-at-a-time ladder so a crashing EP can't
-        // abort the whole session creation. Logs which EP won.
-        let (session, provider) = build_lama_session(id, bytes, threads)?;
+        let (session, pick) = build_lama_session(id, bytes, threads, cpu_only)?;
 
-        let inputs = session.inputs().iter()
-            .map(|i| i.name().to_string())
-            .collect::<Vec<_>>();
-        if inputs.len() < 2 {
-            return Err(format!("LaMa: expected 2 inputs, got {}: {inputs:?}", inputs.len()));
-        }
-        let (img_name, mask_name) = pick_input_names(&inputs);
+        let (img_name, mask_name) = lama_input_names(&session)
+            .map_err(|inputs| format!("LaMa: expected 2 inputs, got {}: {inputs:?}", inputs.len()))?;
         tracing::info!(
             ?id,
             image_input = %img_name,
             mask_input = %mask_name,
-            provider = %provider,
+            provider = %pick.provider,
             threads,
             "Inpaint session ready",
         );
@@ -433,11 +592,11 @@ impl LamaSession {
             session: Mutex::new(session),
             image_input_name: img_name,
             mask_input_name: mask_name,
+            pick,
         })
     }
 
     fn run_tile(&self, image: &RgbaImage, mask: &GrayImage) -> Result<RgbaImage, CoreError> {
-        let (w, h) = image.dimensions();
         let (img_in, mask_in) = encode_tile(image, mask);
 
         // Borrow the output view straight into `decode_tile` — no
@@ -460,23 +619,23 @@ impl LamaSession {
             .map_err(|e| CoreError::Inference(format!("LaMa: output extract: {e}")))?
             .into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?;
-        Ok(decode_tile(view, image, mask, w, h))
+        Ok(decode_tile(view, image, mask))
     }
 }
 
 impl Drop for LamaSession {
     fn drop(&mut self) {
         tracing::info!(
-            rss_mb = crate::inpaint_sd::process_rss_mb_pub(),
+            rss_mb = crate::inpaint_sd::process_rss_mb(),
             "LaMa session dropped (idle release or process exit)",
         );
     }
 }
 
 /// Build the LaMa ORT session, trying GPU EPs first and falling back
-/// to CPU. Returns `(session, provider_name)` so the caller can log
-/// which path won. CPU is the universal fallback; if even CPU fails
-/// we propagate the error string.
+/// to CPU. Returns the session and where it runs, with each GPU
+/// provider that failed on the way. CPU is the universal fallback; if
+/// even CPU fails we propagate the error string.
 ///
 /// Each GPU candidate is **smoke-tested** with a tiny inference before
 /// being accepted — some EPs (notably CUDA on certain ORT versions)
@@ -490,124 +649,58 @@ fn build_lama_session(
     id: prunr_models::ModelId,
     bytes: &[u8],
     threads: usize,
-) -> Result<(Session, String), String> {
-    let gpu_eps = crate::engine::available_gpu_eps();
+    cpu_only: bool,
+) -> Result<(Session, SessionPick), String> {
+    lama_ladder(id, bytes, crate::engine::gpu_eps_for(cpu_only), threads, || base_builder(threads))
+}
 
-    for &ep in gpu_eps {
-        // Static catalog + dynamic cache, same as engine.rs.
-        if !prunr_models::is_ep_compatible(id, ep.as_str()) {
-            tracing::debug!(?id, ep = %ep, "LaMa: EP statically incompatible; skipping");
-            continue;
-        }
-        if crate::ep_compat::is_known_failure(ep, id) {
-            tracing::debug!(?id, ep = %ep, "LaMa: EP cached as incompatible; skipping");
-            continue;
-        }
+/// `build_lama_session` over `eps`, each session started from `builder`.
+fn lama_ladder(
+    id: prunr_models::ModelId,
+    bytes: &[u8],
+    eps: &[EpKind],
+    threads: usize,
+    builder: impl Fn() -> Result<ort::session::builder::SessionBuilder, String>,
+) -> Result<(Session, SessionPick), String> {
+    let landed = crate::engine::walk_ladder("LaMa: ", id, Weights::Fp32, eps, |ep| {
         crate::cache::gc_stale_for_model(id, ep.as_str());
-        let builder = match base_builder(threads) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: builder init failed");
-                continue;
-            }
+        let builder = builder().map_err(Miss::Unusable)?;
+        let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
+            apply_ort_graph_cache(builder, bytes, id, ep.as_str(), Weights::Fp32)
+        } else {
+            (builder, Cow::Borrowed(bytes), None)
         };
-        #[allow(unused_mut)] // mut only used on non-macOS via the CUDA arm
-        let mut bytes_owner: Cow<'_, [u8]> = Cow::Borrowed(bytes);
-        let builder = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => {
-                let (b, owned) = apply_ort_graph_cache(builder, bytes, id, ep.as_str());
-                bytes_owner = owned;
-                b
-            }
-            _ => builder,
-        };
-        let registered = match ep {
-            #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => builder.with_execution_providers([
-                ort::ep::CUDA::default()
-                    .with_device_id(0)
-                    .build(),
-            ]),
-            #[cfg(target_os = "macos")]
-            EpKind::CoreMl => {
-                let mut p = ort::ep::CoreML::default();
-                if let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) {
-                    p = p.with_model_cache_dir(dir.to_string_lossy().into_owned());
-                }
-                builder.with_execution_providers([p.build()])
-            }
-            #[cfg(windows)]
-            EpKind::DirectMl => builder.with_execution_providers([
-                ort::ep::DirectML::default().build(),
-            ]),
-            // Default device "AUTO" lets OpenVINO pick the best target
-            // (iGPU when present + driver works, NPU on newer Intel,
-            // else CPU). Smoke test below catches op-incompat failures.
-            // `with_num_threads` caps the EP-internal TBB pool to match
-            // our outer rayon budget. (No `with_cache_dir` — see
-            // engine.rs for the empirical retest finding.)
-            #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => builder.with_execution_providers([
-                ort::ep::OpenVINO::default()
-                    .with_num_threads(threads.max(1))
-                    .build(),
-            ]),
-        };
-        let mut built = match registered {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: register EP failed");
-                continue;
-            }
-        };
+        let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
+        let mut built = builder
+            .with_execution_providers([ep.provider(id, EpSite::Fill { threads })])
+            .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep, Weights::Fp32) };
         let started = Instant::now();
-        let mut session = match built.commit_from_memory(&bytes_owner) {
-            Ok(s) => {
-                tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
-                s
-            }
-            Err(e) => {
-                tracing::warn!(ep = %ep, %e, "LaMa: GPU session commit failed — trying next");
-                crate::engine::handle_commit_failure(
-                    matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
-                    || crate::cache::optimized_model_path(id, ep.as_str()),
-                    &format!("{e}"),
-                );
-                continue;
-            }
-        };
-        match smoke_test_session(&mut session) {
-            Ok(()) => {
-                tracing::info!(ep = %ep, "LaMa: GPU session validated");
-                return Ok((session, ep.as_str().to_string()));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    ep = %ep, %e,
-                    "LaMa: GPU session smoke test failed — falling back to next EP/CPU",
-                );
-                crate::engine::handle_commit_failure(
-                    matches!(bytes_owner, Cow::Owned(_)),
-                    ep, id,
-                    || crate::cache::optimized_model_path(id, ep.as_str()),
-                    &e,
-                );
-            }
-        }
-    }
+        let mut session = built
+            .commit_from_memory(&bytes_owner)
+            .map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
+        tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+        coverage.report(id, None);
+        smoke_test_session(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+        if let Some(draft) = draft { draft.publish(); }
+        tracing::info!(ep = %ep, "LaMa: GPU session validated");
+        Ok(session)
+    });
+    let failed = match landed {
+        Ok((session, ep, failed)) => return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) })),
+        Err(walk) => walk.failed,
+    };
 
     // CPU fallback: no EP registration, ORT uses its default CPU provider.
-    crate::cache::gc_stale_for_model(id, "CPU");
-    let builder = base_builder(threads)?;
-    let (mut builder, cpu_bytes) = apply_ort_graph_cache(builder, bytes, id, "CPU");
+    crate::cache::gc_stale_for_model(id, crate::engine::CPU_NAME);
+    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, crate::engine::CPU_NAME, Weights::Fp32);
     let started = Instant::now();
     let session = builder
         .commit_from_memory(&cpu_bytes)
         .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
-    tracing::info!(?id, ep = "CPU", elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
-    Ok((session, "CPU".to_string()))
+    if let Some(draft) = draft { draft.publish(); }
+    tracing::info!(?id, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+    Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
 }
 
 /// Run one inference with zero-padded inputs to validate that the
@@ -617,13 +710,8 @@ fn smoke_test_session(session: &mut Session) -> Result<(), String> {
     let s = TILE as usize;
     let img = ndarray::Array4::<f32>::zeros((1, 3, s, s));
     let msk = ndarray::Array4::<f32>::zeros((1, 1, s, s));
-    let inputs = session.inputs().iter()
-        .map(|i| i.name().to_string())
-        .collect::<Vec<_>>();
-    if inputs.len() < 2 {
-        return Err(format!("smoke test: need 2 inputs, got {inputs:?}"));
-    }
-    let (img_name, mask_name) = pick_input_names(&inputs);
+    let (img_name, mask_name) = lama_input_names(session)
+        .map_err(|inputs| format!("smoke test: need 2 inputs, got {inputs:?}"))?;
     let img_t = Tensor::from_array(img)
         .map_err(|e| format!("smoke test: image tensor: {e}"))?;
     let msk_t = Tensor::from_array(msk)
@@ -643,6 +731,18 @@ fn base_builder(threads: usize) -> Result<ort::session::builder::SessionBuilder,
         .map_err(|e| format!("LaMa: optimization level: {e}"))?
         .with_intra_threads(threads)
         .map_err(|e| format!("LaMa: intra_threads: {e}"))
+}
+
+/// The session's (image, mask) input names, or every input name when
+/// there are fewer than two.
+fn lama_input_names(session: &Session) -> Result<(String, String), Vec<String>> {
+    let inputs = session.inputs().iter()
+        .map(|i| i.name().to_string())
+        .collect::<Vec<_>>();
+    if inputs.len() < 2 {
+        return Err(inputs);
+    }
+    Ok(pick_input_names(&inputs))
 }
 
 /// LaMa-ONNX exports use `image` + `mask` as input names (Carve/LaMa-ONNX
@@ -703,9 +803,8 @@ fn decode_tile(
     output: ndarray::ArrayView4<'_, f32>,
     source: &RgbaImage,
     mask: &GrayImage,
-    w: u32,
-    h: u32,
 ) -> RgbaImage {
+    let (w, h) = source.dimensions();
     let s = TILE as usize;
     let plane = s * s;
     let buf = output.as_slice().unwrap_or(&[]);
@@ -745,8 +844,6 @@ fn decode_tile(
     out
 }
 
-/// True when every pixel of `mask` is zero. O(n) scan; cheap relative
-/// to inference, and short-circuits the entire pipeline.
 /// No masked pixel inside `tile`, read in place.
 fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
     let w = mask.width() as usize;
@@ -757,15 +854,15 @@ fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
     })
 }
 
+/// True when every pixel of `mask` is zero. O(n) scan; cheap relative
+/// to inference, and short-circuits the entire pipeline.
 fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
 
-/// Source rect (in image pixels) for one inpaint tile + the same rect
-/// in the destination buffer (always identical here, but the type
-/// makes future repositioning explicit).
+/// One planned inpaint tile: its rect in image pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TilePlacement {
+pub(crate) struct TilePlacement {
     pub x: u32,
     pub y: u32,
     pub w: u32,
@@ -840,6 +937,20 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// f32 accumulators instead of ~250 MB. Pixels outside the bbox are
 /// guaranteed mask==0 and so would be skipped by the composite loop
 /// anyway — the bbox crop is bit-exact with the full-image variant.
+///
+/// Asked for previews, each finished tile goes out as its fill over the
+/// photo (`tile_fill_preview`), made in the tile's photo crop, which the loop
+/// holds anyway, for the part of the tile the mask's box reaches; the
+/// photo the listener shows under the previews holds the rest. The result
+/// is the same either way. Extra per tile (the resample, then the part
+/// sent, at most the tile at preview size) and for a listener that paints
+/// them all into one preview of the whole photo:
+///
+/// | Photo, preview edge | Extra per tile         | Whole preview |
+/// |---------------------|------------------------|---------------|
+/// | 1024 × 768, 1536    | the part, ≤ 1 MB (1:1) | 3 MB          |
+/// | 4096 × 3072, 1536   | 150 KB + the part      | 7 MB          |
+/// | 8192 × 6144, 1536   | 40 KB + the part       | 7 MB          |
 // `pub` to be reachable from `benches/tile_compose.rs`; `#[doc(hidden)]`
 // because it's still an internal kernel — callers should use
 // `process_inpaint`.
@@ -856,9 +967,7 @@ where
     let (w, h) = image.dimensions();
     let mut out = image.clone();
 
-    // No mask → no work. Avoids allocating accumulators for the all-zero
-    // case (was a 250 MB allocation on a 4K image even when nothing
-    // needed to be inpainted).
+    // No mask → no work, and no accumulators allocated.
     let Some(bbox) = mask_bbox(mask, 1, 0) else {
         return Ok(out);
     };
@@ -869,9 +978,9 @@ where
     // in the OVERLAP band; each contributes a smoothstep-weighted
     // sample, normalized at the end. Bbox-sized — see fn docs.
     let mut weight_acc: Vec<f32> = vec![0.0; bbox_n];
-    // Accumulator for the weighted RGBA in f32 — blended in linear
-    // space, quantised back to u8 at the end.
-    let mut color_acc: Vec<[f32; 4]> = vec![[0.0; 4]; bbox_n];
+    // Weighted RGB in f32, quantised back to u8 at the end. No alpha:
+    // the resolve keeps the photo's.
+    let mut color_acc: Vec<[f32; 3]> = vec![[0.0; 3]; bbox_n];
 
     // Only tiles that touch the mask run; they are the tile map's layout.
     let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect();
@@ -890,6 +999,8 @@ where
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
+        let rect = (tile.x, tile.y, tile.w, tile.h);
+        progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| tile_fill_preview(tile_rgba, &painted, &tile_mask, size, part));
         progress.inner(i as u32 + 1, total, Unit::Tile);
         progress.tile(i as u32, true);
     }
@@ -932,6 +1043,19 @@ where
     Ok(out)
 }
 
+/// `part` of a finished tile as the erase shows it, previewed at `size`:
+/// the fill where the mask is set (the rule the final composite follows),
+/// the photo elsewhere, the photo's alpha throughout. Fills `photo` in
+/// place.
+fn tile_fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage, size: (u32, u32), part: (u32, u32, u32, u32)) -> Vec<u8> {
+    for ((p, f), m) in photo.pixels_mut().zip(painted.pixels()).zip(mask.pixels()) {
+        if m.0[0] != 0 {
+            p.0[..3].copy_from_slice(&f.0[..3]);
+        }
+    }
+    crate::formats::preview_rgba(Cow::Owned(photo), size, part)
+}
+
 /// Bounding box of pixels where `mask >= min_value`, expanded by
 /// `margin` pixels on each side and clamped to image bounds. `None`
 /// for an empty result. Parallel row-reduction so a 4 K mask scans
@@ -943,12 +1067,8 @@ where
 /// produce bit-identical output to a full-image variant — both clamp
 /// at the same image edge, just framed differently.
 ///
-/// Two callers in this module today:
-/// - `tile_compose`: `min_value=1, margin=0` (any nonzero pixel
-///   triggers inference; matches `mask_is_empty`'s convention).
-/// - `sharpen_inpainted`: `min_value=128, margin=SHARPEN_MARGIN`
-///   (binary mask threshold; margin = kernel half-width so clamped
-///   blur reads stay bit-identical to the full-image variant).
+/// `min_value = 1` finds any nonzero pixel (the inference trigger, as in
+/// `mask_is_empty`); `128` is the binary-mask threshold.
 pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<Bbox> {
     use rayon::prelude::*;
     let raw = mask.as_raw();
@@ -988,7 +1108,7 @@ pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<
 }
 
 fn accumulate_tile(
-    color_acc: &mut [[f32; 4]],
+    color_acc: &mut [[f32; 3]],
     weight_acc: &mut [f32],
     tile: &RgbaImage,
     placement: &TilePlacement,
@@ -1034,7 +1154,6 @@ fn accumulate_tile(
             acc[0] += tile_raw[p_off]     as f32 * w;
             acc[1] += tile_raw[p_off + 1] as f32 * w;
             acc[2] += tile_raw[p_off + 2] as f32 * w;
-            acc[3] += tile_raw[p_off + 3] as f32 * w;
             weight_acc[dst_idx] += w;
         }
     }
@@ -1065,6 +1184,105 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); t.clone() });
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
+    }
+
+    /// Asked for previews, each finished tile is sent once, while it
+    /// runs, at its place: the fill inside the mask, the photo untouched
+    /// outside it. A photo of one tile goes the same way. The result is
+    /// the same with or without previews, and none is sent unless asked.
+    #[test]
+    fn tile_compose_previews_each_finished_tile_over_the_photo() {
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
+        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        for (w, h) in [(1200, 600), (300, 200)] {
+            let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, 40, 200]));
+            let mut mask = GrayImage::new(w, h);
+            for (x, y) in [(100, 100), (101, 100), (w - 20, h - 30)] {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+            mask.put_pixel(102, 100, Luma([60]));
+            let mask_box = mask_bbox(&mask, 1, 0).expect("a mask");
+            let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+            let sink = std::sync::Arc::new(RecordingSink::default());
+            let with = tile_compose(&img, &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
+            let updates = sink.updates();
+            assert_eq!(check_contract(&updates), Ok(()));
+
+            let mut running = None;
+            let mut previews = 0;
+            for u in &updates {
+                match u {
+                    ProgressUpdate::Tile { index, done: false } => running = Some(*index as usize),
+                    ProgressUpdate::Tile { done: true, .. } => running = None,
+                    ProgressUpdate::TilePreview(p) => {
+                        let t = work[running.expect("a preview is sent while its tile runs")];
+                        let part = mask_box.within((t.x, t.y, t.w, t.h));
+                        assert_eq!((p.x, p.y, p.width, p.height, p.full_width, p.full_height), (part.0, part.1, part.2, part.3, w, h), "the tile's part in the mask's box, at its place");
+                        for (i, px) in p.rgba.chunks(4).enumerate() {
+                            let (x, y) = (p.x + i as u32 % p.width, p.y + i as u32 / p.width);
+                            let photo = img.get_pixel(x, y).0;
+                            let want = if mask.get_pixel(x, y).0[0] != 0 { [250, 0, 0, photo[3]] } else { photo };
+                            assert_eq!(px, want, "({x}, {y})");
+                        }
+                        previews += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(previews, work.len(), "one preview per tile, {w} × {h}");
+            assert!(w > TILE || work.len() == 1, "a small photo is one tile");
+
+            let quiet = std::sync::Arc::new(RecordingSink::default());
+            let without = tile_compose(&img, &mask, &Progress::new(quiet.clone()), fill).unwrap();
+            assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
+            assert_eq!(with.as_raw(), without.as_raw(), "previews leave the result as it is");
+            assert_eq!(tile_compose(&img, &mask, &Progress::none(), fill).unwrap().as_raw(), with.as_raw());
+        }
+    }
+
+    /// Shrunk for the preview, each tile is sent for the part its mask can
+    /// reach: the same pixels the whole tile's preview has there, and
+    /// every pixel where that preview differs from the photo's is inside.
+    #[test]
+    fn a_shrunk_tile_preview_part_holds_what_the_fill_changes() {
+        use crate::progress::{ProgressUpdate, RecordingSink};
+        let (w, h) = (700, 500);
+        let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]));
+        let mut mask = GrayImage::new(w, h);
+        for (x, y) in (300..340).flat_map(|x| (200..230).map(move |y| (x, y))) {
+            mask.put_pixel(x, y, Luma([255]));
+        }
+        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        let previewed = |progress: &Progress| progress.clone().with_tile_previews(300);
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        tile_compose(&img, &mask, &previewed(&Progress::new(sink.clone())), fill).unwrap();
+        let parts: Vec<_> = sink.updates().into_iter().filter_map(|u| match u {
+            ProgressUpdate::TilePreview(p) => Some(p),
+            _ => None,
+        }).collect();
+        let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+        assert!(work.len() > 1 && parts.len() == work.len(), "one part per tile the mask touches");
+        for (t, part) in work.iter().zip(&parts) {
+            let rect = (t.x, t.y, t.w, t.h);
+            let tile_rgba = image::imageops::crop_imm(&img, t.x, t.y, t.w, t.h).to_image();
+            let tile_mask = image::imageops::crop_imm(&mask, t.x, t.y, t.w, t.h).to_image();
+            let whole_sink = std::sync::Arc::new(RecordingSink::default());
+            let whole_progress = previewed(&Progress::new(whole_sink.clone()));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| tile_fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask), &tile_mask, (pw, ph), (0, 0, pw, ph)));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| crate::formats::preview_rgba(Cow::Borrowed(&tile_rgba), (pw, ph), (0, 0, pw, ph)));
+            let updates = whole_sink.updates();
+            let [ProgressUpdate::TilePreview(whole), ProgressUpdate::TilePreview(photo)] = updates.as_slice() else { panic!("{updates:?}") };
+            assert!(part.width < whole.width, "less than the whole tile");
+            for (i, (a, b)) in whole.rgba.chunks(4).zip(photo.rgba.chunks(4)).enumerate() {
+                let (x, y) = (whole.x + i as u32 % whole.width, whole.y + i as u32 / whole.width);
+                if (part.x..part.x + part.width).contains(&x) && (part.y..part.y + part.height).contains(&y) {
+                    let j = (((y - part.y) * part.width + x - part.x) * 4) as usize;
+                    assert_eq!(part.rgba[j..j + 4], *a, "({x}, {y}) as the whole tile's preview has it");
+                } else {
+                    assert_eq!(a, b, "({x}, {y}) changes outside the part");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1168,6 +1386,31 @@ mod tests {
         assert_eq!(result.as_raw(), img.as_raw());
     }
 
+    /// A provider whose session cannot even be started is named in the
+    /// pick, as the engine's ladder names it, and is not held against the
+    /// model; the CPU then takes the session.
+    #[test]
+    fn a_builder_that_cannot_start_on_a_provider_is_in_the_pick() {
+        use prunr_models::ModelId;
+        if crate::ort_runtime::ensure_initialized().is_err() {
+            return;
+        }
+        let Some(bytes) = prunr_models::resolve_bytes(ModelId::Silueta) else { return };
+        #[cfg(not(target_os = "macos"))]
+        let ep = EpKind::Cuda;
+        #[cfg(target_os = "macos")]
+        let ep = EpKind::CoreMl;
+        let id = ModelId::Migan;
+        let calls = std::cell::Cell::new(0);
+        let builder = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { Err("LaMa: no builder here".to_string()) } else { base_builder(1) }
+        };
+        let (_, pick) = lama_ladder(id, &bytes, &[ep], 1, builder).expect("the CPU takes the session");
+        assert_eq!((pick.provider.as_str(), pick.failed.as_slice()), ("CPU", ["LaMa: no builder here".to_string()].as_slice()));
+        assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), "the machine's lack, not the model's");
+    }
+
     #[test]
     fn pick_input_names_matches_by_keyword() {
         let names = vec!["image".to_string(), "mask".to_string()];
@@ -1201,6 +1444,30 @@ mod tests {
         let (img, msk) = pick_input_names(&names);
         assert_eq!(img, "the_image");
         assert_eq!(msk, "the_mask");
+    }
+
+    /// The bbox-cropped grow matches full-image morphology, for masks in
+    /// the middle and touching each image edge, growing and shrinking.
+    #[test]
+    fn grow_mask_matches_full_image_morphology() {
+        let full = |m: &GrayImage, px: i32| {
+            let mut cur = m.clone();
+            let mut next = GrayImage::new(m.width(), m.height());
+            for _ in 0..px.unsigned_abs() {
+                morphology_step_into(&cur, &mut next, px > 0);
+                std::mem::swap(&mut cur, &mut next);
+            }
+            cur
+        };
+        for (x0, y0, x1, y1) in [(10, 12, 20, 25), (0, 0, 6, 9), (30, 33, 40, 40), (0, 15, 40, 18)] {
+            let mut m = GrayImage::new(40, 40);
+            for y in y0..y1 { for x in x0..x1 { m.put_pixel(x, y, Luma([255])); } }
+            m.put_pixel(35, 3, Luma([90]));
+            for px in [-3, -1, 1, 4, 7] {
+                assert_eq!(grow_mask(&m, px), full(&m, px), "rect {:?} px {px}", (x0, y0, x1, y1));
+            }
+        }
+        assert_eq!(grow_mask(&GrayImage::new(8, 8), 3), GrayImage::new(8, 8));
     }
 
     #[test]
@@ -1253,7 +1520,7 @@ mod tests {
         // Fill output with junk to prove we don't read it.
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         for v in output.iter_mut() { *v = 0.5; }
-        let out = decode_tile(output.view(), &src, &mask, 64, 64);
+        let out = decode_tile(output.view(), &src, &mask);
         assert_eq!(out.as_raw(), src.as_raw(), "unmasked pixels must equal source");
     }
 
@@ -1269,7 +1536,7 @@ mod tests {
         output[[0, 0, 4, 4]] = 1.0;
         output[[0, 1, 4, 4]] = 0.0;
         output[[0, 2, 4, 4]] = 128.0 / 255.0;
-        let out = decode_tile(output.view(), &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask);
         let p = out.get_pixel(4, 4);
         assert_eq!(p[0], 255);
         assert_eq!(p[1], 0);
@@ -1289,7 +1556,7 @@ mod tests {
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         // Big values across the whole tile so the heuristic picks 1.0 scale.
         for v in output.iter_mut() { *v = 200.0; }
-        let out = decode_tile(output.view(), &src, &mask, 8, 8);
+        let out = decode_tile(output.view(), &src, &mask);
         assert_eq!(out.get_pixel(4, 4).0[0], 200, "200.0 in [0,255] range stays 200");
     }
 
@@ -1305,6 +1572,153 @@ mod tests {
         assert_eq!(msk_t[[0, 0, 32, 32]], 1.0);
         // Outside the source region, mask stays 0 (zero-padded).
         assert_eq!(msk_t[[0, 0, 200, 200]], 0.0);
+    }
+
+    /// Auto fills a hole up to one tile's worth at full size and shrinks
+    /// a larger one to that; the fixed scales ignore the hole.
+    #[test]
+    fn fill_scale_factor_follows_the_hole_on_auto() {
+        let fit = Fit { long: 700, short: 400 };
+        assert_eq!(FillScale::Auto.factor((700, 400), fit), 1.0, "fits as it is");
+        assert!((FillScale::Auto.factor((2800, 100), fit) - 0.25).abs() < 1e-6, "too long");
+        assert!((FillScale::Auto.factor((800, 650), fit) - 400.0 / 650.0).abs() < 1e-6, "too wide on the short side");
+        assert_eq!(FillScale::Full.factor((5000, 5000), fit), 1.0);
+        assert_eq!(FillScale::Half.factor((10, 10), fit), 0.5);
+        assert_eq!(FillScale::Quarter.factor((10, 10), fit), 0.25);
+        for v in FillScale::ALL {
+            assert_eq!(v.to_string().parse::<FillScale>(), Ok(v));
+        }
+    }
+
+    /// On Auto a large hole and its context come to one LaMa tile, and a
+    /// neighbouring hole inside the crop stays a hole there but is left
+    /// for its own fill.
+    #[test]
+    fn auto_fills_a_large_hole_in_one_tile_and_keeps_other_holes_out() {
+        let image = RgbaImage::from_pixel(3000, 2000, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(3000, 2000);
+        let mut paint = |x0: u32, y0: u32, x1: u32, y1: u32| for y in y0..y1 { for x in x0..x1 { mask.put_pixel(x, y, Luma([255])); } };
+        paint(500, 500, 1700, 1300);
+        paint(1800, 800, 1830, 830);
+        let hole = Bbox { x: 500, y: 500, w: 1200, h: 800 };
+        let factor = FillScale::Auto.factor((hole.w, hole.h), LAMA_FIT);
+        let mut seen = None;
+        let mut out = image.clone();
+        fill_scaled_down(&mut out, &mask, hole, factor, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: &Progress| {
+            // The mark at (1800-1830, 800-830): crop starts 200 px out, scaled by 0.32.
+            let neighbour = m.get_pixel(485, 165).0[0];
+            seen = Some((rgba.dimensions(), neighbour));
+            let mut filled = rgba.clone();
+            for (x, y, p) in m.enumerate_pixels() {
+                if p.0[0] >= 128 { filled.put_pixel(x, y, Rgba([200, 0, 0, 255])); }
+            }
+            Ok(filled)
+        }).unwrap();
+        let ((w, h), neighbour) = seen.expect("filled");
+        assert!(w <= TILE && h <= TILE, "one tile, got {w}x{h}");
+        assert_eq!(neighbour, 255, "the neighbouring hole is a hole to the model, not photo");
+        assert_eq!(out.get_pixel(1100, 900).0, [200, 0, 0, 255], "the hole is filled");
+        assert_eq!(out.get_pixel(1815, 815).0, [10, 20, 30, 255], "the neighbour is left for its own fill");
+    }
+
+    /// Auto judges each region on its own: a small mark far from a large
+    /// one fills at full size in one pass, the large one scaled down.
+    #[test]
+    fn auto_shrinks_only_the_regions_that_need_it() {
+        let image = RgbaImage::from_pixel(1200, 400, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(1200, 400);
+        for y in 50..350 {
+            for x in 100..700 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        for y in 190..210 {
+            for x in 1100..1120 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let mut calls = Vec::new();
+        let Filled { rgba: out, scale } = fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, m, _| {
+            calls.push((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
+            let mut filled = rgba.clone();
+            for (x, y, p) in m.enumerate_pixels() {
+                if p.0[0] >= 128 {
+                    filled.put_pixel(x, y, Rgba([200, 0, 0, 255]));
+                }
+            }
+            Ok(filled)
+        }).unwrap();
+        assert!(scale > 0.0 && scale < 1.0, "reports the large region's scale: {scale}");
+        let full = fill_at_scale(&image, &mask, FillScale::Full, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, _| Ok(rgba.clone())).unwrap();
+        assert_eq!(full.scale, 1.0, "Full fills at full size");
+        assert_eq!(calls.len(), 2, "the large region scaled down, then the rest");
+        assert!(calls[0].0.0 < 1200, "the large region's crop is scaled down");
+        assert_eq!(calls[1], ((1200, 400), 20 * 20), "the small mark alone, at full size");
+        assert_eq!(out.get_pixel(1110, 200).0, [200, 0, 0, 255]);
+        assert_eq!(out.get_pixel(400, 200).0, [200, 0, 0, 255]);
+        assert_eq!(out.get_pixel(900, 200).0, [10, 20, 30, 255]);
+    }
+
+    /// A region filled scaled down reports its tiles and previews where
+    /// its crop sits in the photo, not over the whole photo; the rest,
+    /// filled at full size, reports in the photo's own terms.
+    #[test]
+    fn a_shrunk_region_reports_at_its_place_in_the_photo() {
+        use crate::progress::{ProgressUpdate, RecordingSink};
+        let image = RgbaImage::from_pixel(1200, 400, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(1200, 400);
+        for (x0, x1, y0, y1) in [(300, 700, 100, 300), (1100, 1120, 190, 210)] {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    mask.put_pixel(x, y, Luma([255]));
+                }
+            }
+        }
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let progress = Progress::new(sink.clone()).with_tile_previews(600);
+        fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &progress, |rgba, _, p| {
+            let (w, h) = rgba.dimensions();
+            p.tiles(vec![TileRect::of_pixels(0, 0, w, h, w, h)]);
+            p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![0; (pw * ph * 4) as usize]);
+            Ok(rgba.clone())
+        }).unwrap();
+        // The hole is 400 × 200 against a 300 px fit: filled at 3/4, with
+        // ceil(64 / 0.75) = 86 px of photo around it.
+        let crop = (214u32, 14u32, 572u32, 372u32);
+        let updates = sink.updates();
+        let layouts: Vec<&TileRect> = updates.iter().filter_map(|u| match u { ProgressUpdate::Tiles(t) => Some(&t[0]), _ => None }).collect();
+        let near = |a: f32, b: u32, of: u32| (a * of as f32 - b as f32).abs() < 0.01;
+        let r = layouts[0];
+        assert!(near(r.x, crop.0, 1200) && near(r.y, crop.1, 400) && near(r.w, crop.2, 1200) && near(r.h, crop.3, 400), "the crop's place: {r:?}");
+        assert_eq!(*layouts[1], TileRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, "the rest fills the photo itself");
+        let previews: Vec<_> = updates.iter().filter_map(|u| match u { ProgressUpdate::TilePreview(p) => Some((p.x, p.y, p.width, p.height, p.full_width, p.full_height)), _ => None }).collect();
+        assert_eq!(previews, vec![(107, 7, 286, 186, 600, 200), (0, 0, 600, 200, 600, 200)], "at half the photo's size");
+    }
+
+    /// Below full size the fill sees the hole and photo around it, scaled
+    /// down, and only the hole changes in the result.
+    #[test]
+    fn a_scaled_fill_changes_only_the_hole() {
+        let image = RgbaImage::from_pixel(400, 300, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(400, 300);
+        for y in 100..180 {
+            for x in 150..270 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let hole = mask_bbox(&mask, 128, 0).unwrap();
+        let mut seen = None;
+        let mut out = image.clone();
+        fill_scaled_down(&mut out, &mask, hole, 0.25, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: &Progress| {
+            seen = Some((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
+            Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
+        }).unwrap();
+        let ((w, h), holes) = seen.expect("filled");
+        assert_eq!((w, h), (100, 75), "64 working px each side reach the image's edges here: all of it, at a quarter");
+        assert!(holes >= 30 * 20, "the whole hole is a hole at the small size");
+        assert_eq!(out.get_pixel(200, 140).0, [200, 0, 0, 255], "inside: the fill");
+        assert_eq!(out.get_pixel(140, 140).0, [10, 20, 30, 255], "outside: the photo");
+        assert_eq!(out.get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 
     #[test]
@@ -1329,6 +1743,17 @@ mod tests {
         mask.put_pixel(0, 0, Luma([255]));
         let bbox = mask_bbox(&mask, 128, 4).expect("non-empty");
         assert_eq!(bbox, Bbox { x: 0, y: 0, w: 5, h: 5 });
+    }
+
+    #[test]
+    fn mask_bbox_pads_an_interior_box_by_the_margin() {
+        let mut mask = GrayImage::new(64, 64);
+        for y in 20..30 {
+            for x in 25..35 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        assert_eq!(mask_bbox(&mask, 128, 4), Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
     }
 
     #[test]

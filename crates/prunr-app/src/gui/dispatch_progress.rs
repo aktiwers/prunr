@@ -14,7 +14,7 @@
 //! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
@@ -27,22 +27,34 @@ pub enum ProgressKind {
     Inpaint,
     /// Super-resolution upscale (Real-ESRGAN, HAT-L).
     Upscale,
+    /// Colorize: one model run.
+    Colorize,
+    /// Restore faces: stops after the face it is on.
+    Faces,
+    /// Measuring a photo's depth: under a second, not cancellable.
+    Depth,
 }
 
 /// What Cancel stops. An eraser run needs the item it runs on; without
 /// one the click does nothing rather than stop another item's stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTarget {
-    InpaintForItem(u64),
+    /// The erase run the capsule shows, and the images queued after it.
+    Inpaint,
     Upscale,
+    Colorize,
     SegBatchAndReset,
+    Faces,
 }
 
-pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
+pub fn cancel_target_for(kind: ProgressKind) -> Option<CancelTarget> {
     match kind {
-        ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
+        ProgressKind::Inpaint => Some(CancelTarget::Inpaint),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
+        ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
+        ProgressKind::Faces => Some(CancelTarget::Faces),
+        ProgressKind::Depth => None,
     }
 }
 
@@ -51,9 +63,8 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
 #[derive(Debug, Clone)]
 pub struct DispatchProgress {
     pub kind: ProgressKind,
-    /// Per-stroke / per-batch unit when applicable. `None` for
-    /// non-tiled dispatches (Seg, Upscale today). `Some((current, total))`
-    /// for SD strokes split into multiple 512² patches.
+    /// Per-batch / per-stroke unit: images of a batch or queue, crops of
+    /// an SD stroke; `None` when the run counts one level only.
     pub outer: Option<(u32, u32)>,
     /// Step counter inside the current outer unit. `(0, 0)` means
     /// "indeterminate" — widgets render the spinner-only form.
@@ -68,6 +79,9 @@ pub struct DispatchProgress {
     /// The tile map: where the work happens, and how far each tile is.
     pub tiles: Arc<[prunr_core::TileRect]>,
     pub tile_states: Arc<Vec<TileState>>,
+    /// Cells an earlier layout of this run finished (an erase fills
+    /// region by region): they stay done.
+    pub finished: Arc<[prunr_core::TileRect]>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
 }
@@ -102,6 +116,7 @@ impl DispatchProgress {
             inner_unit: None,
             tiles: Arc::new([]),
             tile_states: Arc::default(),
+            finished: Arc::new([]),
             pace: None,
         }
     }
@@ -122,11 +137,13 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
+                let done = self.tiles.iter().zip(self.tile_states.iter()).filter(|(_, s)| **s == TileState::Done).map(|(c, _)| *c);
+                self.finished = self.finished.iter().copied().chain(done).collect();
                 self.tiles = rects.as_slice().into();
                 self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
-            // Where the subject is: drawn on the image, not counted.
-            ProgressUpdate::Subject(_) => {}
+            // Pictures for the image, not counted.
+            ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) | ProgressUpdate::TilePreview(_) => {}
             &ProgressUpdate::Tile { index, done } => {
                 if let Some(state) = Arc::make_mut(&mut self.tile_states).get_mut(index as usize) {
                     *state = if done { TileState::Done } else { TileState::Running };
@@ -252,7 +269,8 @@ pub struct RunSink {
 }
 
 impl RunSink {
-    fn current(&self) -> bool {
+    /// The slot still shows this run.
+    pub(crate) fn current(&self) -> bool {
         self.slot.run.load(Ordering::Acquire) == self.run
     }
 
@@ -301,38 +319,24 @@ impl DispatchProgressSlot {
         RunSink { slot: self.clone(), run }
     }
 
-    /// A progress handle for a run starting now, with its cancel flag.
-    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<AtomicBool>) -> (prunr_core::Progress, RunSink) {
-        let sink = self.begin(initial);
-        (prunr_core::Progress::new(Arc::new(sink.clone())).with_cancel(cancel), sink)
-    }
-
     /// Replace the active progress snapshot. Pass `None` to clear when
     /// the dispatch finishes (success, cancel, or error).
     pub fn set(&self, progress: Option<DispatchProgress>) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = progress;
+        *self.lock() = progress;
     }
 
     pub fn update(&self, f: impl FnOnce(&mut Option<DispatchProgress>)) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&mut guard);
+        f(&mut self.lock());
     }
 
     /// Snapshot the current progress for a widget. `None` when no
     /// dispatch is in flight.
     pub fn read(&self) -> Option<DispatchProgress> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.clone()
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DispatchProgress>> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -466,8 +470,12 @@ mod tests {
         assert_eq!(*p.tile_states, [TileState::Running, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tile { index: 0, done: true });
         assert_eq!(*p.tile_states, [TileState::Done, TileState::Waiting]);
-        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.5)]));
         assert_eq!(*p.tile_states, [TileState::Waiting], "a new layout starts over");
+        assert_eq!(*p.finished, [half(0.0)], "what the last one finished stays done");
+        p.apply(&ProgressUpdate::Tile { index: 0, done: true });
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        assert_eq!(*p.finished, [half(0.0), half(0.5)]);
     }
 
     #[test]
@@ -499,10 +507,19 @@ mod tests {
         assert_eq!(at(0, 10, 20), None, "nothing done, nothing to go on");
     }
 
+    /// A face search shows Cancel and stops on it; it used to have no
+    /// target, so the button and Esc did nothing while it ran.
     #[test]
-    fn cancel_target_eraser_needs_active_item() {
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, Some(42)), Some(CancelTarget::InpaintForItem(42)));
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, None), None, "another item's stroke is not ours to stop");
+    fn cancel_target_faces_stops_the_search() {
+        assert_eq!(cancel_target_for(ProgressKind::Faces), Some(CancelTarget::Faces));
+    }
+
+    /// The capsule shows an erase run whichever image is on screen, and
+    /// its Cancel stops that run: a button that showed and did nothing
+    /// was the bug.
+    #[test]
+    fn cancel_target_eraser_stops_the_run_shown() {
+        assert_eq!(cancel_target_for(ProgressKind::Inpaint), Some(CancelTarget::Inpaint));
     }
 
     /// A run that was replaced, or has ended, can still have a report in
@@ -541,13 +558,24 @@ mod tests {
         // Upscale is single-flight on the Processor; the item handle
         // is irrelevant — there's only one upscale to cancel.
         assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, None),
+            cancel_target_for(ProgressKind::Upscale),
             Some(CancelTarget::Upscale),
         );
         assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, Some(99)),
+            cancel_target_for(ProgressKind::Upscale),
             Some(CancelTarget::Upscale),
         );
+    }
+
+    #[test]
+    fn a_depth_run_has_no_cancel() {
+        assert_eq!(cancel_target_for(ProgressKind::Depth), None);
+    }
+
+    #[test]
+    fn cancel_target_colorize_ignores_item() {
+        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
+        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
     }
 
     #[test]
@@ -557,11 +585,11 @@ mod tests {
         // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
         // fails this assertion before users see a dropped click.
         assert_eq!(
-            cancel_target_for(ProgressKind::Seg, None),
+            cancel_target_for(ProgressKind::Seg),
             Some(CancelTarget::SegBatchAndReset),
         );
         assert_eq!(
-            cancel_target_for(ProgressKind::Seg, Some(1)),
+            cancel_target_for(ProgressKind::Seg),
             Some(CancelTarget::SegBatchAndReset),
             "seg routes to batch reset regardless of selection",
         );

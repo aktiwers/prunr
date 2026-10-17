@@ -1,9 +1,75 @@
-//! A coarse look at where the subject is, taken the moment segmentation
-//! inference ends, so the app can outline it while the edges are refined.
+//! A coarse look at where the subject is, so the app can outline it while
+//! the run works: taken the moment segmentation inference ends, and, for a
+//! slow run, by a fast model before the slow one starts.
 
+use std::time::Duration;
+
+use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
-use crate::types::ModelKind;
+use crate::engine::OrtEngine;
+use crate::progress::{Progress, Step};
+use crate::types::{CoreError, ModelKind};
+
+/// The model that takes the first look: it finds the subject in about a
+/// second on a CPU.
+pub const FIRST_LOOK_MODEL: ModelKind = ModelKind::Silueta;
+
+/// A run expected to take longer than this per image shows a first look;
+/// a quicker one lands its own result about when a first look would.
+pub const FIRST_LOOK_AFTER: Duration = Duration::from_secs(2);
+
+/// Whether `model` can be slow enough for a first look: BiRefNet and
+/// U2Net, never the first-look model itself.
+pub fn may_take_first_look(model: ModelKind) -> bool {
+    matches!(model, ModelKind::BiRefNetLite | ModelKind::U2net)
+}
+
+/// Whether a run of `model` expected to take `expected` per image
+/// (`None`: not timed yet on this provider) shows a first look. A fast
+/// accelerator's own result lands before a first look would; a weak one,
+/// or the CPU, takes seconds.
+pub fn first_look_pays(model: ModelKind, expected: Option<Duration>) -> bool {
+    may_take_first_look(model) && expected.is_none_or(|t| t > FIRST_LOOK_AFTER)
+}
+
+/// The first-look model's engine, on the CPU beside a pool of `pool_size`
+/// engines, with the share of the cores each of them has.
+pub fn first_look_engine(pool_size: usize) -> Result<OrtEngine, CoreError> {
+    OrtEngine::new_cpu_only(FIRST_LOOK_MODEL, crate::batch::ort_intra_threads(pool_size))
+}
+
+/// Report where `look` (the first-look model's engine) sees the subject
+/// in `img`, before the run's own model starts. A cancel before or during
+/// it stops it unreported.
+///
+/// Peak beyond the session: the RGB copy the resize to the model's 320 px
+/// square reads, gone before the model runs, as the run's own model
+/// makes next.
+///
+/// | image  | RGB copy |
+/// |--------|----------|
+/// | 12 MP  | 36 MB    |
+/// | 24 MP  | 72 MB    |
+pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> Result<(), CoreError> {
+    progress.check_cancelled()?;
+    let started = std::time::Instant::now();
+    let model = look.model_kind();
+    progress.step(Step::FindingSubject);
+    let hint = look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))?;
+    progress.check_cancelled()?;
+    progress.subject(|| hint);
+    tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "first look reported");
+    Ok(())
+}
+
+/// The hint for a segmentation model's raw output (`1 × 1 × h × w`).
+pub(crate) fn hint_of_output(view: ndarray::ArrayView4<'_, f32>, model: ModelKind) -> SubjectHint {
+    let plane = view.slice(ndarray::s![0, 0, .., ..]);
+    let (h, w) = (plane.nrows(), plane.ncols());
+    let flat = plane.as_standard_layout();
+    subject_hint(flat.as_slice().unwrap_or(&[]), h, w, model)
+}
 
 /// Longest side of a subject hint; plenty for a glow around the subject.
 pub const SUBJECT_HINT_SIDE: usize = 128;
@@ -30,7 +96,7 @@ pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: Mod
             tensor.get(ty * tensor_w + tx).copied().unwrap_or(0.0)
         })
         .collect();
-    let (lo, hi) = samples.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let (lo, hi, _) = crate::math::slice_stats(&samples);
     let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
     let coverage = samples.iter().map(|&v| (norm.apply(v) * 255.0) as u8).collect();
     SubjectHint { width: w as u32, height: h as u32, coverage }
@@ -48,6 +114,29 @@ mod tests {
         assert_eq!((hint.width, hint.height), (128, 128));
         assert_eq!(hint.coverage[0], 255, "the left half is the subject");
         assert_eq!(hint.coverage[127], 0, "the right half is not");
+    }
+
+    /// Which runs take a first look: BiRefNet and U2Net, untimed or timed
+    /// over the threshold; never the first-look model itself.
+    #[test]
+    fn only_a_slow_run_pays_for_a_first_look() {
+        let over = Some(FIRST_LOOK_AFTER + Duration::from_millis(1));
+        let under = Some(Duration::from_millis(400));
+        for (model, expected, pays) in [
+            (ModelKind::BiRefNetLite, None, true),
+            (ModelKind::BiRefNetLite, over, true),
+            (ModelKind::BiRefNetLite, under, false),
+            (ModelKind::BiRefNetLite, Some(FIRST_LOOK_AFTER), false),
+            (ModelKind::U2net, None, true),
+            (ModelKind::U2net, over, true),
+            (ModelKind::U2net, under, false),
+            (ModelKind::Silueta, None, false),
+            (ModelKind::Silueta, over, false),
+            (ModelKind::DdcolorTiny, None, false),
+        ] {
+            assert_eq!(first_look_pays(model, expected), pays, "{model:?} expected {expected:?}");
+        }
+        assert!(!may_take_first_look(FIRST_LOOK_MODEL));
     }
 
     #[test]

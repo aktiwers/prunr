@@ -4,20 +4,21 @@
 //! - The `Vec<BatchItem>` and selection state
 //! - The next-id counter for new items
 //! - The `BackgroundIO` channels (thumbnail, decode, save-done, tex-prep,
-//!   file-load) — historically mixed but the majority are batch-driven.
-//!   Future `Saver` / `ImageOpener` extractions may carve out the file-load
-//!   and save-done channels.
+//!   file-load)
 //!
 //! Does NOT own:
 //! - Inference dispatch (worker channels, admission, live-preview) — `Processor`
 //! - Undo — each item's own `timeline`
 //! - Drag-out lifecycle — `DragExportState`
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::background_io::BackgroundIO;
-use super::item::{BatchItem, BatchStatus, ImageSource};
+use super::item::{BatchItem, BatchStatus, ImageSource, RunTier};
+use super::memory::{AdmissionController, ImageMemCost, RESIDENT_HISTORY_STEPS};
 use super::state::AppState;
+use super::worker::{CachedTensorWork, WorkItem};
 
 /// Per-status counts across the batch. Produced by `status_counts` for
 /// callers that need to render progress strings, decide "all done" vs
@@ -72,6 +73,10 @@ pub(crate) struct BatchManager {
     pub(crate) next_id: u64,
     pub(crate) bg_io: BackgroundIO,
     last_history_sweep: std::time::Instant,
+    /// A move of undo states to disk is running.
+    demoting: Arc<std::sync::atomic::AtomicBool>,
+    /// Selection edits made off the UI thread, in order per image.
+    pub(crate) selection_queue: super::selection_queue::SelectionQueue,
 }
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -96,20 +101,46 @@ impl BatchManager {
             return;
         }
         self.last_history_sweep = now;
-        let slots = &self.bg_io.decode_slots;
-        for item in &self.items {
-            item.timeline.stored_images().for_each(|c| c.compress_when_idle(slots));
-            item.timeline.stored_selections().for_each(|c| c.compress_when_idle(slots));
+        let jobs: std::collections::VecDeque<super::timeline::CompressJob> = self.items.iter()
+            .flat_map(|item| {
+                let images = item.timeline.stored_images().filter_map(|c| c.compress_job());
+                images.chain(item.timeline.stored_selections().filter_map(|c| c.compress_job()))
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        // A few workers share the sweep's jobs: after a batch lands there
+        // can be a hundred, and a thread each cost the frame milliseconds.
+        let workers = jobs.len().min(std::thread::available_parallelism().map_or(2, |n| n.get()));
+        let jobs = Arc::new(std::sync::Mutex::new(jobs));
+        for _ in 0..workers {
+            let (jobs, slots) = (Arc::clone(&jobs), Arc::clone(&self.bg_io.decode_slots));
+            std::thread::spawn(move || loop {
+                let Some(job) = jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front() else { break };
+                let _slot = slots.acquire();
+                job();
+            });
         }
     }
 
-    /// Under memory pressure: move compressed undo states to disk.
+    /// Under memory pressure: move compressed undo states to disk, on a
+    /// worker. One move runs at a time; while it does, another ask is
+    /// skipped, and the next landing under pressure asks again.
     pub(crate) fn demote_history_to_disk(&self) {
-        for item in &self.items {
-            for cell in item.timeline.stored_images() {
-                cell.demote_to_disk();
-            }
+        use std::sync::atomic::Ordering;
+        if self.demoting.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let cells: Vec<super::timeline::StoredImage> = self.items.iter()
+            .flat_map(|item| item.timeline.stored_images().cloned())
+            .collect();
+        let demoting = Arc::clone(&self.demoting);
+        std::thread::spawn(move || {
+            let moved = cells.iter().filter(|cell| cell.demote_to_disk()).count();
+            tracing::info!(moved, "undo states moved to disk");
+            demoting.store(false, Ordering::Release);
+        });
     }
 
     pub(crate) fn new() -> Self {
@@ -119,6 +150,8 @@ impl BatchManager {
             next_id: 0,
             bg_io: BackgroundIO::new(),
             last_history_sweep: std::time::Instant::now(),
+            demoting: Arc::default(),
+            selection_queue: super::selection_queue::SelectionQueue::new(),
         }
     }
 
@@ -130,6 +163,11 @@ impl BatchManager {
     /// common when a worker event arrives after the item was removed.
     pub(crate) fn find_by_id(&self, id: u64) -> Option<&BatchItem> {
         self.items.iter().find(|b| b.id == id)
+    }
+
+    /// The position of the item with `id`, for callers that index.
+    pub(crate) fn index_of(&self, id: u64) -> Option<usize> {
+        self.items.iter().position(|b| b.id == id)
     }
 
     /// Mutable counterpart of `find_by_id`. Used by worker-event handlers
@@ -144,7 +182,7 @@ impl BatchManager {
     pub(crate) fn app_state(&self) -> AppState {
         match self.selected_item() {
             None => AppState::Empty,
-            Some(item) => match item.status {
+            Some(item) => match item.status() {
                 BatchStatus::Done => AppState::Done,
                 BatchStatus::Processing => AppState::Processing,
                 _ => AppState::Loaded,
@@ -159,13 +197,28 @@ impl BatchManager {
         self.selected_item().is_some_and(|b| b.id == id)
     }
 
-    /// IDs of checkbox-selected items currently in a given status. Used by
-    /// the partial-cancel path to decide which in-flight items to stop.
-    pub(crate) fn selected_ids_with_status(&self, status: BatchStatus) -> Vec<u64> {
-        self.items.iter()
-            .filter(|i| i.selected && i.status == status)
-            .map(|i| i.id)
-            .collect()
+    /// A cut is queued or under way on some image.
+    pub(crate) fn any_awaiting_cut(&self) -> bool {
+        self.items.iter().any(BatchItem::awaits_cut)
+    }
+
+    /// The ticked images whose cut is queued or under way: what Cancel
+    /// Selected stops, and what its label counts.
+    pub(crate) fn ticked_awaiting_cut(&self) -> impl Iterator<Item = u64> + '_ {
+        self.items.iter().filter(|i| i.ticked && i.awaits_cut()).map(|i| i.id)
+    }
+
+    /// IDs of the ticked items.
+    pub(crate) fn ticked_ids(&self) -> Vec<u64> {
+        self.items.iter().filter(|i| i.ticked).map(|i| i.id).collect()
+    }
+
+
+    /// Tick or untick every item's checkbox.
+    pub(crate) fn set_all_ticked(&mut self, ticked: bool) {
+        for item in &mut self.items {
+            item.ticked = ticked;
+        }
     }
 
     /// Selected-item index clamped to the current batch size. `None` when
@@ -234,8 +287,8 @@ impl BatchManager {
     /// as a glitch.
     pub(crate) fn process_button_label(&self) -> ProcessButtonLabel {
         let total = self.items.len();
-        let selected = self.selected_count();
-        match (selected, total) {
+        let ticked = self.ticked_count();
+        match (ticked, total) {
             (0, _) => ProcessButtonLabel::ProcessViewed,
             (n, t) if n == t && t >= 2 => ProcessButtonLabel::ProcessAll(t),
             (n, _) => ProcessButtonLabel::ProcessSelected(n),
@@ -246,44 +299,40 @@ impl BatchManager {
     /// if any are checked, else the currently-viewed item. Empty when the
     /// batch is empty.
     pub(crate) fn items_to_process(&self) -> Vec<u64> {
-        let checked: Vec<u64> = self.items.iter()
-            .filter(|i| i.selected)
-            .map(|i| i.id)
-            .collect();
-        if !checked.is_empty() {
-            return checked;
-        }
-        self.selected_idx_clamped()
-            .and_then(|idx| self.items.get(idx).map(|i| i.id))
-            .into_iter()
-            .collect()
+        self.process_targets().map(|i| i.id).collect()
     }
 
-    /// Any item in the action target set satisfies `f`. Target set = checked
-    /// items if any, else the currently-viewed one — same rule as
-    /// `items_to_process`, expressed as a fold so callers (toolbar
-    /// Undo/Redo enablement) don't allocate an id vec just to test.
+    /// The images Process runs on, as `items_to_process` picks them: the
+    /// Process gate reads the same set, so a stale index cannot grey the
+    /// button while the run would go.
+    pub(crate) fn process_targets(&self) -> impl Iterator<Item = &BatchItem> {
+        self.targets(self.selected_idx_clamped()).map(|(_, i)| i)
+    }
+
+    /// Any item in the action target set satisfies `f`, without
+    /// allocating (toolbar Undo/Redo enablement).
     pub(crate) fn any_target_can<F: FnMut(&BatchItem) -> bool>(&self, mut f: F) -> bool {
-        let has_selected = self.has_any_selected();
-        let current_id = self.selected_item().map(|b| b.id);
-        self.items.iter().any(|item| {
-            let is_target = if has_selected { item.selected } else { Some(item.id) == current_id };
-            is_target && f(item)
-        })
+        self.targets(self.viewed_unclamped()).any(|(_, item)| f(item))
     }
 
-    /// Indices of items in the current dispatch target set — all
-    /// `selected == true` items when any are checked, or the single
-    /// currently-viewed item when none are. Mirrors the target-set rule
-    /// used by `items_to_process` and `any_target_can`.
+    /// Indices of the items in the action target set.
     pub(crate) fn targeted_indices(&self) -> Vec<usize> {
-        let has_selected = self.has_any_selected();
-        let current_id = self.selected_item().map(|b| b.id);
-        (0..self.items.len())
-            .filter(|&i| {
-                if has_selected { self.items[i].selected } else { Some(self.items[i].id) == current_id }
-            })
-            .collect()
+        self.targets(self.viewed_unclamped()).map(|(i, _)| i).collect()
+    }
+
+    /// The action target set, with indices: the ticked items when any are
+    /// ticked, else the one at `viewed`. Callers resolve `viewed`
+    /// themselves: Process clamps a stale index, Undo/Redo and the
+    /// targeted indices skip it.
+    fn targets(&self, viewed: Option<usize>) -> impl Iterator<Item = (usize, &BatchItem)> {
+        let ticked = self.any_ticked();
+        self.items.iter().enumerate()
+            .filter(move |&(i, item)| if ticked { item.ticked } else { Some(i) == viewed })
+    }
+
+    /// `selected_index` when it names an item.
+    fn viewed_unclamped(&self) -> Option<usize> {
+        self.selected_item().map(|_| self.selected_index)
     }
 
     /// Remove the item at `idx`; its undo files go with its timeline.
@@ -291,16 +340,16 @@ impl BatchManager {
     /// for clamping `selected_index` and any downstream sync.
     pub(crate) fn remove(&mut self, idx: usize) -> bool {
         if idx >= self.items.len() { return false; }
-        self.items.remove(idx);
+        super::reclaim::later(self.items.remove(idx));
         true
     }
 
-    /// Return every `Processing` item to the state it shows, after a
-    /// Cancel-All. Late arrivals from the worker are dropped by the job
-    /// check in `on_batch_item_done`.
-    pub(crate) fn reset_processing_to_pending(&mut self) {
+    /// Abandon every cut, under way or waiting for a slot, after a
+    /// Cancel-All: each image shows its own state again. Late arrivals
+    /// from the worker are dropped by the job check in `on_batch_item_done`.
+    pub(crate) fn abandon_cuts(&mut self) {
         for item in &mut self.items {
-            if item.status == BatchStatus::Processing {
+            if item.awaits_cut() {
                 item.abandon_job();
             }
         }
@@ -308,19 +357,19 @@ impl BatchManager {
 
     /// Number of items with the checkbox set. Single source of truth so
     /// statusbar / sidebar don't re-roll `iter().filter(...).count()`.
-    pub(crate) fn selected_count(&self) -> usize {
-        self.items.iter().filter(|i| i.selected).count()
+    pub(crate) fn ticked_count(&self) -> usize {
+        self.items.iter().filter(|i| i.ticked).count()
     }
 
     /// True when at least one item has the checkbox set.
-    pub(crate) fn has_any_selected(&self) -> bool {
-        self.items.iter().any(|i| i.selected)
+    pub(crate) fn any_ticked(&self) -> bool {
+        self.items.iter().any(|i| i.ticked)
     }
 
     /// True when every item has the checkbox set (and the batch is
-    /// non-empty — an empty batch is not "all selected").
-    pub(crate) fn all_selected(&self) -> bool {
-        !self.items.is_empty() && self.items.iter().all(|i| i.selected)
+    /// non-empty — an empty batch is not "all ticked").
+    pub(crate) fn all_ticked(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|i| i.ticked)
     }
 
     /// Single pass over `items` producing the three counts that callers
@@ -329,7 +378,7 @@ impl BatchManager {
     pub(crate) fn status_counts(&self) -> StatusCounts {
         let mut c = StatusCounts::default();
         for item in &self.items {
-            match item.status {
+            match item.status() {
                 BatchStatus::Done => c.done += 1,
                 BatchStatus::Processing => c.processing += 1,
                 BatchStatus::Error(_) => c.errored += 1,
@@ -344,7 +393,7 @@ impl BatchManager {
     pub(crate) fn progress(&self) -> StatusReport {
         let counts = self.status_counts();
         let total = counts.batch_total();
-        let stage = if counts.processing > 0 {
+        let stage = if self.any_awaiting_cut() {
             format!("Processing {}/{total}", counts.done)
         } else {
             "Finishing up".to_string()
@@ -359,10 +408,7 @@ impl BatchManager {
     /// Used for batch-failure toasts so the user sees the *reason* instead of
     /// just the count.
     pub(crate) fn first_error_message(&self) -> Option<&str> {
-        self.items.iter().find_map(|item| match &item.status {
-            BatchStatus::Error(msg) => Some(msg.as_str()),
-            _ => None,
-        })
+        self.items.iter().find_map(BatchItem::error)
     }
 
     /// Pre-decode source bytes to RgbaImage on a background thread; the
@@ -371,30 +417,33 @@ impl BatchManager {
     /// `decode_pending` and surfaces the error instead of leaving the
     /// item stuck in a "still loading" state forever.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
+        self.spawn_decode(item_id, move || Ok(bytes));
+    }
+
+    /// Pre-decode from an ImageSource. The file is read on the decode
+    /// thread, not the UI thread; a read that fails lands as a failed
+    /// decode, so the image stops waiting for one.
+    pub(crate) fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
+        let source = source.clone();
+        self.spawn_decode(item_id, move || source.load_bytes().map_err(super::item::load_failed));
+    }
+
+    fn spawn_decode(&self, item_id: u64, bytes: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static) {
         let tx = self.bg_io.decode_tx.clone();
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             // Park here past `available_parallelism()` so a 50-image
             // Process All doesn't hold 50 × ~80 MB transient peaks.
             let _slot = slots.acquire();
-            // Inner block scope: the `DynamicImage` (~50 MB at 4 K RGBA)
-            // and the encoded `bytes` Arc both drop before the channel
-            // send, so concurrent decodes don't pile up DynamicImage +
-            // RGBA simultaneously per thread.
-            let result = match image::load_from_memory(&bytes) {
+            // The `DynamicImage` (~50 MB at 4 K RGBA) and the encoded
+            // bytes both drop before the channel send, so concurrent
+            // decodes don't pile up DynamicImage + RGBA per thread.
+            let result = bytes().and_then(|bytes| match image::load_from_memory(&bytes) {
                 Ok(img) => Ok(Arc::new(img.to_rgba8())),
                 Err(e) => Err(format!("decode failed: {e}")),
-            };
-            drop(bytes);
+            });
             let _ = tx.send((item_id, result));
         });
-    }
-
-    /// Pre-decode from an ImageSource (reads file if needed).
-    pub(crate) fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
-        if let Ok(bytes) = source.load_bytes() {
-            self.request_decode_bytes(item_id, bytes);
-        }
     }
 
     /// A background picture finished loading. A picked one replaces the
@@ -443,39 +492,45 @@ impl BatchManager {
         });
     }
 
-    /// Filter-only Process: load + decode + `apply_fill_style` on a background
+    /// Filter-only Process: load + decode + `apply_subject_effect` on a background
     /// thread, deliver the result via `bg_io.filter_only_rx`. Keeps the UI
     /// thread free on large batches that the inline path used to freeze.
     pub(crate) fn request_filter_only(
         &self,
         item_id: u64,
+        run: u64,
         source: &ImageSource,
-        base: Option<Arc<image::RgbaImage>>,
-        fill_style: prunr_core::FillStyle,
+        base: Option<super::worker::RunImage>,
+        effect: prunr_core::SubjectEffect,
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
         let source = source.clone();
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
+            let load = || source.load_bytes().map_err(super::item::load_failed);
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
+            let mut chain_start = None;
             let result: Result<Arc<image::RgbaImage>, String> = (|| {
-                let mut rgba = match base {
-                    Some(base) => Arc::unwrap_or_clone(base),
+                let (start, built) = base.map_or(Ok((None, None)), |run| run.resolve(item_id, load))?;
+                chain_start = built;
+                let mut rgba = match start {
+                    // No effect: the pass is its start, without a copy.
+                    Some(start) if effect == prunr_core::SubjectEffect::None => return Ok(start),
+                    Some(start) => Arc::unwrap_or_clone(start),
                     None => {
-                        let bytes = source.load_bytes()
-                            .map_err(|e| format!("Failed to load: {e}"))?;
+                        let bytes = load()?;
                         let original = prunr_core::load_image_from_bytes(&bytes)
                             .map_err(|_| "Decode failed".to_string())?;
                         drop(bytes);
-                        original.to_rgba8()
+                        original.into_rgba8()
                     }
                 };
-                prunr_core::apply_fill_style(&mut rgba, fill_style);
+                prunr_core::apply_subject_effect(&mut rgba, effect);
                 Ok(Arc::new(rgba))
             })();
-            let _ = tx.send((item_id, result));
+            let _ = tx.send((item_id, run, result, chain_start));
         });
     }
 
@@ -491,17 +546,20 @@ impl BatchManager {
         &self,
         item_id: u64,
         source: &ImageSource,
-        result_rgba: Option<&Arc<image::RgbaImage>>,
+        result: Option<super::item::Pixels>,
     ) {
         let tx = self.bg_io.thumb_tx.clone();
         let slots = self.bg_io.decode_slots.clone();
-        if let Some(rgba) = result_rgba {
-            let rgba = rgba.clone();
+        if let Some(result) = result {
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
-                let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
-                let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
+                // A parked result unpacks here, off the UI thread.
+                let image = result.load().map(|rgba| {
+                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+                    let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
+                    (thumb.width(), thumb.height(), thumb.into_raw())
+                });
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
         } else {
             let source = source.clone();
@@ -519,9 +577,8 @@ impl BatchManager {
                     let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
                 })();
-                if let Some(thumb) = thumb {
-                    let _ = tx.send((item_id, thumb.width(), thumb.height(), thumb.into_raw()));
-                }
+                let image = thumb.map(|t| (t.width(), t.height(), t.into_raw()));
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
         }
     }
@@ -543,8 +600,7 @@ impl BatchManager {
             // Preserve the selected item's tensors (most likely to be reused).
             if Some(item.id) == selected_id { continue; }
             remaining -= item.evictable_tensor_bytes();
-            item.set_cached_tensor(None);
-            item.invalidate_edge_cache();
+            item.drop_tensor_caches();
         }
     }
 
@@ -581,13 +637,23 @@ impl BatchManager {
         self.bg_io.request_selection_visualization(item_id, mask, key, source, base, ctx.clone());
     }
 
+    /// The items a drag from row `idx` carries: every ticked one when that
+    /// row is ticked, else that row. Like Save, a drag writes what each
+    /// image shows, a run under way or not.
+    pub(crate) fn drag_targets(&self, idx: usize) -> Vec<u64> {
+        match self.items.get(idx) {
+            Some(row) if row.ticked => self.items.iter().filter(|b| b.ticked).map(|b| b.id).collect(),
+            Some(row) => vec![row.id],
+            None => Vec::new(),
+        }
+    }
+
     /// Evict all tensor caches except the selected item (called under memory pressure).
     pub(crate) fn evict_all_tensors(&mut self) {
         let selected_id = self.selected_item().map(|b| b.id);
         for item in &mut self.items {
             if Some(item.id) != selected_id {
-                item.set_cached_tensor(None);
-                item.invalidate_edge_cache();
+                item.drop_tensor_caches();
             }
         }
     }
@@ -598,6 +664,7 @@ impl BatchManager {
     ///
     /// Returns `false` if the item was not found or the mask is
     /// byte-identical to the current selection (nothing mutated).
+    #[cfg(test)]
     pub(crate) fn commit_selection(
         &mut self,
         item_id: u64,
@@ -620,24 +687,13 @@ impl BatchManager {
         was_present
     }
 
-    /// Called when source_rgba is replaced on an item (re-decode, image
-    /// switch into a previously-evicted item). Drops the selection AND
-    /// the SAM encoder embedding — both are bound to the source bytes
-    /// they were derived from.
-    pub(crate) fn invalidate_selection_on_source_change(&mut self, item_id: u64) -> bool {
-        let Some(item) = self.find_by_id_mut(item_id) else { return false };
-        let any = item.selection_mask.is_some() || item.magic_brush_embedding.is_some();
-        item.invalidate_selection();
-        item.invalidate_magic_brush_embedding();
-        any
-    }
 
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
-    pub fn share_settings(&mut self, from: usize, ids: &std::collections::HashSet<u64>) {
+    pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
         let Some(source) = self.items.get(from) else { return };
         let (settings, bg_image) = (source.settings, source.bg_image.clone());
-        for item in self.items.iter_mut().filter(|i| ids.contains(&i.id)) {
+        for item in self.in_set(ids) {
             item.adopt_settings(settings, bg_image.clone());
         }
     }
@@ -645,7 +701,7 @@ impl BatchManager {
     /// Drop every image's Magic Brush embedding (16 MB each).
     pub fn clear_magic_embeddings(&mut self) {
         for item in &mut self.items {
-            item.magic_brush_embedding = None;
+            super::reclaim::later(item.magic_brush_embedding.take());
         }
     }
 
@@ -662,6 +718,96 @@ impl BatchManager {
     }
 }
 
+/// The images a Process run sends, by how much of the pipeline each
+/// needs, and how many were already up to date (for the toast).
+#[derive(Default)]
+pub(crate) struct ClassifiedTiers {
+    pub(crate) full: HashSet<u64>,
+    pub(crate) mask: HashSet<u64>,
+    pub(crate) add_edge: HashSet<u64>,
+    pub(crate) up_to_date_count: usize,
+}
+
+impl ClassifiedTiers {
+    pub(crate) fn process_count(&self) -> usize {
+        self.full.len() + self.mask.len() + self.add_edge.len()
+    }
+
+    /// Every image the run sends.
+    pub(crate) fn all_process_ids(&self) -> HashSet<u64> {
+        self.full.iter()
+            .chain(self.mask.iter())
+            .chain(self.add_edge.iter())
+            .copied().collect()
+    }
+}
+
+impl BatchManager {
+    /// The items whose id is in `ids`, in batch order.
+    pub(crate) fn in_set<'a>(&'a mut self, ids: &'a HashSet<u64>) -> impl Iterator<Item = &'a mut BatchItem> + 'a {
+        self.items.iter_mut().filter(move |i| ids.contains(&i.id))
+    }
+
+    /// Whether any image has a decode, thumbnail or texture on its way.
+    pub(crate) fn has_pending_work(&self) -> bool {
+        self.items.iter().any(BatchItem::has_pending_work) || self.selection_queue.any_pending()
+    }
+
+    /// Sort the images in `ids` by the run a `step` by `cutter` needs
+    /// (`BatchItem::run_tier`). One that chains onto another model's
+    /// cut-out is a full run, whatever its recipe says.
+    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind, step: Option<super::timeline::StepKind>, cutter: super::item::Cutter) -> ClassifiedTiers {
+        let mut tiers = ClassifiedTiers::default();
+        for item in self.in_set(ids) {
+            if item.chains(step, cutter) {
+                tiers.full.insert(item.id);
+                continue;
+            }
+            match item.run_tier(model) {
+                RunTier::UpToDate => tiers.up_to_date_count += 1,
+                RunTier::Full => { tiers.full.insert(item.id); }
+                RunTier::Mask => { tiers.mask.insert(item.id); }
+                RunTier::AddEdge => { tiers.add_edge.insert(item.id); }
+            }
+        }
+        tiers
+    }
+
+    /// The work for the images in `ids` that run again from their cached
+    /// tensor.
+    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<CachedTensorWork> {
+        self.in_set(ids)
+            .filter_map(|item| {
+                let work = CachedTensorWork {
+                    item_id: item.id,
+                    tensor: item.cached_tensor.clone()?,
+                    source: item.source.clone(),
+                    mask: item.settings.mask_settings(),
+                };
+                item.mark_running();
+                Some(work)
+            })
+            .collect()
+    }
+
+    /// What a full run on each image in `ids` is expected to hold in RAM.
+    pub(crate) fn full_run_costs(&self, ids: &HashSet<u64>) -> Vec<ImageMemCost> {
+        self.items.iter()
+            .filter(|i| ids.contains(&i.id))
+            .map(|i| AdmissionController::estimate_cost(i.id, i.dimensions, i.source_len, RESIDENT_HISTORY_STEPS))
+            .collect()
+    }
+
+    /// The work for full runs on the images in `ids`, in batch order.
+    pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
+        self.in_set(ids).map(|item| {
+            item.mark_running();
+            item.full_run_work()
+        }).collect()
+    }
+
+}
+
 /// Compute dimensions that fit within `max_w` × `max_h` preserving aspect ratio.
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let scale = (max_w as f32 / src_w as f32).min(max_h as f32 / src_h as f32).min(1.0);
@@ -673,7 +819,7 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
 mod tests {
     use super::*;
     use crate::gui::item_settings::ItemSettings;
-    use crate::gui::worker::{CompressedTensor, TensorCache};
+    use crate::gui::worker::{CompressedTensor, RawSegTensor};
     use prunr_core::ModelKind;
     use std::time::Duration;
 
@@ -683,15 +829,19 @@ mod tests {
 
     /// Recording a step (a switch, an undo, a new result) must cost the UI
     /// thread nothing: a stored state is compressed off-thread once nothing
-    /// else holds it, and reads back unchanged.
+    /// else holds it, and reads back unchanged. The step an undo returns to
+    /// is held unpacked instead.
     #[test]
     fn undo_states_are_compressed_off_the_ui_thread() {
         let mut batch = fixture();
         let mut item = item_with_cache(1, 0);
+        item.on_screen = true;
         let rgba = Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255])));
         item.result_rgba = Some(Arc::clone(&rgba));
-        item.status = BatchStatus::Done;
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([1, 1, 1, 255]))));
+        item.commit(crate::gui::timeline::StepKind::Edit);
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(64, 64)));
         item.commit(crate::gui::timeline::StepKind::Edit);
         batch.items.push(item);
@@ -703,14 +853,125 @@ mod tests {
             batch.compress_history_off_thread();
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(first_compressed(&batch), "the earlier result, held by nothing else, is compressed");
+        assert!(first_compressed(&batch), "an older result, held by nothing else, is compressed");
+        let warm = |b: &BatchManager| b.items[0].warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[crate::gui::item::BACK].as_ref().is_some_and(|w| w.image.is_some());
+        while !warm(&batch) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let previous_compressed = batch.items[0].timeline.stored_images().nth(1).is_some_and(|c| c.is_compressed());
+        assert!(warm(&batch) && !previous_compressed, "the step undo returns to stays unpacked");
         let item = &mut batch.items[0];
         item.undo_step();
-        assert_eq!(item.result_rgba.as_ref().unwrap().get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
+        item.undo_step();
+        assert_eq!(item.shown_result().expect("shown").get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
 
-    /// Construct a BatchItem with optional cached tensor of `bytes_uncompressed`
-    /// raw size. Used by enforce_tensor_budget / cache_size tests.
+    /// Undo onto a packed step unpacks nothing on the UI thread: the step
+    /// stays packed and shows through its handle until the result
+    /// texture's build unpacks it, and the item holds what that build
+    /// unpacked only while the step still shows it.
+    #[test]
+    fn undo_onto_a_packed_step_leaves_it_for_the_texture_build() {
+        let mut batch = fixture();
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 8, 7, 255]))));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(64, 64)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        batch.items.push(item);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first_packed = |b: &BatchManager| b.items[0].timeline.stored_images().next().is_some_and(|c| c.is_compressed());
+        while !first_packed(&batch) && std::time::Instant::now() < deadline {
+            batch.compress_history_off_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(first_packed(&batch));
+        let item = &mut batch.items[0];
+        item.on_screen = true;
+        item.undo_step();
+        assert!(item.result_rgba.is_none() && first_packed(&batch), "undo unpacked nothing");
+        let item = &mut batch.items[0];
+        let pixels = item.result_pixels().expect("the step's result");
+        assert!(matches!(pixels, crate::gui::item::Pixels::Parked(_)));
+        let unpacked = pixels.read().expect("unpacks");
+        item.hold_unpacked_result(Arc::new(image::RgbaImage::new(64, 64)));
+        assert!(item.result_rgba.is_none(), "pixels of another step are not held");
+        item.hold_unpacked_result(Arc::clone(&unpacked));
+        assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &unpacked)));
+        assert_eq!(unpacked.get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
+    }
+
+    /// A packed step that cannot be read ends its texture request instead
+    /// of leaving the image busy, and is not asked for again while it shows.
+    #[test]
+    fn an_unreadable_step_ends_its_texture_request() {
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_tex_pending = true;
+        let target = item.request_result_texture(false);
+        item.texture_unreadable(target);
+        assert!(!item.result_tex_pending && !item.has_pending_work());
+        assert!(item.result_unreadable(), "not asked for again");
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        assert!(!item.result_unreadable(), "another step is asked for");
+    }
+
+    /// The step undo returns to keeps its selection and edits unpacked too,
+    /// so restoring them reads the held planes.
+    #[test]
+    fn the_step_undo_returns_to_keeps_its_planes_unpacked() {
+        let mut item = item_with_cache(1, 0);
+        item.on_screen = true;
+        let plane = |v: i8| Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, vec![v; 16]));
+        item.selection_mask = Some(plane(1));
+        item.edits = Some(plane(-1));
+        item.commit(crate::gui::timeline::StepKind::Stroke);
+        item.selection_mask = None;
+        item.edits = None;
+        item.commit(crate::gui::timeline::StepKind::Stroke);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let held = |i: &BatchItem| i.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[crate::gui::item::BACK]
+            .as_ref().map(|w| w.planes.clone());
+        while held(&item).is_none_or(|p| p.iter().any(Option::is_none)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let [selection, edits] = held(&item).expect("warmed");
+        let back = item.timeline.previous().expect("previous");
+        assert!(selection.is_some_and(|s| back.selection.as_ref().is_some_and(|b| b.holds(&s))));
+        assert!(edits.is_some_and(|e| back.edits.as_ref().is_some_and(|b| b.holds(&e))));
+    }
+
+    /// Under memory pressure the undo states move to disk on a worker,
+    /// not on the frame that asked.
+    #[test]
+    fn undo_states_move_to_disk_off_the_ui_thread() {
+        let mut batch = fixture();
+        let mut item = item_with_cache(1, 0);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(16, 16, image::Rgba([4, 5, 6, 255]))));
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(16, 16)));
+        item.commit(crate::gui::timeline::StepKind::Edit);
+        batch.items.push(item);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first = |b: &BatchManager| b.items[0].timeline.stored_images().next().cloned().expect("a stored step");
+        while !first(&batch).is_compressed() && std::time::Instant::now() < deadline {
+            batch.compress_history_off_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        batch.demote_history_to_disk();
+        while !first(&batch).is_on_disk() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(first(&batch).is_on_disk(), "moved by the worker");
+        assert_eq!(first(&batch).load().expect("reads back").get_pixel(1, 1), &image::Rgba([4, 5, 6, 255]));
+    }
+
+    /// A BatchItem with `tensor_floats` f32s of cached tensor (0 = none).
     fn item_with_cache(id: u64, tensor_floats: usize) -> BatchItem {
         let mut item = BatchItem::new(
             id,
@@ -723,7 +984,7 @@ mod tests {
         if tensor_floats > 0 {
             // Real CompressedTensor: zstd-compress f32 data via from_raw.
             let data: Vec<f32> = vec![0.5; tensor_floats];
-            let cache = TensorCache { data, height: 10, width: 10, model: ModelKind::Silueta };
+            let cache = RawSegTensor { data, height: 10, width: 10, model: ModelKind::Silueta };
             item.set_cached_tensor(CompressedTensor::from_raw(cache));
         }
         item
@@ -769,9 +1030,6 @@ mod tests {
     }
 
     // ── new + selected_item ─────────────────────────────────────────────
-
-    // (BatchManager::new defaults are covered indirectly by tests/batch_tests.rs
-    //  which assert the same fields via PrunrApp::new_for_test → BatchManager::new.)
 
     #[test]
     fn selected_item_returns_none_when_batch_empty() {
@@ -850,7 +1108,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -879,7 +1137,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -896,7 +1154,7 @@ mod tests {
     fn progress_stage_says_finishing_when_no_in_flight() {
         let mut bm = fixture();
         let mut item = item_with_cache(1, 0);
-        item.status = BatchStatus::Done;
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         bm.items.push(item);
 
         let report = bm.progress();
@@ -917,7 +1175,7 @@ mod tests {
         let mut bm = fixture();
         let mut push = |id, status| {
             let mut item = item_with_cache(id, 0);
-            item.status = status;
+            crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
         };
         push(1, BatchStatus::Done);
@@ -995,6 +1253,17 @@ mod tests {
         buf
     }
 
+    /// A file that can't be read reports a failed decode: before, nothing
+    /// came back and the image waited for a decode forever.
+    #[test]
+    fn a_source_that_cannot_be_read_lands_as_a_failed_decode() {
+        let bm = fixture();
+        bm.request_decode_source(5, &ImageSource::Path("/nonexistent/prunr-test/missing.jpg".into()));
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(5)).expect("an answer comes back");
+        assert_eq!(id, 5);
+        assert!(result.is_err());
+    }
+
     #[test]
     fn request_decode_bytes_emits_decoded_rgba_to_decode_rx() {
         let bm = fixture();
@@ -1056,11 +1325,12 @@ mod tests {
         let bm = fixture();
         let result = Arc::new(image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 20, 30, 255])));
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
-        bm.request_thumbnail(7, &source, Some(&result));
+        bm.request_thumbnail(7, &source, Some(crate::gui::item::Pixels::Resident(result)));
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
-        assert_eq!(id, 7);
+        assert_eq!(msg.item_id, 7);
+        let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 200x200 fits within 160x160 → scaled to 160x160.
         assert_eq!((w, h), (160, 160));
         assert_eq!(pixels.len(), (w * h * 4) as usize);
@@ -1072,12 +1342,24 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_thumbnail(8, &source, None);
 
-        let (id, w, h, pixels) = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
+        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb_tx must produce a result within 2s");
-        assert_eq!(id, 8);
+        assert_eq!(msg.item_id, 8);
+        let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 1x1 fits trivially → stays 1x1.
         assert_eq!((w, h), (1, 1));
         assert_eq!(pixels.len(), 4);
+    }
+
+    /// A thumbnail that cannot be made still answers, so its request ends:
+    /// an image that cannot be decoded left the "Preparing" pill up.
+    #[test]
+    fn a_thumbnail_that_cannot_be_made_still_answers() {
+        let bm = fixture();
+        bm.request_thumbnail(9, &ImageSource::Bytes(Arc::new(b"not an image".to_vec())), None);
+        let answer = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2)).expect("no answer: the request never ends");
+        assert_eq!(answer.item_id, 9);
+        assert!(answer.image.is_none());
     }
 
     // ── fit_dimensions (private helper) ─────────────────────────────────
@@ -1107,7 +1389,7 @@ mod tests {
 
     fn checked(id: u64) -> BatchItem {
         let mut i = item_with_cache(id, 0);
-        i.selected = true;
+        i.ticked = true;
         i
     }
 
@@ -1187,6 +1469,40 @@ mod tests {
         assert_eq!(bm.items_to_process(), vec![42]);
     }
 
+    /// The three target-set readers agree on ticked items and on the item
+    /// on screen; a stale index clamps for Process only, the other two
+    /// target nothing.
+    #[test]
+    fn every_target_reader_picks_the_same_items() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(10, 0));
+        bm.items.push(item_with_cache(20, 0));
+        bm.items.push(item_with_cache(30, 0));
+        bm.selected_index = 1;
+        assert_eq!(bm.items_to_process(), vec![20]);
+        assert_eq!(bm.targeted_indices(), vec![1]);
+        assert!(bm.any_target_can(|i| i.id == 20));
+        assert!(!bm.any_target_can(|i| i.id != 20));
+
+        bm.items[0].ticked = true;
+        bm.items[2].ticked = true;
+        assert_eq!(bm.items_to_process(), vec![10, 30]);
+        assert_eq!(bm.targeted_indices(), vec![0, 2]);
+        assert!(bm.any_target_can(|i| i.id == 30));
+        assert!(!bm.any_target_can(|i| i.id == 20));
+
+        bm.set_all_ticked(false);
+        bm.selected_index = 99;
+        assert_eq!(bm.items_to_process(), vec![30]);
+        assert!(bm.targeted_indices().is_empty());
+        assert!(!bm.any_target_can(|_| true));
+
+        let empty = fixture();
+        assert!(empty.items_to_process().is_empty());
+        assert!(empty.targeted_indices().is_empty());
+        assert!(!empty.any_target_can(|_| true));
+    }
+
     #[test]
     fn items_to_process_some_checkboxes_returns_only_checked() {
         let mut bm = fixture();
@@ -1212,17 +1528,17 @@ mod tests {
     }
 
     /// Filter-only Process must be off the UI thread — decodes + applies
-    /// the fill style on a background thread; UI learns via `filter_only_rx`.
+    /// the subject effect on a background thread; UI learns via `filter_only_rx`.
     #[test]
     fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
-        bm.request_filter_only(7, &source, None, prunr_core::FillStyle::default());
+        bm.request_filter_only(7, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 7);
-        let rgba = result.expect("default FillStyle on a 1x1 source must succeed");
+        let rgba = result.expect("default SubjectEffect on a 1x1 source must succeed");
         assert_eq!(rgba.dimensions(), (1, 1));
     }
 
@@ -1235,9 +1551,9 @@ mod tests {
         let source = ImageSource::Path(std::path::PathBuf::from(
             "/nonexistent/prunr-test-missing.png"
         ));
-        bm.request_filter_only(11, &source, None, prunr_core::FillStyle::default());
+        bm.request_filter_only(11, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, result) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
+        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
             .expect("filter_only_tx must produce a result within 2s");
         assert_eq!(id, 11);
         assert!(result.is_err(), "missing file must surface as Err, not stall");
@@ -1345,7 +1661,7 @@ mod tests {
         let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
         let item = &mut bm.items[0];
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (1, style(0.15)), handle, shown: mask, feathered: None,
+            key: (1, style(0.15)), texture: handle.into(), shown: mask, feathered: None,
         });
         assert!(item.selection_hash.is_none(), "the selection was undone");
         bm.ensure_selection_texture(style(0.15), &ctx);
@@ -1366,15 +1682,53 @@ mod tests {
         let item = &mut bm.items[0];
         item.commit_selection_mask(std::sync::Arc::clone(&selection), crate::gui::timeline::StepKind::Stroke);
         let hash = item.selection_hash.expect("committed");
-        let plane = item.correction_plane(style(0.15)).expect("a selection");
+        let plane = item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).expect("a selection");
         assert_eq!((plane.width, plane.height), (8, 8), "the photo's size, not the model's");
         assert!(std::sync::Arc::ptr_eq(&plane, &selection));
 
         let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (hash, style(0.15)), handle, shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
+            key: (hash, style(0.15)), texture: handle.into(), shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
         });
-        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15)).unwrap(), &feathered), "the feathered plane once built");
+        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).unwrap(), &feathered), "the feathered plane once built");
+    }
+
+    /// A drag carries the ticked rows when it starts on one, else its own
+    /// row; one with a run under way too, as Save writes it.
+    #[test]
+    fn a_drag_carries_the_ticked_rows_or_its_own() {
+        let mut bm = fixture();
+        for id in 0..3 {
+            bm.items.push(item_with_cache(id, 0));
+        }
+        bm.items[0].ticked = true;
+        bm.items[2].ticked = true;
+        assert_eq!(bm.drag_targets(0), [0, 2]);
+        assert_eq!(bm.drag_targets(1), [1]);
+        crate::gui::tests::fixtures::put_in(&mut bm.items[2], BatchStatus::Processing);
+        assert_eq!(bm.drag_targets(0), [0, 2]);
+        crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
+        assert_eq!(bm.drag_targets(1), [1], "like Save, a drag writes what the image shows mid-run");
+    }
+
+    /// Cancel Selected counts a ticked cut waiting for its worker slot
+    /// as well as one under way: both are the user's to stop.
+    #[test]
+    fn cancel_selected_counts_waiting_and_running_cuts() {
+        let mut bm = fixture();
+        for id in 0..3 {
+            bm.items.push(item_with_cache(id, 0));
+        }
+        crate::gui::tests::fixtures::put_in(&mut bm.items[1], BatchStatus::Processing);
+        bm.items[2].start_cut(Some(crate::gui::timeline::StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
+        assert!(bm.ticked_awaiting_cut().next().is_none());
+        bm.items[0].ticked = true;
+        assert!(bm.ticked_awaiting_cut().next().is_none(), "ticked but nothing awaited");
+        bm.items[2].ticked = true;
+        assert_eq!(bm.ticked_awaiting_cut().collect::<Vec<_>>(), [2], "a waiting cut counts");
+        bm.set_all_ticked(true);
+        assert_eq!(bm.ticked_awaiting_cut().collect::<Vec<_>>(), [1, 2]);
+        assert!(bm.any_awaiting_cut());
     }
 
     #[test]
@@ -1437,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_selection_on_source_change_drops_embedding() {
+    fn a_source_change_drops_the_selection_and_embedding() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         {
@@ -1450,9 +1804,33 @@ mod tests {
                 high_res_feats_1: vec![0.0; 1_048_576],
             }));
         }
-        bm.invalidate_selection_on_source_change(1);
+        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
         let item = bm.find_by_id(1).unwrap();
         assert!(item.selection_mask.is_none(), "selection_mask must be cleared on source change");
         assert!(item.magic_brush_embedding.is_none(), "embedding must be cleared on source change");
+    }
+
+    /// A depth map belongs to the photo it was measured from: a source
+    /// change drops it, and a run still measuring the old photo lands on
+    /// nothing; one measuring the new photo lands.
+    #[test]
+    fn a_source_change_drops_the_depth_map_and_its_run() {
+        let mut bm = fixture();
+        bm.items.push(item_with_cache(1, 0));
+        let map = || Ok(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
+        let item = bm.find_by_id_mut(1).unwrap();
+        item.depth_run.pending = true;
+        let old_epoch = item.depth_run.epoch;
+        assert!(item.land_depth(old_epoch, map()));
+        item.depth_run.pending = true;
+        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
+        let item = bm.find_by_id_mut(1).unwrap();
+        assert!(item.depth.is_none() && !item.depth_run.pending, "the map and its run are dropped");
+        assert!(item.needs_depth_run());
+        assert!(!item.land_depth(old_epoch, map()), "a run on the old photo lands on nothing");
+        assert!(item.depth.is_none());
+        let epoch = item.depth_run.epoch;
+        assert!(item.land_depth(epoch, map()));
+        assert!(item.depth.is_some());
     }
 }

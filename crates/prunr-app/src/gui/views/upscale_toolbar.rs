@@ -16,7 +16,7 @@ pub(crate) fn render_upscale_chips(
     app_settings: &Settings,
     item_settings: &mut ItemSettings,
     source_dims: (u32, u32),
-    processing: bool,
+    gate: Option<&'static str>,
 ) {
     let factor = item_settings.output_scale.factor();
     let out_w = source_dims.0.saturating_mul(factor);
@@ -24,9 +24,7 @@ pub(crate) fn render_upscale_chips(
     if app_settings.model.to_model_id().is_none() {
         return;
     }
-    // A change mid-run would make the landing result stale and drop it.
-    let reason = processing.then_some("Wait for the upscale to finish, or cancel it.");
-    chip::gated(ui, reason, |ui| {
+    chip::gated(ui, gate, |ui| {
         render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
         render_refine_group(ui, item_settings);
     });

@@ -10,10 +10,11 @@ tests/test_images/*.webp
 tests/test_images/*.bmp
 test_cli/
 
-# Internal dev planning and agent instructions — not for public repo
+# Internal dev planning, agent instructions and dev tooling — not for public repo
 .planning/
 .claude/
 /CLAUDE.md
+/scripts/
 demo/
 memory/
 
@@ -31,3 +32,4 @@ crates/prunr-core/tests/golden_data_local/
 # directory just holds the visual `<before|after|diff>` PNGs used to inspect
 # math-changing refactors before commit.
 /golden-diffs/
+/test_cli.sh

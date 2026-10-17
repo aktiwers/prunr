@@ -1,6 +1,6 @@
 //! F3 modal: the processing order of each mode, one tab per pipeline,
 //! with a one-line explanation per step so the user can predict how a
-//! knob change cascades. Step names match the toolbar rows.
+//! knob change cascades.
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -79,19 +79,16 @@ const PIPELINES: [Pipeline; 4] = [
 
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
+    theme::bare_modal_window(
         ctx, "pipeline_flow", "Pipelines",
         [MODAL_WIDTH, MODAL_HEIGHT],
-        |ui| {
-            let tab_id = egui::Id::new("pipeline_flow_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
+        |ui| chip::modal_page(ui, "Pipelines", "", |ui| {
             let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
-            chip::tab_strip(ui, &labels, &mut tab);
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            let tab = chip::remembered_tab_strip(ui, egui::Id::new("pipeline_flow_tab"), &labels);
             ui.separator();
 
             let pipeline = &PIPELINES[tab];
-            ui.vertical(|ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(theme::SPACE_SM);
                 endpoint_label(ui, pipeline.input);
                 arrow(ui);
@@ -109,11 +106,11 @@ pub fn render(ctx: &egui::Context) -> bool {
                         "The order is fixed. Each step works on the result of the one above it, \
                          so a knob changes what every later step has to work with.",
                     )
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
                 );
             });
-        },
+        }),
     )
 }
 
@@ -129,7 +126,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(format!("Step {number} of {total}"))
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
             ui.label(
@@ -140,7 +137,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
             );
             ui.label(
                 RichText::new(stage.tagline)
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
             );
         });
@@ -163,7 +160,7 @@ fn endpoint_label(ui: &mut egui::Ui, text: &str) {
         ui.add_space(theme::SPACE_SM);
         ui.label(
             RichText::new(text)
-                .size(theme::FONT_SIZE_MONO)
+                .size(theme::FONT_SIZE_SECONDARY)
                 .color(theme::TEXT_SECONDARY),
         );
     });

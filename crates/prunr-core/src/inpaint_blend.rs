@@ -9,16 +9,17 @@
 //!
 //! ## RAM budget — peak working set scales with the **bbox** of the mask,
 //! not the image. Within `seam_guided_blend`, channels run sequentially
-//! and the four `mean_*` buffers are reused across channels via
+//! and the six `mean_*` buffers are reused across channels via
 //! [`crate::guided_filter::box_filter_into`]. Concurrent live `Vec<f32>`
-//! at peak: `guide`, `input`, `gi_a`, `gg_b`, `dist`, `mean_g`, `mean_i`,
-//! `mean_gi`, `mean_gg` = **9 × n** bytes ÷ 4 = **9n × 4 B**.
+//! of n = bbox pixels at peak: `guide`, `input`, `gi_a`, `gg_b`, `dist`,
+//! `mean_g`, `mean_i`, `mean_gi`, `mean_gg`, `mean_a`, `mean_b` =
+//! **11 × n × 4 B**.
 //!
 //! | bbox      | peak f32 working set |
 //! |-----------|----------------------|
-//! |  500²     | ~9 MB                |
-//! | 1000²     | ~36 MB               |
-//! | 4096×3072 | ~450 MB              |
+//! |  500²     | ~11 MB               |
+//! | 1000²     | ~44 MB               |
+//! | 4096×3072 | ~550 MB              |
 //!
 //! Plus the cloned `RgbaImage` output (4 × img_w × img_h u8 — full image,
 //! not bbox-scaled) and the byte-sized `crop_mask`.
@@ -31,6 +32,8 @@ use image::{GrayImage, RgbaImage};
 use rayon::prelude::*;
 
 use crate::guided_filter::{box_filter, box_filter_into};
+use crate::inpaint::{mask_bbox, Bbox};
+use crate::math::SendMutPtr;
 
 /// Default ring width for [`color_match_inpainted`] (pixels). Tuned for
 /// 1024-class inpaint output; on much-larger sources, the visible band
@@ -47,24 +50,35 @@ pub const SEAM_BLEND_RADIUS: u32 = 6;
 /// trade-off between edge sharpness (lower) and seam smoothness (higher).
 pub const SEAM_BLEND_EPSILON: f32 = 1e-3;
 
-/// Default band width for [`seam_guided_blend`]. Pixels deeper than this
-/// stay as the raw inpainted output; pixels at the edge fade toward the
-/// guided-filter result.
-pub const SEAM_BLEND_BAND_PX: f32 = 8.0;
+/// The eraser's default Expand region and Edge blend, in pixels.
+pub const DEFAULT_GROW_PX: f32 = 2.0;
+pub const DEFAULT_EDGE_BLEND_PX: f32 = 4.0;
 
-/// Bounding box of a region inside an image (top-left + size, all in pixels).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Bbox {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
+/// The region a fill replaces: what was painted, grown by `grow_px`, then
+/// by the `edge_blend_px` ring the fill fades into the photo over. The
+/// ring lies outside the grown region, so the blend never reaches the
+/// object being erased.
+pub fn fill_region(painted: &GrayImage, grow_px: f32, edge_blend_px: f32) -> GrayImage {
+    crate::inpaint::grow_mask(painted, (grow_px + edge_blend_px.max(0.0)).round() as i32)
 }
 
-impl Bbox {
-    fn area(&self) -> usize {
-        (self.w as usize) * (self.h as usize)
-    }
+/// What an erase of `painted` will touch, for the overlay to show before
+/// it runs: the painted region grown by `grow_px` at full strength, and
+/// the `edge_blend_px` band beyond it at half, where the fill is blended
+/// into the photo. The same `fill_region` the erase uses draws both.
+///
+/// Peak working set: two grey planes of the mask's size (1 B/px each)
+/// and the returned cells (1 B/px).
+pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge_blend_px: f32) -> crate::selection::MaskArtifact {
+    use crate::selection::{MaskArtifact, FULL};
+    let (w, h) = (painted.width, painted.height);
+    let region = painted.region_mask(w, h);
+    let core = fill_region(&region, grow_px, 0.0);
+    let reach = fill_region(&region, grow_px, edge_blend_px);
+    let cells = core.as_raw().iter().zip(reach.as_raw())
+        .map(|(&c, &r)| if c >= 128 { FULL } else if r >= 128 { FULL / 2 } else { 0 })
+        .collect();
+    MaskArtifact::from_cells(w, h, cells)
 }
 
 /// Color-correct the inpainted region by matching its mean RGB to the
@@ -92,15 +106,14 @@ pub fn color_match_inpainted(
     {
         return inpainted.clone();
     }
-    let (img_w, img_h) = inpainted.dimensions();
-    let Some(bbox) = mask_bbox_expanded(mask, ring_px, img_w, img_h) else {
+    let Some(bbox) = mask_bbox(mask, 128, ring_px) else {
         return inpainted.clone();
     };
     let bwu = bbox.w as usize;
     let bhu = bbox.h as usize;
     let bxu = bbox.x as usize;
     let byu = bbox.y as usize;
-    let img_wu = img_w as usize;
+    let img_wu = inpainted.width() as usize;
 
     // Boundary detection via box-filtered binary mask, evaluated on the
     // cropped mask only — pixels with mean strictly between 0 and 1 are
@@ -206,9 +219,8 @@ pub fn seam_guided_blend(
     {
         return inpainted.clone();
     }
-    let (img_w, img_h) = inpainted.dimensions();
     let margin = radius + band_px.ceil() as u32 + 2;
-    let Some(bbox) = mask_bbox_expanded(mask, margin, img_w, img_h) else {
+    let Some(bbox) = mask_bbox(mask, 128, margin) else {
         return inpainted.clone();
     };
 
@@ -311,65 +323,6 @@ pub fn seam_guided_blend(
     out
 }
 
-/// Find the bounding box of mask>=128 pixels, expanded by `margin` and
-/// clamped to image bounds. Parallel row-reduction — each row computes
-/// its own min/max in parallel, then merged. Returns `None` for an
-/// all-zero mask.
-fn mask_bbox_expanded(
-    mask: &GrayImage,
-    margin: u32,
-    img_w: u32,
-    img_h: u32,
-) -> Option<Bbox> {
-    let raw = mask.as_raw();
-    let w = mask.width() as usize;
-    let h = mask.height() as usize;
-
-    /// Per-row scan: returns (min_x, max_x, has_any) for one row.
-    fn row_extent(row: &[u8]) -> (usize, usize, bool) {
-        let mut min_x = usize::MAX;
-        let mut max_x = 0usize;
-        let mut any = false;
-        for (x, &v) in row.iter().enumerate() {
-            if v >= 128 {
-                if !any { min_x = x; }
-                max_x = x;
-                any = true;
-            }
-        }
-        (min_x, max_x, any)
-    }
-
-    let merged = (0..h)
-        .into_par_iter()
-        .map(|y| {
-            let row = &raw[y * w..(y + 1) * w];
-            let (rmin_x, rmax_x, any) = row_extent(row);
-            if any {
-                Some((rmin_x, y, rmax_x, y))
-            } else {
-                None
-            }
-        })
-        .reduce(
-            || None,
-            |a, b| match (a, b) {
-                (None, x) | (x, None) => x,
-                (Some((axn, ayn, axx, ayx)), Some((bxn, byn, bxx, byx))) => {
-                    Some((axn.min(bxn), ayn.min(byn), axx.max(bxx), ayx.max(byx)))
-                }
-            },
-        )?;
-    let (min_x, min_y, max_x, max_y) = merged;
-
-    let m = margin as usize;
-    let bx = min_x.saturating_sub(m) as u32;
-    let by = min_y.saturating_sub(m) as u32;
-    let bx_end = (max_x + m + 1).min(img_w as usize) as u32;
-    let by_end = (max_y + m + 1).min(img_h as usize) as u32;
-    Some(Bbox { x: bx, y: by, w: bx_end - bx, h: by_end - by })
-}
-
 fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
     let src = img.as_raw();
     let sw = img.width() as usize;
@@ -383,13 +336,6 @@ fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
         }
     });
 }
-
-#[derive(Clone, Copy)]
-struct SendMutPtr(*mut u8);
-// SAFETY: callers must partition writes so no two parallel iterations
-// touch the same byte; see `composite_channel`'s row-disjoint partition.
-unsafe impl Send for SendMutPtr {}
-unsafe impl Sync for SendMutPtr {}
 
 // Per-channel inner kernel — args are the math context the row-parallel
 // loop closes over. Splitting into a struct adds a borrow-lifetime story
@@ -439,19 +385,15 @@ fn composite_channel(
                 *p = blended.clamp(0.0, 255.0) as u8;
             }
         }
-        // Force whole-struct capture of `dp` (Rust 2021 disjoint capture
-        // would otherwise grab `dp.0: *mut u8` alone, which isn't Sync;
-        // the unsafe Send/Sync impls live on `SendMutPtr`, not on the
-        // raw pointer field). Same pattern as `guided_filter::box_filter`.
+        // Capture `dp` whole: its raw-pointer field alone is not Sync.
         let _ = &dp;
     });
 }
 
-/// Single source of truth for the inpaint post-process pipeline:
-/// color match → seam-guided blend → optional sharpen. Used by the
-/// LaMa rayon path and the subprocess worker arm so constants and
-/// order can't drift across call sites. `feather_px == 0.0` falls back
-/// to `SEAM_BLEND_BAND_PX`; `sharpen <= 0.0` skips the sharpen pass.
+/// The one post-process pipeline for every fill — color match →
+/// seam-guided blend → optional sharpen — so order and constants can't
+/// drift between callers. `mask` is the [`fill_region`];
+/// `feather_px <= 0.0` skips the blend, `sharpen <= 0.0` the sharpen.
 pub fn finalize_inpaint(
     raw: &RgbaImage,
     source: &RgbaImage,
@@ -460,10 +402,9 @@ pub fn finalize_inpaint(
     sharpen: f32,
 ) -> RgbaImage {
     let color_matched = color_match_inpainted(raw, source, mask, COLOR_MATCH_RING_PX);
-    let band_px = if feather_px > 0.0 { feather_px } else { SEAM_BLEND_BAND_PX };
     let mut out = seam_guided_blend(
         &color_matched, source, mask,
-        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, band_px,
+        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px,
     );
     if sharpen > 0.0 {
         out = crate::inpaint::sharpen_inpainted(&out, mask, sharpen);
@@ -478,6 +419,26 @@ mod tests {
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba(rgba))
+    }
+
+    /// The preview shows the grown region at full strength and the
+    /// blend band beyond it at half, exactly as far as the erase reaches.
+    #[test]
+    fn fill_preview_shows_the_grown_region_and_the_blend_band() {
+        use crate::selection::{MaskArtifact, FULL};
+        let mut cells = vec![0i8; 11 * 11];
+        cells[5 * 11 + 5] = FULL;
+        let painted = MaskArtifact::from_cells(11, 11, cells);
+        let shown = fill_preview(&painted, 1.0, 1.0);
+        let at = |x: usize, y: usize| shown.cells()[y * 11 + x];
+        assert_eq!(at(5, 5), FULL);
+        assert_eq!(at(4, 5), FULL, "grown by one");
+        assert_eq!(at(3, 5), FULL / 2, "the blend band");
+        assert_eq!(at(2, 5), 0, "beyond the erase's reach");
+        let reach = fill_region(&painted.region_mask(11, 11), 1.0, 1.0);
+        let touched: Vec<bool> = reach.as_raw().iter().map(|&v| v >= 128).collect();
+        let previewed: Vec<bool> = shown.cells().iter().map(|&v| v != 0).collect();
+        assert_eq!(touched, previewed, "the preview covers what the erase touches, no more");
     }
     fn empty_mask(w: u32, h: u32) -> GrayImage {
         GrayImage::from_pixel(w, h, Luma([0]))
@@ -548,7 +509,7 @@ mod tests {
             }
         }
         let ring_px = 8;
-        let bbox = mask_bbox_expanded(&mask, ring_px, 512, 512).unwrap();
+        let bbox = mask_bbox(&mask, 128, ring_px).unwrap();
         let out = color_match_inpainted(&inp, &src, &mask, ring_px);
         for y in 0..512 {
             for x in 0..512 {
@@ -602,6 +563,33 @@ mod tests {
         assert_eq!(outside[0], 200);
     }
 
+    /// A nearly flat photo (a night road, snow: a few levels of noise)
+    /// under an erase the size of a person: the seam must stay between the
+    /// photo and the fill, not blow up to pure 0 / 255 colours along the
+    /// edge.
+    #[test]
+    fn seam_blend_stays_in_range_on_a_large_nearly_flat_erase() {
+        let n = 1400u32;
+        let src = RgbaImage::from_fn(n, n, |x, y| {
+            let v = ((x * 7 + y * 13) % 5) as u8;
+            Rgba([190 + v, 160 + v, 90 + v, 255])
+        });
+        let inp = RgbaImage::from_fn(n, n, |x, y| {
+            let v = ((x * 3 + y * 11) % 5) as u8;
+            Rgba([185 + v, 155 + v, 85 + v, 255])
+        });
+        let mask = GrayImage::from_fn(n, n, |x, y| {
+            let (dx, dy) = (x as f32 - 700.0, y as f32 - 700.0);
+            Luma([if dx * dx + dy * dy < 600.0 * 600.0 { 255 } else { 0 }])
+        });
+        let out = seam_guided_blend(&inp, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX);
+        for (x, y, px) in out.enumerate_pixels() {
+            for (c, lo, hi) in [(0, 180, 200), (1, 150, 170), (2, 80, 100)] {
+                assert!((lo..=hi).contains(&px[c]), "({x}, {y}) channel {c} = {}", px[c]);
+            }
+        }
+    }
+
     /// Mask touching the image boundary has fewer source samples on
     /// the clipped side. The function must still produce sensible
     /// output (no panic, no negative-variance NaN, mask interior
@@ -633,37 +621,49 @@ mod tests {
         assert_eq!(outside[0], 200);
     }
 
+    /// Edge blend 0 is no blend at all: the fill is only colour-matched.
     #[test]
-    fn bbox_finds_tight_box_with_margin() {
-        let mut mask = empty_mask(64, 64);
-        for y in 20..30 {
-            for x in 25..35 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        let bbox = mask_bbox_expanded(&mask, 4, 64, 64);
-        assert_eq!(bbox, Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
+    fn edge_blend_zero_leaves_the_fill_unblended() {
+        let src = solid(48, 48, [90, 120, 150, 255]);
+        let mut raw = solid(48, 48, [90, 120, 150, 255]);
+        let mut mask = empty_mask(48, 48);
+        for y in 16..32 { for x in 16..32 {
+            mask.put_pixel(x, y, Luma([255]));
+            raw.put_pixel(x, y, Rgba([((x * 7) % 255) as u8, 40, 200, 255]));
+        } }
+        let matched = color_match_inpainted(&raw, &src, &mask, COLOR_MATCH_RING_PX);
+        assert_eq!(finalize_inpaint(&raw, &src, &mask, 0.0, 0.0), matched);
     }
 
+    /// The fill region is the painted one grown by Expand and then by the
+    /// Edge blend ring.
     #[test]
-    fn bbox_clamps_to_image_bounds() {
-        let mut mask = empty_mask(32, 32);
-        mask.put_pixel(0, 0, Luma([255]));
-        let bbox = mask_bbox_expanded(&mask, 8, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 9, h: 9 }));
+    fn the_fill_region_grows_by_expand_plus_edge_blend() {
+        let mut painted = empty_mask(40, 40);
+        painted.put_pixel(20, 20, Luma([255]));
+        let region = fill_region(&painted, 2.0, 3.0);
+        assert_eq!(region.get_pixel(25, 20)[0], 255, "5 px out is filled");
+        assert_eq!(region.get_pixel(26, 20)[0], 0, "6 px out is not");
+        assert_eq!(fill_region(&painted, 0.0, 0.0), painted);
     }
 
+    /// The blend fades the fill into the photo over the Edge blend ring,
+    /// which lies outside what was painted: the erased object never
+    /// shows through, however wide the blend.
     #[test]
-    fn bbox_empty_mask_returns_none() {
-        let mask = empty_mask(32, 32);
-        assert!(mask_bbox_expanded(&mask, 4, 32, 32).is_none());
-    }
-
-    /// Full-image mask: bbox spans the whole image plus margin (clamped).
-    #[test]
-    fn bbox_full_image_mask() {
-        let mask = GrayImage::from_pixel(32, 32, Luma([255]));
-        let bbox = mask_bbox_expanded(&mask, 4, 32, 32);
-        assert_eq!(bbox, Some(Bbox { x: 0, y: 0, w: 32, h: 32 }));
+    fn a_wide_edge_blend_never_brings_back_the_erased_object() {
+        let mut src = solid(64, 64, [100, 100, 100, 255]);
+        let mut painted = empty_mask(64, 64);
+        for y in 24..40 { for x in 24..40 {
+            src.put_pixel(x, y, Rgba([250, 250, 250, 255]));
+            painted.put_pixel(x, y, Luma([255]));
+        } }
+        let raw = solid(64, 64, [100, 100, 100, 255]);
+        let region = fill_region(&painted, 0.0, 12.0);
+        let out = finalize_inpaint(&raw, &src, &region, 12.0, 0.0);
+        let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
+            .map(|(x, y)| out.get_pixel(x, y)[0])
+            .max().unwrap();
+        assert!(brightest <= 110, "object rim ghosted back: {brightest}");
     }
 }

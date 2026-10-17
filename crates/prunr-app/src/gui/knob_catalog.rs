@@ -31,10 +31,10 @@ pub enum StaticKnob {
     GuidedRadius,
     GuidedEpsilon,
     Feather,
-    FillStyle,
+    SubjectEffect,
     BgEffect,
 
-    // Edge tier — cached DexiNed tensor reused.
+    // Edge tier — cached TEED tensor reused.
     LineStrength,
     EdgeThickness,
     EdgeScale,
@@ -48,33 +48,17 @@ pub enum StaticKnob {
 
     // Inference-level — needs worker subprocess.
     Model,
+
+    // Mask tier.
+    Decoration,
+    /// The Depth chip: lens blur, fog, aerial perspective and focus.
+    /// Re-renders the photo from the kept depth map.
+    DepthLook,
+    /// Sketch's Fade with distance.
+    LineFade,
 }
 
 impl StaticKnob {
-    /// Stable bit position for `KnobSet`. Order must match `ALL`.
-    const fn ordinal(self) -> u8 {
-        match self {
-            StaticKnob::Gamma => 0,
-            StaticKnob::Contrast => 1,
-            StaticKnob::EdgeShift => 2,
-            StaticKnob::RefineEdges => 3,
-            StaticKnob::GuidedRadius => 4,
-            StaticKnob::GuidedEpsilon => 5,
-            StaticKnob::Feather => 6,
-            StaticKnob::FillStyle => 7,
-            StaticKnob::BgEffect => 8,
-            StaticKnob::LineStrength => 9,
-            StaticKnob::EdgeThickness => 10,
-            StaticKnob::EdgeScale => 11,
-            StaticKnob::SolidLineColor => 12,
-            StaticKnob::ComposeMode => 13,
-            StaticKnob::LineStyle => 14,
-            StaticKnob::BgColor => 15,
-            StaticKnob::BgImageFit => 16,
-            StaticKnob::Model => 17,
-        }
-    }
-
     /// All variants, for table-driven tests and catalog validation.
     pub const ALL: &'static [StaticKnob] = &[
         StaticKnob::Gamma,
@@ -84,7 +68,7 @@ impl StaticKnob {
         StaticKnob::GuidedRadius,
         StaticKnob::GuidedEpsilon,
         StaticKnob::Feather,
-        StaticKnob::FillStyle,
+        StaticKnob::SubjectEffect,
         StaticKnob::BgEffect,
         StaticKnob::LineStrength,
         StaticKnob::EdgeThickness,
@@ -95,11 +79,14 @@ impl StaticKnob {
         StaticKnob::BgColor,
         StaticKnob::BgImageFit,
         StaticKnob::Model,
+        StaticKnob::Decoration,
+        StaticKnob::DepthLook,
+        StaticKnob::LineFade,
     ];
 }
 
 /// Context-sensitive event: line-mode transition. Dispatch depends on
-/// whether the DexiNed tensor is cached — `line_mode_spec` consumes it.
+/// whether the TEED tensor is cached — `line_mode_spec` consumes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineModeChange {
     pub from: LineMode,
@@ -118,6 +105,8 @@ pub enum ModelRole {
     Erase,
     /// Enlarges the image.
     Upscale,
+    /// Colours a black-and-white photo.
+    Colorize,
 }
 
 impl ModelRole {
@@ -125,6 +114,12 @@ impl ModelRole {
     /// erase), rather than shape a selection.
     pub fn edits_cutout(self) -> bool {
         self == ModelRole::Cutout
+    }
+
+    /// Runs only on the image picked, when asked (an eraser also needs a
+    /// painted region), so never on import.
+    pub fn runs_on_demand(self) -> bool {
+        matches!(self, ModelRole::Erase | ModelRole::Upscale | ModelRole::Colorize)
     }
 }
 
@@ -134,11 +129,17 @@ pub enum Surface {
     Mask,
     Lines,
     Effect,
+    /// The cut-out's sticker outline and shadow.
+    Decoration,
     Background,
     /// The upscaler's Scale and Refine chips.
     Upscale,
+    /// The colorizer's Strength chip.
+    Colorize,
     /// The Stable Diffusion eraser's Quality, Prompt and Advanced chips.
     SdChips,
+    /// The RORem eraser's Advanced chip: steps and seed.
+    RoremChips,
     /// Paint and Magic Brush, the selection on the image and its actions.
     Brushes,
     /// The Paint Brush's mode (Restore/Erase or Add/Subtract), Hardness
@@ -147,113 +148,77 @@ pub enum Surface {
     SelectionStrokes,
     /// Expand region, Feather and Sharpen for the filled region.
     FillRegionKnobs,
+    /// Restore faces: every model whose output is the photo.
+    Faces,
+    /// The Depth chip: lens blur, fog and aerial perspective on the photo.
+    Depth,
 }
 
 /// Whether `surface` shows for `model`: only where it has an effect. A
-/// surface that shows but is inactive under another setting (Mask with
-/// Sketch on Full) is greyed with a reason instead, via `knob_enabled`.
+/// surface that shows but cannot act now (Mask with Sketch on Whole
+/// photo, before Process) is greyed with a reason by `surface_gate`.
 pub fn shows(model: SettingsModel, surface: Surface) -> bool {
     use ModelRole::*;
     let role = model.role();
     match surface {
-        Surface::Mask => role == Cutout,
+        Surface::Mask | Surface::Decoration => role == Cutout,
         Surface::Lines | Surface::Effect | Surface::Background => matches!(role, Cutout | Filters),
         Surface::Upscale => role == Upscale,
+        Surface::Colorize => role == Colorize,
         Surface::SdChips => model == SettingsModel::SdInpaint,
-        Surface::Brushes => role != Upscale,
+        Surface::RoremChips => model == SettingsModel::RoremInpaint,
+        Surface::Brushes => !matches!(role, Upscale | Colorize),
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
+        Surface::Faces => matches!(role, Cutout | Filters | Upscale),
+        Surface::Depth => role == Filters,
     }
 }
 
-/// Runtime condition under which a knob's chip is enabled.
-/// Declared on each `StaticKnob` via `requirement()` so new knobs
-/// must think about model affinity at definition time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KnobRequirement {
-    /// Always enabled (when not mid-processing).
-    Always,
-    /// Enabled when the model produces a segmentation mask:
-    /// `model_uses_seg && line_mode != EdgesOnly`.
-    MaskProduced,
-    /// Enabled when a subject channel is present: `line_mode != EdgesOnly`.
-    SubjectPresent,
-    /// Enabled when the output can contain transparency, i.e. not
-    /// (no-model AND line_mode Off) — that combination outputs opaque RGB.
-    TransparencyProduced,
-}
-
-/// Inputs needed to evaluate `KnobRequirement`. Computed once per frame
-/// in the toolbar and passed to `knob_enabled` for each gate.
+/// What a surface's gate reads: the model, the image's facts, and
+/// whether a run is under way.
 #[derive(Clone, Copy, Debug)]
-pub struct KnobContext {
-    pub model_uses_seg: bool,
-    /// True when `SettingsModel::None` is active (filter-only, no AI).
-    pub model_is_none: bool,
-    pub line_mode: LineMode,
+pub(crate) struct GateContext {
+    pub model: SettingsModel,
+    pub facts: crate::gui::capability::ItemFacts,
+    /// A run is under way anywhere in the app, not only on this image.
+    pub processing: bool,
 }
 
-/// Returns `true` when `req` is satisfied under `ctx`.
-pub fn knob_enabled(req: KnobRequirement, ctx: KnobContext) -> bool {
-    match req {
-        KnobRequirement::Always => true,
-        KnobRequirement::MaskProduced =>
-            ctx.model_uses_seg && ctx.line_mode != LineMode::EdgesOnly,
-        KnobRequirement::SubjectPresent =>
-            ctx.line_mode != LineMode::EdgesOnly,
-        KnobRequirement::TransparencyProduced =>
-            !(ctx.model_is_none && ctx.line_mode == LineMode::Off),
+/// Why a shown surface's controls are off right now, `None` when they
+/// work: the one gate the toolbar greys a surface by. Controls that need
+/// the cut-out wait for Process; everything else works on what the image
+/// shows.
+pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static str> {
+    use crate::gui::capability::{check, Need};
+    let role = g.model.role();
+    let needs = |need: Need| check(&g.facts, need, role).reason().map(crate::gui::capability::Reason::text);
+    // A knob an upscale reads changed mid-run makes the landing result
+    // stale and drops it.
+    let upscale_lock = (g.processing && role == ModelRole::Upscale).then_some("Wait for the upscale to finish, or cancel it.");
+    match surface {
+        Surface::Mask | Surface::Decoration => needs(Need::Cutout),
+        Surface::Effect => needs(Need::Subject),
+        Surface::Background => needs(Need::Transparency),
+        Surface::Upscale => upscale_lock,
+        // On an upscaler Faces is a setting of the run; elsewhere it works
+        // on the image shown.
+        Surface::Faces if role == ModelRole::Upscale => upscale_lock,
+        Surface::Faces => needs(Need::ShownImage),
+        Surface::Colorize => g.processing.then_some("Wait for Colorize to finish, or cancel it."),
+        Surface::Lines => needs(Need::Processed),
+        Surface::SdChips
+        | Surface::RoremChips
+        | Surface::Brushes
+        | Surface::SelectionStrokes
+        | Surface::FillRegionKnobs
+        | Surface::Depth => None,
     }
 }
 
-impl StaticKnob {
-    /// Which runtime condition gates this knob's chip.
-    pub fn requirement(self) -> KnobRequirement {
-        match self {
-            StaticKnob::Gamma
-            | StaticKnob::Contrast
-            | StaticKnob::EdgeShift
-            | StaticKnob::RefineEdges
-            | StaticKnob::GuidedRadius
-            | StaticKnob::GuidedEpsilon
-            | StaticKnob::Feather => KnobRequirement::MaskProduced,
-
-            StaticKnob::FillStyle => KnobRequirement::SubjectPresent,
-
-            StaticKnob::BgEffect
-            | StaticKnob::BgColor
-            | StaticKnob::BgImageFit => KnobRequirement::TransparencyProduced,
-
-            StaticKnob::LineStrength
-            | StaticKnob::EdgeThickness
-            | StaticKnob::EdgeScale
-            | StaticKnob::SolidLineColor
-            | StaticKnob::ComposeMode
-            | StaticKnob::LineStyle
-            | StaticKnob::Model => KnobRequirement::Always,
-        }
-    }
-}
-
-/// Bitset over `StaticKnob` variants. `Copy`, zero-alloc; a single u32
-/// covers all 18 static knobs with room to spare.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct KnobSet(u32);
-
-impl KnobSet {
-    pub fn insert(&mut self, k: StaticKnob) {
-        self.0 |= 1u32 << (k.ordinal() as u32);
-    }
-    pub fn contains(self, k: StaticKnob) -> bool {
-        (self.0 >> (k.ordinal() as u32)) & 1 == 1
-    }
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheImpact {
+    #[default]
     Nothing,
     EdgeCache,
     SegCache,
@@ -275,8 +240,9 @@ impl CacheImpact {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DispatchKind {
+    #[default]
     None,
     Render,
     LivePreviewMask,
@@ -349,14 +315,17 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::GuidedRadius
         | StaticKnob::GuidedEpsilon
         | StaticKnob::Feather
-        | StaticKnob::FillStyle => s(MaskRerun, Nothing, LivePreviewMask, true),
+        | StaticKnob::SubjectEffect
+        | StaticKnob::Decoration
+        | StaticKnob::DepthLook => s(MaskRerun, Nothing, LivePreviewMask, true),
 
         StaticKnob::LineStrength
         | StaticKnob::EdgeThickness
         | StaticKnob::EdgeScale
         | StaticKnob::SolidLineColor
         | StaticKnob::ComposeMode
-        | StaticKnob::LineStyle => s(EdgeRerun, Nothing, LivePreviewEdge, true),
+        | StaticKnob::LineStyle
+        | StaticKnob::LineFade => s(EdgeRerun, Nothing, LivePreviewEdge, true),
 
         StaticKnob::BgColor
         | StaticKnob::BgEffect
@@ -370,12 +339,12 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
 /// Precise spec for a line-mode transition.
 ///
 /// `cached_edge` gates the `Off → SubjectOutline` fast path: with the
-/// DexiNed tensor in memory we recompose via live-preview; otherwise we
-/// rerun DexiNed on the cached seg (AddEdgeInference subprocess).
+/// TEED tensor in memory we recompose via live-preview; otherwise we
+/// rerun TEED on the cached seg (AddEdgeInference subprocess).
 ///
-/// Transitions to/from `Off` preserve the DexiNed tensor — `Off` doesn't
+/// Transitions to/from `Off` preserve the TEED tensor — `Off` doesn't
 /// use it. `SubjectOutline ↔ EdgesOnly` invalidates edge cache because
-/// DexiNed sees different input (masked-subject vs raw scene).
+/// TEED sees different input (masked-subject vs raw scene).
 pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
     use CacheImpact::*;
     use DispatchKind::*;
@@ -405,7 +374,7 @@ pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
 }
 
 /// Precise spec for an input-transform change. With a cached seg tensor
-/// we reuse it and rerun DexiNed only; otherwise a full pipeline is needed.
+/// we reuse it and rerun TEED only; otherwise a full pipeline is needed.
 pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
     use CacheImpact::EdgeCache;
     use DispatchKind::{SubprocessAddEdge, SubprocessFullPipeline};
@@ -425,7 +394,7 @@ pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
 }
 
 /// Aggregate `CacheImpact` implied by a recipe diff — union of per-knob
-/// impacts for every field that actually changed. Used by `classify_candidates`
+/// impacts for every field that actually changed. Used by `BatchItem::run_tier`
 /// to invalidate only the caches whose INPUT changed (seg stays valid on an
 /// input_transform change, edge stays valid on a model swap).
 pub fn cache_impact_for_recipe_diff(old: &ProcessingRecipe, new: &ProcessingRecipe) -> CacheImpact {
@@ -462,6 +431,35 @@ fn line_mode_from_flags(uses_seg: bool, uses_edge: bool) -> LineMode {
 
 #[cfg(test)]
 mod tests {
+    /// The toolbar's one gate: cut-out surfaces wait for Process on a
+    /// cut-out model, work on No model's photo, and every surface's
+    /// reason reads as a sentence.
+    #[test]
+    fn surface_gates_follow_what_the_image_shows() {
+        use crate::gui::capability::{Activity, ItemFacts, Shown};
+        use crate::gui::item::Engine;
+        let photo = ItemFacts::photo();
+        let cut = ItemFacts { shown: Shown::Run(Engine::Segment), cutout_mask: true, ..ItemFacts::photo() };
+        let g = |model, facts, processing| GateContext { model, facts, processing };
+        let cutout_surfaces = [Surface::Mask, Surface::Decoration, Surface::Effect, Surface::Background];
+        for s in cutout_surfaces {
+            assert_eq!(surface_gate(s, &g(SettingsModel::Silueta, photo, false)), Some("Process first."), "{s:?} before Process");
+            assert_eq!(surface_gate(s, &g(SettingsModel::Silueta, cut, false)), None, "{s:?} on a cut-out");
+        }
+        assert_eq!(surface_gate(Surface::Effect, &g(SettingsModel::None, photo, false)), None, "Effect on No model's photo");
+        assert!(surface_gate(Surface::Background, &g(SettingsModel::None, photo, false)).is_some_and(|r| r.starts_with("Nothing is transparent")),
+            "No model with Sketch off has nothing transparent to fill");
+        assert_eq!(surface_gate(Surface::Faces, &g(SettingsModel::Silueta, photo, false)), None, "Faces work before Process");
+        let upscaling = ItemFacts { activity: Activity::Running(Engine::Upscale), ..photo };
+        assert!(surface_gate(Surface::Faces, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some(), "Faces wait for the upscale");
+        assert!(surface_gate(Surface::Upscale, &g(SettingsModel::RealEsrganUpscale, upscaling, true)).is_some());
+        let whole = |facts: ItemFacts| ItemFacts { line_mode: LineMode::EdgesOnly, ..facts };
+        assert_eq!(surface_gate(Surface::Mask, &g(SettingsModel::Silueta, whole(cut), false)), Some("Sketch is on Whole photo, so nothing is cut out."));
+        assert_eq!(surface_gate(Surface::Effect, &g(SettingsModel::None, whole(photo), false)), Some("Sketch is on Whole photo, so there is no subject to restyle."));
+        assert_eq!(surface_gate(Surface::Background, &g(SettingsModel::Silueta, whole(cut), false)), None, "lines over a cut-out leave a background to fill");
+        assert_eq!(surface_gate(Surface::Background, &g(SettingsModel::None, whole(photo), false)), None, "lines on No model's photo leave the rest transparent");
+    }
+
     use super::*;
 
     #[test]
@@ -471,47 +469,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn requirement_assignments_match_catalog_intent() {
-        use KnobRequirement::*;
-        let expected: &[(StaticKnob, KnobRequirement)] = &[
-            (StaticKnob::Gamma, MaskProduced),
-            (StaticKnob::Contrast, MaskProduced),
-            (StaticKnob::EdgeShift, MaskProduced),
-            (StaticKnob::RefineEdges, MaskProduced),
-            (StaticKnob::GuidedRadius, MaskProduced),
-            (StaticKnob::GuidedEpsilon, MaskProduced),
-            (StaticKnob::Feather, MaskProduced),
-            (StaticKnob::FillStyle, SubjectPresent),
-            (StaticKnob::BgEffect, TransparencyProduced),
-            (StaticKnob::LineStrength, Always),
-            (StaticKnob::EdgeThickness, Always),
-            (StaticKnob::EdgeScale, Always),
-            (StaticKnob::SolidLineColor, Always),
-            (StaticKnob::ComposeMode, Always),
-            (StaticKnob::LineStyle, Always),
-            (StaticKnob::BgColor, TransparencyProduced),
-            (StaticKnob::BgImageFit, TransparencyProduced),
-            (StaticKnob::Model, Always),
-        ];
-        assert_eq!(expected.len(), StaticKnob::ALL.len(), "table covers all variants");
-        for &(knob, req) in expected {
-            assert_eq!(knob.requirement(), req, "{knob:?}");
-        }
-    }
-
     /// Every model shows exactly the surfaces that act on its image. One
     /// row per model, written out rather than derived, so a new model or
     /// a moved surface has to be decided here.
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Background, Upscale, SdChips, Brushes, SelectionStrokes, FillRegionKnobs];
-        let cutout: &[Surface] = &[Mask, Lines, Effect, Background, Brushes, SelectionStrokes];
-        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes];
+        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, Colorize, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces, Depth];
+        let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
+        let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces, Depth];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
-        let upscale: &[Surface] = &[Upscale];
+        let upscale: &[Surface] = &[Upscale, Faces];
+        let colorize: &[Surface] = &[Colorize];
         let rows: &[(SettingsModel, &[Surface])] = &[
             (SettingsModel::Silueta, cutout),
             (SettingsModel::U2net, cutout),
@@ -521,49 +491,19 @@ mod tests {
             (SettingsModel::BigInpaint, erase),
             (SettingsModel::MiganInpaint, erase),
             (SettingsModel::SdInpaint, sd),
+            (SettingsModel::RoremInpaint, erase),
             (SettingsModel::RealEsrganUpscale, upscale),
             (SettingsModel::Nomos8kUpscale, upscale),
             (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),
             (SettingsModel::FourXNmkdSuperscaleUpscale, upscale),
+            (SettingsModel::Nomos2Upscale, upscale),
+            (SettingsModel::ColorizeDdcolor, colorize),
         ];
         assert_eq!(rows.len(), SettingsModel::ALL.len(), "every model has a row");
         for &(model, shown) in rows {
             for surface in all {
                 assert_eq!(shows(model, surface), shown.contains(&surface), "{model:?} {surface:?}");
             }
-        }
-    }
-
-    #[test]
-    fn knob_enabled_matches_toolbar_boolean_formulas() {
-        use LineMode::*;
-        let cases: &[(bool, bool, LineMode)] = &[
-            // (uses_seg, model_is_none, line_mode)
-            (true,  false, Off),
-            (true,  false, SubjectOutline),
-            (true,  false, EdgesOnly),     // Full lines: no mask is made
-            (false, false, Off),           // inpaint model
-            (false, true,  Off),           // No-model + Off
-            (false, true,  SubjectOutline),
-            (false, true,  EdgesOnly),
-        ];
-        for &(uses_seg, is_none, line_mode) in cases {
-            let ctx = KnobContext { model_uses_seg: uses_seg, model_is_none: is_none, line_mode };
-            let expected_mask = uses_seg && line_mode != EdgesOnly;
-            let expected_subject = line_mode != EdgesOnly;
-            let expected_bg = !(is_none && line_mode == Off);
-            assert_eq!(
-                knob_enabled(KnobRequirement::MaskProduced, ctx), expected_mask,
-                "MaskProduced uses_seg={uses_seg} is_none={is_none} {line_mode:?}",
-            );
-            assert_eq!(
-                knob_enabled(KnobRequirement::SubjectPresent, ctx), expected_subject,
-                "SubjectPresent {line_mode:?}",
-            );
-            assert_eq!(
-                knob_enabled(KnobRequirement::TransparencyProduced, ctx), expected_bg,
-                "TransparencyProduced is_none={is_none} {line_mode:?}",
-            );
         }
     }
 
@@ -677,7 +617,7 @@ mod tests {
     /// If a caller folds the cold dispatch into an aggregate and the
     /// dispatcher then `.max()`es in the refined warm dispatch, the warm
     /// fast path is silently poisoned — every Off→Subject toggle takes the
-    /// subprocess path, spawning a cold DexiNed rerun on each flip. Guard
+    /// subprocess path, spawning a cold TEED rerun on each flip. Guard
     /// by asserting the ordering explicitly so the bug can't return.
     #[test]
     fn cold_line_mode_dispatch_outranks_warm_under_max() {
@@ -712,7 +652,7 @@ mod tests {
     fn mutate_static(knob: StaticKnob, base: crate::gui::item_settings::ItemSettings)
         -> crate::gui::item_settings::ItemSettings
     {
-        use prunr_core::{ComposeMode, EdgeScale, FillStyle, LineStyle};
+        use prunr_core::{ComposeMode, EdgeScale, SubjectEffect, LineStyle};
         let mut new = base;
         match knob {
             StaticKnob::Gamma => new.gamma = base.gamma + 0.5,
@@ -722,12 +662,13 @@ mod tests {
             StaticKnob::GuidedRadius => new.guided_radius = base.guided_radius + 1,
             StaticKnob::GuidedEpsilon => new.guided_epsilon = base.guided_epsilon * 2.0,
             StaticKnob::Feather => new.feather = base.feather + 0.5,
-            StaticKnob::FillStyle => {
-                new.fill_style = match base.fill_style {
-                    FillStyle::None => FillStyle::Invert,
-                    _ => FillStyle::None,
+            StaticKnob::SubjectEffect => {
+                new.effect = match base.effect {
+                    SubjectEffect::None => SubjectEffect::Invert,
+                    _ => SubjectEffect::None,
                 };
             }
+            StaticKnob::Decoration => new.decoration.outline_width = base.decoration.outline_width + 4.0,
             StaticKnob::BgEffect => {
                 new.bg_effect = match base.bg_effect {
                     prunr_core::BgEffect::None => prunr_core::BgEffect::DesaturatedSource,
@@ -772,6 +713,8 @@ mod tests {
                     _ => prunr_core::BgImageFit::Cover,
                 };
             }
+            StaticKnob::DepthLook => new.depth.fog_pct = base.depth.fog_pct + 30,
+            StaticKnob::LineFade => new.line_fade_pct = base.line_fade_pct + 30,
             StaticKnob::Model => {
                 // Model lives outside ItemSettings; tested via
                 // dedicated recipe-level mutations in the integration tests.
@@ -788,19 +731,6 @@ mod tests {
             // otherwise pin to defaults at the recipe boundary.
             line_mode: Lm::SubjectOutline,
             ..Default::default()
-        };
-        let ordered = |t: prunr_core::RequiredTier| -> u8 {
-            use prunr_core::RequiredTier::*;
-            match t {
-                Skip => 0,
-                CompositeOnly => 1,
-                UpscaleTier2 => 2,
-                UpscaleRerun => 3,
-                EdgeRerun => 4,
-                MaskRerun => 5,
-                AddEdgeInference => 6,
-                FullPipeline => 7,
-            }
         };
         for knob in StaticKnob::ALL {
             if matches!(knob, StaticKnob::Model) {
@@ -821,10 +751,81 @@ mod tests {
                 cat_spec.cache_impact, impact_from_diff,
             );
             assert!(
-                ordered(cat_spec.tier) >= ordered(tier_from_resolve),
+                cat_spec.tier >= tier_from_resolve,
                 "knob {knob:?}: catalog tier {:?} < resolve_tier {:?}",
                 cat_spec.tier,
                 tier_from_resolve,
+            );
+        }
+    }
+
+    /// What a settings field's tier is pinned by: a row of the knob table,
+    /// or why it has none.
+    #[derive(Debug, Clone, Copy)]
+    enum TierRow {
+        Knob(StaticKnob),
+        Elsewhere(&'static str),
+    }
+
+    /// Every `ItemSettings` field, each with its row. The destructure has
+    /// no `..`: a new field does not compile until it is listed here.
+    macro_rules! settings_fields {
+        ($($field:ident => $row:expr),* $(,)?) => {{
+            let crate::gui::item_settings::ItemSettings { $($field: _),* } = crate::gui::item_settings::ItemSettings::default();
+            type Changed = fn(&crate::gui::item_settings::ItemSettings, &crate::gui::item_settings::ItemSettings) -> bool;
+            vec![$((stringify!($field), $row, (|a, b| a.$field != b.$field) as Changed)),*]
+        }};
+    }
+
+    /// A new settings field joins the tier table, or says where its tier
+    /// is tested; every knob in the table changes the field it claims.
+    #[test]
+    fn every_settings_field_has_a_tier_row() {
+        use StaticKnob as K;
+        use TierRow::{Elsewhere, Knob};
+        let fields = settings_fields! {
+            gamma => Knob(K::Gamma),
+            contrast => Knob(K::Contrast),
+            edge_shift => Knob(K::EdgeShift),
+            refine_edges => Knob(K::RefineEdges),
+            guided_radius => Knob(K::GuidedRadius),
+            guided_epsilon => Knob(K::GuidedEpsilon),
+            feather => Knob(K::Feather),
+            line_mode => Elsewhere("line_mode_cache_impact_matches_recipe_diff: every pair of modes"),
+            line_strength => Knob(K::LineStrength),
+            solid_line_color => Knob(K::SolidLineColor),
+            edge_thickness => Knob(K::EdgeThickness),
+            edge_scale => Knob(K::EdgeScale),
+            bg => Knob(K::BgColor),
+            compose_mode => Knob(K::ComposeMode),
+            line_style => Knob(K::LineStyle),
+            effect => Knob(K::SubjectEffect),
+            decoration => Knob(K::Decoration),
+            bg_effect => Knob(K::BgEffect),
+            input_transform => Elsewhere("input_transform_cache_impact_matches_recipe_diff"),
+            bg_image_hash => Elsewhere("core recipe test bg_image_hash_change_composite_only"),
+            bg_image_fit => Knob(K::BgImageFit),
+            output_scale => Elsewhere("core recipe upscale tier tests: a scale change reruns the upscale"),
+            pre_denoise => Elsewhere("core recipe upscale tier tests: Tier 1 of the upscaler"),
+            sharpen => Elsewhere("core recipe test sharpen_change_returns_upscale_tier2"),
+            ai_blend => Elsewhere("core recipe test ai_blend_change_returns_upscale_tier2"),
+            color_match => Elsewhere("core recipe test color_match_toggle_returns_upscale_tier2"),
+            faces => Elsewhere("a face pass on the shown image, not a recipe tier"),
+            color_strength_pct => Elsewhere("core recipe test colorize_strength_change_returns_colorize_tier2"),
+            depth => Knob(K::DepthLook),
+            line_fade_pct => Knob(K::LineFade),
+        };
+        let base = crate::gui::item_settings::ItemSettings { line_mode: LineMode::SubjectOutline, ..Default::default() };
+        for (field, row, changed) in &fields {
+            match row {
+                Knob(knob) => assert!(changed(&base, &mutate_static(*knob, base)), "{knob:?} does not change {field}"),
+                Elsewhere(why) => assert!(!why.trim().is_empty(), "{field}: say where its tier is tested"),
+            }
+        }
+        for knob in StaticKnob::ALL.iter().filter(|k| !matches!(k, StaticKnob::Model)) {
+            assert!(
+                fields.iter().any(|(_, row, _)| matches!(row, Knob(k) if k == knob)),
+                "{knob:?} claims no settings field",
             );
         }
     }
@@ -937,7 +938,7 @@ mod tests {
 
     #[test]
     fn cache_impact_for_recipe_diff_covers_common_knobs() {
-        use prunr_core::{ComposeMode, EdgeScale, FillStyle, InputTransform, LineStyle, ModelKind};
+        use prunr_core::{ComposeMode, EdgeScale, SubjectEffect, InputTransform, LineStyle, ModelKind};
         use prunr_core::{CompositeRecipe, EdgeRecipe, InferenceRecipe, MaskSettings, UpscaleRecipe};
 
         let base = ProcessingRecipe {
@@ -954,13 +955,16 @@ mod tests {
                 edge_scale: EdgeScale::Fused,
                 compose_mode: ComposeMode::LinesOnly,
                 line_style: LineStyle::Solid,
+                line_fade_pct: 0,
             },
             mask: (&MaskSettings {
-                fill_style: FillStyle::None,
+                effect: SubjectEffect::None,
                 ..Default::default()
             }).into(),
             composite: CompositeRecipe::default(),
             upscale: UpscaleRecipe::default(),
+            colorize: Default::default(),
+            depth: Default::default(),
         };
 
         assert_eq!(
@@ -983,7 +987,7 @@ mod tests {
         );
 
         // Off → SubjectOutline: seg valid, edge tensor still valid (Off
-        // didn't run DexiNed). Cache stays Nothing.
+        // didn't run TEED). Cache stays Nothing.
         let mut to_subject = base.clone();
         to_subject.inference.uses_edge_detection = true;
         assert_eq!(

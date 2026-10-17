@@ -64,6 +64,15 @@ impl Default for PresetFile {
     }
 }
 
+impl PresetFile {
+    pub(crate) fn single(model: ModelId, preset: ModelPreset) -> Self {
+        Self {
+            format_version: PRESET_FORMAT_VERSION,
+            models: HashMap::from([(model_id_key(model), preset)]),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct ModelPreset {
@@ -76,6 +85,7 @@ pub(crate) struct ModelPreset {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SdPreset {
+    #[serde(deserialize_with = "super::brush_state::own_prompt")]
     pub prompt: String,
     pub negative_prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,13 +98,12 @@ pub(crate) struct SdPreset {
 
 impl Default for SdPreset {
     fn default() -> Self {
-        use super::brush_state::{DEFAULT_SD_NEGATIVE_PROMPT, DEFAULT_SD_PROMPT};
         Self {
-            prompt: DEFAULT_SD_PROMPT.to_string(),
-            negative_prompt: DEFAULT_SD_NEGATIVE_PROMPT.to_string(),
+            prompt: String::new(),
+            negative_prompt: super::brush_state::default_sd_negative_prompt(),
             use_taesd: None,
             seed: None,
-            active_scheduler: SdScheduler::Lcm,
+            active_scheduler: SdScheduler::default(),
             schedulers: HashMap::new(),
         }
     }
@@ -105,53 +114,21 @@ impl Default for SdPreset {
 pub(crate) struct SdSchedulerBundle {
     pub steps: u32,
     pub guidance_scale: f32,
-    pub use_karras_sigmas: bool,
-    pub strength: f32,
 }
 
 impl Default for SdSchedulerBundle {
     fn default() -> Self {
-        Self::default_for(SdScheduler::Lcm)
+        Self::default_for(SdScheduler::default())
     }
 }
 
 impl SdSchedulerBundle {
-    /// Factory tuning for a scheduler — Prunr's floor when an active
-    /// preset omits a `schedulers[S]` entry. The numbers mirror
-    /// `SdQualityPreset::Balanced` for LCM and `SdQualityPreset::Quality`
-    /// for DPM++; DDIM / UniPC / Euler-A use scheduler-typical defaults.
+    /// Factory tuning for a quality — Prunr's floor when an active
+    /// preset omits a `schedulers[S]` entry.
     pub fn default_for(scheduler: SdScheduler) -> Self {
         match scheduler {
-            SdScheduler::Lcm => Self {
-                steps: 8,
-                guidance_scale: 1.5,
-                use_karras_sigmas: false,
-                strength: 1.0,
-            },
-            SdScheduler::Ddim => Self {
-                steps: 20,
-                guidance_scale: 7.5,
-                use_karras_sigmas: false,
-                strength: 1.0,
-            },
-            SdScheduler::DpmPlusPlus2MKarras => Self {
-                steps: 25,
-                guidance_scale: 4.0,
-                use_karras_sigmas: true,
-                strength: 1.0,
-            },
-            SdScheduler::UniPc => Self {
-                steps: 10,
-                guidance_scale: 4.0,
-                use_karras_sigmas: false,
-                strength: 1.0,
-            },
-            SdScheduler::EulerA => Self {
-                steps: 25,
-                guidance_scale: 7.5,
-                use_karras_sigmas: false,
-                strength: 1.0,
-            },
+            SdScheduler::Lcm => Self { steps: 8, guidance_scale: 1.5 },
+            SdScheduler::DpmPlusPlus2MKarras => Self { steps: 25, guidance_scale: 4.0 },
         }
     }
 }
@@ -181,8 +158,6 @@ fn apply_sd_to_brush(
     brush.sd_scheduler = chosen;
     brush.sd_steps = bundle.steps;
     brush.sd_guidance_scale = bundle.guidance_scale;
-    brush.sd_use_karras_sigmas = bundle.use_karras_sigmas;
-    brush.sd_strength = bundle.strength;
     brush.sd_prompt = sd.prompt.clone();
     brush.sd_negative_prompt = sd.negative_prompt.clone();
     brush.sd_seed = sd.seed;
@@ -203,7 +178,7 @@ pub(crate) fn resolve_preset_for_model(
     let mp = entry_for(file, model);
 
     let item_settings = mp.map(|m| m.item_settings).unwrap_or_default();
-    let mut brush = mp.map(|m| m.brush.clone()).unwrap_or_default();
+    let mut brush = mp.map_or_else(|| BrushSettings::floor_for(model), |m| m.brush.clone());
 
     if model.is_sd_family() {
         let sd_default = SdPreset::default();
@@ -229,15 +204,12 @@ pub(crate) fn entry_for(file: &PresetFile, model: ModelId) -> Option<&ModelPrese
     })
 }
 
-/// Save-time split: produce the on-disk shape from a unified live
-/// `BrushSettings`. For non-SD models the SD fields stay on the brush
-/// struct (they're session state) but no `SdPreset` is emitted.
-pub(crate) fn split_brush_for_save(
-    brush: &BrushSettings,
-    model: ModelId,
-) -> (BrushSettings, Option<SdPreset>) {
+/// The `SdPreset` a save of `brush` under `model` stores beside the brush.
+/// Non-SD models get none: their SD fields stay on the brush as session
+/// state.
+pub(crate) fn sd_preset_for_save(brush: &BrushSettings, model: ModelId) -> Option<SdPreset> {
     if !model.is_sd_family() {
-        return (brush.clone(), None);
+        return None;
     }
     let mut schedulers = HashMap::new();
     schedulers.insert(
@@ -245,8 +217,6 @@ pub(crate) fn split_brush_for_save(
         SdSchedulerBundle {
             steps: brush.sd_steps,
             guidance_scale: brush.sd_guidance_scale,
-            use_karras_sigmas: brush.sd_use_karras_sigmas,
-            strength: brush.sd_strength,
         },
     );
     let sd = SdPreset {
@@ -257,7 +227,7 @@ pub(crate) fn split_brush_for_save(
         active_scheduler: brush.sd_scheduler,
         schedulers,
     };
-    (brush.clone(), Some(sd))
+    Some(sd)
 }
 
 /// Apply-time fuse: produce a unified `BrushSettings` from a stored
@@ -305,48 +275,17 @@ mod tests {
     }
 
     #[test]
-    fn sd_scheduler_bundle_default_for_lcm_matches_balanced_apply_to() {
+    fn sd_scheduler_bundle_default_for_lcm_is_fast() {
         let b = SdSchedulerBundle::default_for(SdScheduler::Lcm);
         assert_eq!(b.steps, 8);
         assert!((b.guidance_scale - 1.5).abs() < f32::EPSILON);
-        assert!(!b.use_karras_sigmas);
-        assert!((b.strength - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn sd_scheduler_bundle_default_for_ddim_uses_ddim_tuning() {
-        let b = SdSchedulerBundle::default_for(SdScheduler::Ddim);
-        assert_eq!(b.steps, 20);
-        assert!((b.guidance_scale - 7.5).abs() < f32::EPSILON);
-        assert!(!b.use_karras_sigmas);
-        assert!((b.strength - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn sd_scheduler_bundle_default_for_dpmpp_matches_quality_preset() {
+    fn sd_scheduler_bundle_default_for_dpmpp_is_quality() {
         let b = SdSchedulerBundle::default_for(SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(b.steps, 25);
         assert!((b.guidance_scale - 4.0).abs() < f32::EPSILON);
-        assert!(b.use_karras_sigmas);
-        assert!((b.strength - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn sd_scheduler_bundle_default_for_unipc_uses_unipc_tuning() {
-        let b = SdSchedulerBundle::default_for(SdScheduler::UniPc);
-        assert_eq!(b.steps, 10);
-        assert!((b.guidance_scale - 4.0).abs() < f32::EPSILON);
-        assert!(!b.use_karras_sigmas);
-        assert!((b.strength - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn sd_scheduler_bundle_default_for_eulera_uses_eulera_tuning() {
-        let b = SdSchedulerBundle::default_for(SdScheduler::EulerA);
-        assert_eq!(b.steps, 25);
-        assert!((b.guidance_scale - 7.5).abs() < f32::EPSILON);
-        assert!(!b.use_karras_sigmas);
-        assert!((b.strength - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -490,14 +429,10 @@ mod tests {
         BrushSettings { radius, ..BrushSettings::default() }
     }
 
-    fn item_with(gamma: f32) -> ItemSettings {
-        ItemSettings { gamma, ..ItemSettings::default() }
-    }
-
     #[test]
     fn resolve_full_entry_returns_preset_values() {
         let mp = ModelPreset {
-            item_settings: item_with(2.5),
+            item_settings: crate::gui::item_settings::item_with_gamma(2.5),
             brush: brush_with(80.0),
             sd: None,
         };
@@ -533,14 +468,24 @@ mod tests {
         assert_eq!(r.brush, BrushSettings::default());
     }
 
+    /// SD draws its own detail; the eraser's sharpening starts off there,
+    /// and on for the other erasers.
+    #[test]
+    fn sd_erasers_start_with_sharpen_off() {
+        let file = PresetFile::default();
+        for model in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16] {
+            assert_eq!(resolve_preset_for_model(&file, model, None).brush.inpaint_sharpen, 0.0, "{model:?}");
+        }
+        let lama = resolve_preset_for_model(&file, ModelId::LaMaFp32, None).brush.inpaint_sharpen;
+        assert_eq!(lama, BrushSettings::default().inpaint_sharpen);
+    }
+
     #[test]
     fn resolve_sd_full_bundle_uses_bundle_values() {
         let mut schedulers = HashMap::new();
         schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
             steps: 4,
             guidance_scale: 1.0,
-            use_karras_sigmas: false,
-            strength: 1.0,
         });
         let sd = SdPreset {
             active_scheduler: SdScheduler::Lcm,
@@ -568,11 +513,11 @@ mod tests {
         let mut file = PresetFile::default();
         file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
-        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Ddim));
-        let ddim = SdSchedulerBundle::default_for(SdScheduler::Ddim);
+        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::DpmPlusPlus2MKarras));
+        let ddim = SdSchedulerBundle::default_for(SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(r.brush.sd_steps, ddim.steps);
         assert!((r.brush.sd_guidance_scale - ddim.guidance_scale).abs() < f32::EPSILON);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::Ddim);
+        assert_eq!(r.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
     }
 
     #[test]
@@ -604,14 +549,12 @@ mod tests {
     #[test]
     fn resolve_sd_uses_active_scheduler_when_caller_passes_none() {
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
+        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
             steps: 20,
             guidance_scale: 7.5,
-            use_karras_sigmas: false,
-            strength: 1.0,
         });
         let sd = SdPreset {
-            active_scheduler: SdScheduler::Ddim,
+            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             schedulers,
             ..SdPreset::default()
         };
@@ -620,65 +563,56 @@ mod tests {
         file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
 
         let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, None);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::Ddim);
+        assert_eq!(r.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(r.brush.sd_steps, 20);
         assert!((r.brush.sd_guidance_scale - 7.5).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn split_brush_for_save_non_sd_model_returns_brush_only() {
+    fn sd_preset_for_save_non_sd_model_is_none() {
         let mut brush = BrushSettings::default();
         brush.sd_prompt = "carry-over".into();
         brush.sd_steps = 12;
 
-        let (out_brush, sd) = split_brush_for_save(&brush, ModelId::Silueta);
-        assert_eq!(out_brush, brush);
-        assert!(sd.is_none());
+        assert!(sd_preset_for_save(&brush, ModelId::Silueta).is_none());
     }
 
     #[test]
-    fn split_brush_for_save_sd_model_extracts_sd_fields() {
+    fn sd_preset_for_save_sd_model_extracts_sd_fields() {
         let brush = BrushSettings {
             sd_prompt: "hello".into(),
             sd_negative_prompt: "world".into(),
             sd_steps: 12,
             sd_guidance_scale: 6.5,
-            sd_scheduler: SdScheduler::Ddim,
-            sd_use_karras_sigmas: true,
-            sd_strength: 0.85,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_seed: Some(7),
             sd_use_taesd: Some(true),
             ..BrushSettings::default()
         };
 
-        let (_, sd) = split_brush_for_save(&brush, ModelId::SdV15InpaintFp16);
-        let sd = sd.expect("SD model produces an SdPreset");
+        let sd = sd_preset_for_save(&brush, ModelId::SdV15InpaintFp16).expect("SD model produces an SdPreset");
         assert_eq!(sd.prompt, "hello");
         assert_eq!(sd.negative_prompt, "world");
         assert_eq!(sd.use_taesd, Some(true));
         assert_eq!(sd.seed, Some(7));
-        assert_eq!(sd.active_scheduler, SdScheduler::Ddim);
+        assert_eq!(sd.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
 
-        let bundle = sd.schedulers.get(&SdScheduler::Ddim).copied().expect("Ddim bundle");
+        let bundle = sd.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied().expect("Quality bundle");
         assert_eq!(bundle.steps, 12);
         assert!((bundle.guidance_scale - 6.5).abs() < f32::EPSILON);
-        assert!(bundle.use_karras_sigmas);
-        assert!((bundle.strength - 0.85).abs() < f32::EPSILON);
     }
 
     #[test]
     fn fuse_brush_for_apply_uses_sd_bundle_values() {
         let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Ddim, SdSchedulerBundle {
+        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
             steps: 30,
             guidance_scale: 6.0,
-            use_karras_sigmas: false,
-            strength: 0.9,
         });
         let sd = SdPreset {
             prompt: "x".into(),
             negative_prompt: "y".into(),
-            active_scheduler: SdScheduler::Ddim,
+            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             schedulers,
             ..SdPreset::default()
         };
@@ -688,14 +622,13 @@ mod tests {
             ..ModelPreset::default()
         };
 
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
+        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::DpmPlusPlus2MKarras));
         assert!((fused.radius - 80.0).abs() < f32::EPSILON);
         assert_eq!(fused.sd_steps, 30);
         assert!((fused.sd_guidance_scale - 6.0).abs() < f32::EPSILON);
         assert_eq!(fused.sd_prompt, "x");
         assert_eq!(fused.sd_negative_prompt, "y");
-        assert_eq!(fused.sd_scheduler, SdScheduler::Ddim);
-        assert!((fused.sd_strength - 0.9).abs() < f32::EPSILON);
+        assert_eq!(fused.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
     }
 
     #[test]
@@ -705,7 +638,7 @@ mod tests {
         brush.sd_steps = 11;
         let mp = ModelPreset { brush: brush.clone(), sd: None, ..ModelPreset::default() };
 
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::Ddim));
+        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::DpmPlusPlus2MKarras));
         assert_eq!(fused, brush);
     }
 
@@ -787,16 +720,14 @@ mod tests {
             sd_negative_prompt: "rt-neg".into(),
             sd_steps: 17,
             sd_guidance_scale: 4.25,
-            sd_scheduler: SdScheduler::Ddim,
-            sd_use_karras_sigmas: true,
-            sd_strength: 0.5,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_seed: Some(99),
             sd_use_taesd: Some(false),
             ..BrushSettings::default()
         };
 
-        let (brush_out, sd) = split_brush_for_save(&original, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset { brush: brush_out, sd, ..ModelPreset::default() };
+        let sd = sd_preset_for_save(&original, ModelId::SdV15InpaintFp16);
+        let mp = ModelPreset { brush: original.clone(), sd, ..ModelPreset::default() };
         let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
         assert_eq!(fused, original);
     }

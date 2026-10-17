@@ -1,4 +1,5 @@
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use crate::gui::image_texture::ImageTexture;
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
 
 use crate::gui::app::PrunrApp;
@@ -37,16 +38,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // first via dispatch_inpaint's generation counter, wasting the
     // 5+ minutes of CPU work just performed. The capsule's Cancel is
     // the way out.
-    let inpaint_in_flight_for_selected = app.batch
-        .selected_idx_clamped()
-        .map(|idx| app.batch.items[idx].id)
-        .is_some_and(|id| app.processor.is_inpaint_in_flight(id));
+    // A stroke, a Magic Brush click or a focus pick is a step: one taken
+    // while a run is queued or under way on the image would make that
+    // run's result stale, so they wait for it.
+    let editable = app.batch.selected_item().is_some_and(crate::gui::item::BatchItem::is_idle);
     let app_state = app.batch.app_state();
     let model_has_brushes = shows(app.settings.model, Surface::Brushes);
-    let brush_active = model_has_brushes
-        && app.brush_state.is_enabled()
-        && !inpaint_in_flight_for_selected
-        && matches!(app_state, AppState::Loaded | AppState::Done);
+    let brush_active = model_has_brushes && app.brush_state.is_enabled() && editable;
     // Magic Brush is treated as a brush tool for pan-gate purposes — when
     // it's active and the encoder is ready, left-drag belongs to the
     // brush and pan moves to secondary (right) button, matching Paint
@@ -55,8 +53,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let magic_brush_active = model_has_brushes
         && app.magic_brush_state.is_active()
         && !app.magic_brush_preparing()
-        && matches!(app_state, AppState::Loaded | AppState::Done);
-    let any_brush_tool_active = brush_active || magic_brush_active;
+        && editable;
+    // Picking the Depth chip's focus takes the next left click too.
+    let picking_focus = app.picking_depth_focus && editable;
+    let any_brush_tool_active = brush_active || magic_brush_active || picking_focus;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
     let canvas_gets_zoom = !pointer_blocked;
@@ -71,13 +71,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     if !modifiers.any() {
                         let scroll_y = delta.y;
                         let zoom_delta = theme::ZOOM_STEP.powf(scroll_y);
-                        let new_zoom = (app.zoom_state.zoom * zoom_delta).clamp(theme::ZOOM_MIN, theme::ZOOM_MAX);
                         if let Some(cursor) = i.pointer.hover_pos() {
                             if canvas_rect.contains(cursor) {
-                                let cursor_rel = cursor - canvas_rect.center();
-                                app.zoom_state.pan_offset =
-                                    cursor_rel / app.zoom_state.zoom - cursor_rel / new_zoom + app.zoom_state.pan_offset;
-                                app.zoom_state.zoom = new_zoom;
+                                app.zoom_state.zoom_about(cursor - canvas_rect.center(), app.zoom_state.zoom * zoom_delta);
                             }
                         }
                     }
@@ -115,8 +111,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Handle pending Ctrl+0 (fit to window) / Ctrl+1 (actual size).
     // Only consume the flag when the texture is ready — with lazy decode,
     // the texture may not exist on the first frame after opening.
-    if let Some(tex) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
-        let tex_size = tex.size_vec2();
+    let frame = app.batch.selected_item()
+        .filter(|i| i.source_texture.is_some())
+        .map(|i| (i.id, i.frame_size()));
+    if let Some((item_id, tex_size)) = frame {
+        app.zoom_state.follow_frame(item_id, tex_size);
         let canvas_size = canvas_rect.size();
 
         if app.zoom_state.pending_fit_zoom {
@@ -146,7 +145,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
     let img_rect = match app_state {
         AppState::Empty => {
-            render_empty(ui, app);
+            render_empty(ui);
             None
         }
         AppState::Loaded => render_loaded(ui, app),
@@ -155,48 +154,58 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
 
     if let Some(progress) = app.processor.dispatch_progress() {
-        let active_inpaint_item = app.batch.selected_idx_clamped()
-            .map(|idx| app.batch.items[idx].id)
-            .filter(|&id| app.processor.is_inpaint_in_flight(id));
-        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress) {
+        let preview = app.batch.selected_item().and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
+        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, preview) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
-            if let Some(target) = cancel_target_for(progress.kind, active_inpaint_item) {
+            if let Some(target) = cancel_target_for(progress.kind) {
                 match target {
-                    CancelTarget::InpaintForItem(id) => app.cancel_inpaint_for(id),
-                    CancelTarget::Upscale => app.processor.cancel_upscale(),
+                    CancelTarget::Inpaint => app.cancel_erases(),
+                    // The capsule counts the queued images too: its Cancel ends them all.
+                    CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
+                    CancelTarget::Faces => app.processor.cancel_faces(),
                 }
             }
         }
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
+    } else if let Some(label) = app.busy_pill(std::time::Instant::now()) {
+        super::progress_widget::render_working_pill(ui, canvas_rect, label);
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
     }
 
-    let tool = if app.magic_brush_state.is_active() {
-        Some(super::tool_strip::Tool::Magic)
-    } else if app.brush_state.is_enabled() {
-        Some(super::tool_strip::Tool::Paint)
-    } else {
-        None
-    };
-    if let Some(tool) = tool {
+    // The strip sits on the foreground layer, above the modals' level:
+    // under an open modal it would draw over the modal.
+    if let Some(tool) = app.active_tool().filter(|_| !modal_open) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
+            reroll_refusal: app.reroll_refusal(),
         };
+        let depth_before = app.settings.brush.magic_depth;
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
-        app.apply_brush_change(change);
+        app.apply_brush_change(change.brush);
+        if app.settings.brush.magic_depth && !depth_before {
+            app.offer_depth_model(ui.ctx());
+        }
+        if change.try_another {
+            app.handle_reroll_intent();
+        }
     }
 
-    if brush_active && !pointer_blocked {
-        handle_brush_input(ui, app, canvas_rect);
-    }
+    if picking_focus && !pointer_blocked {
+        handle_focus_pick(ui, app, canvas_rect);
+    } else {
+        if brush_active && !pointer_blocked {
+            handle_brush_input(ui, app, canvas_rect);
+        }
 
-    // Magic Brush click/stroke input. Suppressed during encoder run (silently —
-    // per UI-SPEC, clicks while encoder_pending are ignored without a toast).
-    if app.magic_brush_state.is_active() && !app.magic_brush_preparing() && !pointer_blocked {
-        handle_magic_brush_input(ui, app, canvas_rect);
+        // Magic Brush click/stroke input. Suppressed during encoder run (silently —
+        // clicks while encoder_pending are ignored without a toast).
+        if magic_brush_active && !pointer_blocked {
+            handle_magic_brush_input(ui, app, canvas_rect);
+        }
     }
 
     if app.magic_brush_state.is_active() && app.magic_brush_preparing() {
@@ -205,24 +214,24 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Wait);
         }
         super::progress_widget::render_loading_pill(ui, canvas_rect, hover, prunr_core::Step::LoadingMagicBrush.label());
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        ui.ctx().request_repaint_after(theme::WORK_FRAME);
     }
 
     // Bottom-left modifier hint — shown whenever Magic Brush is the active
     // tool (regardless of encoder state) so users discover Shift / Alt
     // before they need them. Active modifier tints to ACCENT; the rest stays
-    // TEXT_SECONDARY. Mono 12px per 33-UI-SPEC §Selection Visualization.
+    // TEXT_SECONDARY.
     if app.magic_brush_state.is_active() || app.brush_state.is_enabled() {
-        let (shift, alt) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+        let (shift, alt) = modifier_state(ui);
         let base_color = theme::TEXT_SECONDARY;
         let active_color = theme::ACCENT;
         let pos = egui::pos2(
             canvas_rect.min.x + theme::SPACE_SM,
-            canvas_rect.max.y - theme::SPACE_SM - theme::FONT_SIZE_MONO,
+            canvas_rect.max.y - theme::SPACE_SM - theme::FONT_SIZE_SECONDARY,
         );
-        let font = egui::FontId::monospace(theme::FONT_SIZE_MONO);
+        let font = egui::FontId::monospace(theme::FONT_SIZE_SECONDARY);
         let painter = ui.painter();
-        let (shift_hint, alt_hint) = super::shortcuts::modifier_hints(app.settings.model.role());
+        let (shift_hint, alt_hint) = super::shortcuts::MODIFIER_HINTS;
         let shift_color = if shift { active_color } else { base_color };
         let shift_rect = painter.text(
             pos, egui::Align2::LEFT_TOP, shift_hint, font.clone(), shift_color,
@@ -239,55 +248,87 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 }
 
-/// The held modifier's glyph below-right of the pointer, the macOS
-/// modifier-indicator convention.
-fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, glyph: &str) {
+/// Whether Shift and the subtract modifier are held.
+fn modifier_state(ui: &egui::Ui) -> (bool, bool) {
+    ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)))
+}
+
+/// The held modifier's glyph (+ for Shift, − for subtract) below-right of
+/// the pointer, the macOS modifier-indicator convention.
+fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, (shift, subtract): (bool, bool)) {
+    if !(shift || subtract) {
+        return;
+    }
+    let glyph = if shift { "+" } else { "\u{2212}" };
     let Some(p) = ui.ctx().input(|i| i.pointer.hover_pos()).filter(|p| canvas_rect.contains(*p)) else { return };
     ui.painter().text(p + egui::vec2(12.0, 12.0), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(14.0), theme::ACCENT);
 }
 
+/// The item a brush acts on and where its image sits on the canvas;
+/// `None` with no item, or none with a texture to paint over yet.
+fn brush_target(app: &PrunrApp, canvas_rect: Rect) -> Option<(usize, Rect)> {
+    let item = app.batch.selected_item()?;
+    if item.result_texture.is_none() && item.source_texture.is_none() {
+        return None;
+    }
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    Some((app.batch.selected_idx_clamped()?, img_rect))
+}
+
 /// Run the brush overlay (cursor + pointer events) and commit any
-/// finished stroke onto the active item. Pan is suppressed in this mode
-/// — `render_done`'s pan logic already runs with `is_panning = false`
-/// because brush mode disables the press tracking via the `canvas_gets_input`
-/// gate.
+/// finished stroke onto the active item.
 fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     use super::brush_overlay::{self, BrushAction};
-    let Some(item) = app.batch.selected_item() else { return };
-    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
-    let img_rect = compute_img_rect(canvas_rect, tex.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-
-    let Some(idx) = app.batch.selected_idx_clamped() else { return };
-    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
+    let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
+    let (shift, subtract) = modifier_state(ui);
     let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
     let stamp = if selection_strokes {
         let mut stamp = app.settings.brush.stamp();
-        stamp.mode = app.settings.brush.mode_under(shift, subtract);
+        stamp.mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
         stamp
     } else {
         app.settings.brush.region_stamp(subtract && !shift)
     };
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings.brush, stamp, item, img_rect)
+        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, stamp, item, img_rect)
     };
-    if shift || subtract {
-        let glyph = if shift { "+" } else { "\u{2212}" };
-        draw_modifier_glyph(ui, canvas_rect, glyph);
-    }
+    draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
     if let BrushAction::Committed(stroke_mask) = action {
         let item_id = app.batch.items[idx].id;
 
-        let merged = crate::gui::processor::merge_stroke(app.batch.items[idx].selection_mask.clone(), stroke_mask, app.settings.model.edits_cutout());
+        tracing::info!(item_id, "brush stroke committed; merging into the selection");
+        let op = crate::gui::selection_queue::SelectionOp::Merge(std::sync::Arc::new(stroke_mask));
+        app.queue_selection_op(item_id, op, crate::gui::selection_queue::AfterLanding::Nothing);
+    }
+}
 
-        tracing::info!(item_id, "brush stroke committed; writing to selection_mask");
-        app.commit_selection_and_dispatch(item_id, merged, crate::gui::timeline::StepKind::Stroke);
+/// The Depth chip's "Set focus": a crosshair over the image, and the
+/// next click on it focuses there; a click beside it gives up.
+fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
+    let Some(item) = app.batch.selected_item() else { return };
+    let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    let (clicked, hover) = ui.ctx().input(|i| (i.pointer.primary_clicked(), i.pointer.hover_pos()));
+    if hover.is_some_and(|p| canvas_rect.contains(p)) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    }
+    if !clicked {
+        return;
+    }
+    match hover.filter(|p| img_rect.contains(*p)) {
+        Some(p) => {
+            let f = super::brush_overlay::screen_to_model(p, img_rect, 1, 1);
+            let (fx, fy) = (f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0));
+            app.set_depth_focus(fx, fy);
+        }
+        None if hover.is_some_and(|p| canvas_rect.contains(p)) => app.picking_depth_focus = false,
+        None => {}
     }
 }
 
 /// Handle Magic Brush pointer events (click + drag-stroke) on the canvas.
 /// Suppressed when encoder is pending — clicks during "Preparing..." are
-/// silently ignored (per 33-UI-SPEC). Dispatches a SAM decoder job on
+/// silently ignored. Dispatches a SAM decoder job on
 /// every click or completed stroke; modifier keys control mask combination.
 ///
 /// Also owns the per-frame visual feedback for the tool: crosshair cursor
@@ -295,17 +336,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
 /// trail rendering during drag (via `brush_overlay::draw_trail_for`),
 /// and the modifier glyph (+ / −) at the cursor when Shift / Alt is held.
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
-
-    let Some(item) = app.batch.selected_item() else { return };
-    let Some(tex) = item.result_texture.as_ref().or(item.source_texture.as_ref()) else { return };
-    let img_rect = compute_img_rect(
-        canvas_rect,
-        tex.size_vec2(),
-        app.zoom_state.zoom,
-        app.zoom_state.pan_offset,
-    );
-
-    let Some(idx) = app.batch.selected_idx_clamped() else { return };
+    let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
     let item = &app.batch.items[idx];
     let item_id = item.id;
     let (source_w, source_h) = item.dimensions;
@@ -321,16 +352,14 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 
-    let look = super::brush_overlay::MAGIC_CURSOR;
+    let look = super::brush_overlay::CursorLook { erase: app.settings.brush_erases(), ..super::brush_overlay::MAGIC_CURSOR };
     let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
     super::brush_overlay::draw_trail_for(ui, look, look.shape, app.magic_brush_state.active_trail.stamps());
     super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
-    let (shift, subtract) = ui.ctx().input(|i| (i.modifiers.shift, super::shortcuts::is_subtract_modifier(&i.modifiers)));
-    let mode = app.settings.brush.mode_under(shift, subtract);
-    if shift || subtract {
-        draw_modifier_glyph(ui, canvas_rect, if shift { "+" } else { "\u{2212}" });
-    }
+    let (shift, subtract) = modifier_state(ui);
+    let mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
+    draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
 
     let screen_to_src = |pos: egui::Pos2| source_point(pos, img_rect, (source_w, source_h));
 
@@ -344,9 +373,15 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         (clicked, drag_started, dragging, released, hover)
     });
 
-    // No embedding yet? Render cursor + trail above but skip dispatch —
-    // the encoder must finish before a SAM prompt can run.
-    let Some(embedding) = embedding else { return };
+    // What a click or stroke selects with: the depth map, or SAM once the
+    // encoder has finished. Until then the cursor and trail above still
+    // draw, so the tool reads as active, and nothing is dispatched.
+    enum Pick { Depth, Sam(std::sync::Arc<prunr_core::sam::SamEmbedding>) }
+    let pick = if app.settings.brush.magic_depth {
+        Pick::Depth
+    } else {
+        match embedding { Some(embedding) => Pick::Sam(embedding), None => return }
+    };
 
     let screen_radius = look.radius;
 
@@ -373,25 +408,30 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
-        match prunr_core::sam::prompt::build_stroke_prompt(
-            &stroke_pts,
-            source_w,
-            source_h,
-        ) {
-            Ok(prompt) => {
-                app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
-            }
-            Err(e) => {
-                tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
-            }
+        match &pick {
+            // With Depth on a stroke selects like a click where it began.
+            Pick::Depth => app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode),
+            Pick::Sam(embedding) => match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
+                Ok(prompt) => {
+                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
+                }
+                Err(e) => {
+                    tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
+                }
+            },
         }
     } else if clicked {
         if let Some((px, py)) = hover_pos.and_then(screen_to_src) {
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
-            let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-            app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding, prompt, mode));
+            match &pick {
+                Pick::Depth => app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode),
+                Pick::Sam(embedding) => {
+                    let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
+                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
+                }
+            }
         }
         app.magic_brush_state.clear_stroke();
     }
@@ -496,7 +536,7 @@ fn tip_text(ctx: &egui::Context) -> Arc<TipText> {
     }
 }
 
-fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
+fn render_empty(ui: &mut egui::Ui) {
     let avail = ui.available_size();
     let is_hovered = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
     let canvas_rect = ui.available_rect_before_wrap();
@@ -606,6 +646,58 @@ fn render_empty(ui: &mut egui::Ui, _app: &PrunrApp) {
     }
 }
 
+/// Points round a found face's outline.
+const FACE_SEGMENTS: usize = 72;
+
+/// `area`'s outline on screen, `img_rect` showing the photo it is in.
+fn face_outline(area: prunr_core::face::FaceArea, img_rect: Rect) -> [Pos2; FACE_SEGMENTS] {
+    let scale = img_rect.width() / area.photo_size[0].max(1) as f32;
+    let (sin, cos) = area.angle.sin_cos();
+    std::array::from_fn(|k| {
+        let (s, c) = (k as f32 / FACE_SEGMENTS as f32 * std::f32::consts::TAU).sin_cos();
+        let (x, y) = (area.radii[0] * c, area.radii[1] * s);
+        img_rect.min + Vec2::new(area.center[0] + x * cos - y * sin, area.center[1] + x * sin + y * cos) * scale
+    })
+}
+
+/// While Faces and its Outline switch are on, the faces found in the
+/// shown image outlined: what Faces redraws, so a face it missed shows by
+/// having none. They fade in as soon as the search finds them, before they are
+/// redrawn, and glow once; under "Largest" the faces it leaves alone are
+/// faint.
+fn draw_found_faces(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
+    use super::effects::{face_arrival, paint_glow_ring, FACE_ARRIVAL_SECS, FACE_FADE_SECS};
+    let faces = &item.settings.faces;
+    let ctx = ui.ctx();
+    let open = faces.on && app.settings.face_outlines && shows(app.settings.model, Surface::Faces);
+    let shown = ctx.animate_bool_with_time(egui::Id::new("found_faces_shown"), open, theme::fade_secs(ctx, FACE_FADE_SECS));
+    if shown <= 0.0 {
+        return;
+    }
+    let Some(found) = item.outlined_faces(crate::gui::item::FaceStage::of(app.settings.model.role())) else { return };
+    let since = if theme::motion(ctx) { found.found_at.elapsed().as_secs_f32() } else { f32::MAX };
+    if since < FACE_ARRIVAL_SECS {
+        ctx.request_repaint();
+    }
+    let (size, glow) = face_arrival(since);
+    let opacity = shown * prunr_core::math::smoothstep((since / FACE_FADE_SECS).min(1.0));
+    let redrawn = faces.blend().redrawn(found.places());
+    for (i, face) in found.places().enumerate() {
+        let (opacity, glow) = if redrawn(i) { (opacity, glow) } else { (0.4 * opacity, 0.0) };
+        let area = face.area(faces.hair);
+        let area = prunr_core::face::FaceArea { radii: area.radii.map(|r| r * size), ..area };
+        paint_glow_ring(ui.painter(), &face_outline(area, img_rect), opacity, glow);
+    }
+}
+
+/// The faces a search has redrawn so far, each over the image in its
+/// place, until the image with them blended in is shown.
+fn draw_face_preview(ui: &egui::Ui, item: &crate::gui::item::BatchItem, img_rect: Rect) {
+    if let Some(texture) = item.face_preview_texture() {
+        ui.painter().image(texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE);
+    }
+}
+
 /// The item's selection over the image, on models that use one.
 fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchItem, img_rect: Rect) {
     if shows(app.settings.model, Surface::Brushes) {
@@ -615,10 +707,10 @@ fn draw_selection(ui: &egui::Ui, app: &PrunrApp, item: &crate::gui::item::BatchI
 
 /// `texture` in `img_rect`, revealing over the held image while the
 /// item's reveal runs.
-fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &egui::TextureHandle, tint: Color32) {
-    match item.reveal_progress() {
+fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item::BatchItem, texture: &ImageTexture, tint: Color32) {
+    match item.reveal_progress().filter(|_| theme::motion(ui.ctx())) {
         Some((from, p, order)) => {
-            super::effects::paint_reveal(ui.painter(), img_rect, from.id(), texture.id(), p, order);
+            super::effects::paint_reveal(ui.painter(), img_rect, from, texture, p, order);
             // The subject's outline is gone by the time the cut-out has
             // grown halfway out from it.
             if let Some(subject) = item.subject.as_ref() {
@@ -627,20 +719,18 @@ fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item:
             }
             ui.ctx().request_repaint();
         }
-        None => {
-            ui.painter().image(texture.id(), img_rect, super::effects::UNIT_UV, tint);
-        }
+        None => texture.paint(ui.painter(), img_rect, tint),
     }
 }
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-    if let Some(texture) = app.batch.selected_item().and_then(|i| i.source_texture.as_ref()) {
-        let img_rect = compute_img_rect(canvas_rect, texture.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+    if let Some((item, texture)) = app.batch.selected_item().and_then(|i| Some((i, i.source_texture.as_ref()?))) {
+        let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
             true,
-            0.2,
+            theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
         );
         let alpha = (fade * 255.0) as u8;
         if fade < 1.0 { ui.ctx().request_repaint(); }
@@ -649,16 +739,20 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             if item.reveal_progress().is_some() {
                 draw_checkerboard(ui, img_rect, app.settings.dark_checker);
             }
+            // A drag on a photo with no result yet (No model's first one)
+            // shows its quick frames over it.
+            let texture = item.quick.texture().or(item.photo_look.as_ref()).unwrap_or(texture);
             paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         }
 
         // Selection overlay — same call as `render_done`. Required here too
         // because Magic Brush authors selections directly on the source
         // image, before any Process click; without this the action bar
-        // shows but the user sees no mask. See `33-UI-SPEC.md` §"Selection
-        // Visualization — Render gating".
+        // shows but the user sees no mask.
         if let Some(it) = app.batch.selected_item() {
+            draw_face_preview(ui, it, img_rect);
             draw_selection(ui, app, it, img_rect);
+            draw_found_faces(ui, app, it, img_rect);
         }
         Some(img_rect)
     } else {
@@ -677,38 +771,27 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
 /// wiggle/breathing of the source image + horizontal shimmer sweep.
 fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-    let t = ui.ctx().input(|i| i.time) as f32;
+    let t = theme::motion_clock(ui.ctx());
 
-    // A run that builds on an earlier result shows that result while it works.
     let item = app.batch.selected_item();
-    let result_tex = item.and_then(|i| i.result_texture.as_ref());
-    let on_result = item.is_some_and(|i| i.job_builds_on_shown_result());
-    let display_texture = if on_result && result_tex.is_some() {
-        result_tex
-    } else {
-        item.and_then(|i| i.source_texture.as_ref())
-    };
+    let display_texture = item.and_then(processing_texture);
 
     let painted = display_texture.map(|texture| {
-        let tex_size = texture.size_vec2();
+        let tex_size = item.map_or(texture.size_vec2(), |i| i.frame_size());
         let wiggle_zoom = 1.0 + (t * 1.5).sin() * 0.003;
         let wiggle_x = (t * 0.8).sin() * 2.0;
         let wiggle_y = (t * 1.1).cos() * 1.5;
         let wiggle_offset = app.zoom_state.pan_offset + Vec2::new(wiggle_x, wiggle_y);
         let img_rect = compute_img_rect(canvas_rect, tex_size, app.zoom_state.zoom * wiggle_zoom, wiggle_offset);
-        ui.painter().image(
-            texture.id(),
-            img_rect,
-            super::effects::UNIT_UV,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 140),
-        );
+        texture.paint(ui.painter(), img_rect, Color32::from_rgba_unmultiplied(255, 255, 255, 140));
 
         let sweep_x = ((t * 0.6).fract()) * (img_rect.width() + 80.0) - 40.0 + img_rect.min.x;
         let shimmer_rect = Rect::from_min_max(
             Pos2::new(sweep_x - 40.0, img_rect.min.y),
             Pos2::new(sweep_x + 40.0, img_rect.max.y),
         ).intersect(img_rect);
-        if shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
+        // A sweep held still is just a stripe: it only shows while moving.
+        if theme::motion(ui.ctx()) && shimmer_rect.width() > 0.0 && shimmer_rect.height() > 0.0 {
             ui.painter().rect_filled(shimmer_rect, 0.0, theme::PROCESSING_SWEEP);
         }
         // The subject, outlined as soon as the model has found it.
@@ -716,13 +799,28 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             let shown = (subject.shown_at.elapsed().as_secs_f32() / super::effects::SUBJECT_FADE_SECS).min(1.0);
             let breath = 0.75 + 0.25 * super::effects::breath(t);
             ui.painter().image(subject.texture.id(), img_rect, super::effects::UNIT_UV, Color32::WHITE.gamma_multiply(shown * breath));
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(theme::WORK_FRAME);
         }
         img_rect
     });
 
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+    if theme::motion(ui.ctx()) {
+        ui.ctx().request_repaint_after(theme::ANIM_FRAME);
+    }
     painted
+}
+
+/// What the canvas shows while a run works: the image being edited, the
+/// newest result, whatever the run reads; the photo before there is one.
+fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&ImageTexture> {
+    item.result_texture.as_ref().or(item.source_texture.as_ref())
+}
+
+/// What the canvas shows for a result. Until a new result's texture
+/// lands, the image it reveals over stays: the one it replaces, or the
+/// run's tile preview. A drag's quick frame shows in place of the result.
+fn done_texture(item: &crate::gui::item::BatchItem) -> Option<&ImageTexture> {
+    item.held_texture().or(item.quick.texture()).or(item.result_texture.as_ref())
 }
 
 fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
@@ -731,17 +829,11 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let mut painted = None;
     if app.show_original {
         if let Some(texture) = item.and_then(|i| i.source_texture.as_ref()) {
-            // Drawn where the result is, at its size: after an upscale the
-            // original covers the same area instead of a quarter of it.
-            let frame = item.and_then(|i| i.result_texture.as_ref()).unwrap_or(texture);
-            let img_rect =
-                compute_img_rect(canvas_rect, frame.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-            ui.painter().image(
-                texture.id(),
-                img_rect,
-                super::effects::UNIT_UV,
-                Color32::WHITE,
-            );
+            // Drawn in the result's frame: after an upscale the original
+            // covers the same area instead of a quarter of it.
+            let frame = item.map_or(texture.size_vec2(), |i| i.frame_size());
+            let img_rect = compute_img_rect(canvas_rect, frame, app.zoom_state.zoom, app.zoom_state.pan_offset);
+            texture.paint(ui.painter(), img_rect, Color32::WHITE);
             // The selection is authored against the source, so it shows
             // while comparing too.
             if let Some(it) = item {
@@ -750,14 +842,14 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             painted = Some(img_rect);
         }
     } else if let Some(it) = item {
-        // Until the new result's texture lands, the image it replaces stays.
-        let shown = it.result_texture.as_ref().or(it.held_texture())?;
-        let img_rect =
-            compute_img_rect(canvas_rect, shown.size_vec2(), app.zoom_state.zoom, app.zoom_state.pan_offset);
+        let shown = done_texture(it)?;
+        let img_rect = compute_img_rect(canvas_rect, it.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-        paint_backdrop(ui, img_rect, it, shown.size_vec2());
+        paint_backdrop(ui, img_rect, it, it.frame_size());
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
+        draw_face_preview(ui, it, img_rect);
         draw_selection(ui, app, it, img_rect);
+        draw_found_faces(ui, app, it, img_rect);
         painted = Some(img_rect);
     }
 
@@ -766,7 +858,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             canvas_rect.min + Vec2::new(theme::SPACE_SM, theme::SPACE_SM),
             egui::Align2::LEFT_TOP,
             "Original",
-            egui::FontId::monospace(theme::FONT_SIZE_MONO),
+            egui::FontId::monospace(theme::FONT_SIZE_SECONDARY),
             theme::TEXT_SECONDARY,
         );
     }
@@ -827,21 +919,19 @@ pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item:
     }
 }
 
-/// The UV span that repeats a `tex_px` picture at its own pixel size over
+/// The region that repeats a `tex_px` picture at its own pixel size over
 /// an image of `image_px` pixels, as export tiles it: the number of tiles
-/// follows the image, not the zoom. Over 1 it wraps (the texture is
-/// uploaded with `WrapMode::Repeat`).
+/// follows the image, not the zoom. Past 1 the picture repeats.
 fn tile_uv(image_px: Vec2, tex_px: Vec2) -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(image_px.x / tex_px.x, image_px.y / tex_px.y))
 }
 
-/// Paint `tex` into `bounds` per `fit` — UV-only math (no texture
-/// re-upload; the texture must be uploaded with `WrapMode::Repeat` for
-/// `Tile` to wrap rather than clamp).
+/// Paint `tex` into `bounds` per `fit`: which region of the picture shows
+/// where, with no texture re-upload.
 pub(super) fn paint_bg_image(
     ui: &egui::Ui,
     bounds: Rect,
-    tex: &TextureHandle,
+    tex: &ImageTexture,
     fit: prunr_core::BgImageFit,
     image_px: Vec2,
 ) {
@@ -865,16 +955,16 @@ pub(super) fn paint_bg_image(
                 let pad = (1.0 - visible) * 0.5;
                 (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
             };
-            ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
+            tex.paint_region(ui.painter(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
         }
         BgImageFit::Contain => {
             let scale = (bw / tw).min(bh / th);
             let inner = egui::vec2(tw * scale, th * scale);
             let inner_rect = Rect::from_center_size(bounds.center(), inner);
-            ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
+            tex.paint(ui.painter(), inner_rect, Color32::WHITE);
         }
         BgImageFit::Tile => {
-            ui.painter().image(tex.id(), bounds, tile_uv(image_px, tex_size), Color32::WHITE);
+            tex.paint_region(ui.painter(), bounds, tile_uv(image_px, tex_size), Color32::WHITE);
         }
     }
 }
@@ -908,6 +998,21 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
 mod tests {
     use super::*;
 
+    /// A found face's outline sits where the face is in the photo, at
+    /// the zoom the image is shown, turned with the face.
+    #[test]
+    fn a_face_outline_follows_the_photo_onto_the_screen() {
+        use prunr_core::face::FaceArea;
+        let shown = Rect::from_min_size(Pos2::new(10.0, 0.0), Vec2::new(400.0, 200.0));
+        let upright = FaceArea { center: [100.0, 50.0], radii: [10.0, 20.0], angle: 0.0, photo_size: [200, 100] };
+        let pts = face_outline(upright, shown);
+        let near = |p: Pos2, x: f32, y: f32| (p.x - x).abs() < 1e-3 && (p.y - y).abs() < 1e-3;
+        assert!(near(pts[0], 10.0 + 220.0, 100.0), "{:?}", pts[0]);
+        assert!(near(pts[FACE_SEGMENTS / 4], 10.0 + 200.0, 140.0), "{:?}", pts[FACE_SEGMENTS / 4]);
+        let turned = FaceArea { angle: std::f32::consts::FRAC_PI_2, ..upright };
+        assert!(near(face_outline(turned, shown)[0], 10.0 + 200.0, 120.0), "a quarter turn");
+    }
+
     /// Tile repeats a picture at its own pixel size over the image, as
     /// export does: the count follows the image, whatever the zoom.
     #[test]
@@ -915,6 +1020,46 @@ mod tests {
         let uv = tile_uv(Vec2::new(800.0, 600.0), Vec2::new(200.0, 300.0));
         assert_eq!(uv.max, Pos2::new(4.0, 2.0));
         assert_eq!(uv.min, Pos2::ZERO);
+    }
+
+    /// A run shows the image being edited, the newest result, even when
+    /// it redoes that step from the photo (a Sketch mode change, a second
+    /// upscale); the photo shows only before there is a result.
+    #[test]
+    fn a_run_shows_the_newest_image_whatever_it_reads() {
+        use crate::gui::item::{BatchItem, Cutter};
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
+        let mut item = BatchItem::new_for_test();
+        item.source_texture = Some(tex("photo").into());
+        assert_eq!(processing_texture(&item).map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
+
+        item.land_cut_for_test(Cutter::Model(prunr_core::ModelKind::Silueta), std::sync::Arc::new(image::RgbaImage::new(1, 1)));
+        item.result_texture = Some(tex("cut-out").into());
+        item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta));
+        assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
+        assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
+    }
+
+    /// A drag's quick frame shows in place of the result; an image held
+    /// for a reveal still shows over both.
+    #[test]
+    fn a_quick_frame_shows_in_place_of_the_result() {
+        use crate::gui::item::{BatchItem, Reveal};
+        let ctx = egui::Context::default();
+        let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
+        let shown = |item: &BatchItem| done_texture(item).map(|t| t.id());
+        let mut item = BatchItem::new_for_test();
+        let result = tex("result");
+        item.result_texture = Some(result.clone().into());
+        assert_eq!(shown(&item), Some(result.id()));
+        let frame = tex("frame");
+        item.quick.expect(1);
+        item.quick.land(frame.clone().into(), 1);
+        assert_eq!(shown(&item), Some(frame.id()), "the frame, not the result");
+        let held = tex("held");
+        item.reveal = Some(Reveal::Held(held.clone().into()));
+        assert_eq!(shown(&item), Some(held.id()));
     }
 
     #[test]

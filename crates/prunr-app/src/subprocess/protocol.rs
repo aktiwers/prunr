@@ -14,12 +14,59 @@ use serde::{Serialize, Deserialize};
 /// round-trip.
 pub const CANCELLED_ERR_MSG: &str = "Cancelled";
 
+/// An image error that reports a cancel: the dispatch-time
+/// `CANCELLED_ERR_MSG`, or core's own text when the cancel stopped a run
+/// part-way.
+pub fn is_cancel_error(error: &str) -> bool {
+    error == CANCELLED_ERR_MSG || error == prunr_core::CoreError::Cancelled.to_string()
+}
+
 /// `InpaintBridgeResult::Error.error` value the inpaint bridge emits
 /// when its watchdog kills the subprocess to prevent a system-wide
 /// memory-pressure stall. Routed to a distinct user-facing toast
 /// ("Erase aborted — system memory low") so the user knows the abort
 /// was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
+
+/// The longer side of the preview a run shows while it works: about a
+/// canvas at most, so a preview costs a few MB whatever the photo's
+/// size. Runs in the app and in the worker ask for the same.
+pub const TILE_PREVIEW_EDGE: u32 = 1536;
+
+/// Which line scales a worker runs the detector at for each image.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InferredScales {
+    /// The ones the lines draw before the result; then, for the image on
+    /// screen only, the rest, so the app's later scale switch there needs
+    /// no new run. Fine is most of the detector's work, so a result that
+    /// does not draw it waits for none of it.
+    #[default]
+    DrawnFirst,
+    /// Only the ones the lines draw: the CLI never switches scale.
+    Drawn,
+}
+
+impl InferredScales {
+    /// The scales a run makes before its result: the drawn ones, with
+    /// those their detector runs make anyway.
+    pub fn of(self, edge: &EdgeSettings) -> &'static [prunr_core::EdgeScale] {
+        match self {
+            Self::DrawnFirst => prunr_core::scales_from_same_runs(edge.drawn_scales()),
+            Self::Drawn => edge.drawn_scales(),
+        }
+    }
+
+    /// The scales a run of `item_id` leaves for after its result: the
+    /// rest when it is the image `on_screen`, none for an image in the
+    /// background.
+    pub fn spare(self, edge: &EdgeSettings, item_id: u64, on_screen: Option<u64>) -> Vec<prunr_core::EdgeScale> {
+        if self == Self::Drawn || on_screen != Some(item_id) {
+            return Vec::new();
+        }
+        let made = self.of(edge);
+        prunr_core::EdgeScale::ALL.into_iter().filter(|s| !made.contains(s)).collect()
+    }
+}
 
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -34,13 +81,20 @@ pub enum SubprocessCommand {
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
-        force_cpu: bool,
+        cpu_only: bool,
         line_mode: LineMode,
         edge: EdgeSettings,
         /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
         ipc_dir: std::path::PathBuf,
         #[serde(default)]
         inpaint_only: bool,
+        /// Fade with distance, 0-100: the worker measures each photo's
+        /// depth and fades its lines. The app sends 0 and fades the
+        /// lines it shows from its own depth map.
+        #[serde(default)]
+        line_fade_pct: u8,
+        #[serde(default)]
+        edge_scales: InferredScales,
     },
     /// Process a single image. `image_path` points to a temp file with
     /// the raw image bytes (avoids piping large payloads through stdin).
@@ -65,7 +119,7 @@ pub enum SubprocessCommand {
         /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
     },
-    /// AddEdgeInference tier: seg tensor is cached, run only DexiNed on the
+    /// AddEdgeInference tier: seg tensor is cached, run only TEED on the
     /// masked image and compose. Used for Off → SubjectOutline transitions so
     /// enabling the outline doesn't re-run seg inference.
     AddEdgeInference {
@@ -113,6 +167,23 @@ pub enum SubprocessCommand {
     /// Cancel one item by id — worker emits `ImageError { error:
     /// CANCELLED_ERR_MSG }` at the next dispatch check.
     CancelItem { item_id: u64 },
+    /// New mask, Sketch mode and line settings for a worker already
+    /// running: every later `ProcessImage` and `AddEdgeInference` reads
+    /// them, and the worker builds the engines the mode needs that it
+    /// does not have yet, so a change never costs a respawn.
+    Configure {
+        mask: MaskSettings,
+        line_mode: LineMode,
+        edge: EdgeSettings,
+        /// The image whose run reports a first look at the subject before
+        /// its own; `None` lets the first-look model go.
+        #[serde(default)]
+        first_look: Option<u64>,
+        /// The image on screen: its Sketch runs make the line scales they
+        /// do not draw after their result.
+        #[serde(default)]
+        on_screen: Option<u64>,
+    },
     /// Shut down gracefully.
     Shutdown,
 }
@@ -144,6 +215,29 @@ pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) 
     prunr_core::Progress::new(std::sync::Arc::new(IpcProgress { item_id, tx }))
 }
 
+/// The line detector's planes (f32 probabilities, pre-threshold) a
+/// worker wrote for an image: `scales`' planes one after another in that
+/// order, each at its own size, `edge_scale_dims` of the base `height` ×
+/// `width`. A run may write only some scales.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EdgeCacheFile {
+    pub path: std::path::PathBuf,
+    pub height: u32,
+    pub width: u32,
+    pub scales: Vec<prunr_core::EdgeScale>,
+}
+
+/// What became of a run's spare line scales.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SpareOutcome {
+    Made(EdgeCacheFile),
+    /// Not made on purpose: the image left the screen, a cancel, a
+    /// shutdown. Nothing should run in their place.
+    Skipped,
+    /// The detector or the file write failed.
+    Failed,
+}
+
 /// Child → Parent events (sent over child's stdout).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessEvent {
@@ -170,15 +264,21 @@ pub enum SubprocessEvent {
         tensor_cache_path: Option<std::path::PathBuf>,
         tensor_cache_height: Option<u32>,
         tensor_cache_width: Option<u32>,
-        /// Path to cached DexiNed edge tensor (full-resolution f32, pre-threshold).
-        /// Parent compresses and stores for Tier 2 edge reruns on line_strength tweaks.
-        /// Only present when the run used DexiNed (EdgesOnly or SubjectOutline modes).
+        /// The line detector's planes, for Tier 2 edge reruns. Only
+        /// present when the run used TEED (EdgesOnly or SubjectOutline).
         #[serde(default)]
-        edge_cache_path: Option<std::path::PathBuf>,
+        edge_cache: Option<EdgeCacheFile>,
+        /// A `SpareEdgeScales` with this token follows: the run left the
+        /// scales it does not draw for after its result.
         #[serde(default)]
-        edge_cache_height: Option<u32>,
-        #[serde(default)]
-        edge_cache_width: Option<u32>,
+        spare_scales: Option<u64>,
+    },
+    /// The line scales a run left for after its `ImageDone`, under the
+    /// token that event named.
+    SpareEdgeScales {
+        item_id: u64,
+        token: u64,
+        outcome: SpareOutcome,
     },
     /// Image processing failed (non-fatal).
     ImageError {
@@ -192,6 +292,8 @@ pub enum SubprocessEvent {
         rgba_path: std::path::PathBuf,
         width: u32,
         height: u32,
+        /// How large the region was filled: 1 is full size.
+        fill_scale: f32,
     },
     /// Inpaint dispatch failed (model missing, ORT error, IO error).
     InpaintError {
@@ -263,20 +365,7 @@ fn sweep_dir_with_prefix(dir: &std::path::Path, prefixes: &[&str]) {
     }
 }
 
-/// Which subprocess owns an IPC temp file. Drives crash-recovery
-/// cleanup scope so a seg-side wipe (e.g. on cancel-all) leaves a
-/// sibling inpaint subprocess's in-flight files alone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IpcOwner {
-    /// Seg / CLI pipeline (input, chain, edge, result, tensor, …).
-    SegCli,
-    /// Inpaint subprocess (`inpaint-img-…`, `inpaint-mask-…`, `inpaint-out-…`).
-    Inpaint,
-}
-
-/// Every IPC temp-file kind. One source of truth for the prefix +
-/// extension contract previously triplicated across 13 `format!` sites
-/// + the prefix tables + the drift-catcher test.
+/// Every IPC temp-file kind: its file-name prefix and extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpcKind {
     /// Parent → seg worker: encoded source bytes.
@@ -295,13 +384,17 @@ pub enum IpcKind {
     Orig,
     /// Seg worker → parent: composited RGBA result.
     Result,
-    /// Seg worker → parent: DexiNed multi-scale edge tensor cache.
+    /// Seg worker → parent: TEED multi-scale edge tensor cache.
     Edge,
+    /// Seg worker → parent: the line scales a run made after its result,
+    /// named by the pass's token rather than the image, so no other
+    /// file of the image (or a later run's) ever shares its path.
+    SpareEdge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,
-    /// Parent → inpaint worker: source PNG for a stroke (gen-suffixed).
+    /// Parent → inpaint worker: source PNG for a stroke (generation-suffixed).
     InpaintImg,
-    /// Parent → inpaint worker: mask PNG for a stroke (gen-suffixed).
+    /// Parent → inpaint worker: mask PNG for a stroke (generation-suffixed).
     InpaintMask,
     /// Inpaint worker → parent: composited RGBA PNG result.
     InpaintOut,
@@ -318,6 +411,7 @@ impl IpcKind {
             IpcKind::Orig => "orig_",
             IpcKind::Result => "result_",
             IpcKind::Edge => "edge_",
+            IpcKind::SpareEdge => "spare_edge_",
             IpcKind::CliDs => "cli_ds_",
             IpcKind::InpaintImg => "inpaint-img-",
             IpcKind::InpaintMask => "inpaint-mask-",
@@ -329,16 +423,8 @@ impl IpcKind {
     pub const fn ext(self) -> &'static str {
         match self {
             IpcKind::Input | IpcKind::Orig | IpcKind::CliDs => "img",
-            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge => "raw",
+            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge | IpcKind::SpareEdge => "raw",
             IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => "png",
-        }
-    }
-
-    /// Crash-recovery owner: who's allowed to wipe this file's prefix.
-    pub const fn owner(self) -> IpcOwner {
-        match self {
-            IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => IpcOwner::Inpaint,
-            _ => IpcOwner::SegCli,
         }
     }
 
@@ -347,36 +433,19 @@ impl IpcKind {
         ipc_dir.join(format!("{}{id}.{}", self.prefix(), self.ext()))
     }
 
-    /// Build a path for a gen-suffixed inpaint file:
-    /// `<ipc>/<prefix><id>-<gen>.<ext>`. Only valid for `InpaintImg` /
+    /// Build a path for a generation-suffixed inpaint file:
+    /// `<ipc>/<prefix><id>-<generation>.<ext>`. Only valid for `InpaintImg` /
     /// `InpaintMask` (the inpaint worker rewrites these per stroke and
-    /// the gen suffix prevents stale-file races).
-    pub fn path_for_gen(self, ipc_dir: &std::path::Path, id: u64, gen: u64) -> std::path::PathBuf {
-        // `debug_assert!` was insufficient — release builds would silently
-        // produce e.g. `result_5-0.raw` for the wrong variant, breaking
-        // path disambiguation in the IPC temp dir.
+    /// the generation suffix prevents stale-file races).
+    pub fn path_for_generation(self, ipc_dir: &std::path::Path, id: u64, generation: u64) -> std::path::PathBuf {
+        // A full assert, not a debug one: a wrong variant would produce
+        // e.g. `result_5-0.raw` in release, a name no reader expects.
         assert!(
             matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
-            "path_for_gen only valid for InpaintImg / InpaintMask; got {self:?}"
+            "path_for_generation only valid for InpaintImg / InpaintMask; got {self:?}"
         );
-        ipc_dir.join(format!("{}{id}-{gen}.{}", self.prefix(), self.ext()))
+        ipc_dir.join(format!("{}{id}-{generation}.{}", self.prefix(), self.ext()))
     }
-
-    /// All variants. Ordered so prefix-tables (derived below) are stable
-    /// across builds and test diffs are deterministic.
-    pub const ALL: &'static [IpcKind] = &[
-        IpcKind::Input,
-        IpcKind::Chain,
-        IpcKind::Seg,
-        IpcKind::Tensor,
-        IpcKind::Orig,
-        IpcKind::Result,
-        IpcKind::Edge,
-        IpcKind::CliDs,
-        IpcKind::InpaintImg,
-        IpcKind::InpaintMask,
-        IpcKind::InpaintOut,
-    ];
 }
 
 /// File-name prefixes the seg worker writes or consumes-and-deletes
@@ -397,11 +466,14 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::Result.prefix(),
     IpcKind::Seg.prefix(),
     IpcKind::Tensor.prefix(),
+    IpcKind::SpareEdge.prefix(),
 ];
 
 /// File-name prefixes owned by the inpaint subprocess.
 pub const INPAINT_PREFIXES: &[&str] = &[
-    "inpaint-",
+    IpcKind::InpaintImg.prefix(),
+    IpcKind::InpaintMask.prefix(),
+    IpcKind::InpaintOut.prefix(),
 ];
 
 /// File-name prefixes the CLI parent owns *across* worker crashes.
@@ -436,12 +508,6 @@ pub fn cleanup_cli_persistent_temps() {
     cleanup_ipc_temp_for_prefix(CLI_PERSISTENT_PREFIXES);
 }
 
-/// Sweep every file in the IPC temp dir. Process-wide; never call from a
-/// path that could race a sibling subprocess — use a prefix-scoped helper.
-pub fn cleanup_ipc_temp() {
-    crate::fs_util::sweep_dir_files(ipc_temp_dir());
-}
-
 #[cfg(test)]
 mod tests {
     //! Bincode round-trip tests for every `SubprocessCommand` and
@@ -454,6 +520,13 @@ mod tests {
     use std::fmt::Debug;
     use std::path::PathBuf;
 
+    #[test]
+    fn a_cancel_reads_as_a_cancel_whoever_reported_it() {
+        assert!(is_cancel_error(CANCELLED_ERR_MSG));
+        assert!(is_cancel_error(&prunr_core::CoreError::Cancelled.message()));
+        assert!(!is_cancel_error(&prunr_core::CoreError::Inference("out of memory".into()).message()));
+    }
+
     fn roundtrip<T>(value: &T)
     where
         T: serde::Serialize + DeserializeOwned + PartialEq + Debug,
@@ -464,27 +537,159 @@ mod tests {
         assert_eq!(value, &decoded);
     }
 
+    /// Each command's index in `COMMANDS`. No wildcard: a new command
+    /// does not compile until it is named here, and its index fails
+    /// `every_message_round_trips` until it has a sample.
+    fn command_index(command: &SubprocessCommand) -> usize {
+        match command {
+            SubprocessCommand::Init { .. } => 0,
+            SubprocessCommand::ProcessImage { .. } => 1,
+            SubprocessCommand::RePostProcess { .. } => 2,
+            SubprocessCommand::AddEdgeInference { .. } => 3,
+            SubprocessCommand::Inpaint { .. } => 4,
+            SubprocessCommand::CancelItem { .. } => 5,
+            SubprocessCommand::Configure { .. } => 6,
+            SubprocessCommand::Shutdown => 7,
+        }
+    }
+    const COMMANDS: usize = 8;
+
+    /// Each event's index in `EVENTS`, as for commands.
+    fn event_index(event: &SubprocessEvent) -> usize {
+        match event {
+            SubprocessEvent::Ready { .. } => 0,
+            SubprocessEvent::Report { .. } => 1,
+            SubprocessEvent::ImageDone { .. } => 2,
+            SubprocessEvent::SpareEdgeScales { .. } => 3,
+            SubprocessEvent::ImageError { .. } => 4,
+            SubprocessEvent::InpaintDone { .. } => 5,
+            SubprocessEvent::InpaintError { .. } => 6,
+            SubprocessEvent::RssUpdate { .. } => 7,
+            SubprocessEvent::Finished => 8,
+            SubprocessEvent::InitError { .. } => 9,
+        }
+    }
+    const EVENTS: usize = 10;
+
+    fn command_samples() -> Vec<SubprocessCommand> {
+        let path = || PathBuf::from("/tmp/prunr-sample");
+        vec![
+            SubprocessCommand::Init {
+                model: ModelKind::Silueta,
+                jobs: 1,
+                mask: MaskSettings::default(),
+                cpu_only: false,
+                line_mode: LineMode::Off,
+                edge: EdgeSettings::default(),
+                ipc_dir: path(),
+                inpaint_only: false,
+                line_fade_pct: 0,
+                edge_scales: InferredScales::Drawn,
+            },
+            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: None },
+            SubprocessCommand::RePostProcess {
+                item_id: 1,
+                tensor_path: path(),
+                tensor_height: 2,
+                tensor_width: 2,
+                model: ModelKind::Silueta,
+                original_image_path: path(),
+                mask: MaskSettings::default(),
+            },
+            SubprocessCommand::AddEdgeInference {
+                item_id: 1,
+                image_path: path(),
+                seg_tensor_path: path(),
+                seg_tensor_height: 2,
+                seg_tensor_width: 2,
+                model: ModelKind::Silueta,
+                mask: MaskSettings::default(),
+            },
+            SubprocessCommand::Inpaint {
+                item_id: 1,
+                model_id: prunr_models::ModelId::LaMaFp32,
+                image_path: path(),
+                mask_path: path(),
+                sd_req: None,
+                feather_px: 0.0,
+                sharpen: 0.0,
+            },
+            SubprocessCommand::CancelItem { item_id: 1 },
+            SubprocessCommand::Configure { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default(), first_look: None, on_screen: None },
+            SubprocessCommand::Shutdown,
+        ]
+    }
+
+    fn event_samples() -> Vec<SubprocessEvent> {
+        let path = || PathBuf::from("/tmp/prunr-sample");
+        vec![
+            SubprocessEvent::Ready { active_provider: "CPU".into() },
+            SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::Denoising) },
+            SubprocessEvent::ImageDone {
+                item_id: 1,
+                result_path: path(),
+                width: 2,
+                height: 2,
+                active_provider: "CPU".into(),
+                tensor_cache_path: None,
+                tensor_cache_height: None,
+                tensor_cache_width: None,
+                edge_cache: None,
+                spare_scales: None,
+            },
+            SubprocessEvent::SpareEdgeScales { item_id: 1, token: 1, outcome: SpareOutcome::Skipped },
+            SubprocessEvent::ImageError { item_id: 1, error: "failed".into() },
+            SubprocessEvent::InpaintDone { item_id: 1, rgba_path: path(), width: 2, height: 2, fill_scale: 1.0 },
+            SubprocessEvent::InpaintError { item_id: 1, error: "failed".into() },
+            SubprocessEvent::RssUpdate { rss_bytes: 1 },
+            SubprocessEvent::Finished,
+            SubprocessEvent::InitError { error: "failed".into() },
+        ]
+    }
+
+    /// Every command and event the worker and the app trade has a sample
+    /// that survives the wire.
+    #[test]
+    fn every_message_round_trips() {
+        let mut commands = [false; COMMANDS];
+        for command in command_samples() {
+            roundtrip(&command);
+            commands[command_index(&command)] = true;
+        }
+        let mut events = [false; EVENTS];
+        for event in event_samples() {
+            roundtrip(&event);
+            events[event_index(&event)] = true;
+        }
+        assert!(commands.iter().all(|&c| c), "a command without a sample: {commands:?}");
+        assert!(events.iter().all(|&e| e), "an event without a sample: {events:?}");
+    }
+
     #[test]
     fn command_init_roundtrip() {
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
             jobs: 2,
             mask: MaskSettings::default(),
-            force_cpu: false,
+            cpu_only: false,
             line_mode: LineMode::Off,
             edge: EdgeSettings { line_strength: 0.5, solid_line_color: Some([255, 0, 0]), edge_thickness: 0, edge_scale: prunr_core::EdgeScale::Bold, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: false,
+            line_fade_pct: 40,
+            edge_scales: InferredScales::DrawnFirst,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
             jobs: 1,
             mask: MaskSettings::default(),
-            force_cpu: false,
+            cpu_only: false,
             line_mode: LineMode::Off,
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/prunr-ipc-test"),
             inpaint_only: true,
+            line_fade_pct: 0,
+            edge_scales: InferredScales::Drawn,
         });
     }
 
@@ -507,34 +712,21 @@ mod tests {
     }
 
     #[test]
-    fn command_repostprocess_roundtrip() {
-        roundtrip(&SubprocessCommand::RePostProcess {
-            item_id: 9,
-            tensor_path: PathBuf::from("/tmp/t.bin"),
-            tensor_height: 320,
-            tensor_width: 320,
-            model: ModelKind::U2net,
-            original_image_path: PathBuf::from("/tmp/orig.png"),
-            mask: MaskSettings::default(),
+    fn command_configure_roundtrip() {
+        roundtrip(&SubprocessCommand::Configure {
+            mask: MaskSettings { gamma: 1.4, ..MaskSettings::default() },
+            line_mode: LineMode::SubjectOutline,
+            edge: EdgeSettings { line_strength: 0.8, solid_line_color: None, edge_thickness: 2, edge_scale: prunr_core::EdgeScale::Fine, compose_mode: prunr_core::ComposeMode::default(), line_style: prunr_core::LineStyle::default(), input_transform: prunr_core::InputTransform::default() },
+            first_look: Some(12),
+            on_screen: Some(12),
         });
-    }
-
-    #[test]
-    fn command_add_edge_inference_roundtrip() {
-        roundtrip(&SubprocessCommand::AddEdgeInference {
-            item_id: 13,
-            image_path: PathBuf::from("/tmp/orig.png"),
-            seg_tensor_path: PathBuf::from("/tmp/seg.raw"),
-            seg_tensor_height: 1024,
-            seg_tensor_width: 1024,
-            model: ModelKind::BiRefNetLite,
+        roundtrip(&SubprocessCommand::Configure {
             mask: MaskSettings::default(),
+            line_mode: LineMode::Off,
+            edge: EdgeSettings::default(),
+            first_look: None,
+            on_screen: Some(3),
         });
-    }
-
-    #[test]
-    fn command_shutdown_roundtrip() {
-        roundtrip(&SubprocessCommand::Shutdown);
     }
 
     #[test]
@@ -542,13 +734,6 @@ mod tests {
         roundtrip(&SubprocessCommand::CancelItem { item_id: 42 });
         roundtrip(&SubprocessCommand::CancelItem { item_id: 0 });
         roundtrip(&SubprocessCommand::CancelItem { item_id: u64::MAX });
-    }
-
-    #[test]
-    fn event_ready_roundtrip() {
-        roundtrip(&SubprocessEvent::Ready {
-            active_provider: "CUDA".to_string(),
-        });
     }
 
     #[test]
@@ -562,9 +747,8 @@ mod tests {
             tensor_cache_path: Some(PathBuf::from("/tmp/tensor.bin")),
             tensor_cache_height: Some(320),
             tensor_cache_width: Some(320),
-            edge_cache_path: None,
-            edge_cache_height: None,
-            edge_cache_width: None,
+            edge_cache: None,
+            spare_scales: None,
         });
         roundtrip(&SubprocessEvent::ImageDone {
             item_id: 12,
@@ -575,32 +759,29 @@ mod tests {
             tensor_cache_path: None,
             tensor_cache_height: None,
             tensor_cache_width: None,
-            edge_cache_path: Some(PathBuf::from("/tmp/edge.bin")),
-            edge_cache_height: Some(480),
-            edge_cache_width: Some(640),
+            edge_cache: Some(EdgeCacheFile {
+                path: PathBuf::from("/tmp/edge.bin"),
+                height: 480,
+                width: 640,
+                scales: vec![prunr_core::EdgeScale::Bold, prunr_core::EdgeScale::Fused],
+            }),
+            spare_scales: Some(u64::MAX - 1),
         });
     }
 
     #[test]
-    fn event_image_error_roundtrip() {
-        roundtrip(&SubprocessEvent::ImageError {
-            item_id: 4,
-            error: "decode failed: not a PNG".to_string(),
-        });
-    }
-
-    #[test]
-    fn event_rss_update_roundtrip() {
-        roundtrip(&SubprocessEvent::RssUpdate {
-            rss_bytes: 1_234_567_890,
-        });
-    }
-
-    #[test]
-    fn event_finished_and_init_error_roundtrip() {
-        roundtrip(&SubprocessEvent::Finished);
-        roundtrip(&SubprocessEvent::InitError {
-            error: "engine creation failed".into(),
+    fn event_spare_edge_scales_roundtrip() {
+        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 77, outcome: SpareOutcome::Skipped });
+        roundtrip(&SubprocessEvent::SpareEdgeScales { item_id: 5, token: 78, outcome: SpareOutcome::Failed });
+        roundtrip(&SubprocessEvent::SpareEdgeScales {
+            item_id: 6,
+            token: (1 << 32) | 3,
+            outcome: SpareOutcome::Made(EdgeCacheFile {
+                path: PathBuf::from("/tmp/spare_edge_6.raw"),
+                height: 480,
+                width: 640,
+                scales: vec![prunr_core::EdgeScale::Fine],
+            }),
         });
     }
 
@@ -631,10 +812,9 @@ mod tests {
                 guidance_scale: 7.5,
                 seed: Some(42),
                 use_taesd: false,
-                scheduler: prunr_core::inpaint_sd::SchedulerKind::Ddim,
-                strength: 0.85,
-                use_karras_sigmas: false,
-                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512 },
+                scheduler: prunr_core::inpaint_sd::SchedulerKind::DpmPp2MKarras,
+                tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512, cpu_only: true, mem: prunr_core::inpaint_sd::SdMemPlan { memory_pattern: Some(false), device_initializers: true, intra_threads: 4 } },
+                fill_scale: prunr_core::inpaint::FillScale::Quarter,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
@@ -648,6 +828,7 @@ mod tests {
             rgba_path: std::path::PathBuf::from("/tmp/prunr-inpaint-out-11"),
             width: 1920,
             height: 1080,
+            fill_scale: 0.5,
         });
         roundtrip(&SubprocessEvent::InpaintError {
             item_id: 11,
@@ -665,6 +846,11 @@ mod tests {
             ProgressUpdate::Tiles(vec![TileRect { x: 0.0, y: 0.5, w: 0.25, h: 0.5 }]),
             ProgressUpdate::Tile { index: 0, done: true },
             ProgressUpdate::Subject(prunr_core::SubjectHint { width: 2, height: 1, coverage: vec![0, 255] }),
+            ProgressUpdate::Faces(vec![prunr_core::face::FacePlace::of(
+                &prunr_core::face::Face { score: 0.9, bbox: [0.0; 4], landmarks: [[30.0, 40.0], [60.0, 40.0], [45.0, 55.0], [33.0, 70.0], [57.0, 70.0]] },
+                [96, 128],
+            )]),
+            ProgressUpdate::TilePreview(prunr_core::TilePreview { x: 1, y: 0, width: 1, height: 1, full_width: 2, full_height: 1, rgba: vec![1, 2, 3, 4] }),
         ] {
             roundtrip(&SubprocessEvent::Report { item_id: 9, update });
         }
@@ -732,17 +918,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn cleanup_ipc_temp_is_reentrant() {
-        let dir = ipc_temp_dir();
-        std::fs::write(dir.join("test-reentrant.bin"), b"x").unwrap();
-
-        cleanup_ipc_temp();
-        assert_gone(dir, &["test-reentrant.bin"]);
-        cleanup_ipc_temp();
-        assert_gone(dir, &["test-reentrant.bin"]);
-    }
-
     /// A seg-side crash cleanup must not touch a sibling inpaint
     /// subprocess's `inpaint-*` files. Seeds both kinds, runs the
     /// prefix-scoped sweep, asserts seg-prefixed gone and
@@ -752,7 +927,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path();
 
-        let seg = ["chain_42.raw", "edge_5.bin", "input_3.img",
+        let seg = ["chain_42.raw", "edge_5.bin", "spare_edge_5.raw", "input_3.img",
                    "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw"];
         let cli = ["cli_ds_0.img"];
         let inpaint = ["inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png"];
@@ -768,7 +943,7 @@ mod tests {
         }
         for f in &cli {
             assert!(dir.join(f).exists(),
-                "CLI-persistent file {f} must survive a seg-scoped cleanup (B-CLI-1)");
+                "CLI-persistent file {f} must survive a seg-scoped cleanup");
         }
     }
 
@@ -816,7 +991,7 @@ mod tests {
     #[test]
     fn every_ipc_filename_in_tree_matches_a_known_prefix() {
         let production_filenames = [
-            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "input_3.img",
+            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "spare_edge_5.raw", "input_3.img",
             "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw",
             "inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png",
         ];
@@ -835,7 +1010,7 @@ mod tests {
     /// are the CLI parent's pre-staged retry inputs. Wiping them mid-
     /// batch on a worker crash made the CLI re-send paths to files it
     /// had just deleted, which surfaced as "Insufficient memory"
-    /// errors whose actual cause was self-inflicted (B-CLI-1).
+    /// errors whose actual cause was self-inflicted.
     #[test]
     fn seg_pipeline_cleanup_preserves_cli_persistent_temps() {
         let dir = std::env::temp_dir().join(format!(
@@ -912,7 +1087,7 @@ mod tests {
     // ── serde(default) field roundtrip tests ────────────────────────────────
     //
     // `#[serde(default)]` fields — `inpaint_only`, `feather_px`, `sharpen`,
-    // `edge_cache_*` — are pinned here to document their expected defaults
+    // `edge_cache` — are pinned here to document their expected defaults
     // and catch accidental value drift. Bincode is a positional format; it
     // does NOT support "missing trailing field → default" across a wire
     // boundary (it returns `UnexpectedEnd` on a short payload). These tests
@@ -932,22 +1107,52 @@ mod tests {
             model: ModelKind::Silueta,
             jobs: 1,
             mask: MaskSettings::default(),
-            force_cpu: false,
+            cpu_only: false,
             line_mode: LineMode::Off,
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: false,
+            line_fade_pct: 40,
+            edge_scales: InferredScales::DrawnFirst,
         });
         roundtrip(&SubprocessCommand::Init {
             model: ModelKind::Silueta,
             jobs: 1,
             mask: MaskSettings::default(),
-            force_cpu: false,
+            cpu_only: false,
             line_mode: LineMode::Off,
             edge: EdgeSettings::default(),
             ipc_dir: PathBuf::from("/tmp/test"),
             inpaint_only: true,
+            line_fade_pct: 0,
+            edge_scales: InferredScales::Drawn,
         });
+    }
+
+    /// The app's runs make the drawn scales (and what their detector run
+    /// makes anyway) before the result, the rest after it only for the
+    /// image on screen; the CLI runs only the ones its lines draw.
+    #[test]
+    fn a_run_makes_the_drawn_scales_first_and_the_rest_only_on_screen() {
+        use prunr_core::EdgeScale::{self, Bold, Fine, Fused};
+        assert_eq!(InferredScales::default(), InferredScales::DrawnFirst);
+        let (shown, background) = (Some(7), Some(8));
+        for (edge_scale, first, rest) in [
+            (Fused, &[Bold, Fused][..], &[Fine][..]),
+            (Bold, &[Bold, Fused][..], &[Fine][..]),
+            (Fine, &[Fine][..], &[Bold, Fused][..]),
+        ] {
+            let edge = EdgeSettings { edge_scale, ..EdgeSettings::default() };
+            assert_eq!(InferredScales::DrawnFirst.of(&edge), first, "{edge_scale:?}");
+            assert_eq!(InferredScales::DrawnFirst.spare(&edge, 7, shown), rest, "{edge_scale:?} on screen");
+            assert!(InferredScales::DrawnFirst.spare(&edge, 7, background).is_empty(), "{edge_scale:?} in the background");
+            assert!(InferredScales::DrawnFirst.spare(&edge, 7, None).is_empty(), "{edge_scale:?} with nothing on screen");
+            assert_eq!(InferredScales::Drawn.of(&edge), &[edge_scale]);
+            assert!(InferredScales::Drawn.spare(&edge, 7, shown).is_empty(), "the CLI makes no spare scales");
+        }
+        let dual = EdgeSettings { line_style: prunr_core::LineStyle::DualScale { fine_color: [0; 3], bold_color: [0; 3] }, ..EdgeSettings::default() };
+        assert_eq!(InferredScales::DrawnFirst.of(&dual), &EdgeScale::ALL);
+        assert!(InferredScales::DrawnFirst.spare(&dual, 7, shown).is_empty(), "Dual scale draws every run");
     }
 
     /// `Inpaint.feather_px` and `Inpaint.sharpen` default to 0.0 (no
@@ -972,39 +1177,6 @@ mod tests {
             sd_req: None,
             feather_px: 8.5,
             sharpen: 0.4,
-        });
-    }
-
-    /// `ImageDone.edge_cache_*` fields default to `None`. Roundtrip the
-    /// all-None case (no DexiNed run) and the all-Some case so a default
-    /// drift from `None` to some garbage path is caught immediately.
-    #[test]
-    fn event_image_done_edge_cache_fields_roundtrip_none_and_some() {
-        roundtrip(&SubprocessEvent::ImageDone {
-            item_id: 3,
-            result_path: PathBuf::from("/tmp/result.raw"),
-            width: 800,
-            height: 600,
-            active_provider: "CPU".into(),
-            tensor_cache_path: None,
-            tensor_cache_height: None,
-            tensor_cache_width: None,
-            edge_cache_path: None,
-            edge_cache_height: None,
-            edge_cache_width: None,
-        });
-        roundtrip(&SubprocessEvent::ImageDone {
-            item_id: 4,
-            result_path: PathBuf::from("/tmp/result2.raw"),
-            width: 1920,
-            height: 1080,
-            active_provider: "CPU".into(),
-            tensor_cache_path: None,
-            tensor_cache_height: None,
-            tensor_cache_width: None,
-            edge_cache_path: Some(PathBuf::from("/tmp/edge.raw")),
-            edge_cache_height: Some(1080),
-            edge_cache_width: Some(1920),
         });
     }
 }

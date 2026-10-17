@@ -38,9 +38,20 @@ pub enum Request {
     /// Press on a control and keep holding; `Move` drags, `Release` lets go.
     Hold { name: String },
     /// Press at a window position (points) and keep holding: a brush stroke.
-    HoldAt { x: f32, y: f32 },
+    /// `alt` holds Alt until the release: a stroke that takes away.
+    HoldAt {
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        alt: bool,
+    },
     Move { dx: f32, dy: f32 },
     Release,
+    /// Turn the wheel over a control, `lines` up (positive) or down: what
+    /// brings a row below a list's fold into view.
+    Scroll { name: String, lines: f32 },
+    /// Turn the wheel at a window position (points): zoom the canvas there.
+    ScrollAt { x: f32, y: f32, lines: f32 },
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
     Key { chord: String },
     Type { text: String },
@@ -120,8 +131,8 @@ pub struct Automation {
     /// Input, one batch per frame, handed to `raw_input_hook`.
     frames: std::collections::VecDeque<InputFrame>,
     deferred: Vec<Deferred>,
-    /// Where a `Hold` left the pointer, until `Release`.
-    held_at: Option<egui::Pos2>,
+    /// Where the pointer is held, and the modifiers held with it.
+    held_at: Option<(egui::Pos2, Option<egui::Modifiers>)>,
 }
 
 impl Automation {
@@ -145,6 +156,17 @@ impl Automation {
 
     fn snapshot(&self) -> Result<ControlNode, String> {
         self.tree.snapshot().ok_or_else(|| "no frame rendered yet".to_string())
+    }
+
+    /// One wheel turn of `lines` at `pos`, the pointer moved there first.
+    fn wheel_at(&mut self, pos: egui::Pos2, lines: f32) {
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, lines),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
     }
 
     /// The one control named `name`, with its centre.
@@ -171,36 +193,51 @@ impl Automation {
             Request::Click { name, secondary } => {
                 let (target, pos) = self.target(&name)?;
                 let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
-                let modifiers = egui::Modifiers::NONE;
                 self.frames.extend([
                     vec![egui::Event::PointerMoved(pos)].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }].into(),
+                    vec![press(pos, button, true, None)].into(),
+                    vec![press(pos, button, false, None)].into(),
                 ]);
                 (4, Response::ok(target))
             }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, egui::PointerButton::Primary, true, None)].into()]);
+                self.held_at = Some((pos, None));
                 (3, Response::ok(target))
             }
-            Request::HoldAt { x, y } => {
+            Request::HoldAt { x, y, alt } => {
                 let pos = egui::pos2(x, y);
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                let modifiers = alt.then_some(egui::Modifiers::ALT);
+                self.frames.extend([
+                    InputFrame { events: vec![egui::Event::PointerMoved(pos)], modifiers },
+                    InputFrame { events: vec![press(pos, egui::PointerButton::Primary, true, modifiers)], modifiers },
+                ]);
+                self.held_at = Some((pos, modifiers));
                 (3, Response::ok(()))
             }
             Request::Move { dx, dy } => {
-                let from = self.held_at.ok_or("nothing is held")?;
+                let (from, modifiers) = self.held_at.ok_or("nothing is held")?;
                 let to = from + egui::vec2(dx, dy);
-                self.frames.push_back(vec![egui::Event::PointerMoved(to)].into());
-                self.held_at = Some(to);
+                self.frames.push_back(InputFrame { events: vec![egui::Event::PointerMoved(to)], modifiers });
+                self.held_at = Some((to, modifiers));
                 (2, Response::ok([to.x, to.y]))
             }
+            Request::Scroll { name, lines } => {
+                let (target, pos) = self.target(&name)?;
+                self.wheel_at(pos, lines);
+                (4, Response::ok(target))
+            }
+            Request::ScrollAt { x, y, lines } => {
+                self.wheel_at(egui::pos2(x, y), lines);
+                (4, Response::ok(()))
+            }
             Request::Release => {
-                let pos = self.held_at.take().ok_or("nothing is held")?;
-                self.frames.push_back(vec![press(pos, false)].into());
+                let (pos, modifiers) = self.held_at.take().ok_or("nothing is held")?;
+                self.frames.push_back(InputFrame { events: vec![press(pos, egui::PointerButton::Primary, false, modifiers)], modifiers });
+                if modifiers.is_some() {
+                    self.frames.push_back(InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) });
+                }
                 (3, Response::ok(()))
             }
             Request::Key { chord } => {
@@ -263,8 +300,8 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     app.automation = Some(auto);
 }
 
-fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
-    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+fn press(pos: egui::Pos2, button: egui::PointerButton, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
+    egui::Event::PointerButton { pos, button, pressed, modifiers: modifiers.unwrap_or_default() }
 }
 
 /// The controls in the tree, flat, without their children.
@@ -331,6 +368,10 @@ mod tests {
     fn requests_parse_from_tagged_json() {
         let req: Request = serde_json::from_str(r#"{"cmd":"click","name":"Settings"}"#).unwrap();
         assert!(matches!(req, Request::Click { ref name, secondary: false } if name == "Settings"));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll","name":"Silueta","lines":-5}"#).unwrap();
+        assert!(matches!(req, Request::Scroll { ref name, lines } if name == "Silueta" && lines == -5.0));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll_at","x":600,"y":400,"lines":2}"#).unwrap();
+        assert!(matches!(req, Request::ScrollAt { x, y, lines } if x == 600.0 && y == 400.0 && lines == 2.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"wait"}"#).unwrap();
         assert!(matches!(req, Request::Wait { frames: 1 }));
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"explode"}"#).is_err());

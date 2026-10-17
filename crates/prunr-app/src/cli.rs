@@ -13,7 +13,7 @@ pub struct Cli {
     /// Input image file(s).
     pub inputs: Vec<PathBuf>,
 
-    /// Output path. File for single image, directory for batch.
+    /// Output path: a file for one image (a name without an extension is saved as .png), a directory for a batch.
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
@@ -75,7 +75,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.0)]
     pub feather: f32,
 
-    /// Extract lines/edges instead of removing background (uses DexiNed model).
+    /// Extract lines/edges instead of removing background (uses TEED model).
     #[arg(long)]
     pub lines: bool,
 
@@ -101,8 +101,9 @@ pub struct Cli {
     #[arg(long)]
     pub line_color: Option<String>,
 
-    /// DexiNed output scale: `fine` (micro-edges), `balanced` (mid-scale),
-    /// `bold` (abstract outlines), `fused` (default, combined).
+    /// Line scale: `fine` (thin, detailed lines), `bold` (big outlines
+    /// only), `fused` (default, every scale combined). `balanced` is read
+    /// as `fused`.
     #[arg(long, default_value_t = prunr_core::EdgeScale::Fused)]
     pub line_scale: prunr_core::EdgeScale,
 
@@ -125,16 +126,26 @@ pub struct Cli {
     /// desaturate, invert, duotone, sepia, threshold, posterize, solarize,
     /// hue-shift, saturate, color-splash, pixelate, cross-process,
     /// halftone or gradient-map.
-    #[arg(long, value_name = "NAME", value_parser = str::parse::<prunr_core::FillStyle>)]
-    pub effect: Option<prunr_core::FillStyle>,
+    #[arg(long, value_name = "NAME", value_parser = str::parse::<prunr_core::SubjectEffect>)]
+    pub effect: Option<prunr_core::SubjectEffect>,
 
     /// Fill transparent background with a copy of the photo: `blur`
     /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
     /// over `--bg-image` and `--bg-color`, as in the app.
-    #[arg(long, value_name = "blur[:N]|bw", value_parser = parse_bg_effect)]
+    #[arg(long, value_name = "blur[:N]|lens[:N]|bw", value_parser = parse_bg_effect)]
     pub bg_effect: Option<prunr_core::BgEffect>,
 
-    /// Force CPU inference even when GPU is available.
+    /// Sticker outline around the cut-out: width in px, optionally with a
+    /// color, e.g. `8` (white) or `8:000000`.
+    #[arg(long, value_name = "PX[:HEX]", value_parser = parse_outline)]
+    pub outline: Option<(f32, [u8; 3])>,
+
+    /// Shadow under the cut-out: `soft` (all around) or `drop` (below),
+    /// with the app's default opacity, blur and distance.
+    #[arg(long, value_name = "soft|drop", value_parser = str::parse::<prunr_core::ShadowKind>)]
+    pub shadow: Option<prunr_core::ShadowKind>,
+
+    /// Run every model on the CPU, even when a GPU is available.
     #[arg(long)]
     pub cpu: bool,
 
@@ -167,6 +178,152 @@ pub struct Cli {
     /// (no `--inpaint`) errors out instead of silently dropping the flag.
     #[arg(long, requires = "inpaint")]
     pub mask: Option<PathBuf>,
+
+    /// How large the eraser fills the masked area: auto (full size for
+    /// small areas, large ones shrink to fit one model tile), full, half
+    /// or quarter. A large area fills more convincingly at a smaller
+    /// scale, a little softer.
+    #[arg(long, requires = "inpaint", default_value = "auto")]
+    pub fill_scale: prunr_core::inpaint::FillScale,
+
+    /// Upscale mode: enlarge the image with this model instead of
+    /// removing its background. Saves {stem}_x{scale}.png.
+    #[arg(long, value_name = "MODEL")]
+    pub upscale: Option<CliUpscaler>,
+
+    /// How much larger the upscale makes the image.
+    #[arg(long, requires = "upscale", default_value_t = 4, value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub scale: u8,
+
+    /// Denoise before the upscale model, 0 (off) to 1.
+    #[arg(long, requires = "upscale", default_value_t = 0.0)]
+    pub denoise: f32,
+
+    /// Sharpen after the upscale, -1 (soften) to 1; 0 is off.
+    #[arg(long, requires = "upscale", default_value_t = prunr_core::DEFAULT_SHARPEN, allow_negative_numbers = true)]
+    pub sharpen: f32,
+
+    /// AI blend: 1 keeps the model's output, 0 the plain enlargement.
+    #[arg(long, requires = "upscale", default_value_t = 1.0)]
+    pub ai_blend: f32,
+
+    /// Match the upscale's colours to the original.
+    #[arg(long, requires = "upscale")]
+    pub color_match: bool,
+
+    /// Restore faces with this model after the upscale (downloaded in the
+    /// app's Model Store).
+    #[arg(long, requires = "upscale", value_name = "MODEL")]
+    pub restore_faces: Option<CliFaceModel>,
+
+    /// Restore faces strength in percent: up to 50 adds detail and keeps
+    /// the photo's shading, above it the redrawn shading too.
+    #[arg(long, requires = "restore_faces", default_value_t = 50, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub face_strength: u8,
+
+    /// Colorize mode: color a black-and-white photo with DDColor
+    /// (downloaded in the app's Model Store). Saves {stem}_color.png.
+    #[arg(long)]
+    pub colorize: bool,
+
+    /// Color strength: 0 is grey, 1 the predicted color, up to 1.5.
+    #[arg(long, requires = "colorize", default_value_t = 1.0)]
+    pub color_strength: f32,
+
+    /// Lines fade with distance, 0-100 (needs the depth model, from the
+    /// app's Model Store).
+    #[arg(long, value_name = "PERCENT", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub line_fade: u8,
+
+    /// Also write each input's depth map as {stem}-depth.png (16-bit grey,
+    /// white = near) beside the result. Needs the depth model.
+    #[arg(long)]
+    pub depth_map: bool,
+
+    /// Write only the depth maps, nothing else.
+    #[arg(long, requires = "depth_map")]
+    pub depth_only: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Command {
+    /// Time every installed model on the CPU and on the GPU path the app
+    /// takes, check the two outputs agree, and write a report to send back.
+    Bench(BenchArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BenchArgs {
+    /// Models to run, comma-separated (e.g. silueta,real_esrgan_x2plus,migan);
+    /// every installed one when left out.
+    #[arg(long, value_delimiter = ',', value_name = "NAMES")]
+    pub models: Vec<String>,
+
+    /// Timed runs on each side after the first, untimed one.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=100))]
+    pub runs: u32,
+
+    /// Run on this picture instead of the built-in one.
+    #[arg(long, value_name = "PATH")]
+    pub image: Option<PathBuf>,
+
+    /// Also run the multi-GB models: Stable Diffusion 1.5 (both), RORem
+    /// and 4xNomos8kSCHAT-L. Minutes each on a CPU.
+    #[arg(long)]
+    pub heavy: bool,
+
+    /// Where to write the Markdown report; a JSON copy goes beside it.
+    #[arg(long, value_name = "PATH", default_value = "prunr-bench.md")]
+    pub out: PathBuf,
+}
+
+/// Upscale model selection.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliUpscaler {
+    /// Real-ESRGAN x4plus: the all-round photo upscaler.
+    Realesrgan,
+    /// 4xNomos8kSCHAT-L: the most detailed, the slowest.
+    Nomos,
+    /// 4x NMKD Siax-CX: clean or mildly compressed photos.
+    Siax,
+    /// 4x NMKD Superscale: noisy or compressed photos.
+    Superscale,
+    /// 4xNomos2 RealPLKSR: fast, natural skin and hair texture.
+    Nomos2,
+}
+
+impl CliUpscaler {
+    fn model_id(self) -> prunr_models::ModelId {
+        use prunr_models::ModelId;
+        match self {
+            Self::Realesrgan => ModelId::RealEsrganX4Plus,
+            Self::Nomos => ModelId::Nomos8kSchatL,
+            Self::Siax => ModelId::FourXNmkdSiaxCx,
+            Self::Superscale => ModelId::FourXNmkdSuperscale,
+            Self::Nomos2 => ModelId::FourXNomos2RealPlksr,
+        }
+    }
+}
+
+/// Restore faces model selection.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliFaceModel {
+    /// GFPGAN v1.4: the crispest.
+    Gfpgan,
+    /// RestoreFormer++: closest to the person's own features.
+    Restoreformer,
+}
+
+impl CliFaceModel {
+    fn model_id(self) -> prunr_models::ModelId {
+        match self {
+            Self::Gfpgan => prunr_models::ModelId::FaceGfpgan,
+            Self::Restoreformer => prunr_models::ModelId::FaceRestoreFormerPp,
+        }
+    }
 }
 
 /// Model selection
@@ -204,21 +361,23 @@ use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use prunr_core::{
     MaskSettings, ModelKind, CoreError,
     DOWNSCALE_TARGET,
-    load_image_from_path, check_large_image, downscale_image, encode_rgba_png,
+    load_image_from_path, downscale_image, encode_rgba_png,
 };
 
 use crate::gui::settings::LineMode;
+use prunr_core::inpaint_blend::{fill_region, finalize_inpaint, DEFAULT_EDGE_BLEND_PX, DEFAULT_GROW_PX};
 
 /// What goes behind each result, from `--bg-effect`, `--bg-image` and
 /// `--bg-color`.
-enum CliBackdrop {
+enum CliBackdrop<'a> {
     Transparent,
     Color([u8; 3]),
     Image(std::sync::Arc<image::DynamicImage>, prunr_core::BgImageFit),
-    Effect(prunr_core::BgEffect),
+    /// An effect, and where a lens blur gets its depth.
+    Effect(prunr_core::BgEffect, &'a CliDepth),
 }
 
-impl CliBackdrop {
+impl CliBackdrop<'_> {
     /// Put the backdrop under `result`; an effect is made from the photo
     /// at `photo_path`.
     fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path) {
@@ -226,9 +385,15 @@ impl CliBackdrop {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
-            CliBackdrop::Effect(effect) => match prunr_core::load_image_from_path(photo_path) {
+            CliBackdrop::Effect(effect, depth) => match prunr_core::load_image_from_path(photo_path) {
                 Ok(photo) => {
-                    prunr_core::apply_bg_effect(result, &photo.into_rgba8(), *effect);
+                    let photo = photo.into_rgba8();
+                    let depth = effect.needs_depth()
+                        .then(|| depth.for_backdrop(photo_path, &photo)
+                            .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
+                            .ok())
+                        .flatten();
+                    prunr_core::apply_bg_effect(result, &photo, *effect, depth.as_deref());
                 }
                 Err(err) => tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
             },
@@ -236,30 +401,139 @@ impl CliBackdrop {
     }
 }
 
-/// `blur`, `blur:N` (1-64 px) or `bw`.
+/// `blur`, `blur:N` (1-64 px), `lens`, `lens:N` (0-100 %) or `bw`.
 fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     use prunr_core::BgEffect;
     match s.split_once(':') {
         None if s == "blur" => Ok(BgEffect::BlurredSource { radius: 12 }),
+        None if s == "lens" => Ok(BgEffect::LensBlur { amount_pct: 50 }),
         None if s == "bw" => Ok(BgEffect::DesaturatedSource),
         Some(("blur", n)) => match n.parse::<u32>() {
             Ok(radius @ 1..=64) => Ok(BgEffect::BlurredSource { radius }),
             _ => Err(format!("'{n}' is not a blur radius from 1 to 64")),
         },
-        _ => Err(format!("'{s}' is not one of blur, blur:N, bw")),
+        Some(("lens", n)) => match n.parse::<u8>() {
+            Ok(amount_pct @ 0..=100) => Ok(BgEffect::LensBlur { amount_pct }),
+            _ => Err(format!("'{n}' is not a lens blur amount from 0 to 100")),
+        },
+        _ => Err(format!("'{s}' is not one of blur, blur:N, lens, lens:N, bw")),
     }
+}
+
+/// Depth in the CLI: one engine for the run, and each input measured
+/// once when a lens backdrop and `--depth-map` both want it.
+#[derive(Default)]
+struct CliDepth {
+    measurer: prunr_core::depth::Measurer,
+    /// With `--depth-map`: the maps backdrops measured and their photo's
+    /// size (~0.7 MB each), until written.
+    kept: Option<std::cell::RefCell<std::collections::HashMap<PathBuf, KeptDepth>>>,
+}
+
+type KeptDepth = (std::sync::Arc<prunr_core::depth::DepthMap>, (u32, u32));
+
+impl CliDepth {
+    fn new(args: &Cli) -> Self {
+        Self { kept: args.depth_map.then(Default::default), ..Self::default() }
+    }
+
+    /// The map of `photo`, read from `path`, for its backdrop.
+    fn for_backdrop(&self, path: &std::path::Path, photo: &image::RgbaImage) -> Result<std::sync::Arc<prunr_core::depth::DepthMap>, CoreError> {
+        let map = std::sync::Arc::new(self.measurer.measure(photo)?);
+        if let Some(kept) = &self.kept {
+            kept.borrow_mut().insert(path.to_path_buf(), (std::sync::Arc::clone(&map), photo.dimensions()));
+        }
+        Ok(map)
+    }
+
+    /// `input`'s map and its photo's size: the one its backdrop kept, else
+    /// measured now.
+    fn for_file(&self, input: &std::path::Path) -> Result<KeptDepth, String> {
+        if let Some(kept) = self.kept.as_ref().and_then(|kept| kept.borrow_mut().remove(input)) {
+            return Ok(kept);
+        }
+        let photo = prunr_core::load_image_from_path(input).map_err(|e| format!("failed to read {}: {e}", input.display()))?;
+        let map = self.measurer.measure_decoded(&photo).map_err(|e| format!("depth failed: {e}"))?;
+        Ok((std::sync::Arc::new(map), (photo.width(), photo.height())))
+    }
+}
+
+/// Where an input's depth map goes, beside its result.
+fn depth_map_path(args: &Cli, input: &std::path::Path) -> PathBuf {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    args.result_path(input).with_file_name(prunr_core::depth::map_file_name(&stem))
+}
+
+/// Write each input's depth map (`--depth-map`). Returns how many failed.
+fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
+    let mut failed = 0;
+    for input in &args.inputs {
+        let out = depth_map_path(args, input);
+        let written = check_overwrite(&out, args.force)
+            .and_then(|()| depth.for_file(input))
+            .and_then(|(map, (w, h))| prunr_core::depth::encode_depth_png(&map, w, h).map_err(|e| format!("encode failed: {e}")))
+            .and_then(|bytes| prunr_app::fs_util::write_bytes_replacing(&out, &bytes).map_err(|e| format!("failed to save {}: {e}", out.display())));
+        match written {
+            Ok(()) if !args.quiet => eprintln!("Saved {}", out.display()),
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                failed += 1;
+            }
+        }
+    }
+    failed
+}
+
+/// The depth model is needed (a depth map, fading lines, a lens blur)
+/// but not installed: the line to print.
+fn missing_depth_model(args: &Cli) -> Option<String> {
+    let id = prunr_core::depth::MODEL.into();
+    (wants_depth(args) && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
+}
+
+/// Whether the run reads a depth map: a depth-map file, faded lines (only
+/// when lines are drawn), or a lens-blur backdrop.
+fn wants_depth(args: &Cli) -> bool {
+    let draws_lines = args.lines || args.lines_after_bg;
+    args.depth_map || (draws_lines && args.line_fade > 0) || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth)
+}
+
+fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
+    let (width, color) = s.split_once(':').unwrap_or((s, "ffffff"));
+    let width: f32 = width.parse().map_err(|_| format!("'{width}' is not an outline width in px"))?;
+    let max = prunr_core::Decoration::MAX_OUTLINE_PX;
+    if !(0.0..=max).contains(&width) {
+        return Err(format!("outline width {width} is outside 0-{max} px"));
+    }
+    let color = parse_hex_color(color).ok_or_else(|| format!("'{color}' is not a hex color like ffffff"))?;
+    Ok((width, color))
+}
+
+/// A colour flag's value: `None` when the flag is absent, `Err` (after
+/// telling the user, with `example`) when it is not 6-digit hex.
+fn flag_color(flag: &str, value: Option<&str>, example: &str) -> Result<Option<[u8; 3]>, ()> {
+    let Some(s) = value else { return Ok(None) };
+    parse_hex_color(s).map(Some).ok_or_else(|| {
+        eprintln!("error: {flag}: '{s}' is not a 6-digit hex color (e.g. {example})");
+    })
 }
 
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
     let s = s.strip_prefix('#').unwrap_or(s);
     if s.len() != 6 { return None; }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some([r, g, b])
+    prunr_core::color::parse_hex_rgba(s).map(|[r, g, b, _]| [r, g, b])
 }
 
 impl Cli {
+    /// Whether this run writes to the terminal it was started from. A
+    /// Windows release build has no console of its own, so it borrows
+    /// that one, or its output goes nowhere.
+    #[cfg_attr(not(windows), allow(dead_code))] // only Windows borrows a console; the tests check the rule everywhere
+    pub fn writes_to_terminal(&self) -> bool {
+        self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
+    }
+
     fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
@@ -268,9 +542,28 @@ impl Cli {
             refine_edges: self.refine_edges,
             guided_radius: self.edge_width.clamp(1, 64),
             feather: self.feather.max(0.0),
-            fill_style: self.effect.unwrap_or_default(),
+            effect: self.effect.unwrap_or_default(),
+            decoration: self.decoration(),
             ..Default::default()
         }
+    }
+
+    /// Where an input's result is written: `-o` names the file for one
+    /// input and the folder for several.
+    fn result_path(&self, input: &std::path::Path) -> PathBuf {
+        output_path(input, &self.output, self.inputs.len() > 1)
+    }
+
+    fn decoration(&self) -> prunr_core::Decoration {
+        let mut d = prunr_core::Decoration::default();
+        if let Some((width, color)) = self.outline {
+            d.outline_width = width;
+            d.outline_color = color;
+        }
+        if let Some(kind) = self.shadow {
+            d.shadow = kind;
+        }
+        d
     }
 
     fn line_mode(&self) -> LineMode {
@@ -310,38 +603,218 @@ pub fn run_remove(args: &Cli) -> i32 {
         }
     }
 
-    if args.inpaint {
-        // Eraser mode reads `inputs[0]`, `mask`, `output`, `force`,
-        // `quiet` and ignores everything else. Surface the conflicts
-        // up front so a user typing `--inpaint --lines --bg-color
-        // ff0000 --mask m.png photo.jpg` doesn't get a quiet erase
-        // with no hint that those flags were thrown away.
-        let mut conflicts: Vec<&'static str> = Vec::new();
-        if args.lines { conflicts.push("--lines"); }
-        if args.lines_after_bg { conflicts.push("--lines-after-bg"); }
-        if args.line_color.is_some() { conflicts.push("--line-color"); }
-        if args.bg_color.is_some() { conflicts.push("--bg-color"); }
-        if args.bg_image.is_some() { conflicts.push("--bg-image"); }
-        if args.bg_effect.is_some() { conflicts.push("--bg-effect"); }
-        if args.effect.is_some() { conflicts.push("--effect"); }
-        if args.contrast > 0.0 { conflicts.push("--contrast"); }
+    // Eraser and upscale modes ignore the background-removal flags; say so
+    // up front rather than quietly throw them away.
+    let modes = selected_modes(args);
+    if modes.len() > 1 {
+        eprintln!("error: {} cannot be combined.", modes.join(" and "));
+        return 1;
+    }
+    let mode = modes.first().copied();
+    if let Some(mode) = mode {
+        let conflicts = background_removal_flags(args);
         if !conflicts.is_empty() {
             eprintln!(
-                "error: --inpaint cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
+                "error: {mode} cannot be combined with {} \u{2014} those flags belong to background-removal mode.",
                 conflicts.join(", "),
             );
             return 1;
         }
-        return run_inpaint(args);
     }
+    if let Some(err) = missing_depth_model(args) {
+        eprintln!("error: {err}");
+        return 1;
+    }
+    let depth = CliDepth::new(args);
+    let code = if args.depth_only {
+        0
+    } else if args.inpaint {
+        run_inpaint(args)
+    } else if let Some(upscaler) = args.upscale {
+        run_upscale(args, upscaler)
+    } else if args.colorize {
+        run_colorize(args)
+    } else {
+        // All processing uses subprocess isolation for OOM protection
+        run_batch(args, &depth)
+    };
+    if args.depth_map && write_depth_maps(args, &depth) > 0 {
+        return 1;
+    }
+    code
+}
 
-    // All processing uses subprocess isolation for OOM protection
-    run_batch(args)
+/// One upscale as the app runs it: denoise, the model, Refine, faces.
+struct UpscaleJob<'a> {
+    engine: &'a prunr_core::OrtEngine,
+    model: prunr_models::ModelId,
+    scale: prunr_core::OutputScale,
+    refine: prunr_core::upscale::Refine,
+    denoise: f32,
+    /// Loaded once for the batch.
+    faces: Option<(prunr_core::face::FaceRestorer, prunr_core::face::FaceBlend)>,
+}
+
+impl UpscaleJob<'_> {
+    fn run(&mut self, img: image::RgbaImage) -> Result<image::RgbaImage, String> {
+        let img = std::sync::Arc::new(img);
+        let model_input = if self.denoise > 0.0 {
+            std::sync::Arc::new(prunr_core::denoise::apply_denoise(&img, self.denoise.min(1.0)))
+        } else {
+            img
+        };
+        let progress = prunr_core::Progress::none();
+        let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, self.engine, self.model, self.scale.factor(), &progress, None)
+            .map_err(|e| format!("upscale failed: {e}"))?;
+        let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
+        let mut out = std::sync::Arc::unwrap_or_clone(shown);
+        if let Some((restorer, blend)) = self.faces.as_mut() {
+            let faces = restorer.find_and_restore(&out, *blend, &progress)
+                .map_err(|e| format!("restore faces failed: {e}"))?;
+            prunr_core::face::compose_faces_into(&mut out, &faces, *blend);
+        }
+        Ok(out)
+    }
+}
+
+/// The mode flags set on the command line; at most one may be.
+fn selected_modes(args: &Cli) -> Vec<&'static str> {
+    [(args.inpaint, "--inpaint"), (args.upscale.is_some(), "--upscale"), (args.colorize, "--colorize")]
+        .into_iter()
+        .filter_map(|(set, flag)| set.then_some(flag))
+        .collect()
+}
+
+/// The background-removal flags set on the command line.
+fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
+    [
+        (args.lines, "--lines"),
+        (args.lines_after_bg, "--lines-after-bg"),
+        (args.line_color.is_some(), "--line-color"),
+        (args.bg_color.is_some(), "--bg-color"),
+        (args.bg_image.is_some(), "--bg-image"),
+        (args.bg_effect.is_some(), "--bg-effect"),
+        (args.effect.is_some(), "--effect"),
+        (args.contrast > 0.0, "--contrast"),
+        (args.line_fade > 0, "--line-fade"),
+    ]
+    .into_iter()
+    .filter_map(|(set, flag)| set.then_some(flag))
+    .collect()
+}
+
+/// Upscale mode: enlarge each input with `upscaler`, Refine after it
+/// (sharpen, AI blend, colour match) and, when asked, restore faces, as
+/// the app does. The model loads once for the whole batch.
+fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
+    use prunr_core::OutputScale;
+    let scale = match args.scale {
+        2 => OutputScale::X2,
+        3 => OutputScale::X3,
+        _ => OutputScale::X4,
+    };
+    let model = prunr_core::upscale::model_for_scale(upscaler.model_id(), scale, prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus));
+    for needed in std::iter::once(model).chain(args.restore_faces.map(CliFaceModel::model_id)) {
+        if !prunr_models::is_available(needed) {
+            eprintln!("error: {}", prunr_models::not_installed_error(needed));
+            return 1;
+        }
+    }
+    let engine = match load_engine(model, args.cpu, "upscale") {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let refine = prunr_core::upscale::Refine {
+        sharpen: args.sharpen.clamp(-1.0, 1.0),
+        sharpen_sigma: scale.sharpen_sigma(),
+        ai_blend: args.ai_blend.clamp(0.0, 1.0),
+        color_match: args.color_match,
+    };
+    let blend = prunr_core::face::FaceBlend { strength: f32::from(args.face_strength) / 100.0, ..Default::default() };
+    let faces = match args.restore_faces.map(|m| prunr_core::face::FaceRestorer::new(m.model_id())).transpose() {
+        Ok(faces) => faces.map(|restorer| (restorer, blend)),
+        Err(e) => {
+            eprintln!("error: cannot load the face model: {e}");
+            return 1;
+        }
+    };
+    let mut job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces };
+    run_each_input(args, &format!("_x{}.png", scale.factor()), "Upscaling", |img| job.run(img))
+}
+
+/// Colorize mode: colour each input with DDColor at `--color-strength`.
+/// The model loads once for the whole batch.
+fn run_colorize(args: &Cli) -> i32 {
+    let model = crate::gui::settings::COLORIZER.into();
+    if !prunr_models::is_available(model) {
+        eprintln!("error: {}", prunr_models::not_installed_error(model));
+        return 1;
+    }
+    let engine = match load_engine(model, args.cpu, "colorize") {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let strength = args.color_strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX);
+    run_each_input(args, "_color.png", "Colorizing", |img| {
+        let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
+            .map_err(|e| format!("colorize failed: {e}"))?;
+        Ok(prunr_core::colorize::colorized(&img, &plane, strength))
+    })
+}
+
+/// `model`'s session as the app builds it: every core, the model's graph
+/// optimisation level, the CPU alone with `--cpu`. The error is the line
+/// to print.
+fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Result<prunr_core::OrtEngine, String> {
+    prunr_core::OrtEngine::for_model(model, prunr_core::batch::ort_intra_threads(1), cpu)
+        .map_err(|e| format!("cannot load the {what} model: {e}"))
+}
+
+/// Read each input, `run` it, and save it beside the input with `suffix`
+/// (or into `--output`), reporting each as `doing` it. Returns the exit
+/// code: 1 when any input failed.
+fn run_each_input(
+    args: &Cli,
+    suffix: &str,
+    doing: &str,
+    mut run: impl FnMut(image::RgbaImage) -> Result<image::RgbaImage, String>,
+) -> i32 {
+    let is_batch = args.inputs.len() > 1;
+    let mut failed = 0;
+    for input in &args.inputs {
+        let out_path = output_path_with_suffix(input, &args.output, is_batch, suffix);
+        if let Err(e) = check_overwrite(&out_path, args.force) {
+            eprintln!("error: {e}");
+            failed += 1;
+            continue;
+        }
+        if !args.quiet {
+            eprintln!("{doing} {}...", input.display());
+        }
+        let result = image::open(input)
+            .map_err(|e| format!("failed to read {}: {e}", input.display()))
+            .and_then(|img| run(img.into_rgba8()))
+            .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
+        match result {
+            Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                failed += 1;
+            }
+        }
+    }
+    i32::from(failed > 0)
 }
 
 /// Eraser mode: load image + mask, run LaMa, save inpainted result.
-/// Single-file only for now — batch eraser via per-image mask paths
-/// would need a `--mask-dir` flag (not yet wired).
+/// Single-file only.
 fn run_inpaint(args: &Cli) -> i32 {
     if args.inputs.len() != 1 {
         eprintln!("error: --inpaint accepts exactly one input image (got {})", args.inputs.len());
@@ -384,28 +857,16 @@ fn run_inpaint(args: &Cli) -> i32 {
     if !args.quiet {
         eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
     }
-    // CLI defaults to LaMaFp32 — Big-LaMa selection from the CLI is
-    // tracked in PLAN 17-10 (would add `--inpaint-backend big-lama`).
-    let raw = match prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32) {
-        Ok(r) => r,
+    let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
+    let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {
+        Ok(r) => r.rgba,
         Err(e) => {
             eprintln!("error: inpaint failed: {e}");
             return 1;
         }
     };
-    // Post-process: color-match + seam guided blend. Same defaults as
-    // the GUI path so CLI output matches what the user sees on-screen.
-    let color_matched = prunr_core::inpaint_blend::color_match_inpainted(
-        &raw, &img, &mask,
-        prunr_core::inpaint_blend::COLOR_MATCH_RING_PX,
-    );
-    let result = prunr_core::inpaint_blend::seam_guided_blend(
-        &color_matched, &img, &mask,
-        prunr_core::inpaint_blend::SEAM_BLEND_RADIUS,
-        prunr_core::inpaint_blend::SEAM_BLEND_EPSILON,
-        prunr_core::inpaint_blend::SEAM_BLEND_BAND_PX,
-    );
-    if let Err(e) = result.save(&out_path) {
+    let result = finalize_inpaint(&raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0);
+    if let Err(e) = prunr_app::fs_util::save_image_replacing(&out_path, &result) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;
     }
@@ -428,6 +889,9 @@ fn output_path_with_suffix(
     let name = format!("{stem}{suffix}");
     match output {
         Some(out) if is_batch || out.is_dir() => out.join(name),
+        // A name without an extension is a file, saved as PNG: the
+        // extension names the format, and every mode writes one.
+        Some(out) if out.extension().is_none() => out.with_extension("png"),
         Some(out) => out.clone(),
         None => input.with_file_name(name),
     }
@@ -440,7 +904,7 @@ fn output_path_with_suffix(
 /// Single mode with -o file.png: use that path directly.
 /// No -o: write alongside input as {input_dir}/{stem}.prunr.png.
 fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
-    output_path_with_suffix(input, output, is_batch, ".prunr.png")
+    output_path_with_suffix(input, output, is_batch, &prunr_core::ExportFormat::Png.result_suffix())
 }
 
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
@@ -457,51 +921,20 @@ fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
 
 // ── Image loading with large-image handling ──────────────────────────────────
 
-/// Load image bytes applying the LargeImagePolicy.
-/// Returns PNG-encoded bytes ready for process_image / process_image_unchecked.
-fn load_with_policy(
-    path: &std::path::Path,
-    policy: LargeImagePolicy,
-    quiet: bool,
-) -> Result<Vec<u8>, CoreError> {
+fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, CoreError> {
     let img = load_image_from_path(path)?;
-
-    if let Some(_large_err) = check_large_image(&img) {
-        match policy {
-            LargeImagePolicy::Downscale => {
-                if !quiet {
-                    eprintln!(
-                        "warning: '{}' exceeds 8000px. Downscaling to {}px (use --large-image=process to skip).",
-                        path.display(), DOWNSCALE_TARGET
-                    );
-                }
-                let downscaled = downscale_image(img, DOWNSCALE_TARGET);
-                // Encode to PNG bytes for process_image
-                let rgba = downscaled.into_rgba8();
-                return encode_rgba_png(&rgba);
-            }
-            LargeImagePolicy::Process => {
-                if !quiet {
-                    eprintln!(
-                        "warning: '{}' exceeds 8000px. Processing at full size (--large-image=process).",
-                        path.display()
-                    );
-                }
-                // Fall through — process_image_unchecked will skip the guard
-            }
-        }
+    if !quiet {
+        eprintln!(
+            "warning: '{}' exceeds {}px. Downscaling to {}px (use --large-image=process to skip).",
+            path.display(), prunr_core::LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET
+        );
     }
-
-    // Encode as PNG bytes for uniform handling
-    let rgba = img.into_rgba8();
-    encode_rgba_png(&rgba)
+    encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
 }
-
-// ── Single-image execution path ──────────────────────────────────────────────
 
 // ── Batch execution path ─────────────────────────────────────────────────────
 
-fn run_batch(args: &Cli) -> i32 {
+fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     // Validate and decode --bg-image before setting up progress bars.
     // Placing the decode inside the MultiProgress draw region causes
     // eprintln! on decode failure to get overwritten by the next redraw.
@@ -521,7 +954,10 @@ fn run_batch(args: &Cli) -> i32 {
     // the per-tick fan-out cost the perf trace caught was ~13% of
     // prunr-binary self-time. 4 Hz feels indistinguishable for image
     // processing cadence and is the standard non-game-CLI rate.
-    let mp = if !args.quiet {
+    // Spinners only on a terminal: elsewhere indicatif draws nothing, and
+    // a result's message (an error above all) would never show. Without
+    // them each result prints a line instead.
+    let mp = if !args.quiet && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
         Some(MultiProgress::with_draw_target(
             indicatif::ProgressDrawTarget::stderr_with_hz(4),
         ))
@@ -551,7 +987,7 @@ fn run_batch(args: &Cli) -> i32 {
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));
-            // 250 ms (was 80 ms): the worker emits Progress at fixed
+            // 250 ms tick: the worker emits Progress at fixed
             // pipeline checkpoints, with multi-second silence across
             // `session.run()`. Without a tick the spinner glyph would
             // freeze during the most-uncertain wait. The outer
@@ -580,10 +1016,10 @@ fn run_batch(args: &Cli) -> i32 {
             })
         {
             Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
-                && (w > prunr_core::LARGE_IMAGE_LIMIT || h > prunr_core::LARGE_IMAGE_LIMIT) =>
+                && prunr_core::exceeds_large_image_limit(w, h) =>
             {
                 // Oversized — downscale to temp file, pass temp path to subprocess
-                match load_with_policy(input, args.large_image, args.quiet) {
+                match downscale_to_png(input, args.quiet) {
                     Ok(bytes) => {
                         let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
                             .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
@@ -623,33 +1059,14 @@ fn run_batch(args: &Cli) -> i32 {
     let mask = args.mask_settings();
 
     let line_mode = args.line_mode();
-    // `Some("zzzzzz")` and `None` collapsed to the same `None` before,
-    // which silently dropped a typo'd `--line-color "ff00aa "` (note
-    // trailing space). Distinguish "flag absent" from "flag set to
-    // garbage" so automation scripts can detect the failure.
-    let solid_line_color = match args.line_color.as_deref() {
-        Some(s) => match parse_hex_color(s) {
-            Some(c) => Some(c),
-            None => {
-                eprintln!("error: --line-color: '{s}' is not a 6-digit hex color (e.g. ff00aa)");
-                return 1;
-            }
-        },
-        None => None,
-    };
-    let bg_color = match args.bg_color.as_deref() {
-        Some(s) => match parse_hex_color(s) {
-            Some(c) => Some(c),
-            None => {
-                eprintln!("error: --bg-color: '{s}' is not a 6-digit hex color (e.g. ffffff)");
-                return 1;
-            }
-        },
-        None => None,
-    };
+    // Distinguish "flag absent" from "flag set to garbage" (e.g. a
+    // typo'd `--line-color "ff00aa "` with a trailing space) so
+    // automation scripts can detect the failure.
+    let Ok(solid_line_color) = flag_color("--line-color", args.line_color.as_deref(), "ff00aa") else { return 1 };
+    let Ok(bg_color) = flag_color("--bg-color", args.bg_color.as_deref(), "ffffff") else { return 1 };
     // The app's rule: an effect wins over an image, an image over a colour.
     let backdrop = match (args.bg_effect, bg_image, bg_color) {
-        (Some(effect), _, _) => CliBackdrop::Effect(effect),
+        (Some(effect), _, _) => CliBackdrop::Effect(effect, depth),
         (None, Some(image), _) => CliBackdrop::Image(image, args.bg_image_fit),
         (None, None, Some(color)) => CliBackdrop::Color(color),
         (None, None, None) => CliBackdrop::Transparent,
@@ -664,9 +1081,13 @@ fn run_batch(args: &Cli) -> i32 {
         line_style: prunr_core::LineStyle::default(),
         input_transform: prunr_core::InputTransform::default(),
     };
+    let lines = prunr_app::subprocess::manager::WorkerLines {
+        mode: line_mode, edge, fade_pct: args.line_fade,
+        scales: prunr_app::subprocess::protocol::InferredScales::Drawn,
+    };
     let batch_results = run_batch_subprocess(
         &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        line_mode, edge, &backdrop,
+        lines, &backdrop,
         &spinners_arc, &inputs_arc, quiet,
     );
 
@@ -679,7 +1100,7 @@ fn run_batch(args: &Cli) -> i32 {
         let original_idx = valid_indices[batch_idx];
         let input = &args.inputs[original_idx];
         let elapsed = start_times[original_idx].elapsed();
-        let out_path = output_path(input, &args.output, true);
+        let out_path = args.result_path(input);
 
         let spinner_opt = spinners_arc.get(original_idx).and_then(|o| o.as_ref());
 
@@ -705,7 +1126,7 @@ fn run_batch(args: &Cli) -> i32 {
                         continue;
                     }
                 };
-                match std::fs::write(&out_path, &png_bytes) {
+                match prunr_app::fs_util::write_bytes_replacing(&out_path, &png_bytes) {
                     Ok(_) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {
@@ -762,8 +1183,8 @@ fn run_batch(args: &Cli) -> i32 {
 /// Run batch processing via subprocess with auto-retry on OOM.
 /// Accepts file paths — bytes are read lazily by the subprocess.
 // Single-call CLI dispatch — recipe (model + mask + line_mode + edge + bg*)
-// + runtime knobs (jobs, force_cpu) + UI surface (spinners, paths, quiet)
-// arrive together. A struct split here trades 14 args for 14 fields
+// + runtime knobs (jobs, cpu_only) + UI surface (spinners, paths, quiet)
+// arrive together. A struct split here trades each arg for a field
 // behind a builder no other site reuses.
 #[allow(clippy::too_many_arguments)]
 fn run_batch_subprocess(
@@ -772,9 +1193,8 @@ fn run_batch_subprocess(
     model: ModelKind,
     initial_jobs: usize,
     mask: MaskSettings,
-    force_cpu: bool,
-    line_mode: LineMode,
-    edge: prunr_core::EdgeSettings,
+    cpu_only: bool,
+    lines: prunr_app::subprocess::manager::WorkerLines,
     backdrop: &CliBackdrop,
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
@@ -788,9 +1208,8 @@ fn run_batch_subprocess(
     let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
     let mut max_jobs = initial_jobs;
 
-    // Inverse index: orig_idx (item_id cast to usize) → batch_results slot.
-    // The event loop previously linear-scanned valid_indices per event;
-    // on a 1000-image batch that was O(n²) over the run. This map is O(1).
+    // Inverse index: orig_idx (item_id cast to usize) → batch_results slot,
+    // so each event finds its slot without scanning valid_indices.
     let orig_to_batch: std::collections::HashMap<usize, usize> = valid_indices
         .iter()
         .enumerate()
@@ -803,7 +1222,7 @@ fn run_batch_subprocess(
         // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, force_cpu, line_mode, edge,
+            model, effective_jobs, mask, cpu_only, lines,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -859,14 +1278,11 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
-                        if let Some(pos) = batch_idx {
-                            in_flight.remove(pos);
-                        }
+                        let ridx = orig_to_batch.get(&orig_idx).copied();
+                        // in_flight holds batch indices, each sent once a pass.
+                        in_flight.retain(|&i| Some(i) != ridx);
 
-                        let result = std::fs::read(&result_path)
-                            .ok()
-                            .and_then(|data| image::RgbaImage::from_raw(width, height, data))
+                        let result = prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
                             .map(|mut rgba_image| {
                                 backdrop.apply(&mut rgba_image, &inputs[orig_idx]);
                                 prunr_core::ProcessResult {
@@ -875,9 +1291,8 @@ fn run_batch_subprocess(
                                 }
                             })
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
-                        let _ = std::fs::remove_file(&result_path);
 
-                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
+                        if let Some(ridx) = ridx {
                             results[ridx] = Some(result);
                         }
 
@@ -893,11 +1308,10 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageError { item_id, error } => {
                         let orig_idx = item_id as usize;
-                        let batch_idx = in_flight.iter().position(|&i| valid_indices[i] as u64 == item_id);
-                        if let Some(pos) = batch_idx {
-                            in_flight.remove(pos);
-                        }
-                        if let Some(&ridx) = orig_to_batch.get(&orig_idx) {
+                        let ridx = orig_to_batch.get(&orig_idx).copied();
+                        // in_flight holds batch indices, each sent once a pass.
+                        in_flight.retain(|&i| Some(i) != ridx);
+                        if let Some(ridx) = ridx {
                             results[ridx] = Some(Err(CoreError::Model(error)));
                         }
                     }
@@ -979,7 +1393,7 @@ pub fn run_doctor() {
     println!("CPU brand:   {}", p.cpu_brand);
     println!("dGPU:        {}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
     println!("iGPU:        {}", p.igpu.map_or("None".to_string(), |g| g.to_string()));
-    println!("Recommends OpenVINO: {}", p.recommends_openvino());
+    println!("Recommended runtime: {}", p.recommended_runtime().map_or("none", |rt| rt.display_name()));
     println!("Recommends ROCm:     {}", p.recommends_rocm());
     println!();
 
@@ -993,10 +1407,12 @@ pub fn run_doctor() {
             println!("Runtime store:  {}", root.display());
             for (name, has_dylib) in &diag.store_entries {
                 let mark = if *has_dylib { "OK" } else { "MISSING" };
-                println!("  - {name} [{mark}]");
+                let preferred = if diag.preferred.as_ref() == Some(name) { " (preferred)" } else { "" };
+                println!("  - {name} [{mark}]{preferred}");
             }
         }
     }
+    println!("Preferred:      {}", diag.preferred.as_deref().unwrap_or("(none: first by name)"));
     if let Some((path, exists)) = &diag.bundled {
         let mark = if *exists { "OK" } else { "(absent)" };
         println!("Bundled:        {} {mark}", path.display());
@@ -1004,6 +1420,9 @@ pub fn run_doctor() {
     match &diag.resolved {
         Some((p, src)) => println!("Active source:  {src} → {}", p.display()),
         None => println!("Active source:  NONE — `prunr` will refuse to start without --doctor"),
+    }
+    for (lib, exists) in &diag.beside_runtime {
+        println!("Beside it:      {} {}", lib.display(), if *exists { "OK" } else { "(absent)" });
     }
     println!();
 
@@ -1018,8 +1437,7 @@ pub fn run_doctor() {
     section("Paths");
     println!("Data dir:     {}", path_or_unknown(prunr_models::data_dir()));
     println!("Models dir:   {}", path_or_unknown(prunr_models::on_demand_dir()));
-    println!("Settings:     {}", path_or_unknown(
-        dirs::config_dir().map(|d| d.join("prunr").join("settings.json"))));
+    println!("Settings:     {}", path_or_unknown(prunr_app::gui::settings::Settings::config_path()));
     println!();
 
     section("Environment");
@@ -1039,9 +1457,230 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
         |p| p.display().to_string())
 }
 
+/// `prunr bench`: each step on stderr as it starts, the machine and the
+/// results table on stdout, and the report rewritten after every step so
+/// a crash still leaves one naming the step it crashed in.
+pub fn run_bench(args: &BenchArgs) -> i32 {
+    use prunr_app::bench::{self, report};
+    let models = match bench::select(&args.models, args.heavy, prunr_models::is_available) {
+        Ok(models) => models,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let inputs = match &args.image {
+        None => bench::Inputs::built_in(),
+        Some(path) => match prunr_core::load_image_from_path(path) {
+            Ok(img) => bench::Inputs::from_photo(img, path.display().to_string()),
+            Err(e) => {
+                eprintln!("error: cannot read {}: {e}", path.display());
+                return 1;
+            }
+        },
+    };
+    let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None };
+    print!("{}", report::header_text(&report.header));
+    println!();
+    let mut files = ReportFiles::new(args.out.clone());
+    files.write(&report);
+    bench::run(&models, &inputs, args.runs, &mut |event| match event {
+        bench::Event::Stage { index, total, model, stage } => {
+            eprintln!("[{index}/{total}] {model}: {stage}");
+            report.running = Some(format!("{model}: {stage}"));
+            files.write(&report);
+        }
+        bench::Event::Done(row) => {
+            eprintln!("      {}: {}", row.model, row.verdict.label());
+            report.rows.push(*row);
+            report.running = None;
+            files.write(&report);
+        }
+    });
+    println!();
+    print!("{}", report::terminal_table(&report.rows));
+    println!();
+    println!("{}.", report::summary(&report.rows));
+    println!("Report: {} and {}", files.md.display(), files.json().display());
+    0
+}
+
+/// The report's Markdown file and its JSON copy. A path that cannot be
+/// written falls back once to the temp dir, so the report survives a
+/// read-only working directory.
+struct ReportFiles {
+    md: PathBuf,
+    warned: bool,
+}
+
+impl ReportFiles {
+    fn new(md: PathBuf) -> Self {
+        Self { md: std::path::absolute(&md).unwrap_or(md), warned: false }
+    }
+
+    fn json(&self) -> PathBuf {
+        self.md.with_extension("json")
+    }
+
+    fn write(&mut self, report: &prunr_app::bench::report::Report) {
+        let save = |files: &Self| -> std::io::Result<()> {
+            std::fs::write(&files.md, prunr_app::bench::report::markdown(report))?;
+            std::fs::write(files.json(), prunr_app::bench::report::json(report))
+        };
+        let Err(e) = save(self) else { return };
+        if self.warned {
+            return;
+        }
+        self.warned = true;
+        let fallback = std::env::temp_dir().join(self.md.file_name().unwrap_or(std::ffi::OsStr::new("prunr-bench.md")));
+        eprintln!("warning: cannot write {}: {e}; writing {} instead", self.md.display(), fallback.display());
+        self.md = fallback;
+        if let Err(e) = save(self) {
+            eprintln!("warning: cannot write {} either: {e}", self.md.display());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    #[test]
+    fn a_colour_flag_is_absent_hex_or_refused() {
+        assert_eq!(super::flag_color("--bg-color", None, "ffffff"), Ok(None));
+        assert_eq!(super::flag_color("--bg-color", Some("#ff00aa"), "ffffff"), Ok(Some([255, 0, 170])));
+        assert_eq!(super::flag_color("--bg-color", Some("ff00aa "), "ffffff"), Err(()));
+    }
+
+    /// Every run that prints borrows the terminal on Windows, where a
+    /// release build has none of its own; `--doctor` and
+    /// `--clear-ep-cache` printed nowhere there. The GUI does not.
+    #[test]
+    fn every_printing_run_writes_to_the_terminal() {
+        let writes = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args)).writes_to_terminal();
+        assert!(writes(&["--doctor"]));
+        assert!(writes(&["--clear-ep-cache"]));
+        assert!(writes(&["photo.jpg"]));
+        assert!(writes(&["--debug"]));
+        assert!(!writes(&[]), "the GUI");
+        assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
+        assert!(writes(&["bench"]));
+    }
+
+    /// `prunr bench` takes its own flags; a file named like it, or any
+    /// other input, is still an image to process.
+    #[test]
+    fn bench_is_a_subcommand_beside_the_image_inputs() {
+        let cli = super::Cli::parse_from(["prunr", "bench", "--models", "silueta,real_esrgan_x2plus", "--runs", "5", "--heavy", "--out", "r.md"]);
+        let Some(super::Command::Bench(args)) = &cli.command else { panic!("no bench: {cli:?}") };
+        assert_eq!(args.models, ["silueta", "real_esrgan_x2plus"]);
+        assert_eq!((args.runs, args.heavy, args.out.as_path()), (5, true, std::path::Path::new("r.md")));
+        assert!(cli.inputs.is_empty());
+        let defaults = super::Cli::parse_from(["prunr", "bench"]);
+        let Some(super::Command::Bench(args)) = &defaults.command else { panic!("no bench") };
+        assert_eq!((args.models.len(), args.runs, args.heavy, args.image.as_ref()), (0, 3, false, None));
+        assert_eq!(args.out, std::path::Path::new("prunr-bench.md"));
+        let photo = super::Cli::parse_from(["prunr", "bench.jpg", "b.png"]);
+        assert!(photo.command.is_none());
+        assert_eq!(photo.inputs.len(), 2);
+        assert!(super::Cli::try_parse_from(["prunr", "bench", "--runs", "500"]).is_err());
+    }
+
+    /// `-o` with one input is the output file; with several it is the
+    /// folder each result goes into.
+    #[test]
+    fn dash_o_is_the_file_for_one_input_and_the_folder_for_several() {
+        use std::path::Path;
+        let one = super::Cli::parse_from(["prunr", "in/a.jpg", "-o", "out/result.png"]);
+        assert_eq!(one.result_path(Path::new("in/a.jpg")), Path::new("out/result.png"));
+        let many = super::Cli::parse_from(["prunr", "in/a.jpg", "in/b.jpg", "-o", "out"]);
+        assert_eq!(many.result_path(Path::new("in/b.jpg")), Path::new("out/b.prunr.png"));
+        let none = super::Cli::parse_from(["prunr", "in/a.jpg"]);
+        assert_eq!(none.result_path(Path::new("in/a.jpg")), Path::new("in/a.prunr.png"));
+    }
+
+    #[test]
+    fn outline_and_shadow_flags_reach_the_mask_settings() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--outline", "8:000000", "--shadow", "drop"]);
+        let d = cli.mask_settings().decoration;
+        assert_eq!((d.outline_width, d.outline_color, d.shadow), (8.0, [0, 0, 0], prunr_core::ShadowKind::Drop));
+        let white = super::Cli::parse_from(["prunr", "a.png", "--outline", "4"]).mask_settings().decoration;
+        assert_eq!(white.outline_color, [255, 255, 255]);
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--outline", "120"]).is_err());
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
+    }
+
+    /// An `-o` name without an extension saves a PNG, whatever the mode.
+    #[test]
+    fn an_output_name_without_an_extension_is_a_png_file() {
+        use super::output_path_with_suffix;
+        use std::path::PathBuf;
+        let input = std::path::Path::new("/photos/a.jpg");
+        let out = |o: &str| output_path_with_suffix(input, &Some(PathBuf::from(o)), false, "_x.png");
+        assert_eq!(out("/tmp/result"), PathBuf::from("/tmp/result.png"));
+        assert_eq!(out("/tmp/result.webp"), PathBuf::from("/tmp/result.webp"));
+        assert_eq!(output_path_with_suffix(input, &Some(PathBuf::from("/tmp/dir")), true, "_x.png"), PathBuf::from("/tmp/dir/a_x.png"));
+        assert_eq!(output_path_with_suffix(input, &None, false, "_x.png"), PathBuf::from("/photos/a_x.png"));
+    }
+
+    /// `--line-fade` reads the depth model only when lines are drawn;
+    /// on its own it does nothing and must not refuse the run.
+    #[test]
+    fn line_fade_needs_depth_only_with_lines() {
+        let wants = |args: &[&str]| super::wants_depth(&super::Cli::parse_from(["prunr", "a.png"].iter().chain(args).copied()));
+        assert!(!wants(&["--line-fade", "40"]));
+        assert!(wants(&["--lines", "--line-fade", "40"]));
+        assert!(wants(&["--lines-after-bg", "--line-fade", "40"]));
+        assert!(wants(&["--depth-map"]));
+        assert!(!wants(&["--lines"]));
+    }
+
+    /// The upscale flags parse into a mode; its knobs need it, and faces
+    /// need a face model named.
+    #[test]
+    fn the_upscale_flags_need_upscale_mode() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);
+        assert_eq!(cli.upscale, Some(super::CliUpscaler::Nomos));
+        assert_eq!((cli.scale, cli.sharpen, cli.face_strength), (3, -0.5, 70));
+        assert_eq!(cli.restore_faces.map(super::CliFaceModel::model_id), Some(prunr_models::ModelId::FaceRestoreFormerPp));
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--scale", "2"]).is_err(), "--scale needs --upscale");
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "5"]).is_err());
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--face-strength", "50"]).is_err(), "strength needs a face model");
+        let mixed = super::Cli::parse_from(["prunr", "a.png", "--upscale", "siax", "--bg-color", "ff0000"]);
+        assert_eq!(super::background_removal_flags(&mixed), ["--bg-color"]);
+    }
+
+    /// Colorize is its own mode: Strength needs it, and it takes no other
+    /// mode alongside.
+    #[test]
+    fn the_colorize_flags_need_colorize_mode() {
+        let cli = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--color-strength", "0.6"]);
+        assert!(cli.colorize);
+        assert_eq!(cli.color_strength, 0.6);
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "--colorize"]).color_strength, 1.0);
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--color-strength", "0.5"]).is_err(), "--color-strength needs --colorize");
+        let both = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--upscale", "nomos"]);
+        assert_eq!(super::selected_modes(&both), ["--upscale", "--colorize"]);
+        let mixed = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--bg-color", "ff0000"]);
+        assert_eq!(super::background_removal_flags(&mixed), ["--bg-color"]);
+    }
+
+    /// Help › Command-line reference lists every flag `prunr --help`
+    /// shows, so a new or renamed flag cannot leave it behind.
+    #[test]
+    fn the_gui_reference_names_every_visible_flag() {
+        use clap::CommandFactory;
+        let text = include_str!("gui/views/cli_help.rs");
+        let missing: Vec<String> = super::Cli::command()
+            .get_arguments()
+            .filter(|a| !a.is_hide_set())
+            .filter_map(|a| a.get_long())
+            .filter(|long| !["help", "version"].contains(long))
+            .map(|long| format!("--{long}"))
+            .filter(|flag| !text.contains(&format!("\"{flag}")))
+            .collect();
+        assert!(missing.is_empty(), "missing from the reference: {missing:?}");
+    }
 
     #[test]
     fn bg_effect_reads_blur_with_a_radius_and_bw() {
@@ -1050,9 +1689,38 @@ mod tests {
         assert_eq!(parse_bg_effect("blur"), Ok(BgEffect::BlurredSource { radius: 12 }));
         assert_eq!(parse_bg_effect("blur:30"), Ok(BgEffect::BlurredSource { radius: 30 }));
         assert_eq!(parse_bg_effect("bw"), Ok(BgEffect::DesaturatedSource));
+        assert_eq!(parse_bg_effect("lens"), Ok(BgEffect::LensBlur { amount_pct: 50 }));
+        assert_eq!(parse_bg_effect("lens:80"), Ok(BgEffect::LensBlur { amount_pct: 80 }));
+        assert!(parse_bg_effect("lens:120").is_err());
         for bad in ["blur:0", "blur:65", "blur:x", "invert", ""] {
             assert!(parse_bg_effect(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_depth_map_goes_beside_the_result() {
+        use clap::Parser;
+        let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "-o", "/out/x.png", "--depth-map"]);
+        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/out/cat-depth.png"));
+        let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "--depth-map", "--depth-only"]);
+        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/p/cat-depth.png"));
+        assert!(super::Cli::try_parse_from(["prunr", "/p/cat.jpg", "--depth-only"]).is_err(), "--depth-only needs --depth-map");
+    }
+
+    /// `--depth-map` writes the map a backdrop measured instead of
+    /// measuring the input again, and keeps it no longer.
+    #[test]
+    fn a_depth_map_a_backdrop_measured_is_written_without_measuring_again() {
+        use clap::Parser;
+        let args = super::Cli::parse_from(["prunr", "/missing/cat.jpg", "--depth-map"]);
+        let depth = super::CliDepth::new(&args);
+        let map = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
+        let input = std::path::Path::new("/missing/cat.jpg");
+        depth.kept.as_ref().expect("kept with --depth-map").borrow_mut().insert(input.into(), (std::sync::Arc::clone(&map), (4, 8)));
+        let (got, dims) = depth.for_file(input).expect("the kept map");
+        assert!(std::sync::Arc::ptr_eq(&got, &map) && dims == (4, 8));
+        assert!(depth.for_file(input).is_err(), "taken once; the missing file is read the next time");
+        assert!(super::CliDepth::new(&super::Cli::parse_from(["prunr", "/p/cat.jpg"])).kept.is_none(), "nothing kept without --depth-map");
     }
 
     /// The effect is made from the input photo and fills what the result
@@ -1063,7 +1731,7 @@ mod tests {
         let photo = dir.path().join("photo.png");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
         let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
-        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource).apply(&mut result, &photo);
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default()).apply(&mut result, &photo);
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");
@@ -1088,6 +1756,15 @@ mod tests {
         let old = super::Cli::try_parse_from(["prunr", "--line-strength", "0.2", "x.png"]).unwrap();
         assert_eq!(old.line_strength, 0.2);
         assert!(super::Cli::try_parse_from(["prunr", "--line-composition", "inverse", "x.png"]).is_err());
+    }
+
+    /// Scripts written for the retired Balanced scale keep working.
+    #[test]
+    fn line_scale_balanced_reads_as_fused() {
+        let a = super::Cli::try_parse_from(["prunr", "--line-scale", "balanced", "x.png"]).unwrap();
+        assert_eq!(a.line_scale, prunr_core::EdgeScale::Fused);
+        let fine = super::Cli::try_parse_from(["prunr", "--line-scale", "fine", "x.png"]).unwrap();
+        assert_eq!(fine.line_scale, prunr_core::EdgeScale::Fine);
     }
 
     /// Every Mask panel knob has a flag: Feather and Edge width reach the

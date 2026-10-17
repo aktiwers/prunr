@@ -17,33 +17,49 @@ use egui_notify::{Anchor, Toast};
 const TOAST_LINE_CHARS: usize = 60;
 
 #[derive(Default)]
-pub(crate) struct Toasts(egui_notify::Toasts);
+pub(crate) struct Toasts(
+    egui_notify::Toasts,
+    #[cfg(test)] Vec<(&'static str, String)>,
+);
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
-        Self(egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin))
+        Self(
+            egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin),
+            #[cfg(test)] Vec::new(),
+        )
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.success(wrap(&caption.into()))
+        let caption = caption.into();
+        #[cfg(test)] self.1.push(("success", caption.clone()));
+        self.0.success(wrap(&caption))
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.info(wrap(&caption.into()))
+        let caption = caption.into();
+        #[cfg(test)] self.1.push(("info", caption.clone()));
+        self.0.info(wrap(&caption))
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.warning(wrap(&caption.into()))
+        let caption = caption.into();
+        #[cfg(test)] self.1.push(("warning", caption.clone()));
+        self.0.warning(wrap(&caption))
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.error(wrap(&caption.into()))
-    }
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn basic(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.basic(wrap(&caption.into()))
+        let caption = caption.into();
+        #[cfg(test)] self.1.push(("error", caption.clone()));
+        self.0.error(wrap(&caption))
     }
 
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn dismiss_all_toasts(&mut self) {
-        self.0.dismiss_all_toasts()
+    #[cfg(test)]
+    pub fn len_for_test(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The last toast shown: its level ("success", "error", …) and caption.
+    #[cfg(test)]
+    pub fn last_for_test(&self) -> Option<(&'static str, &str)> {
+        self.1.last().map(|(level, caption)| (*level, caption.as_str()))
     }
 
     pub fn show(&mut self, ctx: &Context) {

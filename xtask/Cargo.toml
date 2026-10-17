@@ -11,17 +11,16 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 zstd = { workspace = true }
-dirs = { workspace = true }
 # `dev-models` keeps `include_bytes!` out so xtask can compile before the
 # .zst files exist (xtask is the tool that produces them).
 prunr-models = { path = "../crates/prunr-models", features = ["dev-models"] }
 prunr-runtime-install = { path = "../crates/prunr-runtime-install" }
 
-# Phase 19-02b probe — see `probe_load_dynamic` in src/main.rs.
+# Used by the load-dynamic probe task.
 ort = { workspace = true }
 ndarray = { workspace = true }
-# 19-09: extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
+# Extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
 zip = { workspace = true }
 
-# 20-04: read/write PNGs for the `render-golden-diff` subcommand.
+# Read/write PNGs for the `render-golden-diff` subcommand.
 image = { workspace = true }

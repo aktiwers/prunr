@@ -8,12 +8,28 @@ use crate::{
     types::{CoreError, MaskSettings, ModelKind, ProcessResult},
 };
 
-/// Create an engine pool with GPU/CPU-aware sizing.
-/// GPU: 2 engines for pipeline overlap. CPU: 1 engine with full thread parallelism.
+/// How many engines a batch builds for `jobs` on `provider`: at most two
+/// on a GPU (VRAM), one on the host CPU for a model whose single run
+/// already fills every core, else one per job. OpenVINO runs on the host
+/// CPU here, so the one-engine rule covers it; its pool keeps the cap of
+/// two, which is what was measured.
+pub fn engine_pool_size(model: ModelKind, jobs: usize, cpu_only: bool, provider: &str) -> usize {
+    let jobs = jobs.max(1);
+    let on_cpu = cpu_only || crate::engine::runs_on_host_cpu(provider);
+    if on_cpu && !model.parallel_jobs_pay_on_cpu() {
+        1
+    } else if !cpu_only && !provider.eq_ignore_ascii_case(crate::engine::CPU_NAME) {
+        jobs.min(2)
+    } else {
+        jobs
+    }
+}
+
+/// Create an engine pool sized by `engine_pool_size`.
 ///
 /// Caller invariant: must not be called from inside a rayon scope — the
 /// parallel-build path uses the global pool and could deadlock under
-/// nested rayon (same hazard as `apply_background_color`).
+/// nested rayon.
 ///
 /// During parallel build (`pool_size > 1`, non-DirectML) the peak RSS
 /// briefly doubles relative to sequential build because both ORT
@@ -26,21 +42,12 @@ pub fn create_engine_pool(
     jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    let active = OrtEngine::detect_active_provider();
-    let is_gpu = !cpu_only && !active.eq_ignore_ascii_case("CPU");
-    // GPU: cap at 2 engines (VRAM is limited, more causes allocation failures).
-    // CPU: respect user's setting fully — the admission controller manages
-    // overall memory pressure at the batch level.
-    let pool_size = if is_gpu { jobs.min(2) } else { jobs };
+    let pool_size = engine_pool_size(model, jobs, cpu_only, &OrtEngine::detect_active_provider());
     // With many engines, distribute CPU threads evenly to avoid oversubscription.
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
         ort_intra_threads(pool_size)
-    };
-
-    let create = |threads| {
-        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
     };
 
     // Build engines in parallel where the EP allows it. CPU, OpenVINO,
@@ -50,7 +57,10 @@ pub fn create_engine_pool(
     // when DirectML is the active provider.
     let serial = pool_size <= 1 || crate::engine::directml_active();
 
-    let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
+    // Held for the whole pool: a bundled model unpacks once for every
+    // engine, built in parallel or one after another, and is freed after.
+    let _weights = prunr_models::resolve_bytes(model.into());
+    let build = |_idx| OrtEngine::with_threads(model, intra_threads, cpu_only).map(std::sync::Arc::new);
     if serial {
         (0..pool_size).map(build).collect()
     } else {
@@ -83,16 +93,15 @@ fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
 /// # Arguments
 /// - `images`: Slice of image byte slices (PNG, JPEG, WebP, BMP)
 /// - `model`: Which model to use for all images in this batch
-/// - `jobs`: Desired parallelism. Actual pool size is capped for GPU (max 2) and CPU (1).
+/// - `jobs`: Desired parallelism; the pool is sized by `engine_pool_size`.
 /// - `progress_for`: the progress handle for image `idx`.
 ///
 /// # Returns
 /// `Vec<Result<ProcessResult, CoreError>>` — one entry per input image, in input order.
 ///
 /// # Engine Pool
-/// Engines are created upfront (not per-image). GPU backends cap at 2 sessions to
-/// prevent VRAM exhaustion. CPU uses 1 engine with full thread parallelism. Rayon
-/// pool is sized to match engine count, so there's no Mutex contention.
+/// Engines are created upfront (not per-image). The rayon pool is sized
+/// to match the engine count, so there's no Mutex contention.
 pub fn batch_process<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -107,9 +116,8 @@ where
 
 /// Like `batch_process` but with custom mask settings.
 ///
-/// Uses engine pooling: engines are created upfront (not per-image).
-/// GPU backends are capped at 2 sessions to prevent VRAM exhaustion.
-/// CPU creates one engine per job, each with num_cpus/jobs intra-op threads.
+/// Uses engine pooling: engines are created upfront (not per-image),
+/// each with num_cpus/engines intra-op threads.
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -135,12 +143,8 @@ where
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
 
-    // Write each result directly into its pre-sized slot via
-    // `par_iter_mut().zip(...)`. The previous version `.collect`-ed
-    // a parallel intermediate Vec then sequentially copied into
-    // `results` — held N × `ProcessResult` (each carrying a full RGBA)
-    // alive in a duplicate buffer for the whole batch. On a 100-image
-    // batch of 4 K images that was multi-GB redundant retention.
+    // Results go straight into their slots: no second N × ProcessResult
+    // buffer, each holding a full RGBA.
     pool.install(|| {
         results
             .par_iter_mut()
@@ -158,6 +162,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_heavy_model_gets_one_engine_on_the_host_cpu_and_a_gpu_at_most_two() {
+        for (model, jobs, cpu_only, provider, engines) in [
+            (ModelKind::BiRefNetLite, 4, false, "CPU", 1),
+            (ModelKind::BiRefNetLite, 4, false, "OpenVINO", 1),
+            (ModelKind::BiRefNetLite, 4, true, "CUDA", 1),
+            (ModelKind::BiRefNetLite, 4, false, "CUDA", 2),
+            (ModelKind::BiRefNetLite, 1, false, "CUDA", 1),
+            (ModelKind::Silueta, 4, false, "CPU", 4),
+            (ModelKind::Silueta, 4, true, "CUDA", 4),
+            (ModelKind::Silueta, 4, false, "OpenVINO", 2),
+            (ModelKind::Silueta, 4, false, "CUDA", 2),
+            (ModelKind::U2net, 3, false, "CPU", 3),
+            (ModelKind::U2net, 0, false, "CPU", 1),
+        ] {
+            assert_eq!(engine_pool_size(model, jobs, cpu_only, provider), engines, "{model:?} × {jobs} on {provider}, cpu_only {cpu_only}");
+        }
+    }
 
     #[test]
     fn test_ort_intra_threads_at_least_one() {
@@ -213,19 +236,6 @@ mod tests {
             |_| Progress::none(),
         );
         assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_batch_process_bad_image_returns_err_not_panic() {
-        // batch_process with a garbage image should return Err in that slot, not panic
-        // We test the error type check independently of OrtEngine creation
-        // (unit test without dev-models — just verify the error propagation logic)
-        use crate::formats::load_image_from_bytes;
-        let result = load_image_from_bytes(b"garbage");
-        assert!(
-            matches!(result, Err(CoreError::ImageFormat(_))),
-            "Expected ImageFormat error for garbage bytes"
-        );
     }
 
     #[cfg(feature = "dev-models")]

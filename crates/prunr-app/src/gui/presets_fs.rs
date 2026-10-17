@@ -18,9 +18,9 @@
 //! - Never rename a field without also adding a `#[serde(alias = "old_name")]`.
 //! - Never change a field's type in a way that breaks existing JSON
 //!   (e.g. `u8` → enum). If you must, bump a format version and add a
-//!   migration path in `load_all`.
+//!   migration path in `parse_preset_value`.
 //!
-//! The `loads_old_preset_with_unknown_fields` and
+//! The `loads_preset_with_unknown_fields` and
 //! `loads_empty_preset_as_defaults` tests at the bottom of this file are
 //! the tripwires — if you add a field without `#[serde(default)]`, they
 //! will fail and tell you what's missing.
@@ -34,8 +34,8 @@ use super::item_settings::ItemSettings;
 use super::presets::{
     model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
 };
-use super::settings::{PRUNR_PRESET, Settings};
-use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
+use super::settings::{DEFAULT_PRESET_MODEL, PRUNR_PRESET};
+use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
 /// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
@@ -54,7 +54,7 @@ const SEED_MARKER: &str = ".builtins_seeded_v2";
 /// Resolve the presets directory, creating it if needed. Returns `None` if
 /// the platform config dir can't be resolved (very rare).
 pub(crate) fn presets_dir() -> Option<PathBuf> {
-    let base = dirs::config_dir()?;
+    let base = super::settings::config_root()?;
     let dir = base.join(PRESETS_SUBDIR);
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
@@ -94,8 +94,7 @@ pub fn sanitize_filename(name: &str) -> String {
 /// Wrap a v1 preset file (raw `ItemSettings` shape, no `format_version`
 /// key) into a v2 `PresetFile`. v1 files predate per-model bundling, so
 /// they carry no model identity — every v1 file wraps under the
-/// workspace default (`Settings::default().model`, currently
-/// `BiRefNetLite`). The resolver pulls Prunr-floor brush/sd values at
+/// default model (`DEFAULT_PRESET_MODEL`). The resolver pulls Prunr-floor brush/sd values at
 /// apply-time, so missing brush/sd is not data loss.
 ///
 /// Returns `None` when the JSON does not parse as `ItemSettings` — caller
@@ -109,20 +108,11 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
         return None;
     }
     let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
-    // Settings::default().model is BiRefNetLite, whose to_model_id() is
-    // Some(ModelId::BiRefNetLite) — invariant is local (settings.rs Default
-    // impl + SettingsModel::to_model_id match arms).
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let mut models = HashMap::new();
-    models.insert(model_id_key(wrap_key), ModelPreset {
+    Some(PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
         item_settings,
         brush: Default::default(),
         sd: None,
-    });
-    Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
+    }))
 }
 
 /// Load every preset file in the directory into a map. Malformed files
@@ -134,8 +124,7 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
 /// file is untouched until the user explicitly re-saves it. v2 files
 /// deserialize directly.
 ///
-/// Called once at startup from `Settings::load` (before the first frame) and
-/// once per preset delete to refresh the in-memory map. Not on the render path.
+/// Called once at startup from `Settings::load`, before the first frame.
 pub(crate) fn load_all() -> HashMap<String, PresetFile> {
     let Some(dir) = presets_dir() else { return HashMap::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
@@ -191,7 +180,12 @@ pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
 /// Write a preset to disk. Overwrites any existing file of the same name.
 /// "Prunr" is rejected — that name is synthetic and cannot be persisted.
 pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
+    write_preset(&writable_path(name)?, values)
+}
+
+/// `preset_path` as an error: "Prunr" is reserved, else the config dir is missing.
+fn writable_path(name: &str) -> std::io::Result<PathBuf> {
+    preset_path(name).ok_or_else(|| {
         if name.eq_ignore_ascii_case(PRUNR_PRESET) {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -200,10 +194,13 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
         } else {
             std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
         }
-    })?;
-    let json = serde_json::to_string_pretty(values)
+    })
+}
+
+fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)
+    crate::fs_util::write_bytes_replacing(path, json.as_bytes())
 }
 
 fn merge_into(
@@ -215,82 +212,30 @@ fn merge_into(
     file.models.insert(model_id_key(model_id), mp);
 }
 
-/// Read an existing preset file (v1 auto-migrated to v2) into a
-/// `PresetFile`, or `PresetFile::default()` when the path is absent.
-fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
-    match std::fs::read(path) {
-        Ok(data) => {
-            let value: serde_json::Value = serde_json::from_slice(&data)
-                .unwrap_or(serde_json::Value::Null);
-            if value.is_null() {
-                Ok(PresetFile::default())
-            } else {
-                Ok(parse_preset_value(value).unwrap_or_default())
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PresetFile::default()),
-        Err(e) => Err(e),
+/// Write a preset off the UI thread, after every config write asked for
+/// before it. "Prunr" is never written.
+pub(crate) fn queue_save(name: &str, file: &PresetFile) {
+    let Ok(path) = writable_path(name) else { return };
+    match serde_json::to_string_pretty(file) {
+        Ok(json) => super::disk_queue::write(path, json.into_bytes()),
+        Err(err) => tracing::error!(preset = %name, %err, "preset not saved"),
     }
 }
 
-/// Merge-aware save. Loads the existing file (v1 auto-migrated to v2),
-/// updates the entry for `model_id` via `merge_into`, writes the
-/// merged result. Preserves entries for other model_ids verbatim.
-/// Scheduler bundles within `model_id`'s entry come straight from
-/// `model_preset.sd.schedulers` — the caller is responsible for
-/// carrying over any prior bundles it wants to retain.
-///
-/// If no existing file → behaves like `save` with a single-entry
-/// PresetFile. The "save current as new preset" path skips this
-/// function — it has nothing to merge against.
-pub(crate) fn save_merged(
-    name: &str,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
-        if name.eq_ignore_ascii_case(PRUNR_PRESET) {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "\"Prunr\" is a reserved preset name",
-            )
-        } else {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
-        }
-    })?;
-    let mut file = load_existing_for_merge(&path)?;
+/// Remove a preset's file off the UI thread.
+pub(crate) fn queue_delete(name: &str) {
+    if let Some(path) = preset_path(name) {
+        super::disk_queue::remove(path);
+    }
+}
+
+/// `model_preset` merged into `file`, the preset as it stands: entries for
+/// other models stay verbatim. Scheduler bundles within `model_id`'s entry
+/// come straight from `model_preset.sd.schedulers`: the caller carries
+/// over any prior bundles it wants to keep.
+pub(crate) fn merged(mut file: PresetFile, model_id: prunr_models::ModelId, model_preset: ModelPreset) -> PresetFile {
     merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)
-}
-
-#[cfg(test)]
-fn save_merged_to_path(
-    path: &std::path::Path,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    let mut file = load_existing_for_merge(path)?;
-    merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(path, json)
-}
-
-/// Remove a preset's file. Silent no-op if the file doesn't exist — caller
-/// already drops the in-memory entry, and we don't want to surface "already
-/// deleted" as an error.
-pub fn delete(name: &str) -> std::io::Result<()> {
-    let Some(path) = preset_path(name) else { return Ok(()); };
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    file
 }
 
 /// Write the curated built-in presets to disk on first run. No-op when the
@@ -300,11 +245,6 @@ pub fn seed_builtins_once() {
     let Some(dir) = presets_dir() else { return };
     let marker = dir.join(SEED_MARKER);
     if marker.exists() { return; }
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let wrap_key = model_id_key(wrap_key);
     for (name, item_settings) in builtin_presets() {
         // Skip if a preset file with this name already exists. Protects
         // user customisations against two edge cases:
@@ -315,13 +255,11 @@ pub fn seed_builtins_once() {
         //      `_v2` — keeps their version, skips the rename.
         let Some(path) = preset_path(name) else { continue };
         if path.exists() { continue; }
-        let mut models = HashMap::new();
-        models.insert(wrap_key.clone(), ModelPreset {
+        let file = PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
             item_settings,
             brush: Default::default(),
             sd: None,
         });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
         let _ = save(name, &file);
     }
     let _ = std::fs::write(&marker, b"");
@@ -339,7 +277,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.7,
             edge_thickness: 2,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 4 },
+            effect: SubjectEffect::Posterize { levels: 4 },
             gamma: 1.3,
             ..base
         }),
@@ -349,7 +287,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.8,
             edge_thickness: 0,
             solid_line_color: None,
-            fill_style: FillStyle::Desaturate,
+            effect: SubjectEffect::Desaturate,
             gamma: 1.1,
             ..base
         }),
@@ -359,7 +297,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 3,
             line_style: LineStyle::Rainbow { cycles: 2 },
-            fill_style: FillStyle::Saturate { percent: 220 },
+            effect: SubjectEffect::Saturate { percent: 220 },
             ..base
         }),
         ("Sepia", ItemSettings {
@@ -368,7 +306,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 1,
             solid_line_color: Some([70, 45, 20]),
-            fill_style: FillStyle::Sepia,
+            effect: SubjectEffect::Sepia,
             ..base
         }),
         ("Duotone Poster", ItemSettings {
@@ -377,7 +315,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.6,
             edge_thickness: 2,
             solid_line_color: Some([10, 10, 40]),
-            fill_style: FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
+            effect: SubjectEffect::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
             ..base
         }),
         ("X-Ray", ItemSettings {
@@ -386,7 +324,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.8,
             edge_thickness: 1,
             solid_line_color: Some([200, 230, 255]),
-            fill_style: FillStyle::Invert,
+            effect: SubjectEffect::Invert,
             bg: Some([0, 0, 30, 255]),
             ..base
         }),
@@ -396,7 +334,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.65,
             edge_thickness: 3,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 3 },
+            effect: SubjectEffect::Posterize { levels: 3 },
             gamma: 1.4,
             ..base
         }),
@@ -406,7 +344,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.55,
             edge_thickness: 1,
             solid_line_color: Some([230, 230, 235]),
-            fill_style: FillStyle::Desaturate,
+            effect: SubjectEffect::Desaturate,
             ..base
         }),
         ("Sunset Lines", ItemSettings {
@@ -426,7 +364,7 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
             line_strength: 0.5,
             edge_thickness: 2,
             solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Pixelate { block_size: 10 },
+            effect: SubjectEffect::Pixelate { block_size: 10 },
             ..base
         }),
     ]
@@ -483,10 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn delete_prunr_is_noop() {
+    fn prunr_has_no_file_to_delete() {
         // Would be disastrous to delete anything when a user toggles the
-        // Prunr row, so this must be a safe no-op.
-        assert!(delete(PRUNR_PRESET).is_ok());
+        // Prunr row, so it names no file.
+        assert!(preset_path(PRUNR_PRESET).is_none());
     }
 
     // ── Forward-compat tripwires ──────────────────────────────────────
@@ -671,11 +609,18 @@ mod tests {
     // Overwriting a preset on (active_model, active_scheduler) must
     // touch ONLY that model's entry and ONLY that scheduler's bundle.
     // Other models and other scheduler bundles round-trip bytewise.
-    // Tests use `save_merged_to_path` so they don't write to the
+    // Tests use `overwrite_at` so they don't write to the
     // user's real presets dir.
 
+    /// An overwrite as the app makes it: the preset as loaded, merged,
+    /// written whole.
+    fn overwrite_at(path: &std::path::Path, model_id: prunr_models::ModelId, mp: ModelPreset) -> std::io::Result<()> {
+        let existing = load_from_path(path).unwrap_or_default();
+        write_preset(path, &merged(existing, model_id, mp))
+    }
+
     #[test]
-    fn save_merged_preserves_other_model_entries() {
+    fn overwrite_preserves_other_model_entries() {
         use super::super::brush_state::BrushSettings;
         use super::super::presets::SdPreset;
         use prunr_models::ModelId;
@@ -703,7 +648,7 @@ mod tests {
             brush: BrushSettings::default(),
             sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
         };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let silueta_back = reloaded
@@ -719,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_preserves_other_scheduler_bundles_within_sd() {
+    fn overwrite_preserves_other_scheduler_bundles_within_sd() {
         use super::super::brush_state::SdScheduler;
         use super::super::presets::{SdPreset, SdSchedulerBundle};
         use prunr_models::ModelId;
@@ -728,14 +673,14 @@ mod tests {
         let path = dir.path().join("Foo.json");
 
         let lcm_bundle = SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 8, guidance_scale: 1.5,
         };
         let ddim_bundle_old = SdSchedulerBundle {
-            steps: 20, guidance_scale: 7.5, use_karras_sigmas: false, strength: 1.0,
+            steps: 20, guidance_scale: 7.5,
         };
         let mut schedulers_seed = HashMap::new();
         schedulers_seed.insert(SdScheduler::Lcm, lcm_bundle);
-        schedulers_seed.insert(SdScheduler::Ddim, ddim_bundle_old);
+        schedulers_seed.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_old);
         let seed_sd = SdPreset {
             prompt: "old".into(),
             negative_prompt: "old-neg".into(),
@@ -754,20 +699,20 @@ mod tests {
 
         // Save-merge: caller only touched DDIM. LCM must survive.
         let ddim_bundle_new = SdSchedulerBundle {
-            steps: 30, guidance_scale: 8.0, use_karras_sigmas: true, strength: 0.85,
+            steps: 30, guidance_scale: 8.0,
         };
         let mut new_schedulers = HashMap::new();
-        new_schedulers.insert(SdScheduler::Ddim, ddim_bundle_new);
+        new_schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_new);
         let new_sd = SdPreset {
             prompt: "new".into(),
             negative_prompt: "new-neg".into(),
             use_taesd: Some(true),
             seed: Some(99),
-            active_scheduler: SdScheduler::Ddim,
+            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             schedulers: new_schedulers,
         };
         let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded
@@ -776,18 +721,18 @@ mod tests {
             .expect("SD entry");
         let sd_back = mp_back.sd.as_ref().expect("SD bundle");
 
-        // `save_merged` merges by ModelPreset, not by scheduler — the
+        // `merged` merges by ModelPreset, not by scheduler — the
         // caller decides which scheduler bundles to carry over inside
         // the SdPreset they pass. This test pins the round-trip: the
         // scheduler-bundle map is written exactly as the caller built
         // it, with no silent rewrite. (Cross-MODEL preservation is
-        // pinned by `save_merged_preserves_other_model_entries`.)
+        // pinned by `overwrite_preserves_other_model_entries`.)
         assert_eq!(
-            sd_back.schedulers.get(&SdScheduler::Ddim).copied(),
+            sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied(),
             Some(ddim_bundle_new),
-            "Ddim bundle equals the freshly-merged values",
+            "Quality bundle equals the freshly-merged values",
         );
-        assert_eq!(sd_back.active_scheduler, SdScheduler::Ddim);
+        assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(sd_back.prompt, "new");
         assert_eq!(sd_back.negative_prompt, "new-neg");
         assert_eq!(sd_back.use_taesd, Some(true));
@@ -795,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_creates_file_when_none_exists() {
+    fn overwrite_creates_file_when_none_exists() {
         use prunr_models::ModelId;
 
         let dir = tempfile::tempdir().expect("tmpdir");
@@ -806,7 +751,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        save_merged_to_path(&path, ModelId::Silueta, mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::Silueta, mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -818,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_handles_v1_file_via_load_path() {
+    fn overwrite_handles_v1_file_via_load_path() {
         use prunr_models::ModelId;
 
         let dir = tempfile::tempdir().expect("tmpdir");
@@ -837,7 +782,7 @@ mod tests {
             item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
             ..ModelPreset::default()
         };
-        save_merged_to_path(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
+        overwrite_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
@@ -856,21 +801,17 @@ mod tests {
     }
 
     #[test]
-    fn save_merged_rejects_prunr_name() {
-        use prunr_models::ModelId;
-        let result = save_merged("Prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("Prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        // Case-insensitive — same shape as `save`.
-        let result = save_merged("prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    fn a_queued_save_rejects_the_prunr_name() {
+        for name in ["Prunr", "prunr"] {
+            let err = writable_path(name).expect_err("Prunr is reserved");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]
     fn merge_save_dynamic_field_capture() {
         use super::super::brush_state::{BrushSettings, SdScheduler};
-        use super::super::presets::{fuse_brush_for_apply, split_brush_for_save};
+        use super::super::presets::{fuse_brush_for_apply, sd_preset_for_save};
         use prunr_models::ModelId;
 
         // Build a BrushSettings with every SD-tuning field mutated to a
@@ -884,22 +825,19 @@ mod tests {
         base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
         base.sd_steps = 17;
         base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::Ddim;
-        base.sd_use_karras_sigmas = true;
-        base.sd_strength = 0.66;
+        base.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
         base.sd_seed = Some(13579);
         base.sd_use_taesd = Some(true);
 
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
 
-        let (brush_split, sd) = split_brush_for_save(&base, ModelId::SdV15InpaintFp16);
         let mp = ModelPreset {
             item_settings: ItemSettings::default(),
-            brush: brush_split,
-            sd,
+            brush: base.clone(),
+            sd: sd_preset_for_save(&base, ModelId::SdV15InpaintFp16),
         };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
+        overwrite_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
 
         let reloaded = load_from_path(&path).expect("reload");
         let mp_back = reloaded

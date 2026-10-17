@@ -3,43 +3,35 @@ use std::io::{Read, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use prunr_runtime_install::{retry_with_backoff, Retryable};
+use prunr_runtime_install::{retry_with_backoff, DlError};
 use std::path::{Path, PathBuf};
 
 mod models;
 use models::MODELS;
 
 const XTASK_USER_AGENT: &str = "prunr-xtask/0.1";
+/// Where fetch-models keeps the `.onnx` files and their `.zst` siblings,
+/// relative to the workspace root.
+const MODELS_DIR: &str = "models";
+/// Download tries per model: the first plus two retries.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
 
-/// OnDemand filename from the registry, or `None` for Bundled models.
-/// Single source of truth — bumping a model's version in REGISTRY
-/// automatically updates xtask's mirror target.
-fn ondemand_target(id: prunr_models::ModelId) -> Option<&'static str> {
-    match prunr_models::descriptor(id)?.source {
-        prunr_models::ModelSource::OnDemand { filename, .. } => Some(filename),
-        // Multi-part bundles aren't single-file targets — xtask doesn't
-        // mirror them today; the production DownloadManager handles
-        // on-demand bundles, and bundled variants live in the binary.
-        prunr_models::ModelSource::Bundled
-        | prunr_models::ModelSource::MultiPartOnDemand { .. }
-        | prunr_models::ModelSource::MultiPartBundled { .. } => None,
+/// The `.onnx.zst` that `prunr-models` embeds for `onnx_path`.
+fn zst_sibling(onnx_path: &Path) -> PathBuf {
+    onnx_path.with_extension("onnx.zst")
+}
+
+/// Copy `src` to where the app downloads `id` (the registry-versioned
+/// filename in the user data dir), so the production OnDemand path
+/// (`prunr_models::resolve_bytes`) resolves it without filesystem-shim
+/// heuristics. Bundled and multi-part models have no such place and
+/// are skipped: bundled ones live in the binary, and the production
+/// DownloadManager handles multi-part bundles.
+fn mirror_to_user_data_dir(src: &Path, id: prunr_models::ModelId) -> anyhow::Result<()> {
+    let Some(dst) = prunr_models::download_path(id) else { return Ok(()) };
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
     }
-}
-
-fn user_data_models_dir() -> Option<std::path::PathBuf> {
-    prunr_models::data_dir().map(|d| d.join("models"))
-}
-
-/// Copy `src` to the user data dir under the registry-versioned filename
-/// so the production OnDemand path (`prunr_models::resolve_bytes`)
-/// resolves it without filesystem-shim heuristics.
-fn mirror_to_user_data_dir(src: &Path, target: &str) -> anyhow::Result<()> {
-    let Some(dir) = user_data_models_dir() else {
-        eprintln!("  (skipping user-data-dir mirror: dirs::data_dir returned None)");
-        return Ok(());
-    };
-    std::fs::create_dir_all(&dir)?;
-    let dst = dir.join(target);
     std::fs::copy(src, &dst)?;
     println!("  Mirrored to {}", dst.display());
     Ok(())
@@ -56,14 +48,14 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Usage: cargo xtask <task>");
             eprintln!("Tasks:");
             eprintln!("  fetch-models           Download and verify ONNX model files to models/");
-            eprintln!("  probe-load-dynamic     [Phase 19-02b] Verify ort's `load-dynamic` mechanism");
-            eprintln!("                         can swap libonnxruntime at runtime end-to-end.");
+            eprintln!("  probe-load-dynamic     Verify ort's `load-dynamic` mechanism can swap");
+            eprintln!("                         libonnxruntime at runtime end-to-end.");
             eprintln!("                         Pass dylib path as second arg, or set ORT_DYLIB_PATH.");
-            eprintln!("  install-runtime        [Phase 19-09] Download + extract an `onnxruntime-*`");
+            eprintln!("  install-runtime        Download + extract an `onnxruntime-*`");
             eprintln!("                         PyPI wheel into the user runtime store. Args:");
             eprintln!("                         <package> <version> [target-name]");
             eprintln!("                         e.g. install-runtime onnxruntime-openvino 1.24.1");
-            eprintln!("  render-golden-diff     [Phase 20-04] After UPDATE_GOLDEN regenerates");
+            eprintln!("  render-golden-diff     After UPDATE_GOLDEN regenerates");
             eprintln!("                         expected.png files, produce side-by-side");
             eprintln!("                         <before | after | diff> triptych PNGs for every");
             eprintln!("                         changed golden. Lets a reviewer visually inspect");
@@ -74,16 +66,17 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 19-02b verification: load an externally-provided libonnxruntime via
-/// `ort::init_from`, build a Session against a real ONNX model, run one
-/// inference. Confirms the `load-dynamic` path that Phase 19's Runtime
-/// Store will rely on.
+/// Load an externally-provided libonnxruntime via `ort::init_from`, build
+/// a Session against a real ONNX model, run one inference. Confirms the
+/// `load-dynamic` path that the runtime store relies on.
 ///
 /// Usage:
 ///   cargo xtask probe-load-dynamic <path-to-libonnxruntime.so>
 ///   cargo xtask probe-load-dynamic       # falls back to ORT_DYLIB_PATH
+///   cargo xtask probe-load-dynamic <path> --require-ep CoreMLExecutionProvider
 fn probe_load_dynamic() -> anyhow::Result<()> {
     use ort::{
+        ep::ExecutionProvider,
         inputs as ort_inputs,
         session::{Session, builder::GraphOptimizationLevel},
         value::Tensor,
@@ -96,9 +89,21 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         move |e| anyhow::anyhow!("{stage}: {e}")
     }
 
-    let dylib_path: std::path::PathBuf = std::env::args().nth(2)
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from))
+    let mut dylib_arg: Option<PathBuf> = None;
+    let mut required_eps: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        if arg == "--require-ep" {
+            required_eps.push(args.next()
+                .ok_or_else(|| anyhow::anyhow!("--require-ep needs an ORT provider name"))?);
+        } else if arg.starts_with("--") {
+            anyhow::bail!("unknown flag: {arg}");
+        } else {
+            dylib_arg = Some(PathBuf::from(arg));
+        }
+    }
+    let dylib_path: PathBuf = dylib_arg
+        .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from))
         .ok_or_else(|| anyhow::anyhow!(
             "no dylib path supplied — pass as 2nd arg or set ORT_DYLIB_PATH"
         ))?;
@@ -107,7 +112,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         anyhow::bail!("dylib not found: {}", dylib_path.display());
     }
 
-    println!("=== Phase 19-02b probe: load-dynamic verification ===");
+    println!("=== probe: load-dynamic verification ===");
     println!("Loading: {}", dylib_path.display());
 
     // The probe loads exactly the dylib it was handed, bypassing the
@@ -119,13 +124,33 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     }
     println!("OK ort::init_from + commit");
 
+    let providers: [&dyn ExecutionProvider; 4] = [
+        &ort::ep::CoreML::default(),
+        &ort::ep::CUDA::default(),
+        &ort::ep::DirectML::default(),
+        &ort::ep::OpenVINO::default(),
+    ];
+    println!("Execution providers compiled into this runtime:");
+    for p in providers {
+        let available = p.is_available().map_err(ort_err("GetAvailableProviders"))?;
+        println!("  {:<28} {}", p.name(), if available { "yes" } else { "no" });
+    }
+    for want in &required_eps {
+        let p = providers.iter().find(|p| p.name() == want).ok_or_else(|| anyhow::anyhow!(
+            "--require-ep {want}: not one of {:?}", providers.map(|p| p.name()),
+        ))?;
+        if !p.is_available().map_err(ort_err("GetAvailableProviders"))? {
+            anyhow::bail!("{want} is not compiled into {}", dylib_path.display());
+        }
+    }
+
     let silueta = prunr_models::silueta_bytes();
     println!("Building session against bundled Silueta ({} bytes)", silueta.len());
 
     #[allow(clippy::disallowed_methods)] // same reason as the init_from above
     let mut session = Session::builder().map_err(ort_err("Session::builder"))?
         .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
-        .commit_from_memory(silueta).map_err(ort_err("commit_from_memory"))?;
+        .commit_from_memory(&silueta).map_err(ort_err("commit_from_memory"))?;
 
     let inputs = session.inputs();
     let outputs = session.outputs();
@@ -143,31 +168,9 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!();
     println!("=== load-dynamic VERIFIED ===");
     println!("`ort::init_from(path)` successfully loaded an external libonnxruntime");
-    println!("and built+ran a Session against it. This is the mechanism Phase 19's");
-    println!("Runtime Store will use to swap in EP-specific ORT bundles per-user.");
+    println!("and built+ran a Session against it. This is the mechanism the runtime");
+    println!("store uses to swap in EP-specific ORT bundles per-user.");
     Ok(())
-}
-
-enum FetchError {
-    Transient(String),
-    Fatal(String),
-}
-
-impl Retryable for FetchError {
-    fn is_retryable(&self) -> bool {
-        matches!(self, Self::Transient(_))
-    }
-    fn cancelled() -> Self {
-        Self::Fatal("cancelled".into())
-    }
-}
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transient(m) | Self::Fatal(m) => f.write_str(m),
-        }
-    }
 }
 
 /// GET `url` into memory, streaming the body so a stall surfaces as a
@@ -175,38 +178,33 @@ impl std::fmt::Display for FetchError {
 /// 4xx fails immediately.
 fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec<u8>> {
     let cancel = Arc::new(AtomicBool::new(false));
-    retry_with_backoff(&cancel, 3, 1000, |attempt| {
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, 1000, |attempt| {
         if attempt > 0 {
-            println!("  retry {attempt}/2");
+            println!("  retry {attempt}/{}", DOWNLOAD_ATTEMPTS - 1);
         }
         let mut response = client
             .get(url)
             .send()
-            .map_err(|e| FetchError::Transient(format!("connect: {e}")))?;
+            .map_err(|e| DlError::transient(format!("connect: {e}")))?;
         let status = response.status();
         if !status.is_success() {
-            let msg = format!("HTTP {status}");
-            return Err(if status.is_server_error() {
-                FetchError::Transient(msg)
-            } else {
-                FetchError::Fatal(msg)
-            });
+            return Err(DlError::for_status(status, format!("HTTP {status}")));
         }
         let mut buf = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
         response
             .read_to_end(&mut buf)
-            .map_err(|e| FetchError::Transient(format!("read: {e}")))?;
+            .map_err(|e| DlError::transient(format!("read: {e}")))?;
         Ok(buf)
     })
     .map_err(|e| anyhow::anyhow!("{e} downloading {url}"))
 }
 
 fn fetch_models() -> anyhow::Result<()> {
-    std::fs::create_dir_all("models")?;
+    std::fs::create_dir_all(MODELS_DIR)?;
     let client = prunr_runtime_install::http_client(XTASK_USER_AGENT)?;
 
     for spec in MODELS {
-        let dest = std::path::Path::new("models").join(spec.name);
+        let dest = Path::new(MODELS_DIR).join(spec.name);
 
         if dest.exists() {
             println!("{}: exists, verifying checksum...", spec.name);
@@ -221,9 +219,7 @@ fn fetch_models() -> anyhow::Result<()> {
 
             if hash == spec.sha256 {
                 println!("  OK (cached)");
-                if let Some(target) = ondemand_target(spec.id) {
-                    mirror_to_user_data_dir(&dest, target)?;
-                }
+                mirror_to_user_data_dir(&dest, spec.id)?;
                 continue;
             }
             println!("  Checksum mismatch — re-downloading");
@@ -254,18 +250,16 @@ fn fetch_models() -> anyhow::Result<()> {
         println!("  Saved to {}", dest.display());
 
         compress_to_zst(&dest, &bytes)?;
-        if let Some(target) = ondemand_target(spec.id) {
-            mirror_to_user_data_dir(&dest, target)?;
-        }
+        mirror_to_user_data_dir(&dest, spec.id)?;
     }
 
     // Catch any models with stale .zst (.onnx newer than .zst, or .zst missing).
     // Belt-and-braces for the case where someone fetched models with an older
     // xtask and the .zst step never ran.
     for spec in MODELS {
-        let dest = std::path::Path::new("models").join(spec.name);
+        let dest = Path::new(MODELS_DIR).join(spec.name);
         if !dest.exists() { continue; }
-        let zst_path = dest.with_extension("onnx.zst");
+        let zst_path = zst_sibling(&dest);
         let needs = match (dest.metadata(), zst_path.metadata()) {
             (Ok(_), Err(_)) => true,
             (Ok(o), Ok(z)) => o.modified().ok() > z.modified().ok(),
@@ -282,10 +276,9 @@ fn fetch_models() -> anyhow::Result<()> {
 }
 
 /// zstd level 19 — matches the existing `.onnx.zst` artefacts that
-/// `prunr-models` embeds via `include_bytes!`. Skips if the existing
-/// `.zst` already matches (cheap mtime check via fetch_models).
+/// `prunr-models` embeds via `include_bytes!`.
 fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let zst_path = onnx_path.with_extension("onnx.zst");
+    let zst_path = zst_sibling(onnx_path);
     let compressed = zstd::bulk::compress(bytes, 19)?;
     let onnx_mb = bytes.len() as f64 / 1024.0 / 1024.0;
     let zst_mb = compressed.len() as f64 / 1024.0 / 1024.0;
@@ -297,14 +290,15 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Phase 19-09 / J-7: download + extract a `onnxruntime-*` PyPI wheel.
+/// Download + extract a `onnxruntime-*` PyPI wheel.
 ///
 /// Default target: `<user data>/prunr/runtimes/<package>-<version>-<rid>/`
 /// (the runtime store, hot-loaded by `ort_runtime::resolve_dylib_path`).
 ///
 /// `--stage-to <DIR>`: extract directly into `<DIR>/` instead of the
-/// runtime store. CI release packaging uses this to bundle the CPU
-/// runtime next to the binary, satisfying `bundled_dylib`'s
+/// runtime store. CI release packaging uses this to bundle the default
+/// runtime next to the binary (the CPU build on Linux, the DirectML
+/// build with its DirectML.dll on Windows), satisfying `bundled_dylib`'s
 /// `<exe>/runtime/libonnxruntime.{so,dylib,dll}` lookup. Path-safety
 /// guard (refuse to wipe a path whose parent isn't `runtimes`) does
 /// NOT apply when staging — caller picks the path.
@@ -316,6 +310,7 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Examples:
 ///   cargo xtask install-runtime onnxruntime-openvino 1.24.1
 ///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
+///   cargo xtask install-runtime onnxruntime-directml 1.24.1 --stage-to runtime-stage
 ///
 /// Skips Python bindings (`onnxruntime_pybind11_state.cpython-*.so`,
 /// `*.py` sources) since prunr links via Rust ort. Strips the version
@@ -422,7 +417,7 @@ fn install_runtime() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 20-04: render side-by-side `<before | after | diff>` triptych PNGs for any
+/// Render side-by-side `<before | after | diff>` triptych PNGs for any
 /// `expected.png` under `crates/prunr-core/tests/golden_data/{postprocess,e2e}/`
 /// that differs from its `git HEAD` version. Run after `UPDATE_GOLDEN=1 cargo
 /// test ...` regenerates expected PNGs — the triptychs let a reviewer visually
@@ -607,41 +602,28 @@ fn git_show_head(path: &Path) -> Result<Vec<u8>, GitShowErr> {
     Err(GitShowErr::Other(stderr.into_owned()))
 }
 
+/// Neutral gray behind the panels, so the separators show.
+const PANEL_BG: image::Rgba<u8> = image::Rgba([200, 200, 200, 255]);
+const PANEL_SEP: u32 = 2;
+
+fn pixel_max_diff(a: &image::Rgba<u8>, b: &image::Rgba<u8>) -> u8 {
+    a.0.iter().zip(b.0).map(|(x, y)| x.abs_diff(y)).max().unwrap_or(0)
+}
+
 /// Per-pixel max channel absolute diff, scaled ×4 + clamped to 255 so that
 /// small differences (the common case after a math-neutral-ish refactor)
 /// remain visible. Output is RGBA with alpha=255 throughout.
 fn scaled_abs_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> image::RgbaImage {
     let (w, h) = a.dimensions();
-    let mut out = image::ImageBuffer::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let pa = a.get_pixel(x, y).0;
-            let pb = b.get_pixel(x, y).0;
-            let mut d = 0u32;
-            for c in 0..4 {
-                let cd = pa[c].abs_diff(pb[c]) as u32;
-                if cd > d {
-                    d = cd;
-                }
-            }
-            let scaled = (d * 4).min(255) as u8;
-            out.put_pixel(x, y, image::Rgba([scaled, scaled, scaled, 255]));
-        }
-    }
-    out
+    image::ImageBuffer::from_fn(w, h, |x, y| {
+        let d = u32::from(pixel_max_diff(a.get_pixel(x, y), b.get_pixel(x, y)));
+        let scaled = (d * 4).min(255) as u8;
+        image::Rgba([scaled, scaled, scaled, 255])
+    })
 }
 
 fn max_channel_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> u8 {
-    let mut max = 0u8;
-    for (pa, pb) in a.pixels().zip(b.pixels()) {
-        for c in 0..4 {
-            let d = pa.0[c].abs_diff(pb.0[c]);
-            if d > max {
-                max = d;
-            }
-        }
-    }
-    max
+    a.pixels().zip(b.pixels()).map(|(pa, pb)| pixel_max_diff(pa, pb)).max().unwrap_or(0)
 }
 
 /// Lay out three same-size images horizontally with thin separators.
@@ -651,18 +633,10 @@ fn compose_triptych(
     diff: &image::RgbaImage,
 ) -> image::RgbaImage {
     let (w, h) = before.dimensions();
-    let sep = 2u32;
-    let total_w = w * 3 + sep * 2;
-    let mut out = image::ImageBuffer::new(total_w, h);
-
-    // Fill with neutral gray so separators are visible.
-    for p in out.pixels_mut() {
-        *p = image::Rgba([200, 200, 200, 255]);
-    }
-
+    let mut out = image::ImageBuffer::from_pixel(w * 3 + PANEL_SEP * 2, h, PANEL_BG);
     blit(&mut out, before, 0, 0);
-    blit(&mut out, after, w + sep, 0);
-    blit(&mut out, diff, (w + sep) * 2, 0);
+    blit(&mut out, after, w + PANEL_SEP, 0);
+    blit(&mut out, diff, (w + PANEL_SEP) * 2, 0);
     out
 }
 
@@ -672,15 +646,9 @@ fn compose_dim_mismatch(
 ) -> image::RgbaImage {
     let (bw, bh) = before.dimensions();
     let (aw, ah) = after.dimensions();
-    let sep = 2u32;
-    let total_w = bw + aw + sep;
-    let total_h = bh.max(ah);
-    let mut out = image::ImageBuffer::new(total_w, total_h);
-    for p in out.pixels_mut() {
-        *p = image::Rgba([200, 200, 200, 255]);
-    }
+    let mut out = image::ImageBuffer::from_pixel(bw + aw + PANEL_SEP, bh.max(ah), PANEL_BG);
     blit(&mut out, before, 0, 0);
-    blit(&mut out, after, bw + sep, 0);
+    blit(&mut out, after, bw + PANEL_SEP, 0);
     out
 }
 

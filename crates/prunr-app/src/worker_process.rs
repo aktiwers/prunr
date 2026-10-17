@@ -16,7 +16,12 @@ use prunr_core::{
 
 use prunr_app::subprocess::protocol::*;
 use prunr_app::subprocess::ipc::{read_message, write_message};
+use prunr_app::subprocess::first_look::{FirstLook, Look, Shown};
+use prunr_app::subprocess::spare_scales::{next_token, SpareScales};
+use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
 use prunr_app::gui::settings::LineMode;
+
+const SEG_ENGINE_MISSING: &str = "segmentation engine not initialized";
 
 /// Weighted memory semaphore for processing.
 /// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
@@ -102,66 +107,6 @@ impl Drop for SemaphoreGuard {
     }
 }
 
-/// Check + consume the cancel flag for `item_id`. Removing on hit keeps
-/// the set bounded — without this, every `CancelItem` insert was
-/// permanent for the worker's lifetime and the per-dispatch lock
-/// contention scaled with the cumulative cancel count.
-///
-/// Each dispatch checks once at start; consuming the entry there is
-/// safe because the parent only ever queues one in-flight dispatch per
-/// id, and any later re-process would emit a fresh `CancelItem` if the
-/// user wanted it cancelled too.
-fn is_item_cancelled(
-    set: &Arc<Mutex<std::collections::HashSet<u64>>>,
-    item_id: u64,
-) -> bool {
-    let mut guard = set.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard.remove(&item_id)
-}
-
-type CancelMap = Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>;
-
-/// Flip the mid-inference cancel flag for `item_id` if a dispatch has
-/// registered one. Used twice from `CancelItem` (seg + inpaint maps);
-/// shared so both sites keep the same lock-then-store sequence.
-fn flip_cancel_flag(map: &CancelMap, item_id: u64) {
-    if let Some(flag) = map.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&item_id)
-    {
-        flag.store(true, Ordering::Release);
-    }
-}
-
-/// Insert a fresh `Arc<AtomicBool>` for `item_id` into `map` and return
-/// a clone. Both seg + inpaint dispatches register the same shape so a
-/// `CancelItem` IPC can flip the flag mid-inference.
-fn register_cancel_flag(map: &CancelMap, item_id: u64) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    map.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(item_id, flag.clone());
-    flag
-}
-
-/// RAII guard that removes the cancel-flag entry from `map` on drop so
-/// the map stays bounded when a dispatch finishes (success / error /
-/// panic — Drop runs in every case). Used directly by the seg dispatch
-/// closure and embedded inside the inpaint thread's `Cleanup` struct
-/// (which carries extra fields for pump-join + in_flight decrement).
-struct CancelMapGuard {
-    item_id: u64,
-    map: CancelMap,
-}
-
-impl Drop for CancelMapGuard {
-    fn drop(&mut self) {
-        self.map.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.item_id);
-    }
-}
-
 /// Remove each temp path that lives under the IPC directory. Silent on
 /// missing files — subprocess cancel branches call this before the normal
 /// post-spawn cleanup would have fired.
@@ -173,10 +118,54 @@ fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     }
 }
 
-/// Stream an `EdgeInferenceResult`'s per-scale tensors to a path as one LE
-/// byte sequence — same layout the parent expects in `read_edge_tensor_cache`,
-/// but without the ~16 MB intermediate `Vec<u8>` that `std::fs::write(path,
-/// pack_edge_tensors(res))` would have built.
+fn send_rss(evt_tx: &mpsc::Sender<SubprocessEvent>) {
+    if let Some(stats) = memory_stats::memory_stats() {
+        let _ = evt_tx.send(SubprocessEvent::RssUpdate { rss_bytes: stats.physical_mem as u64 });
+    }
+}
+
+/// Remove an image's IPC inputs: its file and, for a chained run, its start.
+fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, chain: Option<&std::path::Path>) {
+    match chain {
+        Some(c) => cleanup_ipc_temps(ipc, &[image, c]),
+        None => cleanup_ipc_temps(ipc, &[image]),
+    }
+}
+
+/// The edge detector, built on first need.
+fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), String> {
+    if edge_engine.is_none() {
+        *edge_engine = Some(Arc::new(EdgeEngine::new().map_err(|e| format!("Edge engine failed: {e}"))?));
+    }
+    Ok(())
+}
+
+/// The detector's planes the run made, written to `path`; `None` when
+/// it made none or the write failed.
+fn write_edge_cache(
+    path: std::path::PathBuf,
+    item_id: u64,
+    res: &prunr_core::EdgeInferenceResult,
+) -> Option<EdgeCacheFile> {
+    let scales: Vec<prunr_core::EdgeScale> = prunr_core::EdgeScale::ALL.into_iter()
+        .filter(|&s| !res.tensors[s as usize].is_empty())
+        .collect();
+    if scales.is_empty() {
+        return None;
+    }
+    match write_edge_tensors(&path, res) {
+        Ok(()) => Some(EdgeCacheFile { path, height: res.height, width: res.width, scales }),
+        Err(err) => {
+            tracing::error!(item_id, %err, "edge cache write failed");
+            None
+        }
+    }
+}
+
+/// Stream an `EdgeInferenceResult`'s non-empty planes to a path as one LE
+/// byte sequence in `EdgeScale` order — the layout `EdgeCacheFile`
+/// names — without the ~16 MB intermediate `Vec<u8>` that
+/// `std::fs::write(path, pack_edge_tensors(res))` would have built.
 fn write_edge_tensors(
     path: &std::path::Path,
     res: &prunr_core::EdgeInferenceResult,
@@ -187,6 +176,48 @@ fn write_edge_tensors(
         f.write_all(prunr_app::subprocess::ipc::f32s_as_le_bytes(t))?;
     }
     Ok(())
+}
+
+/// Make the scales a run left for after its result and send them under
+/// `token`; `engine` is `None` to skip them (the image left the screen,
+/// a cancel, a shutdown), and the event goes all the same so the app
+/// stops waiting for them.
+fn send_spare_scales(
+    spare: SpareScales,
+    token: u64,
+    item_id: u64,
+    engine: Option<&EdgeEngine>,
+    ipc: &std::path::Path,
+    evt_tx: &mpsc::Sender<SubprocessEvent>,
+) {
+    let started = std::time::Instant::now();
+    let outcome = match engine.and_then(|e| spare.make(e)) {
+        Some(Ok(res)) => write_edge_cache(IpcKind::SpareEdge.path_for(ipc, token), item_id, &res).map_or(SpareOutcome::Failed, SpareOutcome::Made),
+        Some(Err(err)) => {
+            tracing::warn!(item_id, %err, "spare line scales failed");
+            SpareOutcome::Failed
+        }
+        None => SpareOutcome::Skipped,
+    };
+    let made = match &outcome {
+        SpareOutcome::Made(file) => format!("{:?}", file.scales),
+        SpareOutcome::Skipped => "skipped".to_string(),
+        SpareOutcome::Failed => "failed".to_string(),
+    };
+    tracing::info!(item_id, token, %made, elapsed_ms = started.elapsed().as_millis() as u64, "worker: spare line scales sent");
+    let _ = evt_tx.send(SubprocessEvent::SpareEdgeScales { item_id, token, outcome });
+}
+
+/// The token a run's spare scales go under, when it owes them: its edge
+/// cache was written, it kept a photo for them, and its image is on screen.
+fn owed_spare_token(edge_cached: bool, spare: &SpareScales, on_screen: &Shown, item_id: u64) -> Option<u64> {
+    (edge_cached && spare.is_ready() && on_screen.get() == Some(item_id)).then(next_token)
+}
+
+/// Whether owed spare scales are skipped after all: the run was
+/// cancelled, the worker is stopping, or the image left the screen.
+fn spare_skipped(cancel: &DispatchCancel, stopping: &AtomicBool, on_screen: &Shown, item_id: u64) -> bool {
+    cancel.is_cancelled() || stopping.load(Ordering::Acquire) || on_screen.get() != Some(item_id)
 }
 
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
@@ -236,7 +267,7 @@ pub fn run_worker() -> ! {
 
     // Read Init command
     let Ok(Some(SubprocessCommand::Init {
-        model, jobs, mask, force_cpu, line_mode, edge, ipc_dir, inpaint_only,
+        model, jobs, mask, cpu_only, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
         let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -247,7 +278,7 @@ pub fn run_worker() -> ! {
         std::process::exit(1);
     };
     tracing::info!(
-        ?model, jobs, force_cpu, ?line_mode, inpaint_only,
+        ?model, jobs, cpu_only, ?line_mode, inpaint_only,
         "worker: Init received, beginning init sequence",
     );
 
@@ -263,15 +294,20 @@ pub fn run_worker() -> ! {
         has_gpu,
         "worker: detect_active_provider returned",
     );
-    let cpu_only = force_cpu || !has_gpu;
+    let on_cpu = cpu_only || !has_gpu;
 
     // Inpaint-only subprocess: skip seg/edge engine creation entirely.
     // Inpaint sessions are built lazily by `process_inpaint_with` on
     // first dispatch, so the worker can enter the command loop now.
+    // The run settings a `Configure` command replaces; the engines a
+    // later mode needs are built at its first dispatch.
+    let (mut mask, mut line_mode, mut edge) = (mask, line_mode, edge);
     let needs_edge = !inpaint_only && line_mode != LineMode::Off;
     let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
 
-    let edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
+    let line_depth = (!inpaint_only && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
+    let mut traced_scales = edge_scales.of(&edge);
+    let mut edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
         match EdgeEngine::new() {
             Ok(e) => Some(Arc::new(e)),
             Err(e) => {
@@ -288,8 +324,8 @@ pub fn run_worker() -> ! {
     };
 
     // Create segmentation engine pool
-    let engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
-        match create_engine_pool(model, jobs, cpu_only) {
+    let mut engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
+        match create_engine_pool(model, jobs, on_cpu) {
             Ok(e) => e,
             Err(e) => {
                 let _ = evt_tx.send(SubprocessEvent::InitError {
@@ -314,8 +350,9 @@ pub fn run_worker() -> ! {
         active_provider: active_provider.clone(),
     });
 
-    // Build rayon pool for parallel inference
-    let pool_size = engines.len().max(1);
+    // Build rayon pool for parallel inference, sized for the engines a
+    // later `Configure` may still build.
+    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, on_cpu, &active_provider) };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
@@ -324,19 +361,16 @@ pub fn run_worker() -> ! {
         // can't function; no useful recovery possible.
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-    // Worker-side mirror of the parent's per-item cancel set — IPC can't
-    // share `Arc<AtomicBool>`, so we round-trip through `CancelItem` inserts.
-    let cancelled_items: Arc<Mutex<std::collections::HashSet<u64>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
-    // Mid-inference cancel flags shared across all dispatch lanes (seg and
-    // inpaint). One map covers both: seg checks `cancelled_items` at dispatch
-    // start AND polls this flag during inference; inpaint polls between LaMa
-    // tiles / SD UNet steps. A single `CancelItem` flips the flag here so
-    // one cancel reaches every flavour of in-flight work.
-    let cancel_flags: Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // One per dispatch, seg and inpaint alike: a `CancelItem` stops a
+    // queued run before it starts and a running one between stages.
+    let cancels = DispatchCancels::default();
     let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut engine_idx: usize = 0;
+    let first_look = FirstLook::default();
+    let on_screen = Shown::default();
+    // Set by Shutdown: a run's spare scales are skipped rather than
+    // holding the exit for another detector run.
+    let stopping = Arc::new(AtomicBool::new(false));
 
     let ipc_dir = Arc::new(ipc_dir);
 
@@ -354,7 +388,32 @@ pub fn run_worker() -> ! {
         };
 
         match cmd {
+            SubprocessCommand::Configure { mask: new_mask, line_mode: new_mode, edge: new_edge, first_look: shown, on_screen: screen } => {
+                mask = new_mask;
+                line_mode = new_mode;
+                edge = new_edge;
+                traced_scales = edge_scales.of(&edge);
+                first_look.show_for(shown);
+                on_screen.set(screen);
+                tracing::info!(?line_mode, ?shown, ?screen, "worker: run settings replaced");
+            }
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
+                let built = (|| -> Result<(), String> {
+                    if line_mode != LineMode::Off {
+                        ensure_edge_engine(&mut edge_engine)?;
+                    }
+                    if line_mode != LineMode::EdgesOnly && engines.is_empty() {
+                        let started = std::time::Instant::now();
+                        engines = create_engine_pool(model, jobs, on_cpu).map_err(|e| format!("Engine pool failed: {e}"))?;
+                        tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: engine pool built on first use");
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = built {
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                    cleanup_image_inputs(&ipc_dir, &image_path, chain_input.as_ref().map(|c| c.path.as_path()));
+                    continue;
+                }
                 let engine = if !engines.is_empty() {
                     Some(engines[engine_idx % engines.len()].clone())
                 } else {
@@ -364,25 +423,19 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
 
                 let evt_tx = evt_tx.clone();
-                let cancelled_items = cancelled_items.clone();
                 let in_flight = in_flight.clone();
                 let edge_eng = edge_engine.clone();
+                let line_depth = line_depth.clone();
                 let provider = active_provider.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let cancel_flags_for_dispatch = cancel_flags.clone();
-                // Per-item mid-inference cancel flag. Registered before
-                // the closure starts heavy work so a `CancelItem` can
-                // flip it; the guard inside the closure removes the
-                // entry on every exit path so the map stays bounded.
-                let seg_cancel = register_cancel_flag(&cancel_flags_for_dispatch, item_id);
+                let first_look = first_look.clone();
+                let on_screen = on_screen.clone();
+                let stopping = stopping.clone();
+                let engine_count = engines.len();
+                let cancel = cancels.register(item_id);
 
                 pool.spawn(move || {
-                    let _seg_cancel_guard = CancelMapGuard {
-                        item_id,
-                        map: cancel_flags_for_dispatch,
-                    };
-
                     // Hoist chain_path so every early-return path can clean up
                     // the parent-written temp files (img + optional chain) via
                     // `cleanup_ipc_temps`. Forgetting the chain leaks one
@@ -393,20 +446,16 @@ pub fn run_worker() -> ! {
                         let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
-                    let cleanup_inputs = || {
-                        match chain_path.as_deref() {
-                            Some(p) => cleanup_ipc_temps(&ipc, &[image_path.as_path(), p]),
-                            None    => cleanup_ipc_temps(&ipc, &[image_path.as_path()]),
-                        }
-                    };
-
-                    if is_item_cancelled(&cancelled_items, item_id) {
-                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                            item_id,
-                            error: CANCELLED_ERR_MSG.into(),
-                        });
+                    let cleanup_inputs = || cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
+                    // An early exit: report the error, drop the inputs, leave the in-flight count.
+                    let fail = |error: String| {
+                        let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                         cleanup_inputs();
                         in_flight.fetch_sub(1, Ordering::AcqRel);
+                    };
+
+                    if cancel.is_cancelled() {
+                        fail(CANCELLED_ERR_MSG.into());
                         return;
                     }
 
@@ -414,12 +463,7 @@ pub fn run_worker() -> ! {
                     let img_bytes = match std::fs::read(&image_path) {
                         Ok(b) => b,
                         Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                item_id,
-                                error: format!("Failed to read image: {e}"),
-                            });
-                            cleanup_inputs();
-                            in_flight.fetch_sub(1, Ordering::AcqRel);
+                            fail(format!("Failed to read image: {e}"));
                             return;
                         }
                     };
@@ -428,14 +472,16 @@ pub fn run_worker() -> ! {
                     // Small images run in parallel; large images throttle automatically.
                     // Guard releases on drop (panic-safe).
                     let weight = pixel_weight(&img_bytes);
-                    let _sem_guard = sem.acquire(weight);
-                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(seg_cancel.clone());
+                    let sem_guard = sem.acquire(weight);
+                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
+                    // Whether this image is the one on screen is settled
+                    // as its run starts, here.
+                    let look = first_look.for_run(item_id, model, engine_count);
+                    let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
-                    // For LineMode::Off we use the split pipeline (infer_only +
-                    // tensor_to_mask + apply_mask) to capture the raw tensor for
-                    // future Tier 2 mask reruns.  Other modes don't benefit from
-                    // tensor caching so they use the monolithic pipeline.
+                    // Off and non-chained SubjectOutline keep the seg tensor
+                    // for mask reruns.
                     let mut tensor_for_cache: Option<(Vec<f32>, u32, u32)> = None;
                     let mut edge_tensor_for_cache: Option<prunr_core::EdgeInferenceResult> = None;
 
@@ -452,11 +498,12 @@ pub fn run_worker() -> ! {
                             };
                             img_ref.and_then(|img| {
                                 progress.step(prunr_core::Step::DrawingLines);
-                                // invariant: line_mode == EdgesOnly → needs_edge → edge_eng loaded.
+                                // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
-                                eng_ref.infer_all_tensors(&transformed).map(|res| {
-                                    let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge);
+                                spare.trace(eng_ref, &transformed, traced_scales).map(|res| {
+                                    let measured = line_depth.as_ref().and_then(|d| d.measure(img));
+                                    let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge, measured.as_ref().map(Measured::fade));
                                     edge_tensor_for_cache = Some(res);
                                     ProcessResult {
                                         rgba_image,
@@ -471,34 +518,25 @@ pub fn run_worker() -> ! {
                                 // cut-out, effect included, so the lines are traced from
                                 // it directly. No seg cache — no seg tensor made it.
                                 progress.step(prunr_core::Step::DrawingLines);
-                                // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
+                                // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::FillStyle::None, &edge, |i| eng_ref.infer_all_tensors(i))
+                                let measured = line_depth.as_ref().and_then(|d| d.measure(img));
+                                prunr_core::outline_subject(img.to_rgba8(), prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
                                     .map(|(rgba_image, res)| {
                                         edge_tensor_for_cache = Some(res);
                                         ProcessResult { rgba_image, active_provider: provider.clone() }
                                     })
                             } else {
                                 // Non-chain: split pipeline so the seg tensor is captured
-                                // for Tier 2 mask reruns and cross-mode transitions (the
-                                // monolithic `process_image_with_mask` threw it away).
+                                // for Tier 2 mask reruns and cross-mode transitions.
                                 let Some(eng) = engine.as_ref() else {
-                                    let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                        item_id,
-                                        error: "segmentation engine not initialized".into(),
-                                    });
-                                    cleanup_inputs();
-                                    in_flight.fetch_sub(1, Ordering::AcqRel);
+                                    fail(SEG_ENGINE_MISSING.into());
                                     return;
                                 };
                                 let decoded = match prunr_core::load_image_from_bytes(&img_bytes) {
                                     Ok(img) => img,
                                     Err(e) => {
-                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                            item_id, error: e.to_string(),
-                                        });
-                                        cleanup_inputs();
-                                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                                        fail(e.to_string());
                                         return;
                                     }
                                 };
@@ -506,12 +544,13 @@ pub fn run_worker() -> ! {
                                 if let Some(err) = prunr_core::check_large_image(original) {
                                     Err(err)
                                 } else {
-                                    prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                    let look = look.as_ref().and_then(Look::engine);
+                                    prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
                                         progress.step(prunr_core::Step::RefiningEdges);
                                         let th = ir.tensor_height;
                                         let tw = ir.tensor_width;
                                         let active_provider = ir.active_provider.clone();
-                                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask };
+                                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..mask };
                                         let subject = prunr_core::postprocess_from_flat(
                                             &ir.tensor_data, th, tw, original,
                                             &prunr_core::PostprocessOpts::new(&plain, model),
@@ -520,10 +559,11 @@ pub fn run_worker() -> ! {
                                         // SubjectOutline; Off ↔ SubjectOutline can reuse it.
                                         tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
                                         progress.step(prunr_core::Step::DrawingLines);
-                                        // invariant: line_mode == SubjectOutline → needs_edge → edge_eng loaded.
+                                        // invariant: ensure_edge_engine ran above for every line mode but Off.
                                         let eng_ref = edge_eng.as_ref().unwrap();
+                                        let measured = line_depth.as_ref().and_then(|d| d.measure(original));
                                         let (rgba_image, edge_res) = prunr_core::outline_subject(
-                                            subject, mask.fill_style, &edge, |img| eng_ref.infer_all_tensors(img),
+                                            subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
                                         )?;
                                         edge_tensor_for_cache = Some(edge_res);
                                         Ok(ProcessResult { rgba_image, active_provider })
@@ -535,12 +575,7 @@ pub fn run_worker() -> ! {
                             // Split pipeline: infer_only → tensor_to_mask → apply_mask
                             // This captures the raw tensor for future Tier 2 mask reruns.
                             let Some(eng) = engine.as_ref() else {
-                                let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                    item_id,
-                                    error: "segmentation engine not initialized".into(),
-                                });
-                                in_flight.fetch_sub(1, Ordering::AcqRel);
-                                cleanup_inputs();
+                                fail(SEG_ENGINE_MISSING.into());
                                 return;
                             };
                             let decoded;
@@ -550,12 +585,7 @@ pub fn run_worker() -> ! {
                                 match prunr_core::load_image_from_bytes(&img_bytes) {
                                     Ok(img) => { decoded = img; &decoded }
                                     Err(e) => {
-                                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                            item_id,
-                                            error: e.to_string(),
-                                        });
-                                        in_flight.fetch_sub(1, Ordering::AcqRel);
-                                        cleanup_inputs();
+                                        fail(e.to_string());
                                         return;
                                     }
                                 }
@@ -565,7 +595,8 @@ pub fn run_worker() -> ! {
                             if let Some(err) = prunr_core::check_large_image(original) {
                                 Err(err)
                             } else {
-                                prunr_core::infer_only(original, eng, &progress).and_then(|ir| {
+                                let look = look.as_ref().and_then(Look::engine);
+                                prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
                                     progress.step(prunr_core::Step::RefiningEdges);
 
                                     let th = ir.tensor_height;
@@ -613,6 +644,7 @@ pub fn run_worker() -> ! {
                     // Background color is applied by the parent at display/export time
                     // (non-destructive — result_rgba always stores the transparent version)
 
+                    let mut spare_token = None;
                     match result {
                         Ok(pr) => {
                             // Write tensor cache to temp file if available
@@ -631,17 +663,9 @@ pub fn run_worker() -> ! {
                                 (None, None, None)
                             };
 
-                            // Write DexiNed multi-scale cache (4 tensors concatenated
-                            // into a single temp file; parent splits by EDGE_SCALE_COUNT).
-                            let (ecp, ech, ecw) = if let Some(ref res) = edge_tensor_for_cache {
-                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
-                                match write_edge_tensors(&ep, res) {
-                                    Ok(()) => (Some(ep), Some(res.height), Some(res.width)),
-                                    Err(_) => (None, None, None),
-                                }
-                            } else {
-                                (None, None, None)
-                            };
+                            let edge_cache = edge_tensor_for_cache.as_ref()
+                                .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
+                            let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
                             // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
@@ -656,6 +680,7 @@ pub fn run_worker() -> ! {
                             drop(pr);
                             match write_result {
                                 Ok(()) => {
+                                    spare_token = spare_scales;
                                     let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                         item_id,
                                         result_path,
@@ -665,9 +690,8 @@ pub fn run_worker() -> ! {
                                         tensor_cache_path: tcp,
                                         tensor_cache_height: tch,
                                         tensor_cache_width: tcw,
-                                        edge_cache_path: ecp,
-                                        edge_cache_height: ech,
-                                        edge_cache_width: ecw,
+                                        edge_cache,
+                                        spare_scales,
                                     });
                                 }
                                 Err(e) => {
@@ -686,31 +710,31 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    // Report RSS after each image
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
-                    }
+                    send_rss(&evt_tx);
 
                     cleanup_inputs();
+                    if let Some(token) = spare_token {
+                        drop(sem_guard);
+                        let skip = spare_skipped(&cancel, &stopping, &on_screen, item_id);
+                        send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
+                    }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
             }
 
             SubprocessCommand::RePostProcess {
                 item_id, tensor_path, tensor_height, tensor_width,
-                model, original_image_path, mask: repost_mask,
+                model: cmd_model, original_image_path, mask: cmd_mask,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let cancelled_items = cancelled_items.clone();
+                let cancel = cancels.register(item_id);
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
-                    if is_item_cancelled(&cancelled_items, item_id) {
+                    if cancel.is_cancelled() {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
@@ -735,7 +759,7 @@ pub fn run_worker() -> ! {
                         progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&repost_mask, model),
+                            &original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model),
                         ).map_err(|e| e.to_string())
                     })();
 
@@ -755,9 +779,8 @@ pub fn run_worker() -> ! {
                                     tensor_cache_path: None,
                                     tensor_cache_height: None,
                                     tensor_cache_width: None,
-                                    edge_cache_path: None,
-                                    edge_cache_height: None,
-                                    edge_cache_width: None,
+                                    edge_cache: None,
+                                    spare_scales: None,
                                 });
                             }
                         }
@@ -766,19 +789,9 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    // Clean up temp files
-                    if tensor_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&tensor_path);
-                    }
-                    if original_image_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&original_image_path);
-                    }
+                    cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
 
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
-                    }
+                    send_rss(&evt_tx);
 
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
@@ -789,18 +802,24 @@ pub fn run_worker() -> ! {
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
                 mask: cmd_mask,
             } => {
+                if let Err(error) = ensure_edge_engine(&mut edge_engine) {
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
+                    continue;
+                }
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
                 let sem = semaphore.clone();
                 let ipc = ipc_dir.clone();
-                let mask_settings = cmd_mask;
-                let edge_settings = edge;
                 let edge_eng = edge_engine.clone();
-                let cancelled_items = cancelled_items.clone();
+                let line_depth = line_depth.clone();
+                let on_screen = on_screen.clone();
+                let stopping = stopping.clone();
+                let cancel = cancels.register(item_id);
 
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
-                    if is_item_cancelled(&cancelled_items, item_id) {
+                    if cancel.is_cancelled() {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
@@ -808,11 +827,12 @@ pub fn run_worker() -> ! {
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
-                    let _sem_guard = sem.acquire(10);
+                    let sem_guard = sem.acquire(10);
                     let progress = ipc_progress(item_id, evt_tx.clone());
+                    let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
-                    // back as tensor_cache_path — the parent's read_tensor_cache
+                    // back as tensor_cache_path — the parent's read_raw_seg_tensor
                     // reads-and-deletes it. So here we `read`, not `read_and_delete`.
                     let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
                         let raw_bytes = std::fs::read(&seg_tensor_path)
@@ -825,7 +845,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to decode image: {e}"))?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let plain = prunr_core::MaskSettings { fill_style: prunr_core::FillStyle::None, ..mask_settings };
+                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..cmd_mask };
                         let subject = prunr_core::postprocess_from_flat(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
                             &original, &prunr_core::PostprocessOpts::new(&plain, cmd_model),
@@ -834,26 +854,24 @@ pub fn run_worker() -> ! {
                         progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        prunr_core::outline_subject(subject, mask_settings.fill_style, &edge_settings, |img| eng_ref.infer_all_tensors(img))
+                        let measured = line_depth.as_ref().and_then(|d| d.measure(&original));
+                        prunr_core::outline_subject(subject, cmd_mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
 
+                    let mut spare_token = None;
                     match produce {
                         Ok((rgba, edge_res)) => {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
 
-                            let (ecp, ech, ecw) = {
-                                let ep = IpcKind::Edge.path_for(&ipc, item_id);
-                                match write_edge_tensors(&ep, &edge_res) {
-                                    Ok(()) => (Some(ep), Some(edge_res.height), Some(edge_res.width)),
-                                    Err(_) => (None, None, None),
-                                }
-                            };
+                            let edge_cache = write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, &edge_res);
+                            let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
                             let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
                             drop(rgba);
                             if write_ok {
+                                spare_token = spare_scales;
                                 let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
@@ -866,43 +884,29 @@ pub fn run_worker() -> ! {
                                     tensor_cache_path: Some(seg_tensor_path.clone()),
                                     tensor_cache_height: Some(seg_tensor_height),
                                     tensor_cache_width: Some(seg_tensor_width),
-                                    edge_cache_path: ecp,
-                                    edge_cache_height: ech,
-                                    edge_cache_width: ecw,
+                                    edge_cache,
+                                    spare_scales,
                                 });
                             }
                         }
                         Err(e) => {
                             let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
-                            if seg_tensor_path.starts_with(ipc.as_ref()) {
-                                let _ = std::fs::remove_file(&seg_tensor_path);
-                            }
+                            cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
                         }
                     }
 
-                    if image_path.starts_with(ipc.as_ref()) {
-                        let _ = std::fs::remove_file(&image_path);
-                    }
-                    if let Some(stats) = memory_stats::memory_stats() {
-                        let _ = evt_tx.send(SubprocessEvent::RssUpdate {
-                            rss_bytes: stats.physical_mem as u64,
-                        });
+                    cleanup_ipc_temps(&ipc, &[&image_path]);
+                    send_rss(&evt_tx);
+                    if let Some(token) = spare_token {
+                        drop(sem_guard);
+                        let skip = spare_skipped(&cancel, &stopping, &on_screen, item_id);
+                        send_spare_scales(spare, token, item_id, edge_eng.as_deref().filter(|_| !skip), &ipc, &evt_tx);
                     }
                     in_flight.fetch_sub(1, Ordering::AcqRel);
                 });
             }
 
-            SubprocessCommand::CancelItem { item_id } => {
-                {
-                    let mut guard = cancelled_items.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    guard.insert(item_id);
-                }
-                // Flip the shared mid-inference flag so any in-flight
-                // infer_only / SD UNet / LaMa tile loop sees the cancel
-                // between stages instead of running to completion.
-                flip_cancel_flag(&cancel_flags, item_id);
-            }
+            SubprocessCommand::CancelItem { item_id } => cancels.cancel(item_id),
 
             SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
                 // Inpaint runs independent of the seg/edge engine pool —
@@ -915,16 +919,16 @@ pub fn run_worker() -> ! {
                 // correctly.
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
-                let inpaint_cancels = cancel_flags.clone();
-                let inpaint_cancel = register_cancel_flag(&inpaint_cancels, item_id);
+                let inpaint_cancel = cancels.register(item_id);
                 // Reports go out on this stroke's own thread, ahead of its
                 // InpaintDone on the same channel.
-                let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(inpaint_cancel.clone());
+                let progress = ipc_progress(item_id, evt_tx.clone())
+                    .with_cancel(inpaint_cancel.flag())
+                    .with_tile_previews(TILE_PREVIEW_EDGE);
                 let in_flight_for_thread = in_flight.clone();
                 // Clones reserved for the spawn-failure unwind path
                 // — the closure below moves the originals.
                 let evt_tx_on_spawn_err = evt_tx.clone();
-                let inpaint_cancels_on_err = inpaint_cancels.clone();
                 // Pre-clone the parent-written PNG paths so the spawn-
                 // failure path can delete them. Without this, a thread-
                 // exhaustion error left ~20 MB of `inpaint-img-*` /
@@ -942,45 +946,21 @@ pub fn run_worker() -> ! {
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
                     .spawn(move || {
-                    // RAII guard: clears the cancel registry and decrements
-                    // in_flight on Drop, even if the inference closure
-                    // panics; otherwise the parent's cancel flag is never
-                    // reclaimed.
-                    //
-                    // Cancel-map cleanup happens BEFORE `in_flight.fetch_sub`
-                    // so a `Shutdown` waiting on `in_flight == 0` never
-                    // observes the count drop while the cancel-flag entry
-                    // for this item is still present.
-                    //
-                    // `cancel_guard` is the only owner of (item_id, map);
-                    // the body removes through it explicitly and the
-                    // guard's own drop is then a no-op. The guard stays
-                    // for panic-safety — if the body panics between the
-                    // explicit remove and `fetch_sub`, drop still runs
-                    // and (idempotent) re-removes. The parent only ever
-                    // queues one in-flight dispatch per id, so a `CancelItem`
-                    // can't insert a fresh flag between the body's remove and
-                    // the guard's drop — no accidental re-registration.
+                    // Unregisters the cancel and then decrements in_flight,
+                    // panics included, so a `Shutdown` waiting on zero
+                    // never sees this run still registered.
                     struct Cleanup {
                         in_flight: Arc<std::sync::atomic::AtomicUsize>,
-                        cancel_guard: CancelMapGuard,
+                        cancel: Option<DispatchCancel>,
                     }
                     impl Drop for Cleanup {
                         fn drop(&mut self) {
-                            self.cancel_guard.map.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&self.cancel_guard.item_id);
+                            drop(self.cancel.take());
                             self.in_flight.fetch_sub(1, Ordering::AcqRel);
                         }
                     }
-                    let _cleanup = Cleanup {
-                        in_flight: in_flight_for_thread,
-                        cancel_guard: CancelMapGuard {
-                            item_id,
-                            map: inpaint_cancels.clone(),
-                        },
-                    };
-                    let result = (|| -> Result<image::RgbaImage, String> {
+                    let _cleanup = Cleanup { in_flight: in_flight_for_thread, cancel: Some(inpaint_cancel) };
+                    let result = (|| -> Result<(image::RgbaImage, f32), String> {
                         // Inner scope drops encoded bytes + DynamicImage as
                         // soon as `to_rgba8`/`to_luma8` produces the final
                         // buffer — encoded source (~5–20 MB at 4 K) and
@@ -1002,17 +982,18 @@ pub fn run_worker() -> ! {
                                 .map_err(|e| format!("decode mask: {e}"))?
                                 .to_luma8()
                         };
-                        let raw = prunr_core::inpaint::process_inpaint_with(
-                            &image, &mask, model_id, sd_req.clone(), &progress,
-                        ).map_err(|e| format!("inpaint: {e:?}"))?;
+                        let filled = prunr_core::inpaint::process_inpaint_with(
+                            &image, &mask, model_id, sd_req.clone(),
+                            sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
+                        ).map_err(|e| e.message())?;
                         progress.step(prunr_core::Step::Blending);
-                        Ok(prunr_core::inpaint_blend::finalize_inpaint(
-                            &raw, &image, &mask, feather_px, sharpen,
-                        ))
+                        Ok((prunr_core::inpaint_blend::finalize_inpaint(
+                            &filled.rgba, &image, &mask, feather_px, sharpen,
+                        ), filled.scale))
                     })();
                     drop(_cleanup);
                     match result {
-                        Ok(rgba) => {
+                        Ok((rgba, fill_scale)) => {
                             let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
                             match prunr_core::encode_rgba_png(&rgba) {
                                 Ok(bytes) => {
@@ -1028,6 +1009,7 @@ pub fn run_worker() -> ! {
                                         rgba_path: path,
                                         width: rgba.width(),
                                         height: rgba.height(),
+                                        fill_scale,
                                     });
                                 }
                                 Err(e) => {
@@ -1052,13 +1034,11 @@ pub fn run_worker() -> ! {
                 // unwind both before erroring out — otherwise the worker
                 // never completes its drain.
                 if let Err(e) = spawn_result {
+                    // The dropped closure took the cancel with it.
                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                    // Drops on scope exit, removing the cancel-map entry.
-                    let _ = CancelMapGuard { item_id, map: inpaint_cancels_on_err };
-                    // The healthy path's `read_and_delete` inside the
-                    // spawned closure never ran — clean the parent-
-                    // written temps here before the InpaintError lands
-                    // so /dev/shm doesn't accumulate.
+                    // The closure never ran, so its input PNGs are still
+                    // there — clean them before the InpaintError lands so
+                    // /dev/shm doesn't accumulate.
                     let _ = std::fs::remove_file(&image_path_on_spawn_err);
                     let _ = std::fs::remove_file(&mask_path_on_spawn_err);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
@@ -1068,6 +1048,7 @@ pub fn run_worker() -> ! {
                 }
             }
             SubprocessCommand::Shutdown => {
+                stopping.store(true, Ordering::Release);
                 // Wait for in-flight to drain
                 while in_flight.load(Ordering::Acquire) > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1088,6 +1069,40 @@ pub fn run_worker() -> ! {
     drop(evt_tx);
     let _ = writer_handle.join();
     std::process::exit(0);
+}
+
+/// Fade with distance in the worker (the CLI's runs): the depth model,
+/// built on first use and shared by the pool, and how much to fade.
+struct LineDepth {
+    measurer: prunr_core::depth::Measurer,
+    amount: f32,
+}
+
+impl LineDepth {
+    fn new(fade_pct: u8) -> Self {
+        Self { measurer: prunr_core::depth::Measurer::lines_only(), amount: prunr_core::math::pct(fade_pct) }
+    }
+
+    /// `photo`'s depth map; `None` (lines drawn unfaded) when the model
+    /// is missing or the run fails, which is logged.
+    fn measure(&self, photo: &image::DynamicImage) -> Option<Measured> {
+        self.measurer.measure_decoded(photo)
+            .map_err(|err| tracing::warn!(%err, "worker: depth run failed; lines drawn without fading"))
+            .ok()
+            .map(|map| Measured { map, amount: self.amount })
+    }
+}
+
+/// One photo's depth map and how much its lines fade.
+struct Measured {
+    map: prunr_core::depth::DepthMap,
+    amount: f32,
+}
+
+impl Measured {
+    fn fade(&self) -> prunr_core::depth::LineFade<'_> {
+        prunr_core::depth::LineFade { depth: &self.map, amount: self.amount }
+    }
 }
 
 #[cfg(test)]

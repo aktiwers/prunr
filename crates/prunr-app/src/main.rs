@@ -26,23 +26,24 @@ fn main() {
     //   PRUNR_DEBUG_LOG=<path> → also tee tracing to a file (bulletproof on
     //                            Windows where AttachConsole + GUI-subsystem
     //                            subprocess stderr is unreliable).
-    if cli.debug {
+    // The bench's report carries every provider failure; the warnings
+    // the ladder logs for them would bury its progress lines.
+    let level = if cli.debug { Some("prunr=debug") } else { cli.command.is_some().then_some("prunr=error") };
+    if let Some(level) = level.filter(|_| std::env::var_os("RUST_LOG").is_none()) {
         // SAFETY: single-threaded at this point in main.
-        if std::env::var_os("RUST_LOG").is_none() {
-            unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
-        }
-        if std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
-            let log_path = std::env::temp_dir().join("prunr-debug.log");
-            unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
-        }
+        unsafe { std::env::set_var("RUST_LOG", level); }
+    }
+    if cli.debug && std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
+        let log_path = std::env::temp_dir().join("prunr-debug.log");
+        // SAFETY: single-threaded at this point in main.
+        unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
     }
 
     // Attach the parent console BEFORE init_tracing so the stderr writer
-    // captures a valid handle. The previous order inverted these, causing
-    // parent stderr to work by luck and worker stderr (via Stdio::inherit)
-    // to silently drop on Windows windows_subsystem=windows builds.
+    // captures a valid handle; otherwise worker stderr (via
+    // Stdio::inherit) silently drops on windows_subsystem=windows builds.
     #[cfg(windows)]
-    if cli.debug || !cli.inputs.is_empty() {
+    if cli.writes_to_terminal() {
         attach_parent_console();
     }
 
@@ -52,6 +53,8 @@ fn main() {
         cli::run_doctor();
         std::process::exit(0);
     }
+
+    prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
 
     if cli.clear_ep_cache {
         let n = prunr_core::ep_compat::clear();
@@ -66,6 +69,12 @@ fn main() {
 
     if cli.worker {
         worker_process::run_worker();
+    }
+
+    std::thread::spawn(prunr_core::cache::remove_retired_root);
+
+    if let Some(cli::Command::Bench(args)) = &cli.command {
+        std::process::exit(cli::run_bench(args));
     }
 
     // `--open <path>` forces GUI mode regardless of input args. Plumbed

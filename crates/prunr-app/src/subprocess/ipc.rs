@@ -61,6 +61,22 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
     Ok(Some(msg))
 }
 
+/// Read a one-shot IPC temp file and delete it in the same breath; a file
+/// that cannot be read is left for the prefix-scoped cleanup.
+pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(bytes)
+}
+
+/// A worker's raw RGBA result. Unlike `read_and_delete`, the file goes
+/// even when it cannot be read or does not match `w`×`h`.
+pub fn read_result_rgba(path: &std::path::Path, w: u32, h: u32) -> Option<image::RgbaImage> {
+    let image = std::fs::read(path).ok().and_then(|data| image::RgbaImage::from_raw(w, h, data));
+    let _ = std::fs::remove_file(path);
+    image
+}
+
 /// View an f32 slice as raw bytes. Zero-copy on little-endian hosts (every
 /// platform we target). The returned slice borrows from `data`; the caller
 /// feeds it straight into `fs::write` / `zstd::encode_all` / similar
@@ -90,6 +106,31 @@ pub fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn a_read_temp_file_is_gone_and_a_missing_one_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.raw");
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        assert_eq!(read_and_delete(&path), Some(vec![1, 2, 3]));
+        assert!(!path.exists());
+        assert_eq!(read_and_delete(&path), None);
+    }
+
+    #[test]
+    fn a_result_file_is_gone_whether_or_not_it_fits_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.raw");
+        std::fs::write(&path, [1u8, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let image = read_result_rgba(&path, 2, 1).expect("2x1 RGBA");
+        assert_eq!(image.as_raw(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(!path.exists());
+
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        assert!(read_result_rgba(&path, 2, 1).is_none());
+        assert!(!path.exists(), "a short file is removed too");
+        assert!(read_result_rgba(&path, 2, 1).is_none());
+    }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
     enum TestMsg {
