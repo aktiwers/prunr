@@ -2809,6 +2809,9 @@ impl BatchItem {
         };
         // A lens blur is made with the depth map, focused on the result's subject.
         Some(match backdrop {
+            // A tiled picture is uploaded to wrap around; the others clamp
+            // at the edge, or the far edge bleeds into the near one.
+            _ if self.backdrop_repeats() => key ^ 0x9e37_79b9_7f4a_7c15,
             Backdrop::Effect(effect) if effect.needs_depth() => {
                 let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
                 let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
@@ -2816,6 +2819,11 @@ impl BatchItem {
             }
             _ => key,
         })
+    }
+
+    /// The backdrop is a picture repeated across the frame.
+    pub(crate) fn backdrop_repeats(&self) -> bool {
+        self.settings.backdrop().fit(self.settings.bg_image_fit) == prunr_core::BgImageFit::Tile
     }
 
     /// Measure the lens-blur focus again when the depth map or the result
