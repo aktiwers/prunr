@@ -924,21 +924,19 @@ pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item:
     }
 }
 
-/// The UV span that repeats a `tex_px` picture at its own pixel size over
+/// The region that repeats a `tex_px` picture at its own pixel size over
 /// an image of `image_px` pixels, as export tiles it: the number of tiles
-/// follows the image, not the zoom. Over 1 it wraps (the texture is
-/// uploaded with `WrapMode::Repeat`).
+/// follows the image, not the zoom. Past 1 the picture repeats.
 fn tile_uv(image_px: Vec2, tex_px: Vec2) -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(image_px.x / tex_px.x, image_px.y / tex_px.y))
 }
 
-/// Paint `tex` into `bounds` per `fit` — UV-only math (no texture
-/// re-upload; the texture must be uploaded with `WrapMode::Repeat` for
-/// `Tile` to wrap rather than clamp).
+/// Paint `tex` into `bounds` per `fit`: which region of the picture shows
+/// where, with no texture re-upload.
 pub(super) fn paint_bg_image(
     ui: &egui::Ui,
     bounds: Rect,
-    tex: &TextureHandle,
+    tex: &ImageTexture,
     fit: prunr_core::BgImageFit,
     image_px: Vec2,
 ) {
@@ -962,16 +960,16 @@ pub(super) fn paint_bg_image(
                 let pad = (1.0 - visible) * 0.5;
                 (Pos2::new(0.0, pad), Pos2::new(1.0, 1.0 - pad))
             };
-            ui.painter().image(tex.id(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
+            tex.paint_region(ui.painter(), bounds, Rect::from_min_max(uv_min, uv_max), Color32::WHITE);
         }
         BgImageFit::Contain => {
             let scale = (bw / tw).min(bh / th);
             let inner = egui::vec2(tw * scale, th * scale);
             let inner_rect = Rect::from_center_size(bounds.center(), inner);
-            ui.painter().image(tex.id(), inner_rect, super::effects::UNIT_UV, Color32::WHITE);
+            tex.paint(ui.painter(), inner_rect, Color32::WHITE);
         }
         BgImageFit::Tile => {
-            ui.painter().image(tex.id(), bounds, tile_uv(image_px, tex_size), Color32::WHITE);
+            tex.paint_region(ui.painter(), bounds, tile_uv(image_px, tex_size), Color32::WHITE);
         }
     }
 }

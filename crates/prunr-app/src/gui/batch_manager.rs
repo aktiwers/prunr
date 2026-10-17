@@ -1659,7 +1659,7 @@ mod tests {
         let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
         let item = &mut bm.items[0];
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (1, style(0.15)), handle, shown: mask, feathered: None,
+            key: (1, style(0.15)), texture: handle.into(), shown: mask, feathered: None,
         });
         assert!(item.selection_hash.is_none(), "the selection was undone");
         bm.ensure_selection_texture(style(0.15), &ctx);
@@ -1686,7 +1686,7 @@ mod tests {
 
         let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (hash, style(0.15)), handle, shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
+            key: (hash, style(0.15)), texture: handle.into(), shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
         });
         assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).unwrap(), &feathered), "the feathered plane once built");
     }

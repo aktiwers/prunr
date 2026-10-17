@@ -834,7 +834,7 @@ pub(crate) struct BatchItem {
     pub(crate) bg_image: Option<Arc<BgImage>>,
     /// The picture behind the result (a background image or an effect
     /// made from the photo) and its `Backdrop::picture_key`.
-    pub(crate) backdrop_texture: Option<(u64, egui::TextureHandle)>,
+    pub(crate) backdrop_texture: Option<(u64, super::image_texture::ImageTexture)>,
     /// The key of the picture a background thread is building, so the
     /// next frame doesn't start the same one again.
     pub(crate) backdrop_tex_pending: Option<u64>,
@@ -932,7 +932,7 @@ pub(crate) struct LastDecode {
 /// plane per item while a newer mask awaits its patch.
 pub(crate) struct SelectionTexture {
     pub(crate) key: super::background_io::SelectionTextureKey,
-    pub(crate) handle: egui::TextureHandle,
+    pub(crate) texture: super::image_texture::ImageTexture,
     pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
     /// With Feather on, the feathered plane the texture was built from, so
     /// Delete / Copy / Cut act on it without filtering again.
@@ -1631,46 +1631,64 @@ impl BatchItem {
     }
 
     /// A selection overlay built off-thread lands when it is still for
-    /// the mask shown; `load` uploads a whole one. Returns whether a
-    /// feathered plane the cut-out has not had yet came with it.
+    /// the mask shown: a patch at once, a whole one handed to `upload`
+    /// (it stays pending until `install_selection_texture`).
     pub(crate) fn land_selection_texture(
         &mut self,
         result: super::background_io::SelectionTextureResult,
-        load: impl FnOnce(egui::ColorImage) -> egui::TextureHandle,
-    ) -> bool {
+        upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding),
+    ) {
         use super::background_io::SelectionImage;
-        if self.selection_tex_pending == Some(result.key) {
-            self.selection_tex_pending = None;
-        }
-        if self.selection_hash != Some(result.key.0) {
-            return false;
-        }
-        if self.selection_mask.is_none() {
-            return false;
-        }
-        let super::background_io::SelectionTextureResult { image, key, shown, .. } = result;
+        let current = self.selection_hash == Some(result.key.0) && self.selection_mask.is_some();
+        let super::background_io::SelectionTextureResult { item_id, image, key, shown } = result;
         match image {
-            SelectionImage::Full { image, feathered } => {
-                // Re-cut only for a feathered plane the cut-out has not
-                // had yet; a rebuild for zoom keeps the same one.
-                let had_it = self.selection_texture.as_ref().is_some_and(|t| {
-                    t.feathered.is_some() && t.key.0 == key.0 && t.key.1.edge_feather_px == key.1.edge_feather_px
-                });
-                let new_plane = feathered.is_some() && !had_it;
-                self.selection_texture = Some(SelectionTexture { key, handle: load(image), shown, feathered });
-                new_plane
+            SelectionImage::Full { image, feathered } if current => {
+                upload(image, super::background_io::TexLanding::Selection { item_id, key, shown, feathered });
+            }
+            SelectionImage::Full { .. } => {
+                if self.selection_tex_pending == Some(key) {
+                    self.selection_tex_pending = None;
+                }
             }
             // A patch whose base texture has moved on is dropped; the
             // per-frame check asks again against the new base.
             SelectionImage::Patch { base_hash, pos, image } => {
-                if let Some(tex) = self.selection_texture.as_mut().filter(|t| t.key == (base_hash, key.1)) {
-                    tex.handle.set_partial(pos, image, egui::TextureOptions::LINEAR);
+                if self.selection_tex_pending == Some(key) {
+                    self.selection_tex_pending = None;
+                }
+                if let Some(tex) = self.selection_texture.as_mut().filter(|t| current && t.key == (base_hash, key.1)) {
+                    tex.texture.set_partial(pos, &image, egui::TextureOptions::LINEAR);
                     tex.key = key;
                     tex.shown = shown;
                 }
-                false
             }
         }
+    }
+
+    /// A whole selection overlay uploaded: it shows while still for the
+    /// mask shown. Returns whether a feathered plane the cut-out has not
+    /// had yet came with it.
+    pub(crate) fn install_selection_texture(
+        &mut self,
+        texture: super::image_texture::ImageTexture,
+        key: super::background_io::SelectionTextureKey,
+        shown: Arc<prunr_core::selection::MaskArtifact>,
+        feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
+    ) -> bool {
+        if self.selection_tex_pending == Some(key) {
+            self.selection_tex_pending = None;
+        }
+        if self.selection_hash != Some(key.0) || self.selection_mask.is_none() {
+            return false;
+        }
+        // Re-cut only for a feathered plane the cut-out has not had yet;
+        // a rebuild for zoom keeps the same one.
+        let had_it = self.selection_texture.as_ref().is_some_and(|t| {
+            t.feathered.is_some() && t.key.0 == key.0 && t.key.1.edge_feather_px == key.1.edge_feather_px
+        });
+        let new_plane = feathered.is_some() && !had_it;
+        self.selection_texture = Some(SelectionTexture { key, texture, shown, feathered });
+        new_plane
     }
 
     /// Whether an erase has something to fill.
@@ -1681,21 +1699,40 @@ impl BatchItem {
     /// A picture built for the backdrop lands when it is still the
     /// item's backdrop (`true`); a stale or empty build frees the slot
     /// for the next frame to build the current one.
-    pub(crate) fn land_backdrop(&mut self, key: u64, ci: Option<egui::ColorImage>, ctx: &egui::Context) -> bool {
+    /// The picture built for the backdrop arrives: handed to `upload`
+    /// while it is still the backdrop (it stays pending until
+    /// `install_backdrop`). False when it was dropped.
+    pub(crate) fn land_backdrop(
+        &mut self,
+        key: u64,
+        image: Option<super::image_texture::PreparedImage>,
+        upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding),
+    ) -> bool {
+        match image.filter(|_| self.backdrop_key() == Some(key)) {
+            Some(image) => {
+                upload(image, super::background_io::TexLanding::Backdrop { item_id: self.id, key });
+                true
+            }
+            None => {
+                if self.backdrop_tex_pending == Some(key) {
+                    self.backdrop_tex_pending = None;
+                }
+                false
+            }
+        }
+    }
+
+    /// The backdrop picture uploaded: it shows while it is still the
+    /// backdrop. Returns whether it did.
+    pub(crate) fn install_backdrop(&mut self, key: u64, texture: super::image_texture::ImageTexture) -> bool {
         if self.backdrop_tex_pending == Some(key) {
             self.backdrop_tex_pending = None;
         }
-        let Some(ci) = ci.filter(|_| self.backdrop_key() == Some(key)) else { return false };
-        // WrapMode::Repeat enables BgImageFit::Tile (UV > 1.0 wraps);
-        // other fits keep UVs in [0, 1] so the wrap is a no-op.
-        let opts = egui::TextureOptions {
-            magnification: egui::TextureFilter::Linear,
-            minification: egui::TextureFilter::Linear,
-            wrap_mode: egui::TextureWrapMode::Repeat,
-            mipmap_mode: None,
-        };
-        self.backdrop_texture = Some((key, ctx.load_texture(format!("backdrop_{key:x}"), ci, opts)));
-        true
+        let current = self.backdrop_key() == Some(key);
+        if current {
+            self.backdrop_texture = Some((key, texture));
+        }
+        current
     }
 
     /// Faces found for this image are kept for the blend when they are
@@ -3249,10 +3286,10 @@ mod tests {
     /// plane that comes with it is reported once.
     #[test]
     fn a_selection_overlay_lands_only_for_the_mask_shown() {
-        use crate::gui::background_io::{SelectionImage, SelectionStyle, SelectionTextureResult};
+        use crate::gui::background_io::{SelectionImage, SelectionStyle, SelectionTextureResult, TexLanding};
+        use crate::gui::image_texture::PreparedImage;
         let ctx = egui::Context::default();
-        let load = |image| ctx.load_texture("selection", image, egui::TextureOptions::LINEAR);
-        let image = || egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]);
+        let image = || PreparedImage::from_color_image(egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]));
         let style = SelectionStyle { fill_opacity: 0.5, erase: false, outline_thickness: 1.0, edge_feather_px: 2, fill: None };
         let full = |hash: u64, feathered: bool| SelectionTextureResult {
             item_id: 1,
@@ -3260,14 +3297,28 @@ mod tests {
             key: (hash, style),
             shown: make_mask(hash, 2, 2),
         };
+        // An upload as the frame makes it, installed once its tiles are up.
+        let land = |item: &mut BatchItem, result| {
+            let mut queued = None;
+            item.land_selection_texture(result, |image, landing| queued = Some((image, landing)));
+            queued.map(|(image, landing)| {
+                let mut uploads = crate::gui::image_texture::Uploads::default();
+                uploads.push("selection".into(), image, landing);
+                let (texture, landing) = uploads.pump(&ctx, egui::TextureOptions::LINEAR).pop().expect("uploaded");
+                let TexLanding::Selection { key, shown, feathered, .. } = landing else { panic!("a selection") };
+                item.install_selection_texture(texture, key, shown, feathered)
+            })
+        };
         let mut item = fixture_item(1);
         item.selection_mask = Some(make_mask(7, 2, 2));
         item.selection_hash = Some(7);
         item.selection_tex_pending = Some((3, style));
-        assert!(!item.land_selection_texture(full(3, true), load));
-        assert!(item.selection_texture.is_none() && item.selection_tex_pending.is_none(), "a stale build is dropped and frees the slot");
-        assert!(item.land_selection_texture(full(7, true), load), "the shown mask's overlay lands with a new feathered plane");
-        assert!(!item.land_selection_texture(full(7, true), load), "a rebuild keeps the plane it had");
+        assert_eq!(land(&mut item, full(3, true)), None, "a stale build is not uploaded");
+        assert!(item.selection_texture.is_none() && item.selection_tex_pending.is_none(), "and frees the slot");
+        item.selection_tex_pending = Some((7, style));
+        assert_eq!(land(&mut item, full(7, true)), Some(true), "the shown mask's overlay lands with a new feathered plane");
+        assert!(item.selection_tex_pending.is_none(), "pending until installed");
+        assert_eq!(land(&mut item, full(7, true)), Some(false), "a rebuild keeps the plane it had");
     }
 
     /// A lens-blur backdrop keys on where it focuses: a new result with
