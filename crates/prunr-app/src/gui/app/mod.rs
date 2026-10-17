@@ -131,9 +131,10 @@ pub struct PrunrApp {
     /// where `requires_license_acceptance() && !has_accepted_license`;
     /// cleared on Accept (then `start_download`) or Cancel.
     pub(crate) pending_license_request: Option<prunr_models::ModelId>,
-    /// Upgrade path: saved settings may reference a model that's now
-    /// OnDemand and not installed. Shown once, then `take()`d.
-    pub(crate) pending_onboarding_toast: Option<String>,
+    /// Notes made while the app was built, shown on the first frame (egui
+    /// is not ready before): a saved model that now needs a download, a
+    /// runtime that would not load.
+    pub(crate) pending_first_toasts: Vec<String>,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
     /// Snapshot of `RuntimeId::is_installed()` to avoid syscalling per-frame
@@ -270,7 +271,9 @@ impl PrunrApp {
         // The saved model's tools, as a switch to it would set them: an
         // eraser starts with its brush on, a cut-out warms Magic Brush.
         app.fit_brush_models_to_model();
-        app.pending_onboarding_toast = onboarding_toast;
+        app.pending_first_toasts = onboarding_toast.into_iter()
+            .chain(prunr_core::ort_runtime::fallback_note().map(str::to_string))
+            .collect();
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
         app.batch.selection_queue.wake(&cc.egui_ctx);
@@ -437,7 +440,7 @@ impl PrunrApp {
             bindings: Arc::new(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys)),
             model_store: None,
             pending_license_request: None,
-            pending_onboarding_toast: None,
+            pending_first_toasts: Vec::new(),
             runtime_install: None,
             hardware_install_cache: Default::default(),
             runtime_prompt: None,
@@ -1529,7 +1532,7 @@ mod field_list_tests {
             bindings: _,
             model_store: _,
             pending_license_request: _,
-            pending_onboarding_toast: _,
+            pending_first_toasts: _,
             runtime_install: _,
             hardware_install_cache: _,
             runtime_prompt: _,
