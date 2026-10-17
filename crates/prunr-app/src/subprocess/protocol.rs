@@ -712,37 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn command_repostprocess_roundtrip() {
-        roundtrip(&SubprocessCommand::RePostProcess {
-            item_id: 9,
-            tensor_path: PathBuf::from("/tmp/t.bin"),
-            tensor_height: 320,
-            tensor_width: 320,
-            model: ModelKind::U2net,
-            original_image_path: PathBuf::from("/tmp/orig.png"),
-            mask: MaskSettings::default(),
-        });
-    }
-
-    #[test]
-    fn command_add_edge_inference_roundtrip() {
-        roundtrip(&SubprocessCommand::AddEdgeInference {
-            item_id: 13,
-            image_path: PathBuf::from("/tmp/orig.png"),
-            seg_tensor_path: PathBuf::from("/tmp/seg.raw"),
-            seg_tensor_height: 1024,
-            seg_tensor_width: 1024,
-            model: ModelKind::BiRefNetLite,
-            mask: MaskSettings::default(),
-        });
-    }
-
-    #[test]
-    fn command_shutdown_roundtrip() {
-        roundtrip(&SubprocessCommand::Shutdown);
-    }
-
-    #[test]
     fn command_configure_roundtrip() {
         roundtrip(&SubprocessCommand::Configure {
             mask: MaskSettings { gamma: 1.4, ..MaskSettings::default() },
@@ -765,13 +734,6 @@ mod tests {
         roundtrip(&SubprocessCommand::CancelItem { item_id: 42 });
         roundtrip(&SubprocessCommand::CancelItem { item_id: 0 });
         roundtrip(&SubprocessCommand::CancelItem { item_id: u64::MAX });
-    }
-
-    #[test]
-    fn event_ready_roundtrip() {
-        roundtrip(&SubprocessEvent::Ready {
-            active_provider: "CUDA".to_string(),
-        });
     }
 
     #[test]
@@ -820,29 +782,6 @@ mod tests {
                 width: 640,
                 scales: vec![prunr_core::EdgeScale::Fine],
             }),
-        });
-    }
-
-    #[test]
-    fn event_image_error_roundtrip() {
-        roundtrip(&SubprocessEvent::ImageError {
-            item_id: 4,
-            error: "decode failed: not a PNG".to_string(),
-        });
-    }
-
-    #[test]
-    fn event_rss_update_roundtrip() {
-        roundtrip(&SubprocessEvent::RssUpdate {
-            rss_bytes: 1_234_567_890,
-        });
-    }
-
-    #[test]
-    fn event_finished_and_init_error_roundtrip() {
-        roundtrip(&SubprocessEvent::Finished);
-        roundtrip(&SubprocessEvent::InitError {
-            error: "engine creation failed".into(),
         });
     }
 

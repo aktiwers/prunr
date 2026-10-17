@@ -1495,11 +1495,8 @@ mod hotkey_capture_tests {
 #[cfg(test)]
 mod field_list_tests {
     /// `PrunrApp` coordinates; it does not own domain state. A new field
-    /// does not compile until it is listed here, so it is a decision:
-    /// first find its owner in CLAUDE.md's state-ownership table (batch
-    /// items -> BatchManager, worker or preview work -> Processor, I/O
-    /// channels -> BatchManager.bg_io); only UI flags and coordinator
-    /// handles belong here.
+    /// does not compile until it is listed here: list it only once the
+    /// state-ownership table says no coordinator owns it.
     #[test]
     fn every_field_is_a_decision() {
         let app = super::PrunrApp::new_for_test();
