@@ -26,6 +26,8 @@ const UPLOAD_BUDGET: usize = 2 * TILE_SIDE * TILE_SIDE * 4;
 pub(crate) struct ImageTexture {
     size: [usize; 2],
     tiles: Arc<[Tile<TextureHandle>]>,
+    /// One texture that wraps around: a repeating region is one quad.
+    repeats: bool,
 }
 
 /// One tile: the part of the image it covers (0..1), and the part of its
@@ -45,7 +47,7 @@ impl ImageTexture {
     /// A texture uploaded whole: a small image.
     pub(crate) fn single(handle: TextureHandle) -> Self {
         let unit = crate::gui::views::effects::UNIT_UV;
-        Self { size: handle.size(), tiles: Arc::from([Tile { part: unit, texture_uv: unit, origin: [0, 0], texture: handle }]) }
+        Self { size: handle.size(), tiles: Arc::from([Tile { part: unit, texture_uv: unit, origin: [0, 0], texture: handle }]), repeats: false }
     }
 
     pub(crate) fn size_vec2(&self) -> egui::Vec2 {
@@ -85,6 +87,10 @@ impl ImageTexture {
     fn region_pieces(&self, rect: Rect, region: Rect) -> Vec<(Rect, TextureId, Rect)> {
         let mut pieces = Vec::new();
         if region.width() <= 0.0 || region.height() <= 0.0 {
+            return pieces;
+        }
+        if self.repeats {
+            pieces.push((rect, self.tiles[0].texture.id(), region));
             return pieces;
         }
         let to_screen = |p: egui::Pos2| rect.lerp_inside(egui::vec2((p.x - region.min.x) / region.width(), (p.y - region.min.y) / region.height()));
@@ -292,7 +298,8 @@ impl<T> Uploads<T> {
             }
             // just checked: the front upload has no tiles left
             let Some(upload) = self.queue.pop_front() else { break };
-            finished.push((ImageTexture { size: upload.size, tiles: upload.done.into() }, upload.landing));
+            let repeats = upload.options.wrap_mode == egui::TextureWrapMode::Repeat && upload.done.len() == 1;
+            finished.push((ImageTexture { size: upload.size, tiles: upload.done.into(), repeats }, upload.landing));
             if spent >= self.budget {
                 break;
             }
@@ -377,6 +384,24 @@ mod tests {
         }
         assert!(frames > 1, "not all in one frame");
         assert_eq!(landed, vec![(1, 3, [3 * TILE_STEP, 1]), (2, 1, [2, 2])]);
+    }
+
+    /// A small image uploaded to wrap draws a repeating region as one
+    /// quad; a tiled one cannot wrap and draws a quad per copy and tile.
+    #[test]
+    fn a_wrapping_texture_repeats_in_one_quad() {
+        let ctx = egui::Context::default();
+        let wrap = TextureOptions { wrap_mode: egui::TextureWrapMode::Repeat, ..TextureOptions::LINEAR };
+        let region = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(3.0, 2.0));
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        let mut pieces = Vec::new();
+        for (side, options) in [(4, wrap), (4, TextureOptions::LINEAR), (TILE_STEP + 10, wrap)] {
+            let mut uploads = Uploads { budget: usize::MAX, ..Uploads::default() };
+            uploads.push_with("bg".into(), PreparedImage::from_rgba(&image::RgbaImage::new(side as u32, 1)), (), options);
+            let (texture, ()) = uploads.pump(&ctx, |_| true).landed.pop().expect("uploaded");
+            pieces.push(texture.region_pieces(screen, region).len());
+        }
+        assert_eq!(pieces, vec![1, 6, 12]);
     }
 
     /// An upload no longer wanted is dropped part-way, behind the front
