@@ -1491,3 +1491,61 @@ mod hotkey_capture_tests {
         assert!(app.show_settings, "Escape went to the capture field, not to the modal");
     }
 }
+
+#[cfg(test)]
+mod field_list_tests {
+    /// `PrunrApp` coordinates; it does not own domain state. A new field
+    /// does not compile until it is listed here, so it is a decision:
+    /// first find its owner in CLAUDE.md's state-ownership table (batch
+    /// items -> BatchManager, worker or preview work -> Processor, I/O
+    /// channels -> BatchManager.bg_io); only UI flags and coordinator
+    /// handles belong here.
+    #[test]
+    fn every_field_is_a_decision() {
+        let app = super::PrunrApp::new_for_test();
+        let super::PrunrApp {
+            last_open_dir: _,
+            processor: _,
+            status: _,
+            system: _,
+            show_cli_help: _,
+            show_pipeline_flow: _,
+            pending_copy: _,
+            zoom_state: _,
+            brush_state: _,
+            magic_brush_state: _,
+            download_manager: _,
+            show_original: _,
+            picking_depth_focus: _,
+            busy_since: _,
+            synced_selected: _,
+            title_state: _,
+            last_drift_check: _,
+            batch: _,
+            sidebar_hidden: _,
+            adjustments_hidden: _,
+            show_settings: _,
+            settings: _,
+            settings_tab: _,
+            pending_reset_confirm: _,
+            hotkey_capture: _,
+            bindings: _,
+            model_store: _,
+            pending_license_request: _,
+            pending_onboarding_toast: _,
+            runtime_install: _,
+            hardware_install_cache: _,
+            runtime_prompt: _,
+            runtime_prompt_evaluated: _,
+            popup_open_at_frame_start: _,
+            canvas_switch_id: _,
+            result_switch_id: _,
+            pending_batch_sync: _,
+            toasts: _,
+            drag_export: _,
+            automation: _,
+            save_preset: _,
+            settings_save_due: _,
+        } = app;
+    }
+}
