@@ -130,6 +130,10 @@ mod tests {
     /// look switched away from loads nothing.
     #[test]
     fn the_first_look_model_loads_on_need_and_goes_when_looks_are_off() {
+        if let Err(why) = prunr_core::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         let look = FirstLook::default();
         look.show_for(Some(4));
         let stale = look.for_run(4, ModelKind::BiRefNetLite, 1).expect("the shown image's run");

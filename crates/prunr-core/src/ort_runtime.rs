@@ -53,6 +53,19 @@ impl std::fmt::Display for DylibSource {
 
 static INIT: OnceLock<Result<DylibSource, String>> = OnceLock::new();
 
+/// For a test that builds a session: `Err(why)` to skip it where no
+/// runtime is installed (the macOS runners). `PRUNR_REQUIRE_ORT=1`, set
+/// where CI installs one, turns a missing runtime into a failure, so a
+/// broken install cannot pass as a skip.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn runtime_for_tests() -> Result<(), String> {
+    let Err(why) = ensure_initialized() else { return Ok(()) };
+    if crate::env::flag("PRUNR_REQUIRE_ORT") == Some(true) {
+        panic!("PRUNR_REQUIRE_ORT=1 but no runtime: {why}");
+    }
+    Err(why)
+}
+
 /// Load the runtime once per process. Every later call returns the
 /// first outcome, so a missing runtime surfaces as the same error at
 /// every session site instead of a hang.

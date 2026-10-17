@@ -7,7 +7,6 @@
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
 use image::{GrayImage, ImageBuffer, Luma, Rgba, RgbaImage};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,14 +18,9 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
 /// Returns `true` when ORT couldn't be initialised, after printing a
 /// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
 pub fn skip_if_no_ort(label: &str) -> bool {
-    if let Err(msg) = ensure_ort_initialized() {
-        if env::var_os("PRUNR_REQUIRE_ORT").is_some_and(|v| v == "1") {
-            panic!("[{label}] PRUNR_REQUIRE_ORT=1 but no runtime: {msg}");
-        }
-        eprintln!("[{label}] SKIP: {msg}");
-        return true;
-    }
-    false
+    let Err(msg) = prunr_core::ort_runtime::runtime_for_tests() else { return false };
+    eprintln!("[{label}] SKIP: {msg}");
+    true
 }
 
 /// Returns `true` when the OnDemand model `id` isn't installed, after
