@@ -454,10 +454,7 @@ fn end_if_dead(
     res_tx: &mpsc::Sender<InpaintBridgeResult>,
 ) {
     let SubState::Ready(s) = sub_state else { return };
-    if s.is_alive() {
-        return;
-    }
-    let reason = s.crash_reason();
+    let Some(reason) = s.died() else { return };
     tracing::warn!(%reason, in_flight = inflight_generations.len(), "eraser worker ended");
     *sub_state = SubState::Idle;
     fail_inflight(inflight_generations, res_tx, &format!("The eraser stopped: {reason}. Erase again."));
