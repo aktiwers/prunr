@@ -110,6 +110,16 @@ impl Drop for SemaphoreGuard {
 /// Remove each temp path that lives under the IPC directory. Silent on
 /// missing files — subprocess cancel branches call this before the normal
 /// post-spawn cleanup would have fired.
+/// Write a result for the parent to read. One that fails (a full temp
+/// disk) leaves no half file behind; the caller reports the error, or the
+/// parent would wait for an answer that never comes.
+fn write_result(path: &std::path::Path, rgba: &image::RgbaImage) -> Result<(), String> {
+    std::fs::write(path, rgba.as_raw()).map_err(|e| {
+        let _ = std::fs::remove_file(path);
+        format!("Failed to write result: {e}")
+    })
+}
+
 fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     for p in paths {
         if p.starts_with(ipc) {
@@ -671,14 +681,14 @@ pub fn run_worker() -> ! {
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
                             let active_provider = pr.active_provider.clone();
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
-                            let write_result = std::fs::write(&result_path, pr.rgba_image.as_raw());
+                            let written = write_result(&result_path, &pr.rgba_image);
                             // Free the result RGBA (~50 MB at 4 K) before
                             // posting the event — under N-job parallelism
                             // this drops N×50 MB of redundant retention
                             // during the brief window before the next
                             // dispatch overwrites `pr`.
                             drop(pr);
-                            match write_result {
+                            match written {
                                 Ok(()) => {
                                     spare_token = spare_scales;
                                     let _ = evt_tx.send(SubprocessEvent::ImageDone {
@@ -694,11 +704,8 @@ pub fn run_worker() -> ! {
                                         spare_scales,
                                     });
                                 }
-                                Err(e) => {
-                                    let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                        item_id,
-                                        error: format!("Failed to write result: {e}"),
-                                    });
+                                Err(error) => {
+                                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                                 }
                             }
                         }
@@ -767,10 +774,10 @@ pub fn run_worker() -> ! {
                         Ok(rgba) => {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
-                            let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
+                            let written = write_result(&result_path, &rgba);
                             drop(rgba);
-                            if write_ok {
-                                let _ = evt_tx.send(SubprocessEvent::ImageDone {
+                            let _ = evt_tx.send(match written {
+                                Ok(()) => SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
                                     width: w,
@@ -781,8 +788,9 @@ pub fn run_worker() -> ! {
                                     tensor_cache_width: None,
                                     edge_cache: None,
                                     spare_scales: None,
-                                });
-                            }
+                                },
+                                Err(error) => SubprocessEvent::ImageError { item_id, error },
+                            });
                         }
                         Err(e) => {
                             let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
@@ -868,9 +876,15 @@ pub fn run_worker() -> ! {
                             let edge_cache = write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, &edge_res);
                             let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
-                            let write_ok = std::fs::write(&result_path, rgba.as_raw()).is_ok();
+                            let written = write_result(&result_path, &rgba);
                             drop(rgba);
-                            if write_ok {
+                            if let Err(error) = written {
+                                if let Some(file) = &edge_cache {
+                                    let _ = std::fs::remove_file(&file.path);
+                                }
+                                cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
+                                let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                            } else {
                                 spare_token = spare_scales;
                                 let _ = evt_tx.send(SubprocessEvent::ImageDone {
                                     item_id,
@@ -1109,6 +1123,24 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A result that cannot be written is an error for the parent, with no
+    /// half file left; one that can is the whole image.
+    #[test]
+    fn a_result_that_cannot_be_written_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let rgba = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 4]));
+        let blocked = dir.path().join("result_0.raw");
+        std::fs::create_dir(&blocked).unwrap();
+        let err = write_result(&blocked, &rgba).unwrap_err();
+        assert!(err.starts_with("Failed to write result"), "{err}");
+        let missing = dir.path().join("gone").join("result_1.raw");
+        assert!(write_result(&missing, &rgba).is_err());
+        assert!(!missing.exists());
+        let fine = dir.path().join("result_2.raw");
+        write_result(&fine, &rgba).unwrap();
+        assert_eq!(std::fs::read(&fine).unwrap(), rgba.as_raw().as_slice());
+    }
     use std::time::{Duration, Instant};
 
     /// Block until the semaphore has at least `n` waiters parked. Polls
