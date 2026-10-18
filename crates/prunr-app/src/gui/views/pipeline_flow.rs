@@ -68,11 +68,10 @@ const PIPELINES: [Pipeline; 4] = [
         output: "The enlarged photo",
         stages: &[
             Stage { icon: ICON_BLUR_ON.codepoint, title: "Denoise", tagline: "Smooths grain first so it is not enlarged along with the detail. Requires reprocessing." },
-            Stage { icon: ICON_BRIGHTNESS_6.codepoint, title: "Brightness lift", tagline: "Brightens shadows for the model, then restores the original brightness. Requires reprocessing." },
             Stage { icon: ICON_ARROW_UPWARD.codepoint, title: "Upscale", tagline: "The model enlarges the photo tile by tile at the chosen scale." },
             Stage { icon: ICON_PSYCHOLOGY.codepoint, title: "AI blend", tagline: "Mixes the plain enlargement back in to soften a plastic look." },
             Stage { icon: ICON_DEBLUR.codepoint, title: "Sharpen", tagline: "Negative softens, positive sharpens." },
-            Stage { icon: ICON_PALETTE.codepoint, title: "Saturation and color match", tagline: "Adjusts color intensity, then matches the result's color balance to the photo." },
+            Stage { icon: ICON_PALETTE.codepoint, title: "Color match", tagline: "Matches the result's color balance to the photo." },
         ],
     },
 ];

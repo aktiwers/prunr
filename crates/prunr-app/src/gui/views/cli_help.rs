@@ -295,7 +295,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
             // Footer
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.label(
-                    RichText::new("Press F2 to close")
+                    RichText::new(format!("Press {} to close", super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::CliHelp)))
                         .size(theme::FONT_SIZE_SECONDARY)
                         .color(theme::TEXT_HINT),
                 );

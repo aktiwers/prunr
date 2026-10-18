@@ -466,7 +466,7 @@ fn render_mask_group(
             });
             ui.add_space(theme::SPACE_SM);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                hint(ui, "Pipeline diagram: F3");
+                hint(ui, &format!("Pipelines: {}", super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::PipelineFlow)));
             });
         }
     });
@@ -1201,7 +1201,7 @@ fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
         icon: ICON_PALETTE.codepoint,
         label: "Strength",
         summary: &summary,
-        tooltip: "Color strength. 0 = grey, 1 = as predicted.",
+        tooltip: "Color strength. 0% = black and white, 100% = the model's colors, up to 150%.",
         tuned,
         width: theme::POPOVER_WIDTH,
         live: true,
@@ -1252,10 +1252,10 @@ pub(super) fn render_model_dropdown(
         use crate::gui::knob_catalog::ModelRole;
         let body = match app_settings.model.role() {
             ModelRole::Cutout if !mask_active => "Sketch is on Whole photo, so the lines cover the whole photo and nothing is cut out. Set Sketch to Off or Subject to cut out the subject again.",
-            ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and download size.",
+            ModelRole::Cutout => "Cuts the subject out of the photo. Each model in the list shows its strength and size. Requires reprocessing.",
             ModelRole::Erase => "Removes what you paint over and fills the area in. Paint with the brush, then Process.",
-            ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size.",
-            ModelRole::Colorize => "Colors a black-and-white photo. Process, then set Strength.",
+            ModelRole::Upscale => "Enlarges the photo. Each model in the list shows what it is best at and its download size. Requires reprocessing.",
+            ModelRole::Colorize => "Colors a black-and-white photo. Process, then set Strength. Requires reprocessing.",
             ModelRole::Filters => "No model runs: only the effect, lines and background apply to the photo.",
         };
         let resp = chip::tooltip(resp, "Model", body, None);

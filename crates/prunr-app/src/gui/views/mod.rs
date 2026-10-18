@@ -124,9 +124,9 @@ pub struct ModelInfo {
 pub fn model_info(model: SettingsModel) -> ModelInfo {
     let (icon, name, character) = match model {
         SettingsModel::Silueta => (ICON_SPRINT.codepoint, "Silueta", "Fast \u{00b7} ~4 MB"),
-        SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "Quality"),
+        SettingsModel::U2net => (ICON_SMART_TOY.codepoint, "U2Net", "Quality \u{00b7} ~170 MB"),
         SettingsModel::BiRefNetLite => (ICON_NEUROLOGY.codepoint, "BiRefNet", "Detail \u{00b7} ~214 MB"),
-        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "Filters and lines only"),
+        SettingsModel::None => (ICON_BLOCK.codepoint, "No model", "Effects, lines and background only"),
         SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "Object removal"),
         SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "Sharper fills"),
         SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "Compact"),
