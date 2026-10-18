@@ -421,6 +421,12 @@ fn write_fast_png<W: std::io::Write>(w: W, bytes: &[u8], width: u32, height: u32
         .map_err(CoreError::from)
 }
 
+fn write_kept_png<W: std::io::Write>(w: W, bytes: &[u8], width: u32, height: u32, ty: image::ExtendedColorType) -> Result<(), CoreError> {
+    PngEncoder::new_with_quality(w, CompressionType::Level(4), PngFilter::Adaptive)
+        .write_image(bytes, width, height, ty)
+        .map_err(CoreError::from)
+}
+
 /// Encode an RgbaImage as PNG bytes with fast compression. Convenience
 /// wrapper over `encode_rgba_png_into` for callers that need owned bytes
 /// (e.g. shipping over a channel). Streaming callers writing to a file
@@ -485,8 +491,7 @@ impl ExportFormat {
     pub fn encode_into<W: std::io::Write>(self, img: &RgbaImage, w: W) -> Result<(), CoreError> {
         let (width, height) = img.dimensions();
         match self {
-            Self::Png => PngEncoder::new_with_quality(w, CompressionType::Level(4), PngFilter::Adaptive)
-                .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgba8),
+            Self::Png => return write_kept_png(w, img.as_raw(), width, height, image::ExtendedColorType::Rgba8),
             Self::Jpeg => {
                 const JPEG_QUALITY: u8 = 92;
                 let flat = flatten_on_white(img);
@@ -517,6 +522,12 @@ fn flatten_on_white(img: &RgbaImage) -> image::RgbImage {
 /// Encode a GrayImage (L8) as PNG with fast compression, streamed into `w`.
 pub fn encode_gray_png_into<W: std::io::Write>(img: &GrayImage, w: W) -> Result<(), CoreError> {
     write_fast_png(w, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
+}
+
+/// A GrayImage (L8) PNG for a file the user keeps, at the compression
+/// `ExportFormat::Png` uses, streamed into `w`.
+pub fn encode_gray_png_kept_into<W: std::io::Write>(img: &GrayImage, w: W) -> Result<(), CoreError> {
+    write_kept_png(w, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::L8)
 }
 
 /// Encode a 16-bit grey image as PNG bytes with fast compression.
