@@ -8,6 +8,14 @@ pub fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The nearest byte to `v` on the 0-255 scale, clamped. A plain `as u8`
+/// truncates, darkening every value by half a step on average. Not
+/// `f32::round`: without SSE4.1 that is a libm call per channel.
+#[inline]
+pub fn round_u8(v: f32) -> u8 {
+    (v + 0.5).clamp(0.0, 255.0) as u8
+}
+
 /// Logistic sigmoid, logit → probability.
 #[inline]
 pub(crate) fn sigmoid(x: f32) -> f32 {
@@ -132,6 +140,11 @@ unsafe impl Sync for SendMutPtr {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_u8_rounds_and_clamps() {
+        assert_eq!([-3.0, 0.49, 0.5, 99.99, 254.6, 300.0, f32::NAN].map(round_u8), [0, 0, 1, 100, 255, 255, 0]);
+    }
 
     #[test]
     fn slice_stats_empty_returns_sentinel() {

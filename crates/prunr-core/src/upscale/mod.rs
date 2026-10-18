@@ -21,6 +21,7 @@ use ort::session::{NoSelectedOutputs, RunOptions};
 use ort::value::TensorElementType;
 
 use crate::CoreError;
+use crate::math::round_u8;
 use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
 
 /// Shared `RunOptions` handle used by callers that want to terminate a
@@ -82,9 +83,9 @@ fn pack_output(
             )));
         }
         for idx in 0..plane {
-            packed[3 * idx]     = (slice[idx] * 255.0).clamp(0.0, 255.0) as u8;
-            packed[3 * idx + 1] = (slice[plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
-            packed[3 * idx + 2] = (slice[2 * plane + idx] * 255.0).clamp(0.0, 255.0) as u8;
+            packed[3 * idx]     = round_u8(slice[idx] * 255.0);
+            packed[3 * idx + 1] = round_u8(slice[plane + idx] * 255.0);
+            packed[3 * idx + 2] = round_u8(slice[2 * plane + idx] * 255.0);
         }
         Ok(())
     }

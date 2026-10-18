@@ -241,7 +241,7 @@ impl Band {
             // by 0 would otherwise produce inf and saturate the channel.
             let inv_w = 1.0 / w.max(1e-6);
             for k in 0..3 {
-                px[k] = (rgb[k] * inv_w).clamp(0.0, 255.0) as u8;
+                px[k] = crate::math::round_u8(rgb[k] * inv_w);
             }
         }
         self.rgb.copy_within(done_px * 3.., 0);
@@ -515,7 +515,7 @@ mod tests {
         RgbaImage::from_fn(out_w, out_h, |x, y| {
             let i = (y * out_w + x) as usize;
             let inv = 1.0 / wts[i].max(1e-6);
-            let c = |k: usize| (acc[i * 3 + k] * inv).clamp(0.0, 255.0) as u8;
+            let c = |k: usize| crate::math::round_u8(acc[i * 3 + k] * inv);
             image::Rgba([c(0), c(1), c(2), alpha.get_pixel(x, y)[0]])
         })
     }
@@ -535,6 +535,20 @@ mod tests {
         };
         let banded = upscale_tiled(&input, scale, cfg, |t, pw, ph| Ok(run(t, pw, ph)), &Progress::none()).unwrap();
         assert!(banded == full_buffer_reference(&input, scale, cfg, run), "bit-identical");
+    }
+
+    /// A flat image comes back flat across the overlaps: the blend's
+    /// weighted mean is not quite the value in f32, and truncating it
+    /// would land one low there.
+    #[test]
+    fn overlaps_give_back_a_flat_colour_exactly() {
+        let cfg = TilingConfig { tile_size: 64, tile_multiple: None, overlap: 24 };
+        let run = |rgb: &RgbImage, pw: u32, ph: u32| Ok(RgbImage::from_fn(2 * pw, 2 * ph, |x, y| *rgb.get_pixel(x / 2, y / 2)));
+        for v in [1u8, 3, 77, 101, 199, 254] {
+            let input = RgbaImage::from_pixel(150, 150, image::Rgba([v, v, v, 255]));
+            let out = upscale_tiled(&input, 2, cfg, run, &Progress::none()).unwrap();
+            assert!(out.pixels().all(|p| p[0] == v), "{v} drifted");
+        }
     }
 
     #[test]
