@@ -25,7 +25,7 @@
 //! the tripwires — if you add a field without `#[serde(default)]`, they
 //! will fail and tell you what's missing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use rayon::prelude::*;
@@ -138,42 +138,80 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
         })
         .collect();
 
-    paths
+    let read: Vec<(String, Result<PresetFile, Skipped>)> = paths
         .par_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
-            if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
-            let file = load_from_path(path)?;
-            Some((name, file))
+            (!name.eq_ignore_ascii_case(PRUNR_PRESET)).then(|| (name, read_preset(path)))
         })
-        .collect()
+        .collect();
+    let mut presets = HashMap::new();
+    let mut newer = HashSet::new();
+    for (name, file) in read {
+        match file {
+            Ok(file) => {
+                presets.insert(name, file);
+            }
+            Err(Skipped::Newer) => {
+                newer.insert(name.to_lowercase());
+            }
+            Err(Skipped::Unreadable) => {}
+        }
+    }
+    let _ = NEWER_PRESETS.set(newer);
+    presets
+}
+
+/// Why a preset file was left out.
+#[derive(Debug, PartialEq)]
+enum Skipped {
+    /// A newer Prunr saved it, in a format this one cannot read.
+    Newer,
+    Unreadable,
+}
+
+/// Names (lowercased) of the presets a newer Prunr saved: shown nowhere,
+/// and never written over, so that version keeps them.
+static NEWER_PRESETS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+
+/// Why a preset cannot be saved under `name`, when it cannot.
+pub(crate) fn name_refusal(name: &str) -> Option<&'static str> {
+    refusal_among(name, NEWER_PRESETS.get())
+}
+
+fn refusal_among(name: &str, newer: Option<&HashSet<String>>) -> Option<&'static str> {
+    if name.trim().eq_ignore_ascii_case(PRUNR_PRESET) {
+        return Some("\"Prunr\" is reserved — pick another name.");
+    }
+    let lower = name.trim().to_lowercase();
+    newer
+        .is_some_and(|newer| newer.contains(&lower))
+        .then_some("A newer version of Prunr saved a preset with this name — pick another.")
 }
 
 /// Parse a `serde_json::Value` into a `PresetFile`. v2 (has
-/// `format_version: 2`) deserializes directly; anything else is
-/// attempted as a v1 `ItemSettings` migration. Returns `None` when
-/// neither path succeeds; the caller decides whether to log + skip.
-fn parse_preset_value(mut value: serde_json::Value) -> Option<PresetFile> {
+/// `format_version: 2`) deserializes directly; one with no version is
+/// attempted as a v1 `ItemSettings` migration. A later version is a
+/// newer Prunr's, never read as v1.
+fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skipped> {
     super::item_settings::migrate_old_item_settings(&mut value);
-    if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-        serde_json::from_value(value).ok()
-    } else {
-        migrate_v1_to_v2(&value)
+    match value.get("format_version").and_then(|v| v.as_u64()) {
+        Some(v) if v > u64::from(PRESET_FORMAT_VERSION) => Err(Skipped::Newer),
+        Some(2) => serde_json::from_value(value).map_err(|_| Skipped::Unreadable),
+        _ => migrate_v1_to_v2(&value).ok_or(Skipped::Unreadable),
     }
 }
 
-/// Load a single preset file from disk. Returns `None` when the file
-/// is unreadable, malformed, or doesn't match either format. Used by
-/// `load_all`'s parallel scan AND by callers that want to refresh a
-/// single entry without rescanning the whole directory.
-pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
+/// Load a single preset file from disk, or why it was left out:
+/// unreadable, malformed, matching neither format, or a newer Prunr's.
+fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
     let data = std::fs::read(path)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
+        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).map_err(|()| Skipped::Unreadable)?;
     let value: serde_json::Value = serde_json::from_slice(&data)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
-    parse_preset_value(value).or_else(|| {
-        tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
-        None
+        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).map_err(|()| Skipped::Unreadable)?;
+    parse_preset_value(value).inspect_err(|skipped| match skipped {
+        Skipped::Newer => tracing::warn!(?path, "skipping a preset a newer Prunr saved; it is kept as it is"),
+        Skipped::Unreadable => tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)"),
     })
 }
 
@@ -183,18 +221,12 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     write_preset(&writable_path(name)?, values)
 }
 
-/// `preset_path` as an error: "Prunr" is reserved, else the config dir is missing.
+/// `preset_path` for a name a preset may be saved under (`name_refusal`).
 fn writable_path(name: &str) -> std::io::Result<PathBuf> {
-    preset_path(name).ok_or_else(|| {
-        if name.eq_ignore_ascii_case(PRUNR_PRESET) {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "\"Prunr\" is a reserved preset name",
-            )
-        } else {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
-        }
-    })
+    if let Some(why) = name_refusal(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    }
+    preset_path(name).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable"))
 }
 
 fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()> {
@@ -379,6 +411,21 @@ mod tests {
     fn sanitize_strips_path_separators() {
         assert_eq!(sanitize_filename("foo/bar"), "foobar");
         assert_eq!(sanitize_filename("foo\\bar"), "foobar");
+    }
+
+    /// A preset a newer Prunr saved is left out, not read as defaults, and
+    /// its name cannot be saved over, so that version keeps it.
+    #[test]
+    fn a_newer_preset_is_left_out_and_never_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Future.json");
+        std::fs::write(&path, r#"{ "format_version": 3, "models": {}, "something_new": true }"#).unwrap();
+        assert_eq!(read_preset(&path).unwrap_err(), Skipped::Newer);
+        let newer: HashSet<String> = ["future".to_string()].into();
+        assert!(refusal_among("Future", Some(&newer)).is_some(), "its name is refused, any case");
+        assert!(refusal_among(" future ", Some(&newer)).is_some());
+        assert_eq!(refusal_among("Other", Some(&newer)), None);
+        assert!(refusal_among("prunr", None).is_some(), "Prunr stays reserved");
     }
 
     #[test]
@@ -615,7 +662,7 @@ mod tests {
     /// An overwrite as the app makes it: the preset as loaded, merged,
     /// written whole.
     fn overwrite_at(path: &std::path::Path, model_id: prunr_models::ModelId, mp: ModelPreset) -> std::io::Result<()> {
-        let existing = load_from_path(path).unwrap_or_default();
+        let existing = read_preset(path).unwrap_or_default();
         write_preset(path, &merged(existing, model_id, mp))
     }
 
@@ -650,7 +697,7 @@ mod tests {
         };
         overwrite_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
 
-        let reloaded = load_from_path(&path).expect("reload");
+        let reloaded = read_preset(&path).expect("reload");
         let silueta_back = reloaded
             .models
             .get(&model_id_key(ModelId::Silueta))
@@ -714,7 +761,7 @@ mod tests {
         let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
         overwrite_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
 
-        let reloaded = load_from_path(&path).expect("reload");
+        let reloaded = read_preset(&path).expect("reload");
         let mp_back = reloaded
             .models
             .get(&model_id_key(ModelId::SdV15InpaintFp16))
@@ -753,7 +800,7 @@ mod tests {
         };
         overwrite_at(&path, ModelId::Silueta, mp.clone()).unwrap();
 
-        let reloaded = load_from_path(&path).expect("reload");
+        let reloaded = read_preset(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
         assert_eq!(reloaded.models.len(), 1);
         assert_eq!(
@@ -784,7 +831,7 @@ mod tests {
         };
         overwrite_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
 
-        let reloaded = load_from_path(&path).expect("reload");
+        let reloaded = read_preset(&path).expect("reload");
         assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
         // v1 wraps under the workspace default model (BiRefNetLite).
         let v1_back = reloaded
@@ -839,7 +886,7 @@ mod tests {
         };
         overwrite_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
 
-        let reloaded = load_from_path(&path).expect("reload");
+        let reloaded = read_preset(&path).expect("reload");
         let mp_back = reloaded
             .models
             .get(&model_id_key(ModelId::SdV15InpaintFp16))

@@ -225,13 +225,9 @@ pub(crate) fn render(
                     text_resp.request_focus();
                 }
                 let trimmed = name_buf.trim();
-                let is_prunr_name = trimmed.eq_ignore_ascii_case(PRUNR_PRESET);
-                if is_prunr_name {
-                    ui.label(
-                        RichText::new("\"Prunr\" is reserved — pick another name.")
-                            .color(theme::DESTRUCTIVE)
-                            .size(theme::FONT_SIZE_SECONDARY),
-                    );
+                let refusal = crate::gui::presets_fs::name_refusal(trimmed);
+                if let Some(why) = refusal {
+                    ui.label(RichText::new(why).color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_SECONDARY));
                 } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
                     ui.label(
                         RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
@@ -243,7 +239,7 @@ pub(crate) fn render(
                 ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled_ui(!is_prunr_name, |ui| button(ui, ButtonKind::Primary, "Save"))
+                        .add_enabled_ui(refusal.is_none(), |ui| button(ui, ButtonKind::Primary, "Save"))
                         .inner
                         .clicked()
                     {
@@ -283,7 +279,7 @@ pub(crate) fn render(
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
         let target_name = overwrite_target.or_else(|| {
-            (commit && !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET))
+            (commit && !trimmed.is_empty() && crate::gui::presets_fs::name_refusal(trimmed).is_none())
                 .then(|| trimmed.to_string())
         });
         if let Some(name) = target_name {
