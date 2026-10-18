@@ -998,7 +998,7 @@ where
         let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask);
-        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox);
+        accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox, (w, h));
         let rect = (tile.x, tile.y, tile.w, tile.h);
         progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| tile_fill_preview(tile_rgba, &painted, &tile_mask, size, part));
         progress.inner(i as u32 + 1, total, Unit::Tile);
@@ -1113,6 +1113,7 @@ fn accumulate_tile(
     tile: &RgbaImage,
     placement: &TilePlacement,
     bbox: Bbox,
+    (img_w, img_h): (u32, u32),
 ) {
     // Hoist tile↔bbox intersection out of the per-pixel loop. For a
     // small stroke far from this tile's edge, this skips ~62 K
@@ -1131,19 +1132,22 @@ fn accumulate_tile(
     let tx_end = (bbox_x_end - placement.x).min(placement.w);
     let ty_end = (bbox_y_end - placement.y).min(placement.h);
 
+    // The feather fades a side only where a neighbouring tile takes
+    // over; on the photo's edge a zero weight would leave pixels unfilled.
+    let faded = |dist: u32, neighbour: bool| if neighbour { dist } else { u32::MAX };
     let bbox_w = bbox.w as usize;
     let tile_raw = tile.as_raw();
     let tile_w = tile.width() as usize;
     for ty in ty_start..ty_end {
         let by = ((placement.y + ty) - bbox.y) as usize;
-        let dist_top = ty;
-        let dist_bottom = placement.h - 1 - ty;
+        let dist_top = faded(ty, placement.y > 0);
+        let dist_bottom = faded(placement.h - 1 - ty, tile_y_end < img_h);
         let edge_y = dist_top.min(dist_bottom);
         let tile_row = ty as usize * tile_w;
         for tx in tx_start..tx_end {
             let bx = ((placement.x + tx) - bbox.x) as usize;
-            let dist_left = tx;
-            let dist_right = placement.w - 1 - tx;
+            let dist_left = faded(tx, placement.x > 0);
+            let dist_right = faded(placement.w - 1 - tx, tile_x_end < img_w);
             let edge_x = dist_left.min(dist_right);
             let w = feather_weight(edge_x.min(edge_y));
             let dst_idx = by * bbox_w + bx;
@@ -1562,6 +1566,24 @@ mod tests {
         let out = decode_tile(output.view(), &src, &mask);
         let got: Vec<u8> = (0..256u32).map(|v| out.get_pixel(v % 16, v / 16)[0]).collect();
         assert_eq!(got, (0..=255).collect::<Vec<u8>>());
+    }
+
+    /// A painted pixel on the photo's edge is filled like any other: a
+    /// tile's feather fades to nothing at its border, but only where a
+    /// neighbouring tile takes over.
+    #[test]
+    fn a_stroke_on_the_photos_edge_is_filled() {
+        for (w, h) in [(300, 200), (1100, 700)] {
+            let img = RgbaImage::from_pixel(w, h, Rgba([10, 10, 10, 255]));
+            let mut mask = GrayImage::new(w, h);
+            for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+            let out = tile_compose(&img, &mask, &Progress::none(), |t, _| RgbaImage::from_pixel(t.width(), t.height(), Rgba([200, 0, 0, 255]))).unwrap();
+            for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
+                assert_eq!(out.get_pixel(x, y).0, [200, 0, 0, 255], "{w}x{h} at ({x}, {y})");
+            }
+        }
     }
 
     #[test]
