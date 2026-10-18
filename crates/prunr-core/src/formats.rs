@@ -94,12 +94,13 @@ pub fn preview_reach(at: u32, len: u32, span: u32, out: u32) -> (u32, u32) {
     (start, end.max(start + 1) - start)
 }
 
-/// SIMD-accelerated Lanczos3 resize for RGB images. The `to_rgb8` call
-/// is unavoidable when `img` is a `DynamicImage` of a different layout
-/// (e.g. RGBA), but the resulting `RgbImage` is then borrowed into the
-/// resizer rather than copied again.
+/// SIMD-accelerated Lanczos3 resize for RGB images. An RGB8 image is
+/// read in place; any other layout is converted once first.
 pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
-    resize_rgb_image_lanczos3(&img.to_rgb8(), dst_width, dst_height)
+    match img {
+        DynamicImage::ImageRgb8(rgb) => resize_rgb_image_lanczos3(rgb, dst_width, dst_height),
+        other => resize_rgb_image_lanczos3(&other.to_rgb8(), dst_width, dst_height),
+    }
 }
 
 /// Load an image from a file path. Format detected by file extension.
@@ -489,6 +490,16 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An RGB8 image resizes in place to the same pixels an RGBA copy of
+    /// it gives.
+    #[test]
+    fn rgb_resize_reads_rgb8_in_place_with_the_same_result() {
+        let rgb = image::RgbImage::from_fn(97, 61, |x, y| image::Rgb([(x * 3) as u8, (y * 4) as u8, (x ^ y) as u8]));
+        let rgba = DynamicImage::ImageRgb8(rgb.clone()).to_rgba8();
+        let direct = resize_rgb_lanczos3(&DynamicImage::ImageRgb8(rgb), 40, 30);
+        assert!(direct == resize_rgb_lanczos3(&DynamicImage::ImageRgba8(rgba), 40, 30));
+    }
 
     /// Every size in, every size out, an empty one included: resizing
     /// never panics. A zero side gave the resizer an empty image.
