@@ -515,7 +515,7 @@ impl TipText {
             press(Action::Save),
             press(Action::Copy),
             press(Action::Undo),
-            "Open multiple images for batch processing".to_string(),
+            "Open several images to queue them".to_string(),
         ];
         let open_hint = format!("or press {} to open a file", keys(Action::Open));
         Self { bindings, tips, open_hint }

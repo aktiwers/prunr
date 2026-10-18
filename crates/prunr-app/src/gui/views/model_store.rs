@@ -153,7 +153,7 @@ const fn filter(c: ModelCategory) -> super::chip::Choice<Option<ModelCategory>> 
 /// A category's name on its filter tab and its cards.
 const fn category_name(c: ModelCategory) -> &'static str {
     match c {
-        ModelCategory::Segmentation => "Background",
+        ModelCategory::Segmentation => "Background removal",
         ModelCategory::EdgeDetection => "Sketch",
         ModelCategory::Inpaint => "Eraser",
         ModelCategory::Upscale => "Upscale",

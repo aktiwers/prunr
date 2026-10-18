@@ -3,7 +3,7 @@
 //! - **Hardware**: this computer, the accelerator runtime, the cache
 //! - **Images**: what happens when images arrive
 //! - **Editing**: how the canvas looks while editing
-//! - **Hotkeys**: the shortcut table, each chord rebindable in place
+//! - **Shortcuts**: the shortcut table, each chord rebindable in place
 //! - **Credits**: installed-model attribution (CC-BY compliance)
 //!
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
@@ -40,7 +40,7 @@ impl SettingsTab {
             Self::Hardware => "Hardware",
             Self::Images => "Images",
             Self::Editing => "Editing",
-            Self::Hotkeys => "Hotkeys",
+            Self::Hotkeys => "Shortcuts",
             Self::Credits => "Credits",
         }
     }
@@ -251,7 +251,7 @@ fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) 
 fn render_reset_confirm(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.separator();
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Reset settings? Presets, licences, background pictures and the model stay.")
+        ui.label(RichText::new("Reset settings? Presets, licenses, background images and the model stay.")
             .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_SECONDARY));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
@@ -370,7 +370,7 @@ fn jobs_hint(on_cpu: bool, max_jobs: usize) -> String {
     if on_cpu {
         format!("Images at once. 1\u{2013}{max_jobs}. On the CPU only {} run several; the other models take one at a time, since one run already uses every core.", models_running_several_on_cpu())
     } else {
-        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
+        format!("Images at once. 1\u{2013}{max_jobs}; on a graphics card 1\u{2013}2 is optimal.")
     }
 }
 
@@ -397,13 +397,13 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_instal
     group(ui, |rows| {
         rows.row("Parallel jobs", &jobs_hint, |ui| stepper(ui, "Parallel jobs", &mut settings.parallel_jobs, 1..=max_jobs));
         if gpu {
-            rows.row("Processor", "Auto runs each model on the accelerator when it supports one.", |ui| {
+            rows.row("Runs on", "Auto runs each model on the graphics card when it supports it.", |ui| {
                 super::chip::choice_buttons(ui, &[
-                    Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the accelerator when it supports one, else the CPU", enabled: true },
+                    Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the graphics card when it supports it, else the CPU", enabled: true },
                     Choice {
                         value: ComputeMode::CpuOnly,
                         name: "CPU only",
-                        description: if sd_installed { "Every model on the CPU. The Stable Diffusion eraser needs the accelerator" } else { "Every model on the CPU" },
+                        description: if sd_installed { "Every model on the CPU. The Stable Diffusion eraser needs the graphics card" } else { "Every model on the CPU" },
                         enabled: true,
                     },
                 ], &mut settings.processor);
@@ -454,7 +454,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             (None, Some(i)) => format!("{i} (iGPU)"),
             (None, None) => "none detected".to_string(),
         };
-        kv(ui, "GPU", &gpu_label);
+        kv(ui, "Graphics card", &gpu_label);
         kv(ui, "Accelerator", &ctx.active_provider);
         let total_ram = hardware::total_ram_bytes();
         kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
@@ -487,7 +487,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
     let recommended = p.recommended_runtime();
     group(ui, |rows| {
         if ctx.installs.built_in_gpu {
-            rows.row("DirectML Runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the processor without one.", |_| {});
+            rows.row("DirectML runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the CPU without one.", |_| {});
         }
         for &rt in ctx.offered {
             runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
@@ -516,10 +516,10 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             },
         );
         rows.row(
-            "GPU failures",
-            "A model that failed on the graphics card runs on the processor until the graphics driver or Prunr changes. Forget them to try the graphics card again.",
+            "Graphics card failures",
+            "A model that failed on the graphics card runs on the CPU until the graphics driver or Prunr changes. Forget them to try the graphics card again.",
             |ui| {
-                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget GPU failures").clicked() {
+                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget graphics card failures").clicked() {
                     intent = Some(HardwareSectionIntent::ForgetGpuFailures);
                 }
             },
@@ -678,7 +678,7 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.add_space(theme::SPACE_MD);
     if app.settings.hotkeys.is_empty() {
         ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
-    } else if button(ui, ButtonKind::Secondary, "Reset all hotkeys").clicked() {
+    } else if button(ui, ButtonKind::Secondary, "Reset all shortcuts").clicked() {
         reset = Some(Bindings::shipped());
     }
     if let Some(next) = reset {
