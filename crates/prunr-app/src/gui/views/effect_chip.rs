@@ -113,7 +113,7 @@ fn params(ui: &mut Ui, style: &mut SubjectEffect, quick: bool) -> bool {
         SubjectEffect::ColorSplash { keep_hue, tolerance } => {
             changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
             if !quick {
-                changed |= chip::slider_row(ui, "Tolerance (degrees)", tolerance, 0..=180).changed;
+                changed |= chip::slider_row(ui, "Tolerance (\u{00b0})", tolerance, 0..=180).changed;
                 chip::kept_hues(ui, *keep_hue, *tolerance);
             }
         }

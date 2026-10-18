@@ -156,6 +156,18 @@ fn every_surface_names_its_controls_and_shows_what_it_must() {
     assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }
 
+/// Color splash's full panel names each row inside the name column.
+#[test]
+fn the_color_splash_panel_names_fit_their_column() {
+    crate::gui::automation::record::turn_on();
+    let mut h = super::harness::loaded();
+    for step in [Step::Click("Effect"), Step::Click("All effects"), Step::Click("Color splash")] {
+        run(&mut h, step).unwrap();
+    }
+    let clips = crate::gui::automation::record::last(&h.ctx).1;
+    assert!(clips.is_empty(), "{clips:?}");
+}
+
 #[test]
 fn every_modal_is_visited_or_says_why_not() {
     for (name, _) in PrunrApp::MODALS {
