@@ -150,9 +150,9 @@ pub enum SubprocessCommand {
         item_id: u64,
         /// Which inpaint model to run.
         model_id: ModelId,
-        /// Source image bytes (PNG/JPG/etc — worker decodes).
+        /// The photo as `ipc::write_image` writes it.
         image_path: std::path::PathBuf,
-        /// Single-channel mask: 255 = inpaint here, 0 = keep.
+        /// Single-channel mask, the same way: 255 = inpaint here, 0 = keep.
         mask_path: std::path::PathBuf,
         /// SD-specific knobs. `None` for LaMa / Big-LaMa / MI-GAN.
         sd_req: Option<SdInpaintRequest>,
@@ -285,8 +285,8 @@ pub enum SubprocessEvent {
         item_id: u64,
         error: String,
     },
-    /// Inpaint completed — RGBA result lives at `rgba_path`. Same
-    /// read-and-delete contract as `ImageDone.result_path`.
+    /// Inpaint completed — raw RGBA, `width` × `height`, lives at
+    /// `rgba_path`. Same read-and-delete contract as `ImageDone.result_path`.
     InpaintDone {
         item_id: u64,
         rgba_path: std::path::PathBuf,
@@ -392,11 +392,11 @@ pub enum IpcKind {
     SpareEdge,
     /// CLI parent: downscaled image temp before subprocess dispatch.
     CliDs,
-    /// Parent → inpaint worker: source PNG for a stroke (generation-suffixed).
+    /// Parent → inpaint worker: the raw source for a stroke (generation-suffixed).
     InpaintImg,
-    /// Parent → inpaint worker: mask PNG for a stroke (generation-suffixed).
+    /// Parent → inpaint worker: the raw mask for a stroke (generation-suffixed).
     InpaintMask,
-    /// Inpaint worker → parent: composited RGBA PNG result.
+    /// Inpaint worker → parent: composited raw RGBA result.
     InpaintOut,
 }
 

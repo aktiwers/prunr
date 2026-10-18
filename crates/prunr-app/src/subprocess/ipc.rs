@@ -69,6 +69,33 @@ pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Hand `image` to the other process as a file: its width and height
+/// (u32 LE), then its raw pixels. No encode on this side, no decode on
+/// the other.
+pub fn write_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path, image: &image::ImageBuffer<P, Vec<u8>>) -> io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(&image.width().to_le_bytes())?;
+    file.write_all(&image.height().to_le_bytes())?;
+    file.write_all(image.as_raw())
+}
+
+/// An image `write_image` wrote, its file removed; `None` when it is
+/// missing or short.
+pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Option<image::ImageBuffer<P, Vec<u8>>> {
+    let read = || -> io::Result<Option<image::ImageBuffer<P, Vec<u8>>>> {
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header)?;
+        let [w, h] = [0, 4].map(|at| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]));
+        let mut pixels = Vec::with_capacity(w as usize * h as usize * usize::from(P::CHANNEL_COUNT));
+        file.read_to_end(&mut pixels)?;
+        Ok(image::ImageBuffer::from_raw(w, h, pixels))
+    };
+    let image = read().ok().flatten();
+    let _ = std::fs::remove_file(path);
+    image
+}
+
 /// A worker's raw RGBA result. Unlike `read_and_delete`, the file goes
 /// even when it cannot be read or does not match `w`×`h`.
 pub fn read_result_rgba(path: &std::path::Path, w: u32, h: u32) -> Option<image::RgbaImage> {
@@ -115,6 +142,26 @@ mod tests {
         assert_eq!(read_and_delete(&path), Some(vec![1, 2, 3]));
         assert!(!path.exists());
         assert_eq!(read_and_delete(&path), None);
+    }
+
+    /// An image goes over as its size and pixels and comes back the
+    /// same, colour or grey; the file is gone after, and a short one
+    /// reads as nothing.
+    #[test]
+    fn an_image_file_round_trips_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.raw");
+        let rgba = image::RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8, y as u8, 7, 200]));
+        write_image(&path, &rgba).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 3 * 2 * 4);
+        assert_eq!(read_image::<image::Rgba<u8>>(&path), Some(rgba));
+        assert!(!path.exists());
+        let gray = image::GrayImage::from_fn(2, 2, |x, y| image::Luma([(x + 2 * y) as u8 * 60]));
+        write_image(&path, &gray).unwrap();
+        assert_eq!(read_image::<image::Luma<u8>>(&path), Some(gray));
+        std::fs::write(&path, [4u8, 0, 0, 0, 4, 0, 0, 0, 1, 2]).unwrap();
+        assert_eq!(read_image::<image::Luma<u8>>(&path), None);
+        assert!(!path.exists());
     }
 
     #[test]
