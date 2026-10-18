@@ -95,19 +95,19 @@ pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge
 /// bbox have mask = 0 by construction (the bbox encloses every mask >=
 /// 128 pixel), and the offset-apply pass only writes where mask >= 128.
 pub fn color_match_inpainted(
-    inpainted: &RgbaImage,
+    inpainted: &mut RgbaImage,
     source: &RgbaImage,
     mask: &GrayImage,
     ring_px: u32,
-) -> RgbaImage {
+) {
     if ring_px == 0
         || inpainted.dimensions() != source.dimensions()
         || source.dimensions() != mask.dimensions()
     {
-        return inpainted.clone();
+        return;
     }
     let Some(bbox) = mask_bbox(mask, 128, ring_px) else {
-        return inpainted.clone();
+        return;
     };
     let bwu = bbox.w as usize;
     let bhu = bbox.h as usize;
@@ -164,7 +164,7 @@ pub fn color_match_inpainted(
         }
     }
     if src_count < 16 || inp_count < 16 {
-        return inpainted.clone();
+        return;
     }
     let offset: [f32; 3] = std::array::from_fn(|c| {
         src_sum[c] as f32 / src_count as f32 - inp_sum[c] as f32 / inp_count as f32
@@ -172,8 +172,7 @@ pub fn color_match_inpainted(
 
     // Apply offset only on bbox rows; mask >= 128 pixels live entirely
     // inside the bbox by construction.
-    let mut out = inpainted.clone();
-    let out_raw = out.as_mut();
+    let out_raw = inpainted.as_mut();
     out_raw[byu * img_wu * 4..(byu + bhu) * img_wu * 4]
         .par_chunks_mut(img_wu * 4)
         .enumerate()
@@ -191,7 +190,6 @@ pub fn color_match_inpainted(
                 row[p + 2] = crate::math::round_u8(row[p + 2] as f32 + offset[2]);
             }
         });
-    out
 }
 
 /// Refine the inpaint↔source seam using a 3-channel guided filter (one
@@ -200,32 +198,31 @@ pub fn color_match_inpainted(
 /// inpaint (deep interior). Outside the mask, output is left unchanged
 /// (the caller's compose step has already painted source there).
 ///
-/// Returns the input unchanged when the mask is empty or dimensions
+/// Leaves `inpainted` as it is when the mask is empty or dimensions
 /// disagree. Internally crops to the mask bounding box plus a margin
 /// of `radius + ceil(band_px) + 2` so a small brush stroke pays for a
 /// small bbox, not the whole image.
 pub fn seam_guided_blend(
-    inpainted: &RgbaImage,
+    inpainted: &mut RgbaImage,
     source: &RgbaImage,
     mask: &GrayImage,
     radius: u32,
     epsilon: f32,
     band_px: f32,
-) -> RgbaImage {
+) {
     if band_px <= 0.0
         || radius == 0
         || inpainted.dimensions() != source.dimensions()
         || source.dimensions() != mask.dimensions()
     {
-        return inpainted.clone();
+        return;
     }
     let margin = radius + band_px.ceil() as u32 + 2;
     let Some(bbox) = mask_bbox(mask, 128, margin) else {
-        return inpainted.clone();
+        return;
     };
 
     let n = bbox.area();
-    let mut out = inpainted.clone();
 
     // Distance-from-edge inside the mask, evaluated on the cropped mask
     // so chamfer cost scales with bbox not image. (Reused across channels
@@ -312,15 +309,15 @@ pub fn seam_guided_blend(
             || box_filter_into(&gg_b, bbox.w, bbox.h, radius, &mut mean_b),
         );
 
-        // Composite back into `out`: q = mean_a * source_pixel + mean_b,
-        // blended toward raw inpaint deeper in the mask.
+        // Composite back in place: q = mean_a * source_pixel + mean_b,
+        // blended toward raw inpaint deeper in the mask. Channel `c` was
+        // read above and the others are untouched, so writing it here
+        // changes nothing a later channel reads.
         composite_channel(
-            &mut out, source, bbox, c, crop_mask_raw,
+            inpainted, source, bbox, c, crop_mask_raw,
             &dist, &mean_a, &mean_b, inv_band,
         );
     }
-
-    out
 }
 
 fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
@@ -395,21 +392,16 @@ fn composite_channel(
 /// drift between callers. `mask` is the [`fill_region`];
 /// `feather_px <= 0.0` skips the blend, `sharpen <= 0.0` the sharpen.
 pub fn finalize_inpaint(
-    raw: &RgbaImage,
+    mut raw: RgbaImage,
     source: &RgbaImage,
     mask: &GrayImage,
     feather_px: f32,
     sharpen: f32,
 ) -> RgbaImage {
-    let color_matched = color_match_inpainted(raw, source, mask, COLOR_MATCH_RING_PX);
-    let mut out = seam_guided_blend(
-        &color_matched, source, mask,
-        SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px,
-    );
-    if sharpen > 0.0 {
-        out = crate::inpaint::sharpen_inpainted(&out, mask, sharpen);
-    }
-    out
+    color_match_inpainted(&mut raw, source, mask, COLOR_MATCH_RING_PX);
+    seam_guided_blend(&mut raw, source, mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px);
+    crate::inpaint::sharpen_inpainted(&mut raw, mask, sharpen);
+    raw
 }
 
 #[cfg(test)]
@@ -449,7 +441,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(64, 64);
-        let out = color_match_inpainted(&inp, &src, &mask, 8);
+        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
         assert_eq!(out, inp);
     }
 
@@ -458,7 +450,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(32, 32);
-        let out = color_match_inpainted(&inp, &src, &mask, 8);
+        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
         assert_eq!(out, inp);
     }
 
@@ -473,7 +465,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = color_match_inpainted(&inp, &src, &mask, 8);
+        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
         let p = out.get_pixel(32, 32);
         assert!(
             p[0] >= 180 && p[0] <= 220,
@@ -492,7 +484,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = GrayImage::from_pixel(64, 64, Luma([255]));
-        let out = color_match_inpainted(&inp, &src, &mask, 8);
+        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
         assert_eq!(out, inp);
     }
 
@@ -510,7 +502,7 @@ mod tests {
         }
         let ring_px = 8;
         let bbox = mask_bbox(&mask, 128, ring_px).unwrap();
-        let out = color_match_inpainted(&inp, &src, &mask, ring_px);
+        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, ring_px);
         for y in 0..512 {
             for x in 0..512 {
                 let inside = x >= bbox.x && x < bbox.x + bbox.w
@@ -531,7 +523,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(64, 64);
-        let out = seam_guided_blend(&inp, &src, &mask, 4, 1e-3, 8.0);
+        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
         assert_eq!(out, inp);
     }
 
@@ -546,7 +538,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = seam_guided_blend(&inp, &src, &mask, 4, 1e-3, 8.0);
+        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
         let edge = out.get_pixel(16, 32);
         assert!(
             edge[0] > 60,
@@ -582,7 +574,7 @@ mod tests {
             let (dx, dy) = (x as f32 - 700.0, y as f32 - 700.0);
             Luma([if dx * dx + dy * dy < 600.0 * 600.0 { 255 } else { 0 }])
         });
-        let out = seam_guided_blend(&inp, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX);
+        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX);
         for (x, y, px) in out.enumerate_pixels() {
             for (c, lo, hi) in [(0, 180, 200), (1, 150, 170), (2, 80, 100)] {
                 assert!((lo..=hi).contains(&px[c]), "({x}, {y}) channel {c} = {}", px[c]);
@@ -606,7 +598,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = seam_guided_blend(&inp, &src, &mask, 4, 1e-3, 8.0);
+        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
         // Pixel near the inside seam (right/bottom of mask) should be
         // lifted toward source. Pixels at the actual image corner have
         // less context so we don't assert on (0,0).
@@ -631,8 +623,9 @@ mod tests {
             mask.put_pixel(x, y, Luma([255]));
             raw.put_pixel(x, y, Rgba([((x * 7) % 255) as u8, 40, 200, 255]));
         } }
-        let matched = color_match_inpainted(&raw, &src, &mask, COLOR_MATCH_RING_PX);
-        assert_eq!(finalize_inpaint(&raw, &src, &mask, 0.0, 0.0), matched);
+        let mut matched = raw.clone();
+        color_match_inpainted(&mut matched, &src, &mask, COLOR_MATCH_RING_PX);
+        assert_eq!(finalize_inpaint(raw, &src, &mask, 0.0, 0.0), matched);
     }
 
     /// The fill region is the painted one grown by Expand and then by the
@@ -660,7 +653,7 @@ mod tests {
         } }
         let raw = solid(64, 64, [100, 100, 100, 255]);
         let region = fill_region(&painted, 0.0, 12.0);
-        let out = finalize_inpaint(&raw, &src, &region, 12.0, 0.0);
+        let out = finalize_inpaint(raw.clone(), &src, &region, 12.0, 0.0);
         let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
             .map(|(x, y)| out.get_pixel(x, y)[0])
             .max().unwrap();

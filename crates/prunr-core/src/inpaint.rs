@@ -145,9 +145,9 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
 /// the kernel half-width (2 px) so blur reads from cropped pixels
 /// stay bit-identical to a full-image variant. A 200 × 200 stroke on
 /// a 4096 × 3072 image holds ~480 KB of f32 instead of ~150 MB.
-pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> RgbaImage {
+pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
     if amount <= 0.0 {
-        return image.clone();
+        return;
     }
     let amount = amount.min(2.0);
     let (w, _h) = image.dimensions();
@@ -157,11 +157,11 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
             mask_dims = ?mask.dimensions(),
             "sharpen_inpainted: dim mismatch, skipping",
         );
-        return image.clone();
+        return;
     }
     // No mask>127 pixels → nothing to sharpen; skip the temp f32 buffer.
     let Some(bbox) = mask_bbox(mask, 128, SHARPEN_MARGIN) else {
-        return image.clone();
+        return;
     };
     let src = image.as_raw();
     let img_w = w as usize;
@@ -190,14 +190,12 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
         }
     });
 
-    // Output starts as image clone. Pixels outside the bbox are
-    // mask <= 127 by definition (bbox covers all mask >= 128) — they
-    // stay as source. Vertical blur + sharpen overrides bbox-masked
-    // pixels. Rows are write-disjoint → parallelise via SendMutPtr.
-    let mut out = image.clone();
-    let out_raw = out.as_mut();
+    // Sharpened in place: the blur reads only `tmp`, and each pixel's
+    // own value is read just before it is written. Pixels outside the
+    // bbox are mask <= 127 by definition and stay. Rows are
+    // write-disjoint → parallelise via SendMutPtr.
     let msk_raw = mask.as_raw();
-    let dp = crate::math::SendMutPtr(out_raw.as_mut_ptr());
+    let dp = crate::math::SendMutPtr(image.as_mut_ptr());
     (0..bbox_h).into_par_iter().for_each(|by| {
         let global_y = bbox_y + by;
         for bx in 0..bbox_w {
@@ -218,19 +216,20 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                         .clamp(0, bbox_h as isize - 1) as usize;
                     blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
                 }
-                let s = src[pix + c] as f32;
-                let sharp = s + amount * (s - blur);
-                // SAFETY: each parallel iteration `by` writes to bytes
-                // at global rows {global_y} only — different `by`s are
-                // row-disjoint. Channels (c=0,1,2) within one pixel
+                // SAFETY: each parallel iteration `by` reads and writes
+                // bytes at global row {global_y} only — different `by`s
+                // are row-disjoint. Channels (c=0,1,2) within one pixel
                 // are also distinct bytes. No race.
-                unsafe { *dp.0.add(pix + c) = crate::math::round_u8(sharp); }
+                unsafe {
+                    let p = dp.0.add(pix + c);
+                    let s = f32::from(*p);
+                    *p = crate::math::round_u8(s + amount * (s - blur));
+                }
             }
         }
         // Capture `dp` whole: its raw-pointer field alone is not Sync.
         let _ = &dp;
     });
-    out
 }
 
 /// Top-level inpaint entry. `id` selects the inpaint backend
@@ -1888,7 +1887,7 @@ mod tests {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mut mask = GrayImage::new(16, 16);
         mask.put_pixel(8, 8, Luma([255]));
-        let out = sharpen_inpainted(&img, &mask, 0.0);
+        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.0);
         assert_eq!(out, img);
     }
 
@@ -1896,7 +1895,7 @@ mod tests {
     fn sharpen_inpainted_empty_mask_is_clone() {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mask = GrayImage::new(16, 16);
-        let out = sharpen_inpainted(&img, &mask, 0.5);
+        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.5);
         assert_eq!(out, img);
     }
 
@@ -1904,7 +1903,7 @@ mod tests {
     fn sharpen_inpainted_dim_mismatch_is_clone() {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mask = GrayImage::new(8, 8);
-        let out = sharpen_inpainted(&img, &mask, 0.5);
+        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.5);
         assert_eq!(out, img);
     }
 
@@ -1927,7 +1926,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = sharpen_inpainted(&img, &mask, 0.7);
+        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.7);
         for y in 0..64 {
             for x in 0..64 {
                 if mask.get_pixel(x, y).0[0] > 127 {
@@ -1998,7 +1997,8 @@ mod tests {
 
     #[cfg(test)]
     fn assert_bbox_sharpen_matches_reference(img: &RgbaImage, mask: &GrayImage, amount: f32) {
-        let bbox_out = sharpen_inpainted(img, mask, amount);
+        let mut bbox_out = img.clone();
+        sharpen_inpainted(&mut bbox_out, mask, amount);
         let ref_out = reference_sharpen(img, mask, amount);
         for y in 0..img.height() {
             for x in 0..img.width() {

@@ -240,7 +240,7 @@ fn sd_bench() {
                     assert_eq!(result.dimensions(), image.dimensions());
                     eprintln!("[sd_bench] {stem} steps={steps} seed={seed} fill={fill_scale} total {} ms", started.elapsed().as_millis());
                     if let Some(dir) = &out_dir {
-                        let done = inpaint_blend::finalize_inpaint(&result, image, mask, inpaint_blend::DEFAULT_EDGE_BLEND_PX, 0.0);
+                        let done = inpaint_blend::finalize_inpaint(result, image, mask, inpaint_blend::DEFAULT_EDGE_BLEND_PX, 0.0);
                         done.save(format!("{dir}/{stem}_s{steps}_seed{seed}_{fill_scale}.png")).expect("save the bench output");
                     }
                 }
