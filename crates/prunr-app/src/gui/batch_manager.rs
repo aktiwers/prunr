@@ -439,7 +439,7 @@ impl BatchManager {
             // bytes both drop before the channel send, so concurrent
             // decodes don't pile up DynamicImage + RGBA per thread.
             let result = bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
-                Ok(img) => Ok(Arc::new(img.to_rgba8())),
+                Ok(img) => Ok(Arc::new(img.into_rgba8())),
                 Err(e) => Err(format!("decode failed: {e}")),
             });
             let _ = tx.send((item_id, result));

@@ -56,7 +56,7 @@ pub fn run() -> eframe::Result {
     let icon = {
         let png_bytes = include_bytes!("../../../../assets/prunr-256.png");
         let img = image::load_from_memory(png_bytes).expect("Failed to decode app icon");
-        let rgba = img.to_rgba8();
+        let rgba = img.into_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         egui::IconData {
             rgba: rgba.into_raw(),
