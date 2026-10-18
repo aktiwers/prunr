@@ -706,7 +706,7 @@ impl SentWork {
 /// sent) — caller returns immediately.
 enum EventLoopOutcome {
     Finished,
-    Crashed(String),
+    Crashed(crate::subprocess::manager::Crash),
     Cancelled,
 }
 
@@ -946,10 +946,8 @@ fn run_event_loop(
 
         if is_stalled(last_event_at.elapsed(), sent.len(), HANG_TIMEOUT) {
             sub.kill();
-            return EventLoopOutcome::Crashed(format!(
-                "Worker stopped responding (no events for {}s)",
-                HANG_TIMEOUT.as_secs(),
-            ));
+            tracing::warn!(silent_secs = HANG_TIMEOUT.as_secs(), "worker sent nothing; killed");
+            return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::Unresponsive);
         }
 
         // Block up to 50 ms for the next event. Wakes immediately when
@@ -1327,7 +1325,7 @@ fn cancel_subprocess(
 fn handle_crash_and_retry(
     state: &mut BatchRunState,
     mut sent: SentWork,
-    crash_reason: String,
+    crash_reason: crate::subprocess::manager::Crash,
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
@@ -1396,15 +1394,14 @@ fn on_crash(jobs: usize) -> OnCrash {
     if jobs <= 1 { OnCrash::FailInFlight } else { OnCrash::RetryWith(jobs / 2) }
 }
 
-/// What an image a crash failed tells the user; the raw `reason` (a
-/// signal, an exit code) goes to the log.
-fn crash_message(reason: &str) -> &'static str {
-    if crate::subprocess::manager::out_of_memory(reason) {
-        "Ran out of memory. Try a smaller model or fewer images at once."
-    } else if reason.contains("stopped responding") {
-        "The model stopped responding. Process again."
-    } else {
-        "The model stopped unexpectedly. Process again; if it happens again, run prunr --doctor and send the report."
+/// What an image a crash failed tells the user; the detail (a signal, an
+/// exit code) goes to the log.
+fn crash_message(crash: &crate::subprocess::manager::Crash) -> &'static str {
+    use crate::subprocess::manager::Crash;
+    match crash {
+        Crash::OutOfMemory => "Ran out of memory. Try a smaller model or fewer images at once.",
+        Crash::Unresponsive => "The model stopped responding. Process again.",
+        Crash::Other(_) => "The model stopped unexpectedly. Process again; if it happens again, run prunr --doctor and send the report.",
     }
 }
 
@@ -1684,9 +1681,10 @@ mod tests {
         assert_eq!(super::on_crash(4), super::OnCrash::RetryWith(2));
         assert_eq!(super::on_crash(2), super::OnCrash::RetryWith(1));
         assert_eq!(super::on_crash(1), super::OnCrash::FailInFlight);
-        assert!(super::crash_message("Process killed by OS (out of memory)").starts_with("Ran out of memory"));
-        assert!(super::crash_message("Worker stopped responding (no events for 60s)").starts_with("The model stopped responding"));
-        assert!(super::crash_message("Process crashed (segmentation fault)").starts_with("The model stopped unexpectedly"));
+        use crate::subprocess::manager::Crash;
+        assert!(super::crash_message(&Crash::OutOfMemory).starts_with("Ran out of memory"));
+        assert!(super::crash_message(&Crash::Unresponsive).starts_with("The model stopped responding"));
+        assert!(super::crash_message(&Crash::Other("exited with code 3".into())).starts_with("The model stopped unexpectedly"));
     }
 
     /// Work goes out up to the job limit; the memory pause holds it back

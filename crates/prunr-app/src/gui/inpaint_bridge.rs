@@ -213,7 +213,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 kill_ready_and_drain(
                     &mut sub_state, &mut inflight_generations, &res_tx,
                     crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG,
-                    "inpaint subprocess killed by memory-pressure watchdog",
+                    "eraser worker killed by the memory-pressure watchdog",
                 );
             }
         }
@@ -299,7 +299,7 @@ fn handle_cancel(
             kill_ready_and_drain(
                 sub_state, inflight_generations, res_tx,
                 crate::subprocess::protocol::CANCELLED_ERR_MSG,
-                "inpaint subprocess killed by Cancel",
+                "eraser worker killed by Cancel",
             );
         }
     }
@@ -457,10 +457,9 @@ fn end_if_dead(
     let Some(reason) = s.died() else { return };
     tracing::warn!(%reason, in_flight = inflight_generations.len(), "eraser worker ended");
     *sub_state = SubState::Idle;
-    let why = if crate::subprocess::manager::out_of_memory(&reason) {
-        "The eraser ran out of memory. Try a lighter eraser or a smaller region."
-    } else {
-        "The eraser stopped unexpectedly. Erase again."
+    let why = match reason {
+        crate::subprocess::manager::Crash::OutOfMemory => "The eraser ran out of memory. Try a lighter eraser or a smaller region.",
+        _ => "The eraser stopped unexpectedly. Erase again.",
     };
     fail_inflight(inflight_generations, res_tx, why);
 }
