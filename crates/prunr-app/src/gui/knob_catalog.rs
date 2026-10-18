@@ -154,6 +154,25 @@ pub enum Surface {
     Depth,
 }
 
+impl Surface {
+    pub const ALL: [Self; 14] = [
+        Self::Mask,
+        Self::Lines,
+        Self::Effect,
+        Self::Decoration,
+        Self::Background,
+        Self::Upscale,
+        Self::Colorize,
+        Self::SdChips,
+        Self::RoremChips,
+        Self::Brushes,
+        Self::SelectionStrokes,
+        Self::FillRegionKnobs,
+        Self::Faces,
+        Self::Depth,
+    ];
+}
+
 /// Whether `surface` shows for `model`: only where it has an effect. A
 /// surface that shows but cannot act now (Mask with Sketch on Whole
 /// photo, before Process) is greyed with a reason by `surface_gate`.

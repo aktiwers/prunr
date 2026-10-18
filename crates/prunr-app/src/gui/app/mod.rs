@@ -700,23 +700,22 @@ impl PrunrApp {
         !self.open_modals().is_empty()
     }
 
+    /// Every modal the app can show, by name, and whether it is up.
+    pub(crate) const MODALS: [(&'static str, IsUp); 9] = [
+        ("settings", |a| a.show_settings),
+        ("cli_help", |a| a.show_cli_help),
+        ("pipeline_flow", |a| a.show_pipeline_flow),
+        ("model_store", |a| a.model_store.is_some()),
+        ("license", |a| a.pending_license_request.is_some()),
+        ("save_preset", |a| a.save_preset.is_some()),
+        ("runtime_prompt", |a| a.runtime_prompt.is_some()),
+        ("reset_confirm", |a| a.pending_reset_confirm),
+        ("file_dialog", |a| a.system.dialog_open()),
+    ];
+
     /// The modals up this frame, by name.
     pub(crate) fn open_modals(&self) -> Vec<&'static str> {
-        [
-            (self.show_settings, "settings"),
-            (self.show_cli_help, "cli_help"),
-            (self.show_pipeline_flow, "pipeline_flow"),
-            (self.model_store.is_some(), "model_store"),
-            (self.pending_license_request.is_some(), "license"),
-            (self.save_preset.is_some(), "save_preset"),
-            (self.runtime_prompt.is_some(), "runtime_prompt"),
-            (self.pending_reset_confirm, "reset_confirm"),
-            (self.system.dialog_open(), "file_dialog"),
-        ]
-        .into_iter()
-        .filter(|(open, _)| *open)
-        .map(|(_, name)| name)
-        .collect()
+        Self::MODALS.iter().filter(|(_, open)| open(self)).map(|(name, _)| *name).collect()
     }
 
     /// Step the targeted images (the checked ones, else the shown one) one
@@ -1500,6 +1499,9 @@ mod hotkey_capture_tests {
         assert!(app.show_settings, "Escape went to the capture field, not to the modal");
     }
 }
+
+/// Whether one modal is up.
+type IsUp = fn(&PrunrApp) -> bool;
 
 #[cfg(test)]
 mod field_list_tests {

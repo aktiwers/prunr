@@ -34,7 +34,7 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Performance => "Performance",
             Self::Hardware => "Hardware",

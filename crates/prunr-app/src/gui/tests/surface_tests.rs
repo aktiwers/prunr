@@ -373,58 +373,18 @@ fn the_sketch_flyout_names_every_control_in_every_mode() {
     }
 }
 
-/// The Background flyout names every control for each choice it can show.
+/// The Background flyout names every control with a background image:
+/// picking one takes a file dialog, so the catalog's clicks never reach it.
 #[test]
-fn the_background_flyout_names_every_control_for_each_choice() {
-    use prunr_core::BgEffect;
-    type Choose = fn(&mut crate::gui::item::BatchItem);
-    let set: [(&str, Choose); 5] = [
-        ("transparent", |_| {}),
-        ("solid", |i| i.settings.bg = Some([10, 20, 30, 255])),
-        ("image", |i| i.set_bg_image(image::DynamicImage::new_rgba8(4, 4), None)),
-        ("blurred", |i| i.settings.bg_effect = BgEffect::BlurredSource { radius: 5 }),
-        ("black and white", |i| i.settings.bg_effect = BgEffect::DesaturatedSource),
-    ];
-    for (name, apply) in set {
-        let mut h = loaded();
-        apply(&mut h.state_mut().batch.items[0]);
-        settle(&mut h);
-        click(&mut h, "Background");
-        assert!(egui::Popup::is_any_open(&h.ctx), "{name}: the Background flyout opened");
-        assert_all_controls_named(&h, &format!("background strip, {name}"));
-        click(&mut h, "All background settings");
-        assert_all_controls_named(&h, &format!("background panel, {name}"));
-    }
-}
-
-/// The Effect flyout names every control for each effect, "None" first.
-#[test]
-fn the_effect_flyout_names_every_control_for_each_effect() {
-    for style in prunr_core::SubjectEffect::ALL {
-        let mut h = loaded();
-        h.state_mut().batch.items[0].settings.effect = *style;
-        settle(&mut h);
-        click(&mut h, "Effect");
-        assert!(egui::Popup::is_any_open(&h.ctx), "{style:?}: the Effect flyout opened");
-        assert_all_controls_named(&h, &format!("effect strip, {style:?}"));
-        click(&mut h, "All effects");
-        assert!(names(&h).iter().any(|n| n == "Gradient map"), "{style:?}: every look has a tile");
-        assert_all_controls_named(&h, &format!("effect panel, {style:?}"));
-    }
-}
-
-/// The upscale row's Scale popover and Refine flyout name every control.
-#[test]
-fn the_upscale_surfaces_name_every_control() {
-    for (chip, expect) in [("Scale", "2\u{00d7}"), ("Refine", "Sharpen")] {
-        let mut h = loaded();
-        h.state_mut().settings.model = crate::gui::settings::SettingsModel::RealEsrganUpscale;
-        settle(&mut h);
-        click(&mut h, chip);
-        assert!(egui::Popup::is_any_open(&h.ctx), "{chip} opened");
-        assert!(names(&h).iter().any(|n| n == expect), "{chip}: {expect} shown");
-        assert_all_controls_named(&h, &format!("{chip} on an upscaler"));
-    }
+fn the_background_flyout_names_every_control_with_an_image() {
+    let mut h = loaded();
+    h.state_mut().batch.items[0].set_bg_image(image::DynamicImage::new_rgba8(4, 4), None);
+    settle(&mut h);
+    click(&mut h, "Background");
+    assert!(egui::Popup::is_any_open(&h.ctx), "the Background flyout opened");
+    assert_all_controls_named(&h, "background strip, image");
+    click(&mut h, "All background settings");
+    assert_all_controls_named(&h, "background panel, image");
 }
 
 /// Colorize's Strength is a flyout: it names its slider and stays open
@@ -444,22 +404,6 @@ fn the_colorize_strength_flyout_names_its_control_and_stays_open() {
     assert!(egui::Popup::is_any_open(&h.ctx), "the canvas click did not close it");
     click(&mut h, "Strength");
     assert!(!egui::Popup::is_any_open(&h.ctx), "its chip closes it");
-}
-
-/// The SD eraser's Quality and Prompt popovers and Advanced flyout name
-/// every control, the prompts included.
-#[test]
-fn the_sd_eraser_surfaces_name_every_control() {
-    for (chip, expect) in [("Quality", "Fast"), ("Prompt", "Negative prompt"), ("Advanced", "Guidance")] {
-        let mut h = loaded();
-        h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
-        settle(&mut h);
-        click(&mut h, chip);
-        assert!(egui::Popup::is_any_open(&h.ctx), "{chip} opened");
-        let names = names(&h);
-        assert!(names.iter().any(|n| n.starts_with(expect)), "{chip}: {expect} shown in {names:?}");
-        assert_all_controls_named(&h, &format!("{chip} on the SD eraser"));
-    }
 }
 
 /// Quality is a set-and-go popover: picking one closes it.
