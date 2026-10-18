@@ -9,10 +9,9 @@ use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
 
-/// Why an upscale to `out` cannot run in `free` bytes, with the model's
-/// own `working_set_mb` beside it; `None` when it fits.
-fn too_large_to_upscale(out: (u32, u32), working_set_mb: u32, free: u64) -> Option<String> {
-    let needed = prunr_core::upscale::peak_bytes(out.0, out.1) + u64::from(working_set_mb) * 1024 * 1024;
+/// Why an upscale to `out` that holds `needed` bytes cannot run in `free`
+/// bytes; `None` when it fits.
+fn too_large_to_upscale(out: (u32, u32), needed: u64, free: u64) -> Option<String> {
     (needed > free).then(|| {
         use crate::gui::views::format_byte_size;
         format!(
@@ -140,15 +139,17 @@ impl PrunrApp {
         let recipe = item.settings.current_recipe(model_kind);
         let start = item.next_upscale_start(model_kind);
         let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims);
-        let out = (w.saturating_mul(output_scale.factor()), h.saturating_mul(output_scale.factor()));
+        let factor = output_scale.factor();
+        let out = (w.saturating_mul(factor), h.saturating_mul(factor));
+        let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
+        let needed = prunr_core::upscale::peak_bytes(run_model, w, h, factor) + u64::from(crate::gui::memory::working_set_mb(model_kind)) * 1024 * 1024;
         let free = crate::hardware::available_ram_bytes_throttled();
-        if let Some(why) = too_large_to_upscale(out, crate::gui::memory::working_set_mb(model_kind), free) {
-            tracing::warn!(item_id, out_w = out.0, out_h = out.1, free, "upscale refused: too large for free memory");
+        if let Some(why) = too_large_to_upscale(out, needed, free) {
+            tracing::warn!(item_id, out_w = out.0, out_h = out.1, needed, free, "upscale refused: too large for free memory");
             self.toasts.error(why);
             return false;
         }
         let input = item.pixels_from(start.as_ref());
-        let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
         item.start_job_at(Some(StepKind::Upscale), Engine::Upscale, start);
         let run = item.job_run().unwrap_or_default();
@@ -734,8 +735,8 @@ mod process_targets_tests {
     #[test]
     fn an_upscale_too_large_for_free_memory_is_refused() {
         let gb = 1024 * 1024 * 1024;
-        assert_eq!(super::too_large_to_upscale((4000, 3000), 500, 8 * gb), None, "12 MP: about 0.7 GB");
-        let why = super::too_large_to_upscale((16000, 12000), 500, 2 * gb).expect("192 MP: about 4 GB");
+        assert_eq!(super::too_large_to_upscale((4000, 3000), gb, 8 * gb), None);
+        let why = super::too_large_to_upscale((16000, 12000), 4 * gb, 2 * gb).expect("does not fit");
         assert!(why.contains("16000\u{00d7}12000") && why.contains("free"), "{why}");
     }
 
