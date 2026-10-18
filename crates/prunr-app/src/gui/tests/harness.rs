@@ -74,11 +74,6 @@ pub(super) fn names<S>(harness: &Harness<'_, S>) -> Vec<String> {
 /// Every control in the tree has a readable name. Fails with the list of
 /// nameless controls: an icon-only button, an unlabelled slider.
 pub(super) fn assert_all_controls_named<S>(harness: &Harness<'_, S>, surface: &str) {
-    let root = tree(harness);
-    let nameless: Vec<String> = root
-        .iter()
-        .filter(|n| n.is_control() && n.name.is_none())
-        .map(|n| format!("{:?} {:?} at {:?}", n.role, n.id, n.rect))
-        .collect();
+    let nameless: Vec<String> = crate::gui::automation::checks::nameless(&tree(harness)).iter().map(|v| v.detail.clone()).collect();
     assert!(nameless.is_empty(), "{surface}: controls without a readable name:\n{}", nameless.join("\n"));
 }

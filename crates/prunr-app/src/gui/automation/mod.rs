@@ -6,6 +6,7 @@
 //! reacts exactly as it does to a user; intents go through the same
 //! `PrunrApp::perform` the keyboard uses; `state` is a serde dump.
 
+pub mod checks;
 pub mod server;
 pub mod state;
 pub mod tree;
