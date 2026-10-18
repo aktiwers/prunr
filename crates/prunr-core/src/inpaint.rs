@@ -1184,6 +1184,13 @@ fn accumulate_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `img` with `f` applied to a copy.
+    fn applied(img: &RgbaImage, f: impl FnOnce(&mut RgbaImage)) -> RgbaImage {
+        let mut out = img.clone();
+        f(&mut out);
+        out
+    }
     use image::{Luma, Rgba};
 
     /// LaMa's tiler reports a contract-clean run over only the tiles
@@ -1887,7 +1894,7 @@ mod tests {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mut mask = GrayImage::new(16, 16);
         mask.put_pixel(8, 8, Luma([255]));
-        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.0);
+        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.0));
         assert_eq!(out, img);
     }
 
@@ -1895,7 +1902,7 @@ mod tests {
     fn sharpen_inpainted_empty_mask_is_clone() {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mask = GrayImage::new(16, 16);
-        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.5);
+        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.5));
         assert_eq!(out, img);
     }
 
@@ -1903,7 +1910,7 @@ mod tests {
     fn sharpen_inpainted_dim_mismatch_is_clone() {
         let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
         let mask = GrayImage::new(8, 8);
-        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.5);
+        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.5));
         assert_eq!(out, img);
     }
 
@@ -1926,7 +1933,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let mut out = img.clone(); sharpen_inpainted(&mut out, &mask, 0.7);
+        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.7));
         for y in 0..64 {
             for x in 0..64 {
                 if mask.get_pixel(x, y).0[0] > 127 {

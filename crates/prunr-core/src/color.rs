@@ -122,7 +122,7 @@ pub(crate) fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
 #[inline]
 pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
     let inv = 255 - t;
-    std::array::from_fn(|c| ((a[c] as u16 * inv + b[c] as u16 * t + 127) / 255) as u8)
+    std::array::from_fn(|c| crate::math::div255_round(u32::from(a[c]) * u32::from(inv) + u32::from(b[c]) * u32::from(t)) as u8)
 }
 
 /// RGB ("ff8000") or RGBA ("ff800080") hex digits, no `#`; alpha is 255
@@ -146,13 +146,13 @@ mod tests {
     /// Every (a, b, t) in 0..=255: the shared lerp is the nearest byte to
     /// the exact blend, and the ends are exactly `a` and `b`.
     #[test]
-    fn lerp_rgb_matches_the_former_inline_blends() {
-        let old = |a: u8, b: u8, t: u16| ((f32::from(a) * f32::from(255 - t) + f32::from(b) * f32::from(t)) / 255.0).round() as u8;
+    fn lerp_rgb_is_the_nearest_byte() {
+        let exact = |a: u8, b: u8, t: u16| ((f32::from(a) * f32::from(255 - t) + f32::from(b) * f32::from(t)) / 255.0).round() as u8;
         for a in 0..=255u8 {
             for b in 0..=255u8 {
                 for t in 0..=255u16 {
                     let got = lerp_rgb([a, b, a], [b, a, 255 - b], t);
-                    assert_eq!(got, [old(a, b, t), old(b, a, t), old(a, 255 - b, t)], "{a} {b} {t}");
+                    assert_eq!(got, [exact(a, b, t), exact(b, a, t), exact(a, 255 - b, t)], "{a} {b} {t}");
                 }
                 assert_eq!(lerp_rgb([a, b, a], [b, a, b], 255), [b, a, b]);
             }

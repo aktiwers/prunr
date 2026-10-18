@@ -179,9 +179,7 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, blend: Fac
     SWEEPER.get_or_init(|| crate::inpaint_sd::spawn_idle_sweeper("face-idle-sweeper", warm_restorers, "faces: released the idle face model"));
     let restorer = crate::inpaint_sd::warm_entry(warm_restorers(), id, || FaceRestorer::new(id).map(std::sync::Mutex::new))?;
     let found = restorer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).find_and_restore(image, blend, progress);
-    if let Some(entry) = warm_restorers().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&id) {
-        entry.last_used = std::time::Instant::now();
-    }
+    crate::inpaint_sd::warm_touch(warm_restorers(), &id);
     found
 }
 

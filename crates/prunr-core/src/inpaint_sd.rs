@@ -1457,6 +1457,14 @@ pub(crate) fn warm_entry<K: std::hash::Hash + Eq + Clone, V, E>(
     Ok(Arc::clone(&lock().entry(key).or_insert_with(|| CacheEntry::new(built, Instant::now())).value))
 }
 
+/// Mark `key`'s entry used now: a run that outlasts the idle release
+/// would otherwise be swept the moment it ends.
+pub(crate) fn warm_touch<K: std::hash::Hash + Eq, V>(cache: &Mutex<HashMap<K, CacheEntry<Arc<V>>>>, key: &K) {
+    if let Some(entry) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(key) {
+        entry.last_used = Instant::now();
+    }
+}
+
 /// Background sweeper interval. 60 s gives reclaim within ~1 minute of
 /// the idle threshold without burning CPU; the sweep itself is a single
 /// HashMap::retain over <10 entries so it's free.

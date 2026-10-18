@@ -1236,8 +1236,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             let edge_settings = inputs.settings.edge_settings();
 
             // Base for compose: masked subject (SubjectOutline) or raw original (EdgesOnly).
-            // We only need its dimensions for `resolve_edge_mask` — used to be
-            // a full RGBA→DynamicImage clone (~64 MB at 4K, 10 Hz during drag).
+            // `resolve_edge_mask` needs only its dimensions.
             let out_dims = match masked_base.as_ref() {
                 Some(arc) => (arc.width(), arc.height()),
                 None => inputs.original.dimensions(),

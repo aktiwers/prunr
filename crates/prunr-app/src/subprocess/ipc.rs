@@ -71,12 +71,17 @@ pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
 
 /// Hand `image` to the other process as a file: its width and height
 /// (u32 LE), then its raw pixels. No encode on this side, no decode on
-/// the other.
+/// the other. A write that fails leaves no partial file behind.
 pub fn write_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path, image: &image::ImageBuffer<P, Vec<u8>>) -> io::Result<()> {
-    let mut file = std::fs::File::create(path)?;
-    file.write_all(&image.width().to_le_bytes())?;
-    file.write_all(&image.height().to_le_bytes())?;
-    file.write_all(image.as_raw())
+    let write = || -> io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&image.width().to_le_bytes())?;
+        file.write_all(&image.height().to_le_bytes())?;
+        file.write_all(image.as_raw())
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }
 
 /// An image `write_image` wrote, its file removed; `None` when it is

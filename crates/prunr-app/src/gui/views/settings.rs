@@ -29,7 +29,7 @@ pub enum SettingsTab {
     Hardware,
     Images,
     Editing,
-    Hotkeys,
+    Shortcuts,
     Credits,
 }
 
@@ -40,7 +40,7 @@ impl SettingsTab {
             Self::Hardware => "Hardware",
             Self::Images => "Images",
             Self::Editing => "Editing",
-            Self::Hotkeys => "Shortcuts",
+            Self::Shortcuts => "Shortcuts",
             Self::Credits => "Credits",
         }
     }
@@ -51,13 +51,13 @@ impl SettingsTab {
             Self::Hardware => ICON_MEMORY.codepoint,
             Self::Images => ICON_IMAGE.codepoint,
             Self::Editing => ICON_EDIT.codepoint,
-            Self::Hotkeys => ICON_KEYBOARD.codepoint,
+            Self::Shortcuts => ICON_KEYBOARD.codepoint,
             Self::Credits => ICON_INFO.codepoint,
         }
     }
 
     pub(crate) const ALL: [SettingsTab; 6] = [
-        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Hotkeys, Self::Credits,
+        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Shortcuts, Self::Credits,
     ];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
@@ -189,7 +189,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
         }
         SettingsTab::Images => { render_page_images(ui, &mut app.settings); None }
         SettingsTab::Editing => { render_page_editing(ui, &mut app.settings); None }
-        SettingsTab::Hotkeys => { render_tab_hotkeys(ui, app); None }
+        SettingsTab::Shortcuts => { render_tab_shortcuts(ui, app); None }
         SettingsTab::Credits => { render_tab_model_credits(ui, &app.hardware_install_cache); None }
     }
 }
@@ -613,7 +613,7 @@ fn render_page_editing(ui: &mut egui::Ui, settings: &mut Settings) {
 /// One row per action: label, the key slots, Reset. Clicking a slot
 /// starts a capture that `PrunrApp::handle_hotkey_capture` completes on
 /// the next key press.
-fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
+fn render_tab_shortcuts(ui: &mut egui::Ui, app: &mut PrunrApp) {
     use super::shortcuts::{self, Bindings, SHORTCUTS, SLOTS};
 
     let current = Arc::clone(&app.bindings);

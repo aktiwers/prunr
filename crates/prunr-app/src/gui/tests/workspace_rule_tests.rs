@@ -123,7 +123,7 @@ fn colour_bytes_are_rounded_not_truncated() {
             let float = code.contains("255.0) as u8") || (core && code.contains("as f32") && code.contains(") as u8"));
             let integer = (code.contains("/ 255) as u8") || code.contains("/ 255).clamp(0, 255) as u8")) && !code.contains("+ 127");
             if (float && !code.contains("round") && !code.contains("+ 0.5") && !code.contains("floor")) || integer {
-                found.push(format!("{rel}:{n}: use prunr_core::math::round_u8, or + 127 before / 255"));
+                found.push(format!("{rel}:{n}: use math::round_u8 (floats) or math::div255_round (integers)"));
             }
         }
     }
@@ -223,6 +223,32 @@ const ENGINEERING_WORDS: [&str; 11] = [
 ];
 
 /// The string literals on `line`'s code.
+/// The string literals in GUI source `text` that can reach the user, with
+/// their line: those in a logging call (spanning every line it does), an
+/// `expect` message or an egui id are left out.
+fn user_literals(text: &str) -> Vec<(usize, &str)> {
+    const LOGGING: [&str; 5] = ["tracing::", "debug!(", "info!(", "warn!(", "error!("];
+    let mut out = Vec::new();
+    let mut in_log = false;
+    for (n, line) in production_lines(text) {
+        let code = code_part(line);
+        if in_log || LOGGING.iter().any(|t| code.contains(t)) {
+            in_log = !code.trim_end().ends_with(';');
+            continue;
+        }
+        if code.contains(".expect(") || code.contains("Id::new(") {
+            continue;
+        }
+        out.extend(literals(code).map(|literal| (n, literal)));
+    }
+    out
+}
+
+/// The GUI's sources, every user-text rule's one scope.
+fn is_gui_source(rel: &str) -> bool {
+    rel.starts_with("prunr-app/src/gui/")
+}
+
 fn literals(line: &str) -> impl Iterator<Item = &str> {
     scan_line(line).0.into_iter().map(move |r| &line[r])
 }
@@ -232,22 +258,13 @@ fn literals(line: &str) -> impl Iterator<Item = &str> {
 #[test]
 fn user_text_has_no_engineering_words() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources() {
-        if !rel.starts_with("prunr-app/src/gui/views/") {
-            continue;
-        }
-        for (n, line) in production_lines(text) {
-            let code = code_part(line);
-            if ["tracing::", "debug!(", "info!(", "warn!(", "error!(", "Id::new("].iter().any(|t| code.contains(t)) {
-                continue;
-            }
-            for literal in literals(code) {
-                let lower = literal.to_lowercase();
-                let word = ENGINEERING_WORDS.iter().find(|w| lower.contains(*w));
-                let ort = literal.split(|c: char| !c.is_alphanumeric()).any(|w| w == "ORT");
-                if let Some(word) = word.copied().or(ort.then_some("ORT")) {
-                    found.push(format!("{rel}:{n}: \"{literal}\" says {word:?}"));
-                }
+    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+        for (n, literal) in user_literals(text) {
+            let lower = literal.to_lowercase();
+            let word = ENGINEERING_WORDS.iter().find(|w| lower.contains(*w));
+            let ort = literal.split(|c: char| !c.is_alphanumeric()).any(|w| w == "ORT");
+            if let Some(word) = word.copied().or(ort.then_some("ORT")) {
+                found.push(format!("{rel}:{n}: \"{literal}\" says {word:?}"));
             }
         }
     }
@@ -260,20 +277,15 @@ fn user_text_has_no_engineering_words() {
 #[test]
 fn user_text_names_no_keys_by_hand() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources() {
-        if !rel.starts_with("prunr-app/src/gui/views/") || rel.ends_with("/shortcuts.rs") {
-            continue;
-        }
-        for (n, line) in production_lines(text) {
-            for literal in literals(code_part(line)) {
-                let words = literal.split(|c: char| !c.is_alphanumeric() && c != '+');
-                let named = words.into_iter().find(|w| {
-                    let f_key = w.strip_prefix('F').is_some_and(|d| !d.is_empty() && d.len() <= 2 && d.bytes().all(|b| b.is_ascii_digit()));
-                    f_key || ["Shift+", "Ctrl+", "Cmd+", "Alt+"].iter().any(|m| w.starts_with(m))
-                });
-                if let Some(key) = named {
-                    found.push(format!("{rel}:{n}: \"{literal}\" names {key}: use shortcuts::keys"));
-                }
+    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel) && !rel.ends_with("/shortcuts.rs")) {
+        for (n, literal) in user_literals(text) {
+            let words = literal.split(|c: char| !c.is_alphanumeric() && c != '+');
+            let named = words.into_iter().find(|w| {
+                let f_key = w.strip_prefix('F').is_some_and(|d| !d.is_empty() && d.len() <= 2 && d.bytes().all(|b| b.is_ascii_digit()));
+                f_key || ["Shift+", "Ctrl+", "Cmd+", "Alt+"].iter().any(|m| w.starts_with(m))
+            });
+            if let Some(key) = named {
+                found.push(format!("{rel}:{n}: \"{literal}\" names {key}: use shortcuts::keys"));
             }
         }
     }
@@ -285,19 +297,10 @@ fn user_text_names_no_keys_by_hand() {
 #[test]
 fn user_text_has_no_three_dots_or_plural_brackets() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources() {
-        if !rel.starts_with("prunr-app/src/gui/") {
-            continue;
-        }
-        for (n, line) in production_lines(text) {
-            let code = code_part(line);
-            if ["tracing::", "debug!(", "info!(", "warn!(", "error!("].iter().any(|t| code.contains(t)) {
-                continue;
-            }
-            for literal in literals(code) {
-                if literal.contains("...") || literal.contains("(s)") {
-                    found.push(format!("{rel}:{n}: \"{literal}\": use an ellipsis character / fmt::count"));
-                }
+    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+        for (n, literal) in user_literals(text) {
+            if literal.contains("...") || literal.contains("(s)") {
+                found.push(format!("{rel}:{n}: \"{literal}\": use an ellipsis character / fmt::count"));
             }
         }
     }
@@ -310,16 +313,11 @@ fn user_text_has_no_three_dots_or_plural_brackets() {
 fn user_text_uses_us_spelling() {
     const BRITISH: [&str; 5] = ["grey", "colour", "licence", "centre", "behaviour"];
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources() {
-        if !rel.starts_with("prunr-app/src/gui/views/") {
-            continue;
-        }
-        for (n, line) in production_lines(text) {
-            for literal in literals(code_part(line)) {
-                let lower = literal.to_lowercase();
-                if let Some(word) = BRITISH.iter().find(|w| lower.split(|c: char| !c.is_alphabetic()).any(|t| t.starts_with(*w))) {
-                    found.push(format!("{rel}:{n}: \"{literal}\" spells {word:?}"));
-                }
+    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+        for (n, literal) in user_literals(text) {
+            let lower = literal.to_lowercase();
+            if let Some(word) = BRITISH.iter().find(|w| lower.split(|c: char| !c.is_alphabetic()).any(|t| t.starts_with(*w))) {
+                found.push(format!("{rel}:{n}: \"{literal}\" spells {word:?}"));
             }
         }
     }

@@ -16,6 +16,13 @@ pub fn round_u8(v: f32) -> u8 {
     (v + 0.5).clamp(0.0, 255.0) as u8
 }
 
+/// `v / 255` rounded to the nearest integer, for byte products and blends
+/// kept in integers (`a * t / 255` floors, half a step dark).
+#[inline]
+pub(crate) fn div255_round(v: u32) -> u32 {
+    (v + 127) / 255
+}
+
 /// Logistic sigmoid, logit → probability.
 #[inline]
 pub(crate) fn sigmoid(x: f32) -> f32 {

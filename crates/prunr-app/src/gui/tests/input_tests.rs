@@ -50,20 +50,20 @@ fn handle_open_path_nonexistent_does_not_panic() {
 }
 
 /// F1 shows the shortcuts where they can also be changed: Settings on
-/// the Hotkeys tab. A second press closes it.
+/// the Shortcuts tab. A second press closes it.
 #[test]
-fn f1_opens_settings_on_hotkeys_and_closes_it_again() {
+fn f1_opens_settings_on_shortcuts_and_closes_it_again() {
     use crate::gui::views::settings::SettingsTab;
     use crate::gui::views::shortcuts::Action;
     let ctx = egui::Context::default();
     let mut app = PrunrApp::new_for_test();
     app.perform(Action::Shortcuts, &ctx);
     assert!(app.show_settings);
-    assert_eq!(app.settings_tab, SettingsTab::Hotkeys);
+    assert_eq!(app.settings_tab, SettingsTab::Shortcuts);
     app.perform(Action::Shortcuts, &ctx);
     assert!(!app.show_settings);
     app.settings_tab = SettingsTab::Performance;
     app.show_settings = true;
     app.perform(Action::Shortcuts, &ctx);
-    assert!(app.show_settings && app.settings_tab == SettingsTab::Hotkeys, "from another tab it switches, not closes");
+    assert!(app.show_settings && app.settings_tab == SettingsTab::Shortcuts, "from another tab it switches, not closes");
 }
