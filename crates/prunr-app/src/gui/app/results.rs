@@ -284,14 +284,15 @@ impl PrunrApp {
             progress.last_event = event.clone();
             match event {
                 InstallEvent::Done { .. } => {
-                    let name = progress.runtime.display_name();
-                    self.toasts.success(format!("{name} installed"));
+                    let name = progress.target.display_name();
+                    self.toasts.success(format!("{name} installed. Restart Prunr to use them"));
                     self.runtime_install = None;
                     self.refresh_install_cache();
                     return;
                 }
                 InstallEvent::Failed { error } => {
-                    let name = progress.runtime.display_name();
+                    let name = progress.target.display_name();
+                    tracing::warn!(target = name, %error, "install failed");
                     self.toasts.error(format!("Could not install {name}: {error}"));
                     self.runtime_install = None;
                     self.refresh_install_cache();

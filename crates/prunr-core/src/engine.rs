@@ -99,11 +99,12 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
             if ort::ep::OpenVINO::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
             if ort::ep::CUDA::default().is_available().unwrap_or(false) {
+                crate::ort_runtime::preload_nvidia_libraries();
                 match provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()) {
                     Ok(()) => eps.push(EpKind::Cuda),
                     Err(e) => {
                         tracing::info!(%e, "CUDA cannot start; sessions run on the CPU");
-                        let _ = GPU_START_NOTE.set(cuda_start_note(&e));
+                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of_cuda(&e));
                     }
                 }
             }
@@ -117,14 +118,58 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     }).as_slice()
 }
 
-/// Why the loaded runtime's GPU provider could not start, in the user's
-/// words, when it could not.
-static GPU_START_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Why the loaded runtime's GPU provider could not start, when it could not.
+static GPU_START_FAILURE: std::sync::OnceLock<GpuStartFailure> = std::sync::OnceLock::new();
 
 /// Why the GPU provider the runtime carries does not run here, once the
 /// providers have been probed; `None` when it runs or there is none.
-pub fn gpu_start_note() -> Option<&'static str> {
-    GPU_START_NOTE.get().map(String::as_str)
+pub fn gpu_start_failure() -> Option<&'static GpuStartFailure> {
+    GPU_START_FAILURE.get()
+}
+
+/// Why CUDA did not start. It runs only beside NVIDIA's driver and its
+/// CUDA 12 and cuDNN 9 libraries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuStartFailure {
+    /// The loader could not find this library (a CUDA or cuDNN one).
+    MissingLibrary(String),
+    /// No NVIDIA driver, or one older than CUDA 12 needs.
+    NoDriver,
+    /// The driver runs but finds no NVIDIA graphics card.
+    NoDevice,
+    Other,
+}
+
+impl GpuStartFailure {
+    /// `err` names the first library the loader could not find.
+    #[cfg(not(target_os = "macos"))]
+    fn of_cuda(err: &str) -> Self {
+        let missing = err
+            .split(": cannot open shared object file")
+            .next()
+            .and_then(|head| head.rsplit(' ').next())
+            .filter(|lib| lib.starts_with("lib") && lib.contains(".so"));
+        match missing {
+            Some(lib) if lib.starts_with("libcuda.so") => Self::NoDriver,
+            Some(lib) => Self::MissingLibrary(lib.to_string()),
+            // cudaErrorInsufficientDriver, which is also what a missing
+            // driver gives once CUDA's own libraries load.
+            None if err.contains("CUDA failure 35:") => Self::NoDriver,
+            // cudaErrorNoDevice.
+            None if err.contains("CUDA failure 100:") => Self::NoDevice,
+            None => Self::Other,
+        }
+    }
+
+    /// The failure in the user's words.
+    pub fn text(&self) -> String {
+        match self {
+            Self::MissingLibrary(lib) => format!("CUDA could not start: {lib} is missing. It needs NVIDIA's CUDA 12 and cuDNN 9 libraries."),
+            Self::NoDriver => "CUDA could not start: the NVIDIA driver is missing or older than CUDA 12 needs (525 or newer).".to_string(),
+            Self::NoDevice => "CUDA could not start: no NVIDIA graphics card was found.".to_string(),
+            Self::Other => "CUDA could not start, so models run on the CPU. The log has the details.".to_string(),
+        }
+    }
 }
 
 /// Whether `provider` registers on a session builder. A runtime lists a
@@ -135,23 +180,6 @@ fn provider_starts(provider: ExecutionProviderDispatch) -> Result<(), String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| e.to_string())
         .and_then(|b| b.with_execution_providers([provider]).map(drop).map_err(|e| e.to_string()))
-}
-
-/// The CUDA runtime starts only beside NVIDIA's driver and its CUDA 12
-/// and cuDNN 9 libraries; `err` names the first library the loader
-/// could not find.
-#[cfg(not(target_os = "macos"))]
-fn cuda_start_note(err: &str) -> String {
-    let missing = err
-        .split(": cannot open shared object file")
-        .next()
-        .and_then(|head| head.rsplit(' ').next())
-        .filter(|lib| lib.starts_with("lib") && lib.contains(".so"));
-    match missing {
-        Some(lib) if lib.starts_with("libcuda.so") => "CUDA could not start: no NVIDIA driver was found.".to_string(),
-        Some(lib) => format!("CUDA could not start: {lib} is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr."),
-        None => "CUDA could not start, so models run on the CPU. The log has the details.".to_string(),
-    }
 }
 
 /// Whether DirectML can start a device here. The DirectML runtime, which
@@ -955,15 +983,20 @@ mod tests {
         }
     }
 
-    /// A CUDA runtime that cannot start says what to install, in words.
+    /// A CUDA runtime that cannot start knows which library is missing,
+    /// so the app can offer it, and tells a missing driver apart.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_cuda_runtime_that_cannot_start_names_what_is_missing() {
         let failed = |lib: &str| format!("ORT register CUDA EP failed: provider_bridge_ort.cc:1957 [ONNXRuntimeError] : 1 : FAIL : Failed to load library /x/libonnxruntime_providers_cuda.so with error: {lib}: cannot open shared object file: No such file or directory");
-        assert_eq!(cuda_start_note(&failed("libcublasLt.so.12")), "CUDA could not start: libcublasLt.so.12 is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr.");
-        assert_eq!(cuda_start_note(&failed("libcudnn.so.9")), "CUDA could not start: libcudnn.so.9 is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr.");
-        assert_eq!(cuda_start_note(&failed("libcuda.so.1")), "CUDA could not start: no NVIDIA driver was found.");
-        assert!(cuda_start_note("CUDA failure 100: no CUDA-capable device is detected").starts_with("CUDA could not start, so"));
+        assert_eq!(GpuStartFailure::of_cuda(&failed("libcublasLt.so.12")), GpuStartFailure::MissingLibrary("libcublasLt.so.12".into()));
+        assert_eq!(GpuStartFailure::of_cuda(&failed("libcudnn.so.9")), GpuStartFailure::MissingLibrary("libcudnn.so.9".into()));
+        assert_eq!(GpuStartFailure::of_cuda(&failed("libcuda.so.1")), GpuStartFailure::NoDriver);
+        let parse_failed = |cuda: &str| format!("Parse Failed to parse provider option \"device_id\": {cuda} ; GPU=-1 ; expr=cudaGetDeviceCount(&num_devices);");
+        assert_eq!(GpuStartFailure::of_cuda(&parse_failed("CUDA failure 35: CUDA driver version is insufficient for CUDA runtime version")), GpuStartFailure::NoDriver);
+        assert_eq!(GpuStartFailure::of_cuda(&parse_failed("CUDA failure 100: no CUDA-capable device is detected")), GpuStartFailure::NoDevice);
+        assert_eq!(GpuStartFailure::of_cuda("out of memory"), GpuStartFailure::Other);
+        assert_eq!(GpuStartFailure::MissingLibrary("libcudnn.so.9".into()).text(), "CUDA could not start: libcudnn.so.9 is missing. It needs NVIDIA's CUDA 12 and cuDNN 9 libraries.");
     }
 
     #[test]
