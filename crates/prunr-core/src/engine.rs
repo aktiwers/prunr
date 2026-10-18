@@ -167,10 +167,14 @@ impl EpKind {
             EpKind::Cuda => {
                 let p = ort::ep::CUDA::default().with_device_id(0);
                 match site {
+                    // No CUDA graph: it replays the first run's shapes and
+                    // buffer addresses, and tiles and photos change both.
+                    // Heuristic conv search for the same reason: exhaustive
+                    // benchmarks every new shape, the fixed default
+                    // algorithm is often the slowest.
                     EpSite::Engine { .. } => p
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
-                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Default)
-                        .with_cuda_graph(true)
+                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
                         .with_tf32(true)
                         .build(),
                     EpSite::Fill { .. } | EpSite::SdPart { .. } => p.build(),
