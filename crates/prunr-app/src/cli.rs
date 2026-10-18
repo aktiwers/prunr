@@ -1108,17 +1108,10 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                     fail_count += 1;
                     continue;
                 }
-                let png_bytes = match prunr_core::encode_rgba_png(&pr.rgba_image) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        fail_count += 1;
-                        if let Some(pb) = spinner_opt {
-                            pb.finish_with_message(format!("X {} — encode error: {e}", input.display()));
-                        }
-                        continue;
-                    }
-                };
-                match prunr_app::fs_util::write_bytes_replacing(&out_path, &png_bytes) {
+                let saved = prunr_app::fs_util::write_replacing(&out_path, |w| {
+                    prunr_core::encode_rgba_png_saved_into(&pr.rgba_image, w).map_err(std::io::Error::other)
+                });
+                match saved {
                     Ok(_) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {
