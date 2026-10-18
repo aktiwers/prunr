@@ -22,6 +22,10 @@ pub struct StateDump {
     pub sidebar_hidden: bool,
     pub adjustments_hidden: bool,
     pub modals: Vec<&'static str>,
+    /// The captions of the toasts on screen.
+    pub toasts: Vec<String>,
+    /// The window's size in points, filled in by the control socket.
+    pub viewport: Option<[f32; 2]>,
     pub settings: SettingsDump,
 }
 
@@ -46,6 +50,11 @@ pub struct SettingsDump {
     pub keep_sd_loaded: bool,
 }
 
+/// Work still owed to the screen: what `wait_idle` waits out.
+pub fn busy(app: &PrunrApp) -> bool {
+    app.quiet_background_work().is_some() || app.processor.is_run_in_flight() || app.batch.items.iter().any(|it| it.is_busy())
+}
+
 pub fn dump(app: &PrunrApp) -> StateDump {
     StateDump {
         app_state: format!("{:?}", app.batch.app_state()),
@@ -57,9 +66,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             None => "none",
         },
         selected: app.batch.selected_item().map(|it| it.id),
-        busy: app.quiet_background_work().is_some()
-            || app.processor.is_run_in_flight()
-            || app.batch.items.iter().any(|it| it.is_busy()),
+        busy: busy(app),
         items: app
             .batch
             .items
@@ -81,6 +88,8 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         sidebar_hidden: app.sidebar_hidden,
         adjustments_hidden: app.adjustments_hidden,
         modals: app.open_modals(),
+        toasts: app.toasts.shown(),
+        viewport: None,
         settings: SettingsDump {
             auto_process_on_import: app.settings.auto_process_on_import,
             parallel_jobs: app.settings.parallel_jobs,

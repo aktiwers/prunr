@@ -10,6 +10,7 @@ mod per_model_interpretation_tests;
 mod tree_tests;
 mod surface_tests;
 mod catalog_tests;
+mod control_socket_tests;
 mod layout_tests;
 mod dialog_tests;
 mod rule_scan_tests;
