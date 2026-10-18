@@ -93,6 +93,7 @@ rfd = "0.15"
 pollster = "0.4"
 dirs = "6"
 sysinfo = "0.37"
+dunce = "1.0"
 memory-stats = "1"
 
 # Runtime install + xtask shared deps. Hoisted so version bumps live in
