@@ -7,6 +7,7 @@ use crate::runtime_install::{RuntimeChoice, RuntimeId};
 pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
     pub cuda: bool,
+    pub migraphx: bool,
     /// NVIDIA's libraries beside the CUDA runtime.
     pub nvidia_libraries: bool,
     /// OpenVINO may run models on the Intel GPU from the next start.
@@ -60,6 +61,7 @@ impl HardwareInstallCache {
         Self {
             openvino: RuntimeId::OpenVino.is_installed(),
             cuda: RuntimeId::Cuda.is_installed(),
+            migraphx: RuntimeId::MiGraphX.is_installed(),
             nvidia_libraries: crate::runtime_install::nvidia_libraries_installed(),
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
@@ -89,6 +91,7 @@ impl HardwareInstallCache {
         Self {
             openvino: true,
             cuda: true,
+            migraphx: true,
             nvidia_libraries: false,
             intel_gpu: false,
             built_in_gpu: true,
@@ -115,6 +118,7 @@ impl HardwareInstallCache {
         match runtime {
             RuntimeId::OpenVino => self.openvino,
             RuntimeId::Cuda => self.cuda,
+            RuntimeId::MiGraphX => self.migraphx,
         }
     }
 

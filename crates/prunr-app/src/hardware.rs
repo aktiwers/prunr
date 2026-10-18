@@ -72,8 +72,9 @@ impl HardwareProfile {
     /// The runtime download the first-launch prompt and Settings
     /// recommend, among those offered here. A graphics card that suits
     /// DirectML needs none, since DirectML is built in, even with an
-    /// Intel iGPU beside it. An NVIDIA card wins over an Intel iGPU beside
-    /// it (the usual Linux laptop): CUDA runs the card, OpenVINO the iGPU.
+    /// Intel iGPU beside it. A graphics card wins over an Intel iGPU beside
+    /// it (the usual Linux laptop): CUDA or MIGraphX runs the card,
+    /// OpenVINO only the iGPU.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
         use crate::runtime_install::RuntimeId;
         if self.suits_directml {
@@ -81,6 +82,7 @@ impl HardwareProfile {
         }
         [
             (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda),
+            self.recommends_rocm().then_some(RuntimeId::MiGraphX),
             self.recommends_openvino().then_some(RuntimeId::OpenVino),
         ]
         .into_iter()
@@ -553,8 +555,10 @@ mod tests {
         };
         let offered = |rt| RuntimeId::OFFERED.contains(&rt).then_some(rt);
         assert_eq!(p.recommended_runtime(), offered(RuntimeId::Cuda).or(offered(RuntimeId::OpenVino)));
-        let no_igpu = HardwareProfile { igpu: None, ..p };
+        let no_igpu = HardwareProfile { igpu: None, ..p.clone() };
         assert_eq!(no_igpu.recommended_runtime(), offered(RuntimeId::Cuda));
+        let amd = HardwareProfile { dgpu: Some(GpuVendor::Amd), ..p };
+        assert_eq!(amd.recommended_runtime(), offered(RuntimeId::MiGraphX).or(offered(RuntimeId::OpenVino)));
     }
 
     #[test]

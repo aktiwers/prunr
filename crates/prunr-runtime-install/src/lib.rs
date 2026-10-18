@@ -39,9 +39,22 @@ pub fn host_rid() -> &'static str {
     else { "unknown" }
 }
 
-/// The newest glibc a Linux wheel may need: the one ORT's own wheels
-/// need, so anything that runs beside the runtime runs.
-const MAX_GLIBC: (u32, u32) = (2, 28);
+/// This machine's glibc: the newest a Linux wheel may need to load here.
+/// (0, 0) off glibc, where no manylinux wheel fits.
+pub fn host_glibc() -> (u32, u32) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: glibc returns a static NUL-terminated version string.
+        let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+        if let Some((major, minor)) = version.to_str().ok().and_then(|v| v.split_once('.')) {
+            let minor = minor.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+            if let (Ok(major), Ok(minor)) = (major.parse(), minor.parse()) {
+                return (major, minor);
+            }
+        }
+    }
+    (0, 0)
+}
 
 /// The glibc a manylinux tag for `arch` needs: `manylinux_2_27_x86_64`,
 /// or a legacy alias (`manylinux2014_x86_64` is 2.17).
@@ -61,9 +74,9 @@ fn manylinux_glibc(tag: &str, arch: &str) -> Option<(u32, u32)> {
 /// Whether a wheel's platform tag runs on `rid`. A macOS tag carries
 /// the wheel's minimum OS, which moves between ORT releases
 /// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
-/// only its arch is fixed. A Linux tag may need any glibc up to
-/// `MAX_GLIBC` (NVIDIA's wheels carry 2.12 to 2.27).
-fn tag_fits(tag: &str, rid: &str) -> bool {
+/// only its arch is fixed. A Linux tag may need any glibc up to `glibc`,
+/// the host's (NVIDIA's wheels carry 2.12 to 2.27, MIGraphX's 2.34).
+fn tag_fits(tag: &str, rid: &str, glibc: (u32, u32)) -> bool {
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let macos = |arch: &str| tag.strip_prefix("macosx_")
         .and_then(|t| t.strip_suffix(arch))
@@ -71,8 +84,8 @@ fn tag_fits(tag: &str, rid: &str) -> bool {
         .and_then(|version| version.split_once('_'))
         .is_some_and(|(major, minor)| number(major) && number(minor));
     match rid {
-        "linux-x64" => manylinux_glibc(tag, "x86_64").is_some_and(|v| v <= MAX_GLIBC),
-        "linux-arm64" => manylinux_glibc(tag, "aarch64").is_some_and(|v| v <= MAX_GLIBC),
+        "linux-x64" => manylinux_glibc(tag, "x86_64").is_some_and(|v| v <= glibc),
+        "linux-arm64" => manylinux_glibc(tag, "aarch64").is_some_and(|v| v <= glibc),
         "windows-x64" => tag == "win_amd64",
         "windows-arm64" => tag == "win_arm64",
         "macos-arm64" => macos("arm64"),
@@ -123,10 +136,10 @@ pub struct WheelInfo {
 /// Pick the right wheel for the host platform. Prefers cp313, falls
 /// back to any cp tag.
 pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, String> {
-    pick_wheel(urls, host_rid())
+    pick_wheel_on(urls, host_rid(), host_glibc())
 }
 
-fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String> {
+fn pick_wheel_on(urls: &[serde_json::Value], rid: &str, glibc: (u32, u32)) -> Result<WheelInfo, String> {
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
         // Reject sdists / non-wheel artifacts up front so a future PyPI
@@ -134,7 +147,7 @@ fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String
         // filename can't slip through to `extract_wheel` (which would
         // fail at `ZipArchive::new` with a confusing error).
         if !name.ends_with(".whl") { return None; }
-        if !platform_tags(name).any(|tag| tag_fits(tag, rid)) { return None; }
+        if !platform_tags(name).any(|tag| tag_fits(tag, rid, glibc)) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
         Some(WheelInfo {
             url: u["url"].as_str()?.to_string(),
@@ -456,6 +469,12 @@ pub const DYLIB_NAME: &str = if cfg!(windows) {
 mod tests {
     use super::*;
 
+    /// `pick_wheel_on` for a host with glibc 2.28, the oldest that runs
+    /// ORT's own Linux wheels.
+    fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String> {
+        pick_wheel_on(urls, rid, (2, 28))
+    }
+
     /// Both `release.yml` (the runtime each artifact ships) and `ci.yml`
     /// (Linux install for the e2e test, macOS smoke test) hard-code the same
     /// version this const carries. Cargo doesn't link CI YAML, so drift
@@ -548,7 +567,7 @@ mod tests {
     }
 
     /// NVIDIA's wheels carry older manylinux tags than ORT's; any glibc up
-    /// to 2.28 fits, a newer one or another arch does not.
+    /// to the host's fits (2.28 here), a newer one or another arch does not.
     #[test]
     fn linux_wheels_fit_up_to_the_glibc_ort_needs() {
         for filename in [
@@ -567,6 +586,16 @@ mod tests {
         ] {
             assert!(pick_wheel(&urls_for(&[filename]), "linux-x64").is_err(), "took {filename}");
         }
+        let migraphx = urls_for(&["onnxruntime_migraphx-1.24.2-cp312-cp312-manylinux_2_34_x86_64.whl"]);
+        assert!(pick_wheel_on(&migraphx, "linux-x64", (2, 35)).is_ok(), "a 2.35 host runs a 2.34 wheel");
+        assert!(pick_wheel_on(&migraphx, "linux-x64", (2, 31)).is_err(), "a 2.31 host does not");
+    }
+
+    /// The host's glibc reads as a version on a glibc Linux.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_host_glibc_reads_back() {
+        assert!(host_glibc() >= (2, 17), "{:?}", host_glibc());
     }
 
     #[test]

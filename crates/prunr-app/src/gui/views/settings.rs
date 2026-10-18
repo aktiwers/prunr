@@ -591,9 +591,9 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
 /// NVIDIA's CUDA and cuDNN libraries, offered once the CUDA runtime is
 /// loaded and could not start for a missing library.
 fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
-    use prunr_core::engine::GpuStartFailure;
+    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
     let installing = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::NvidiaLibraries);
-    let missing_library = matches!(ctx.gpu_failure, Some(GpuStartFailure::MissingLibrary(_)))
+    let missing_library = matches!(ctx.gpu_failure, Some(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(_) }))
         && ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(RuntimeId::Cuda));
     if !(ctx.nvidia_libraries || installing.is_some() || missing_library) {
         return;
