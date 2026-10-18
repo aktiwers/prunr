@@ -31,7 +31,9 @@ pub enum DownloadState {
 pub enum DownloadEvent {
     Progress { id: ModelId, bytes_so_far: u64, total: u64 },
     Verifying { id: ModelId },
-    Complete { id: ModelId },
+    /// It is installed; `note` says what the person should know (a
+    /// companion file that did not come).
+    Complete { id: ModelId, note: Option<String> },
     Failed { id: ModelId, error: String },
     Cancelled { id: ModelId },
 }
@@ -125,7 +127,7 @@ impl DownloadManager {
             DownloadEvent::Verifying { id } => {
                 self.states.insert(id, DownloadState::Verifying);
             }
-            DownloadEvent::Complete { id } => {
+            DownloadEvent::Complete { id, .. } => {
                 self.states.insert(id, DownloadState::Done);
                 self.end_active(id);
             }
@@ -181,6 +183,10 @@ impl DownloadManager {
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
+            if let Some(why) = crate::hardware::free_space_at(&dir).and_then(|free| space_refusal(total, free)) {
+                let _ = tx.send(DownloadEvent::Failed { id, error: why });
+                return;
+            }
             let on_progress_main = {
                 let tx = tx.clone();
                 move |bytes_so_far: u64, _part_total: u64| {
@@ -198,6 +204,7 @@ impl DownloadManager {
                 return;
             }
 
+            let mut note = None;
             if let (Some(variant), Some(dest_fp16)) = (fp16.as_ref(), fp16_dest.as_ref()) {
                 let on_progress_fp16 = {
                     let tx = tx.clone();
@@ -216,10 +223,11 @@ impl DownloadManager {
                         error = %e.message,
                         "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
                     );
+                    note = Some("Its faster half-precision file did not download, so it runs at full precision. Download it again to get it.".to_string());
                 }
             }
 
-            let _ = tx.send(DownloadEvent::Complete { id });
+            let _ = tx.send(DownloadEvent::Complete { id, note });
         });
     }
 
@@ -239,6 +247,11 @@ impl DownloadManager {
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
+            let to_fetch: u64 = parts.iter().filter(|p| !bundle_dir.join(p.filename).is_file()).map(|p| p.size_bytes).sum();
+            if let Some(why) = crate::hardware::free_space_at(&bundle_dir).and_then(|free| space_refusal(to_fetch, free)) {
+                let _ = tx.send(DownloadEvent::Failed { id, error: why });
+                return;
+            }
             let mut bytes_done: u64 = 0;
             for part in parts {
                 let dest = bundle_dir.join(part.filename);
@@ -268,7 +281,7 @@ impl DownloadManager {
                     }
                 }
             }
-            let _ = tx.send(DownloadEvent::Complete { id });
+            let _ = tx.send(DownloadEvent::Complete { id, note: None });
         });
     }
 
@@ -369,15 +382,38 @@ fn download_attempt(
     }
 
     let total = response.content_length().unwrap_or(0);
-    let mut response = response;
-    let mut file = std::fs::File::create(&partial)
+    // A download that stops here (a full disk, a dropped connection, a
+    // cancel, a bad checksum) leaves no partial file, which on a full disk
+    // could be gigabytes keeping it full.
+    finish_download(&partial, dest, fetch_into(response, &partial, total, expected_sha, cancel, on_progress, on_verifying))
+}
+
+/// A fetched file moves into place; one that failed leaves no partial.
+fn finish_download(partial: &Path, dest: &Path, fetched: Result<(), DlError>) -> Result<(), DlError> {
+    let result = fetched.and_then(|()| std::fs::rename(partial, dest).map_err(|e| DlError::fatal(format!("Could not finalize file: {e}"))));
+    if result.is_err() {
+        let _ = std::fs::remove_file(partial);
+    }
+    result
+}
+
+/// Stream `response` into `partial`, hashing as it goes, and check the hash.
+fn fetch_into(
+    mut response: impl std::io::Read,
+    partial: &Path,
+    total: u64,
+    expected_sha: &str,
+    cancel: &Arc<AtomicBool>,
+    on_progress: &dyn Fn(u64, u64),
+    on_verifying: &dyn Fn(),
+) -> Result<(), DlError> {
+    let mut file = std::fs::File::create(partial)
         .map_err(|e| DlError::fatal(format!("Could not create {}: {e}", partial.display())))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = 0;
     loop {
         if cancel.load(Ordering::Acquire) {
-            let _ = std::fs::remove_file(&partial);
             return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
         }
         let n = std::io::Read::read(&mut response, &mut buf)
@@ -398,15 +434,26 @@ fn download_attempt(
     on_verifying();
     let actual_sha = hex::encode(hasher.finalize());
     if !actual_sha.eq_ignore_ascii_case(expected_sha) {
-        let _ = std::fs::remove_file(&partial);
         return Err(DlError::fatal(format!(
             "Checksum mismatch — expected {expected_sha}, got {actual_sha}",
         )));
     }
 
-    std::fs::rename(&partial, dest)
-        .map_err(|e| DlError::fatal(format!("Could not finalize file: {e}")))?;
     Ok(())
+}
+
+/// Why a download of `needed` bytes should not start with `free` bytes
+/// free: it would fill the disk. Room is left over for the rest of the
+/// system.
+fn space_refusal(needed: u64, free: u64) -> Option<String> {
+    const SPARE: u64 = 500 * 1024 * 1024;
+    (free < needed.saturating_add(SPARE)).then(|| {
+        format!(
+            "Not enough disk space: it needs {}, and {} is free.",
+            crate::gui::views::format_byte_size(needed),
+            crate::gui::views::format_byte_size(free),
+        )
+    })
 }
 
 fn partial_path(dest: &Path) -> PathBuf {
@@ -418,6 +465,32 @@ fn partial_path(dest: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download that would fill the disk does not start, and says how
+    /// much it needs; one with room does.
+    #[test]
+    fn a_download_needs_room_to_start() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let why = space_refusal(5 * GB, GB).expect("refused");
+        assert!(why.starts_with("Not enough disk space"), "{why}");
+        assert_eq!(space_refusal(GB, 5 * GB), None);
+        assert!(space_refusal(GB, GB).is_some(), "room is left for the system");
+        assert!(crate::hardware::free_space_at(&std::env::temp_dir()).is_some_and(|free| free > 0));
+    }
+
+    /// A download that failed part-way leaves no partial file; one that
+    /// finished moves into place.
+    #[test]
+    fn a_failed_download_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (partial, dest) = (dir.path().join("model.onnx.partial"), dir.path().join("model.onnx"));
+        std::fs::write(&partial, b"half").unwrap();
+        assert!(finish_download(&partial, &dest, Err(DlError::fatal("Write error: no space"))).is_err());
+        assert!(!partial.exists() && !dest.exists());
+        std::fs::write(&partial, b"whole").unwrap();
+        finish_download(&partial, &dest, Ok(())).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"whole");
+    }
 
     fn fixture() -> DownloadManager {
         DownloadManager::new()
@@ -465,7 +538,7 @@ mod tests {
     fn apply_event_complete_clears_active() {
         let mut dm = fixture();
         dm.active = Some(ModelId::U2net);
-        dm.apply_event(&DownloadEvent::Complete { id: ModelId::U2net });
+        dm.apply_event(&DownloadEvent::Complete { id: ModelId::U2net, note: None });
         assert_eq!(dm.state(ModelId::U2net), DownloadState::Done);
         assert!(dm.active.is_none());
     }
@@ -574,7 +647,7 @@ mod tests {
             other => panic!("expected InProgress, got {other:?}"),
         }
         // Bundle complete.
-        dm.apply_event(&DownloadEvent::Complete { id });
+        dm.apply_event(&DownloadEvent::Complete { id, note: None });
         assert_eq!(dm.state(id), DownloadState::Done);
     }
 
