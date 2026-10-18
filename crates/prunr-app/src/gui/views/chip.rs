@@ -869,7 +869,7 @@ pub(super) fn group_chip<R>(
         ui.set_width(g.width);
         // Each slider spans the panel, its value box at the end.
         ui.spacing_mut().slider_width = g.width - PANEL_VALUE_WIDTH;
-        let reset = popover_header(ui, g.label, Some(("Reset every knob in this group", !g.tuned)));
+        let reset = popover_header(ui, g.label, Some(("Reset every setting in this group", !g.tuned)));
         out = Some(body(ui, reset));
     };
     if g.live {

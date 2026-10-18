@@ -1156,7 +1156,7 @@ pub(super) fn render_reset_preset_cluster(
     let reset_resp = chip::tooltip(
         chip::icon_action_button(ui, ICON_RESTART_ALT.codepoint, theme::TEXT_PRIMARY),
         "Reset",
-        "Return every knob to your default preset.",
+        "Return every setting to your default preset.",
         None,
     );
     if reset_resp.clicked() {

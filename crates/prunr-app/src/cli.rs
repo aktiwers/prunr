@@ -452,7 +452,7 @@ impl CliDepth {
         if let Some(kept) = self.kept.as_ref().and_then(|kept| kept.borrow_mut().remove(input)) {
             return Ok(kept);
         }
-        let photo = prunr_core::load_image_from_path(input).map_err(|e| format!("failed to read {}: {e}", input.display()))?;
+        let photo = prunr_core::load_image_from_path(input).map_err(|e| format!("{}: could not read: {e}", input.display()))?;
         let map = self.measurer.measure_decoded(&photo).map_err(|e| format!("depth failed: {e}"))?;
         Ok((std::sync::Arc::new(map), (photo.width(), photo.height())))
     }
@@ -798,9 +798,9 @@ fn run_each_input(
             eprintln!("{doing} {}...", input.display());
         }
         let result = image::open(input)
-            .map_err(|e| format!("failed to read {}: {e}", input.display()))
+            .map_err(|e| format!("{}: could not read: {e}", input.display()))
             .and_then(|img| run(img.into_rgba8()))
-            .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| format!("failed to save {}: {e}", out_path.display())));
+            .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| format!("{}: could not save: {e}", out_path.display())));
         match result {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
             Ok(()) => {}
@@ -835,14 +835,14 @@ fn run_inpaint(args: &Cli) -> i32 {
     let img = match image::open(input) {
         Ok(i) => i.into_rgba8(),
         Err(e) => {
-            eprintln!("error: failed to read {}: {e}", input.display());
+            eprintln!("error: {}: could not read: {e}", input.display());
             return 1;
         }
     };
     let mask = match image::open(mask_path) {
         Ok(i) => i.into_luma8(),
         Err(e) => {
-            eprintln!("error: failed to read mask {}: {e}", mask_path.display());
+            eprintln!("error: {}: could not read the mask: {e}", mask_path.display());
             return 1;
         }
     };
@@ -861,7 +861,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {
         Ok(r) => r.rgba,
         Err(e) => {
-            eprintln!("error: inpaint failed: {e}");
+            eprintln!("error: {}: could not erase: {e}", input.display());
             return 1;
         }
     };
@@ -1133,7 +1133,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                         if let Some(pb) = spinner_opt {
                             pb.finish_with_message(format!("X {} — write error: {e}", input.display()));
                         } else {
-                            eprintln!("error writing '{}': {e}", input.display());
+                            eprintln!("error: {}: could not write: {e}", out_path.display());
                         }
                     }
                 }
@@ -1143,7 +1143,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                 if let Some(pb) = spinner_opt {
                     pb.finish_with_message(format!("X {} — {e}", input.display()));
                 } else {
-                    eprintln!("error processing '{}': {e}", input.display());
+                    eprintln!("error: {}: could not process: {e}", input.display());
                 }
             }
         }

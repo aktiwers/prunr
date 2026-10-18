@@ -302,7 +302,10 @@ fn build_sam_session(part: &str) -> Result<ort::session::Session, String> {
     prunr_core::ort_runtime::session_builder()
         .map_err(|e| e.to_string())?
         .commit_from_memory(&bytes)
-        .map_err(|e| format!("ORT session ({part}): {e}"))
+        .map_err(|e| {
+            tracing::warn!(part, %e, "Magic Brush model did not load");
+            format!("Could not load the Magic Brush model: {e}")
+        })
 }
 
 /// Cached sessions, built outside the lock so a release on the GUI

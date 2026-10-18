@@ -440,7 +440,7 @@ impl BatchManager {
             // decodes don't pile up DynamicImage + RGBA per thread.
             let result = bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
                 Ok(img) => Ok(Arc::new(img.into_rgba8())),
-                Err(e) => Err(format!("decode failed: {e}")),
+                Err(e) => Err(format!("Could not read the image: {e}")),
             });
             let _ = tx.send((item_id, result));
         });
@@ -1317,7 +1317,7 @@ mod tests {
             .expect("decode_tx must produce a result within 2s");
         assert_eq!(id, 7);
         let err = result.expect_err("garbage bytes must produce Err");
-        assert!(err.contains("decode failed"), "expected 'decode failed' prefix, got: {err}");
+        assert!(err.starts_with("Could not read the image"), "{err}");
     }
 
     #[test]

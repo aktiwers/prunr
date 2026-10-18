@@ -86,6 +86,13 @@ impl WorkerLines {
     }
 }
 
+const OUT_OF_MEMORY: &str = "out of memory";
+
+/// A `crash_reason` that says the system killed the worker for memory.
+pub fn out_of_memory(reason: &str) -> bool {
+    reason.contains(OUT_OF_MEMORY)
+}
+
 impl SubprocessManager {
     /// Spawn a `prunr --worker` subprocess and send the Init command.
     /// Blocks until the child sends `Ready` or `InitError`.
@@ -503,7 +510,8 @@ impl SubprocessManager {
         (!self.is_alive()).then(|| self.crash_reason())
     }
 
-    /// Describe why the subprocess died (for user-facing messages).
+    /// Describe why the subprocess died, for the log; `out_of_memory`
+    /// reads it for the user's message.
     pub fn crash_reason(&mut self) -> String {
         match self.child.try_wait() {
             Ok(Some(status)) => {
@@ -512,7 +520,7 @@ impl SubprocessManager {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(signal) = status.signal() {
                         return match signal {
-                            9 => "Process killed by OS (out of memory)".to_string(),
+                            9 => format!("Process killed by OS ({OUT_OF_MEMORY})"),
                             11 => "Process crashed (segmentation fault)".to_string(),
                             _ => format!("Process killed by signal {signal}"),
                         };

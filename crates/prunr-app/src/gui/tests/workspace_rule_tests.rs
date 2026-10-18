@@ -218,8 +218,8 @@ fn comments_name_no_planning_ids_or_future_work() {
 }
 
 /// Words that describe our plumbing, not what a knob does.
-const ENGINEERING_WORDS: [&str; 10] = [
-    "tier-1", "tier-2", "tier 1", "tier 2", "real-time", "updates live", "inference", "postprocess", "debounce", "subprocess",
+const ENGINEERING_WORDS: [&str; 11] = [
+    "tier-1", "tier-2", "tier 1", "tier 2", "real-time", "updates live", "inference", "postprocess", "debounce", "subprocess", "knob",
 ];
 
 /// The string literals on `line`'s code.
