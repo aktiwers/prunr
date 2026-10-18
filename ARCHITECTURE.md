@@ -453,7 +453,7 @@ Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVIN
 
 ### Model variants
 
-`OrtEngine` tries an optimised variant from disk before the FP32 bytes: FP16 on a GPU EP, INT8 on CPU. macOS always uses FP32 because CoreML converts to FP16 internally and a second conversion loses precision. The CPU retry after a GPU failure also tries INT8 first.
+`OrtEngine` tries an optimised variant from disk before the FP32 bytes: FP16 on a GPU EP, INT8 on CPU. macOS uses FP32: ORT asks CoreML for FP32 compute on the GPU and CPU (the Neural Engine computes in FP16 whatever it is given), and whether FP16 weights would pay on a Mac is not measured yet. The CPU retry after a GPU failure also tries INT8 first.
 
 ## GUI State Machine
 
