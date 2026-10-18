@@ -42,7 +42,10 @@ fn catalog_lists_every_visit_and_model_by_picker_name() {
     let catalog = ask(&mut h, &tx, r#"{"cmd":"catalog"}"#).unwrap();
     let visits = catalog["visits"].as_array().unwrap();
     assert_eq!(visits.len(), crate::gui::surface_catalog::VISITS.len());
-    assert!(catalog["models"].as_array().unwrap().iter().any(|m| m == "Silueta"));
+    let models = catalog["models"].as_array().unwrap();
+    assert!(models.iter().any(|m| m["name"] == "No model" && m["id"] == "None"), "{models:?}");
+    let picked = crate::gui::automation::state::dump(h.state()).model;
+    assert!(models.iter().any(|m| m["id"] == picked.as_str()), "state names models by their catalog id");
     let mask = visits.iter().find(|v| v["id"] == "mask").unwrap();
     assert_eq!(mask["open"][0]["click"], "Mask");
     assert!(mask["models"].as_array().unwrap().iter().any(|m| m == "Silueta"), "{mask}");
@@ -102,6 +105,18 @@ fn click_takes_the_last_of_a_shared_name_only_when_asked() {
     assert!(ask(&mut h, &tx, r#"{"cmd":"click","name":"Sepia"}"#).unwrap_err().contains("2 controls named"));
     let clicked = ask(&mut h, &tx, r#"{"cmd":"click","name":"Sepia","last":true}"#).unwrap();
     assert_eq!(clicked["name"], "Sepia");
+}
+
+/// A row below a list's fold is scrolled into view by its own node,
+/// the AccessKit action egui answers.
+#[test]
+fn reveal_asks_egui_to_scroll_the_control_into_view() {
+    let (mut h, tx) = socket();
+    let target = ask(&mut h, &tx, r#"{"cmd":"reveal","name":"Model"}"#).unwrap();
+    let frame = h.state_mut().automation.as_mut().unwrap().take_frame().expect("one input frame");
+    let [egui::Event::AccessKitActionRequest(request)] = frame.events.as_slice() else { panic!("{:?}", frame.events) };
+    assert_eq!(request.action, accesskit::Action::ScrollIntoView);
+    assert_eq!(request.target_node, accesskit::NodeId(target["id"].as_u64().unwrap()));
 }
 
 #[test]

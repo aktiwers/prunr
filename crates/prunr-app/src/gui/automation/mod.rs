@@ -92,6 +92,10 @@ pub enum Request {
     /// Move the pointer onto a control without pressing: its tooltip
     /// shows after egui's delay.
     Hover { name: String },
+    /// Scroll the list holding a control until the control shows: a row
+    /// below a list's fold is in the tree, but a click there lands
+    /// outside the list.
+    Reveal { name: String },
     /// Resize the window to `w` × `h` points.
     Resize { w: f32, h: f32 },
     /// Reply once no work is owed to the screen, or after `timeout_ms`;
@@ -377,6 +381,17 @@ impl Automation {
                 let (target, pos) = self.locate(&name, true)?;
                 self.frames.push_back(vec![egui::Event::PointerMoved(pos)].into());
                 (2, Response::ok(target))
+            }
+            Request::Reveal { name } => {
+                let (target, _) = self.locate(&name, true)?;
+                let scroll = accesskit::ActionRequest {
+                    action: accesskit::Action::ScrollIntoView,
+                    target_tree: accesskit::TreeId::ROOT,
+                    target_node: accesskit::NodeId(target.id),
+                    data: None,
+                };
+                self.frames.push_back(vec![egui::Event::AccessKitActionRequest(scroll)].into());
+                (3, Response::ok(target))
             }
             Request::Resize { w, h } => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
