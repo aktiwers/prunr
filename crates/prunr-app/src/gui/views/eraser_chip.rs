@@ -120,7 +120,7 @@ pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_s
             committed = true;
         }
         committed |= chip::slider_row(ui, "Steps", &mut brush.rorem_steps, ROREM_STEPS_RANGE).commit;
-        hint(ui, "Fewer steps are faster but rougher; above the 4 the model was trained for, the fill barely changes.");
+        hint(ui, "Fewer steps are faster but rougher; past 4, the number the model was trained for, the fill barely changes.");
         ui.add_space(theme::SPACE_XS);
         committed |= seed_row(ui, brush, shown_seed);
     });

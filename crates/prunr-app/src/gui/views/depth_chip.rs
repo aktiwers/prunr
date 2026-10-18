@@ -86,7 +86,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
             }
             change.picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur));
             change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
-            hint(ui, "Lens blur. Blurs what is far from the focus.");
+            hint(ui, "Blurs what is far from the focus.");
             ui.horizontal(|ui| {
                 let text = if picking { "Click the image\u{2026}" } else { "Set focus" };
                 let resp = chip::named(chip::button(ui, chip::ButtonKind::Secondary, text), "Set focus");
