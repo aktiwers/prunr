@@ -112,10 +112,10 @@ impl PreviewKind {
 pub(crate) fn finish_upscale(
     raw: &Arc<RgbaImage>,
     input: &RgbaImage,
-    reference: Option<Arc<RgbaImage>>,
+    reference: Option<Arc<prunr_core::upscale::Reference>>,
     knobs: &prunr_core::upscale::Refine,
     faces: Option<&FacedKey>,
-) -> (Arc<RgbaImage>, Option<Arc<RgbaImage>>) {
+) -> (Arc<RgbaImage>, Option<Arc<prunr_core::upscale::Reference>>) {
     let (shown, reference) = prunr_core::upscale::refine(raw, input, reference, knobs);
     let shown = match faces {
         // The faces were found in `raw`; over a refined image the blend
@@ -165,7 +165,7 @@ pub struct PreviewResult {
     pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
     /// The upscale reference an UpscaleTier2 dispatch built, for the kept
     /// upscale run.
-    pub new_reference: Option<Arc<image::RgbaImage>>,
+    pub new_reference: Option<Arc<prunr_core::upscale::Reference>>,
     /// The faced photo this dispatch built, for the item to reuse.
     pub new_faced: Option<(Arc<RgbaImage>, FacedKey)>,
     /// The depth-looked photo this dispatch built, for the item to reuse.
@@ -964,7 +964,7 @@ struct RunOutput {
     built_edge: EdgePlanes,
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
-    built_reference: Option<Arc<image::RgbaImage>>,
+    built_reference: Option<Arc<prunr_core::upscale::Reference>>,
     built_faced: Option<Arc<RgbaImage>>,
     built_depth_photo: Option<(Arc<RgbaImage>, crate::gui::item::DepthPhotoKey)>,
     built_quick_photo: Option<QuickPhoto>,

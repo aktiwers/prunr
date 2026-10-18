@@ -15,13 +15,13 @@ use super::brush_state::CutoutAction;
 pub(crate) struct UpscaleCache {
     pub(crate) raw: Arc<image::RgbaImage>,
     pub(crate) input: Arc<image::RgbaImage>,
-    pub(crate) reference: Option<Arc<image::RgbaImage>>,
+    pub(crate) reference: Option<Arc<prunr_core::upscale::Reference>>,
     /// Which run this is, for the step it lands on to claim.
     run: u64,
 }
 
 impl UpscaleCache {
-    pub(crate) fn new(raw: Arc<image::RgbaImage>, input: Arc<image::RgbaImage>, reference: Option<Arc<image::RgbaImage>>) -> Self {
+    pub(crate) fn new(raw: Arc<image::RgbaImage>, input: Arc<image::RgbaImage>, reference: Option<Arc<prunr_core::upscale::Reference>>) -> Self {
         Self { raw, input, reference, run: next_run() }
     }
 }
@@ -3155,7 +3155,7 @@ mod tests {
     fn the_upscale_run_outlives_a_display_reset_but_not_a_model_switch() {
         let mut item = fixture_item(1);
         let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
-        item.upscale = Some(UpscaleCache::new(img.clone(), img.clone(), Some(img)));
+        item.upscale = Some(UpscaleCache::new(img.clone(), img.clone(), Some(Arc::new(prunr_core::upscale::Reference::new((*img).clone())))));
         item.reset_result_caches();
         assert!(item.upscale.is_some());
         item.invalidate_upscale_cache();

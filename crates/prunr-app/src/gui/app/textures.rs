@@ -231,7 +231,7 @@ mod background_item_tests {
         let mut app = super::PrunrApp::new_for_test();
         let image = || Arc::new(image::RgbaImage::new(8, 8));
         for id in [1, 2] {
-            push_test_item(&mut app, id).upscale = Some(UpscaleCache::new(image(), image(), Some(image())));
+            push_test_item(&mut app, id).upscale = Some(UpscaleCache::new(image(), image(), Some(Arc::new(prunr_core::upscale::Reference::new((*image()).clone())))));
         }
         app.batch.select_item(0);
         app.evict_background_item_caches(0);
