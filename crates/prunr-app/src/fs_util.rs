@@ -49,7 +49,7 @@ pub fn write_bytes_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn save_image_replacing(path: &Path, img: &image::RgbaImage) -> Result<(), String> {
     let format = image::ImageFormat::from_path(path).map_err(|e| e.to_string())?;
     write_replacing(path, |w| match format {
-        image::ImageFormat::Png => prunr_core::encode_rgba_png_saved_into(img, w).map_err(std::io::Error::other),
+        image::ImageFormat::Png => prunr_core::ExportFormat::Png.encode_into(img, w).map_err(std::io::Error::other),
         _ => img.write_to(w, format).map_err(std::io::Error::other),
     })
     .map_err(|e| e.to_string())

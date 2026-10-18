@@ -366,8 +366,8 @@ fn write_composite(
     format: prunr_core::ExportFormat,
     measure: &ExportDepth,
 ) -> Result<(), String> {
-    let bytes = format.encode(&bg.bake(rgba, measure)).map_err(|e| e.to_string())?;
-    crate::fs_util::write_bytes_replacing(path, &bytes).map_err(|e| e.to_string())
+    let baked = bg.bake(rgba, measure);
+    crate::fs_util::write_replacing(path, |w| format.encode_into(&baked, w).map_err(std::io::Error::other)).map_err(|e| e.to_string())
 }
 
 /// What a multi-file save did: files saved, files that failed, and why
