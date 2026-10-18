@@ -1126,16 +1126,25 @@ mod tests {
     /// long compile is not taken for a hang; it stops with the build.
     #[test]
     fn a_model_being_built_keeps_reporting() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+        // Waits on events, not sleeps: a loaded CI runner stalls threads
+        // for longer than any fixed sleep.
+        let wait = Duration::from_secs(10);
         let (tx, rx) = std::sync::mpsc::channel();
-        let beat = Heartbeat::start(tx, 7, std::time::Duration::from_millis(20));
-        std::thread::sleep(std::time::Duration::from_millis(110));
+        let beat = Heartbeat::start(tx, 7, Duration::from_millis(20));
+        for _ in 0..3 {
+            let report = rx.recv_timeout(wait).expect("a report while building");
+            assert!(matches!(report, SubprocessEvent::Report { item_id: 7, .. }));
+        }
         drop(beat);
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        let reports: Vec<_> = rx.try_iter().collect();
-        assert!(reports.len() >= 3, "{} reports", reports.len());
-        assert!(reports.iter().all(|r| matches!(r, SubprocessEvent::Report { item_id: 7, .. })));
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        assert_eq!(rx.try_iter().count(), 0, "it stops with the build");
+        // The beat thread owns the sender, so the channel closes when it ends.
+        let end = loop {
+            if let Err(e) = rx.recv_timeout(wait) {
+                break e;
+            }
+        };
+        assert_eq!(end, RecvTimeoutError::Disconnected, "it stops with the build");
     }
 
     /// A result that cannot be written is an error for the parent, with no
