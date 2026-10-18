@@ -855,7 +855,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     }
 
     if !args.quiet {
-        eprintln!("Inpainting {} (mask: {})...", input.display(), mask_path.display());
+        eprintln!("Erasing {} (mask: {})...", input.display(), mask_path.display());
     }
     let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
     let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {

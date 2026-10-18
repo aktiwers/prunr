@@ -89,8 +89,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--lines", "Extract lines only (skip BG removal)");
-                            opt_row(ui, "--lines-after-bg", "Remove BG first, then extract lines");
+                            opt_row(ui, "--lines", "Extract lines only (skip background removal)");
+                            opt_row(ui, "--lines-after-bg", "Remove the background first, then extract lines");
                             opt_row(ui, "--line-detail <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
                             opt_row(ui, "--line-width <px>", "Line width, 0\u{2013}20 px (default 0)");
                             opt_row(ui, "--line-composition <mode>", "With --lines-after-bg: lines-only / subject-filled / engraving / ghost");

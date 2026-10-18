@@ -130,7 +130,7 @@ pub fn model_info(model: SettingsModel) -> ModelInfo {
         SettingsModel::Inpaint => (ICON_BRUSH.codepoint, "Eraser (LaMa)", "Object removal"),
         SettingsModel::BigInpaint => (ICON_BRUSH.codepoint, "Eraser (Big-LaMa)", "Sharper fills"),
         SettingsModel::MiganInpaint => (ICON_BRUSH.codepoint, "Eraser (MI-GAN)", "Compact"),
-        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (SD 1.5)", "Generative"),
+        SettingsModel::SdInpaint => (ICON_BRUSH.codepoint, "Eraser (Stable Diffusion 1.5)", "Generative"),
         SettingsModel::RoremInpaint => (ICON_BRUSH.codepoint, "Eraser (RORem)", "Large objects"),
         SettingsModel::RealEsrganUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Real-ESRGAN)", "4\u{00d7}"),
         SettingsModel::Nomos8kUpscale => (ICON_ARROW_UPWARD.codepoint, "Upscale (Nomos8k)", "4\u{00d7} photos, the slowest"),

@@ -46,7 +46,7 @@ const PIPELINES: [Pipeline; 4] = [
             Stage { icon: ICON_FILTER_B_AND_W.codepoint, title: "Pre-filter", tagline: "Grayscale, contrast or posterize applied before detection. Requires reprocessing." },
             Stage { icon: ICON_TUNE.codepoint, title: "Scale", tagline: "How zoomed-in the detector looks: fine texture, bold silhouettes, or every scale fused." },
             Stage { icon: ICON_TUNE.codepoint, title: "Line detail", tagline: "How much of the detected edge map becomes a line." },
-            Stage { icon: ICON_LINE_WEIGHT.codepoint, title: "Line thickness", tagline: "Thickens the lines by whole pixels." },
+            Stage { icon: ICON_LINE_WEIGHT.codepoint, title: "Line width", tagline: "Thickens the lines by whole pixels." },
             Stage { icon: ICON_LAYERS.codepoint, title: "Composition and color", tagline: "How the lines combine with the subject, and what color they take." },
         ],
     },
@@ -57,7 +57,7 @@ const PIPELINES: [Pipeline; 4] = [
         stages: &[
             Stage { icon: ICON_BRUSH.codepoint, title: "Paint region", tagline: "Everything under the brush is replaced." },
             Stage { icon: ICON_OPEN_IN_FULL.codepoint, title: "Expand region", tagline: "Grows or shrinks the region first; a little growth gives the fill more context." },
-            Stage { icon: ICON_AUTO_AWESOME.codepoint, title: "Fill", tagline: "The eraser model invents what belongs there. SD models follow the prompt." },
+            Stage { icon: ICON_AUTO_AWESOME.codepoint, title: "Fill", tagline: "The eraser model invents what belongs there. The Stable Diffusion eraser follows the prompt." },
             Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Feather", tagline: "Blends the fill into the photo across a band at the boundary." },
             Stage { icon: ICON_DEBLUR.codepoint, title: "Sharpen", tagline: "Sharpens the filled area, which comes out slightly soft." },
         ],

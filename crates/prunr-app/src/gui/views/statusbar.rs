@@ -124,7 +124,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
             let backend_display = if app.settings.cpu_only() { "CPU only" } else { &app.settings.active_backend };
             ui.label(
-                RichText::new(format!("Backend: {backend_display}"))
+                RichText::new(format!("Accelerator: {backend_display}"))
                     .monospace()
                     .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),

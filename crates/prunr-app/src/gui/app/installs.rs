@@ -11,7 +11,7 @@ impl PrunrApp {
     pub(crate) fn remove_model(&mut self, id: ModelId, ctx: &egui::Context) {
         let Some(desc) = prunr_models::descriptor(id) else { return };
         let Some(dir) = prunr_models::on_demand_dir() else {
-            self.toasts.error("Could not resolve user data directory");
+            self.toasts.error("Could not find Prunr's data folder.");
             return;
         };
         let path = match desc.source {
@@ -22,7 +22,7 @@ impl PrunrApp {
         let name = desc.display_name;
         self.off_thread(ctx, move || {
             let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-            removed.map_err(|e| format!("Could not delete {name}: {e}"))?;
+            removed.map_err(|e| format!("Could not remove {name}: {e}"))?;
             tracing::info!(?id, "deleted on-demand model");
             // The compiled-model cache (CUDA optimized.onnx, CoreML
             // mlmodelc) is useless without the source weights.
@@ -37,8 +37,8 @@ impl PrunrApp {
     pub(crate) fn uninstall_runtime(&mut self, rt: crate::runtime_install::RuntimeId, ctx: &egui::Context) {
         self.off_thread(ctx, move || {
             crate::runtime_install::uninstall(rt)
-                .map(|()| format!("{} removed", rt.display_name()))
-                .map_err(|e| format!("Uninstall failed: {e}"))
+                .map(|()| format!("{} uninstalled", rt.display_name()))
+                .map_err(|e| format!("Could not uninstall {}: {e}", rt.display_name()))
         });
     }
 
