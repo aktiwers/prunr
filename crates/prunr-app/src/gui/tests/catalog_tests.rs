@@ -36,12 +36,16 @@ fn start(visit: &Visit, model: Option<SettingsModel>) -> Harness<'static, PrunrA
 
 fn run(h: &mut Harness<'_, PrunrApp>, step: Step) -> Result<(), String> {
     match step {
-        Step::Click(name) => {
+        Step::Click(name) | Step::Expand(name) => {
+            let open = matches!(step, Step::Expand(_))
+                && tree(h).iter().filter(|n| n.name.as_deref() == Some(name)).last().and_then(|n| n.toggled) == Some(true);
             let node = h
                 .query_all_by(|n| n.label().as_deref().and_then(readable_name).as_deref() == Some(name))
                 .last()
                 .ok_or_else(|| format!("no control named {name:?}"))?;
-            node.click();
+            if !open {
+                node.click();
+            }
         }
         Step::Key(chord) => {
             let chord = Chord::parse(chord).ok_or_else(|| format!("unknown chord {chord:?}"))?;
@@ -88,7 +92,7 @@ fn walk(visit: &Visit, model: Option<SettingsModel>) -> Vec<String> {
     let mut h = start(visit, model);
     if let Some(reason) = gated(&h, visit) {
         let opener = visit.open.first().and_then(|&step| match step {
-            Step::Click(name) => tree(&h).iter().find(|n| n.name.as_deref() == Some(name)).map(|n| n.disabled),
+            Step::Click(name) | Step::Expand(name) => tree(&h).iter().find(|n| n.name.as_deref() == Some(name)).map(|n| n.disabled),
             Step::Key(_) => None,
         });
         return match opener {
@@ -166,6 +170,23 @@ fn the_color_splash_panel_names_fit_their_column() {
     }
     let clips = crate::gui::automation::record::last(&h.ctx).1;
     assert!(clips.is_empty(), "{clips:?}");
+}
+
+/// A strip's full panel stays open across closing the strip: opening
+/// it again by `Expand` finds it open rather than closing it, and its
+/// toggle says so to the tree.
+#[test]
+fn a_panel_left_open_is_found_open_again() {
+    let mut h = super::harness::loaded();
+    let include_hair = |h: &Harness<'_, PrunrApp>| tree(h).iter().any(|n| n.name.as_deref() == Some("Include hair"));
+    for _ in 0..2 {
+        for step in [Step::Click("Faces"), Step::Expand("More face settings")] {
+            run(&mut h, step).unwrap();
+        }
+        assert!(include_hair(&h), "the full panel is open");
+        run(&mut h, Step::Key("Escape")).unwrap();
+        run(&mut h, Step::Key("Escape")).unwrap();
+    }
 }
 
 #[test]

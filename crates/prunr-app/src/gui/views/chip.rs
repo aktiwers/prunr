@@ -931,6 +931,9 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
                     if dots.clicked() {
                         expanded = !expanded;
                     }
+                    // The panel stays open across closing the strip, so the
+                    // tree says whether it is, and a script opens it only once.
+                    dots.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, expanded, more));
                 });
             });
             if expanded {
