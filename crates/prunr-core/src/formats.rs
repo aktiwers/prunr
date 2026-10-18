@@ -362,12 +362,23 @@ fn build_bg_layer(
     dst_w: u32,
     dst_h: u32,
     fit: crate::types::BgImageFit,
-) -> RgbaImage {
+) -> std::borrow::Cow<'_, RgbaImage> {
     use crate::types::BgImageFit;
+    // At the frame's size Cover and Contain place the picture as it is (a
+    // background effect always is): no resample, crop or copy. It goes
+    // opaque, as the resampled path's RGB does.
+    if fit != BgImageFit::Tile && (bg.width(), bg.height()) == (dst_w, dst_h) {
+        if let Some(rgba) = bg.as_rgba8().filter(|rgba| rgba.pixels().all(|p| p[3] == u8::MAX)) {
+            return std::borrow::Cow::Borrowed(rgba);
+        }
+        let mut rgba = bg.to_rgba8();
+        rgba.pixels_mut().for_each(|p| p[3] = u8::MAX);
+        return std::borrow::Cow::Owned(rgba);
+    }
     let mut out = RgbaImage::new(dst_w, dst_h);
     let (sw, sh) = (bg.width(), bg.height());
     if sw == 0 || sh == 0 || dst_w == 0 || dst_h == 0 {
-        return out;
+        return std::borrow::Cow::Owned(out);
     }
     match fit {
         BgImageFit::Cover => {
@@ -392,7 +403,7 @@ fn build_bg_layer(
             image::imageops::tile(&mut out, &bg.to_rgba8());
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Stream-encode an RgbaImage into a `Write` sink (typically
@@ -535,6 +546,21 @@ impl AsRgba for RgbaImage {
 
 #[cfg(test)]
 mod tests {
+
+    /// A background already the frame's size is used as it is: the same
+    /// layer the resample path made (a same-size Lanczos pass is a copy,
+    /// and Cover / Contain go opaque), borrowed when it is opaque already.
+    #[test]
+    fn a_background_at_the_frames_size_is_used_as_it_is() {
+        let resampled = |bg: &DynamicImage| -> RgbaImage { resize_rgb_lanczos3(bg, 97, 61).convert() };
+        let opaque = DynamicImage::ImageRgba8(RgbaImage::from_fn(97, 61, |x, y| image::Rgba([(x * 37 % 256) as u8, (y * 91 % 256) as u8, ((x * y) % 256) as u8, 255])));
+        let seen = DynamicImage::ImageRgba8(RgbaImage::from_fn(97, 61, |x, y| image::Rgba([(x * 5) as u8, y as u8, 9, (x * 2) as u8])));
+        for fit in [crate::types::BgImageFit::Cover, crate::types::BgImageFit::Contain] {
+            let layer = build_bg_layer(&opaque, 97, 61, fit);
+            assert!(matches!(layer, std::borrow::Cow::Borrowed(_)) && *layer == resampled(&opaque));
+            assert!(*build_bg_layer(&seen, 97, 61, fit) == resampled(&seen), "its alpha goes opaque as before");
+        }
+    }
 
     /// An opaque image resizes without the alpha weighting to the very
     /// pixels it gives with it.
