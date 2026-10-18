@@ -1333,7 +1333,7 @@ mod faces_tests {
         assert!(item.face_photo(FaceStage::Photo).is_none());
         assert!(item.faces_input(FaceStage::Photo).is_none());
 
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(!item.faces_already_restored(FaceStage::Photo), "back on the faced step: its redo restores again");
     }
 
@@ -1404,7 +1404,7 @@ mod faces_tests {
         item.settings.faces.on = false;
         item.commit(crate::gui::timeline::StepKind::Adjust);
         item.cached_masked_base = Some((Arc::new(image::RgbaImage::new(8, 8)), prunr_core::MaskRecipe::from(&item.settings.mask_settings()), prunr_core::ModelKind::Silueta));
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(item.cached_masked_base.is_none());
     }
 
@@ -1821,7 +1821,7 @@ mod timeline_contract_tests {
         let again = item.reroll().expect("re-rolls chain");
         assert!(Arc::ptr_eq(&again.region, &painted));
         assert_eq!(again.start.as_ref().map(|s| s.dims), first_start, "still from the pre-erase image");
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.shown_seed(), Some(1), "undo shows the fill before");
     }
 
@@ -1846,7 +1846,7 @@ mod timeline_contract_tests {
         app.settings.model = SettingsModel::Inpaint;
         assert!(!app.can_reroll_intent(), "LaMa fills are not generated");
         app.settings.model = SettingsModel::SdInpaint;
-        app.batch.items[0].undo_step();
+        let _ = app.batch.items[0].undo_step();
         assert!(!app.can_reroll_intent(), "the shown step is the stroke");
     }
 
@@ -1968,7 +1968,7 @@ mod timeline_contract_tests {
             let item = &mut app.batch.items[1];
             assert_eq!(item.status(), BatchStatus::Done, "{what}");
             assert_eq!(item.timeline.undo_steps(), steps_before + 1, "{what}: the rerun is a step of its own");
-            assert!(item.undo_step().is_some(), "{what}");
+            assert!(item.undo_step().is_ok(), "{what}");
             assert_eq!(item.settings, before, "{what}: undo brings back its own settings");
             let shown = item.timeline.current().result.as_ref().map(|r| r.holds(&first));
             assert_eq!(shown, Some(true), "{what}: and the result it had");

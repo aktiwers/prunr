@@ -746,7 +746,7 @@ impl PrunrApp {
     /// Undo / redo the images `ids`.
     pub(super) fn step_items(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action, ids: &[u64]) {
         use crate::gui::views::shortcuts::Action;
-        let (step, verb, nothing): (fn(&mut BatchItem) -> Option<StepKind>, _, _) = match action {
+        let (step, verb, nothing): (crate::gui::item::StepFn, _, _) = match action {
             Action::Redo => (BatchItem::redo_step, "redone", "Nothing to redo"),
             _ => (BatchItem::undo_step, "undone", "Nothing to undo"),
         };
@@ -757,17 +757,26 @@ impl PrunrApp {
         &mut self,
         ctx: &egui::Context,
         ids: &[u64],
-        step: fn(&mut BatchItem) -> Option<StepKind>,
+        step: crate::gui::item::StepFn,
         verb: &str,
         nothing: &str,
     ) {
         let mut stepped = Vec::new();
+        let mut lost = false;
         for &id in ids {
             let Some(idx) = self.batch.index_of(id) else { continue };
             let preset_before = self.batch.items[idx].settings.bg_image_hash;
             self.cancel_runs_on(id);
             self.processor.live_preview.cancel(id);
-            if let Some(kind) = step(&mut self.batch.items[idx]) {
+            let kind = match step(&mut self.batch.items[idx]) {
+                Ok(kind) => Some(kind),
+                Err(crate::gui::item::StepRefused::Lost) => {
+                    lost = true;
+                    None
+                }
+                Err(crate::gui::item::StepRefused::Nothing) => None,
+            };
+            if let Some(kind) = kind {
                 if self.batch.items[idx].settings.bg_image_hash != preset_before {
                     self.reconcile_bg_image_after_preset(idx);
                 }
@@ -780,8 +789,13 @@ impl PrunrApp {
                 stepped.push(kind);
             }
         }
+        if lost {
+            self.status_error("That step can no longer be restored: its saved state was removed from the disk cache.");
+        }
         if stepped.is_empty() {
-            self.toasts.info(nothing);
+            if !lost {
+                self.toasts.info(nothing);
+            }
             return;
         }
         self.result_switch_id += 1;

@@ -261,6 +261,14 @@ impl<T: Payload> Stored<T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn disk_path(&self) -> Option<PathBuf> {
+        match &*self.lock() {
+            Tier::OnDisk(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_on_disk(&self) -> bool {
         matches!(&*self.lock(), Tier::OnDisk(_))
     }
