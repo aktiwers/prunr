@@ -316,7 +316,7 @@ pub fn apply_background_color(img: &mut RgbaImage, bg: [u8; 3]) {
 pub(crate) fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
     let a = px[3] as f32 / 255.0;
     let inv = 1.0 - a;
-    std::array::from_fn(|c| (px[c] as f32 * a + bg[c] as f32 * inv) as u8)
+    std::array::from_fn(|c| crate::math::round_u8(px[c] as f32 * a + bg[c] as f32 * inv))
 }
 
 /// Alpha-blend an RGBA image onto a background image, making opaque any

@@ -117,15 +117,12 @@ pub(crate) fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     (r, g, b)
 }
 
-/// Lerp two RGB triples: `a` at t=0, `b` at t=255.
+/// Lerp two RGB triples: `a` at t=0, `b` at t=255, rounded to the
+/// nearest byte (a plain `/ 255` floors, half a step dark).
 #[inline]
 pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
     let inv = 255 - t;
-    [
-        ((a[0] as u16 * inv + b[0] as u16 * t) / 255) as u8,
-        ((a[1] as u16 * inv + b[1] as u16 * t) / 255) as u8,
-        ((a[2] as u16 * inv + b[2] as u16 * t) / 255) as u8,
-    ]
+    std::array::from_fn(|c| ((a[c] as u16 * inv + b[c] as u16 * t + 127) / 255) as u8)
 }
 
 /// RGB ("ff8000") or RGBA ("ff800080") hex digits, no `#`; alpha is 255
@@ -146,12 +143,11 @@ pub fn parse_hex_rgba(digits: &str) -> Option<[u8; 4]> {
 mod tests {
     use super::*;
 
-    /// Every (a, b, t) in 0..=255: the shared lerp equals the per-channel
-    /// formula the line colours, Cross Process and gradient map each wrote
-    /// out before, and the line blend's former `weight == 255` copy.
+    /// Every (a, b, t) in 0..=255: the shared lerp is the nearest byte to
+    /// the exact blend, and the ends are exactly `a` and `b`.
     #[test]
     fn lerp_rgb_matches_the_former_inline_blends() {
-        let old = |a: u8, b: u8, t: u16| ((a as u16 * (255 - t) + b as u16 * t) / 255) as u8;
+        let old = |a: u8, b: u8, t: u16| ((f32::from(a) * f32::from(255 - t) + f32::from(b) * f32::from(t)) / 255.0).round() as u8;
         for a in 0..=255u8 {
             for b in 0..=255u8 {
                 for t in 0..=255u16 {

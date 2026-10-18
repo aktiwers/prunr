@@ -657,7 +657,7 @@ mod tests {
         for (d, s) in flatten_on_white(&rgba).pixels().zip(rgba.pixels()) {
             let a = s.0[3] as f32 / 255.0;
             let want: [u8; 3] = if a < 1.0 {
-                std::array::from_fn(|c| (s.0[c] as f32 * a + 255.0 * (1.0 - a)) as u8)
+                std::array::from_fn(|c| crate::math::round_u8(s.0[c] as f32 * a + 255.0 * (1.0 - a)))
             } else {
                 [s.0[0], s.0[1], s.0[2]]
             };
@@ -800,12 +800,12 @@ mod tests {
         // loop. LLVM will typically hoist it anyway, but spelling it out makes
         // the cost predictable regardless of optimization settings.
         let alpha_fn: fn(i32, i32) -> u8 = match compose {
-            ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+            ComposeMode::LinesOnly => |s, e| ((s * e + 127) / 255) as u8,
             ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
             ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
             // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
             // saturates to fully opaque where subject AND edge both contribute.
-            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204 + 127) / 255).clamp(0, 255) as u8,
         };
 
         // LineStyle gradients supersede `solid_line_color` — they compute the
@@ -898,10 +898,10 @@ mod tests {
         let pixel_count = (ow * oh) as usize;
 
         let alpha_fn: fn(i32, i32) -> u8 = match compose {
-            ComposeMode::LinesOnly => |s, e| (s * e / 255) as u8,
+            ComposeMode::LinesOnly => |s, e| ((s * e + 127) / 255) as u8,
             ComposeMode::SubjectFilled => |s, e| s.max(e) as u8,
             ComposeMode::Engraving => |s, e| (s - e).max(0) as u8,
-            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+            ComposeMode::Ghost => |s, e| ((s * 77 + e * 204 + 127) / 255).clamp(0, 255) as u8,
         };
 
         for i in 0..pixel_count {
