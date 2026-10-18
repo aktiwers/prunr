@@ -119,7 +119,15 @@ pub fn runtime_version_from_info(info: &str) -> Option<String> {
 pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     ensure_initialized().map_err(CoreError::Inference)?;
     #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded one line above
-    Session::builder().map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
+    // No spin-waiting between ops: idle ORT threads spinning steal the cores
+    // from rayon's tile blending and from a second session running at once.
+    // Measured (tests/spin_probe.rs, 4-core i7): LaMa 5.2 s -> 3.5 s alone,
+    // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
+    // an OpenVINO session is unchanged.
+    Session::builder()
+        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+        .with_intra_op_spinning(false)
+        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
 }
 
 /// Libraries loaded from beside the runtime before the runtime itself.
