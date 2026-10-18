@@ -27,94 +27,105 @@ fn box_radii(sigma: f32) -> [usize; PASSES] {
     })
 }
 
-/// One box pass along each row of `src` (rows of `width` RGBA pixels),
-/// edges replicated. Integer sums for all four channels in one sweep,
-/// rounded once per pixel; reads are clamped only near the ends.
-fn box_rows(src: &[u8], dst: &mut [u8], width: usize, radius: usize) {
-    let row_len = width * 4;
+/// One box pass along `row` (`width` RGBA pixels) into `out`, edges
+/// replicated. Integer sums for all four channels in one sweep, rounded
+/// once per pixel; reads are clamped only near the ends.
+fn box_row(row: &[u8], out: &mut [u8], width: usize, radius: usize) {
     let kernel = (2 * radius + 1) as u32;
     let half = kernel / 2;
     let last = width - 1;
     // Between `head_end` and `tail_start` the window lies inside the row.
     let head_end = radius.min(width);
     let tail_start = width.saturating_sub(radius + 1).max(head_end);
-    dst.par_chunks_exact_mut(row_len).zip(src.par_chunks_exact(row_len)).for_each(|(out, row)| {
-        let px = |x: usize| {
-            let i = x * 4;
-            [u32::from(row[i]), u32::from(row[i + 1]), u32::from(row[i + 2]), u32::from(row[i + 3])]
-        };
-        let clamped = |x: usize| px(x.min(last));
-        let mut sum = px(0).map(|v| v * (radius as u32 + 1));
-        for x in 1..=radius {
-            let p = clamped(x);
-            for c in 0..4 {
-                sum[c] += p[c];
-            }
+    let px = |x: usize| {
+        let i = x * 4;
+        [u32::from(row[i]), u32::from(row[i + 1]), u32::from(row[i + 2]), u32::from(row[i + 3])]
+    };
+    let clamped = |x: usize| px(x.min(last));
+    let mut sum = px(0).map(|v| v * (radius as u32 + 1));
+    for x in 1..=radius {
+        let p = clamped(x);
+        for c in 0..4 {
+            sum[c] += p[c];
         }
-        let mut slide = |x: usize, add: [u32; 4], sub: [u32; 4]| {
-            let o = &mut out[x * 4..x * 4 + 4];
-            for c in 0..4 {
-                o[c] = ((sum[c] + half) / kernel) as u8;
-                sum[c] = sum[c] + add[c] - sub[c];
-            }
-        };
-        for x in 0..head_end {
-            slide(x, clamped(x + radius + 1), px(0));
+    }
+    let mut slide = |x: usize, add: [u32; 4], sub: [u32; 4]| {
+        let o = &mut out[x * 4..x * 4 + 4];
+        for c in 0..4 {
+            o[c] = ((sum[c] + half) / kernel) as u8;
+            sum[c] = sum[c] + add[c] - sub[c];
         }
-        for x in head_end..tail_start {
-            slide(x, px(x + radius + 1), px(x - radius));
-        }
-        for x in tail_start..width {
-            slide(x, px(last), px(x - radius));
-        }
-    });
+    };
+    for x in 0..head_end {
+        slide(x, clamped(x + radius + 1), px(0));
+    }
+    for x in head_end..tail_start {
+        slide(x, px(x + radius + 1), px(x - radius));
+    }
+    for x in tail_start..width {
+        slide(x, px(last), px(x - radius));
+    }
 }
 
-/// `src` (`width × height` RGBA) transposed into `dst` (`height × width`).
-fn transpose(src: &[u8], dst: &mut [u8], width: usize, height: usize) {
-    let dst_row = height * 4;
-    dst.par_chunks_mut(TRANSPOSE_BLOCK * dst_row).enumerate().for_each(|(block, chunk)| {
-        let x0 = block * TRANSPOSE_BLOCK;
-        let columns = chunk.len() / dst_row;
-        for y in 0..height {
-            let from = (y * width + x0) * 4;
-            for dx in 0..columns {
-                let to = (dx * height + y) * 4;
-                chunk[to..to + 4].copy_from_slice(&src[from + dx * 4..from + dx * 4 + 4]);
-            }
+/// Every box pass of `radii` over `line` in place, `scratch` as the
+/// other buffer (both `width` RGBA pixels).
+fn box_line(line: &mut [u8], scratch: &mut [u8], width: usize, radii: &[usize; PASSES]) {
+    for (i, &r) in radii.iter().enumerate() {
+        if i % 2 == 0 {
+            box_row(line, scratch, width, r);
+        } else {
+            box_row(scratch, line, width, r);
         }
-    });
+    }
+    if PASSES % 2 == 1 {
+        line.copy_from_slice(scratch);
+    }
 }
 
 /// `src` blurred by roughly a Gaussian of `sigma` pixels; alpha too.
 ///
-/// Peak working set: two buffers the size of `src` (w·h·4 bytes each),
-/// one of which is returned.
+/// Peak working set: the returned image (w·h·4 bytes), blurred in place,
+/// plus per thread a row's scratch and a band of `TRANSPOSE_BLOCK`
+/// columns (h·64 bytes, 256 KB for a 4000 px tall photo).
 pub fn blur_rgba(src: &RgbaImage, sigma: f32) -> RgbaImage {
     let (w, h) = src.dimensions();
+    let mut out = src.clone();
     if sigma <= 0.0 || w == 0 || h == 0 {
-        return src.clone();
+        return out;
     }
     let radii = box_radii(sigma);
-    let [first, rest @ ..] = radii;
     let (w, h) = (w as usize, h as usize);
-    let mut a = vec![0u8; src.as_raw().len()];
-    let mut b = vec![0u8; a.len()];
-    box_rows(src.as_raw(), &mut a, w, first);
-    for &r in &rest {
-        box_rows(&a, &mut b, w, r);
-        std::mem::swap(&mut a, &mut b);
-    }
-    transpose(&a, &mut b, w, h);
-    std::mem::swap(&mut a, &mut b);
-    for &r in &radii {
-        box_rows(&a, &mut b, h, r);
-        std::mem::swap(&mut a, &mut b);
-    }
-    transpose(&a, &mut b, h, w);
-    drop(a);
-    // `b` holds w·h·4 bytes after the second transpose
-    RgbaImage::from_raw(w as u32, h as u32, b).expect("buffer sized from src")
+    out.as_mut().par_chunks_exact_mut(w * 4).for_each_init(|| vec![0u8; w * 4], |scratch, row| box_line(row, scratch, w, &radii));
+    // Columns a band at a time: each band is copied out as rows of `h`
+    // pixels, boxed like rows, and copied back.
+    let dp = crate::math::SendMutPtr(out.as_mut_ptr());
+    (0..w.div_ceil(TRANSPOSE_BLOCK)).into_par_iter().for_each_init(
+        || (vec![0u8; TRANSPOSE_BLOCK * h * 4], vec![0u8; h * 4]),
+        |(band, scratch), block| {
+            let x0 = block * TRANSPOSE_BLOCK;
+            let columns = TRANSPOSE_BLOCK.min(w - x0);
+            // SAFETY: band `block` reads and writes columns x0..x0 +
+            // columns only; bands are column-disjoint, so no two threads
+            // touch the same byte.
+            let at = |y: usize, dx: usize| unsafe { dp.0.add((y * w + x0 + dx) * 4) };
+            for y in 0..h {
+                for dx in 0..columns {
+                    unsafe { std::ptr::copy_nonoverlapping(at(y, dx), band[(dx * h + y) * 4..].as_mut_ptr(), 4) };
+                }
+            }
+            for column in band.chunks_exact_mut(h * 4).take(columns) {
+                box_line(column, scratch, h, &radii);
+            }
+            for y in 0..h {
+                for dx in 0..columns {
+                    unsafe { std::ptr::copy_nonoverlapping(band[(dx * h + y) * 4..].as_ptr(), at(y, dx), 4) };
+                }
+            }
+            // Capture `dp` whole: its raw-pointer field alone is not Sync.
+            let _ = &dp;
+        },
+    );
+    out
 }
 
 #[cfg(test)]
@@ -144,13 +155,46 @@ mod tests {
         assert_eq!(blur_rgba(&src, 0.0), src);
     }
 
+    /// The two-buffer blur the in-place one replaced: whole-image
+    /// passes with a transpose between the axes. Kept as the oracle.
+    fn two_buffer_reference(src: &RgbaImage, sigma: f32) -> Vec<u8> {
+        let (w, h) = (src.width() as usize, src.height() as usize);
+        let rows = |from: &[u8], to: &mut [u8], width: usize, r: usize| {
+            for (o, row) in to.chunks_exact_mut(width * 4).zip(from.chunks_exact(width * 4)) {
+                box_row(row, o, width, r);
+            }
+        };
+        let transpose = |from: &[u8], to: &mut [u8], width: usize, height: usize| {
+            for y in 0..height {
+                for x in 0..width {
+                    to[(x * height + y) * 4..][..4].copy_from_slice(&from[(y * width + x) * 4..][..4]);
+                }
+            }
+        };
+        let radii = box_radii(sigma);
+        let (mut a, mut b) = (src.as_raw().clone(), vec![0u8; w * h * 4]);
+        for &r in &radii {
+            rows(&a, &mut b, w, r);
+            std::mem::swap(&mut a, &mut b);
+        }
+        transpose(&a, &mut b, w, h);
+        std::mem::swap(&mut a, &mut b);
+        for &r in &radii {
+            rows(&a, &mut b, h, r);
+            std::mem::swap(&mut a, &mut b);
+        }
+        transpose(&a, &mut b, h, w);
+        b
+    }
+
+    /// In place, a row and a band of columns at a time, the blur gives
+    /// the very bytes the two-buffer blur gave, a partial last band
+    /// included.
     #[test]
-    fn transposing_twice_gives_the_original() {
-        let src = pattern(37, 19);
-        let mut t = vec![0u8; src.as_raw().len()];
-        let mut back = vec![0u8; src.as_raw().len()];
-        transpose(src.as_raw(), &mut t, 37, 19);
-        transpose(&t, &mut back, 19, 37);
-        assert_eq!(&back, src.as_raw());
+    fn the_in_place_blur_matches_the_two_buffer_one() {
+        for (w, h, sigma) in [(97, 61, 3.0), (40, 300, 30.0), (5, 5, 2.0), (33, 17, 0.8)] {
+            let src = pattern(w, h);
+            assert!(blur_rgba(&src, sigma).as_raw() == &two_buffer_reference(&src, sigma), "{w}x{h} sigma {sigma}");
+        }
     }
 }
