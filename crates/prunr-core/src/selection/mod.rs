@@ -250,19 +250,19 @@ impl MaskArtifact {
         self.flags().1
     }
 
-    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8) -> Result<Self, SelectionError> {
+    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8 + Sync) -> Result<Self, SelectionError> {
         if self.width != other.width || self.height != other.height {
             return Err(SelectionError::DimensionMismatch {
                 lhs: (self.width, self.height),
                 rhs: (other.width, other.height),
             });
         }
-        let data = self.data.iter().zip(other.data.iter()).map(|(&a, &b)| f(a, b)).collect();
+        let data = self.data.par_iter().zip(other.data.par_iter()).map(|(&a, &b)| f(a, b)).collect();
         Ok(Self::from_cells(self.width, self.height, data))
     }
 
-    fn map(&self, f: impl Fn(i8) -> i8) -> Self {
-        let data = self.data.iter().map(|&v| f(v)).collect();
+    fn map(&self, f: impl Fn(i8) -> i8 + Sync) -> Self {
+        let data = self.data.par_iter().map(|&v| f(v)).collect();
         Self::from_cells(self.width, self.height, data)
     }
 
