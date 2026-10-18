@@ -800,7 +800,7 @@ mod tests {
         use crate::gui::item::{BatchItem, ImageSource};
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
         let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
-        let gone = ImageSource::Path(PathBuf::from("/nonexistent/prunr-drag-gone.png"));
+        let gone = ImageSource::file(PathBuf::from("/nonexistent/prunr-drag-gone.png"));
         let item = BatchItem::new(11, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new());
         let mut state = DragExportState::new();
         state.prewrite(11, DragKey::of(&item, spec), DragFiles::of(&item, spec));
@@ -859,7 +859,7 @@ mod tests {
         let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
         let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
         let mut items: Vec<_> = (200..204).map(|id| processed_item(id, &format!("order{id}.jpg"))).collect();
-        let gone = ImageSource::Path(PathBuf::from("/nonexistent/prunr-drag-order-gone.png"));
+        let gone = ImageSource::file(PathBuf::from("/nonexistent/prunr-drag-order-gone.png"));
         items.push(BatchItem::new(299, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new()));
         let find = |id: u64| items.iter().find(|i| i.id == id);
         let mut state = DragExportState::new();

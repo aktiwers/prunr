@@ -290,27 +290,62 @@ impl Thumbnail {
 }
 
 const FILE_GONE: &str = "The file was moved or deleted since it was opened. Open it again.";
-const FILE_CHANGED: &str = "The file changed since it was opened. Open it again to use the new version.";
+
+/// The file was written since it was opened: it is not the photo the
+/// steps were made on.
+#[derive(Debug)]
+struct FileChanged;
+
+impl std::fmt::Display for FileChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The file changed since it was opened. Open it again to use the new version.")
+    }
+}
+
+impl std::error::Error for FileChanged {}
 
 /// The error an image shows when its file cannot be read.
 pub(crate) fn source_unreadable(err: std::io::Error) -> String {
     if err.kind() == std::io::ErrorKind::NotFound {
         FILE_GONE.to_string()
+    } else if err.get_ref().is_some_and(|inner| inner.is::<FileChanged>()) {
+        err.to_string()
     } else {
         format!("Failed to load: {err}")
+    }
+}
+
+/// A file's length and last write when it was opened; an edit since
+/// changes one, whatever size the image now decodes at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FileStamp {
+    pub(crate) len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
+        Self { len: meta.len(), modified: meta.modified().ok() }
     }
 }
 
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
 #[derive(Clone)]
 pub(crate) enum ImageSource {
-    /// Loaded from a file. Bytes read on demand and dropped after use.
-    Path(PathBuf),
+    /// Loaded from a file. Bytes read on demand and dropped after use;
+    /// no stamp when the file could not be looked at on open.
+    Path(PathBuf, Option<FileStamp>),
     /// From clipboard, drag-drop, or CLI pipe. Bytes kept in memory.
     Bytes(Arc<Vec<u8>>),
 }
 
 impl ImageSource {
+    /// A file as it is now: later reads refuse it once it is written again.
+    pub(crate) fn file(path: PathBuf) -> Self {
+        let stamp = std::fs::metadata(&path).ok().map(|m| FileStamp::of(&m));
+        Self::Path(path, stamp)
+    }
+
     /// Decode the source to straight RGBA.
     pub(crate) fn decode_rgba(&self) -> Result<Arc<image::RgbaImage>, String> {
         self.decode().map(|img| Arc::new(img.into_rgba8()))
@@ -324,7 +359,7 @@ impl ImageSource {
     /// Whether both name the same image: one path, or one shared buffer.
     pub(crate) fn same_as(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Path(a), Self::Path(b)) => a == b,
+            (Self::Path(a, _), Self::Path(b, _)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
@@ -332,7 +367,17 @@ impl ImageSource {
 
     pub(crate) fn load_bytes(&self) -> std::io::Result<Arc<Vec<u8>>> {
         match self {
-            Self::Path(path) => Ok(Arc::new(std::fs::read(path)?)),
+            Self::Path(path, stamp) => {
+                use std::io::Read;
+                let mut file = std::fs::File::open(path)?;
+                let meta = file.metadata()?;
+                if stamp.is_some_and(|stamp| stamp != FileStamp::of(&meta)) {
+                    return Err(std::io::Error::other(FileChanged));
+                }
+                let mut bytes = Vec::with_capacity(meta.len() as usize);
+                file.read_to_end(&mut bytes)?;
+                Ok(Arc::new(bytes))
+            }
             Self::Bytes(bytes) => Ok(bytes.clone()),
         }
     }
@@ -1730,16 +1775,6 @@ impl BatchItem {
     /// shows why decoding failed.
     pub(crate) fn land_decode(&mut self, result: Result<Arc<image::RgbaImage>, String>) -> bool {
         self.decode_pending = false;
-        // Its file is read again whenever it is needed: one edited since it
-        // was opened decodes at another size, and is not the photo the
-        // steps were made on.
-        let result = result.and_then(|rgba| {
-            if rgba.dimensions() == self.dimensions {
-                Ok(rgba)
-            } else {
-                Err(FILE_CHANGED.to_string())
-            }
-        });
         match result {
             Ok(rgba) => {
                 self.decode_failed = false;
@@ -2758,7 +2793,7 @@ impl BatchItem {
     ) -> Self {
         let source_len = match &source {
             ImageSource::Bytes(bytes) => bytes.len(),
-            ImageSource::Path(_) => 0,
+            ImageSource::Path(..) => 0,
         };
         Self {
             id,
@@ -3604,17 +3639,22 @@ mod tests {
     /// The first decode of a photo keeps what was made from it before:
     /// its depth map and selection; a different photo landing drops them.
     /// A photo that decodes at another size than it was opened at is not
-    /// the file that was opened: it is refused with why, not shown in its
-    /// place. A file that is gone says so.
+    /// the file that was opened, even at the same size: it is refused with
+    /// why, not shown in its place. A file that is gone says so.
     #[test]
     fn a_changed_or_missing_file_says_so() {
-        let mut item = fixture_item(1);
-        item.dimensions = (4, 4);
-        item.source_rgba = None;
-        assert!(!item.land_decode(Ok(Arc::new(image::RgbaImage::new(6, 6)))));
-        assert!(item.source_rgba.is_none() && item.decode_failed);
-        assert!(matches!(item.status(), BatchStatus::Error(e) if e.contains("changed")));
-        let gone = super::source_unreadable(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        std::fs::write(&path, b"first").unwrap();
+        let source = ImageSource::file(path.clone());
+        assert_eq!(&**source.load_bytes().unwrap(), b"first");
+        std::fs::write(&path, b"other").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        let changed = source.load_bytes().map_err(super::source_unreadable).unwrap_err();
+        assert!(changed.contains("changed since it was opened"), "{changed}");
+        std::fs::remove_file(&path).unwrap();
+        let gone = source.load_bytes().map_err(super::source_unreadable).unwrap_err();
         assert!(gone.contains("moved or deleted"), "{gone}");
     }
 
@@ -3656,7 +3696,7 @@ mod tests {
     #[test]
     fn a_runs_work_leaves_its_file_unread() {
         let mut item = fixture_item(1);
-        item.source = ImageSource::Path(PathBuf::from("/nonexistent/photo.png"));
+        item.source = ImageSource::file(PathBuf::from("/nonexistent/photo.png"));
         item.start_job(Some(StepKind::Process), Engine::Segment);
         let work = item.full_run_work();
         assert_eq!(work.id, 1);
@@ -3774,7 +3814,7 @@ mod tests {
         path.push(format!("prunr-item-test-{}.bin", std::process::id()));
         std::fs::write(&path, payload).expect("write tempfile");
 
-        let source = ImageSource::Path(path.clone());
+        let source = ImageSource::file(path.clone());
         let loaded = source.load_bytes().expect("Path variant must read the file");
         assert_eq!(&**loaded, payload);
 

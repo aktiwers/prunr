@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn a_source_that_cannot_be_read_lands_as_a_failed_decode() {
         let bm = fixture();
-        bm.request_decode_source(5, &ImageSource::Path("/nonexistent/prunr-test/missing.jpg".into()));
+        bm.request_decode_source(5, &ImageSource::file("/nonexistent/prunr-test/missing.jpg".into()));
         let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(5)).expect("an answer comes back");
         assert_eq!(id, 5);
         assert!(result.is_err());
@@ -1548,7 +1548,7 @@ mod tests {
     #[test]
     fn request_filter_only_emits_load_failure_via_err_variant() {
         let bm = fixture();
-        let source = ImageSource::Path(std::path::PathBuf::from(
+        let source = ImageSource::file(std::path::PathBuf::from(
             "/nonexistent/prunr-test-missing.png"
         ));
         bm.request_filter_only(11, 0, &source, None, prunr_core::SubjectEffect::default());

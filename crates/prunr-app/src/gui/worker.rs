@@ -1614,7 +1614,7 @@ mod tests {
     fn a_runs_inputs_are_read_where_it_is_sent() {
         use super::{CachedTensorWork, RunImage, WorkItem};
         use crate::gui::item::{ImageSource, Pixels};
-        let missing = ImageSource::Path(std::path::PathBuf::from("/nonexistent/photo.png"));
+        let missing = ImageSource::file(std::path::PathBuf::from("/nonexistent/photo.png"));
         let file = ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
 
         let gone = WorkItem { id: 1, run: 0, source: missing.clone(), image: None }.read_inputs();

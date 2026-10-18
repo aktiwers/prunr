@@ -42,7 +42,7 @@ impl PrunrApp {
             return;
         };
         let filename = display_name(&path, "image");
-        self.load_image_source(ImageSource::Path(path), dims, filename);
+        self.load_image_source(ImageSource::file(path), dims, filename);
     }
 
     /// Open an image from raw bytes; an empty name reads as "image".
@@ -229,10 +229,11 @@ pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Ve
         }
         for path in resolved {
             let name = display_name(&path, UNTITLED);
-            let len = std::fs::metadata(&path).map_or(0, |m| m.len() as usize);
+            let stamp = std::fs::metadata(&path).ok().map(|m| crate::gui::item::FileStamp::of(&m));
+            let len = stamp.map_or(0, |s| s.len as usize);
             let dims = prunr_core::image_dimensions_from_path(&path);
             // Once the receiver is gone every later send fails too.
-            if tx.send(FileLoad::Image { source: ImageSource::Path(path), name, len, dims }).is_err() {
+            if tx.send(FileLoad::Image { source: ImageSource::Path(path, stamp), name, len, dims }).is_err() {
                 break;
             }
         }
