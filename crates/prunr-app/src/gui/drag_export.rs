@@ -231,7 +231,7 @@ impl LayerSource {
     fn of(job: &LayerJob) -> Option<Self> {
         let start = job.start.as_ref().and_then(|s| s.load()).or_else(|| job.source_rgba.clone());
         let original = match (&job.faces, start) {
-            (Some(super::live_preview::FacesInput { faced: Some(faced), .. }), _) => (**faced).clone(),
+            (Some(super::live_preview::FacesInput { faced: Some(faced), .. }), _) => DynamicImage::ImageRgba8((**faced).clone()),
             (Some(faces), Some(rgba)) => DynamicImage::ImageRgba8(prunr_core::face::compose_faces(&rgba, &faces.key.faces, faces.key.blend)),
             (None, Some(rgba)) => DynamicImage::ImageRgba8((*rgba).clone()),
             (_, None) => job.source.decode()

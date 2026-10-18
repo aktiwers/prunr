@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use image::{DynamicImage, GrayImage, RgbaImage};
+use image::{GrayImage, RgbaImage};
 
 use prunr_core::depth::LineFade;
 use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
@@ -47,7 +47,7 @@ use crate::gui::worker::CompressedTensor;
 /// on postprocess failure; caller falls back to the raw original.
 fn build_masked_base(
     seg: &SegTensor,
-    original: &DynamicImage,
+    original: &RgbaImage,
     settings: &ItemSettings,
     correction: Option<&prunr_core::selection::MaskArtifact>,
 ) -> Option<RgbaImage> {
@@ -167,13 +167,13 @@ pub struct PreviewResult {
     /// upscale run.
     pub new_reference: Option<Arc<image::RgbaImage>>,
     /// The faced photo this dispatch built, for the item to reuse.
-    pub new_faced: Option<(Arc<DynamicImage>, FacedKey)>,
+    pub new_faced: Option<(Arc<RgbaImage>, FacedKey)>,
     /// The depth-looked photo this dispatch built, for the item to reuse.
-    pub(crate) new_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
+    pub(crate) new_depth_photo: Option<(Arc<RgbaImage>, crate::gui::item::DepthPhotoKey)>,
     /// The image a quick frame shrank, for the drag's next frames.
     pub(crate) new_quick_photo: Option<QuickPhoto>,
-    /// The `DynamicImage` of the render's photo it built, for the item to keep.
-    pub(crate) new_original: Option<BuiltOriginal>,
+    /// The run's start the render read back, for the item to hold.
+    pub(crate) new_start: Option<Arc<RgbaImage>>,
     /// The correction plane the render built, for the item to keep.
     pub(crate) new_correction: Option<crate::gui::item::BuiltCorrection>,
     /// The tensors the render unpacked, for the item's hot cache.
@@ -551,7 +551,7 @@ impl LivePreview {
                     new_faced: output.built_faced.zip(faced_key),
                     new_depth_photo: output.built_depth_photo,
                     new_quick_photo: output.built_quick_photo,
-                    new_original: output.built_original,
+                    new_start: output.built_start,
                     new_correction: output.built_correction,
                     unpacked: output.unpacked,
                     applied_mask: mask_recipe,
@@ -653,10 +653,10 @@ pub struct DispatchInputs {
     /// A drag's in-between frame: the depth look may be made at a smaller
     /// size, and the result is not kept for the next one.
     pub quick: bool,
-    pub original: Arc<DynamicImage>,
-    /// Where `original` comes from when the item had no `DynamicImage`
-    /// of it yet: the render's thread makes it (a full copy, or an unpack
-    /// first) and hands it back, so the UI thread never does.
+    pub original: Arc<RgbaImage>,
+    /// The run's start when it is stored packed: the render's thread reads
+    /// it back into `original` and hands it back, so the UI thread never
+    /// unpacks it.
     pub(crate) original_from: Option<OriginalFrom>,
     /// Where the preview starts when that is an earlier result (`None`: the
     /// source), recorded as the step's start on landing.
@@ -711,7 +711,7 @@ pub struct DispatchInputs {
 pub(crate) struct DepthInput {
     pub(crate) map: Arc<prunr_core::depth::DepthMap>,
     pub(crate) look: Option<prunr_core::depth::DepthLook>,
-    pub(crate) photo: Option<Arc<DynamicImage>>,
+    pub(crate) photo: Option<Arc<RgbaImage>>,
 }
 
 impl DispatchInputs {
@@ -756,7 +756,7 @@ impl DispatchInputs {
 
     /// A `kind` preview of `original` with `settings` and nothing cached,
     /// kept or found yet; callers set what their kind reads.
-    pub(crate) fn new(kind: PreviewKind, version: u64, original: Arc<DynamicImage>, settings: ItemSettings) -> Self {
+    pub(crate) fn new(kind: PreviewKind, version: u64, original: Arc<RgbaImage>, settings: ItemSettings) -> Self {
         Self {
             kind,
             version,
@@ -789,7 +789,7 @@ impl DispatchInputs {
     pub(crate) fn can_be_quick(&self) -> bool {
         let (w, h) = match self.kind {
             PreviewKind::Mask | PreviewKind::Edge => self.original_from.as_ref()
-                .map_or((self.original.width(), self.original.height()), OriginalFrom::dims),
+                .map_or(self.original.dimensions(), |from| from.dims),
             PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
             PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
             PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
@@ -805,7 +805,7 @@ impl DispatchInputs {
 #[derive(Clone)]
 pub struct FacesInput {
     pub key: FacedKey,
-    pub faced: Option<Arc<DynamicImage>>,
+    pub faced: Option<Arc<RgbaImage>>,
 }
 
 /// What a faced photo was built from: these faces at this blend.
@@ -965,10 +965,10 @@ struct RunOutput {
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
     built_reference: Option<Arc<image::RgbaImage>>,
-    built_faced: Option<Arc<DynamicImage>>,
-    built_depth_photo: Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)>,
+    built_faced: Option<Arc<RgbaImage>>,
+    built_depth_photo: Option<(Arc<RgbaImage>, crate::gui::item::DepthPhotoKey)>,
     built_quick_photo: Option<QuickPhoto>,
-    built_original: Option<BuiltOriginal>,
+    built_start: Option<Arc<RgbaImage>>,
     built_correction: Option<crate::gui::item::BuiltCorrection>,
     unpacked: Unpacked,
 }
@@ -991,42 +991,11 @@ pub(crate) struct Unpacked {
     pub(crate) edge: Option<(crate::gui::worker::CompressedEdgeTensors, prunr_core::EdgeScale, Arc<Vec<f32>>)>,
 }
 
-/// The photo a render draws on, before it is a `DynamicImage`.
+/// The run's start image a render draws on, stored packed, with its size.
 #[derive(Clone)]
-pub(crate) enum OriginalFrom {
-    /// The run's start image, maybe stored compressed; with its size.
-    Start(crate::gui::timeline::StoredImage, (u32, u32)),
-    /// The decoded photo.
-    Photo(Arc<RgbaImage>),
-}
-
-impl OriginalFrom {
-    fn dims(&self) -> (u32, u32) {
-        match self {
-            Self::Start(_, dims) => *dims,
-            Self::Photo(rgba) => rgba.dimensions(),
-        }
-    }
-
-    /// The pixels and their `DynamicImage`; `None` if a stored start can
-    /// no longer be read.
-    fn wrap(&self) -> Option<BuiltOriginal> {
-        let (rgba, start) = match self {
-            Self::Start(stored, _) => (stored.load()?, true),
-            Self::Photo(rgba) => (Arc::clone(rgba), false),
-        };
-        let wrapped = Arc::new(DynamicImage::ImageRgba8((*rgba).clone()));
-        Some(BuiltOriginal { rgba, wrapped, start })
-    }
-}
-
-/// A `DynamicImage` a render made of its photo, and which photo it is.
-#[derive(Clone)]
-pub(crate) struct BuiltOriginal {
-    pub(crate) rgba: Arc<RgbaImage>,
-    pub(crate) wrapped: Arc<DynamicImage>,
-    /// Made from the run's start image, not the decoded photo.
-    pub(crate) start: bool,
+pub(crate) struct OriginalFrom {
+    pub(crate) image: crate::gui::timeline::StoredImage,
+    pub(crate) dims: (u32, u32),
 }
 
 /// Runs on a rayon worker thread.
@@ -1086,11 +1055,11 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     }
 
     let mut inputs = inputs;
-    let built_original = match inputs.original_from.take() {
+    let built_start = match inputs.original_from.take() {
         Some(from) => {
-            let Some(built) = from.wrap() else { return RunOutput::default() };
-            inputs.original = Arc::clone(&built.wrapped);
-            Some(built)
+            let Some(start) = from.image.load() else { return RunOutput::default() };
+            inputs.original = Arc::clone(&start);
+            Some(start)
         }
         None => None,
     };
@@ -1101,7 +1070,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             None
         }
         Some(FacesInput { key, faced: None }) => {
-            let faced = Arc::new(DynamicImage::ImageRgba8(key.blend_into(inputs.original.to_rgba8())));
+            let faced = Arc::new(key.blend_into((*inputs.original).clone()));
             inputs.original = Arc::clone(&faced);
             Some(faced)
         }
@@ -1109,7 +1078,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     };
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     if inputs.kind == PreviewKind::Photo {
-        return RunOutput { rgba: Some(Arc::new(inputs.original.to_rgba8())), built_faced, built_original, ..RunOutput::default() };
+        return RunOutput { rgba: Some(inputs.original), built_faced, built_start, ..RunOutput::default() };
     }
     let full_width = inputs.original.width();
     // A looked photo kept from a full-size render is the one to shrink;
@@ -1130,7 +1099,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     }
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let output = run_photo_preview(inputs);
-    RunOutput { built_faced, built_depth_photo, built_quick_photo, built_original, ..output }
+    RunOutput { built_faced, built_depth_photo, built_quick_photo, built_start, ..output }
 }
 
 /// The long side a drag's quick frames are made at. A larger image's
@@ -1142,82 +1111,26 @@ pub(crate) const QUICK_FRAME_SIDE: u32 = 2048;
 /// weakly so the pair never keeps a full-size image alive.
 #[derive(Clone)]
 pub(crate) struct QuickPhoto {
-    from: std::sync::Weak<dyn std::any::Any + Send + Sync>,
-    small: Small,
-}
-
-#[derive(Clone)]
-enum Small {
-    Photo(Arc<DynamicImage>),
-    Image(Arc<RgbaImage>),
-}
-
-/// An image a quick frame is made from.
-trait Shrinks: Sized + Send + Sync + 'static {
-    fn long_side(&self) -> u32;
-    fn shrunk(&self) -> Self;
-    fn kept(small: &Small) -> Option<Arc<Self>>;
-    fn keep(small: Arc<Self>) -> Small;
-}
-
-impl Shrinks for DynamicImage {
-    fn long_side(&self) -> u32 {
-        self.width().max(self.height())
-    }
-
-    fn shrunk(&self) -> Self {
-        use prunr_core::formats::{fit_long_side, resize_to_rgba, ResizeFilter};
-        let (qw, qh) = fit_long_side(self.width(), self.height(), QUICK_FRAME_SIDE);
-        DynamicImage::ImageRgba8(resize_to_rgba(self, qw, qh, ResizeFilter::Bilinear))
-    }
-
-    fn kept(small: &Small) -> Option<Arc<Self>> {
-        match small { Small::Photo(p) => Some(Arc::clone(p)), Small::Image(_) => None }
-    }
-
-    fn keep(small: Arc<Self>) -> Small {
-        Small::Photo(small)
-    }
-}
-
-impl Shrinks for RgbaImage {
-    fn long_side(&self) -> u32 {
-        self.width().max(self.height())
-    }
-
-    fn shrunk(&self) -> Self {
-        use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
-        let (qw, qh) = fit_long_side(self.width(), self.height(), QUICK_FRAME_SIDE);
-        resize_rgba(self, qw, qh, ResizeFilter::Bilinear)
-    }
-
-    fn kept(small: &Small) -> Option<Arc<Self>> {
-        match small { Small::Image(i) => Some(Arc::clone(i)), Small::Photo(_) => None }
-    }
-
-    fn keep(small: Arc<Self>) -> Small {
-        Small::Image(small)
-    }
+    from: std::sync::Weak<RgbaImage>,
+    small: Arc<RgbaImage>,
 }
 
 impl QuickPhoto {
     /// `image` no larger than a quick frame: the kept one when it was
     /// shrunk from `image`, else a fresh one, returned to keep.
-    fn shrink<T: Shrinks>(image: &Arc<T>, kept: Option<&QuickPhoto>) -> (Arc<T>, Option<QuickPhoto>) {
-        if image.long_side() <= QUICK_FRAME_SIDE {
+    fn shrink(image: &Arc<RgbaImage>, kept: Option<&QuickPhoto>) -> (Arc<RgbaImage>, Option<QuickPhoto>) {
+        use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+        if image.width().max(image.height()) <= QUICK_FRAME_SIDE {
             return (Arc::clone(image), None);
         }
         // The weak reference holds the allocation, so an equal address is
         // the same image, never a new one at a freed address.
-        let hit = kept
-            .filter(|k| std::ptr::eq(k.from.as_ptr().cast::<()>(), Arc::as_ptr(image).cast::<()>()))
-            .and_then(|k| T::kept(&k.small));
-        if let Some(small) = hit {
-            return (small, None);
+        if let Some(k) = kept.filter(|k| std::ptr::eq(k.from.as_ptr(), Arc::as_ptr(image))) {
+            return (Arc::clone(&k.small), None);
         }
-        let small = Arc::new(image.shrunk());
-        let from: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(image) as _;
-        (Arc::clone(&small), Some(QuickPhoto { from: Arc::downgrade(&from), small: T::keep(small) }))
+        let (qw, qh) = fit_long_side(image.width(), image.height(), QUICK_FRAME_SIDE);
+        let small = Arc::new(resize_rgba(image, qw, qh, ResizeFilter::Bilinear));
+        (Arc::clone(&small), Some(QuickPhoto { from: Arc::downgrade(image), small }))
     }
 }
 
@@ -1234,7 +1147,7 @@ fn shrink_to_quick_frame(inputs: &mut DispatchInputs, full_width: u32) {
 /// Swap `inputs.original` for the photo with the Depth chip's look on it:
 /// the one made last time when it still matches, or a fresh one, which
 /// is returned with its key for the item to keep.
-fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, crate::gui::item::DepthPhotoKey)> {
+fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<RgbaImage>, crate::gui::item::DepthPhotoKey)> {
     let depth = inputs.depth.as_ref()?;
     let look = depth.look.filter(prunr_core::depth::DepthLook::is_active)?;
     if let Some(photo) = &depth.photo {
@@ -1242,12 +1155,10 @@ fn apply_depth_look(inputs: &mut DispatchInputs) -> Option<(Arc<DynamicImage>, c
         return None;
     }
     if inputs.quick {
-        let looked = look.apply(&prunr_core::rgba_view(&inputs.original), &depth.map)?;
-        inputs.original = Arc::new(DynamicImage::ImageRgba8(looked));
+        inputs.original = Arc::new(look.apply(&inputs.original, &depth.map)?);
         return None;
     }
-    let looked = look.apply(&prunr_core::rgba_view(&inputs.original), &depth.map)?;
-    let photo = Arc::new(DynamicImage::ImageRgba8(looked));
+    let photo = Arc::new(look.apply(&inputs.original, &depth.map)?);
     let key = crate::gui::item::DepthPhotoKey { base: Arc::clone(&inputs.original), depth: Arc::clone(&depth.map), look };
     inputs.original = Arc::clone(&photo);
     Some((photo, key))
@@ -1295,7 +1206,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 // raw source so the user sees the filter effect without
                 // running inference.
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
-                    let mut rgba = inputs.original.to_rgba8();
+                    let mut rgba = (*inputs.original).clone();
                     prunr_core::apply_subject_effect(&mut rgba, inputs.settings.effect);
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
@@ -1329,7 +1240,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             // a full RGBA→DynamicImage clone (~64 MB at 4K, 10 Hz during drag).
             let out_dims = match masked_base.as_ref() {
                 Some(arc) => (arc.width(), arc.height()),
-                None => (inputs.original.width(), inputs.original.height()),
+                None => inputs.original.dimensions(),
             };
             let fade = line_fade(&inputs);
             let (mask, built_edge) = resolve_edge_mask(&inputs.cached_edge, edge, out_dims, &edge_settings, fade);
@@ -1338,7 +1249,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             let (base, compose_settings) = match masked_base.as_deref() {
                 Some(subject) => (std::borrow::Cow::Borrowed(subject), edge_settings),
                 None => (
-                    prunr_core::rgba_view(&inputs.original),
+                    std::borrow::Cow::Borrowed(&*inputs.original),
                     prunr_core::EdgeSettings { compose_mode: prunr_core::ComposeMode::LinesOnly, ..edge_settings },
                 ),
             };
@@ -1464,7 +1375,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_original: None, new_correction: None, unpacked: Unpacked::default(),
+            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_start: None, new_correction: None, unpacked: Unpacked::default(),
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,
@@ -1638,7 +1549,7 @@ mod tests {
     /// A render of an image `long_side` px on its long side, which a
     /// worker makes in no time (no tensor: the filters on a blank photo).
     fn photo_inputs(long_side: u32) -> DispatchInputs {
-        let photo = Arc::new(image::DynamicImage::new_rgba8(long_side, 1));
+        let photo = Arc::new(RgbaImage::new(long_side, 1));
         DispatchInputs::new(PreviewKind::Mask, 0, photo, ItemSettings::default())
     }
 
@@ -1690,7 +1601,7 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Edge);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| Ok(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(image::DynamicImage::new_rgb8(8, 8)), ItemSettings::default())));
+        lp.tick(|_, _| Ok(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(RgbaImage::new(8, 8)), ItemSettings::default())));
         assert!(lp.works_on(1), "dispatched");
         let deadline = Instant::now() + Duration::from_secs(10);
         while lp.works_on(1) && Instant::now() < deadline {
@@ -2042,7 +1953,7 @@ mod tests {
                 upscale_tier2_knobs: Some(knobs),
                 ..DispatchInputs::new(
                     PreviewKind::UpscaleTier2, 0,
-                    Arc::new(image::DynamicImage::ImageRgba8((*raw_arc).clone())), ItemSettings::default(),
+                    Arc::clone(&raw_arc), ItemSettings::default(),
                 )
             },
             &cancel,
@@ -2058,7 +1969,7 @@ mod tests {
     fn a_render_from_packed_tensors_draws_the_same() {
         use crate::gui::item_settings::ItemSettings;
         use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors, RawSegTensor};
-        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([90, 120, 150, 255]))));
+        let photo = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([90, 120, 150, 255])));
         let seg: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         let settings = ItemSettings { line_mode: LineMode::SubjectOutline, ..ItemSettings::default() };
         let primary = settings.edge_settings().primary_scale();
@@ -2095,7 +2006,7 @@ mod tests {
     fn a_quick_frame_is_made_small_and_a_settled_render_full_size() {
         use crate::gui::item_settings::ItemSettings;
         let (w, h) = (QUICK_FRAME_SIDE * 2, 600);
-        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 150, 255]))));
+        let photo = Arc::new(RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 150, 255])));
         let full_plane = Arc::new(GrayImage::new(w, h));
         let settings = ItemSettings { edge_shift: 8.0, feather: 4.0, line_mode: LineMode::EdgesOnly, ..ItemSettings::default() };
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
@@ -2147,17 +2058,17 @@ mod tests {
     /// it, another image does not, and the kept pair holds no full image.
     #[test]
     fn quick_frames_shrink_the_photo_once() {
-        let photo = Arc::new(image::DynamicImage::new_rgb8(QUICK_FRAME_SIDE * 2, 10));
+        let photo = Arc::new(RgbaImage::new(QUICK_FRAME_SIDE * 2, 10));
         let (small, kept) = QuickPhoto::shrink(&photo, None);
         assert_eq!((small.width(), small.height()), (QUICK_FRAME_SIDE, 5));
         let kept = kept.expect("a fresh shrink is kept");
         let (again, built) = QuickPhoto::shrink(&photo, Some(&kept));
         assert!(Arc::ptr_eq(&again, &small) && built.is_none(), "the next frame reuses it");
-        let other = Arc::new(image::DynamicImage::new_rgb8(QUICK_FRAME_SIDE * 2, 10));
+        let other = Arc::new(RgbaImage::new(QUICK_FRAME_SIDE * 2, 10));
         let (fresh, built) = QuickPhoto::shrink(&other, Some(&kept));
         assert!(!Arc::ptr_eq(&fresh, &small) && built.is_some(), "another photo is shrunk anew");
         assert_eq!(Arc::strong_count(&photo), 1, "the kept pair holds the photo weakly");
-        let tiny = Arc::new(image::DynamicImage::new_rgb8(8, 8));
+        let tiny = Arc::new(RgbaImage::new(8, 8));
         let (same, built) = QuickPhoto::shrink(&tiny, None);
         assert!(Arc::ptr_eq(&same, &tiny) && built.is_none(), "a small photo is its own quick frame");
 
@@ -2206,13 +2117,13 @@ mod tests {
                     quick_photo: kept_upscale.clone(),
                     upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None)),
                     upscale_tier2_knobs: Some(prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.6, color_match: true }),
-                    ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
+                    ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(RgbaImage::new(1, 1)), ItemSettings::default())
                 }),
                 ("colorize quick", DispatchInputs {
                     quick: true,
                     quick_photo: kept_colorize.clone(),
                     colorize: Some(crate::gui::item::ColorizeCache::new(Arc::clone(&colorize), Arc::clone(&raw))),
-                    ..DispatchInputs::new(PreviewKind::ColorizeTier2, 0, Arc::new(image::DynamicImage::new_rgb8(1, 1)), ItemSettings::default())
+                    ..DispatchInputs::new(PreviewKind::ColorizeTier2, 0, Arc::new(RgbaImage::new(1, 1)), ItemSettings::default())
                 }),
             ] {
                 let t = Instant::now();
@@ -2230,7 +2141,7 @@ mod tests {
     #[ignore]
     fn quick_frame_timing() {
         use crate::gui::item_settings::ItemSettings;
-        let photo = Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(6000, 4000, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8]))));
+        let photo = Arc::new(RgbaImage::from_fn(6000, 4000, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255])));
         let seg = Arc::new(SegTensor { data: (0..1024 * 1024).map(|i| ((i % 1024) as f32 / 512.0) - 1.0).collect(), height: 1024, width: 1024, model: ModelKind::BiRefNetLite });
         let mut kept = None;
         for refine_edges in [false, true] {
@@ -2252,11 +2163,11 @@ mod tests {
     fn a_photo_preview_wears_the_depth_look_and_reuses_it() {
         use crate::gui::item_settings::ItemSettings;
         use prunr_core::depth::{DepthLook, DepthMap};
-        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]))));
+        let photo = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255])));
         let map = Arc::new(DepthMap::from_raw(1, 8, (0..8).map(|y| y as f32).collect()));
         let look = DepthLook { fog_pct: 100, ..DepthLook::default() };
         let settings = ItemSettings { depth: look, ..ItemSettings::default() };
-        let inputs = |cached: Option<Arc<image::DynamicImage>>| DispatchInputs {
+        let inputs = |cached: Option<Arc<RgbaImage>>| DispatchInputs {
             depth: Some(DepthInput { map: Arc::clone(&map), look: Some(look), photo: cached }),
             ..DispatchInputs::new(PreviewKind::Mask, 0, Arc::clone(&photo), settings)
         };
@@ -2281,7 +2192,7 @@ mod tests {
         use crate::gui::item_settings::ItemSettings;
         use prunr_core::LineMode;
         let (th, tw) = (8u32, 8u32);
-        let photo = Arc::new(image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, image::Rgba([90, 90, 90, 255]))));
+        let photo = Arc::new(RgbaImage::from_pixel(8, 8, image::Rgba([90, 90, 90, 255])));
         let edge = EdgeTensor { data: Arc::new(vec![1.0; (th * tw) as usize]), height: th, width: tw };
         let map = Arc::new(prunr_core::depth::DepthMap::from_raw(1, 8, (0..8).map(|y| y as f32).collect()));
         let settings = ItemSettings { line_mode: LineMode::EdgesOnly, line_fade_pct: 100, ..ItemSettings::default() };
@@ -2316,7 +2227,7 @@ mod tests {
                 colorize: Some(run.clone()),
                 ..DispatchInputs::new(
                     PreviewKind::ColorizeTier2, 0,
-                    Arc::new(image::DynamicImage::new_rgba8(0, 0)), ItemSettings { color_strength_pct, ..ItemSettings::default() },
+                    Arc::new(RgbaImage::new(0, 0)), ItemSettings { color_strength_pct, ..ItemSettings::default() },
                 )
             };
             run_preview(inputs, &std::sync::atomic::AtomicBool::new(false)).rgba.expect("rendered")
@@ -2344,7 +2255,7 @@ mod tests {
         };
         let res = EdgeInferenceResult { tensors: EdgeScale::ALL.map(pattern), height: th, width: tw };
         let (w, h) = (40u32, 30u32);
-        let photo = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 6) as u8, (y * 8) as u8, 90])));
+        let photo = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 90, 255]));
         let subject = Arc::new(RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 90, if x > 10 { 255 } else { 40 }])));
         let tensor = |scale: EdgeScale| {
             let (height, width) = res.dims(scale);
@@ -2382,7 +2293,7 @@ mod tests {
             let process = if subject_mode {
                 prunr_core::compose_subject_outline(&res, &subject, &edge, None)
             } else {
-                prunr_core::compose_whole_photo(&res, &photo, &edge, None)
+                prunr_core::compose_whole_photo(&res, &image::DynamicImage::ImageRgba8(photo.clone()), &edge, None)
             };
             assert!(preview.as_raw() == process.as_raw(), "{mode:?} {style:?} {compose:?}: preview differs from Process");
         }

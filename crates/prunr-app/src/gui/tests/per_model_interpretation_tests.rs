@@ -596,7 +596,7 @@ fn a_recut_landing_off_screen_keeps_the_image_parked() {
     let item = &mut app.batch.items[0];
     assert!(item.result_rgba.is_none(), "parked");
     assert!(!item.result_tex_pending, "no texture for an image off screen");
-    assert!(item.volatile_seg_tensor.is_none() && item.source_dyn.is_none(), "working copies released");
+    assert!(item.volatile_seg_tensor.is_none() && item.start_photo.is_none(), "working copies released");
     item.unpark_result();
     assert!(item.result_rgba.as_ref().is_some_and(|r| **r == px(9)), "the re-cut is what comes back");
 }

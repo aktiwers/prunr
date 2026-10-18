@@ -1375,7 +1375,7 @@ mod faces_tests {
     fn a_blend_change_reblends() {
         let (mut app, _) = app_with_faces_on();
         crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], crate::gui::item::BatchStatus::Done);
-        let faced = Arc::new(image::DynamicImage::new_rgba8(8, 8));
+        let faced = Arc::new(image::RgbaImage::new(8, 8));
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         app.batch.items[0].faced_photo = Some((faced, key));
         app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
@@ -1417,7 +1417,7 @@ mod faces_tests {
         let key = crate::gui::live_preview::FacedKey { faces: Arc::default(), blend: Default::default() };
         let item = &mut app.batch.items[0];
         item.found_faces = Some(found);
-        item.faced_photo = Some((Arc::new(image::DynamicImage::new_rgba8(8, 8)), key));
+        item.faced_photo = Some((Arc::new(image::RgbaImage::new(8, 8)), key));
         app.batch.select_item(1);
         app.evict_background_item_caches(1);
         assert!(app.batch.items[0].faced_photo.is_none());
@@ -1679,7 +1679,7 @@ mod timeline_contract_tests {
         let style = app.selection_style();
         let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::UpscaleTier2, app.settings.model.role(), style, app.settings.brush.cutout_action);
         assert!(inputs.is_ok_and(|i| i.upscale.is_some()), "dispatched from the kept run");
-        assert!(app.batch.items[0].source_dyn.is_none() && app.batch.items[0].start_dyn_cache.is_none(), "without decoding or copying the photo");
+        assert!(app.batch.items[0].source_rgba.is_none() && app.batch.items[0].start_photo.is_none(), "without decoding the photo");
     }
 
     /// A model without brushes loads none of Magic Brush: switching to an
