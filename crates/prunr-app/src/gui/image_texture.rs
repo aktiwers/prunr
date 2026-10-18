@@ -163,19 +163,19 @@ pub(crate) struct PreparedImage {
 }
 
 impl PreparedImage {
+    /// Each tile's pixels converted straight from the image's rows, the
+    /// tiles in parallel.
     pub(crate) fn from_rgba(rgba: &image::RgbaImage) -> Self {
+        use rayon::prelude::*;
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         let raw = rgba.as_raw();
+        let color = |p: &[u8]| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
         Self::cut(w, h, |[x0, y0], [gw, gh]| {
-            if (gw, gh) == (w, h) {
-                return egui::ColorImage::from_rgba_unmultiplied([w, h], raw);
-            }
-            let mut pixels = Vec::with_capacity(gw * gh * 4);
-            for row in y0..y0 + gh {
-                let start = (row * w + x0) * 4;
-                pixels.extend_from_slice(&raw[start..start + gw * 4]);
-            }
-            egui::ColorImage::from_rgba_unmultiplied([gw, gh], &pixels)
+            let pixels = (y0..y0 + gh)
+                .into_par_iter()
+                .flat_map_iter(|row| raw[(row * w + x0) * 4..][..gw * 4].chunks_exact(4).map(color))
+                .collect();
+            egui::ColorImage::new([gw, gh], pixels)
         })
     }
 
@@ -198,7 +198,7 @@ impl PreparedImage {
 
     /// Cut a `w`×`h` image into tiles; `texture(origin, size)` makes the
     /// pixels of the texture starting at `origin`.
-    fn cut(w: usize, h: usize, texture: impl Fn([usize; 2], [usize; 2]) -> egui::ColorImage) -> Self {
+    fn cut(w: usize, h: usize, texture: impl Fn([usize; 2], [usize; 2]) -> egui::ColorImage + Sync) -> Self {
         let mut tiles = Vec::new();
         // An image that fits one texture is one tile, without overlap.
         let step = |len: usize| if len <= TILE_SIDE { TILE_SIDE } else { TILE_STEP };
@@ -317,6 +317,22 @@ impl<T> Uploads<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tiles converted straight from the image's rows hold the very pixels
+    /// the copy-then-convert tiles held.
+    #[test]
+    fn tiles_convert_straight_from_the_rows() {
+        let rgba = image::RgbaImage::from_fn((2 * TILE_STEP + 7) as u32, 5, |x, y| image::Rgba([x as u8, y as u8, (x ^ y) as u8, (x % 256) as u8]));
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        let raw = rgba.as_raw();
+        let copied = PreparedImage::cut(w, h, |[x0, y0], [gw, gh]| {
+            let rows: Vec<u8> = (y0..y0 + gh).flat_map(|row| raw[(row * w + x0) * 4..][..gw * 4].iter().copied()).collect();
+            egui::ColorImage::from_rgba_unmultiplied([gw, gh], &rows)
+        });
+        let direct = PreparedImage::from_rgba(&rgba);
+        assert_eq!(direct.tiles.len(), 3);
+        assert!(copied.tiles.iter().zip(&direct.tiles).all(|(a, b)| a.texture.size == b.texture.size && a.texture.pixels == b.texture.pixels));
+    }
 
     /// A large image is cut into tiles that cover it exactly, each within
     /// the tile side; a small one is one tile.
