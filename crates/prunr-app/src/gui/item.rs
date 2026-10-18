@@ -289,19 +289,16 @@ impl Thumbnail {
     }
 }
 
-/// The error an image shows when its file cannot be read: one moved or
-/// deleted since it was opened says so.
+const FILE_GONE: &str = "The file was moved or deleted since it was opened. Open it again.";
+const FILE_CHANGED: &str = "The file changed since it was opened. Open it again to use the new version.";
+
+/// The error an image shows when its file cannot be read.
 pub(crate) fn source_unreadable(err: std::io::Error) -> String {
     if err.kind() == std::io::ErrorKind::NotFound {
-        "The file was moved or deleted since it was opened. Open it again.".to_string()
+        FILE_GONE.to_string()
     } else {
-        load_failed(err)
+        format!("Failed to load: {err}")
     }
-}
-
-/// The error an image shows when its source can't be read.
-pub(crate) fn load_failed(e: impl std::fmt::Display) -> String {
-    format!("Failed to load: {e}")
 }
 
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
@@ -1740,7 +1737,7 @@ impl BatchItem {
             if rgba.dimensions() == self.dimensions {
                 Ok(rgba)
             } else {
-                Err("The file changed since it was opened. Open it again to use the new version.".to_string())
+                Err(FILE_CHANGED.to_string())
             }
         });
         match result {
@@ -2008,33 +2005,23 @@ impl BatchItem {
 
     /// Step back one state; returns what the undone step did.
     pub(crate) fn undo_step(&mut self) -> Result<StepKind, StepRefused> {
-        let undone = self.timeline.undo().ok_or(StepRefused::Nothing)?;
-        if !self.shown_state_readable() {
-            self.timeline.redo();
-            return Err(StepRefused::Lost);
-        }
-        self.restore();
-        self.warm_neighbour_steps();
-        Ok(undone)
+        self.step(Timeline::previous, Timeline::undo)
     }
 
     /// Step forward one state; returns what the redone step did.
     pub(crate) fn redo_step(&mut self) -> Result<StepKind, StepRefused> {
-        let redone = self.timeline.redo().ok_or(StepRefused::Nothing)?;
-        if !self.shown_state_readable() {
-            self.timeline.undo();
-            return Err(StepRefused::Lost);
-        }
-        self.restore();
-        self.warm_neighbour_steps();
-        Ok(redone)
+        self.step(Timeline::next, Timeline::redo)
     }
 
-    /// The shown state's selection and edits read back: one kept on disk
-    /// and since removed (a cache cleaner) does not.
-    fn shown_state_readable(&self) -> bool {
-        let shown = self.timeline.current();
-        shown.selection.as_ref().is_none_or(|s| s.load().is_some()) && shown.edits.as_ref().is_none_or(|e| e.load().is_some())
+    /// Move to the step `target` names, unless its saved state is gone.
+    fn step(&mut self, target: fn(&Timeline) -> Option<&DocState>, moved: fn(&mut Timeline) -> Option<StepKind>) -> Result<StepKind, StepRefused> {
+        if !target(&self.timeline).ok_or(StepRefused::Nothing)?.readable() {
+            return Err(StepRefused::Lost);
+        }
+        let kind = moved(&mut self.timeline).ok_or(StepRefused::Nothing)?;
+        self.restore();
+        self.warm_neighbour_steps();
+        Ok(kind)
     }
 
     /// Note a run starting now; `step` is the step its result records,

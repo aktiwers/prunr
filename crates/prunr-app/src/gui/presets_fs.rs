@@ -125,9 +125,9 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
 /// deserialize directly.
 ///
 /// Called once at startup from `Settings::load`, before the first frame.
-pub(crate) fn load_all() -> HashMap<String, PresetFile> {
-    let Some(dir) = presets_dir() else { return HashMap::new() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
+pub(crate) fn load_all() -> (HashMap<String, PresetFile>, HashSet<String>) {
+    let Some(dir) = presets_dir() else { return Default::default() };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Default::default() };
 
     let paths: Vec<PathBuf> = entries
         .flatten()
@@ -158,8 +158,7 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
             Err(Skipped::Unreadable) => {}
         }
     }
-    let _ = NEWER_PRESETS.set(newer);
-    presets
+    (presets, newer)
 }
 
 /// Why a preset file was left out.
@@ -170,24 +169,17 @@ enum Skipped {
     Unreadable,
 }
 
-/// Names (lowercased) of the presets a newer Prunr saved: shown nowhere,
-/// and never written over, so that version keeps them.
-static NEWER_PRESETS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
-
-/// Why a preset cannot be saved under `name`, when it cannot.
-pub(crate) fn name_refusal(name: &str) -> Option<&'static str> {
-    refusal_among(name, NEWER_PRESETS.get())
-}
-
-fn refusal_among(name: &str, newer: Option<&HashSet<String>>) -> Option<&'static str> {
-    if name.trim().eq_ignore_ascii_case(PRUNR_PRESET) {
-        return Some("\"Prunr\" is reserved — pick another name.");
+/// Why a preset cannot be saved under `name`, when it cannot: "Prunr" is
+/// reserved, and a name in `newer` (a newer Prunr's preset) is kept for it.
+pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>) -> Option<&'static str> {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case(PRUNR_PRESET) {
+        return Some(RESERVED_NAME);
     }
-    let lower = name.trim().to_lowercase();
-    newer
-        .is_some_and(|newer| newer.contains(&lower))
-        .then_some("A newer version of Prunr saved a preset with this name — pick another.")
+    newer.contains(&name.to_lowercase()).then_some("A newer version of Prunr saved a preset with this name — pick another.")
 }
+
+const RESERVED_NAME: &str = "\"Prunr\" is reserved — pick another name.";
 
 /// Parse a `serde_json::Value` into a `PresetFile`. v2 (has
 /// `format_version: 2`) deserializes directly; one with no version is
@@ -205,10 +197,14 @@ fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skippe
 /// Load a single preset file from disk, or why it was left out:
 /// unreadable, malformed, matching neither format, or a newer Prunr's.
 fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
-    let data = std::fs::read(path)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).map_err(|()| Skipped::Unreadable)?;
-    let value: serde_json::Value = serde_json::from_slice(&data)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).map_err(|()| Skipped::Unreadable)?;
+    let data = std::fs::read(path).map_err(|e| {
+        tracing::warn!(?path, %e, "skipping unreadable preset");
+        Skipped::Unreadable
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&data).map_err(|e| {
+        tracing::warn!(?path, %e, "skipping malformed-JSON preset");
+        Skipped::Unreadable
+    })?;
     parse_preset_value(value).inspect_err(|skipped| match skipped {
         Skipped::Newer => tracing::warn!(?path, "skipping a preset a newer Prunr saved; it is kept as it is"),
         Skipped::Unreadable => tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)"),
@@ -221,10 +217,10 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     write_preset(&writable_path(name)?, values)
 }
 
-/// `preset_path` for a name a preset may be saved under (`name_refusal`).
+/// `preset_path` for any name but the reserved "Prunr".
 fn writable_path(name: &str) -> std::io::Result<PathBuf> {
-    if let Some(why) = name_refusal(name) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    if name.trim().eq_ignore_ascii_case(PRUNR_PRESET) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, RESERVED_NAME));
     }
     preset_path(name).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable"))
 }
@@ -422,10 +418,10 @@ mod tests {
         std::fs::write(&path, r#"{ "format_version": 3, "models": {}, "something_new": true }"#).unwrap();
         assert_eq!(read_preset(&path).unwrap_err(), Skipped::Newer);
         let newer: HashSet<String> = ["future".to_string()].into();
-        assert!(refusal_among("Future", Some(&newer)).is_some(), "its name is refused, any case");
-        assert!(refusal_among(" future ", Some(&newer)).is_some());
-        assert_eq!(refusal_among("Other", Some(&newer)), None);
-        assert!(refusal_among("prunr", None).is_some(), "Prunr stays reserved");
+        assert!(name_refusal("Future", &newer).is_some(), "its name is refused, any case");
+        assert!(name_refusal(" future ", &newer).is_some());
+        assert_eq!(name_refusal("Other", &newer), None);
+        assert!(name_refusal("prunr", &HashSet::new()).is_some(), "Prunr stays reserved");
     }
 
     #[test]

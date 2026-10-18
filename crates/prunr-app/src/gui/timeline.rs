@@ -260,6 +260,15 @@ impl<T: Payload> Stored<T> {
         }
     }
 
+    /// It can be read back: all but one kept on disk whose file was
+    /// removed under the app (a cache cleaner). No decode.
+    pub(crate) fn is_readable(&self) -> bool {
+        match &*self.lock() {
+            Tier::OnDisk(p) => p.is_file(),
+            _ => true,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn disk_path(&self) -> Option<PathBuf> {
         match &*self.lock() {
@@ -270,7 +279,7 @@ impl<T: Payload> Stored<T> {
 
     #[cfg(test)]
     pub(crate) fn is_on_disk(&self) -> bool {
-        matches!(&*self.lock(), Tier::OnDisk(_))
+        self.disk_path().is_some()
     }
 
     #[cfg(test)]
@@ -357,6 +366,13 @@ pub(crate) struct RunStart {
 }
 
 impl DocState {
+    /// Every stored part of the step can be read back.
+    pub(crate) fn readable(&self) -> bool {
+        let start = self.origin.as_ref().and_then(|o| o.start.as_ref()).map(|s| &s.image);
+        self.result.iter().chain(start).all(|s| s.is_readable())
+            && self.selection.iter().chain(self.edits.as_ref()).all(|s| s.is_readable())
+    }
+
     /// The image as imported: no result, no selection.
     pub(crate) fn original(settings: ItemSettings, applied_preset: String) -> Self {
         Self {
