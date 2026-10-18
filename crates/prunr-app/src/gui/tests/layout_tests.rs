@@ -153,6 +153,7 @@ fn the_toolbar_layout_settles_at_every_width() {
 /// a control past the canvas (under the sidebar), two overlapping, or a
 /// layout that does not settle.
 fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
+    crate::gui::automation::record::turn_on();
     let mut harness = with_a_done_image(width, model);
     settle(&mut harness);
     let title = match tool {
@@ -178,10 +179,21 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
     let all = controls(&harness, |_| true);
     let rect_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, r)| *r);
     let canvas_right = rect_of("Select all")?[0];
-    let strip_top = rect_of(&format!("More {title} settings"))?[1] - 60.0;
+    let more = rect_of(&format!("More {title} settings"))?;
+    // The strip's last control: one starting past the sidebar's edge is
+    // left out of the scan below, so it is checked on its own.
+    if more[2] > canvas_right {
+        return Some(format!("its '...' ends at {} under the sidebar at {canvas_right}", more[2]));
+    }
+    let strip_top = more[1] - 60.0;
     let strip = controls(&harness, |r| r[1] >= TOOLBAR_BOTTOM && r[1] >= strip_top && r[3] <= strip_top + 200.0 && r[0] < canvas_right);
     if let Some((name, r)) = strip.iter().find(|(_, r)| r[2] > canvas_right) {
         return Some(format!("{name:?} ends at {} under the sidebar at {canvas_right}", r[2]));
+    }
+    // A label wider than the room its row was given: the row overflowed
+    // even where no control's rect shows it.
+    if let Some(clip) = crate::gui::automation::record::last(&harness.ctx).1.first() {
+        return Some(format!("clipped: {clip:?}"));
     }
     first_overlap(&strip).map(|v| v.detail)
 }

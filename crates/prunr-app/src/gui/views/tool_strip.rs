@@ -63,13 +63,14 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
             let available = (canvas_rect.width() - 2.0 * TOP_INSET).max(0.0);
             ui.set_max_width(available);
             // The width the strip takes in one row, measured last frame:
-            // past the room, the region knobs go on a second row. Measured
-            // in both layouts alike, so the choice settles.
+            // past the room, the knobs after Size go on a second row.
+            // Measured in both layouts alike, so the choice settles.
             let fit_id = fit_id(tool);
             let one_row = ui.ctx().data(|d| d.get_temp::<f32>(fit_id));
             let frame_margin = theme::pill_frame().total_margin().sum().x;
             let two_rows = one_row.is_some_and(|w| w + frame_margin > available);
             let fill_knobs = shows(facts.model, Surface::FillRegionKnobs);
+            let has_second = fill_knobs || (tool == Tool::Paint && shows(facts.model, Surface::SelectionStrokes));
             let mut dots = None;
             let framed = theme::pill_frame().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
@@ -81,8 +82,8 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         Tool::Paint => paint_knobs(ui, brush, facts.model),
                         Tool::Magic => magic_knobs(ui, brush, facts.model),
                     };
-                    if fill_knobs && !two_rows {
-                        change.committed |= region_knobs(ui, brush);
+                    if !two_rows {
+                        change.committed |= second_knobs(ui, tool, brush, facts.model, fill_knobs);
                     }
                     ui.separator();
                     dots = Some(chip::tooltip(
@@ -101,10 +102,10 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         strip.try_another = chip::tooltip(resp, "Try another", "Generate this fill again with a new seed. Undo brings the previous one back.", None).clicked();
                     }
                 }).response.rect.width();
-                if !(fill_knobs && two_rows) {
+                if !(has_second && two_rows) {
                     return first;
                 }
-                let second = ui.horizontal(|ui| region_knobs(ui, brush));
+                let second = ui.horizontal(|ui| second_knobs(ui, tool, brush, facts.model, fill_knobs));
                 change.committed |= second.inner;
                 first + ui.spacing().item_spacing.x + second.response.rect.width()
             });
@@ -143,10 +144,19 @@ fn paint_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool
     if shows(model, Surface::SelectionStrokes) {
         committed |= brush_chip::mode_buttons(ui, model, s);
     }
-    committed |= chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit;
-    if shows(model, Surface::SelectionStrokes) {
+    committed | chip::slider_row_f32(ui, "Size", &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit
+}
+
+/// The knobs after Size, which go on a second row when one row does not
+/// fit: the Paint Brush's stroke edge, and a filled region's reach.
+fn second_knobs(ui: &mut Ui, tool: Tool, s: &mut BrushSettings, model: SettingsModel, fill: bool) -> bool {
+    let mut committed = false;
+    if tool == Tool::Paint && shows(model, Surface::SelectionStrokes) {
         committed |= chip::slider_row_f32(ui, "Hardness", &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit;
         committed |= chip::slider_row_f32(ui, "Opacity", &mut s.strength, 0.0..=1.0, false, fmt::percent).commit;
+    }
+    if fill {
+        committed |= region_knobs(ui, s);
     }
     committed
 }
