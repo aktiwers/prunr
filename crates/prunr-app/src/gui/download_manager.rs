@@ -183,8 +183,8 @@ impl DownloadManager {
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
-            if let Some(why) = crate::hardware::free_space_at(&dir).and_then(|free| space_refusal(total, free)) {
-                let _ = tx.send(DownloadEvent::Failed { id, error: why });
+            if let Some(why) = no_room(&dir, total) {
+                let _ = tx.send(failure_event(id, why, &cancel));
                 return;
             }
             let on_progress_main = {
@@ -248,8 +248,8 @@ impl DownloadManager {
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
             let to_fetch: u64 = parts.iter().filter(|p| !bundle_dir.join(p.filename).is_file()).map(|p| p.size_bytes).sum();
-            if let Some(why) = crate::hardware::free_space_at(&bundle_dir).and_then(|free| space_refusal(to_fetch, free)) {
-                let _ = tx.send(DownloadEvent::Failed { id, error: why });
+            if let Some(why) = no_room(&bundle_dir, to_fetch) {
+                let _ = tx.send(failure_event(id, why, &cancel));
                 return;
             }
             let mut bytes_done: u64 = 0;
@@ -382,13 +382,12 @@ fn download_attempt(
     }
 
     let total = response.content_length().unwrap_or(0);
-    // A download that stops here (a full disk, a dropped connection, a
-    // cancel, a bad checksum) leaves no partial file, which on a full disk
-    // could be gigabytes keeping it full.
     finish_download(&partial, dest, fetch_into(response, &partial, total, expected_sha, cancel, on_progress, on_verifying))
 }
 
-/// A fetched file moves into place; one that failed leaves no partial.
+/// A fetched file moves into place; one that failed (a full disk, a
+/// dropped connection, a cancel, a bad checksum) leaves no partial, which
+/// on a full disk could be gigabytes keeping it full.
 fn finish_download(partial: &Path, dest: &Path, fetched: Result<(), DlError>) -> Result<(), DlError> {
     let result = fetched.and_then(|()| std::fs::rename(partial, dest).map_err(|e| DlError::fatal(format!("Could not finalize file: {e}"))));
     if result.is_err() {
@@ -440,6 +439,11 @@ fn fetch_into(
     }
 
     Ok(())
+}
+
+/// Why `needed` bytes should not be downloaded into `dir`.
+fn no_room(dir: &Path, needed: u64) -> Option<String> {
+    crate::hardware::free_space_at(dir).and_then(|free| space_refusal(needed, free))
 }
 
 /// Why a download of `needed` bytes should not start with `free` bytes
