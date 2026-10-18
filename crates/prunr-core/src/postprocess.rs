@@ -190,7 +190,7 @@ fn tensor_to_mask_core(
     let finalise = |val: f32| -> u8 {
         let mut v = val;
         if gamma != 1.0 { v = v.powf(gamma); }
-        (v * 255.0) as u8
+        crate::math::round_u8(v * 255.0)
     };
 
     if let Some(uv) = uniform_val {
@@ -583,7 +583,7 @@ pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
         60.0 * ((rf - gf) / delta + 4.0)
     };
     let h = if h < 0.0 { h + 360.0 } else { h };
-    (h as u16 % 360, (s * 255.0) as u8, (v * 255.0) as u8)
+    (h as u16 % 360, crate::math::round_u8(s * 255.0), crate::math::round_u8(v * 255.0))
 }
 
 /// Convert HSV (H 0..=359°, S / V 0..=255) to RGB (0..=255).
@@ -604,9 +604,9 @@ pub(crate) fn hsv_to_rgb(h: u16, s: u8, v: u8) -> (u8, u8, u8) {
     };
     let m = vf - c;
     (
-        ((rp + m) * 255.0) as u8,
-        ((gp + m) * 255.0) as u8,
-        ((bp + m) * 255.0) as u8,
+        crate::math::round_u8((rp + m) * 255.0),
+        crate::math::round_u8((gp + m) * 255.0),
+        crate::math::round_u8((bp + m) * 255.0),
     )
 }
 

@@ -279,7 +279,7 @@ pub fn tensor_to_edge_mask(
         .map(|&prob| {
             // Remap [lo, threshold+0.1] to [0, 1] for anti-aliased edges.
             let edge = ((prob - lo) / 0.2).clamp(0.0, 1.0);
-            (crate::math::smoothstep(edge) * 255.0) as u8
+            crate::math::round_u8(crate::math::smoothstep(edge) * 255.0)
         })
         .collect();
     let mask = image::GrayImage::from_raw(tensor_w, tensor_h, mask_buf)

@@ -111,9 +111,9 @@ pub(crate) fn lab_to_srgb(l: f32, a: f32, b_lab: f32) -> (u8, u8, u8) {
     let y = lab_f_inv(fy) * D65_Y;
     let z = lab_f_inv(fz) * D65_Z;
     let (lr, lg, lb) = xyz_to_linear_rgb(x, y, z);
-    let r = (linear_to_srgb(lr) * 255.0).clamp(0.0, 255.0) as u8;
-    let g = (linear_to_srgb(lg) * 255.0).clamp(0.0, 255.0) as u8;
-    let b = (linear_to_srgb(lb) * 255.0).clamp(0.0, 255.0) as u8;
+    let r = crate::math::round_u8(linear_to_srgb(lr) * 255.0);
+    let g = crate::math::round_u8(linear_to_srgb(lg) * 255.0);
+    let b = crate::math::round_u8(linear_to_srgb(lb) * 255.0);
     (r, g, b)
 }
 

@@ -732,7 +732,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             true,
             theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
         );
-        let alpha = (fade * 255.0) as u8;
+        let alpha = prunr_core::math::round_u8(fade * 255.0);
         if fade < 1.0 { ui.ctx().request_repaint(); }
         if let Some(item) = app.batch.selected_item() {
             // Undone back to the original: the source reveals over the cut.

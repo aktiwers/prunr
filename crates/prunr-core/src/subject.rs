@@ -98,7 +98,7 @@ pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: Mod
         .collect();
     let (lo, hi, _) = crate::math::slice_stats(&samples);
     let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
-    let coverage = samples.iter().map(|&v| (norm.apply(v) * 255.0) as u8).collect();
+    let coverage = samples.iter().map(|&v| crate::math::round_u8(norm.apply(v) * 255.0)).collect();
     SubjectHint { width: w as u32, height: h as u32, coverage }
 }
 
