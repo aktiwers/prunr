@@ -45,7 +45,7 @@ impl Header {
             ram: format!("{:.0} GB", crate::hardware::total_ram_bytes() as f64 / (1u64 << 30) as f64),
             gpus,
             runtime,
-            gpu_providers: prunr_core::engine::gpu_provider_names().into_iter().map(str::to_string).collect(),
+            gpu_providers: prunr_core::engine::gpu_provider_names(),
             input: input.to_string(),
             runs,
         }
