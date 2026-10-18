@@ -202,7 +202,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--denoise <0-1>", "Denoise before the model (default 0)");
                             opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens (default 0)");
                             opt_row(ui, "--ai-blend <0-1>", "1 keeps the model's output, 0 the plain enlargement (default 1)");
-                            opt_row(ui, "--color-match", "Match the upscale's colours to the original");
+                            opt_row(ui, "--color-match", "Match the upscale's colors to the original");
                             opt_row(ui, "--restore-faces <model>", "gfpgan or restoreformer: redraw soft faces after the upscale");
                             opt_row(ui, "--face-strength <0-100>", "Up to 50 adds detail over the photo's shading (default 50)");
                         });
@@ -221,7 +221,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--colorize", "Color a black-and-white photo with DDColor");
-                            opt_row(ui, "--color-strength <0-1.5>", "0 is grey, 1 the predicted colour (default 1)");
+                            opt_row(ui, "--color-strength <0-1.5>", "0 is black and white, 1 the model's colors (default 1)");
                         });
                     example_row(ui, toasts, "prunr --colorize old_photo.jpg",
                         "Color it, save old_photo_color.png");
@@ -232,7 +232,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--depth-map", "Also save {stem}-depth.png: 16-bit grey, white = near");
+                            opt_row(ui, "--depth-map", "Also save {stem}-depth.png: 16-bit gray, white = near");
                             opt_row(ui, "--depth-only", "With --depth-map: save only the depth maps");
                         });
                     example_row(ui, toasts, "prunr --depth-map --depth-only landscape.jpg",
