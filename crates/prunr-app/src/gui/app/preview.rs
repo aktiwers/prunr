@@ -103,9 +103,8 @@ impl PrunrApp {
 
         // Dispatch phase: tick() invokes the closure for each item whose
         // debounce expired this frame. The closure borrows `batch.items`
-        // mutably so `build_preview_inputs` can lazily cache an
-        // `Arc<DynamicImage>` on the item (built once, reused across every
-        // subsequent dispatch of the drag session — see `source_dyn`).
+        // mutably so `build_preview_inputs` can hold the run's start on
+        // the item for the drag session.
         let role = self.settings.model.role();
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
@@ -150,10 +149,7 @@ impl PrunrApp {
     /// decompressed tensors + settings + reusable edge mask if its
     /// line_strength still matches. Returns `None` to abort the dispatch
     /// when a required tensor cache isn't available (user must Process first).
-    ///
-    /// Lazily builds (and then reuses) `item.source_dyn` — the first dispatch
-    /// of a drag session pays the ~15ms / 48 MB clone to wrap `source_rgba`
-    /// in a `DynamicImage`, every subsequent dispatch is just an `Arc::clone`.
+    /// The photo goes over as its `Arc`: no copy.
     pub(crate) fn build_preview_inputs(
         item: &mut BatchItem,
         kind: PreviewKind,
@@ -180,7 +176,7 @@ impl PrunrApp {
                 upscale_tier2_knobs: Some(knobs),
                 faces: item.faces_input(crate::gui::item::FaceStage::Upscale),
                 // `original` is unread by a Refine preview, which re-finishes the kept run.
-                ..DispatchInputs::new(kind, version, Arc::new(image::DynamicImage::new_rgba8(0, 0)), item.settings)
+                ..DispatchInputs::new(kind, version, Arc::new(image::RgbaImage::new(0, 0)), item.settings)
             });
         }
         if matches!(kind, PreviewKind::ColorizeTier2) {
@@ -189,7 +185,7 @@ impl PrunrApp {
             // `original` is unread: Strength re-renders the kept run.
             return Ok(DispatchInputs {
                 colorize: Some(colorize),
-                ..DispatchInputs::new(kind, version, Arc::new(image::DynamicImage::new_rgba8(0, 0)), item.settings)
+                ..DispatchInputs::new(kind, version, Arc::new(image::RgbaImage::new(0, 0)), item.settings)
             });
         }
         need(Need::PhotoRender)?;
@@ -214,33 +210,25 @@ impl PrunrApp {
         // A run on top of an earlier result (an erase, a hand edit) keeps
         // it: the preview starts where Process would, the shown step's own
         // start when it redoes that step.
-        // The photo as a DynamicImage, kept on the item once a render has
-        // made it; until then the render's thread unpacks and wraps it.
+        // The run's start when stored packed is read back on the render's
+        // thread; held on the item while previews start from it, so it is
+        // not packed away between ticks.
         let start = item.run_start(Engine::Segment);
-        let unwrapped = || Arc::new(image::DynamicImage::new_rgba8(0, 0));
         let (original, original_from) = match start.as_ref() {
-            Some(s) => {
-                let kept = s.image.loaded().and_then(|rgba| item.start_dyn_cache.as_ref()
-                    .filter(|(src, _)| Arc::ptr_eq(&rgba, src))
-                    .map(|(_, wrapped)| Arc::clone(wrapped)));
-                match kept {
-                    Some(wrapped) => (wrapped, None),
-                    None => (unwrapped(), Some(OriginalFrom::Start(Arc::clone(&s.image), s.dims))),
+            Some(s) => match s.image.loaded() {
+                Some(rgba) => {
+                    item.start_photo = Some(Arc::clone(&rgba));
+                    (rgba, None)
                 }
-            }
+                None => (Arc::new(image::RgbaImage::new(0, 0)), Some(OriginalFrom { image: Arc::clone(&s.image), dims: s.dims })),
+            },
             None => {
-                item.start_dyn_cache = None;
-                match &item.source_dyn {
-                    Some(wrapped) => (Arc::clone(wrapped), None),
-                    None => {
-                        let undecoded = match facts.photo {
-                            crate::gui::capability::Photo::Unreadable => Verdict::Never(Reason::Unreadable),
-                            _ => Verdict::Wait(Reason::Decoding),
-                        };
-                        let rgba = item.source_rgba.as_ref().ok_or(undecoded)?;
-                        (unwrapped(), Some(OriginalFrom::Photo(Arc::clone(rgba))))
-                    }
-                }
+                item.start_photo = None;
+                let undecoded = match facts.photo {
+                    crate::gui::capability::Photo::Unreadable => Verdict::Never(Reason::Unreadable),
+                    _ => Verdict::Wait(Reason::Decoding),
+                };
+                (Arc::clone(item.source_rgba.as_ref().ok_or(undecoded)?), None)
             }
         };
         // The line scales the render reads: the active one (hot from the
@@ -309,7 +297,7 @@ impl PrunrApp {
     /// from the same photo (the faced one, when faces go in first).
     fn depth_input(
         item: &BatchItem,
-        original: &Arc<image::DynamicImage>,
+        original: &Arc<image::RgbaImage>,
         faces: Option<&crate::gui::live_preview::FacesInput>,
         is_filter_only: bool,
     ) -> Option<crate::gui::live_preview::DepthInput> {
@@ -351,8 +339,8 @@ impl PrunrApp {
                     // Computed for a state the item has since left.
                     continue;
                 }
-                if let Some(built) = r.new_original.clone() {
-                    item.keep_built_original(built);
+                if let Some(start) = r.new_start.clone() {
+                    item.keep_loaded_start(start);
                 }
                 if let Some(built) = r.new_correction.clone() {
                     item.keep_built_correction(built);
@@ -460,8 +448,7 @@ impl PrunrApp {
                     item.quick.clear();
                     item.result_tex_pending = false;
                     item.drop_hot_tensors();
-                    item.source_dyn = None;
-                    item.start_dyn_cache = None;
+                    item.start_photo = None;
                     item.park_result();
                 }
                 (item.id, item.source.clone(), r.is_final, new_rgba)

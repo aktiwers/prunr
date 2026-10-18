@@ -36,8 +36,8 @@ impl<'a> PostprocessOpts<'a> {
 /// Postprocess raw ONNX model output into a transparent RGBA image.
 /// Allocates the RGBA buffer once and reuses it for guided filter (if enabled)
 /// and final mask application — avoids two 4×width×height allocations.
-pub fn postprocess(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> RgbaImage {
-    let mut rgba = original.to_rgba8();
+pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba, opts: &PostprocessOpts<'_>) -> RgbaImage {
+    let mut rgba = original.as_rgba().into_owned();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     apply_mask_inplace(&mut rgba, &mask);
     apply_subject_effect(&mut rgba, opts.mask_settings.effect);
@@ -51,7 +51,7 @@ pub fn postprocess_from_flat(
     tensor: &[f32],
     tensor_h: usize,
     tensor_w: usize,
-    original: &DynamicImage,
+    original: &impl crate::formats::AsRgba,
     opts: &PostprocessOpts<'_>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
     let view = flat_view(tensor, tensor_h, tensor_w)?;

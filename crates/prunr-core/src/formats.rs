@@ -515,6 +515,24 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
     img.as_rgba8().map_or_else(|| std::borrow::Cow::Owned(img.to_rgba8()), std::borrow::Cow::Borrowed)
 }
 
+/// A photo the pipeline reads as straight RGBA: a decoded image in any
+/// layout (converted when it is not RGBA), or RGBA already (borrowed).
+pub trait AsRgba {
+    fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage>;
+}
+
+impl AsRgba for DynamicImage {
+    fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage> {
+        rgba_view(self)
+    }
+}
+
+impl AsRgba for RgbaImage {
+    fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage> {
+        std::borrow::Cow::Borrowed(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

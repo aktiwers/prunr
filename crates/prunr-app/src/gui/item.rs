@@ -621,8 +621,6 @@ pub(crate) enum Pixels {
     Resident(Arc<image::RgbaImage>),
     /// A step's image in the timeline, compressed while off screen.
     Parked(super::timeline::StoredImage),
-    /// The photo, decoded into a `DynamicImage` only.
-    Wrapped(Arc<image::DynamicImage>),
     /// The photo, not decoded.
     Source(ImageSource),
 }
@@ -637,7 +635,6 @@ impl Pixels {
         match self {
             Self::Resident(rgba) => Ok(Arc::clone(rgba)),
             Self::Parked(stored) => stored.load().ok_or_else(|| "a stored image could not be read".to_string()),
-            Self::Wrapped(dynamic) => Ok(Arc::new(dynamic.to_rgba8())),
             Self::Source(source) => source.decode_rgba(),
         }
     }
@@ -674,7 +671,7 @@ impl ExportImage {
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
         let Some(faces) = &self.faces else { return self.pixels.load() };
         if let Some(faced) = &faces.faced {
-            return Some(Arc::new(faced.to_rgba8()));
+            return Some(Arc::clone(faced));
         }
         let photo = self.pixels.load()?;
         let photo = Arc::try_unwrap(photo).unwrap_or_else(|shared| (*shared).clone());
@@ -841,21 +838,13 @@ pub(crate) struct BatchItem {
     pub(crate) dimensions: (u32, u32),
     /// Pre-decoded source RGBA (decoded on background thread for instant switching)
     pub(crate) source_rgba: Option<Arc<image::RgbaImage>>,
-    /// Same pixels as `source_rgba`, pre-wrapped in `DynamicImage::ImageRgba8`
-    /// and shared via `Arc`. Built lazily by `build_preview_inputs` on the
-    /// first live-preview dispatch for this item and reused for every
-    /// subsequent dispatch in the session, so each drag-tweak avoids a ~15ms,
-    /// ~48MB memcpy clone. Cleared whenever `source_rgba` is re-populated
-    /// (re-decode) so the cache can't go stale.
-    pub(crate) source_dyn: Option<Arc<image::DynamicImage>>,
     pub(crate) source_texture: Option<super::image_texture::ImageTexture>,
     pub(crate) thumb: Thumbnail,
     pub(crate) result_rgba: Option<Arc<image::RgbaImage>>,
-    /// `source_dyn` for a live preview that starts from an earlier result:
-    /// a `DynamicImage` wrapping that start, so drag ticks don't re-clone
-    /// the full RGBA buffer. Keyed by the start's Arc (`Arc::ptr_eq`), so a
-    /// new start misses; cleared when previews start from the source.
-    pub(crate) start_dyn_cache: Option<(Arc<image::RgbaImage>, Arc<image::DynamicImage>)>,
+    /// The run's start, read back, held while live previews start from
+    /// it so it is not packed away again between drag ticks; cleared when
+    /// they start from the photo.
+    pub(crate) start_photo: Option<Arc<image::RgbaImage>>,
     pub(crate) result_texture: Option<super::image_texture::ImageTexture>,
     /// A drag's newest quick frame, shown in place of the result until
     /// the full-size render lands; never the result itself.
@@ -895,7 +884,7 @@ pub(crate) struct BatchItem {
     /// The photo with the found faces blended in, as a preview built it,
     /// so other knobs' previews reuse it. One image of RAM while Restore
     /// faces is on.
-    pub(crate) faced_photo: Option<(Arc<image::DynamicImage>, super::live_preview::FacedKey)>,
+    pub(crate) faced_photo: Option<(Arc<image::RgbaImage>, super::live_preview::FacedKey)>,
     /// True while a background thread is decoding source bytes to RGBA.
     pub(crate) decode_pending: bool,
     /// The source could not be decoded; no decode is asked for again.
@@ -1013,7 +1002,7 @@ pub(crate) struct BatchItem {
     /// The previewed photo with the Depth chip's look on it, and what it
     /// was made from, so a line or effect tweak does not blur again. One
     /// image of RAM while the look is on; dropped off screen.
-    pub(crate) depth_photo: Option<(Arc<image::DynamicImage>, DepthPhotoKey)>,
+    pub(crate) depth_photo: Option<(Arc<image::RgbaImage>, DepthPhotoKey)>,
     /// The image shrunk for a drag's quick frames (the photo, or a kept
     /// upscale or colorize run's), so each frame does not shrink it
     /// again. About 11 MB; dropped off screen.
@@ -1033,7 +1022,7 @@ pub(crate) struct DepthRun {
 /// What a depth-looked photo was made from.
 #[derive(Clone)]
 pub(crate) struct DepthPhotoKey {
-    pub(crate) base: Arc<image::DynamicImage>,
+    pub(crate) base: Arc<image::RgbaImage>,
     pub(crate) depth: Arc<prunr_core::depth::DepthMap>,
     pub(crate) look: prunr_core::depth::DepthLook,
 }
@@ -1593,17 +1582,11 @@ impl BatchItem {
         paint_tile(&mut preview.texture, ctx, &format!("face-preview-{}", self.id), tile, image);
     }
 
-    /// Keep the `DynamicImage` a render made of this image's photo, while
-    /// it is still that photo: the start a run redoes from, or the decoded
-    /// source.
-    pub(crate) fn keep_built_original(&mut self, built: super::live_preview::BuiltOriginal) {
-        if built.start {
-            let still_start = self.run_start(Engine::Segment).is_some_and(|s| s.image.holds(&built.rgba));
-            if still_start {
-                self.start_dyn_cache = Some((built.rgba, built.wrapped));
-            }
-        } else if self.source_rgba.as_ref().is_some_and(|src| Arc::ptr_eq(src, &built.rgba)) {
-            self.source_dyn = Some(built.wrapped);
+    /// Hold the start a render read back, while it is still the start a
+    /// run redoes from.
+    pub(crate) fn keep_loaded_start(&mut self, start: Arc<image::RgbaImage>) {
+        if self.run_start(Engine::Segment).is_some_and(|s| s.image.holds(&start)) {
+            self.start_photo = Some(start);
         }
     }
 
@@ -1782,9 +1765,6 @@ impl BatchItem {
                 // was made from it (depth, selection, embedding) stays.
                 // Only a photo replaced by another invalidates it.
                 let replaced = self.source_rgba.replace(Arc::clone(&rgba)).is_some_and(|old| !Arc::ptr_eq(&old, &rgba));
-                // Live-preview DynamicImage cache is built from source_rgba;
-                // invalidate so the next dispatch rebuilds against the new one.
-                self.source_dyn = None;
                 if replaced {
                     self.invalidate_source_derived();
                 }
@@ -2703,11 +2683,7 @@ impl BatchItem {
 
     /// The photo, however far it is decoded.
     pub(crate) fn photo_pixels(&self) -> Pixels {
-        match (&self.source_rgba, &self.source_dyn) {
-            (Some(rgba), _) => Pixels::Resident(Arc::clone(rgba)),
-            (None, Some(dynamic)) => Pixels::Wrapped(Arc::clone(dynamic)),
-            (None, None) => Pixels::Source(self.source.clone()),
-        }
+        self.source_rgba.clone().map_or_else(|| Pixels::Source(self.source.clone()), Pixels::Resident)
     }
 
     /// The shown state has a result that the working copy has released.
@@ -2802,11 +2778,10 @@ impl BatchItem {
             source_len,
             dimensions,
             source_rgba: None,
-            source_dyn: None,
             source_texture: None,
             thumb: Thumbnail::default(),
             result_rgba: None,
-            start_dyn_cache: None,
+            start_photo: None,
             result_texture: None,
             quick: Default::default(),
             photo_look: None,
@@ -3487,9 +3462,8 @@ mod tests {
         let mut item = fixture_item(1);
         item.dimensions = (2, 2);
         item.decode_pending = true;
-        item.source_dyn = Some(Arc::new(image::DynamicImage::new_rgba8(1, 1)));
         assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(2, 2)))));
-        assert!(item.source_rgba.is_some() && item.source_dyn.is_none() && !item.decode_pending);
+        assert!(item.source_rgba.is_some() && !item.decode_pending);
         assert!(!item.land_decode(Err("bad file".into())));
         assert_eq!(item.status(), BatchStatus::Error("bad file".into()));
     }
