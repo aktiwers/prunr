@@ -308,9 +308,12 @@ impl PrunrApp {
         for event in events {
             use crate::gui::download_manager::DownloadEvent;
             match event {
-                DownloadEvent::Complete { id } => {
+                DownloadEvent::Complete { id, note } => {
                     let name = prunr_models::display_name(id);
                     self.toasts.success(format!("{name} ready"));
+                    if let Some(note) = note {
+                        self.toasts.info(note);
+                    }
                     self.refresh_install_cache();
                 }
                 DownloadEvent::Failed { id, error } => {
