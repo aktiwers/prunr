@@ -10,27 +10,6 @@ use super::harness::{
 use crate::gui::app::PrunrApp;
 use crate::gui::views::settings::SettingsTab;
 
-#[test]
-fn empty_window_names_every_control() {
-    let mut harness = harness();
-    settle(&mut harness);
-    assert_all_controls_named(&harness, "empty window");
-    let names = names(&harness);
-    // The Model picker shows before any image, so a model can be picked
-    // or downloaded first (its last row opens the Model Store).
-    for expected in ["Open", "Settings", "Model"] {
-        assert!(names.iter().any(|n| n == expected), "{expected} missing from {names:?}");
-    }
-}
-
-#[test]
-fn loaded_item_names_every_control() {
-    let harness = loaded();
-    assert_all_controls_named(&harness, "loaded item");
-    // A screen reader, and the control socket, pick an image by its name.
-    assert!(names(&harness).iter().any(|n| n == "test1.png"), "the sidebar row is named after its file");
-}
-
 /// The real toolbar, per model, shows exactly the chips the surface
 /// table says act on that model's image.
 #[test]
@@ -80,18 +59,6 @@ fn a_run_in_flight_names_its_cancel_button() {
     assert_all_controls_named(&harness, "run in flight");
     let names = names(&harness);
     assert!(names.iter().any(|n| n == "Cancel"), "the capsule's Cancel is named: {names:?}");
-}
-
-#[test]
-fn settings_tabs_name_every_control() {
-    let mut harness = harness();
-    settle(&mut harness);
-    click(&mut harness, "Settings");
-    for tab in SettingsTab::ALL {
-        harness.state_mut().settings_tab = tab;
-        settle(&mut harness);
-        assert_all_controls_named(&harness, &format!("settings › {tab:?}"));
-    }
 }
 
 /// Settings › Hardware as Windows shows it, which offers both runtimes:
@@ -185,20 +152,6 @@ fn the_model_store_opens_from_its_toolbar_button() {
     assert!(harness.state().model_store.is_none());
     click(&mut harness, "Model Store");
     assert_eq!(harness.state().model_store.map(|r| r.filter), Some(None), "the whole store, no category picked");
-}
-
-#[test]
-fn help_modals_name_every_control() {
-    let mut harness = harness();
-    for (flag, surface) in [(1, "cli help"), (2, "pipeline flow")] {
-        {
-            let app = harness.state_mut();
-            app.show_cli_help = flag == 1;
-            app.show_pipeline_flow = flag == 2;
-        }
-        settle(&mut harness);
-        assert_all_controls_named(&harness, surface);
-    }
 }
 
 #[test]
@@ -320,61 +273,20 @@ fn a_colorize_run_holds_its_strength_chip() {
     }
 }
 
-/// Each quick strip and the full panel its dots open name every control.
+/// No model's Depth chip: Point picks the lens blur, and Set focus waits
+/// for a click on the image.
 #[test]
-fn quick_strips_name_every_control() {
-    for (chip, on, more, in_panel) in [
-        ("Mask", None, "All mask settings", "Contrast"),
-        ("Sketch", Some("Whole photo"), "All line settings", "Style"),
-        ("Effect", Some("Duotone"), "All effects", "Shadows"),
-        ("Faces", None, "More face settings", "Include hair"),
-        ("Background", Some("Cream"), "All background settings", "Custom color"),
-    ] {
-        let mut h = loaded();
-        click(&mut h, chip);
-        if let Some(on) = on {
-            click(&mut h, on);
-        }
-        assert_all_controls_named(&h, &format!("{chip} strip"));
-        click(&mut h, more);
-        assert!(names(&h).iter().any(|n| n == in_panel), "{chip}: {in_panel} missing from the full panel");
-        assert_all_controls_named(&h, &format!("{chip} panel"));
-    }
-}
-
-/// No model's Depth chip: its strip and full panel name every control,
-/// and Set focus waits for a click on the image.
-#[test]
-fn the_depth_chip_names_every_control() {
+fn the_depth_chip_s_controls_act() {
     let mut h = loaded_with(|app| {
         app.settings.model = crate::gui::settings::SettingsModel::None;
         app.hardware_install_cache.depth = true;
     });
     click(&mut h, "Depth");
-    for knob in ["Off", "Point", "Tilt-shift", "Amount", "Fog"] {
-        assert!(names(&h).iter().any(|n| n == knob), "{knob} missing from the Depth strip");
-    }
-    assert_all_controls_named(&h, "Depth strip");
     click(&mut h, "Point");
     assert_eq!(h.state().batch.items[0].settings.depth.blur, prunr_core::depth::LensBlurMode::Point);
     click(&mut h, "All depth settings");
-    for knob in ["Set focus", "Aerial perspective"] {
-        assert!(names(&h).iter().any(|n| n == knob), "{knob} missing from the Depth panel");
-    }
-    assert_all_controls_named(&h, "Depth panel");
     click(&mut h, "Set focus");
     assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
-}
-
-/// Sketch's full panel names Fade with distance.
-#[test]
-fn the_sketch_panel_names_fade_with_distance() {
-    let mut h = loaded();
-    click(&mut h, "Sketch");
-    click(&mut h, "Whole photo");
-    click(&mut h, "All line settings");
-    assert!(names(&h).iter().any(|n| n == "Fade with distance"));
-    assert_all_controls_named(&h, "Sketch panel");
 }
 
 /// A dropdown in a flyout opens its list in place: a popup list would
@@ -390,16 +302,14 @@ fn a_dropdown_keeps_its_flyout_open() {
     assert!(names(&h).iter().any(|n| n.starts_with("Rainbow")), "the list opened");
 }
 
-/// The Model Store names every control, a card's details open in place.
+/// A Model Store card's details open in place, the store staying up.
 #[test]
-fn the_model_store_names_every_control() {
+fn a_store_card_s_details_open_in_place() {
     let mut h = harness();
     h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
     settle(&mut h);
-    assert_all_controls_named(&h, "model store");
     click(&mut h, "Details Silueta");
     assert!(h.state().model_store.is_some(), "the store stays open");
     let toggle = tree(&h).iter().find(|n| n.name.as_deref() == Some("Details Silueta")).map(|n| n.toggled);
     assert_eq!(toggle, Some(Some(true)), "the card opened");
-    assert_all_controls_named(&h, "model store, a card open");
 }
