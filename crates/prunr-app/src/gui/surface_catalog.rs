@@ -6,7 +6,8 @@
 use crate::gui::knob_catalog::Surface;
 
 /// One user action, as the control socket can replay it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Step {
     /// Click the control by its name. A name a quick strip and its open
     /// panel share picks the panel's: the later one in the tree.
@@ -16,7 +17,8 @@ pub enum Step {
 }
 
 /// What a visit opens, and so how its opening and closing are told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// The window itself, nothing opened.
     Window,
@@ -31,7 +33,8 @@ pub enum Kind {
 }
 
 /// What the window holds before the visit's steps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Start {
     Empty,
     /// One processed image, selected.
@@ -39,7 +42,7 @@ pub enum Start {
 }
 
 /// One more state of an open surface: its steps run after the visit's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Variant {
     pub name: &'static str,
     pub steps: Vec<Step>,
@@ -201,4 +204,51 @@ fn settings_tabs() -> Vec<Variant> {
         .iter()
         .map(|t| Variant { name: t.label(), steps: vec![Click(t.label())], expect: &[] })
         .collect()
+}
+
+/// One visit as the control socket hands it to a script: the models
+/// are named as the model picker shows them.
+#[derive(Debug, serde::Serialize)]
+pub struct Entry {
+    pub id: &'static str,
+    pub kind: Kind,
+    pub surface: Option<String>,
+    /// The models it shows for; empty when it shows for every one.
+    pub models: Vec<&'static str>,
+    pub start: Start,
+    pub open: &'static [Step],
+    pub expect: &'static [&'static str],
+    pub variants: Vec<Variant>,
+    pub dismiss: Option<Step>,
+}
+
+/// The catalog for a script: every visit, and every model by its picker name.
+#[derive(Debug, serde::Serialize)]
+pub struct Catalog {
+    pub models: Vec<&'static str>,
+    pub visits: Vec<Entry>,
+}
+
+pub fn catalog() -> Catalog {
+    use crate::gui::settings::SettingsModel;
+    let name = |m: SettingsModel| crate::gui::views::model_info(m).name;
+    Catalog {
+        models: SettingsModel::ALL.into_iter().map(name).collect(),
+        visits: VISITS
+            .iter()
+            .map(|v| Entry {
+                id: v.id,
+                kind: v.kind,
+                surface: v.surface.map(|s| format!("{s:?}")),
+                models: v.surface.map_or_else(Vec::new, |s| {
+                    SettingsModel::ALL.into_iter().filter(|&m| crate::gui::knob_catalog::shows(m, s)).map(name).collect()
+                }),
+                start: v.start,
+                open: v.open,
+                expect: v.expect,
+                variants: v.variants(),
+                dismiss: v.dismiss,
+            })
+            .collect(),
+    }
 }

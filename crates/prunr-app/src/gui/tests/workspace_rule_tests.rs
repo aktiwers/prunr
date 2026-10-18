@@ -217,11 +217,6 @@ fn comments_name_no_planning_ids_or_future_work() {
     report(found, "planning ids or future work in comments (they belong in the planning docs)");
 }
 
-/// Words that describe our plumbing, not what a knob does.
-const ENGINEERING_WORDS: [&str; 11] = [
-    "tier-1", "tier-2", "tier 1", "tier 2", "real-time", "updates live", "inference", "postprocess", "debounce", "subprocess", "knob",
-];
-
 /// The string literals on `line`'s code.
 /// The string literals in GUI source `text` that can reach the user, with
 /// their line: those in a logging call (spanning every line it does), an
@@ -244,9 +239,14 @@ fn user_literals(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// GUI sources whose literals are no user text, with why.
+const USER_TEXT_ALLOWED: [(&str, &str); 1] = [
+    ("prunr-app/src/gui/automation/checks.rs", "holds the user-text rules: its literals are the banned words and the reasons, read by a script"),
+];
+
 /// The GUI's sources, every user-text rule's one scope.
 fn is_gui_source(rel: &str) -> bool {
-    rel.starts_with("prunr-app/src/gui/")
+    rel.starts_with("prunr-app/src/gui/") && !USER_TEXT_ALLOWED.iter().any(|(f, _)| rel == *f)
 }
 
 fn literals(line: &str) -> impl Iterator<Item = &str> {
@@ -260,10 +260,7 @@ fn user_text_has_no_engineering_words() {
     let mut found = Vec::new();
     for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
         for (n, literal) in user_literals(text) {
-            let lower = literal.to_lowercase();
-            let word = ENGINEERING_WORDS.iter().find(|w| lower.contains(*w));
-            let ort = literal.split(|c: char| !c.is_alphanumeric()).any(|w| w == "ORT");
-            if let Some(word) = word.copied().or(ort.then_some("ORT")) {
+            if let Some(word) = crate::gui::automation::checks::engineering_word(literal) {
                 found.push(format!("{rel}:{n}: \"{literal}\" says {word:?}"));
             }
         }
@@ -299,7 +296,7 @@ fn user_text_has_no_three_dots_or_plural_brackets() {
     let mut found = Vec::new();
     for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
         for (n, literal) in user_literals(text) {
-            if literal.contains("...") || literal.contains("(s)") {
+            if crate::gui::automation::checks::typography(literal).is_some() {
                 found.push(format!("{rel}:{n}: \"{literal}\": use an ellipsis character / fmt::count"));
             }
         }
@@ -311,12 +308,10 @@ fn user_text_has_no_three_dots_or_plural_brackets() {
 /// license, center.
 #[test]
 fn user_text_uses_us_spelling() {
-    const BRITISH: [&str; 5] = ["grey", "colour", "licence", "centre", "behaviour"];
     let mut found = Vec::new();
     for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
         for (n, literal) in user_literals(text) {
-            let lower = literal.to_lowercase();
-            if let Some(word) = BRITISH.iter().find(|w| lower.split(|c: char| !c.is_alphabetic()).any(|t| t.starts_with(*w))) {
+            if let Some(word) = crate::gui::automation::checks::british_word(literal) {
                 found.push(format!("{rel}:{n}: \"{literal}\" spells {word:?}"));
             }
         }

@@ -1428,12 +1428,16 @@ pub(crate) fn screenshot_dir() -> PathBuf {
 }
 
 /// Drain any `Event::Screenshot` replies and persist them as PNGs into
-/// `screenshot_dir()`. Filename is the unix-millis timestamp so a
-/// scenario that fires Shift+F12 multiple times never collides.
+/// `screenshot_dir()`: at the path the control socket asked for, or
+/// named by the unix-millis timestamp so a scenario that fires the
+/// shortcut several times never collides.
 fn drain_screenshot_replies(ctx: &egui::Context) {
-    let images: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+    let images: Vec<(std::sync::Arc<egui::ColorImage>, Option<PathBuf>)> = ctx.input(|i| {
         i.events.iter().filter_map(|e| match e {
-            egui::Event::Screenshot { image, .. } => Some(std::sync::Arc::clone(image)),
+            egui::Event::Screenshot { image, user_data, .. } => {
+                let path = user_data.data.as_ref().and_then(|d| d.downcast_ref::<PathBuf>()).cloned();
+                Some((std::sync::Arc::clone(image), path))
+            }
             _ => None,
         }).collect()
     });
@@ -1443,18 +1447,20 @@ fn drain_screenshot_replies(ctx: &egui::Context) {
 
 /// Encoded and written off the UI thread; each PNG appears under its
 /// final name only once whole, for a reader polling the folder.
-fn save_screenshots(images: Vec<std::sync::Arc<egui::ColorImage>>) {
+fn save_screenshots(images: Vec<(std::sync::Arc<egui::ColorImage>, Option<PathBuf>)>) {
     let dir = screenshot_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(%e, ?dir, "screenshot dir create failed");
         return;
     }
-    for image in images {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let path = dir.join(format!("{stamp}.png"));
+    for (image, asked) in images {
+        let path = asked.unwrap_or_else(|| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            dir.join(format!("{stamp}.png"))
+        });
         let [w, h] = image.size;
         let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
         let Some(rgba) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) else {

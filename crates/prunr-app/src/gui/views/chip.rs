@@ -112,18 +112,20 @@ fn chip_face(ui: &mut Ui, text: String, accent: bool) -> Response {
         egui::Stroke::new(theme::STROKE_DEFAULT, Color32::TRANSPARENT)
     };
     let btn = egui::Button::new(
-        RichText::new(text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
+        RichText::new(text.as_str()).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY),
     )
     .stroke(stroke)
     .corner_radius(theme::BUTTON_ROUNDING)
     .min_size(egui::vec2(0.0, theme::CHIP_HEIGHT));
-    with_fill(ui, theme::BG_SECONDARY, |ui| {
+    let resp = with_fill(ui, theme::BG_SECONDARY, |ui| {
         let saved_padding = ui.spacing().button_padding;
         ui.spacing_mut().button_padding = egui::vec2(CHIP_PADDING_X, 4.0);
         let resp = ui.add(btn);
         ui.spacing_mut().button_padding = saved_padding;
         resp
-    })
+    });
+    crate::gui::automation::record::clip(ui.ctx(), &text, resp.rect, crate::gui::automation::record::room(ui));
+    resp
 }
 
 /// A soft brush stamp's look: the solid core (its radius and colour, when
@@ -222,6 +224,7 @@ pub(super) fn icon_square_button(ui: &mut Ui, icon: &str, color: Color32, fill: 
 /// body, and the keys when the control has a shortcut. Pass an empty
 /// body for icon buttons whose title says it all.
 pub(super) fn tooltip(resp: Response, title: &str, body: &str, shortcut: Option<Action>) -> Response {
+    crate::gui::automation::record::tooltip(&resp.ctx, title, body, shortcut);
     named(resp, title).on_hover_ui(|ui| {
         ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
         if !body.is_empty() {
@@ -459,7 +462,10 @@ fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: 
     if in_panel_rows(ui) {
         return panel_slider(ui, label, slider, value_w);
     }
-    let label = ui.label(RichText::new(label).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+    let room = crate::gui::automation::record::room(ui);
+    let text = label;
+    let label = ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+    crate::gui::automation::record::clip(ui.ctx(), text, label.rect, room);
     let resp = add_slider(ui, slider, value_w).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
 }
@@ -521,7 +527,9 @@ fn in_panel_rows(ui: &Ui) -> bool {
 pub(super) fn panel_name(ui: &mut Ui, label: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(PANEL_NAME_WIDTH, PANEL_ROW_HEIGHT), egui::Sense::hover());
     let name = ui.painter().layout_no_wrap(label.to_owned(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY);
-    ui.painter().galley(egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, theme::TEXT_PRIMARY);
+    let at = egui::pos2(rect.left(), rect.center().y - name.size().y / 2.0);
+    crate::gui::automation::record::clip(ui.ctx(), label, egui::Rect::from_min_size(at, name.size()), rect);
+    ui.painter().galley(at, name, theme::TEXT_PRIMARY);
 }
 
 fn panel_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: f32) -> (ChipChange, Response) {
@@ -679,7 +687,9 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
         ui.available_width().max(text_w + 2.0 * PAD.x + CHECK_ROOM),
         (text_h + 2.0 * PAD.y).max(theme::CHIP_HEIGHT),
     );
+    let room = crate::gui::automation::record::room(ui);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    crate::gui::automation::record::clip(ui.ctx(), title, rect, room);
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, row_name(title, description)));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -957,7 +967,9 @@ impl PanelHeader<'_> {
 fn panel_header(ui: &mut Ui, title: &str, header: PanelHeader<'_>, at_default: bool) -> bool {
     let clicked = ui
         .horizontal(|ui| {
-            ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            let room = crate::gui::automation::record::room(ui);
+            let label = ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            crate::gui::automation::record::clip(ui.ctx(), title, label.rect, room);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let clicked = reset_button(ui, header.reset, !at_default).clicked();
                 if !header.note.is_empty() {
@@ -1071,7 +1083,9 @@ const STEP_NUMBERS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "
 pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool)>) -> bool {
     let clicked = ui
         .horizontal(|ui| {
-            ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            let room = crate::gui::automation::record::room(ui);
+            let label = ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
+            crate::gui::automation::record::clip(ui.ctx(), title, label.rect, room);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 reset.is_some_and(|(tip, at_default)| {
                     reset_button(ui, "Reset", !at_default).on_hover_text(tip).clicked()

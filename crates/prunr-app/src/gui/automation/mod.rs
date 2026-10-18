@@ -7,6 +7,7 @@
 //! `PrunrApp::perform` the keyboard uses; `state` is a serde dump.
 
 pub mod checks;
+pub mod record;
 pub mod server;
 pub mod state;
 pub mod tree;
@@ -60,15 +61,48 @@ pub enum Request {
     Intent { action: String },
     Open { paths: Vec<PathBuf> },
     State,
-    Screenshot,
+    /// Save the window as `<name>.png` in the screenshot folder (a time
+    /// stamp without a name); the reply is the file's path.
+    Screenshot {
+        #[serde(default)]
+        name: Option<String>,
+    },
     Wait {
         #[serde(default = "one")]
         frames: u32,
+    },
+    /// Every surface, how to open it, and the models it shows for.
+    Catalog,
+    /// What is wrong with the last frame: nameless controls, `expect`
+    /// names missing, tooltip copy, clipped text, overlaps in the open
+    /// surface.
+    Check {
+        #[serde(default)]
+        expect: Vec<String>,
+    },
+    /// The tooltips the last frame's controls carry.
+    Tooltips,
+    /// The texts the last frame drew past their room.
+    Clips,
+    /// Move the pointer onto a control without pressing: its tooltip
+    /// shows after egui's delay.
+    Hover { name: String },
+    /// Resize the window to `w` × `h` points.
+    Resize { w: f32, h: f32 },
+    /// Reply once no work is owed to the screen, or after `timeout_ms`;
+    /// the reply says which.
+    WaitIdle {
+        #[serde(default = "idle_timeout_ms")]
+        timeout_ms: u64,
     },
 }
 
 fn one() -> u32 {
     1
+}
+
+fn idle_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Serialize)]
@@ -98,10 +132,18 @@ pub struct Pending {
     pub reply: mpsc::Sender<Response>,
 }
 
+/// When a held reply goes out.
+enum Release {
+    /// Once this many more frames have run; zero or one is the next.
+    After(u32),
+    /// Once the app owes the screen no work, or at the deadline.
+    Idle(std::time::Instant),
+}
+
 /// A reply held until the frames that carry its input have run and
-/// the UI has reacted; zero frames means right away.
+/// the UI has reacted, or until the app is idle.
 struct Deferred {
-    frames_left: u32,
+    release: Release,
     reply: mpsc::Sender<Response>,
     response: Response,
 }
@@ -141,10 +183,23 @@ impl Automation {
     /// the port cannot be bound.
     pub fn start(ctx: &egui::Context, port: u16) -> Option<Self> {
         let inbox = server::spawn(port, ctx.clone())?;
-        let tree = tree::Mirror::default();
         ctx.enable_accesskit();
+        Some(Self::listening(ctx, inbox))
+    }
+
+    fn listening(ctx: &egui::Context, inbox: mpsc::Receiver<Pending>) -> Self {
+        let tree = tree::Mirror::default();
         ctx.add_plugin(tree.clone());
-        Some(Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None })
+        record::turn_on();
+        Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None }
+    }
+
+    /// Automation fed through the returned sender instead of a socket,
+    /// for a test harness (which reads the AccessKit tree already).
+    #[cfg(test)]
+    pub fn for_test(ctx: &egui::Context) -> (Self, mpsc::Sender<Pending>) {
+        let (tx, inbox) = mpsc::channel();
+        (Self::listening(ctx, inbox), tx)
     }
 
     pub fn take_frame(&mut self) -> Option<InputFrame> {
@@ -170,22 +225,38 @@ impl Automation {
         self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
     }
 
-    /// The one control named `name`, with its centre.
-    fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
+    /// The one control named `name`, with its centre; a greyed one only
+    /// when `greyed_too`.
+    fn locate(&self, name: &str, greyed_too: bool) -> Result<(ControlNode, egui::Pos2), String> {
         let root = self.snapshot()?;
         let found = find(&root, name);
         let [target] = found.as_slice() else {
             return Err(format!("{} controls named {name:?}", found.len()));
         };
-        if target.disabled {
+        if target.disabled && !greyed_too {
             return Err(format!("{name:?} is disabled"));
         }
         let pos = target.center().ok_or_else(|| format!("{name:?} has no rectangle"))?;
         Ok((target.clone(), pos))
     }
 
+    /// The one live control named `name`, with its centre.
+    fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
+        self.locate(name, false)
+    }
+
+    /// The reply and when to send it.
+    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(Release, Response), String> {
+        if let Request::WaitIdle { timeout_ms } = request {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            return Ok((Release::Idle(deadline), Response::ok(())));
+        }
+        let (frames, response) = self.answer(app, ctx, request)?;
+        Ok((Release::After(frames), response))
+    }
+
     /// The reply and how many frames to wait before sending it.
-    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(u32, Response), String> {
+    fn answer(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(u32, Response), String> {
         Ok(match request {
             Request::Ping => (0, Response::ok("pong")),
             Request::Tree { all: true } => (0, Response::ok(self.snapshot()?)),
@@ -270,12 +341,35 @@ impl Automation {
                 }
                 (0, Response::ok(count))
             }
-            Request::State => (0, Response::ok(state::dump(app))),
-            Request::Screenshot => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-                (3, Response::ok(super::app::screenshot_dir()))
+            Request::State => {
+                let mut dump = state::dump(app);
+                let size = ctx.content_rect().size();
+                dump.viewport = Some([size.x, size.y]);
+                (0, Response::ok(dump))
+            }
+            Request::Screenshot { name } => {
+                let path = super::app::screenshot_dir().join(screenshot_file(name.as_deref())?);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(path.clone())));
+                (3, Response::ok(path))
             }
             Request::Wait { frames } => (frames.max(1), Response::ok(())),
+            Request::Catalog => (0, Response::ok(super::surface_catalog::catalog())),
+            Request::Check { expect } => {
+                let expect: Vec<&str> = expect.iter().map(String::as_str).collect();
+                (0, Response::ok(check(&self.snapshot()?, ctx, &expect)))
+            }
+            Request::Tooltips => (0, Response::ok(record::last(ctx).0)),
+            Request::Clips => (0, Response::ok(record::last(ctx).1)),
+            Request::Hover { name } => {
+                let (target, pos) = self.locate(&name, true)?;
+                self.frames.push_back(vec![egui::Event::PointerMoved(pos)].into());
+                (2, Response::ok(target))
+            }
+            Request::Resize { w, h } => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                (6, Response::ok(()))
+            }
+            Request::WaitIdle { .. } => unreachable!("answered by `run`"),
         })
     }
 }
@@ -284,21 +378,65 @@ impl Automation {
 /// Called once per frame from `logic`, after the keyboard.
 pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     let Some(mut auto) = app.automation.take() else { return };
-    let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut auto.deferred).into_iter().partition(|d| d.frames_left <= 1);
-    auto.deferred = waiting;
-    for d in &mut auto.deferred {
-        d.frames_left -= 1;
-    }
-    for d in ready {
-        let _ = d.reply.send(d.response);
+    // Input still queued is work the app has not seen yet.
+    let idle = auto.frames.is_empty() && !state::busy(app);
+    let now = std::time::Instant::now();
+    for mut d in std::mem::take(&mut auto.deferred) {
+        match d.release {
+            Release::After(n) if n > 1 => {
+                d.release = Release::After(n - 1);
+                auto.deferred.push(d);
+            }
+            Release::After(_) => {
+                let _ = d.reply.send(d.response);
+            }
+            Release::Idle(deadline) if !idle && now < deadline => auto.deferred.push(d),
+            Release::Idle(_) => {
+                let _ = d.reply.send(Response::ok(serde_json::json!({ "idle": idle })));
+            }
+        }
     }
     while let Ok(Pending { request, reply }) = auto.inbox.try_recv() {
         tracing::debug!(?request, "control request");
-        let (frames_left, response) = auto.run(app, ctx, request).unwrap_or_else(|e| (0, Response::err(e)));
-        auto.deferred.push(Deferred { frames_left, reply, response });
+        let (release, response) = auto.run(app, ctx, request).unwrap_or_else(|e| (Release::After(0), Response::err(e)));
+        auto.deferred.push(Deferred { release, reply, response });
     }
     ctx.request_repaint_after(if auto.busy() { FRAME_INTERVAL } else { POLL_INTERVAL });
     app.automation = Some(auto);
+}
+
+/// Everything `checks` finds in one frame: the tree, the tooltips and
+/// clips the widgets recorded, and overlaps inside the open surface.
+pub fn check(root: &ControlNode, ctx: &egui::Context, expect: &[&str]) -> Vec<checks::Violation> {
+    let (tooltips, clips) = record::last(ctx);
+    let mut found = checks::nameless(root);
+    found.extend(checks::missing(root, expect));
+    found.extend(checks::tooltip_copy(&tooltips));
+    found.extend(checks::clipped(&clips));
+    found.extend(open_surface(ctx).and_then(|r| checks::overlap_within(root, r)));
+    found
+}
+
+/// The rect of the topmost popover, flyout or dialog, if one is up.
+fn open_surface(ctx: &egui::Context) -> Option<[f32; 4]> {
+    let rect = ctx.memory(|m| {
+        let layer = m.areas().top_layer_id(egui::Order::Foreground)?;
+        m.area_rect(layer.id)
+    })?;
+    Some([rect.min.x, rect.min.y, rect.max.x, rect.max.y])
+}
+
+/// A screenshot's file name: `name` plus ".png", or a time stamp. A
+/// name that would reach outside the screenshot folder is refused.
+fn screenshot_file(name: Option<&str>) -> Result<String, String> {
+    match name {
+        Some(n) if n.is_empty() || n.starts_with('.') || n.contains(['/', '\\']) => Err(format!("screenshot name {n:?} must be a plain file name")),
+        Some(n) => Ok(format!("{n}.png")),
+        None => {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            Ok(format!("{stamp}.png"))
+        }
+    }
 }
 
 fn press(pos: egui::Pos2, button: egui::PointerButton, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
@@ -375,6 +513,23 @@ mod tests {
         assert!(matches!(req, Request::ScrollAt { x, y, lines } if x == 600.0 && y == 400.0 && lines == 2.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"wait"}"#).unwrap();
         assert!(matches!(req, Request::Wait { frames: 1 }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"screenshot"}"#).unwrap();
+        assert!(matches!(req, Request::Screenshot { name: None }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"wait_idle"}"#).unwrap();
+        assert!(matches!(req, Request::WaitIdle { timeout_ms: 30_000 }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"check","expect":["Save"]}"#).unwrap();
+        assert!(matches!(req, Request::Check { ref expect } if expect == &["Save"]));
+        let req: Request = serde_json::from_str(r#"{"cmd":"resize","w":900,"h":540}"#).unwrap();
+        assert!(matches!(req, Request::Resize { w, h } if w == 900.0 && h == 540.0));
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"explode"}"#).is_err());
+    }
+
+    #[test]
+    fn a_screenshot_name_stays_in_the_folder() {
+        assert_eq!(screenshot_file(Some("model-picker")).as_deref(), Ok("model-picker.png"));
+        for bad in ["", "../x", "a/b", "a\\b", ".hidden"] {
+            assert!(screenshot_file(Some(bad)).is_err(), "{bad:?}");
+        }
+        assert!(screenshot_file(None).unwrap().ends_with(".png"));
     }
 }

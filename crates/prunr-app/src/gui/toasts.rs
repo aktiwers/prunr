@@ -19,35 +19,45 @@ const TOAST_LINE_CHARS: usize = 60;
 #[derive(Default)]
 pub(crate) struct Toasts(
     egui_notify::Toasts,
+    /// The latest captions, kept while a script reads them.
+    std::collections::VecDeque<String>,
     #[cfg(test)] Vec<(&'static str, String)>,
 );
+
+/// How many captions `Toasts` keeps for a script; more never show at once.
+const KEPT_CAPTIONS: usize = 8;
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
         Self(
             egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin),
+            std::collections::VecDeque::new(),
             #[cfg(test)] Vec::new(),
         )
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        #[cfg(test)] self.1.push(("success", caption.clone()));
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("success", caption.clone()));
         self.0.success(wrap(&caption))
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        #[cfg(test)] self.1.push(("info", caption.clone()));
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("info", caption.clone()));
         self.0.info(wrap(&caption))
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        #[cfg(test)] self.1.push(("warning", caption.clone()));
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("warning", caption.clone()));
         self.0.warning(wrap(&caption))
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        #[cfg(test)] self.1.push(("error", caption.clone()));
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("error", caption.clone()));
         self.0.error(wrap(&caption))
     }
 
@@ -59,11 +69,28 @@ impl Toasts {
     /// The last toast shown: its level ("success", "error", …) and caption.
     #[cfg(test)]
     pub fn last_for_test(&self) -> Option<(&'static str, &str)> {
-        self.1.last().map(|(level, caption)| (*level, caption.as_str()))
+        self.2.last().map(|(level, caption)| (*level, caption.as_str()))
     }
 
     pub fn show(&mut self, ctx: &Context) {
         self.0.show(ctx)
+    }
+
+    fn keep(&mut self, caption: &str) {
+        if !crate::gui::automation::record::is_on() {
+            return;
+        }
+        if self.1.len() == KEPT_CAPTIONS {
+            self.1.pop_front();
+        }
+        self.1.push_back(caption.to_owned());
+    }
+
+    /// The captions on screen, oldest first: the latest as many as are
+    /// still shown (they leave in the order they came). Empty unless a
+    /// script turned recording on.
+    pub fn shown(&self) -> Vec<String> {
+        self.1.iter().rev().take(self.0.len()).rev().cloned().collect()
     }
 }
 
