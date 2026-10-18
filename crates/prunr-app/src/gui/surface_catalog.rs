@@ -12,6 +12,10 @@ pub enum Step {
     /// Click the control by its name. A name a quick strip and its open
     /// panel share picks the panel's: the later one in the tree.
     Click(&'static str),
+    /// Open a strip's full panel by its toggle, unless it is open: the
+    /// panel stays open across closing the strip, so a second click would
+    /// close it.
+    Expand(&'static str),
     /// A chord in the settings form: "Escape", "Mod+Z".
     Key(&'static str),
 }
@@ -86,7 +90,7 @@ impl Visit {
     }
 }
 
-use Step::{Click, Key};
+use Step::{Click, Expand, Key};
 
 const ESCAPE: Option<Step> = Some(Key("Escape"));
 
@@ -128,12 +132,12 @@ pub const VISITS: &[Visit] = &[
     visit("pipelines", Kind::Modal("pipeline_flow"), &[Click("Help"), Click("Pipelines")], &[]),
     visit("save preset", Kind::Modal("save_preset"), &[Click("Preset"), Click("Save current as…")], &["Save", "Cancel", "Close window"]),
     on(Surface::Mask, with(
-        Variants::Fixed(&[panel(&[Click("All mask settings")], &["Contrast"])]),
+        Variants::Fixed(&[panel(&[Expand("All mask settings")], &["Contrast"])]),
         visit("mask", Kind::Flyout, &[Click("Mask")], &["All mask settings"]),
     )),
     on(Surface::Lines, with(
         Variants::Fixed(&[
-            FixedVariant { name: "whole photo panel", steps: &[Click("Whole photo"), Click("All line settings")], expect: &["Style", "Fade with distance"] },
+            FixedVariant { name: "whole photo panel", steps: &[Click("Whole photo"), Expand("All line settings")], expect: &["Style", "Fade with distance"] },
         ]),
         visit("sketch", Kind::Flyout, &[Click("Sketch")], &["Off", "Whole photo", "All line settings"]),
     )),
@@ -141,28 +145,28 @@ pub const VISITS: &[Visit] = &[
     on(Surface::Decoration, with(
         Variants::Fixed(&[FixedVariant {
             name: "panel with a drop shadow",
-            steps: &[Click("Drop"), Click("All outline and shadow settings")],
+            steps: &[Click("Drop"), Expand("All outline and shadow settings")],
             expect: &["Width", "No shadow", "Soft", "Drop", "Opacity", "Blur", "Distance"],
         }]),
         visit("outline and shadow", Kind::Flyout, &[Click("Outline and shadow")], &["Outline", "All outline and shadow settings"]),
     )),
     on(Surface::Background, with(
         Variants::Fixed(&[
-            FixedVariant { name: "cream", steps: &[Click("Cream"), Click("All background settings")], expect: &["Custom color"] },
-            FixedVariant { name: "transparent", steps: &[Click("All background settings"), Click("Transparent")], expect: &[] },
-            FixedVariant { name: "solid color", steps: &[Click("All background settings"), Click("Solid color")], expect: &["Custom color"] },
-            FixedVariant { name: "blurred", steps: &[Click("All background settings"), Click("Blurred")], expect: &[] },
-            FixedVariant { name: "lens blur", steps: &[Click("All background settings"), Click("Lens blur")], expect: &[] },
-            FixedVariant { name: "black and white", steps: &[Click("All background settings"), Click("Black and white")], expect: &[] },
+            FixedVariant { name: "cream", steps: &[Click("Cream"), Expand("All background settings")], expect: &["Custom color"] },
+            FixedVariant { name: "transparent", steps: &[Expand("All background settings"), Click("Transparent")], expect: &[] },
+            FixedVariant { name: "solid color", steps: &[Expand("All background settings"), Click("Solid color")], expect: &["Custom color"] },
+            FixedVariant { name: "blurred", steps: &[Expand("All background settings"), Click("Blurred")], expect: &[] },
+            FixedVariant { name: "lens blur", steps: &[Expand("All background settings"), Click("Lens blur")], expect: &[] },
+            FixedVariant { name: "black and white", steps: &[Expand("All background settings"), Click("Black and white")], expect: &[] },
         ]),
         visit("background", Kind::Flyout, &[Click("Background")], &["Transparent", "Cream", "All background settings"]),
     )),
     on(Surface::Faces, with(
-        Variants::Fixed(&[panel(&[Click("More face settings")], &["Include hair"])]),
+        Variants::Fixed(&[panel(&[Expand("More face settings")], &["Include hair"])]),
         visit("faces", Kind::Flyout, &[Click("Faces")], &["More face settings"]),
     )),
     on(Surface::Depth, with(
-        Variants::Fixed(&[panel(&[Click("All depth settings")], &["Set focus", "Aerial perspective"])]),
+        Variants::Fixed(&[panel(&[Expand("All depth settings")], &["Set focus", "Aerial perspective"])]),
         visit("depth", Kind::Flyout, &[Click("Depth")], &["Off", "Point", "Tilt-shift", "Amount", "Fog"]),
     )),
     on(Surface::Upscale, visit("scale", Kind::Popover, &[Click("Scale")], &["2\u{00d7}"])),
@@ -195,7 +199,7 @@ pub const UNVISITED_MODALS: &[(&str, &str)] = &[
 fn effects() -> Vec<Variant> {
     prunr_core::SubjectEffect::ALL
         .iter()
-        .map(|e| Variant { name: e.name(), steps: vec![Click("All effects"), Click(e.name())], expect: &["Gradient map"] })
+        .map(|e| Variant { name: e.name(), steps: vec![Expand("All effects"), Click(e.name())], expect: &["Gradient map"] })
         .collect()
 }
 
