@@ -224,7 +224,7 @@ pub fn sharpen_inpainted(image: &RgbaImage, mask: &GrayImage, amount: f32) -> Rg
                 // at global rows {global_y} only — different `by`s are
                 // row-disjoint. Channels (c=0,1,2) within one pixel
                 // are also distinct bytes. No race.
-                unsafe { *dp.0.add(pix + c) = sharp.clamp(0.0, 255.0) as u8; }
+                unsafe { *dp.0.add(pix + c) = crate::math::round_u8(sharp); }
             }
         }
         // Capture `dp` whole: its raw-pointer field alone is not Sync.
@@ -830,9 +830,9 @@ fn decode_tile(
             let i = nchw_row + x;
             let pix = rgba_row + x * 4;
             if msk_raw[mask_row + x] > 127 {
-                out_raw[pix] = (buf[i] * scale).clamp(0.0, 255.0) as u8;
-                out_raw[pix + 1] = (buf[plane + i] * scale).clamp(0.0, 255.0) as u8;
-                out_raw[pix + 2] = (buf[plane * 2 + i] * scale).clamp(0.0, 255.0) as u8;
+                out_raw[pix] = crate::math::round_u8(buf[i] * scale);
+                out_raw[pix + 1] = crate::math::round_u8(buf[plane + i] * scale);
+                out_raw[pix + 2] = crate::math::round_u8(buf[plane * 2 + i] * scale);
             } else {
                 out_raw[pix] = src_raw[pix];
                 out_raw[pix + 1] = src_raw[pix + 1];
@@ -1034,9 +1034,9 @@ where
                 // untouched: source clone already filled it, and LaMa
                 // is RGB-only.
                 let pix = global_idx * 4;
-                out_raw[pix]     = (c[0] * inv).clamp(0.0, 255.0) as u8;
-                out_raw[pix + 1] = (c[1] * inv).clamp(0.0, 255.0) as u8;
-                out_raw[pix + 2] = (c[2] * inv).clamp(0.0, 255.0) as u8;
+                out_raw[pix]     = crate::math::round_u8(c[0] * inv);
+                out_raw[pix + 1] = crate::math::round_u8(c[1] * inv);
+                out_raw[pix + 2] = crate::math::round_u8(c[2] * inv);
             }
         }
     }
@@ -1546,6 +1546,24 @@ mod tests {
         assert_eq!(out.get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 
+    /// A model answer a hair under v/255 is still the byte v, for every
+    /// v: truncating it would land one low.
+    #[test]
+    fn decode_tile_gives_back_every_byte() {
+        let src = RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255]));
+        let mask = GrayImage::from_pixel(16, 16, Luma([255]));
+        let s = TILE as usize;
+        let mut output = Array4::<f32>::zeros((1, 3, s, s));
+        for v in 0..256 {
+            for c in 0..3 {
+                output[[0, c, v / 16, v % 16]] = (v as f32 - 0.2).max(0.0) / 255.0;
+            }
+        }
+        let out = decode_tile(output.view(), &src, &mask);
+        let got: Vec<u8> = (0..256u32).map(|v| out.get_pixel(v % 16, v / 16)[0]).collect();
+        assert_eq!(got, (0..=255).collect::<Vec<u8>>());
+    }
+
     #[test]
     fn decode_tile_detects_0_255_range() {
         // Output already in [0, 255] range — no rescaling.
@@ -1894,7 +1912,7 @@ mod tests {
                     }
                     let s = src[pix + c] as f32;
                     let sharp = s + amount * (s - blur);
-                    out_raw[pix + c] = sharp.clamp(0.0, 255.0) as u8;
+                    out_raw[pix + c] = crate::math::round_u8(sharp);
                 }
             }
         }
