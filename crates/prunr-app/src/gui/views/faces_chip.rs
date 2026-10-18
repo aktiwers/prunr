@@ -103,7 +103,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, ins
                 }
             }
             change.blend |= strength_row(ui, s);
-            hint(ui, "Up to 50% adds detail and keeps the photo's own shading; above, the redrawn shading too.");
+            hint(ui, "Up to 50% adds detail but keeps the photo's own shading; above 50%, the redrawn shading shows too.");
             change.blend |= chip::choice_row(ui, "Faces", &WHICH, &mut s.largest_only);
             change.blend |= chip::toggle_row(ui, "Include hair", &mut s.hair).commit;
         }
