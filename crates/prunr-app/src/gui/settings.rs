@@ -14,6 +14,25 @@ pub const PRUNR_PRESET: &str = "Prunr";
 /// live on `BatchItem.settings: ItemSettings` instead. New images inherit
 /// whichever preset `default_preset` points at; the adjustments toolbar
 /// edits the current image's `ItemSettings` directly.
+const SETTINGS_UNREADABLE: &str = "Your settings could not be read, so Prunr started with its defaults. The old file is kept as settings.json.bad.";
+const SOME_SETTINGS_RESET: &str = "Some settings could not be read and are back to their defaults; the rest are kept. The old file is kept as settings.json.bad.";
+
+static LOAD_NOTE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Why the settings loaded are not all the ones saved, when some were not.
+pub(crate) fn load_note() -> Option<&'static str> {
+    LOAD_NOTE.get().copied()
+}
+
+/// Keep a settings file that did not read beside it, as `<name>.bad`.
+fn keep_unreadable(path: &std::path::Path) {
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    if let Err(err) = std::fs::copy(path, &bad) {
+        tracing::warn!(%err, ?path, "could not keep the unreadable settings file");
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
@@ -198,33 +217,54 @@ impl Settings {
         // etc. in the dropdown on first launch.
         super::presets_fs::seed_builtins_once();
 
-        let Some(path) = Self::config_path() else { return Self::default() };
-        let Ok(data) = std::fs::read_to_string(&path) else {
-            // No settings.json, but the user may still have preset files
-            // dropped into the folder. Pick those up.
-            return Self {
-                presets: super::presets_fs::load_all(),
-                ..Self::default()
-            };
+        let mut settings = match Self::config_path() {
+            Some(path) => {
+                let (settings, note) = Self::read(&path);
+                if let Some(note) = note {
+                    let _ = LOAD_NOTE.set(note);
+                }
+                settings
+            }
+            None => Self::default(),
         };
+        let mut loaded = super::presets_fs::load_all();
+        // Preserve the freshly-migrated "Previous defaults" entry
+        // (load_all picks it up too if save succeeded, but be defensive).
+        for (k, v) in settings.presets.drain() {
+            loaded.entry(k).or_insert(v);
+        }
+        settings.presets = loaded;
+        settings
+    }
+
+    /// The settings saved at `path`, kept as far as they read, and a note
+    /// for the person when some could not be: a file that is no JSON gives
+    /// the defaults, a setting this version cannot read (one a newer Prunr
+    /// saved) gives that setting's default and keeps the rest. Either way
+    /// the file is kept beside it as `.bad`, as the next save replaces it.
+    fn read(path: &std::path::Path) -> (Self, Option<&'static str>) {
+        let Ok(data) = std::fs::read_to_string(path) else { return (Self::default(), None) };
 
         // Parse to Value first so we can migrate v1 fields regardless of
         // whether strict struct parsing succeeds.
         let mut value: serde_json::Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(%e, "settings.json is corrupt; falling back to defaults");
-                return Self::default();
+                tracing::warn!(%e, "settings.json is not JSON; starting from defaults");
+                keep_unreadable(path);
+                return (Self::default(), Some(SETTINGS_UNREADABLE));
             }
         };
         super::item_settings::migrate_old_item_settings(&mut value);
         migrate_sd_margin(&mut value);
 
-        let mut settings: Self = match serde_json::from_value(value.clone()) {
-            Ok(s) => s,
+        let (mut settings, note) = match serde_json::from_value(value.clone()) {
+            Ok(s) => (s, None),
             Err(e) => {
-                tracing::warn!(%e, "settings.json is corrupt; falling back to defaults");
-                return Self::default();
+                let (s, reset) = Self::merge_readable(&value);
+                tracing::warn!(%e, ?reset, "settings.json has settings this version cannot read; they start from defaults");
+                keep_unreadable(path);
+                (s, Some(SOME_SETTINGS_RESET))
             }
         };
         settings.brush.fit_sd_to_quality();
@@ -248,15 +288,26 @@ impl Settings {
                 settings.presets.insert(LEGACY_PRESET.to_string(), file);
             }
         }
+        (settings, note)
+    }
 
-        let mut loaded = super::presets_fs::load_all();
-        // Preserve the freshly-migrated "Previous defaults" entry above
-        // (load_all picks it up too if save succeeded, but be defensive).
-        for (k, v) in settings.presets.drain() {
-            loaded.entry(k).or_insert(v);
+    /// The defaults with every saved setting in `value` that reads laid
+    /// over them, and the names of those that did not.
+    fn merge_readable(value: &serde_json::Value) -> (Self, Vec<String>) {
+        let (Ok(mut merged), Some(saved)) = (serde_json::to_value(Self::default()), value.as_object()) else {
+            return (Self::default(), Vec::new());
+        };
+        let mut reset = Vec::new();
+        for (key, setting) in saved {
+            let mut trial = merged.clone();
+            trial[key.as_str()] = setting.clone();
+            if serde_json::from_value::<Self>(trial.clone()).is_ok() {
+                merged = trial;
+            } else {
+                reset.push(key.clone());
+            }
         }
-        settings.presets = loaded;
-        settings
+        (serde_json::from_value(merged).unwrap_or_default(), reset)
     }
 
     /// Save to disk. Errors are silently ignored (best-effort).
@@ -803,6 +854,37 @@ mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
     use prunr_core::LineMode;
+
+    /// A settings file that is no JSON starts from the defaults and is
+    /// kept beside it; the person is told.
+    #[test]
+    fn unreadable_settings_start_from_defaults_and_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let (settings, note) = Settings::read(&path);
+        assert_eq!(settings.parallel_jobs, Settings::default().parallel_jobs);
+        assert_eq!(note, Some(SETTINGS_UNREADABLE));
+        assert_eq!(std::fs::read(dir.path().join("settings.json.bad")).unwrap(), b"{ not json");
+    }
+
+    /// A setting this version cannot read (a newer Prunr's model) starts
+    /// from its default; every other setting is kept, and the file too.
+    #[test]
+    fn a_setting_this_version_cannot_read_resets_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut saved = serde_json::to_value(Settings { parallel_jobs: 3, ..Settings::default() }).unwrap();
+        saved["model"] = serde_json::json!("ModelFromTheFuture");
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let (settings, note) = Settings::read(&path);
+        assert_eq!(settings.parallel_jobs, 3, "the rest are kept");
+        assert_eq!(settings.model, Settings::default().model);
+        assert_eq!(note, Some(SOME_SETTINGS_RESET));
+        assert!(dir.path().join("settings.json.bad").exists());
+        let (_, note) = Settings::read(&{ let p = dir.path().join("fine.json"); std::fs::write(&p, serde_json::to_vec(&serde_json::to_value(Settings::default()).unwrap()).unwrap()).unwrap(); p });
+        assert_eq!(note, None, "settings that read say nothing");
+    }
 
     #[test]
     fn openvino_and_cpu_only_count_as_the_host_cpu() {

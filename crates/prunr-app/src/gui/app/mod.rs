@@ -271,6 +271,7 @@ impl PrunrApp {
         app.fit_brush_models_to_model();
         app.pending_first_toasts = onboarding_toast.into_iter()
             .chain(prunr_core::ort_runtime::fallback_note().map(str::to_string))
+            .chain(super::settings::load_note().map(str::to_string))
             .collect();
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
