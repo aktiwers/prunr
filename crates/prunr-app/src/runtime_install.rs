@@ -101,7 +101,7 @@ impl RuntimeId {
     pub fn not_installed(self, recommended: bool) -> &'static str {
         match (self, recommended) {
             (Self::OpenVino, false) => "Not installed (80 MB).",
-            (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.",
+            (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
         }
     }
 
@@ -112,9 +112,9 @@ impl RuntimeId {
     /// The first-launch prompt's body.
     pub fn first_launch_prompt_body(self) -> &'static str {
         match self {
-            Self::OpenVino => "We detected hardware that can use OpenVINO Runtime. \
-                Installing it (~80 MB) unlocks 2-3× faster background removal and \
-                makes Stable Diffusion inpaint usable on your machine.",
+            Self::OpenVino => "We detected Intel hardware that can use OpenVINO Runtime. \
+                Installing it (~80 MB) makes the models run faster, and lets you \
+                try running them on the Intel graphics chip (Settings › Hardware).",
         }
     }
 
