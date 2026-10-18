@@ -1145,7 +1145,7 @@ impl Processor {
                 // This path only sees LaMa / Big-LaMa / MI-GAN.
                 let filled = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress)?;
                 progress.step(prunr_core::Step::Blending);
-                let rgba = prunr_core::inpaint_blend::finalize_inpaint(&filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen);
+                let rgba = prunr_core::inpaint_blend::finalize_inpaint(filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen);
                 Ok((rgba, filled.scale))
             });
             run.end();

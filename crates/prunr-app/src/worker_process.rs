@@ -1019,7 +1019,7 @@ pub fn run_worker() -> ! {
                         ).map_err(|e| e.message())?;
                         progress.step(prunr_core::Step::Blending);
                         Ok((prunr_core::inpaint_blend::finalize_inpaint(
-                            &filled.rgba, &image, &mask, feather_px, sharpen,
+                            filled.rgba, &image, &mask, feather_px, sharpen,
                         ), filled.scale))
                     })();
                     drop(_cleanup);
