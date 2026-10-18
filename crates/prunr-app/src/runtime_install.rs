@@ -47,6 +47,7 @@ impl InstallEvent {
 pub enum RuntimeId {
     OpenVino,
     Cuda,
+    MiGraphX,
 }
 
 impl RuntimeId {
@@ -56,12 +57,12 @@ impl RuntimeId {
     /// DLL without `openvino.dll` (Python loads that from the separate
     /// `openvino` package), so the provider never registers and every
     /// session would run on the CPU, where DirectML runs the same iGPU.
-    /// CUDA is offered where DirectML is not and `onnxruntime-gpu` has a
-    /// wheel: Linux on x86-64.
+    /// CUDA and MIGraphX are offered where DirectML is not and their
+    /// runtimes have a wheel: Linux on x86-64.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) {
         &[]
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        &[Self::OpenVino, Self::Cuda]
+        &[Self::OpenVino, Self::Cuda, Self::MiGraphX]
     } else {
         &[Self::OpenVino]
     };
@@ -70,11 +71,21 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "onnxruntime-openvino",
             Self::Cuda => "onnxruntime-gpu",
+            Self::MiGraphX => "onnxruntime-migraphx",
+        }
+    }
+
+    /// The ORT release this runtime installs. The MIGraphX wheel skipped
+    /// 1.24.1; any 1.24 release serves the same API.
+    fn ort_version(self) -> &'static str {
+        match self {
+            Self::OpenVino | Self::Cuda => ri::PINNED_ORT_VERSION,
+            Self::MiGraphX => "1.24.2",
         }
     }
 
     pub fn install_subdir(self) -> String {
-        ri::install_subdir(self.short_name(), ri::PINNED_ORT_VERSION)
+        ri::install_subdir(self.short_name(), self.ort_version())
     }
 
     /// The offered runtime installed under `subdir` of the runtime store.
@@ -104,6 +115,7 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "openvino",
             Self::Cuda => "cuda",
+            Self::MiGraphX => "migraphx",
         }
     }
 
@@ -111,6 +123,7 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "OpenVINO Runtime",
             Self::Cuda => "CUDA Runtime",
+            Self::MiGraphX => "MIGraphX Runtime",
         }
     }
 
@@ -122,6 +135,8 @@ impl RuntimeId {
             (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
             (Self::Cuda, false) => "Not installed (250 MB). Runs the models on an NVIDIA graphics card; needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
             (Self::Cuda, true) => "Not installed (250 MB). Recommended for your NVIDIA graphics card: runs the models on it. Needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
+            (Self::MiGraphX, false) => "Not installed (20 MB). Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
+            (Self::MiGraphX, true) => "Not installed (20 MB). Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
         }
     }
 
@@ -129,6 +144,7 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "Uninstall OpenVINO Runtime",
             Self::Cuda => "Uninstall CUDA Runtime",
+            Self::MiGraphX => "Uninstall MIGraphX Runtime",
         }
     }
 
@@ -141,6 +157,9 @@ impl RuntimeId {
             Self::Cuda => "We detected an NVIDIA graphics card. Installing CUDA Runtime \
                 (~250 MB) runs the models on it instead of the processor. It needs \
                 NVIDIA's CUDA 12 and cuDNN 9 libraries on this computer.",
+            Self::MiGraphX => "We detected an AMD graphics card. Installing MIGraphX Runtime \
+                (~20 MB) runs the models on it instead of the processor. It needs \
+                AMD's ROCm 7 with MIGraphX on this computer.",
         }
     }
 
@@ -149,6 +168,7 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "Install OpenVINO Runtime",
             Self::Cuda => "Install CUDA Runtime",
+            Self::MiGraphX => "Install MIGraphX Runtime",
         }
     }
 
@@ -158,6 +178,7 @@ impl RuntimeId {
         match self {
             Self::OpenVino => "OpenVino",
             Self::Cuda => "Cuda",
+            Self::MiGraphX => "MiGraphX",
         }
     }
 }
@@ -224,7 +245,12 @@ pub enum RuntimeChoice {
 
 impl RuntimeChoice {
     /// Every choice Settings can show, in its order.
-    pub const ALL: [RuntimeChoice; 3] = [Self::BuiltIn, Self::Store(RuntimeId::OpenVino), Self::Store(RuntimeId::Cuda)];
+    pub const ALL: [RuntimeChoice; 4] = [
+        Self::BuiltIn,
+        Self::Store(RuntimeId::OpenVino),
+        Self::Store(RuntimeId::Cuda),
+        Self::Store(RuntimeId::MiGraphX),
+    ];
 
     fn preference(self) -> String {
         match self {
@@ -263,6 +289,7 @@ impl RuntimeChoice {
             Self::BuiltIn => "Built in",
             Self::Store(RuntimeId::OpenVino) => "OpenVINO",
             Self::Store(RuntimeId::Cuda) => "CUDA",
+            Self::Store(RuntimeId::MiGraphX) => "MIGraphX",
         }
     }
 
@@ -271,6 +298,7 @@ impl RuntimeChoice {
             Self::BuiltIn => "DirectML: any DirectX 12 graphics card, else the processor",
             Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
             Self::Store(RuntimeId::Cuda) => "NVIDIA graphics cards",
+            Self::Store(RuntimeId::MiGraphX) => "AMD graphics cards",
         }
     }
 }
@@ -409,7 +437,7 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
 }
 
 fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
-    query_pypi_package(rt.pypi_package(), ri::PINNED_ORT_VERSION)
+    query_pypi_package(rt.pypi_package(), rt.ort_version())
 }
 
 fn query_pypi_package(package: &str, version: &str) -> Result<ri::WheelInfo, String> {
@@ -509,7 +537,7 @@ mod tests {
         let expected: &[RuntimeId] = if cfg!(windows) {
             &[]
         } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            &[RuntimeId::OpenVino, RuntimeId::Cuda]
+            &[RuntimeId::OpenVino, RuntimeId::Cuda, RuntimeId::MiGraphX]
         } else {
             &[RuntimeId::OpenVino]
         };

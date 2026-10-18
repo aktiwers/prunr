@@ -31,6 +31,9 @@ pub(crate) enum EpKind {
     OpenVino,
     #[cfg(not(target_os = "macos"))]
     Cuda,
+    /// AMD's provider (ROCm 7); its runtime has only a Linux wheel.
+    #[cfg(target_os = "linux")]
+    MiGraphX,
     #[cfg(target_os = "macos")]
     CoreMl,
     #[cfg(windows)]
@@ -56,6 +59,8 @@ impl EpKind {
             EpKind::OpenVino => OPENVINO_NAME,
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => "CUDA",
+            #[cfg(target_os = "linux")]
+            EpKind::MiGraphX => "MIGraphX",
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => "CoreML",
             #[cfg(windows)]
@@ -104,7 +109,17 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
                     Ok(()) => eps.push(EpKind::Cuda),
                     Err(e) => {
                         tracing::info!(%e, "CUDA cannot start; sessions run on the CPU");
-                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of_cuda(&e));
+                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of(GpuStack::Cuda, &e));
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if ort::ep::MIGraphX::default().is_available().unwrap_or(false) {
+                match provider_starts(ort::ep::MIGraphX::default().with_device_id(0).build().error_on_failure()) {
+                    Ok(()) => eps.push(EpKind::MiGraphX),
+                    Err(e) => {
+                        tracing::info!(%e, "MIGraphX cannot start; sessions run on the CPU");
+                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of(GpuStack::Rocm, &e));
                     }
                 }
             }
@@ -127,47 +142,85 @@ pub fn gpu_start_failure() -> Option<&'static GpuStartFailure> {
     GPU_START_FAILURE.get()
 }
 
-/// Why CUDA did not start. It runs only beside NVIDIA's driver and its
-/// CUDA 12 and cuDNN 9 libraries.
+/// The vendor stack a GPU runtime needs installed beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuStack {
+    /// NVIDIA's driver with CUDA 12 and cuDNN 9.
+    Cuda,
+    /// AMD's ROCm 7 with MIGraphX.
+    Rocm,
+}
+
+impl GpuStack {
+    fn provider(self) -> &'static str {
+        match self {
+            Self::Cuda => "CUDA",
+            Self::Rocm => "MIGraphX",
+        }
+    }
+
+    fn needs(self) -> &'static str {
+        match self {
+            Self::Cuda => "NVIDIA's CUDA 12 and cuDNN 9 libraries",
+            Self::Rocm => "AMD's ROCm 7 with MIGraphX installed",
+        }
+    }
+}
+
+/// Why a GPU runtime's provider did not start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GpuStartFailure {
-    /// The loader could not find this library (a CUDA or cuDNN one).
+pub struct GpuStartFailure {
+    pub stack: GpuStack,
+    pub why: StartFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartFailure {
+    /// The loader could not find this library of the vendor's stack.
     MissingLibrary(String),
-    /// No NVIDIA driver, or one older than CUDA 12 needs.
+    /// No driver, or one older than the stack needs.
     NoDriver,
-    /// The driver runs but finds no NVIDIA graphics card.
+    /// The driver runs but finds no graphics card it serves.
     NoDevice,
     Other,
 }
 
 impl GpuStartFailure {
-    /// `err` names the first library the loader could not find.
-    #[cfg(not(target_os = "macos"))]
-    fn of_cuda(err: &str) -> Self {
+    /// `err` names the first library the loader could not find, or the
+    /// vendor's error code.
+    pub(crate) fn of(stack: GpuStack, err: &str) -> Self {
         let missing = err
             .split(": cannot open shared object file")
             .next()
             .and_then(|head| head.rsplit(' ').next())
             .filter(|lib| lib.starts_with("lib") && lib.contains(".so"));
-        match missing {
-            Some(lib) if lib.starts_with("libcuda.so") => Self::NoDriver,
-            Some(lib) => Self::MissingLibrary(lib.to_string()),
+        let why = match missing {
+            Some(lib) if lib.starts_with("libcuda.so") => StartFailure::NoDriver,
+            Some(lib) => StartFailure::MissingLibrary(lib.to_string()),
             // cudaErrorInsufficientDriver, which is also what a missing
             // driver gives once CUDA's own libraries load.
-            None if err.contains("CUDA failure 35:") => Self::NoDriver,
-            // cudaErrorNoDevice.
-            None if err.contains("CUDA failure 100:") => Self::NoDevice,
-            None => Self::Other,
-        }
+            None if err.contains("CUDA failure 35:") => StartFailure::NoDriver,
+            // cudaErrorNoDevice / hipErrorNoDevice.
+            None if err.contains("CUDA failure 100:") || err.contains("hipErrorNoDevice") => StartFailure::NoDevice,
+            None => StartFailure::Other,
+        };
+        Self { stack, why }
     }
 
     /// The failure in the user's words.
     pub fn text(&self) -> String {
-        match self {
-            Self::MissingLibrary(lib) => format!("CUDA could not start: {lib} is missing. It needs NVIDIA's CUDA 12 and cuDNN 9 libraries."),
-            Self::NoDriver => "CUDA could not start: the NVIDIA driver is missing or older than CUDA 12 needs (525 or newer).".to_string(),
-            Self::NoDevice => "CUDA could not start: no NVIDIA graphics card was found.".to_string(),
-            Self::Other => "CUDA could not start, so models run on the CPU. The log has the details.".to_string(),
+        let provider = self.stack.provider();
+        match &self.why {
+            StartFailure::MissingLibrary(lib) => format!("{provider} could not start: {lib} is missing. It needs {}.", self.stack.needs()),
+            StartFailure::NoDriver => match self.stack {
+                GpuStack::Cuda => "CUDA could not start: the NVIDIA driver is missing or older than CUDA 12 needs (525 or newer).".to_string(),
+                GpuStack::Rocm => "MIGraphX could not start: the AMD graphics driver is missing or too old for ROCm 7.".to_string(),
+            },
+            StartFailure::NoDevice => match self.stack {
+                GpuStack::Cuda => "CUDA could not start: no NVIDIA graphics card was found.".to_string(),
+                GpuStack::Rocm => "MIGraphX could not start: no AMD graphics card that ROCm supports was found.".to_string(),
+            },
+            StartFailure::Other => format!("{provider} could not start, so models run on the CPU. The log has the details."),
         }
     }
 }
@@ -284,6 +337,9 @@ impl EpKind {
                     EpSite::Fill { .. } | EpSite::SdPart { .. } => p.build(),
                 }
             }
+            // One device, as for CUDA: the first card ROCm lists.
+            #[cfg(target_os = "linux")]
+            EpKind::MiGraphX => ort::ep::MIGraphX::default().with_device_id(0).build(),
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
                 let dir = match site {
@@ -983,20 +1039,29 @@ mod tests {
         }
     }
 
-    /// A CUDA runtime that cannot start knows which library is missing,
-    /// so the app can offer it, and tells a missing driver apart.
+    /// A GPU runtime that cannot start knows which library is missing, so
+    /// the app can offer it, and tells a missing driver or card apart.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn a_cuda_runtime_that_cannot_start_names_what_is_missing() {
+    fn a_gpu_runtime_that_cannot_start_names_what_is_missing() {
+        let why = |stack, err: &str| GpuStartFailure::of(stack, err).why;
         let failed = |lib: &str| format!("ORT register CUDA EP failed: provider_bridge_ort.cc:1957 [ONNXRuntimeError] : 1 : FAIL : Failed to load library /x/libonnxruntime_providers_cuda.so with error: {lib}: cannot open shared object file: No such file or directory");
-        assert_eq!(GpuStartFailure::of_cuda(&failed("libcublasLt.so.12")), GpuStartFailure::MissingLibrary("libcublasLt.so.12".into()));
-        assert_eq!(GpuStartFailure::of_cuda(&failed("libcudnn.so.9")), GpuStartFailure::MissingLibrary("libcudnn.so.9".into()));
-        assert_eq!(GpuStartFailure::of_cuda(&failed("libcuda.so.1")), GpuStartFailure::NoDriver);
+        assert_eq!(why(GpuStack::Cuda, &failed("libcublasLt.so.12")), StartFailure::MissingLibrary("libcublasLt.so.12".into()));
+        assert_eq!(why(GpuStack::Cuda, &failed("libcuda.so.1")), StartFailure::NoDriver);
         let parse_failed = |cuda: &str| format!("Parse Failed to parse provider option \"device_id\": {cuda} ; GPU=-1 ; expr=cudaGetDeviceCount(&num_devices);");
-        assert_eq!(GpuStartFailure::of_cuda(&parse_failed("CUDA failure 35: CUDA driver version is insufficient for CUDA runtime version")), GpuStartFailure::NoDriver);
-        assert_eq!(GpuStartFailure::of_cuda(&parse_failed("CUDA failure 100: no CUDA-capable device is detected")), GpuStartFailure::NoDevice);
-        assert_eq!(GpuStartFailure::of_cuda("out of memory"), GpuStartFailure::Other);
-        assert_eq!(GpuStartFailure::MissingLibrary("libcudnn.so.9".into()).text(), "CUDA could not start: libcudnn.so.9 is missing. It needs NVIDIA's CUDA 12 and cuDNN 9 libraries.");
+        assert_eq!(why(GpuStack::Cuda, &parse_failed("CUDA failure 35: CUDA driver version is insufficient for CUDA runtime version")), StartFailure::NoDriver);
+        assert_eq!(why(GpuStack::Cuda, &parse_failed("CUDA failure 100: no CUDA-capable device is detected")), StartFailure::NoDevice);
+        assert_eq!(why(GpuStack::Rocm, &failed("libmigraphx_c.so.3")), StartFailure::MissingLibrary("libmigraphx_c.so.3".into()));
+        assert_eq!(why(GpuStack::Rocm, "hipErrorNoDevice"), StartFailure::NoDevice);
+        assert_eq!(why(GpuStack::Cuda, "out of memory"), StartFailure::Other);
+        assert_eq!(
+            GpuStartFailure::of(GpuStack::Cuda, &failed("libcudnn.so.9")).text(),
+            "CUDA could not start: libcudnn.so.9 is missing. It needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
+        );
+        assert_eq!(
+            GpuStartFailure::of(GpuStack::Rocm, &failed("libamdhip64.so.7")).text(),
+            "MIGraphX could not start: libamdhip64.so.7 is missing. It needs AMD's ROCm 7 with MIGraphX installed.",
+        );
     }
 
     #[test]

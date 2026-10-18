@@ -116,9 +116,9 @@ fn the_nvidia_libraries_are_offered_only_when_cuda_needs_them() {
     use crate::gui::hardware_cache::HardwareInstallCache;
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
-    use prunr_core::engine::GpuStartFailure;
-    static MISSING: GpuStartFailure = GpuStartFailure::MissingLibrary(String::new());
-    static NO_DRIVER: GpuStartFailure = GpuStartFailure::NoDriver;
+    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
+    static MISSING: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(String::new()) };
+    static NO_DRIVER: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDriver };
     if !RuntimeId::OFFERED.contains(&RuntimeId::Cuda) {
         return;
     }
