@@ -163,7 +163,7 @@ fn stable_diffusion_settings_show_only_with_an_sd_eraser_installed() {
         harness.state_mut().settings_tab = SettingsTab::Hardware;
         settle(&mut harness);
         let sd15 = installs.has_model(SettingsModel::SdInpaint) || installs.lcm_bundle;
-        assert_eq!(line_of(&harness, "SD 1.5"), sd15, "Hardware: the SD 1.5 memory line");
+        assert_eq!(line_of(&harness, "Stable Diffusion 1.5"), sd15, "Hardware: the Stable Diffusion 1.5 memory line");
         assert_eq!(line_of(&harness, "RORem"), installs.has_model(SettingsModel::RoremInpaint), "Hardware: the RORem memory line");
     }
 }

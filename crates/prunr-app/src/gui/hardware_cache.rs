@@ -136,7 +136,7 @@ impl HardwareInstallCache {
             self.lcm_bundle.then_some(ModelId::SdV15LcmInpaintFp16)
         };
         let rorem = self.has_model(SettingsModel::RoremInpaint).then_some(ModelId::RoremFp16);
-        [sd15.map(|id| ("SD 1.5", id)), rorem.map(|id| ("RORem", id))].into_iter().flatten()
+        [sd15.map(|id| ("Stable Diffusion 1.5", id)), rorem.map(|id| ("RORem", id))].into_iter().flatten()
     }
 
     pub fn has_sd_eraser(&self) -> bool {
