@@ -39,10 +39,30 @@ pub fn host_rid() -> &'static str {
     else { "unknown" }
 }
 
+/// The newest glibc a Linux wheel may need: the one ORT's own wheels
+/// need, so anything that runs beside the runtime runs.
+const MAX_GLIBC: (u32, u32) = (2, 28);
+
+/// The glibc a manylinux tag for `arch` needs: `manylinux_2_27_x86_64`,
+/// or a legacy alias (`manylinux2014_x86_64` is 2.17).
+fn manylinux_glibc(tag: &str, arch: &str) -> Option<(u32, u32)> {
+    let rest = tag.strip_prefix("manylinux")?.strip_suffix(arch)?.strip_suffix('_')?;
+    match rest {
+        "1" => Some((2, 5)),
+        "2010" => Some((2, 12)),
+        "2014" => Some((2, 17)),
+        _ => {
+            let (major, minor) = rest.strip_prefix('_')?.split_once('_')?;
+            Some((major.parse().ok()?, minor.parse().ok()?))
+        }
+    }
+}
+
 /// Whether a wheel's platform tag runs on `rid`. A macOS tag carries
 /// the wheel's minimum OS, which moves between ORT releases
 /// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
-/// only its arch is fixed.
+/// only its arch is fixed. A Linux tag may need any glibc up to
+/// `MAX_GLIBC` (NVIDIA's wheels carry 2.12 to 2.27).
 fn tag_fits(tag: &str, rid: &str) -> bool {
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let macos = |arch: &str| tag.strip_prefix("macosx_")
@@ -51,8 +71,8 @@ fn tag_fits(tag: &str, rid: &str) -> bool {
         .and_then(|version| version.split_once('_'))
         .is_some_and(|(major, minor)| number(major) && number(minor));
     match rid {
-        "linux-x64" => tag == "manylinux_2_28_x86_64",
-        "linux-arm64" => tag == "manylinux_2_28_aarch64",
+        "linux-x64" => manylinux_glibc(tag, "x86_64").is_some_and(|v| v <= MAX_GLIBC),
+        "linux-arm64" => manylinux_glibc(tag, "aarch64").is_some_and(|v| v <= MAX_GLIBC),
         "windows-x64" => tag == "win_amd64",
         "windows-arm64" => tag == "win_arm64",
         "macos-arm64" => macos("arm64"),
@@ -389,6 +409,41 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
     Ok(target_dir.to_path_buf())
 }
 
+/// Filter + flatten for files extracted from an NVIDIA library wheel
+/// (`nvidia/<package>/lib/libX.so.N`): its shared libraries, by file
+/// name. The same path-traversal guard as `repackage_target_filename`.
+pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
+    let rest = zip_name.strip_prefix("nvidia/")?;
+    let (_package, file) = rest.split_once("/lib/")?;
+    if file.is_empty() || file.contains('/') || file.contains('\\') || !file.contains(".so") {
+        return None;
+    }
+    // Shipped beside what ORT links but never loaded by it.
+    if file.starts_with("libnvblas") || file.starts_with("libcufftw") || file.contains(".alt.") {
+        return None;
+    }
+    Some(file.to_string())
+}
+
+/// Extract an NVIDIA library wheel's shared libraries into `target_dir`,
+/// flat; how many were written. Errors when the wheel holds none.
+pub fn extract_nvidia_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip parse: {e}"))?;
+    let mut written = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let Some(file) = nvidia_target_filename(entry.name()) else { continue };
+        let dest = target_dir.join(&file);
+        let mut out = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("extract {}: {e}", dest.display()))?;
+        written += 1;
+    }
+    if written == 0 {
+        return Err("no libraries in the NVIDIA wheel — its layout may have changed".to_string());
+    }
+    Ok(written)
+}
+
 pub const DYLIB_NAME: &str = if cfg!(windows) {
     "onnxruntime.dll"
 } else if cfg!(target_os = "macos") {
@@ -490,6 +545,28 @@ mod tests {
         // 1.24 dropped Intel macOS and has no Windows-on-Arm wheel.
         assert!(pick_wheel(&urls, "macos-x64").is_err());
         assert!(pick_wheel(&urls, "windows-arm64").is_err());
+    }
+
+    /// NVIDIA's wheels carry older manylinux tags than ORT's; any glibc up
+    /// to 2.28 fits, a newer one or another arch does not.
+    #[test]
+    fn linux_wheels_fit_up_to_the_glibc_ort_needs() {
+        for filename in [
+            "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl",
+            "nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+            "onnxruntime_gpu-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), "linux-x64").is_ok(), "rejected {filename}");
+        }
+        for filename in [
+            "x-1.0-py3-none-manylinux_2_34_x86_64.whl",
+            "x-1.0-py3-none-manylinux_2_27_aarch64.whl",
+            "x-1.0-py3-none-musllinux_1_2_x86_64.whl",
+            "x-1.0-py3-none-manylinux_2_x_x86_64.whl",
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), "linux-x64").is_err(), "took {filename}");
+        }
     }
 
     #[test]
@@ -669,6 +746,41 @@ mod tests {
             assert_eq!(repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(), Some(name));
         }
         assert!(repackage_target_filename("onnxruntime/capi/libonnxruntime_providers_tensorrt.so").is_none());
+    }
+
+    /// An NVIDIA wheel gives up its shared libraries by file name, and
+    /// nothing else: headers, Python files and traversal names stay out.
+    #[test]
+    fn nvidia_wheels_give_up_only_their_libraries() {
+        assert_eq!(nvidia_target_filename("nvidia/cudnn/lib/libcudnn.so.9").as_deref(), Some("libcudnn.so.9"));
+        assert_eq!(nvidia_target_filename("nvidia/cublas/lib/libcublasLt.so.12").as_deref(), Some("libcublasLt.so.12"));
+        assert!(nvidia_target_filename("nvidia/cudnn/include/cudnn.h").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/__init__.py").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/../../evil.so").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/..\\evil.so").is_none());
+        assert!(nvidia_target_filename("onnxruntime/capi/libonnxruntime.so").is_none());
+        for unused in ["libnvblas.so.12", "libcufftw.so.11", "libnvrtc.alt.so.12", "libnvrtc-builtins.alt.so.12.9"] {
+            assert!(nvidia_target_filename(&format!("nvidia/x/lib/{unused}")).is_none(), "{unused}");
+        }
+    }
+
+    /// Extraction writes the libraries flat and refuses a wheel without any.
+    #[test]
+    fn an_nvidia_wheel_extracts_flat_and_one_without_libraries_fails() {
+        use std::io::Write;
+        let wheel = |files: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for f in files {
+                zip.start_file(*f, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"elf").unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let n = extract_nvidia_wheel(&wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"]), dir.path()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read(dir.path().join("libcurand.so.10")).unwrap(), b"elf");
+        assert!(extract_nvidia_wheel(&wheel(&["nvidia/curand/include/curand.h"]), dir.path()).is_err());
     }
 
     #[test]

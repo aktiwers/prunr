@@ -74,7 +74,7 @@ fn the_hardware_page_names_every_runtime_control() {
     both.next_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
     let mut built_in_only = HardwareInstallCache::default();
     built_in_only.built_in_gpu = true;
-    let installing = Some((RuntimeId::OpenVino, "Downloading 40% (32/80 MB)".to_string()));
+    let installing = Some((crate::runtime_install::InstallTarget::Runtime(RuntimeId::OpenVino), "Downloading 40% (32/80 MB)".to_string()));
     let shapes = [
         ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
         ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
@@ -93,7 +93,8 @@ fn the_hardware_page_names_every_runtime_control() {
             installing,
             active_provider: "DirectML".into(),
             sd_margin_mb: 2048,
-            gpu_note: None,
+            gpu_failure: None,
+            nvidia_libraries: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -104,6 +105,50 @@ fn the_hardware_page_names_every_runtime_control() {
         }
         let choice_shown = present.iter().any(|n| n == "Built in");
         assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
+    }
+}
+
+/// The NVIDIA libraries are offered only while the loaded CUDA runtime
+/// is missing a library: Download then, Cancel while they install, and
+/// neither for a missing driver or once they are there.
+#[test]
+fn the_nvidia_libraries_are_offered_only_when_cuda_needs_them() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
+    use prunr_core::engine::GpuStartFailure;
+    static MISSING: GpuStartFailure = GpuStartFailure::MissingLibrary(String::new());
+    static NO_DRIVER: GpuStartFailure = GpuStartFailure::NoDriver;
+    if !RuntimeId::OFFERED.contains(&RuntimeId::Cuda) {
+        return;
+    }
+    let mut on_cuda = HardwareInstallCache::default();
+    on_cuda.cuda = true;
+    on_cuda.loaded_runtime = Some(RuntimeChoice::Store(RuntimeId::Cuda));
+    let installing = Some((InstallTarget::NvidiaLibraries, "Downloading 10% (170/1700 MB)".to_string()));
+    let shapes = [
+        ("missing a library", &MISSING, None, false, Some("Download NVIDIA libraries")),
+        ("installing", &MISSING, installing, false, Some("Cancel")),
+        ("no driver", &NO_DRIVER, None, false, None),
+        ("installed", &MISSING, None, true, None),
+    ];
+    for (shape, failure, installing, nvidia_libraries, expected) in shapes {
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs: on_cuda,
+            installing,
+            active_provider: "CPU".into(),
+            sd_margin_mb: 2048,
+            gpu_failure: Some(failure),
+            nvidia_libraries,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in ["Download NVIDIA libraries", "Cancel"] {
+            assert_eq!(present.iter().any(|n| n == name), expected == Some(name), "{shape}: {name}: {present:?}");
+        }
     }
 }
 
