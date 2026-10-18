@@ -915,6 +915,20 @@ pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
     out
 }
 
+/// One tile centred on the painted `bbox` when it fits with `OVERLAP` of
+/// photo on every side (or the photo is no larger than a tile there):
+/// one model run, and the most photo around the hole. On the grid a
+/// small stroke over a seam ran up to four tiles, each seeing it at its
+/// edge.
+fn tile_around(bbox: Bbox, width: u32, height: u32) -> Option<TilePlacement> {
+    let axis = |start: u32, len: u32, full: u32| {
+        let size = TILE.min(full);
+        (size == full || len + 2 * OVERLAP <= size).then(|| ((start + len / 2).saturating_sub(size / 2).min(full - size), size))
+    };
+    let ((x, w), (y, h)) = (axis(bbox.x, bbox.w, width)?, axis(bbox.y, bbox.h, height)?);
+    Some(TilePlacement { x, y, w, h })
+}
+
 /// Smoothstep weight for blending tile contributions in the overlap
 /// region. Returns 1.0 at the tile interior, 0.0 at the very edge,
 /// with a smooth `t² (3 - 2t)` taper across `OVERLAP` pixels.
@@ -983,7 +997,10 @@ where
     let mut color_acc: Vec<[f32; 3]> = vec![[0.0; 3]; bbox_n];
 
     // Only tiles that touch the mask run; they are the tile map's layout.
-    let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect();
+    let work: Vec<TilePlacement> = match tile_around(bbox, w, h) {
+        Some(tile) => vec![tile],
+        None => plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect(),
+    };
     let total = work.len() as u32;
     progress.step(Step::Erasing);
     progress.tiles(work.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, w, h)).collect());
@@ -1253,7 +1270,8 @@ mod tests {
         let (w, h) = (700, 500);
         let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]));
         let mut mask = GrayImage::new(w, h);
-        for (x, y) in (300..340).flat_map(|x| (200..230).map(move |y| (x, y))) {
+        // Wider than one tile less its margins, so the grid runs.
+        for (x, y) in (150..560).flat_map(|x| (200..230).map(move |y| (x, y))) {
             mask.put_pixel(x, y, Luma([255]));
         }
         let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
@@ -1566,6 +1584,39 @@ mod tests {
         let out = decode_tile(output.view(), &src, &mask);
         let got: Vec<u8> = (0..256u32).map(|v| out.get_pixel(v % 16, v / 16)[0]).collect();
         assert_eq!(got, (0..=255).collect::<Vec<u8>>());
+    }
+
+    /// A small stroke runs one tile centred on it, wherever it falls on
+    /// the grid: one model run, with photo all around it. A stroke too
+    /// large for that still gets the grid.
+    #[test]
+    fn a_small_stroke_runs_one_tile_centred_on_it() {
+        let (w, h) = (1100, 700);
+        let img = RgbaImage::from_pixel(w, h, Rgba([10, 10, 10, 255]));
+        let run = |x0: u32, y0: u32, side: u32| {
+            let mut mask = GrayImage::new(w, h);
+            for y in y0..y0 + side {
+                for x in x0..x0 + side {
+                    mask.put_pixel(x, y, Luma([255]));
+                }
+            }
+            let mut tiles = Vec::new();
+            tile_compose(&img, &mask, &Progress::none(), |t, m| {
+                tiles.push((t.dimensions(), mask_bbox(m, 1, 0).unwrap()));
+                t.clone()
+            }).unwrap();
+            tiles
+        };
+        // Across the first grid seam (tiles start every 448 px).
+        let tiles = run(430, 420, 40);
+        assert_eq!(tiles.len(), 1, "{tiles:?}");
+        let (size, painted) = tiles[0];
+        assert_eq!(size, (TILE, TILE));
+        assert_eq!((painted.x, painted.y), ((TILE - 40) / 2, (TILE - 40) / 2), "centred");
+        // Near a corner the tile stays inside the photo.
+        let (_, painted) = run(5, 650, 30)[0];
+        assert_eq!((painted.x, painted.y), (5, 650 - (h - TILE)));
+        assert!(run(100, 100, 400).len() > 1, "a stroke wider than a tile less its margins");
     }
 
     /// A painted pixel on the photo's edge is filled like any other: a
