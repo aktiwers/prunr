@@ -1020,7 +1020,7 @@ pub fn run_worker() -> ! {
                             let _ = std::fs::remove_file(&image_path);
                             image::load_from_memory(&bytes)
                                 .map_err(|e| format!("decode source: {e}"))?
-                                .to_rgba8()
+                                .into_rgba8()
                         };
                         let mask: image::GrayImage = {
                             let bytes = std::fs::read(&mask_path)

@@ -1360,7 +1360,7 @@ impl Processor {
                         let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
                             Some(b) => match image::load_from_memory(&b) {
                                 Ok(img) => {
-                                    let rgba = img.to_rgba8();
+                                    let rgba = img.into_rgba8();
                                     debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
                                     // Stamp with the dispatch's own generation — drain
                                     // drops it as stale if a fresher stroke
