@@ -62,7 +62,7 @@ pub fn write_blob(bytes: &[u8]) -> std::io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = cache_dir().join(format!("state_{n}.zst"));
-    std::fs::write(&path, bytes)?;
+    crate::fs_util::write_bytes_replacing(&path, bytes)?;
     Ok(path)
 }
 
