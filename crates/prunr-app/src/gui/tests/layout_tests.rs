@@ -3,6 +3,7 @@
 //! controls overlap and none runs past the window's right edge.
 
 use super::fixtures::push_test_item;
+use crate::gui::automation::checks::first_overlap;
 use super::harness::{click, harness_sized, names, settle, tree};
 use egui_kittest::Harness;
 
@@ -46,17 +47,6 @@ fn controls(harness: &Harness<'_, PrunrApp>, keep: impl Fn(&[f32; 4]) -> bool) -
         .collect()
 }
 
-/// The first two of `controls` that overlap, if any.
-fn first_overlap(controls: &[(String, [f32; 4])]) -> Option<String> {
-    controls.iter().enumerate().find_map(|(i, (a, ra))| {
-        controls[i + 1..].iter().find_map(|(b, rb)| {
-            let w = ra[2].min(rb[2]) - ra[0].max(rb[0]);
-            let h = ra[3].min(rb[3]) - ra[1].max(rb[1]);
-            (w > 1.0 && h > 1.0).then(|| format!("{a:?} overlaps {b:?}"))
-        })
-    })
-}
-
 /// What is wrong with the toolbar at `width` for `model`, if anything.
 fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
     let mut harness = with_a_done_image(width, model);
@@ -72,7 +62,7 @@ fn toolbar_clash(width: f32, model: SettingsModel) -> Option<String> {
     if let Some((name, r)) = bars.iter().find(|(_, r)| r[2] > width) {
         return Some(format!("{name:?} ends at {} past {width}", r[2]));
     }
-    first_overlap(&bars)
+    first_overlap(&bars).map(|v| v.detail)
 }
 
 #[test]
@@ -193,7 +183,7 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
     if let Some((name, r)) = strip.iter().find(|(_, r)| r[2] > canvas_right) {
         return Some(format!("{name:?} ends at {} under the sidebar at {canvas_right}", r[2]));
     }
-    first_overlap(&strip)
+    first_overlap(&strip).map(|v| v.detail)
 }
 
 /// The brush strip stays on the canvas at every width, and its layout
