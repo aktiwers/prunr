@@ -222,10 +222,18 @@ pub struct Entry {
     pub dismiss: Option<Step>,
 }
 
-/// The catalog for a script: every visit, and every model by its picker name.
+/// A model as a script picks it (`name`, the picker's) and checks it
+/// took (`id`, what the socket's `state` reports).
+#[derive(Debug, serde::Serialize)]
+pub struct Model {
+    pub name: &'static str,
+    pub id: String,
+}
+
+/// The catalog for a script: every visit, and every model.
 #[derive(Debug, serde::Serialize)]
 pub struct Catalog {
-    pub models: Vec<&'static str>,
+    pub models: Vec<Model>,
     pub visits: Vec<Entry>,
 }
 
@@ -233,7 +241,7 @@ pub fn catalog() -> Catalog {
     use crate::gui::settings::SettingsModel;
     let name = |m: SettingsModel| crate::gui::views::model_info(m).name;
     Catalog {
-        models: SettingsModel::ALL.into_iter().map(name).collect(),
+        models: SettingsModel::ALL.into_iter().map(|m| Model { name: name(m), id: format!("{m:?}") }).collect(),
         visits: VISITS
             .iter()
             .map(|v| Entry {
