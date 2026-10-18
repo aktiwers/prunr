@@ -3,7 +3,8 @@
 //! kept on disk once they go.
 
 use std::path::PathBuf;
-use std::sync::{mpsc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
 
 enum Job {
     Write(PathBuf, Vec<u8>),
@@ -29,6 +30,7 @@ fn run(job: Job) {
         Job::Write(path, bytes) => {
             if let Err(err) = write_whole(&path, &bytes) {
                 tracing::warn!(?path, %err, "file not written");
+                note_failure(format!("A settings or preset file could not be saved ({err}). Changes made now may not be kept."));
             }
         }
         Job::Remove(path) => match std::fs::remove_file(&path) {
@@ -47,6 +49,25 @@ fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     crate::fs_util::write_bytes_replacing(path, bytes)
+}
+
+static FAILURE: Mutex<Option<String>> = Mutex::new(None);
+static FAILED: AtomicBool = AtomicBool::new(false);
+
+/// The first write that failed this session is kept for the person; the
+/// rest only go to the log, as one message says what is wrong.
+fn note_failure(message: String) {
+    if !FAILED.swap(true, Ordering::AcqRel) {
+        *FAILURE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+    }
+}
+
+/// The failed write to tell the person about, once a session.
+pub(crate) fn take_failure() -> Option<String> {
+    if !FAILED.load(Ordering::Acquire) {
+        return None;
+    }
+    FAILURE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
 }
 
 pub(crate) fn write(path: PathBuf, bytes: Vec<u8>) {
@@ -68,6 +89,19 @@ pub(crate) fn flush() {
 
 #[cfg(test)]
 mod tests {
+    /// The first failed write is told once; a second is not told again.
+    #[test]
+    fn a_failed_write_is_told_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("settings.json");
+        std::fs::create_dir(&blocked).unwrap();
+        super::write(blocked.clone(), b"x".to_vec());
+        super::write(blocked, b"y".to_vec());
+        super::flush();
+        assert!(super::take_failure().is_some_and(|m| m.contains("could not be saved")));
+        assert_eq!(super::take_failure(), None, "told once");
+    }
+
     /// Writes and removals land in the order asked, whole, and a flush
     /// returns once they are on disk.
     #[test]

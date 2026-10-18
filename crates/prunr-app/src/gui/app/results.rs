@@ -37,6 +37,9 @@ impl PrunrApp {
         for msg in std::mem::take(&mut self.pending_first_toasts) {
             self.toasts.info(msg);
         }
+        if let Some(msg) = super::super::disk_queue::take_failure() {
+            self.toasts.error(msg);
+        }
         // The SD eraser's reports and result come through its bridge. A
         // run sends its pictures before its result, and they land first:
         // the result reveals over them.
