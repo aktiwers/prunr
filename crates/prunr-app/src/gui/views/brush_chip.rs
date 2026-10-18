@@ -36,7 +36,7 @@ impl BrushChipOutcome {
 const CUTOUT_ACTIONS: [chip::Choice<CutoutAction>; 3] = [
     chip::Choice { value: CutoutAction::Restore, name: "Restore", description: "Bring back what the model took away, as you paint", enabled: true },
     chip::Choice { value: CutoutAction::Erase, name: "Erase", description: "Remove what the model left behind, as you paint", enabled: true },
-    chip::Choice { value: CutoutAction::Select, name: "Select", description: "Only select; Restore and Delete in the toolbar act on it", enabled: true },
+    chip::Choice { value: CutoutAction::Select, name: "Select", description: "Only select; Restore and Delete in the selection bar act on it", enabled: true },
 ];
 
 /// Elsewhere a stroke shapes the selection or the region to fill.

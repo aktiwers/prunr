@@ -603,7 +603,8 @@ fn render_page_editing(ui: &mut egui::Ui, settings: &mut Settings) {
     });
     group_heading(ui, "Toolbar");
     group(ui, |rows| {
-        rows.row("Auto-hide adjustments", "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.", |ui| {
+        let toggle = super::shortcuts::keys(rows.ui.ctx(), super::shortcuts::Action::ToggleAdjustments);
+        rows.row("Auto-hide adjustments", &format!("Collapse the toolbar when the cursor leaves it. Toggle with {toggle}."), |ui| {
             super::chip::switch(ui, "Auto-hide adjustments toolbar", &mut settings.auto_hide_adjustments);
         });
     });

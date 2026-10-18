@@ -254,6 +254,32 @@ fn user_text_has_no_engineering_words() {
     report(found, "engineering words in user text");
 }
 
+/// A key named in user text comes from the binding table
+/// (`shortcuts::keys`): Settings › Shortcuts rebinds them, and a key
+/// written by hand stays wrong after.
+#[test]
+fn user_text_names_no_keys_by_hand() {
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        if !rel.starts_with("prunr-app/src/gui/views/") || rel.ends_with("/shortcuts.rs") {
+            continue;
+        }
+        for (n, line) in production_lines(text) {
+            for literal in literals(code_part(line)) {
+                let words = literal.split(|c: char| !c.is_alphanumeric() && c != '+');
+                let named = words.into_iter().find(|w| {
+                    let f_key = w.strip_prefix('F').is_some_and(|d| !d.is_empty() && d.len() <= 2 && d.bytes().all(|b| b.is_ascii_digit()));
+                    f_key || ["Shift+", "Ctrl+", "Cmd+", "Alt+"].iter().any(|m| w.starts_with(m))
+                });
+                if let Some(key) = named {
+                    found.push(format!("{rel}:{n}: \"{literal}\" names {key}: use shortcuts::keys"));
+                }
+            }
+        }
+    }
+    report(found, "keys written by hand in user text");
+}
+
 /// The accessors that hold the egui context's lock while their closure runs.
 const CTX_LOCKING: [&str; 6] = ["input(", "input_mut(", "memory(", "memory_mut(", "data(", "data_mut("];
 
