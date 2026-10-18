@@ -1,35 +1,33 @@
 //! Tile-based upscale with overlap-blend.
 //!
-//! Peak working-set RAM (per dispatch, scale=4, fp32 RGB accumulator +
-//! weight buffer + per-tile transient scratch + alpha companion buffers).
-//! Numbers are for the OUTPUT buffers; the input image and the model
-//! session are separate.
+//! Peak working-set RAM (per dispatch, scale=4, 512 tiles). Numbers are
+//! for the OUTPUT buffers; the input image and the model session are
+//! separate.
 //!
-//! | Input        | RGB accum f32 | Weight buf f32 | Per-tile transient¹ | Alpha src+dst | Total      |
-//! |--------------|---------------|----------------|---------------------|---------------|------------|
-//! | 1024 × 1024  | 192 MB        | 64 MB          | ~10 MB              | 5 MB          | ~272 MB    |
-//! | 2048 × 2048  | 768 MB        | 256 MB         | ~10 MB              | 20 MB         | ~1054 MB   |
-//! | 4096 × 4096  | 3072 MB       | 1024 MB        | ~10 MB              | 80 MB         | ~4186 MB   |
+//! | Input        | Band f32 (one tile row of sums + weights) | Output RGBA | Alpha | Per-tile transient¹ | Total    |
+//! |--------------|-------------------------------------------|-------------|-------|---------------------|----------|
+//! | 1024 × 1024  | 128 MB                                    | 64 MB       | 16 MB | ~10 MB              | ~218 MB  |
+//! | 2048 × 2048  | 256 MB                                    | 256 MB      | 64 MB | ~10 MB              | ~586 MB  |
+//! | 4096 × 4096  | 512 MB                                    | 1024 MB     | 256 MB| ~10 MB              | ~1802 MB |
 //!
 //! ¹ Per-tile transient = padded RGB tile + inferred RGB output (lives only
 //! during one `run_tile` call, dropped before the next tile). The blend
 //! reads `inferred` directly with an offset (no separate trimmed copy).
 //!
-//! 4K → 16K upscale is the limit on a 16 GB machine. The Processor's
-//! working_set_mb admission gate refuses to dispatch when free RAM is
-//! below this peak.
+//! The band is freed before the alpha is made, so the total overstates
+//! by the alpha. The upscale dispatch refuses to start when free RAM is
+//! below this peak (`super::peak_bytes`).
 
 use crate::progress::{Progress, Step, TileRect, Unit};
 
-/// Bytes per output pixel at the run's peak, as it finishes: the RGB
-/// accumulator and weights (16), the enlarged alpha (1) and the output
-/// (4) live together.
-const PEAK_BYTES_PER_OUTPUT_PIXEL: u64 = 21;
-
-/// What an upscale to `out_w` × `out_h` holds at its peak, besides the
-/// input image and the model.
-pub fn peak_bytes(out_w: u32, out_h: u32) -> u64 {
-    u64::from(out_w) * u64::from(out_h) * PEAK_BYTES_PER_OUTPUT_PIXEL
+/// What `upscale_tiled` holds at its peak, besides the input and the
+/// model: one tile row of colour sums and weights (16 bytes a pixel),
+/// the output (4) and, as it finishes, the enlarged alpha (1).
+pub(super) fn tiled_peak_bytes(in_w: u32, in_h: u32, scale: u32, tile_size: u32) -> u64 {
+    let out_w = u64::from(in_w) * u64::from(scale);
+    let out_h = u64::from(in_h) * u64::from(scale);
+    let band_rows = u64::from(tile_size.min(in_h)) * u64::from(scale);
+    band_rows * out_w * 16 + out_w * out_h * 5
 }
 
 use image::{GrayImage, RgbImage, RgbaImage};
@@ -139,7 +137,7 @@ pub fn upscale_tiled<F>(
 where
     F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
 {
-    let TilingConfig { overlap, .. } = cfg;
+    let TilingConfig { tile_size, overlap, .. } = cfg;
     let (in_w, in_h) = input.dimensions();
     let out_w = in_w * scale;
     let out_h = in_h * scale;
@@ -150,10 +148,13 @@ where
     progress.tiles(tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, in_w, in_h)).collect());
     progress.inner(0, total, Unit::Tile);
 
-    // RGB f32 accumulator (channels interleaved: R, G, B per pixel).
-    let pixel_count = (out_w as usize) * (out_h as usize);
-    let mut rgb_accum: Vec<f32> = vec![0.0; pixel_count * 3];
-    let mut weight_buf: Vec<f32> = vec![0.0; pixel_count];
+    // Tiles run a row at a time, so output rows above the next tile row
+    // are final: the accumulator holds one tile row of output, finished
+    // into `out_img` and slid up as the rows advance.
+    let row_len = out_w as usize;
+    let band_rows = (tile_size.min(in_h) * scale) as usize;
+    let mut band = Band { top: 0, rgb: vec![0.0; band_rows * row_len * 3], weight: vec![0.0; band_rows * row_len] };
+    let mut out_img = RgbaImage::new(out_w, out_h);
 
     // Sequential: ort sessions are Mutex-guarded internally and nested
     // rayon inside the subprocess worker path deadlocks.
@@ -168,6 +169,7 @@ where
             rgb_tile
         };
         let inferred = run_tile(&padded_tile, tile.padded_w, tile.padded_h)?;
+        band.finish_above(tile.y * scale, &mut out_img);
 
         // Blend the unpadded `tile.w * scale × tile.h * scale` region of
         // `inferred` into the accumulator with smoothstep weights. The taper
@@ -191,14 +193,13 @@ where
                 let w = wx * wy;
 
                 let out_x = out_tile_x + px;
-                let out_y = out_tile_y + py;
-                let out_idx = (out_y as usize) * (out_w as usize) + (out_x as usize);
+                let out_idx = ((out_tile_y + py - band.top) as usize) * row_len + (out_x as usize);
 
                 let tile_pixel = inferred.get_pixel(px, py).0;
-                rgb_accum[out_idx * 3] += tile_pixel[0] as f32 * w;
-                rgb_accum[out_idx * 3 + 1] += tile_pixel[1] as f32 * w;
-                rgb_accum[out_idx * 3 + 2] += tile_pixel[2] as f32 * w;
-                weight_buf[out_idx] += w;
+                band.rgb[out_idx * 3] += tile_pixel[0] as f32 * w;
+                band.rgb[out_idx * 3 + 1] += tile_pixel[1] as f32 * w;
+                band.rgb[out_idx * 3 + 2] += tile_pixel[2] as f32 * w;
+                band.weight[out_idx] += w;
             }
         }
 
@@ -208,25 +209,49 @@ where
         progress.tile(tile_idx as u32, true);
     }
     progress.step(Step::Finishing);
+    band.finish_above(out_h, &mut out_img);
+    drop(band);
 
     let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
+    for (px, a) in out_img.pixels_mut().zip(alpha.as_raw()) {
+        px.0[3] = *a;
+    }
+    Ok(out_img)
+}
 
-    let mut out_img = RgbaImage::new(out_w, out_h);
-    for py in 0..out_h {
-        for px in 0..out_w {
-            let idx = (py as usize) * (out_w as usize) + (px as usize);
+/// The weighted colour sums of the output rows still taking tiles, from
+/// output row `top` down.
+struct Band {
+    top: u32,
+    rgb: Vec<f32>,
+    weight: Vec<f32>,
+}
+
+impl Band {
+    /// Write the rows above output row `until` into `out` and slide the
+    /// band down to start there. No tile reaches them any more.
+    fn finish_above(&mut self, until: u32, out: &mut RgbaImage) {
+        let Some(done) = until.checked_sub(self.top).filter(|&n| n > 0) else { return };
+        let row_len = out.width() as usize;
+        let done_px = (done as usize * row_len).min(self.weight.len());
+        let start = self.top as usize * row_len * 4;
+        let rows = &mut out.as_mut()[start..start + done_px * 4];
+        for ((px, rgb), w) in rows.chunks_exact_mut(4).zip(self.rgb.chunks_exact(3)).zip(&self.weight) {
             // Guard against zero weight on unreachable pixels — f32 division
             // by 0 would otherwise produce inf and saturate the channel.
-            let inv_w = 1.0 / weight_buf[idx].max(1e-6);
-            let r = (rgb_accum[idx * 3] * inv_w).clamp(0.0, 255.0) as u8;
-            let g = (rgb_accum[idx * 3 + 1] * inv_w).clamp(0.0, 255.0) as u8;
-            let b = (rgb_accum[idx * 3 + 2] * inv_w).clamp(0.0, 255.0) as u8;
-            let a = alpha.get_pixel(px, py).0[0];
-            out_img.put_pixel(px, py, image::Rgba([r, g, b, a]));
+            let inv_w = 1.0 / w.max(1e-6);
+            for k in 0..3 {
+                px[k] = (rgb[k] * inv_w).clamp(0.0, 255.0) as u8;
+            }
         }
+        self.rgb.copy_within(done_px * 3.., 0);
+        let kept = self.rgb.len() - done_px * 3;
+        self.rgb[kept..].fill(0.0);
+        self.weight.copy_within(done_px.., 0);
+        let kept = self.weight.len() - done_px;
+        self.weight[kept..].fill(0.0);
+        self.top = until;
     }
-
-    Ok(out_img)
 }
 
 /// The finished `tile` at `width × height` for its preview: the model's
@@ -278,8 +303,9 @@ mod tests {
     #[test]
     fn the_peak_matches_the_table_and_does_not_overflow() {
         let mb = |b: u64| b / (1024 * 1024);
-        assert_eq!(mb(peak_bytes(4096, 4096)), 336, "1024 x 1024 at 4x: the table's 272 MB plus the output");
-        assert_eq!(peak_bytes(100_000, 100_000), 210_000_000_000);
+        assert_eq!(mb(tiled_peak_bytes(1024, 1024, 4, 512)), 208, "the table's row less the per-tile scratch");
+        assert_eq!(mb(tiled_peak_bytes(4096, 4096, 4, 512)), 1792);
+        assert_eq!(tiled_peak_bytes(50_000, 50_000, 2, 512), 1024 * 100_000 * 16 + 100_000 * 100_000 * 5);
     }
 
     use super::*;
@@ -460,6 +486,55 @@ mod tests {
         let quiet = std::sync::Arc::new(RecordingSink::default());
         upscale_tiled(&input, scale, cfg, run_tile, &Progress::new(quiet.clone())).expect("upscale_tiled failed");
         assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
+    }
+
+    /// The whole-image accumulator the band replaced, kept as the oracle.
+    fn full_buffer_reference(input: &RgbaImage, scale: u32, cfg: TilingConfig, run_tile: impl Fn(&RgbImage, u32, u32) -> RgbImage) -> RgbaImage {
+        let (in_w, in_h) = input.dimensions();
+        let (out_w, out_h) = (in_w * scale, in_h * scale);
+        let mut acc = vec![0f32; (out_w * out_h * 3) as usize];
+        let mut wts = vec![0f32; (out_w * out_h) as usize];
+        for tile in plan_upscale_tiles(in_w, in_h, cfg) {
+            let rgb = extract_rgb_tile(input, &tile);
+            let padded = if tile.padded_w != tile.w || tile.padded_h != tile.h { pad_rgb_tile(&rgb, tile.padded_w, tile.padded_h) } else { rgb };
+            let inferred = run_tile(&padded, tile.padded_w, tile.padded_h);
+            let (tw, th, edge) = (tile.w * scale, tile.h * scale, cfg.overlap * scale);
+            for py in 0..th {
+                for px in 0..tw {
+                    let w = blend_weight_sided(px, edge, tw, tile.x > 0, tile.x + tile.w < in_w) * blend_weight_sided(py, edge, th, tile.y > 0, tile.y + tile.h < in_h);
+                    let i = ((tile.y * scale + py) * out_w + tile.x * scale + px) as usize;
+                    let c = inferred.get_pixel(px, py).0;
+                    for k in 0..3 {
+                        acc[i * 3 + k] += c[k] as f32 * w;
+                    }
+                    wts[i] += w;
+                }
+            }
+        }
+        let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
+        RgbaImage::from_fn(out_w, out_h, |x, y| {
+            let i = (y * out_w + x) as usize;
+            let inv = 1.0 / wts[i].max(1e-6);
+            let c = |k: usize| (acc[i * 3 + k] * inv).clamp(0.0, 255.0) as u8;
+            image::Rgba([c(0), c(1), c(2), alpha.get_pixel(x, y)[0]])
+        })
+    }
+
+    /// Finishing rows a band at a time gives the very bytes the whole-image
+    /// accumulator gave: several tile rows, overlap, padding, the last row
+    /// moved in, and tiles that disagree where they overlap.
+    #[test]
+    fn the_banded_accumulator_matches_the_whole_image_one() {
+        let (w, h, scale) = (300u32, 700u32, 2u32);
+        let input = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8, (x + y * 5) as u8]));
+        let cfg = TilingConfig { tile_size: 128, tile_multiple: Some(16), overlap: 16 };
+        // Each tile shifts its colours by its first pixel, so overlaps blend.
+        let run = |rgb: &RgbImage, pw: u32, ph: u32| {
+            let shift = rgb.get_pixel(0, 0)[0] / 8;
+            RgbImage::from_fn(scale * pw, scale * ph, |x, y| image::Rgb(rgb.get_pixel(x / scale, y / scale).0.map(|v| v.wrapping_add(shift))))
+        };
+        let banded = upscale_tiled(&input, scale, cfg, |t, pw, ph| Ok(run(t, pw, ph)), &Progress::none()).unwrap();
+        assert!(banded == full_buffer_reference(&input, scale, cfg, run), "bit-identical");
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub mod postprocess;
 pub use postprocess::{sharpened, apply_ai_blend, apply_color_match, refine, Refine};
 
 pub use alpha::upscale_alpha_lanczos3;
-pub use tiling::{peak_bytes, plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
+pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
 
 use std::sync::Arc;
 
@@ -295,6 +295,23 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     out
 }
 
+/// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
+/// holds at its peak, besides the input and the model: the tiler's
+/// buffers at the model's own scale, or the resample to `scale` when
+/// that is larger.
+pub fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
+    let descriptor = prunr_models::descriptor(model);
+    let native = descriptor.and_then(|d| d.upscale.as_ref()).map_or(scale, |k| k.native_scale);
+    // A model without a tile size refuses to run; count the whole height.
+    let tile = descriptor.and_then(|d| d.recommended_tile).unwrap_or(in_h);
+    let tiled = tiling::tiled_peak_bytes(in_w, in_h, native, tile);
+    if native == scale {
+        return tiled;
+    }
+    let pixels = |s: u32| u64::from(in_w) * u64::from(in_h) * u64::from(s) * u64::from(s);
+    tiled.max(pixels(native) * 4 + pixels(scale) * 5)
+}
+
 /// Builds its own engine; for callers without a warm engine (CLI, tests).
 ///
 /// Peak working-set RAM (additive to the `upscale_tiled` accumulators
@@ -332,6 +349,18 @@ pub fn model_for_scale(model: prunr_models::ModelId, scale: crate::OutputScale, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The peak counts the model's own scale: a 2x from a 4x model holds
+    /// the 4x image before it is brought down.
+    #[test]
+    fn the_peak_is_at_the_models_own_scale() {
+        use prunr_models::ModelId;
+        let mb = |b: u64| b / (1024 * 1024);
+        let four = peak_bytes(ModelId::RealEsrganX4Plus, 4096, 4096, 4);
+        assert_eq!(mb(four), 512 + 1024 + 256, "a 512 band, the output and its alpha");
+        assert_eq!(peak_bytes(ModelId::RealEsrganX4Plus, 4096, 4096, 2), four, "the tiler at 4x outweighs the resample");
+        assert_eq!(mb(peak_bytes(ModelId::RealEsrganX2Plus, 4096, 4096, 2)), 128 + 256 + 64);
+    }
 
     #[test]
     fn a_real_esrgan_2x_runs_the_native_2x_model_when_installed() {
