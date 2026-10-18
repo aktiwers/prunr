@@ -861,8 +861,8 @@ mod tests {
         let previous_compressed = batch.items[0].timeline.stored_images().nth(1).is_some_and(|c| c.is_compressed());
         assert!(warm(&batch) && !previous_compressed, "the step undo returns to stays unpacked");
         let item = &mut batch.items[0];
-        item.undo_step();
-        item.undo_step();
+        let _ = item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.shown_result().expect("shown").get_pixel(5, 5), &image::Rgba([9, 8, 7, 255]));
     }
 
@@ -890,7 +890,7 @@ mod tests {
         assert!(first_packed(&batch));
         let item = &mut batch.items[0];
         item.on_screen = true;
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(item.result_rgba.is_none() && first_packed(&batch), "undo unpacked nothing");
         let item = &mut batch.items[0];
         let pixels = item.result_pixels().expect("the step's result");

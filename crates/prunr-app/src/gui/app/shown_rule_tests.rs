@@ -316,7 +316,7 @@ fn an_undone_cut_is_not_applied_again() {
     item.commit(StepKind::Process);
     crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
     assert!(item.shows_cutout());
-    assert!(item.undo_step().is_some());
+    assert!(item.undo_step().is_ok());
     assert!(!item.shows_cutout() && item.hot_seg_tensor().is_none(), "the photo shows: the mask made nothing on screen");
     let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
     assert!(!crate::gui::drag_export::LayerJob::of(item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "no subject layer from the undone cut");
@@ -402,7 +402,7 @@ fn a_parked_result_stays_parked_through_steps() {
     item.settings.gamma = 1.3;
     item.commit(StepKind::Adjust);
     assert!(item.result_rgba.is_none() && item.has_result(), "the step shares the stored result, still parked");
-    assert!(item.undo_step().is_some());
+    assert!(item.undo_step().is_ok());
     assert!(item.result_rgba.is_none() && item.has_result(), "undone off screen: still parked");
     assert_eq!(item.run_input_dims(Engine::Upscale), (8, 8), "the stored step knows its size");
 }

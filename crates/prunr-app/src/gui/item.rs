@@ -224,6 +224,19 @@ fn clear_if<K: PartialEq>(pending: &mut Option<K>, key: K) {
     }
 }
 
+/// A step back or forward (`BatchItem::undo_step` / `redo_step`).
+pub(crate) type StepFn = fn(&mut BatchItem) -> Result<StepKind, StepRefused>;
+
+/// Why a step back or forward did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepRefused {
+    /// There is no step that way.
+    Nothing,
+    /// The step's saved state is gone (its file removed); the image stays
+    /// on the step it was.
+    Lost,
+}
+
 /// The sidebar thumbnail: the one shown, and whether a new one is being
 /// made. The one shown stays while a new one is made, so a result never
 /// blinks to a spinner.
@@ -1994,19 +2007,34 @@ impl BatchItem {
     }
 
     /// Step back one state; returns what the undone step did.
-    pub(crate) fn undo_step(&mut self) -> Option<StepKind> {
-        let undone = self.timeline.undo()?;
+    pub(crate) fn undo_step(&mut self) -> Result<StepKind, StepRefused> {
+        let undone = self.timeline.undo().ok_or(StepRefused::Nothing)?;
+        if !self.shown_state_readable() {
+            self.timeline.redo();
+            return Err(StepRefused::Lost);
+        }
         self.restore();
         self.warm_neighbour_steps();
-        Some(undone)
+        Ok(undone)
     }
 
     /// Step forward one state; returns what the redone step did.
-    pub(crate) fn redo_step(&mut self) -> Option<StepKind> {
-        let redone = self.timeline.redo()?;
+    pub(crate) fn redo_step(&mut self) -> Result<StepKind, StepRefused> {
+        let redone = self.timeline.redo().ok_or(StepRefused::Nothing)?;
+        if !self.shown_state_readable() {
+            self.timeline.undo();
+            return Err(StepRefused::Lost);
+        }
         self.restore();
         self.warm_neighbour_steps();
-        Some(redone)
+        Ok(redone)
+    }
+
+    /// The shown state's selection and edits read back: one kept on disk
+    /// and since removed (a cache cleaner) does not.
+    fn shown_state_readable(&self) -> bool {
+        let shown = self.timeline.current();
+        shown.selection.as_ref().is_none_or(|s| s.load().is_some()) && shown.edits.as_ref().is_none_or(|e| e.load().is_some())
     }
 
     /// Note a run starting now; `step` is the step its result records,
@@ -3009,7 +3037,7 @@ mod tests {
         item.commit(StepKind::Process);
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.tile_preview = Some(ctx.load_texture("preview", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default()));
-        assert!(item.undo_step().is_some());
+        assert!(item.undo_step().is_ok());
         assert!(item.tile_preview.is_none());
     }
 
@@ -3055,7 +3083,7 @@ mod tests {
         item.commit(StepKind::Process);
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255]))));
         item.commit(StepKind::Adjust);
-        item.undo_step();
+        let _ = item.undo_step();
         let warm = (0..200).find_map(|_| {
             std::thread::sleep(std::time::Duration::from_millis(5));
             item.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[AHEAD].as_ref().and_then(|w| w.image.clone())
@@ -3155,9 +3183,9 @@ mod tests {
         assert_eq!(item.kept_run_tier(model), KeptRunTier::UpToDate, "nothing changed yet");
         item.settings.color_strength_pct = 50;
         assert_eq!(item.kept_run_tier(model), KeptRunTier::Refinish);
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(item.kept_colorize().is_none(), "an earlier colorize step: the kept run is not its own");
-        item.redo_step();
+        let _ = item.redo_step();
         assert!(item.kept_colorize().is_some());
         item.invalidate_colorize_cache();
         assert!(item.kept_colorize().is_none());
@@ -3206,7 +3234,7 @@ mod tests {
         assert_eq!(item.next_upscale_dims(model), (8, 8), "Process again enlarges the upscale");
         upscale(&mut item, 16);
         assert_eq!(item.next_upscale_dims(model), (16, 16));
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.next_upscale_dims(model), (8, 8), "after undo: what is shown, with its run no longer kept");
         item.settings.output_scale = prunr_core::OutputScale::X2;
         assert!(item.next_upscale_start(model).is_none(), "a new Scale redoes the shown upscale from the photo");
@@ -3225,9 +3253,9 @@ mod tests {
             item.land_upscale(UpscaleCache::new(img(), img(), None));
         }
         assert!(item.kept_upscale().is_some(), "the shown step's own run");
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(item.kept_upscale().is_none(), "an earlier upscale step: the kept run is not its own");
-        item.redo_step();
+        let _ = item.redo_step();
         assert!(item.kept_upscale().is_some());
         item.commit(StepKind::Adjust);
         assert!(item.kept_upscale().is_some(), "a Refine knob step keeps its upscale's run");
@@ -3246,7 +3274,7 @@ mod tests {
         item.result_rgba = Some(Arc::clone(&raw));
         item.land_upscale(UpscaleCache::new(Arc::clone(&raw), Arc::clone(&source), None));
         assert!(item.face_photo(FaceStage::Upscale).is_some_and(|p| p.same(&FacePhoto::Upscaled(Arc::clone(&raw)))));
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(item.face_photo(FaceStage::Upscale).is_none(), "the earlier step has no upscale of its own");
         let _ = raw;
     }
@@ -3262,11 +3290,11 @@ mod tests {
             item.finish_job();
         }
         assert_eq!(item.shown_seed(), Some(8));
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.shown_seed(), Some(7));
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.shown_seed(), None, "the original has no fill");
-        item.redo_step();
+        let _ = item.redo_step();
         assert_eq!(item.shown_seed(), Some(7));
     }
 
@@ -3383,7 +3411,7 @@ mod tests {
         item.commit(StepKind::Adjust);
 
         let dragged = item.request_result_texture(true);
-        assert!(item.undo_step().is_some());
+        assert!(item.undo_step().is_ok());
         let restored = item.request_result_texture(false);
         let shown = tex("restored");
         item.land_texture(shown.clone().into(), restored);
@@ -3391,7 +3419,7 @@ mod tests {
         assert_eq!(item.result_texture.as_ref().map(|t| t.id()), Some(shown.id()), "the undone render lands no more");
 
         let stale = item.request_result_texture(false);
-        assert!(item.undo_step().is_some());
+        assert!(item.undo_step().is_ok());
         item.land_texture(tex("stale").into(), stale);
         assert!(item.result_texture.is_none(), "the original has no result to show");
     }
@@ -3413,7 +3441,7 @@ mod tests {
         item.result_texture = Some(tex("result").into());
         item.commit(StepKind::Adjust);
         put_up(&mut item);
-        assert!(item.undo_step().is_some());
+        assert!(item.undo_step().is_ok());
         assert!(item.quick.texture().is_none(), "an undo takes it down");
         let revealed_from = match &item.reveal {
             Some(Reveal::Held(t) | Reveal::Running(t, ..)) => Some(t.id()),
@@ -3603,6 +3631,25 @@ mod tests {
         assert!(gone.contains("moved or deleted"), "{gone}");
     }
 
+    /// An undo onto a step whose saved selection was removed from the disk
+    /// cache does not move, and says why, instead of showing that step
+    /// with its selection gone.
+    #[test]
+    fn an_undo_onto_a_lost_step_does_not_move() {
+        let mut item = fixture_item(1);
+        let plane = |v: i8| Arc::new(prunr_core::selection::MaskArtifact::from_cells(2, 2, vec![v; 4]));
+        item.commit_selection_mask(plane(1), StepKind::Stroke);
+        let earlier = item.timeline.current().selection.clone().expect("a selection step");
+        item.commit_selection_mask(plane(2), StepKind::Stroke);
+        earlier.compress_job().expect("only the timeline holds it")();
+        assert!(earlier.demote_to_disk());
+        std::fs::remove_file(earlier.disk_path().expect("on disk")).unwrap();
+        let shown = item.selection_mask.clone();
+        assert_eq!(item.undo_step(), Err(StepRefused::Lost));
+        assert!(Arc::ptr_eq(item.selection_mask.as_ref().unwrap(), shown.as_ref().unwrap()), "nothing changed");
+        assert_eq!(item.redo_step(), Err(StepRefused::Nothing), "still on the newest step");
+    }
+
     #[test]
     fn the_first_decode_keeps_what_was_made_from_the_photo() {
         let mut item = fixture_item(1);
@@ -3785,20 +3832,20 @@ mod tests {
         item.settings.gamma = 1.7;
         item.commit(StepKind::Adjust);
 
-        assert_eq!(item.undo_step(), Some(StepKind::Adjust));
+        assert_eq!(item.undo_step(), Ok(StepKind::Adjust));
         assert_eq!((shown(&item), item.settings.gamma), (Some(2), ItemSettings::default().gamma));
-        assert_eq!(item.undo_step(), Some(StepKind::Stroke));
+        assert_eq!(item.undo_step(), Ok(StepKind::Stroke));
         assert_eq!(shown(&item), Some(1), "the image before the stroke, stored, not re-cut");
         assert!(item.selection_mask.is_none() && item.selection_hash.is_none());
-        assert_eq!(item.undo_step(), Some(StepKind::Process));
+        assert_eq!(item.undo_step(), Ok(StepKind::Process));
         assert_eq!((shown(&item), &item.status()), (None, &BatchStatus::Pending));
-        assert_eq!(item.undo_step(), None);
+        assert_eq!(item.undo_step(), Err(StepRefused::Nothing));
 
-        assert_eq!(item.redo_step(), Some(StepKind::Process));
-        assert_eq!(item.redo_step(), Some(StepKind::Stroke));
+        assert_eq!(item.redo_step(), Ok(StepKind::Process));
+        assert_eq!(item.redo_step(), Ok(StepKind::Stroke));
         assert_eq!(item.selection_hash, Some(make_mask(5, 4, 4).content_hash()));
         assert_eq!(shown(&item), Some(2));
-        assert_eq!(item.redo_step(), Some(StepKind::Adjust));
+        assert_eq!(item.redo_step(), Ok(StepKind::Adjust));
         assert_eq!(item.settings.gamma, 1.7);
     }
 
@@ -3819,7 +3866,7 @@ mod tests {
         assert_eq!(item.timeline.undo_steps(), 1, "a re-run fills in the shown step");
 
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        item.undo_step();
+        let _ = item.undo_step();
         assert!(!item.job_is_current(), "an undo since the start makes the result stale");
     }
 
@@ -3855,7 +3902,7 @@ mod tests {
         item.commit(StepKind::Edit);
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(9), "a hand edit is kept by the next run");
 
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(6), "undo brings back the step's own start");
         assert!(item.starts_from_result(Engine::Segment));
         assert_eq!(item.run_input_dims(Engine::Upscale), (2, 2));
@@ -3881,7 +3928,7 @@ mod tests {
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(7), "a re-cut redoes it from the built start");
         assert!(!item.cuts_anothers_cutout(birefnet));
         assert!(item.cuts_anothers_cutout(silueta), "and Silueta's Process would build on BiRefNet's");
-        item.undo_step();
+        let _ = item.undo_step();
         assert_eq!(item.run_input(Engine::Segment), None, "undo is back on Silueta's cut from the photo");
     }
 
@@ -3928,7 +3975,7 @@ mod tests {
         item.unpark_result();
         assert_eq!((shown(&item), item.timeline.undo_steps()), (Some(3), 1));
 
-        item.undo_step();
+        let _ = item.undo_step();
         item.unpark_result();
         assert_eq!(shown(&item), None, "the original has no result to bring back");
     }

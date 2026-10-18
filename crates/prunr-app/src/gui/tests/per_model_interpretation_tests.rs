@@ -620,7 +620,7 @@ fn delete_on_a_cutout_keeps_the_erase_and_undo_returns_the_selection() {
     assert_eq!(item.timeline.undo_steps(), 3, "the run, the stroke and the fold");
 
     let item = &mut app.batch.items[0];
-    item.undo_step();
+    let _ = item.undo_step();
     assert!(item.edits.is_none(), "undo takes the erase away");
     assert_eq!(item.selection_mask.as_ref().map(|m| m.content_hash()), selection.map(|m| m.content_hash()));
 }
