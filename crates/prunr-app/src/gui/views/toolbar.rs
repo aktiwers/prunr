@@ -44,7 +44,7 @@ fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
             changed = true;
             depth_turned_on = app.settings.export_depth_map;
         }
-        super::hint(ui, "Also saves each image's depth as a 16-bit grey PNG, white = near.");
+        super::hint(ui, "Also saves each image's depth as a 16-bit gray PNG, white = near.");
     });
     if changed {
         app.settings.save();

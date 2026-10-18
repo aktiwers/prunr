@@ -280,6 +280,28 @@ fn user_text_names_no_keys_by_hand() {
     report(found, "keys written by hand in user text");
 }
 
+/// User text spells the US way, as most of it does: gray, color,
+/// license, center.
+#[test]
+fn user_text_uses_us_spelling() {
+    const BRITISH: [&str; 5] = ["grey", "colour", "licence", "centre", "behaviour"];
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        if !rel.starts_with("prunr-app/src/gui/views/") {
+            continue;
+        }
+        for (n, line) in production_lines(text) {
+            for literal in literals(code_part(line)) {
+                let lower = literal.to_lowercase();
+                if let Some(word) = BRITISH.iter().find(|w| lower.split(|c: char| !c.is_alphabetic()).any(|t| t.starts_with(*w))) {
+                    found.push(format!("{rel}:{n}: \"{literal}\" spells {word:?}"));
+                }
+            }
+        }
+    }
+    report(found, "British spelling in user text");
+}
+
 /// The accessors that hold the egui context's lock while their closure runs.
 const CTX_LOCKING: [&str; 6] = ["input(", "input_mut(", "memory(", "memory_mut(", "data(", "data_mut("];
 
