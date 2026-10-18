@@ -50,7 +50,7 @@ fn build_masked_base(
     original: &DynamicImage,
     settings: &ItemSettings,
     correction: Option<&prunr_core::selection::MaskArtifact>,
-) -> Option<DynamicImage> {
+) -> Option<RgbaImage> {
     let mask_settings = settings.mask_settings();
     let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
         .with_correction(correction);
@@ -62,7 +62,6 @@ fn build_masked_base(
         &opts,
     )
     .ok()
-    .map(DynamicImage::ImageRgba8)
 }
 
 /// Throttle cadence for live-preview dispatch during a continuous drag.
@@ -1274,7 +1273,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             let seg = inputs.seg_tensor.as_ref().unwrap();
             build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
                 .map_or((None, None), |img| {
-                    let arc = Arc::new(img.to_rgba8());
+                    let arc = Arc::new(img);
                     (Some(Arc::clone(&arc)), Some(arc))
                 })
         };
@@ -1303,7 +1302,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
                 else { return RunOutput::default(); };
-                return RunOutput { rgba: Some(Arc::new(masked.to_rgba8())), ..RunOutput::default() };
+                return RunOutput { rgba: Some(Arc::new(masked)), ..RunOutput::default() };
             }
             // SubjectOutline: compose subject + edges via the selected mode.
             // All modes are compose-time only — no re-inference.
