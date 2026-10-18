@@ -295,6 +295,35 @@ pub fn forget_preferred_runtime(subdir: &str) {
     }
 }
 
+/// Present when the user lets OpenVINO run models on the Intel GPU
+/// (Settings › Hardware). A file, like [`PREFERRED_FILE`], so the worker
+/// subprocess and the CLI follow it too.
+pub const INTEL_GPU_FILE: &str = "intel-gpu";
+
+/// Whether the user lets OpenVINO use the Intel GPU, read from disk now.
+pub fn intel_gpu_chosen() -> bool {
+    prunr_models::runtime_store_dir().is_some_and(|root| root.join(INTEL_GPU_FILE).is_file())
+}
+
+/// Let OpenVINO use the Intel GPU, or not, from each process's next start.
+pub fn set_intel_gpu(on: bool) -> Result<(), String> {
+    let root = prunr_models::runtime_store_dir().ok_or("could not resolve user data dir")?;
+    write_intel_gpu(&root, on)
+}
+
+fn write_intel_gpu(root: &Path, on: bool) -> Result<(), String> {
+    let path = root.join(INTEL_GPU_FILE);
+    if on {
+        std::fs::create_dir_all(root).map_err(|e| format!("create {}: {e}", root.display()))?;
+        std::fs::write(&path, b"").map_err(|e| format!("write {}: {e}", path.display()))
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("remove {}: {e}", path.display())),
+            _ => Ok(()),
+        }
+    }
+}
+
 fn read_preferred(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(PREFERRED_FILE)).ok()?;
     let name = text.trim();
@@ -505,6 +534,19 @@ mod tests {
         assert_eq!(picked(root.path(), Some(&built_in), false), Some(built_in.clone()), "built in, as picked");
         assert_eq!(picked(root.path(), None, false), openvino, "built in picked but absent (a dev build)");
         assert_eq!(runtime_candidates(Some(root.path()), Some(built_in), true).first().map(|(_, s)| s.to_string()), Some("bundled".to_string()));
+    }
+
+    #[test]
+    fn the_intel_gpu_choice_turns_on_and_off() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join(INTEL_GPU_FILE);
+        write_intel_gpu(root.path(), false).unwrap();
+        assert!(!file.exists(), "off when never chosen");
+        write_intel_gpu(root.path(), true).unwrap();
+        assert!(file.is_file());
+        write_intel_gpu(root.path(), true).unwrap();
+        write_intel_gpu(root.path(), false).unwrap();
+        assert!(!file.exists());
     }
 
     #[test]

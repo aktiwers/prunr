@@ -86,6 +86,7 @@ pub(crate) enum HardwareSectionIntent {
     CancelInstall,
     Uninstall(RuntimeId),
     PreferRuntime(RuntimeChoice),
+    IntelGpu(bool),
     ClearCompiledCache,
     ForgetGpuFailures,
 }
@@ -167,6 +168,13 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
                     app.toasts.error(format!("Could not choose {}: {e}", choice.name()));
                 }
             }
+            app.refresh_install_cache();
+        }
+        HardwareSectionIntent::IntelGpu(on) => {
+            match prunr_core::ort_runtime::set_intel_gpu(on) {
+                Ok(()) => app.toasts.info("Restart Prunr to apply"),
+                Err(e) => app.toasts.error(format!("Could not change the Intel graphics setting: {e}")),
+            };
             app.refresh_install_cache();
         }
         HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
@@ -505,6 +513,18 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                     intent = chosen.map(HardwareSectionIntent::PreferRuntime);
                 }
             });
+        }
+        if ctx.installs.openvino && p.recommends_openvino() {
+            rows.row(
+                "Use Intel graphics",
+                "Experimental. Runs cut-outs and upscaling on the Intel graphics chip as well as the CPU: faster for some models and computers, slower for others. Takes effect when you restart Prunr.",
+                |ui| {
+                    let mut on = ctx.installs.intel_gpu;
+                    if super::chip::switch(ui, "Use Intel graphics", &mut on).changed() {
+                        intent = Some(HardwareSectionIntent::IntelGpu(on));
+                    }
+                },
+            );
         }
         rows.row(
             "Compiled-model cache",

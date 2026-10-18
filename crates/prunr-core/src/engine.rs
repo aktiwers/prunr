@@ -153,6 +153,40 @@ pub(crate) enum EpSite<'a> {
     SdPart { part: &'a str, ov_device: Option<&'a str> },
 }
 
+/// OpenVINO's device for engines once the user lets it use the Intel GPU.
+/// AUTO compiles for the GPU while the CPU serves the first runs, and
+/// stays on the CPU where no GPU or OpenCL driver is. Opt-in because it
+/// is not a win everywhere: on an HD 530 (prunr bench, 2026-10) U2Net ran
+/// 441 → 185 ms, BiRefNet-lite 9.1 → 12.9 s, and Real-ESRGAN x2's FP16
+/// output drifted (10.8% of values off by more than 2/255).
+#[cfg(not(target_os = "macos"))]
+const OV_ENGINE_DEVICE: &str = "AUTO:GPU,CPU";
+
+/// The user's Intel GPU choice, read once per process.
+#[cfg(not(target_os = "macos"))]
+fn intel_gpu_chosen() -> bool {
+    static CHOSEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        let chosen = crate::ort_runtime::intel_gpu_chosen();
+        tracing::info!(chosen, "OpenVINO may use the Intel GPU");
+        chosen
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+impl EpSite<'_> {
+    /// The OpenVINO device this site asks for; `None` is OpenVINO's CPU.
+    /// Fills stay on the CPU: the GPU plugin cannot build LaMa (dynamic
+    /// shapes), and under AUTO it ran ~10% slower than the CPU.
+    fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
+        match self {
+            EpSite::Engine { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
+            EpSite::Fill { .. } => None,
+            EpSite::SdPart { ov_device, .. } => *ov_device,
+        }
+    }
+}
+
 impl EpKind {
     /// This provider tuned for `site`, set to fail its registration
     /// loudly. ort's default logs a failed registration and commits the
@@ -203,22 +237,28 @@ impl EpKind {
                 // Uncapped, OpenVINO sizes its pool to all logical cores
                 // and oversubscribes against the rayon workers —
                 // `sched_yield` was ~2% of CLI batch wall time.
-                EpSite::Engine { threads } | EpSite::Fill { threads } => ort::ep::OpenVINO::default()
-                    .with_num_threads(threads.max(1))
-                    .build(),
+                EpSite::Engine { threads } | EpSite::Fill { threads } => {
+                    let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
+                    match site.ov_device(intel_gpu_chosen()) {
+                        Some(device) => provider.with_device_type(device),
+                        None => provider,
+                    }
+                    .build()
+                }
                 // `num_streams=1` disables per-stream buffer duplication
                 // (the bundle sits at ~16 GB RSS on an i7-6700 either
                 // way; measured 2026-10). Dynamic shapes cost nothing per
                 // step, so one bundle serves 512² tiles and the 512×768
                 // crop.
-                EpSite::SdPart { ov_device, .. } => {
-                    let mut p = ort::ep::OpenVINO::default()
+                EpSite::SdPart { .. } => {
+                    let provider = ort::ep::OpenVINO::default()
                         .with_num_streams(1)
                         .with_dynamic_shapes(true);
-                    if let Some(dev) = ov_device {
-                        p = p.with_device_type(dev);
+                    match site.ov_device(intel_gpu_chosen()) {
+                        Some(device) => provider.with_device_type(device),
+                        None => provider,
                     }
-                    p.build()
+                    .build()
                 }
             },
         };
@@ -364,8 +404,12 @@ pub(crate) fn walk_ladder<S>(
 
 /// The GPU providers the loaded runtime offers, in the order a session
 /// tries them.
-pub fn gpu_provider_names() -> Vec<&'static str> {
-    available_gpu_eps().iter().map(EpKind::as_str).collect()
+pub fn gpu_provider_names() -> Vec<String> {
+    available_gpu_eps().iter().map(|&ep| match ep {
+        #[cfg(not(target_os = "macos"))]
+        EpKind::OpenVino if intel_gpu_chosen() => format!("{OPENVINO_NAME} (Intel graphics on)"),
+        _ => ep.as_str().to_string(),
+    }).collect()
 }
 
 /// The lighter copy of `id`'s weights a session tries before its own,
@@ -853,6 +897,20 @@ mod tests {
     struct MockEngine;
     impl InferenceEngine for MockEngine {
         fn active_provider(&self) -> &str { "CPU" }
+    }
+
+    /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
+    /// behind it, only when the user chose it; fills never do, and an SD
+    /// part keeps the device it pins.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn only_engines_ask_openvino_for_the_gpu_and_only_when_chosen() {
+        for chosen in [false, true] {
+            assert_eq!(EpSite::Engine { threads: 4 }.ov_device(chosen), chosen.then_some("AUTO:GPU,CPU"));
+            assert_eq!(EpSite::Fill { threads: 4 }.ov_device(chosen), None);
+            assert_eq!(EpSite::SdPart { part: "unet", ov_device: None }.ov_device(chosen), None);
+            assert_eq!(EpSite::SdPart { part: "unet", ov_device: Some("GPU") }.ov_device(chosen), Some("GPU"));
+        }
     }
 
     #[test]
