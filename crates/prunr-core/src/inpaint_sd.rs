@@ -499,7 +499,7 @@ struct TileWindow {
 /// overlap between neighbours. Tiles always anchor inside the image
 /// (no out-of-bounds access at composite time) — for image axes
 /// shorter than SD_TILE, the tile width/height collapses to the image
-/// extent and `pad_to` handles the rest at the ORT boundary.
+/// extent and `pad_mirrored` handles the rest at the ORT boundary.
 fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
     let span_x = bbox.x_max - bbox.x_min + 1;
     let span_y = bbox.y_max - bbox.y_min + 1;
@@ -781,7 +781,7 @@ fn crop_side(span: u32, max_side: u32) -> Option<u32> {
 /// region exceeds `max_side` on an axis or `SD_TILE` on both (only one
 /// long side was measured; a 768² crop goes to tiles). For images
 /// smaller than the crop on an axis, the crop shrinks to that dimension
-/// (`pad_to` pads it back).
+/// (`pad_mirrored` pads it back).
 fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> Option<(u32, u32, u32, u32)> {
     let cw = crop_side(bbox.x_max - bbox.x_min + 1, max_side)?;
     let ch = crop_side(bbox.y_max - bbox.y_min + 1, max_side)?;
@@ -816,8 +816,8 @@ fn run_one_tile(
     use crate::progress::Step;
     let (w, h) = image.dimensions();
     let (pw, ph) = padded_dims(w, h);
-    let padded_image = pad_to(image, pw, ph);
-    let padded_mask = pad_to(mask, pw, ph);
+    let padded_image = crate::formats::pad_mirrored(image, pw, ph);
+    let padded_mask = crate::formats::pad_mirrored(mask, pw, ph);
     let (lw, lh) = ((pw / VAE_FACTOR) as usize, (ph / VAE_FACTOR) as usize);
     let mut timer = TileTimer::start();
 
@@ -2332,20 +2332,6 @@ fn step_array(
         }
         Scheduler::DpmPp2M(s) => s.step(latent, noise_pred, step_idx),
     }
-}
-
-/// `image` zero-padded to `w × h` (borrowed when it already is).
-fn pad_to<P>(image: &image::ImageBuffer<P, Vec<P::Subpixel>>, w: u32, h: u32) -> std::borrow::Cow<'_, image::ImageBuffer<P, Vec<P::Subpixel>>>
-where
-    P: image::Pixel + 'static,
-    P::Subpixel: 'static,
-{
-    if image.dimensions() == (w, h) {
-        return std::borrow::Cow::Borrowed(image);
-    }
-    let mut out = image::ImageBuffer::new(w, h);
-    image::imageops::overlay(&mut out, image, 0, 0);
-    std::borrow::Cow::Owned(out)
 }
 
 // ── Safety guards ───────────────────────────────────────────────────────

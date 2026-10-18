@@ -94,6 +94,34 @@ pub fn preview_reach(at: u32, len: u32, span: u32, out: u32) -> (u32, u32) {
     (start, end.max(start + 1) - start)
 }
 
+/// `image` grown to `w × h` by mirroring it across its right and bottom
+/// edges (borrowed when it is that size already): a model fed a tile
+/// sees photo past the edge, not a black band it bleeds into the result.
+pub fn pad_mirrored<P>(image: &image::ImageBuffer<P, Vec<P::Subpixel>>, w: u32, h: u32) -> std::borrow::Cow<'_, image::ImageBuffer<P, Vec<P::Subpixel>>>
+where
+    P: image::Pixel + 'static,
+{
+    let (iw, ih) = image.dimensions();
+    if (iw, ih) == (w, h) {
+        return std::borrow::Cow::Borrowed(image);
+    }
+    if iw == 0 || ih == 0 {
+        return std::borrow::Cow::Owned(image::ImageBuffer::new(w, h));
+    }
+    std::borrow::Cow::Owned(image::ImageBuffer::from_fn(w, h, |x, y| *image.get_pixel(mirror(x, iw), mirror(y, ih))))
+}
+
+/// `i` folded back into `0..len` by reflecting at both ends, the edge
+/// pixel not repeated.
+fn mirror(i: u32, len: u32) -> u32 {
+    if len <= 1 {
+        return 0;
+    }
+    let period = 2 * (len - 1);
+    let m = i % period;
+    if m < len { m } else { period - m }
+}
+
 /// SIMD-accelerated Lanczos3 resize for RGB images. An RGB8 image is
 /// read in place; any other layout is converted once first.
 pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) -> image::RgbImage {
@@ -490,6 +518,18 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Padding reflects the image at its right and bottom edges, folding
+    /// back again when the pad is longer than the image.
+    #[test]
+    fn padding_mirrors_the_image_past_its_edges() {
+        let img = GrayImage::from_fn(3, 2, |x, y| image::Luma([(y * 3 + x) as u8]));
+        let padded = pad_mirrored(&img, 7, 4);
+        let rows: Vec<Vec<u8>> = padded.rows().map(|r| r.map(|p| p[0]).collect()).collect();
+        assert_eq!(rows, vec![vec![0, 1, 2, 1, 0, 1, 2], vec![3, 4, 5, 4, 3, 4, 5], vec![0, 1, 2, 1, 0, 1, 2], vec![3, 4, 5, 4, 3, 4, 5]]);
+        assert!(matches!(pad_mirrored(&img, 3, 2), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(pad_mirrored(&GrayImage::from_pixel(1, 1, image::Luma([9])), 2, 2).as_raw(), &vec![9; 4]);
+    }
 
     /// An RGB8 image resizes in place to the same pixels an RGBA copy of
     /// it gives.

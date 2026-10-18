@@ -163,11 +163,7 @@ where
         progress.tile(tile_idx as u32, false);
 
         let rgb_tile = extract_rgb_tile(input, tile);
-        let padded_tile = if tile.padded_w != tile.w || tile.padded_h != tile.h {
-            pad_rgb_tile(&rgb_tile, tile.padded_w, tile.padded_h)
-        } else {
-            rgb_tile
-        };
+        let padded_tile = crate::formats::pad_mirrored(&rgb_tile, tile.padded_w, tile.padded_h);
         let inferred = run_tile(&padded_tile, tile.padded_w, tile.padded_h)?;
         band.finish_above(tile.y * scale, &mut out_img);
 
@@ -270,12 +266,6 @@ fn preview_tile(input: &RgbaImage, inferred: &RgbImage, tile: &UpscaleTilePlacem
 fn extract_rgb_tile(input: &RgbaImage, tile: &UpscaleTilePlacement) -> RgbImage {
     let cropped = image::imageops::crop_imm(input, tile.x, tile.y, tile.w, tile.h).to_image();
     image::DynamicImage::ImageRgba8(cropped).to_rgb8()
-}
-
-fn pad_rgb_tile(src: &RgbImage, padded_w: u32, padded_h: u32) -> RgbImage {
-    let mut dst = RgbImage::new(padded_w, padded_h);
-    image::imageops::overlay(&mut dst, src, 0, 0);
-    dst
 }
 
 /// Smoothstep weight for a single axis, respecting whether adjacent tiles
@@ -496,7 +486,7 @@ mod tests {
         let mut wts = vec![0f32; (out_w * out_h) as usize];
         for tile in plan_upscale_tiles(in_w, in_h, cfg) {
             let rgb = extract_rgb_tile(input, &tile);
-            let padded = if tile.padded_w != tile.w || tile.padded_h != tile.h { pad_rgb_tile(&rgb, tile.padded_w, tile.padded_h) } else { rgb };
+            let padded = crate::formats::pad_mirrored(&rgb, tile.padded_w, tile.padded_h);
             let inferred = run_tile(&padded, tile.padded_w, tile.padded_h);
             let (tw, th, edge) = (tile.w * scale, tile.h * scale, cfg.overlap * scale);
             for py in 0..th {
