@@ -760,8 +760,9 @@ fn pick_input_names(names: &[String]) -> (String, String) {
 }
 
 /// Encode an RGBA tile + binary mask into the two NCHW float tensors LaMa
-/// expects. Pads to TILE×TILE with zeros when the tile is smaller (edge
-/// tiles or sub-512 images).
+/// expects. A tile smaller than TILE×TILE (a photo under 512 px) is
+/// mirrored out to it, mask included: the reflection of a painted object
+/// is filled too, not handed to the model as photo.
 ///
 /// LaMa-ONNX (Carve) input convention:
 /// - `image` [1, 3, TILE, TILE] f32 in [0, 1]
@@ -774,6 +775,7 @@ fn encode_tile(image: &RgbaImage, mask: &GrayImage) -> (Array4<f32>, Array4<f32>
     // invariant: freshly allocated, standard layout — slice views are valid.
     let img_buf = img.as_slice_mut().unwrap();
     let msk_buf = msk.as_slice_mut().unwrap();
+    let (image, mask) = (crate::formats::pad_mirrored(image, TILE, TILE), crate::formats::pad_mirrored(mask, TILE, TILE));
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
     let img_raw = image.as_raw();
@@ -1653,7 +1655,7 @@ mod tests {
 
     #[test]
     fn encode_tile_pads_small_inputs_to_tile_size() {
-        let img = RgbaImage::new(64, 64);
+        let img = RgbaImage::from_fn(64, 64, |x, _| Rgba([x as u8 * 4, 0, 0, 255]));
         let mut mask = GrayImage::new(64, 64);
         mask.put_pixel(32, 32, Luma([255]));
         let (img_t, msk_t) = encode_tile(&img, &mask);
@@ -1661,7 +1663,9 @@ mod tests {
         assert_eq!(msk_t.shape(), &[1, 1, TILE as usize, TILE as usize]);
         // The painted mask cell maps to NCHW[0,0,32,32].
         assert_eq!(msk_t[[0, 0, 32, 32]], 1.0);
-        // Outside the source region, mask stays 0 (zero-padded).
+        // Past the photo both are mirrored: column 94 reflects column 32.
+        assert_eq!(msk_t[[0, 0, 32, 94]], 1.0);
+        assert_eq!(img_t[[0, 0, 0, 94]], img_t[[0, 0, 0, 32]]);
         assert_eq!(msk_t[[0, 0, 200, 200]], 0.0);
     }
 
