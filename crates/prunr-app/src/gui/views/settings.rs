@@ -76,6 +76,8 @@ pub(crate) struct HardwareSectionContext {
     pub installing: Option<(RuntimeId, String)>,
     pub active_provider: String,
     pub sd_margin_mb: u64,
+    /// Why the loaded runtime's GPU provider does not run, when it does not.
+    pub gpu_note: Option<&'static str>,
 }
 
 /// View-layer intent the Hardware page returns so platform side effects
@@ -192,6 +194,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
                 installing: app.runtime_install.as_ref().map(|p| (p.runtime, p.last_event.status_text())),
                 active_provider: app.settings.active_backend.clone(),
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
+                gpu_note: prunr_core::engine::gpu_start_note(),
             };
             render_page_hardware(ui, &hw_ctx)
         }
@@ -555,7 +558,10 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let installing_this = ctx.installing.as_ref().filter(|(r, _)| *r == rt);
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
-        None if installed => "Installed.",
+        None if installed => match ctx.gpu_note {
+            Some(note) if ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt)) => note,
+            _ => "Installed.",
+        },
         None => rt.not_installed(recommended),
     };
     rows.row(rt.display_name(), status, |ui| {

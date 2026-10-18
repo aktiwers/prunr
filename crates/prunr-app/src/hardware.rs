@@ -72,12 +72,20 @@ impl HardwareProfile {
     /// The runtime download the first-launch prompt and Settings
     /// recommend, among those offered here. A graphics card that suits
     /// DirectML needs none, since DirectML is built in, even with an
-    /// Intel iGPU beside it.
+    /// Intel iGPU beside it. An NVIDIA card wins over an Intel iGPU beside
+    /// it (the usual Linux laptop): CUDA runs the card, OpenVINO the iGPU.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
         use crate::runtime_install::RuntimeId;
-        (!self.suits_directml && self.recommends_openvino())
-            .then_some(RuntimeId::OpenVino)
-            .filter(|rt| RuntimeId::OFFERED.contains(rt))
+        if self.suits_directml {
+            return None;
+        }
+        [
+            (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda),
+            self.recommends_openvino().then_some(RuntimeId::OpenVino),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|rt| RuntimeId::OFFERED.contains(rt))
     }
 
     /// AMD discrete GPU only. APU iGPUs excluded — ROCm/MIGraphX
@@ -528,6 +536,25 @@ mod tests {
         p.igpu = None;
         p.suits_directml = false;
         assert_eq!(p.recommended_runtime(), None);
+    }
+
+    /// An NVIDIA card gets CUDA where it is offered, even beside an Intel
+    /// iGPU; where it is not, the iGPU still gets OpenVINO.
+    #[test]
+    fn an_nvidia_card_gets_cuda_over_openvino_where_offered() {
+        use crate::runtime_install::RuntimeId;
+        let p = HardwareProfile {
+            cpu_vendor: CpuVendor::Intel,
+            cpu_brand: "Intel Core i7".into(),
+            dgpu: Some(GpuVendor::Nvidia),
+            igpu: Some(GpuVendor::Intel),
+            suits_directml: false,
+            os: "linux", arch: "x86_64",
+        };
+        let offered = |rt| RuntimeId::OFFERED.contains(&rt).then_some(rt);
+        assert_eq!(p.recommended_runtime(), offered(RuntimeId::Cuda).or(offered(RuntimeId::OpenVino)));
+        let no_igpu = HardwareProfile { igpu: None, ..p };
+        assert_eq!(no_igpu.recommended_runtime(), offered(RuntimeId::Cuda));
     }
 
     #[test]

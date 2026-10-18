@@ -6,6 +6,7 @@ use crate::runtime_install::{RuntimeChoice, RuntimeId};
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub(crate) struct HardwareInstallCache {
     pub openvino: bool,
+    pub cuda: bool,
     /// OpenVINO may run models on the Intel GPU from the next start.
     pub intel_gpu: bool,
     /// The app ships a GPU runtime (DirectML on Windows release builds).
@@ -56,6 +57,7 @@ impl HardwareInstallCache {
         use prunr_models::ModelId;
         Self {
             openvino: RuntimeId::OpenVino.is_installed(),
+            cuda: RuntimeId::Cuda.is_installed(),
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
             next_runtime: RuntimeChoice::next(),
@@ -83,6 +85,7 @@ impl HardwareInstallCache {
     pub(crate) fn all_installed() -> Self {
         Self {
             openvino: true,
+            cuda: true,
             intel_gpu: false,
             built_in_gpu: true,
             next_runtime: None,
@@ -107,6 +110,7 @@ impl HardwareInstallCache {
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
         match runtime {
             RuntimeId::OpenVino => self.openvino,
+            RuntimeId::Cuda => self.cuda,
         }
     }
 

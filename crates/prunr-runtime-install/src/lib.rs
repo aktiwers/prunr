@@ -140,6 +140,8 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
         return None;
     }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
+    // The GPU wheel's TensorRT provider: no session registers it.
+    if stripped.starts_with("libonnxruntime_providers_tensorrt") { return None; }
     if stripped.ends_with(".py") { return None; }
     if stripped.starts_with("libonnxruntime.so.") {
         return Some("libonnxruntime.so".to_string());
@@ -657,6 +659,16 @@ mod tests {
                 Some(name),
             );
         }
+    }
+
+    /// The CUDA wheel keeps its CUDA provider and the shared bridge it
+    /// loads through; the TensorRT provider stays behind.
+    #[test]
+    fn repackage_keeps_the_cuda_provider_and_drops_tensorrt() {
+        for name in ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so"] {
+            assert_eq!(repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(), Some(name));
+        }
+        assert!(repackage_target_filename("onnxruntime/capi/libonnxruntime_providers_tensorrt.so").is_none());
     }
 
     #[test]

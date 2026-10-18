@@ -93,6 +93,7 @@ fn the_hardware_page_names_every_runtime_control() {
             installing,
             active_provider: "DirectML".into(),
             sd_margin_mb: 2048,
+            gpu_note: None,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);

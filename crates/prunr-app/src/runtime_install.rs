@@ -46,6 +46,7 @@ impl InstallEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeId {
     OpenVino,
+    Cuda,
 }
 
 impl RuntimeId {
@@ -55,10 +56,21 @@ impl RuntimeId {
     /// DLL without `openvino.dll` (Python loads that from the separate
     /// `openvino` package), so the provider never registers and every
     /// session would run on the CPU, where DirectML runs the same iGPU.
-    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) { &[] } else { &[Self::OpenVino] };
+    /// CUDA is offered where DirectML is not and `onnxruntime-gpu` has a
+    /// wheel: Linux on x86-64.
+    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) {
+        &[]
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        &[Self::OpenVino, Self::Cuda]
+    } else {
+        &[Self::OpenVino]
+    };
 
     fn pypi_package(self) -> &'static str {
-        match self { Self::OpenVino => "onnxruntime-openvino" }
+        match self {
+            Self::OpenVino => "onnxruntime-openvino",
+            Self::Cuda => "onnxruntime-gpu",
+        }
     }
 
     pub fn install_subdir(self) -> String {
@@ -89,11 +101,17 @@ impl RuntimeId {
     }
 
     fn short_name(self) -> &'static str {
-        match self { Self::OpenVino => "openvino" }
+        match self {
+            Self::OpenVino => "openvino",
+            Self::Cuda => "cuda",
+        }
     }
 
     pub fn display_name(self) -> &'static str {
-        match self { Self::OpenVino => "OpenVINO Runtime" }
+        match self {
+            Self::OpenVino => "OpenVINO Runtime",
+            Self::Cuda => "CUDA Runtime",
+        }
     }
 
     /// Settings › Hardware's line while this runtime is not installed: its
@@ -102,11 +120,16 @@ impl RuntimeId {
         match (self, recommended) {
             (Self::OpenVino, false) => "Not installed (80 MB).",
             (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
+            (Self::Cuda, false) => "Not installed (250 MB). Runs the models on an NVIDIA graphics card; needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
+            (Self::Cuda, true) => "Not installed (250 MB). Recommended for your NVIDIA graphics card: runs the models on it. Needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
         }
     }
 
     pub fn uninstall_label(self) -> &'static str {
-        match self { Self::OpenVino => "Uninstall OpenVINO Runtime" }
+        match self {
+            Self::OpenVino => "Uninstall OpenVINO Runtime",
+            Self::Cuda => "Uninstall CUDA Runtime",
+        }
     }
 
     /// The first-launch prompt's body.
@@ -115,18 +138,27 @@ impl RuntimeId {
             Self::OpenVino => "We detected Intel hardware that can use OpenVINO Runtime. \
                 Installing it (~80 MB) makes the models run faster, and lets you \
                 try running them on the Intel graphics chip (Settings › Hardware).",
+            Self::Cuda => "We detected an NVIDIA graphics card. Installing CUDA Runtime \
+                (~250 MB) runs the models on it instead of the processor. It needs \
+                NVIDIA's CUDA 12 and cuDNN 9 libraries on this computer.",
         }
     }
 
     /// The first-launch prompt's install-button label.
     pub fn install_button_label(self) -> &'static str {
-        match self { Self::OpenVino => "Install OpenVINO Runtime" }
+        match self {
+            Self::OpenVino => "Install OpenVINO Runtime",
+            Self::Cuda => "Install CUDA Runtime",
+        }
     }
 
     /// Stable key for persisted settings — decoupled from `Debug` output
     /// so we can rename the variant without breaking user state.
     pub fn settings_key(self) -> &'static str {
-        match self { Self::OpenVino => "OpenVino" }
+        match self {
+            Self::OpenVino => "OpenVino",
+            Self::Cuda => "Cuda",
+        }
     }
 }
 
@@ -140,7 +172,7 @@ pub enum RuntimeChoice {
 
 impl RuntimeChoice {
     /// Every choice Settings can show, in its order.
-    pub const ALL: [RuntimeChoice; 2] = [Self::BuiltIn, Self::Store(RuntimeId::OpenVino)];
+    pub const ALL: [RuntimeChoice; 3] = [Self::BuiltIn, Self::Store(RuntimeId::OpenVino), Self::Store(RuntimeId::Cuda)];
 
     fn preference(self) -> String {
         match self {
@@ -178,6 +210,7 @@ impl RuntimeChoice {
         match self {
             Self::BuiltIn => "Built in",
             Self::Store(RuntimeId::OpenVino) => "OpenVINO",
+            Self::Store(RuntimeId::Cuda) => "CUDA",
         }
     }
 
@@ -185,6 +218,7 @@ impl RuntimeChoice {
         match self {
             Self::BuiltIn => "DirectML: any DirectX 12 graphics card, else the processor",
             Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
+            Self::Store(RuntimeId::Cuda) => "NVIDIA graphics cards",
         }
     }
 }
@@ -367,9 +401,17 @@ mod tests {
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
     }
 
+    /// Windows offers no download (DirectML is built in, OpenVINO's wheel
+    /// there lacks openvino.dll); CUDA only where its wheel exists.
     #[test]
-    fn directml_is_built_in_and_not_offered_for_download() {
-        let expected: &[RuntimeId] = if cfg!(windows) { &[] } else { &[RuntimeId::OpenVino] };
-        assert_eq!(RuntimeId::OFFERED, expected, "Windows offers no download: OpenVINO's wheel there lacks openvino.dll");
+    fn each_platform_offers_the_runtimes_it_has_a_wheel_for() {
+        let expected: &[RuntimeId] = if cfg!(windows) {
+            &[]
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            &[RuntimeId::OpenVino, RuntimeId::Cuda]
+        } else {
+            &[RuntimeId::OpenVino]
+        };
+        assert_eq!(RuntimeId::OFFERED, expected);
     }
 }
