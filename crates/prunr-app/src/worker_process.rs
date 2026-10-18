@@ -107,9 +107,6 @@ impl Drop for SemaphoreGuard {
     }
 }
 
-/// Remove each temp path that lives under the IPC directory. Silent on
-/// missing files — subprocess cancel branches call this before the normal
-/// post-spawn cleanup would have fired.
 /// How often a model being built reports, well inside the parent's hang
 /// watchdog.
 const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
@@ -154,6 +151,9 @@ fn write_result(path: &std::path::Path, rgba: &image::RgbaImage) -> Result<(), S
     })
 }
 
+/// Remove each temp path that lives under the IPC directory. Silent on
+/// missing files — subprocess cancel branches call this before the normal
+/// post-spawn cleanup would have fired.
 fn cleanup_ipc_temps(ipc: &std::path::Path, paths: &[&std::path::Path]) {
     for p in paths {
         if p.starts_with(ipc) {
@@ -440,7 +440,9 @@ pub fn run_worker() -> ! {
                 let built = (|| -> Result<(), String> {
                     // A model built here (a compile can run minutes) says so
                     // as it goes, or the parent's hang watchdog kills it.
-                    let _loading = Heartbeat::start(evt_tx.clone(), item_id, HEARTBEAT_EVERY);
+                    let builds = (line_mode != LineMode::Off && edge_engine.is_none())
+                        || (line_mode != LineMode::EdgesOnly && engines.is_empty());
+                    let _loading = builds.then(|| Heartbeat::start(evt_tx.clone(), item_id, HEARTBEAT_EVERY));
                     if line_mode != LineMode::Off {
                         ensure_edge_engine(&mut edge_engine)?;
                     }
