@@ -914,16 +914,22 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
     let resp = tooltip(chip_button(ui, g.icon, face, g.tuned), g.label, g.tooltip, None);
     let pop_id = group_chip_id(g.id_salt);
     let expanded_id = pop_id.with("expanded");
+    // The strip's width in its normal layout, measured while in it: past
+    // the window's room it lays out compact. Measured only while normal,
+    // so the choice does not flip back once compact fits.
+    let fit_id = pop_id.with("fit");
     show_flyout(pop_id, &resp, below_chip(&resp, pop_id), |ui| {
             let mut expanded = ui.data(|d| d.get_temp::<bool>(expanded_id).unwrap_or(false));
+            let room = ui.ctx().content_rect().width() - 2.0 * STRIP_EDGE;
+            let compact = ui.data(|d| d.get_temp::<f32>(fit_id)).is_some_and(|w| w > room);
             let strip = theme::pill_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // The row's centre line is set by its first height: the
                     // title and knobs centred on 18 px while the '...' grew
                     // it to 28.
                     ui.set_min_height(theme::CHIP_HEIGHT);
-                    ui.spacing_mut().item_spacing.x = 16.0;
-                    ui.spacing_mut().slider_width = STRIP_SLIDER_WIDTH;
+                    ui.spacing_mut().item_spacing.x = if compact { STRIP_SPACING_COMPACT } else { STRIP_SPACING };
+                    ui.spacing_mut().slider_width = if compact { STRIP_SLIDER_WIDTH_COMPACT } else { STRIP_SLIDER_WIDTH };
                     ui.label(RichText::new(g.label).strong().color(theme::TEXT_PRIMARY));
                     body(ui, Part::Quick);
                     let fill = if expanded { theme::ACCENT_BRIGHT.gamma_multiply(0.35) } else { theme::FIELD_FILL };
@@ -936,6 +942,10 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
                     dots.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, expanded, more));
                 });
             });
+            if !compact {
+                let width = strip.response.rect.width();
+                ui.data_mut(|d| d.insert_temp(fit_id, width));
+            }
             if expanded {
                 ui.add_space(10.0);
                 let frame = theme::panel_frame();
@@ -1056,6 +1066,12 @@ pub(super) fn swatch_tile(ui: &mut Ui, name: &str, selected: bool, size: egui::V
 
 /// A quick strip's slider width.
 const STRIP_SLIDER_WIDTH: f32 = 72.0;
+/// A strip's sliders and gaps when it would not fit the window otherwise.
+const STRIP_SLIDER_WIDTH_COMPACT: f32 = 52.0;
+const STRIP_SPACING: f32 = 16.0;
+const STRIP_SPACING_COMPACT: f32 = 8.0;
+/// The room a strip keeps from each window edge.
+const STRIP_EDGE: f32 = 16.0;
 
 /// One numbered step of a full panel: the number in its badge (dim while
 /// the step is off) and the step's rows beside it.

@@ -189,6 +189,45 @@ fn a_panel_left_open_is_found_open_again() {
     }
 }
 
+/// At the minimum window every strip's full panel can be reached: its
+/// toggle lies inside the window (the Mask strip ran its '...' off the
+/// right edge at 900 px live).
+#[test]
+fn every_panel_toggle_is_on_screen_at_the_minimum_width() {
+    use crate::gui::theme::MIN_WINDOW_SIZE;
+    // The harness measures text ~3% narrower than a live window, so the
+    // minimum width is checked 3% narrower too.
+    let width = (MIN_WINDOW_SIZE[0] * 0.97).floor();
+    let mut off = Vec::new();
+    for visit in VISITS.iter().filter(|v| v.start == Start::Image) {
+        let toggles: Vec<&str> = visit.open.iter().copied()
+            .chain(visit.variants().into_iter().flat_map(|v| v.steps))
+            .filter_map(|step| match step { Step::Expand(name) => Some(name), _ => None })
+            .collect();
+        let Some(&toggle) = toggles.first() else { continue };
+        for model in models(visit) {
+            let mut h = super::harness::harness_sized(egui::vec2(width, MIN_WINDOW_SIZE[1]));
+            {
+                let app = h.state_mut();
+                super::fixtures::cut_out(super::fixtures::push_test_item(app, 1), prunr_core::ModelKind::Silueta);
+                app.batch.select_item(0);
+                if let Some(model) = model {
+                    app.settings.model = model;
+                }
+            }
+            settle(&mut h);
+            if gated(&h, visit).is_some() || visit.open.iter().try_for_each(|&s| run(&mut h, s)).is_err() {
+                continue;
+            }
+            match tree(&h).iter().filter(|n| n.name.as_deref() == Some(toggle)).last().and_then(|n| n.rect) {
+                Some(r) if r[2] <= width => {}
+                r => off.push(format!("{} ({model:?}): {toggle:?} at {r:?}", visit.id)),
+            }
+        }
+    }
+    assert!(off.is_empty(), "{off:#?}");
+}
+
 #[test]
 fn every_modal_is_visited_or_says_why_not() {
     for (name, _) in PrunrApp::MODALS {
