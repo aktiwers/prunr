@@ -1433,6 +1433,30 @@ impl<V, E> CacheEntry<Arc<OnceLock<Result<V, E>>>> {
     }
 }
 
+/// The cached value for `key`, built with `build` when there is none
+/// (a failed build is returned, not cached, so a model installed since
+/// works on the next try). Every other key is taken out: one warm at a
+/// time. Two callers racing a build both build; the first stored wins.
+pub(crate) fn warm_entry<K: std::hash::Hash + Eq + Clone, V, E>(
+    cache: &Mutex<HashMap<K, CacheEntry<Arc<V>>>>,
+    key: K,
+    build: impl FnOnce() -> Result<V, E>,
+) -> Result<Arc<V>, E> {
+    let lock = || cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let taken = {
+        let mut guard = lock();
+        let taken = take_where(&mut guard, |k, _| *k != key);
+        if let Some(entry) = guard.get_mut(&key) {
+            entry.last_used = Instant::now();
+            return Ok(Arc::clone(&entry.value));
+        }
+        taken
+    };
+    drop(taken);
+    let built = Arc::new(build()?);
+    Ok(Arc::clone(&lock().entry(key).or_insert_with(|| CacheEntry::new(built, Instant::now())).value))
+}
+
 /// Background sweeper interval. 60 s gives reclaim within ~1 minute of
 /// the idle threshold without burning CPU; the sweep itself is a single
 /// HashMap::retain over <10 entries so it's free.
@@ -3817,6 +3841,23 @@ mod tests {
         assert!(cache["quality"].pinned);
         admit(&mut cache, "quality", || 9, now, false);
         assert_eq!(cache["quality"].value, 2, "the resident bundle is reused, not rebuilt");
+    }
+
+    /// A warm model is built once and handed out again; asking for
+    /// another frees the first; a failed build is not kept, so the next
+    /// ask builds again.
+    #[test]
+    fn a_warm_entry_builds_once_and_keeps_one_model() {
+        let cache: Mutex<HashMap<u8, CacheEntry<Arc<u32>>>> = Mutex::new(HashMap::new());
+        let builds = std::cell::Cell::new(0);
+        let build = |v: u32| { builds.set(builds.get() + 1); Ok::<_, String>(v) };
+        let first = warm_entry(&cache, 1, || build(10)).unwrap();
+        assert!(Arc::ptr_eq(&first, &warm_entry(&cache, 1, || build(11)).unwrap()));
+        assert_eq!(builds.get(), 1);
+        assert_eq!(*warm_entry(&cache, 2, || build(20)).unwrap(), 20);
+        assert_eq!(cache.lock().unwrap().keys().copied().collect::<Vec<_>>(), vec![2], "one warm at a time");
+        assert!(warm_entry(&cache, 3, || Err::<u32, _>("not installed".to_string())).is_err());
+        assert_eq!(*warm_entry(&cache, 3, || build(30)).unwrap(), 30, "the failure was not kept");
     }
 
     #[test]
