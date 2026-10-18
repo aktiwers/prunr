@@ -8,13 +8,19 @@ use fast_image_resize::{images::{Image, ImageRef}, PixelType, ResizeAlg, ResizeO
 pub use fast_image_resize::FilterType as ResizeFilter;
 use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 
-/// SIMD convolution resize of a borrowed interleaved buffer; the
-/// channels are resampled independently (straight alpha, like the rest
-/// of the pipeline).
+/// SIMD convolution resize of a borrowed interleaved buffer. RGBA is
+/// weighted by its alpha inside the resize (in and out straight alpha),
+/// so a transparent pixel's colour does not bleed into its neighbours;
+/// a fully opaque one skips that, which changes nothing but the time.
 fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u32, filter: ResizeFilter) -> Vec<u8> {
+    let opaque = pixel == PixelType::U8x4 && src.chunks_exact(4).all(|p| p[3] == u8::MAX);
+    resize_raw_with(src, w, h, pixel, (dst_w, dst_h), filter, !opaque)
+}
+
+fn resize_raw_with(src: &[u8], w: u32, h: u32, pixel: PixelType, (dst_w, dst_h): (u32, u32), filter: ResizeFilter, weigh_alpha: bool) -> Vec<u8> {
     let src = ImageRef::new(w, h, src, pixel).expect("buffer matches its dimensions");
     let mut dst = Image::new(dst_w, dst_h, pixel);
-    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter)).use_alpha(weigh_alpha);
     // The resizer fails only on mismatched pixel types or a bad crop:
     // both images share `pixel` and no crop is asked.
     Resizer::new().resize(&src, &mut dst, Some(&options)).expect("same pixel type, no crop");
@@ -511,6 +517,17 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An opaque image resizes without the alpha weighting to the very
+    /// pixels it gives with it.
+    #[test]
+    fn an_opaque_resize_skips_the_alpha_weighting_with_the_same_result() {
+        let rgba = RgbaImage::from_fn(97, 61, |x, y| image::Rgba([(x * 3) as u8, (y * 4) as u8, (x ^ y) as u8, 255]));
+        for (dst, filter) in [((40, 30), ResizeFilter::Lanczos3), ((200, 150), ResizeFilter::Bilinear)] {
+            let weighed = resize_raw_with(rgba.as_raw(), 97, 61, PixelType::U8x4, dst, filter, true);
+            assert_eq!(resize_rgba(&rgba, dst.0, dst.1, filter).as_raw(), &weighed);
+        }
+    }
 
     /// Padding reflects the image at its right and bottom edges, folding
     /// back again when the pad is longer than the image.
