@@ -90,6 +90,20 @@ fn hover_moves_the_pointer_onto_the_control_without_a_click() {
     assert!(ask(&mut h, &tx, r#"{"cmd":"hover","name":"No such control"}"#).is_err());
 }
 
+/// A name a quick strip and its open panel share is clicked on the
+/// panel's (the later) only when the step asks for the last.
+#[test]
+fn click_takes_the_last_of_a_shared_name_only_when_asked() {
+    let (mut h, tx) = socket();
+    super::harness::click(&mut h, "Effect");
+    super::harness::click(&mut h, "All effects");
+    let shared = super::harness::names(&h).into_iter().filter(|n| n == "Sepia").count();
+    assert_eq!(shared, 2, "the strip and the panel both show it");
+    assert!(ask(&mut h, &tx, r#"{"cmd":"click","name":"Sepia"}"#).unwrap_err().contains("2 controls named"));
+    let clicked = ask(&mut h, &tx, r#"{"cmd":"click","name":"Sepia","last":true}"#).unwrap();
+    assert_eq!(clicked["name"], "Sepia");
+}
+
 #[test]
 fn resize_asks_the_window_for_the_size() {
     let (mut h, tx) = socket();
