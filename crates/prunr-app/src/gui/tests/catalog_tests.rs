@@ -6,7 +6,7 @@ use egui_kittest::Harness;
 
 use super::harness::{harness, loaded_with, settle, tree};
 use crate::gui::app::PrunrApp;
-use crate::gui::automation::checks::{self, Violation};
+use crate::gui::automation::checks::Violation;
 use crate::gui::automation::tree::readable_name;
 use crate::gui::capability::ItemFacts;
 use crate::gui::knob_catalog::{shows, surface_gate, GateContext, Surface};
@@ -14,8 +14,10 @@ use crate::gui::settings::SettingsModel;
 use crate::gui::surface_catalog::{Kind, Start, Step, Visit, UNVISITED_MODALS, VISITS};
 use crate::gui::views::shortcuts::Chord;
 
-/// A fresh window for `visit`, on `model` (`None`: the app's own).
+/// A fresh window for `visit`, on `model` (`None`: the app's own), its
+/// tooltips and clipped text recorded for `check`.
 fn start(visit: &Visit, model: Option<SettingsModel>) -> Harness<'static, PrunrApp> {
+    crate::gui::automation::record::turn_on();
     let pick = |app: &mut PrunrApp| {
         if let Some(model) = model {
             app.settings.model = model;
@@ -59,11 +61,9 @@ fn is_open(h: &Harness<'_, PrunrApp>, kind: Kind) -> Option<bool> {
     }
 }
 
+/// The control socket's `check` on the harness's last frame.
 fn check(h: &Harness<'_, PrunrApp>, expect: &[&str]) -> Vec<Violation> {
-    let root = tree(h);
-    let mut found = checks::nameless(&root);
-    found.extend(checks::missing(&root, expect));
-    found
+    crate::gui::automation::check(&tree(h), &h.ctx, expect)
 }
 
 /// Why the visit's surface waits on the image shown, if it does: then
