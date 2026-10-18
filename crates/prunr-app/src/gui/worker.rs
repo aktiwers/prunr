@@ -1309,7 +1309,7 @@ fn report_failed(
 /// Cancel path: kill the child immediately and clean up. We used to send
 /// `Cancel` + sleep 200ms to let the child emit `Finished`, but killing the
 /// process is instant and orphaned IPC temps are swept by the prefix-scoped
-/// cleanup — the politeness delay just made "Cancel All" feel laggy.
+/// cleanup — the politeness delay just made "Cancel all" feel laggy.
 fn cancel_subprocess(
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,

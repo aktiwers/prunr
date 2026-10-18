@@ -53,7 +53,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Process all JPEGs into a folder");
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Common Options");
+                    section_heading(ui, "Common options");
 
                     egui::Grid::new("cli_opts_grid")
                         .num_columns(2)
@@ -78,7 +78,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                 }
 
                 CliTab::Sketch => {
-                    section_heading(ui, "Line Extraction");
+                    section_heading(ui, "Line extraction");
                     hint(ui, "Trace edges and outlines with the line-detection model.");
                     hint(ui, "Great for logos, graffiti, and illustrations.");
 
@@ -123,7 +123,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                 }
 
                 CliTab::Mask => {
-                    section_heading(ui, "Mask Tuning");
+                    section_heading(ui, "Mask tuning");
                     hint(ui, "Fine-tune how the background removal mask is generated.");
                     hint(ui, "These flags work with all models.");
 
@@ -157,11 +157,11 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     example_row(ui, toasts, "prunr --refine-edges photo.jpg",
                         "Sharpen mask around hair and leaves");
                     example_row(ui, toasts, "prunr --edge-shift -3 product.jpg",
-                        "Trim 3px fringe around subject");
+                        "Trim a 3 px fringe around the subject");
                 }
 
                 CliTab::Eraser => {
-                    section_heading(ui, "Object Removal (Eraser)");
+                    section_heading(ui, "Object removal (eraser)");
                     hint(ui, "Paint over an unwanted object and let the eraser fill it in.");
                     hint(ui, "Pass a binary mask (white = remove here, black = keep).");
 
@@ -210,9 +210,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     ui.add_space(theme::SPACE_MD);
                     section_heading(ui, "Examples");
                     example_row(ui, toasts, "prunr --upscale realesrgan photo.jpg",
-                        "Enlarge 4x, save photo_x4.png");
+                        "Enlarge 4\u{00d7}, save photo_x4.png");
                     example_row(ui, toasts, "prunr --upscale realesrgan --scale 2 --restore-faces gfpgan portrait.jpg",
-                        "Enlarge 2x and restore the faces");
+                        "Enlarge 2\u{00d7} and restore the faces");
 
                     ui.add_space(theme::SPACE_MD);
                     section_heading(ui, "Colorize");
@@ -252,18 +252,18 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         });
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Large Image Handling");
+                    section_heading(ui, "Large images");
 
                     egui::Grid::new("cli_large_grid")
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--large-image downscale", "Auto-shrink to 4096px (default)");
+                            opt_row(ui, "--large-image downscale", "Auto-shrink to 4096 px (default)");
                             opt_row(ui, "--large-image process", "Process at full resolution");
                         });
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Diagnostics & Workflow");
+                    section_heading(ui, "Diagnostics and workflow");
 
                     egui::Grid::new("cli_diag_grid")
                         .num_columns(2)

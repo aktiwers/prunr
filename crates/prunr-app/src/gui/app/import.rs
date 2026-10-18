@@ -79,7 +79,7 @@ impl PrunrApp {
         crate::gui::reclaim::later(removed);
         self.sync_after_batch_change();
         if count > 0 {
-            self.toasts.info(format!("Removed {count} image(s)"));
+            self.toasts.info(format!("Removed {}", crate::gui::views::fmt::count(count, "image", "images")));
         }
     }
 

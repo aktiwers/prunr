@@ -963,7 +963,7 @@ impl PrunrApp {
                 item.abandon_job();
             }
         }
-        self.toasts.info(format!("Cancelling {} image(s)", targets.len()));
+        self.toasts.info(format!("Cancelling {}", crate::gui::views::fmt::count(targets.len(), "image", "images")));
     }
 }
 

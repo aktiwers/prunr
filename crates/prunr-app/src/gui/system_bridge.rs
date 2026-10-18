@@ -240,7 +240,7 @@ fn look(request: &DialogRequest) -> Look {
     let folder = |title| Look { pick: Pick::Folder, title, filters: Vec::new(), file_name: None };
     match request {
         DialogRequest::OpenImages => {
-            Look { pick: Pick::Files, title: "Open Image(s)", filters: images(OPEN_EXTENSIONS), file_name: None }
+            Look { pick: Pick::Files, title: "Open images", filters: images(OPEN_EXTENSIONS), file_name: None }
         }
         DialogRequest::Background { .. } => Look {
             pick: Pick::File,
@@ -330,7 +330,7 @@ mod tests {
             look(&DialogRequest::OpenImages),
             Look {
                 pick: Pick::Files,
-                title: "Open Image(s)",
+                title: "Open images",
                 filters: vec![exts("Images", &["png", "jpg", "jpeg", "webp", "bmp", "svg"])],
                 file_name: None,
             },

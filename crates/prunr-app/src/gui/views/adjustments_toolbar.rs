@@ -488,12 +488,12 @@ const LEVEL_STEPS: [chip::Choice<u8>; 5] = [step(2, "2"), step(3, "3"), step(4, 
 fn line_style_description(style: &prunr_core::LineStyle) -> &'static str {
     use prunr_core::LineStyle;
     match style {
-        LineStyle::Solid => "one color for every line",
-        LineStyle::GradientY { .. } => "one color at the top fading to another at the bottom",
-        LineStyle::GradientX { .. } => "one color on the left fading to another on the right",
-        LineStyle::RadialGradient { .. } => "one color at a center point fading outward",
-        LineStyle::Rainbow { .. } => "colors cycling across the image",
-        LineStyle::DualScale { .. } => "fine detail and bold shapes, each in its own color",
+        LineStyle::Solid => "One color for every line",
+        LineStyle::GradientY { .. } => "One color at the top fading to another at the bottom",
+        LineStyle::GradientX { .. } => "One color on the left fading to another on the right",
+        LineStyle::RadialGradient { .. } => "One color at a center point fading outward",
+        LineStyle::Rainbow { .. } => "Colors cycling across the image",
+        LineStyle::DualScale { .. } => "Fine detail and bold shapes, each in its own color",
     }
 }
 
@@ -791,20 +791,20 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
     changed
 }
 
-/// The Outline & Shadow chip: a sticker outline and a shadow under the
+/// The Outline and shadow chip: a sticker outline and a shadow under the
 /// cut-out. Returns true when a knob moved.
 fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
     let value = match (d.has_outline(), d.has_shadow()) {
         (false, false) => "Off",
         (true, false) => "Outline",
         (false, true) => "Shadow",
-        (true, true) => "Outline + shadow",
+        (true, true) => "Outline and shadow",
     };
     let on = d.has_outline() || d.has_shadow();
     let group = chip::GroupChip {
         id_salt: "decoration",
         icon: ICON_BORDER_OUTER.codepoint,
-        label: "Outline & Shadow",
+        label: "Outline and shadow",
         summary: value,
         tooltip: "A sticker outline and a shadow under the cut-out.",
         tuned: on,
@@ -872,7 +872,7 @@ impl BgKind {
             Self::Image => "Image",
             Self::BlurredSource => "Blurred photo",
             Self::LensBlur => "Lens blur",
-            Self::DesaturatedSource => "Black & white photo",
+            Self::DesaturatedSource => "Black and white photo",
         }
     }
 
@@ -880,7 +880,7 @@ impl BgKind {
     fn short_name(self) -> &'static str {
         match self {
             Self::BlurredSource => "Blurred",
-            Self::DesaturatedSource => "Black & white",
+            Self::DesaturatedSource => "Black and white",
             kind => kind.name(),
         }
     }

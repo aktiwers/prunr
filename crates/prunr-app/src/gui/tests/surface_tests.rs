@@ -505,7 +505,7 @@ fn save_options_name_their_controls_and_follow_the_model() {
     }
 }
 
-/// The Outline & Shadow flyout names every control, with the outline on
+/// The Outline and shadow flyout names every control, with the outline on
 /// and a Drop shadow (every row showing).
 #[test]
 fn the_outline_and_shadow_flyout_names_every_control() {
@@ -516,7 +516,7 @@ fn the_outline_and_shadow_flyout_names_every_control() {
         d.shadow = prunr_core::ShadowKind::Drop;
     }
     settle(&mut h);
-    click(&mut h, "Outline & Shadow");
+    click(&mut h, "Outline and shadow");
     click(&mut h, "All outline and shadow settings");
     assert_all_controls_named(&h, "outline and shadow");
     let names = names(&h);

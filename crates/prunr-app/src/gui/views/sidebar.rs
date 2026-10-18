@@ -105,7 +105,7 @@ fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
         if ui
             .checkbox(
                 &mut select_all,
-                RichText::new("Select All")
+                RichText::new("Select all")
                     .size(theme::FONT_SIZE_BODY)
                     .color(theme::TEXT_PRIMARY),
             )

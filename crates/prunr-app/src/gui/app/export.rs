@@ -84,7 +84,7 @@ impl PrunrApp {
                 without_layers.join(", "),
             ));
         }
-        self.toasts.info("Saving layers...");
+        self.toasts.info("Saving layers\u{2026}");
         let tx = self.batch.bg_io.save_done_tx.clone();
         spawn_save_layers(folder, jobs, format, tx);
     }
@@ -123,7 +123,7 @@ impl PrunrApp {
             None => (path.with_extension(preferred.extension()), preferred),
         };
         let tx = self.batch.bg_io.save_done_tx.clone();
-        self.toasts.info("Saving...");
+        self.toasts.info("Saving\u{2026}");
         spawn_save_single(path, one, format, tx);
     }
 
@@ -152,7 +152,7 @@ impl PrunrApp {
             return;
         }
         let count = items.len();
-        self.toasts.info(format!("Saving {count} image(s)..."));
+        self.toasts.info(format!("Saving {}\u{2026}", crate::gui::views::fmt::count(count, "image", "images")));
         let tx = self.batch.bg_io.save_done_tx.clone();
         spawn_save_batch(folder, items, self.settings.export_format, tx);
     }
@@ -392,10 +392,10 @@ impl SaveTally {
     }
 
     /// The toast: an error naming the first failure when any file failed.
-    fn summary(self, noun: &str) -> Result<String, String> {
+    fn summary(self, one: &str, many: &str) -> Result<String, String> {
         match self.first_error {
             Some(why) => Err(format!("Saved {}, failed {}: {why}", self.saved, self.failed)),
-            None => Ok(format!("Saved {} {noun}", self.saved)),
+            None => Ok(format!("Saved {}", crate::gui::views::fmt::count(self.saved, one, many))),
         }
     }
 }
@@ -438,7 +438,7 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
             }
             save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut tally);
         }
-        let _ = tx.send(tally.summary("file(s)"));
+        let _ = tx.send(tally.summary("file", "files"));
     });
 }
 
@@ -469,7 +469,7 @@ fn spawn_save_batch(
                 .and_then(|rgba| write_composite(&out_path, &rgba, &bg, format, &measure).map_err(|e| format!("{filename}: {e}")));
             tally.count(written);
         }
-        let _ = tx.send(tally.summary("image(s)"));
+        let _ = tx.send(tally.summary("image", "images"));
     });
 }
 
@@ -482,10 +482,10 @@ mod save_tally_tests {
         let mut all_failed = super::SaveTally::default();
         all_failed.count(Err("photo.png could not be read".into()));
         all_failed.count(Err("second reason".into()));
-        assert_eq!(all_failed.summary("file(s)"), Err("Saved 0, failed 2: photo.png could not be read".into()));
+        assert_eq!(all_failed.summary("file", "files"), Err("Saved 0, failed 2: photo.png could not be read".into()));
         let mut fine = super::SaveTally::default();
         fine.count(Ok(()));
-        assert_eq!(fine.summary("file(s)"), Ok("Saved 1 file(s)".into()));
+        assert_eq!(fine.summary("file", "files"), Ok("Saved 1 file".into()));
     }
 }
 
@@ -573,14 +573,14 @@ mod toast_kind_tests {
         done_item(&mut app, 2);
         let dir = tempfile::tempdir().unwrap();
         app.on_save_selected_picked(&[1, 2], dir.path().to_path_buf());
-        assert_eq!(save_toast(&mut app), ("success", "Saved 2 image(s)".to_string()));
+        assert_eq!(save_toast(&mut app), ("success", "Saved 2 images".to_string()));
         app.on_save_selected_picked(&[1, 2], dir.path().join("missing"));
         let (level, caption) = save_toast(&mut app);
         assert_eq!(level, "error");
         assert!(caption.starts_with("Saved 0, failed 2: "), "{caption}: says why");
 
         app.on_save_layers_picked(&[1], dir.path().to_path_buf());
-        assert_eq!(save_toast(&mut app), ("success", "Saved 1 file(s)".to_string()));
+        assert_eq!(save_toast(&mut app), ("success", "Saved 1 file".to_string()));
         app.on_save_layers_picked(&[1], dir.path().join("missing"));
         let (level, caption) = save_toast(&mut app);
         assert_eq!(level, "error");

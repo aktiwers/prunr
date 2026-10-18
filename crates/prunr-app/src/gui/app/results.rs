@@ -645,9 +645,9 @@ impl PrunrApp {
             prunr_core::LineMode::SubjectOutline => format!("{seg_name} + TEED"),
         };
         if cfg!(target_os = "macos") {
-            format!("Loading {models} (first run may take a few minutes)...")
+            format!("Loading {models} (first run may take a few minutes)\u{2026}")
         } else {
-            format!("Loading {models}...")
+            format!("Loading {models}\u{2026}")
         }
     }
 
