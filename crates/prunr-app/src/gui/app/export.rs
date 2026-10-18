@@ -370,24 +370,40 @@ fn write_composite(
     crate::fs_util::write_bytes_replacing(path, &bytes).map_err(|e| e.to_string())
 }
 
-/// The toast after a multi-file save; an error when any file failed.
-fn save_summary(saved: usize, failed: usize, noun: &str) -> Result<String, String> {
-    if failed > 0 {
-        Err(format!("Saved {saved}, failed {failed}"))
-    } else {
-        Ok(format!("Saved {saved} {noun}"))
+/// What a multi-file save did: files saved, files that failed, and why
+/// the first one failed.
+#[derive(Default)]
+struct SaveTally {
+    saved: usize,
+    failed: usize,
+    first_error: Option<String>,
+}
+
+impl SaveTally {
+    fn count(&mut self, written: Result<(), String>) {
+        match written {
+            Ok(()) => self.saved += 1,
+            Err(why) => {
+                tracing::warn!(%why, "a file of a save failed");
+                self.failed += 1;
+                self.first_error.get_or_insert(why);
+            }
+        }
+    }
+
+    /// The toast: an error naming the first failure when any file failed.
+    fn summary(self, noun: &str) -> Result<String, String> {
+        match self.first_error {
+            Some(why) => Err(format!("Saved {}, failed {}: {why}", self.saved, self.failed)),
+            None => Ok(format!("Saved {} {noun}", self.saved)),
+        }
     }
 }
 
-/// Write `depth` into `folder` when asked for; counts it as saved or failed.
-fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Path, measure: &ExportDepth, saved: &mut usize, failed: &mut usize) {
-    match depth.map(|d| d.write(folder, measure)) {
-        Some(Ok(())) => *saved += 1,
-        Some(Err(e)) => {
-            tracing::warn!(%e, "depth map save failed");
-            *failed += 1;
-        }
-        None => {}
+/// Write `depth` into `folder` when asked for.
+fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Path, measure: &ExportDepth, tally: &mut SaveTally) {
+    if let Some(depth) = depth {
+        tally.count(depth.write(folder, measure));
     }
 }
 
@@ -403,28 +419,26 @@ struct LayerSave {
 /// thread (the composite where an image has none); report the counts.
 fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<Result<String, String>>) {
     std::thread::spawn(move || {
-        let mut saved = 0usize;
-        let mut failed = 0usize;
+        let mut tally = SaveTally::default();
         let depth = ExportDepth::default();
         for job in jobs {
             let mut files = job.layers.render_bytes(&depth);
             if files.is_empty() {
                 let (image, bg) = &job.composite;
-                if let Some(rgba) = image.load() {
-                    if let Ok(bytes) = format.encode(&bg.bake(&rgba, &depth)) {
-                        files.push((crate::gui::drag_export::export_name(job.layers.filename(), format), bytes));
-                    }
+                let composite = image.load()
+                    .ok_or_else(|| format!("{} could not be read", job.layers.filename()))
+                    .and_then(|rgba| format.encode(&bg.bake(&rgba, &depth)).map_err(|e| e.to_string()));
+                match composite {
+                    Ok(bytes) => files.push((crate::gui::drag_export::export_name(job.layers.filename(), format), bytes)),
+                    Err(why) => tally.count(Err(why)),
                 }
             }
             for (name, bytes) in files {
-                match crate::fs_util::write_bytes_replacing(&folder.join(name), &bytes) {
-                    Ok(()) => saved += 1,
-                    Err(_) => failed += 1,
-                }
+                tally.count(crate::fs_util::write_bytes_replacing(&folder.join(&name), &bytes).map_err(|e| format!("{name}: {e}")));
             }
-            save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut saved, &mut failed);
+            save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut tally);
         }
-        let _ = tx.send(save_summary(saved, failed, "file(s)"));
+        let _ = tx.send(tally.summary("file(s)"));
     });
 }
 
@@ -445,23 +459,34 @@ fn spawn_save_batch(
     tx: mpsc::Sender<Result<String, String>>,
 ) {
     std::thread::spawn(move || {
-        let mut saved = 0usize;
-        let mut failed = 0usize;
+        let mut tally = SaveTally::default();
         let measure = ExportDepth::default();
         for BatchSave { filename, result, bg, depth } in items {
-            save_depth_beside(depth.as_ref(), &folder, &measure, &mut saved, &mut failed);
+            save_depth_beside(depth.as_ref(), &folder, &measure, &mut tally);
             let out_path = folder.join(crate::gui::drag_export::export_name(&filename, format));
-            let Some(rgba) = result.load() else {
-                failed += 1;
-                continue;
-            };
-            match write_composite(&out_path, &rgba, &bg, format, &measure) {
-                Ok(()) => saved += 1,
-                Err(_) => failed += 1,
-            }
+            let written = result.load()
+                .ok_or_else(|| format!("{filename} could not be read"))
+                .and_then(|rgba| write_composite(&out_path, &rgba, &bg, format, &measure).map_err(|e| format!("{filename}: {e}")));
+            tally.count(written);
         }
-        let _ = tx.send(save_summary(saved, failed, "image(s)"));
+        let _ = tx.send(tally.summary("image(s)"));
     });
+}
+
+#[cfg(test)]
+mod save_tally_tests {
+    /// A save that wrote nothing because everything failed is an error,
+    /// never "Saved 0", and it says why the first file failed.
+    #[test]
+    fn a_save_with_failures_says_why() {
+        let mut all_failed = super::SaveTally::default();
+        all_failed.count(Err("photo.png could not be read".into()));
+        all_failed.count(Err("second reason".into()));
+        assert_eq!(all_failed.summary("file(s)"), Err("Saved 0, failed 2: photo.png could not be read".into()));
+        let mut fine = super::SaveTally::default();
+        fine.count(Ok(()));
+        assert_eq!(fine.summary("file(s)"), Ok("Saved 1 file(s)".into()));
+    }
 }
 
 /// Each status and save message keeps its toast kind: success for what
@@ -550,11 +575,15 @@ mod toast_kind_tests {
         app.on_save_selected_picked(&[1, 2], dir.path().to_path_buf());
         assert_eq!(save_toast(&mut app), ("success", "Saved 2 image(s)".to_string()));
         app.on_save_selected_picked(&[1, 2], dir.path().join("missing"));
-        assert_eq!(save_toast(&mut app), ("error", "Saved 0, failed 2".to_string()));
+        let (level, caption) = save_toast(&mut app);
+        assert_eq!(level, "error");
+        assert!(caption.starts_with("Saved 0, failed 2: "), "{caption}: says why");
 
         app.on_save_layers_picked(&[1], dir.path().to_path_buf());
         assert_eq!(save_toast(&mut app), ("success", "Saved 1 file(s)".to_string()));
         app.on_save_layers_picked(&[1], dir.path().join("missing"));
-        assert_eq!(save_toast(&mut app), ("error", "Saved 0, failed 1".to_string()));
+        let (level, caption) = save_toast(&mut app);
+        assert_eq!(level, "error");
+        assert!(caption.starts_with("Saved 0, failed 1: "), "{caption}: says why");
     }
 }
