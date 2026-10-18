@@ -162,9 +162,11 @@ pub fn largest_face<'a>(faces: impl IntoIterator<Item = &'a FacePlace>) -> Optio
     faces.into_iter().enumerate().min_by(|(_, a), (_, b)| a.to_crop.scale().total_cmp(&b.to_crop.scale())).map(|(i, _)| i)
 }
 
-/// Find every face in `image` and redraw it with `id`'s restorer, loading
-/// the models for this one photo. `blend` is how previews show each face
-/// blended in; what is returned is the same whatever it is.
+/// Find every face in `image` and redraw it with `id`'s restorer. The
+/// models stay loaded for the next search and free after
+/// `crate::IDLE_RELEASE` unused, or when another face model is asked for.
+/// `blend` is how previews show each face blended in; what is returned
+/// is the same whatever it is.
 ///
 /// Peak working set: the detector's input (≤ 1280² × 3 f32, 20 MB), the
 /// restorer session (~1.2 GB for GFPGAN while it runs), and two 512²
@@ -173,7 +175,21 @@ pub fn largest_face<'a>(faces: impl IntoIterator<Item = &'a FacePlace>) -> Optio
 /// preview, at most the preview's own size (1536² × 4 = 9 MB for a face
 /// filling the photo; a few hundred KB for a face in a group).
 pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
-    FaceRestorer::new(id)?.find_and_restore(image, blend, progress)
+    static SWEEPER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SWEEPER.get_or_init(|| crate::inpaint_sd::spawn_idle_sweeper("face-idle-sweeper", warm_restorers, "faces: released the idle face model"));
+    let restorer = crate::inpaint_sd::warm_entry(warm_restorers(), id, || FaceRestorer::new(id).map(std::sync::Mutex::new))?;
+    let found = restorer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).find_and_restore(image, blend, progress);
+    if let Some(entry) = warm_restorers().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&id) {
+        entry.last_used = std::time::Instant::now();
+    }
+    found
+}
+
+type WarmRestorers = std::collections::HashMap<prunr_models::ModelId, crate::inpaint_sd::CacheEntry<std::sync::Arc<std::sync::Mutex<FaceRestorer>>>>;
+
+fn warm_restorers() -> &'static std::sync::Mutex<WarmRestorers> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<WarmRestorers>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
 }
 
 /// The face detector built into the app (YuNet), loaded once for as many
@@ -337,6 +353,8 @@ fn report_preview(image: &RgbaImage, face: &RestoredFace, blend: FaceBlend, prog
     });
 }
 
+// No optimised-graph cache: measured on GFPGAN (CPU), loading the
+// cached graph saved 0.2 s of a 4.2 s first search for 340 MB of disk.
 fn load(path: &std::path::Path) -> Result<Session, CoreError> {
     crate::ort_runtime::session_builder()?
         .commit_from_file(path)

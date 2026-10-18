@@ -2053,12 +2053,14 @@ impl Processor {
             .into_progress()
             .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
+            let started = std::time::Instant::now();
             let result = caught(|| {
                 photo.load()
                     .ok_or_else(|| "the photo is no longer there".to_string())
                     .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, blend, &progress).map_err(|e| e.to_string()))
             })
             .unwrap_or_else(Err);
+            tracing::info!(item_id, ?model, faces = result.as_ref().map_or(0, Vec::len), elapsed_ms = started.elapsed().as_millis() as u64, "face search ended");
             if let Some(run) = run {
                 run.end();
             }
