@@ -227,7 +227,7 @@ impl PrunrApp {
         super::drag_export::cleanup_stale();
         super::history_disk::cleanup_stale();
 
-        let mut settings = Settings::load();
+        let (mut settings, settings_note) = Settings::load();
         settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
         // PRUNR_OPEN_MODEL must apply BEFORE the worker prewarm config below
         // — otherwise the wrong model loads at startup and the first Process
@@ -271,7 +271,7 @@ impl PrunrApp {
         app.fit_brush_models_to_model();
         app.pending_first_toasts = onboarding_toast.into_iter()
             .chain(prunr_core::ort_runtime::fallback_note().map(str::to_string))
-            .chain(super::settings::load_note().map(str::to_string))
+            .chain(settings_note.map(str::to_string))
             .collect();
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
@@ -769,33 +769,29 @@ impl PrunrApp {
             self.cancel_runs_on(id);
             self.processor.live_preview.cancel(id);
             let kind = match step(&mut self.batch.items[idx]) {
-                Ok(kind) => Some(kind),
-                Err(crate::gui::item::StepRefused::Lost) => {
-                    lost = true;
-                    None
+                Ok(kind) => kind,
+                Err(refused) => {
+                    lost |= refused == crate::gui::item::StepRefused::Lost;
+                    continue;
                 }
-                Err(crate::gui::item::StepRefused::Nothing) => None,
             };
-            if let Some(kind) = kind {
-                if self.batch.items[idx].settings.bg_image_hash != preset_before {
-                    self.reconcile_bg_image_after_preset(idx);
-                }
-                // The step's image shows its selection as the switch stood
-                // then; the switch may have moved since.
-                let item = &self.batch.items[idx];
-                if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
-                    self.dispatch_brush_rerun(idx);
-                }
-                stepped.push(kind);
+            if self.batch.items[idx].settings.bg_image_hash != preset_before {
+                self.reconcile_bg_image_after_preset(idx);
             }
+            // The step's image shows its selection as the switch stood
+            // then; the switch may have moved since.
+            let item = &self.batch.items[idx];
+            if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
+                self.dispatch_brush_rerun(idx);
+            }
+            stepped.push(kind);
         }
         if lost {
             self.status_error("That step can no longer be restored: its saved state was removed from the disk cache.");
+        } else if stepped.is_empty() {
+            self.toasts.info(nothing);
         }
         if stepped.is_empty() {
-            if !lost {
-                self.toasts.info(nothing);
-            }
             return;
         }
         self.result_switch_id += 1;

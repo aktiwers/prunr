@@ -17,13 +17,6 @@ pub const PRUNR_PRESET: &str = "Prunr";
 const SETTINGS_UNREADABLE: &str = "Your settings could not be read, so Prunr started with its defaults. The old file is kept as settings.json.bad.";
 const SOME_SETTINGS_RESET: &str = "Some settings could not be read and are back to their defaults; the rest are kept. The old file is kept as settings.json.bad.";
 
-static LOAD_NOTE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-
-/// Why the settings loaded are not all the ones saved, when some were not.
-pub(crate) fn load_note() -> Option<&'static str> {
-    LOAD_NOTE.get().copied()
-}
-
 /// Keep a settings file that did not read beside it, as `<name>.bad`.
 fn keep_unreadable(path: &std::path::Path) {
     let mut bad = path.as_os_str().to_owned();
@@ -79,6 +72,10 @@ pub struct Settings {
     /// presets are dropped.
     #[serde(default, skip_serializing)]
     pub(crate) presets: HashMap<String, super::presets::PresetFile>,
+    /// Names (lowercased) of presets a newer Prunr saved: left out of
+    /// `presets`, and never saved over.
+    #[serde(skip)]
+    pub(crate) newer_presets: std::collections::HashSet<String>,
     /// Which preset new imports inherit, and what Reset All Knobs restores.
     /// Always set; defaults to "Prunr". If the named preset goes missing
     /// (user deleted it out of serde state), resolution falls back to "Prunr".
@@ -211,30 +208,24 @@ impl Settings {
     ///
     /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
     /// into a "Previous defaults" preset file on first load.
-    pub fn load() -> Self {
+    /// The saved settings and presets, and a note for the first frame when
+    /// some did not read.
+    pub fn load() -> (Self, Option<&'static str>) {
         // Seed curated built-in presets on first run (idempotent via marker
         // file). Runs before any load_all() so users see "Comic", "Neon"
         // etc. in the dropdown on first launch.
         super::presets_fs::seed_builtins_once();
 
-        let mut settings = match Self::config_path() {
-            Some(path) => {
-                let (settings, note) = Self::read(&path);
-                if let Some(note) = note {
-                    let _ = LOAD_NOTE.set(note);
-                }
-                settings
-            }
-            None => Self::default(),
-        };
-        let mut loaded = super::presets_fs::load_all();
+        let (mut settings, note) = Self::config_path().map_or_else(|| (Self::default(), None), |path| Self::read(&path));
+        let (mut loaded, newer) = super::presets_fs::load_all();
+        settings.newer_presets = newer;
         // Preserve the freshly-migrated "Previous defaults" entry
         // (load_all picks it up too if save succeeded, but be defensive).
         for (k, v) in settings.presets.drain() {
             loaded.entry(k).or_insert(v);
         }
         settings.presets = loaded;
-        settings
+        (settings, note)
     }
 
     /// The settings saved at `path`, kept as far as they read, and a note
@@ -299,11 +290,9 @@ impl Settings {
         };
         let mut reset = Vec::new();
         for (key, setting) in saved {
-            let mut trial = merged.clone();
-            trial[key.as_str()] = setting.clone();
-            if serde_json::from_value::<Self>(trial.clone()).is_ok() {
-                merged = trial;
-            } else {
+            let before = std::mem::replace(&mut merged[key.as_str()], setting.clone());
+            if serde_json::from_value::<Self>(merged.clone()).is_err() {
+                merged[key.as_str()] = before;
                 reset.push(key.clone());
             }
         }
@@ -517,6 +506,7 @@ impl Settings {
         *self = Self {
             active_backend: kept.active_backend,
             presets: kept.presets,
+            newer_presets: kept.newer_presets,
             default_preset: kept.default_preset,
             accepted_licenses: kept.accepted_licenses,
             bg_image_paths: kept.bg_image_paths,
@@ -834,6 +824,7 @@ impl Default for Settings {
             export_depth_map: false,
             export_format: prunr_core::ExportFormat::Png,
             presets: HashMap::new(),
+            newer_presets: Default::default(),
             default_preset: default_preset_name(),
             bg_image_paths: HashMap::new(),
             accepted_licenses: Vec::new(),

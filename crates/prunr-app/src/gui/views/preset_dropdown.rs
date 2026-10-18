@@ -225,7 +225,7 @@ pub(crate) fn render(
                     text_resp.request_focus();
                 }
                 let trimmed = name_buf.trim();
-                let refusal = crate::gui::presets_fs::name_refusal(trimmed);
+                let refusal = crate::gui::presets_fs::name_refusal(trimmed, &settings.newer_presets);
                 if let Some(why) = refusal {
                     ui.label(RichText::new(why).color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_SECONDARY));
                 } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
@@ -279,7 +279,7 @@ pub(crate) fn render(
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
         let target_name = overwrite_target.or_else(|| {
-            (commit && !trimmed.is_empty() && crate::gui::presets_fs::name_refusal(trimmed).is_none())
+            (commit && !trimmed.is_empty() && crate::gui::presets_fs::name_refusal(trimmed, &settings.newer_presets).is_none())
                 .then(|| trimmed.to_string())
         });
         if let Some(name) = target_name {
