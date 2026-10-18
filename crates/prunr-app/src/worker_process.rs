@@ -110,6 +110,40 @@ impl Drop for SemaphoreGuard {
 /// Remove each temp path that lives under the IPC directory. Silent on
 /// missing files — subprocess cancel branches call this before the normal
 /// post-spawn cleanup would have fired.
+/// How often a model being built reports, well inside the parent's hang
+/// watchdog.
+const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Reports "Loading model" for `item_id` every `every` until dropped.
+struct Heartbeat {
+    stop: Arc<AtomicBool>,
+    beating: std::thread::Thread,
+}
+
+impl Heartbeat {
+    fn start(events: std::sync::mpsc::Sender<SubprocessEvent>, item_id: u64, every: std::time::Duration) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let beating = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let report = SubprocessEvent::Report { item_id, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) };
+                if events.send(report).is_err() {
+                    return;
+                }
+                std::thread::park_timeout(every);
+            }
+        });
+        Self { stop, beating: beating.thread().clone() }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.beating.unpark();
+    }
+}
+
 /// Write a result for the parent to read. One that fails (a full temp
 /// disk) leaves no half file behind; the caller reports the error, or the
 /// parent would wait for an answer that never comes.
@@ -404,6 +438,9 @@ pub fn run_worker() -> ! {
             }
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
                 let built = (|| -> Result<(), String> {
+                    // A model built here (a compile can run minutes) says so
+                    // as it goes, or the parent's hang watchdog kills it.
+                    let _loading = Heartbeat::start(evt_tx.clone(), item_id, HEARTBEAT_EVERY);
                     if line_mode != LineMode::Off {
                         ensure_edge_engine(&mut edge_engine)?;
                     }
@@ -1118,6 +1155,22 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// While a model builds, the worker reports it again and again, so a
+    /// long compile is not taken for a hang; it stops with the build.
+    #[test]
+    fn a_model_being_built_keeps_reporting() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let beat = Heartbeat::start(tx, 7, std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(110));
+        drop(beat);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let reports: Vec<_> = rx.try_iter().collect();
+        assert!(reports.len() >= 3, "{} reports", reports.len());
+        assert!(reports.iter().all(|r| matches!(r, SubprocessEvent::Report { item_id: 7, .. })));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(rx.try_iter().count(), 0, "it stops with the build");
+    }
 
     /// A result that cannot be written is an error for the parent, with no
     /// half file left; one that can is the whole image.
