@@ -559,7 +559,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::LaMaFp32,
         display_name: "Eraser (LaMa)",
-        description: "Object removal via inpainting. Smooth fills on simple backgrounds.",
+        description: "Object removal. Smooth fills on simple backgrounds.",
         category: ModelCategory::Inpaint,
         source: ModelSource::OnDemand {
             filename: "lama_fp32-1.0.0.onnx",
@@ -587,7 +587,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::BigLaMa,
         display_name: "Eraser (Big-LaMa)",
-        description: "Same architecture as LaMa, trained on more data (Places2). Sharper fills on detailed regions.",
+        description: "LaMa trained on more photos (Places2): sharper fills on detailed regions.",
         category: ModelCategory::Inpaint,
         source: ModelSource::OnDemand {
             filename: "big_lama-1.0.1.onnx",
@@ -615,7 +615,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Migan,
         display_name: "Eraser (MI-GAN)",
-        description: "Lightweight GAN inpainter (~25 MB). Sharper than LaMa on detailed regions; less smooth on flat backgrounds.",
+        description: "A light eraser (~25 MB). Sharper than LaMa on detailed regions; less smooth on flat backgrounds.",
         category: ModelCategory::Inpaint,
         source: ModelSource::OnDemand {
             filename: "migan-1.0.0.onnx",
@@ -644,7 +644,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::SdV15InpaintFp16,
         display_name: "Eraser (Stable Diffusion 1.5)",
-        description: "Generative inpainting via Stable Diffusion. Phone-app-class quality, GPU strongly preferred. ~2 GB.",
+        description: "Generative fills with Stable Diffusion. Needs a graphics card. About 2 GB.",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
             subdir: "sd15-inpaint-fp16-1.0.0",
@@ -706,7 +706,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // steps batch into one UNet call and crops other than 512² load).
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
-        display_name: "Eraser (SD 1.5 LCM, fast)",
+        display_name: "Eraser (Stable Diffusion 1.5, fast)",
         description: "The Stable Diffusion eraser's Fast quality: several times faster than Quality.",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
@@ -841,8 +841,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     // Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
     ModelDescriptor {
         id: ModelId::TaesdFp16,
-        display_name: "TAESD VAE (fast SD)",
-        description: "Tiny distilled VAE for SD 1.5. Toggle on the SD chip. Works with any scheduler. ~3\u{00d7} faster decode at slight quality cost.",
+        display_name: "Fast decoder (TAESD)",
+        description: "Finishes Stable Diffusion fills about 3\u{00d7} faster, a little softer. Turn on Fast decoder in the eraser's Advanced settings.",
         category: ModelCategory::Inpaint,
         source: ModelSource::MultiPartOnDemand {
             subdir: "taesd-fp16-1.0.0",
@@ -884,7 +884,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::RealEsrganX4Plus,
         display_name: "Real-ESRGAN x4plus",
-        description: "General-purpose 4x super-resolution. Strong on photos and illustrations.",
+        description: "General-purpose 4\u{00d7} upscaler. Strong on photos and illustrations.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "RealESRGAN_x4plus.onnx",
@@ -922,7 +922,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
         display_name: "4xNomos8kSCHAT-L",
-        description: "Photo-tuned HAT-L super-resolution. The most detailed upscaler and the slowest: about a minute for a small photo without a graphics card.",
+        description: "Photo-tuned upscaler (HAT-L). The most detailed and the slowest: about a minute for a small photo without a graphics card.",
         category: ModelCategory::Upscale,
         source: ModelSource::OnDemand {
             filename: "4xNomos8kSCHAT-L.onnx",
@@ -1106,7 +1106,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::DdcolorTiny,
         display_name: "DDColor",
-        description: "Colours a black-and-white photo. Strength sets how much of the predicted colour shows.",
+        description: "Colors a black-and-white photo. Strength sets how much of the model's color shows.",
         category: ModelCategory::Colorize,
         source: ModelSource::OnDemand {
             filename: "ddcolor_paper_tiny.onnx",
@@ -1168,7 +1168,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Sam21HieraSmall,
         display_name: "Magic Brush (SAM 2.1 Hiera Small)",
-        description: "Click or stroke to select objects automatically. Apache 2.0 from Meta. Encoder runs once per image; decoder runs per click for real-time feel.",
+        description: "Click or stroke to select objects. Apache 2.0, from Meta. Reads each photo once, then answers every click at once.",
         category: ModelCategory::Selection,
         source: ModelSource::MultiPartBundled {
             parts: &[
@@ -1275,7 +1275,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::YuNet,
         display_name: "Face finder (YuNet)",
-        description: "Finds the faces Restore faces redraws and Auto focus aims at.",
+        description: "Finds the faces that Faces redraws and that Auto focus aims at.",
         category: ModelCategory::Face,
         source: ModelSource::Bundled {
             license: LicenseInfo {
