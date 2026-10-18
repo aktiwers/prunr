@@ -280,6 +280,30 @@ fn user_text_names_no_keys_by_hand() {
     report(found, "keys written by hand in user text");
 }
 
+/// User text writes "…" (not three dots) and plurals through
+/// `fmt::count` (not "(s)").
+#[test]
+fn user_text_has_no_three_dots_or_plural_brackets() {
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        if !rel.starts_with("prunr-app/src/gui/") {
+            continue;
+        }
+        for (n, line) in production_lines(text) {
+            let code = code_part(line);
+            if ["tracing::", "debug!(", "info!(", "warn!(", "error!("].iter().any(|t| code.contains(t)) {
+                continue;
+            }
+            for literal in literals(code) {
+                if literal.contains("...") || literal.contains("(s)") {
+                    found.push(format!("{rel}:{n}: \"{literal}\": use an ellipsis character / fmt::count"));
+                }
+            }
+        }
+    }
+    report(found, "three dots or (s) plurals in user text");
+}
+
 /// User text spells the US way, as most of it does: gray, color,
 /// license, center.
 #[test]

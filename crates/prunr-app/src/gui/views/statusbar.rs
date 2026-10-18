@@ -36,7 +36,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             // so check it first — otherwise the "All done" branch wins.
             running(prunr_core::Step::Erasing)
         } else if batch_processing {
-            format!("Processing {batch_done_count}/{batch_total} images...")
+            format!("Processing {batch_done_count}/{}\u{2026}", super::fmt::count(batch_total, "image", "images"))
         } else if batch_total >= 2 && batch_done_count == batch_total {
             format!("All done \u{2014} {batch_total} images processed")
         } else if batch_total >= 2 && batch_done_count > 0 {
@@ -51,7 +51,7 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                     }
                 }
                 AppState::Processing => {
-                    format!("Processing... {}", app.status.stage)
+                    format!("Processing\u{2026} {}", app.status.stage)
                 }
                 AppState::Done => app.status.text.clone(),
             }

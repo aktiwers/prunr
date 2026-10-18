@@ -187,7 +187,7 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
     }
     let all = controls(&harness, |_| true);
     let rect_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, r)| *r);
-    let canvas_right = rect_of("Select All")?[0];
+    let canvas_right = rect_of("Select all")?[0];
     let strip_top = rect_of(&format!("More {title} settings"))?[1] - 60.0;
     let strip = controls(&harness, |r| r[1] >= TOOLBAR_BOTTOM && r[1] >= strip_top && r[3] <= strip_top + 200.0 && r[0] < canvas_right);
     if let Some((name, r)) = strip.iter().find(|(_, r)| r[2] > canvas_right) {

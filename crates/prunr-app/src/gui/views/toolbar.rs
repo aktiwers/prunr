@@ -162,7 +162,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
             if is_batch_processing {
                 let partial = ticked_processing;
-                let cancel_label = if partial { "Cancel Selected" } else { "Cancel All" };
+                let cancel_label = if partial { "Cancel selected" } else { "Cancel all" };
                 let cancel_btn = egui::Button::new(
                     RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),
                 )

@@ -148,7 +148,7 @@ fn save_layers_answer_writes_into_the_picked_folder() {
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
     let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
-    assert_eq!(msg, Ok("Saved 1 file(s)".to_string()));
+    assert_eq!(msg, Ok("Saved 1 file".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
 }
 
@@ -165,7 +165,7 @@ fn save_selected_answer_writes_each_into_the_picked_folder() {
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
     let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
-    assert_eq!(msg, Ok("Saved 2 image(s)".to_string()));
+    assert_eq!(msg, Ok("Saved 2 images".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
     assert!(dir.path().join("test2.prunr.png").is_file());
     assert!(!dir.path().join("test3.prunr.png").exists(), "unticked image stays out");
