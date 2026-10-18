@@ -119,7 +119,7 @@ pub struct PrunrApp {
     /// Inline "Reset to defaults" confirmation. Set when the user clicks
     /// the reset button; the next render shows a confirm/cancel pair.
     pub(crate) pending_reset_confirm: bool,
-    /// The Hotkeys tab is waiting for a key press for this action's slot.
+    /// The Shortcuts tab is waiting for a key press for this action's slot.
     pub(crate) hotkey_capture: Option<(super::views::shortcuts::Action, usize)>,
     /// The live key bindings: the shipped table plus `settings.hotkeys`.
     /// Installed into the egui context each frame for the views.
@@ -351,7 +351,7 @@ impl PrunrApp {
                     self.apply_cancel_shortcut(ctx);
                 }
             }
-            Action::Shortcuts => self.toggle_hotkeys_tab(),
+            Action::Shortcuts => self.toggle_shortcuts_tab(),
             Action::CliHelp => self.show_cli_help ^= true,
             Action::PipelineFlow => self.show_pipeline_flow ^= true,
             Action::Settings => self.toggle_settings_panel(),
@@ -968,7 +968,7 @@ impl PrunrApp {
 }
 
 impl PrunrApp {
-    /// While the Hotkeys tab waits for a key, this frame's press is the
+    /// While the Shortcuts tab waits for a key, this frame's press is the
     /// new chord (Escape cancels, Backspace clears the slot), never a
     /// command. Returns true while capture is active.
     fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
@@ -1059,14 +1059,14 @@ impl PrunrApp {
         true
     }
 
-    /// Settings on the Hotkeys tab, the one list of shortcuts; closes it
+    /// Settings on the Shortcuts tab, the one list of shortcuts; closes it
     /// when that tab is already showing.
-    pub(crate) fn toggle_hotkeys_tab(&mut self) {
+    pub(crate) fn toggle_shortcuts_tab(&mut self) {
         use super::views::settings::SettingsTab;
-        if self.show_settings && self.settings_tab == SettingsTab::Hotkeys {
+        if self.show_settings && self.settings_tab == SettingsTab::Shortcuts {
             self.close_settings();
         } else {
-            self.settings_tab = SettingsTab::Hotkeys;
+            self.settings_tab = SettingsTab::Shortcuts;
             self.open_settings();
         }
     }
@@ -1473,7 +1473,7 @@ mod hotkey_capture_tests {
     use super::PrunrApp;
     use crate::gui::views::shortcuts::Action;
 
-    /// A key pressed for the Hotkeys capture field never reaches the
+    /// A key pressed for the Shortcuts capture field never reaches the
     /// command handler in that frame: Escape cancels the capture and
     /// leaves the settings modal open.
     #[test]

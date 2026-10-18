@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn duotone_and_gradient_map_match_their_former_formulas() {
+    fn duotone_and_gradient_map_blend_to_the_nearest_byte() {
         let blend = |lo: [u8; 3], hi: [u8; 3], t: u16| -> [u8; 3] {
             let inv = 255 - t;
             std::array::from_fn(|c| ((lo[c] as u16 * inv + hi[c] as u16 * t + 127) / 255) as u8)

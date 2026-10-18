@@ -155,8 +155,8 @@ mod tests {
         assert_eq!(blur_rgba(&src, 0.0), src);
     }
 
-    /// The two-buffer blur the in-place one replaced: whole-image
-    /// passes with a transpose between the axes. Kept as the oracle.
+    /// The plain two-buffer blur, whole-image passes with a transpose
+    /// between the axes: the oracle.
     fn two_buffer_reference(src: &RgbaImage, sigma: f32) -> Vec<u8> {
         let (w, h) = (src.width() as usize, src.height() as usize);
         let rows = |from: &[u8], to: &mut [u8], width: usize, r: usize| {

@@ -1,6 +1,6 @@
 //! The keyboard bindings. One shipped table plus the user's overrides
 //! (`Settings.hotkeys`) resolve into one `Bindings`, which feeds the key
-//! handler, the F1 overlay, the Settings › Hotkeys tab, button tooltips,
+//! handler, the F1 overlay, the Settings › Shortcuts tab, button tooltips,
 //! the selection action-bar hints and the empty-canvas tips, so none of
 //! them can drift from the keys that actually work.
 
@@ -252,7 +252,7 @@ pub struct Bindings {
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     chords: Vec<Chord>,
-    /// Per chord, for the Hotkeys tab's slots.
+    /// Per chord, for the Shortcuts tab's slots.
     texts: Vec<Arc<str>>,
     /// All chords joined, for tooltips and lists.
     display: Arc<str>,
@@ -273,7 +273,7 @@ impl Row {
 /// Shown wherever an action has no key.
 pub const UNBOUND: &str = "Unbound";
 
-/// Slots an action offers in the Hotkeys tab: a key and an alternate.
+/// Slots an action offers in the Shortcuts tab: a key and an alternate.
 pub const SLOTS: usize = 2;
 
 impl Bindings {
@@ -492,7 +492,7 @@ pub fn label(action: Action) -> &'static str {
     row(action).label
 }
 
-/// The mouse gestures, for the Hotkeys tab's list below the keys.
+/// The mouse gestures, for the Shortcuts tab's list below the keys.
 pub fn gestures() -> &'static [(&'static str, &'static str)] {
     GESTURES
 }

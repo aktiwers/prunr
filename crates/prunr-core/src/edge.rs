@@ -651,7 +651,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flatten_on_white_matches_its_former_formula() {
+    fn flatten_on_white_is_the_rounded_blend() {
         let px: Vec<u8> = (0..=255u8).flat_map(|a| [a, 255 - a, 37, a]).collect();
         let rgba = RgbaImage::from_raw(256, 1, px).unwrap();
         for (d, s) in flatten_on_white(&rgba).pixels().zip(rgba.pixels()) {

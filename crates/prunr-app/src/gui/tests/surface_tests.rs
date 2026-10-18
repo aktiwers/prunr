@@ -594,7 +594,7 @@ fn a_dialog_reopened_from_a_menu_stays_open() {
     click(&mut h, "Help");
     click(&mut h, "Keyboard shortcuts");
     h.run_steps(10);
-    assert!(h.state().show_settings, "Settings opened on Hotkeys stays open");
+    assert!(h.state().show_settings, "Settings opened on Shortcuts stays open");
 }
 
 /// The capsule and the canvas animate while a run works, for minutes at

@@ -47,12 +47,11 @@ impl PrunrApp {
 
     /// Open an image from raw bytes; an empty name reads as "image".
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
+        let name = if name.is_empty() { "image".into() } else { name };
         let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else {
-            let what = if name.is_empty() { "the image" } else { name.as_str() };
-            self.status_error(&format!("Could not open {what}: not an image Prunr can read"));
+            self.status_error(&format!("Could not open {name}: not an image Prunr can read"));
             return;
         };
-        let name = if name.is_empty() { "image".into() } else { name };
         self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
     }
 
@@ -230,7 +229,7 @@ pub(crate) fn queue_file_loads(tx: &std::sync::mpsc::Sender<FileLoad>, paths: Ve
         }
         for path in resolved {
             let name = display_name(&path, UNTITLED);
-            let stamp = std::fs::metadata(&path).ok().map(|m| crate::gui::item::FileStamp::of(&m));
+            let stamp = crate::gui::item::FileStamp::at(&path);
             let len = stamp.map_or(0, |s| s.len as usize);
             let dims = prunr_core::image_dimensions_from_path(&path);
             // Once the receiver is gone every later send fails too.

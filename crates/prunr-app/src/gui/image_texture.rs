@@ -171,10 +171,11 @@ impl PreparedImage {
         let raw = rgba.as_raw();
         let color = |p: &[u8]| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
         Self::cut(w, h, |[x0, y0], [gw, gh]| {
-            let pixels = (y0..y0 + gh)
-                .into_par_iter()
-                .flat_map_iter(|row| raw[(row * w + x0) * 4..][..gw * 4].chunks_exact(4).map(color))
-                .collect();
+            let mut pixels = vec![Color32::TRANSPARENT; gw * gh];
+            pixels.par_chunks_exact_mut(gw).enumerate().for_each(|(row, out)| {
+                let src = &raw[((y0 + row) * w + x0) * 4..][..gw * 4];
+                out.iter_mut().zip(src.chunks_exact(4)).for_each(|(o, p)| *o = color(p));
+            });
             egui::ColorImage::new([gw, gh], pixels)
         })
     }

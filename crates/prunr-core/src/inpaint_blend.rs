@@ -407,6 +407,13 @@ pub fn finalize_inpaint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `img` with `f` applied to a copy.
+    fn applied(img: &RgbaImage, f: impl FnOnce(&mut RgbaImage)) -> RgbaImage {
+        let mut out = img.clone();
+        f(&mut out);
+        out
+    }
     use image::{Luma, Rgba};
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> RgbaImage {
@@ -441,7 +448,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(64, 64);
-        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
+        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
         assert_eq!(out, inp);
     }
 
@@ -450,7 +457,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(32, 32);
-        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
+        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
         assert_eq!(out, inp);
     }
 
@@ -465,7 +472,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
+        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
         let p = out.get_pixel(32, 32);
         assert!(
             p[0] >= 180 && p[0] <= 220,
@@ -484,7 +491,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = GrayImage::from_pixel(64, 64, Luma([255]));
-        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, 8);
+        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
         assert_eq!(out, inp);
     }
 
@@ -502,7 +509,7 @@ mod tests {
         }
         let ring_px = 8;
         let bbox = mask_bbox(&mask, 128, ring_px).unwrap();
-        let mut out = inp.clone(); color_match_inpainted(&mut out, &src, &mask, ring_px);
+        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, ring_px));
         for y in 0..512 {
             for x in 0..512 {
                 let inside = x >= bbox.x && x < bbox.x + bbox.w
@@ -523,7 +530,7 @@ mod tests {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
         let mask = empty_mask(64, 64);
-        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
         assert_eq!(out, inp);
     }
 
@@ -538,7 +545,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
         let edge = out.get_pixel(16, 32);
         assert!(
             edge[0] > 60,
@@ -574,7 +581,7 @@ mod tests {
             let (dx, dy) = (x as f32 - 700.0, y as f32 - 700.0);
             Luma([if dx * dx + dy * dy < 600.0 * 600.0 { 255 } else { 0 }])
         });
-        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX);
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX));
         for (x, y, px) in out.enumerate_pixels() {
             for (c, lo, hi) in [(0, 180, 200), (1, 150, 170), (2, 80, 100)] {
                 assert!((lo..=hi).contains(&px[c]), "({x}, {y}) channel {c} = {}", px[c]);
@@ -598,7 +605,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let mut out = inp.clone(); seam_guided_blend(&mut out, &src, &mask, 4, 1e-3, 8.0);
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
         // Pixel near the inside seam (right/bottom of mask) should be
         // lifted toward source. Pixels at the actual image corner have
         // less context so we don't assert on (0,0).

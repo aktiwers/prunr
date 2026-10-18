@@ -478,7 +478,7 @@ mod tests {
         assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
     }
 
-    /// The whole-image accumulator the band replaced, kept as the oracle.
+    /// The plain whole-image accumulator: the oracle.
     fn full_buffer_reference(input: &RgbaImage, scale: u32, cfg: TilingConfig, run_tile: impl Fn(&RgbImage, u32, u32) -> RgbImage) -> RgbaImage {
         let (in_w, in_h) = input.dimensions();
         let (out_w, out_h) = (in_w * scale, in_h * scale);

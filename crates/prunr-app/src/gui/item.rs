@@ -327,6 +327,11 @@ impl FileStamp {
     pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
         Self { len: meta.len(), modified: meta.modified().ok() }
     }
+
+    /// The file at `path` as it is now; `None` when it cannot be looked at.
+    pub(crate) fn at(path: &std::path::Path) -> Option<Self> {
+        std::fs::metadata(path).ok().map(|m| Self::of(&m))
+    }
 }
 
 /// Where an image's raw bytes live — file path (lazy) or in-memory (clipboard/paste).
@@ -342,7 +347,7 @@ pub(crate) enum ImageSource {
 impl ImageSource {
     /// A file as it is now: later reads refuse it once it is written again.
     pub(crate) fn file(path: PathBuf) -> Self {
-        let stamp = std::fs::metadata(&path).ok().map(|m| FileStamp::of(&m));
+        let stamp = FileStamp::at(&path);
         Self::Path(path, stamp)
     }
 
