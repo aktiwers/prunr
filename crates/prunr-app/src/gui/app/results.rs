@@ -273,7 +273,7 @@ impl PrunrApp {
             self.toasts.info(format!("{run} cancelled"));
         } else {
             tracing::error!(item_id, run, %err, "run failed");
-            self.toasts.error(format!("{run} failed: {err}"));
+            self.toasts.error(format!("{run} did not finish: {}", err.message()));
         }
     }
 
@@ -292,7 +292,7 @@ impl PrunrApp {
                 }
                 InstallEvent::Failed { error } => {
                     let name = progress.runtime.display_name();
-                    self.toasts.error(format!("{name} install failed: {error}"));
+                    self.toasts.error(format!("Could not install {name}: {error}"));
                     self.runtime_install = None;
                     self.refresh_install_cache();
                     return;
@@ -321,7 +321,7 @@ impl PrunrApp {
                 }
                 DownloadEvent::Failed { id, error } => {
                     let name = prunr_models::display_name(id);
-                    self.toasts.error(format!("{name} download failed: {error}"));
+                    self.toasts.error(format!("Could not download {name}: {error}"));
                     self.refresh_install_cache();
                 }
                 DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } | DownloadEvent::Cancelled { .. } => {}
@@ -349,7 +349,7 @@ impl PrunrApp {
             }
             Some(Err(err)) => {
                 tracing::warn!(item_id, %err, "face restore failed");
-                self.toasts.error(format!("Restore faces failed: {err}"));
+                self.toasts.error(format!("Could not redraw the faces: {err}"));
             }
         }
         self.redo_faces_blend(idx);
@@ -483,7 +483,7 @@ impl PrunrApp {
                 self.on_depth_landed(idx);
                 ctx.request_repaint();
             } else if let Some(err) = error.filter(|_| current) {
-                self.toasts.error(format!("Depth failed: {err}"));
+                self.toasts.error(format!("Could not measure the depth: {err}"));
             }
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
@@ -831,9 +831,9 @@ impl PrunrApp {
         } else if counts.errored > 0 {
             let first_err = self.batch.first_error_message().unwrap_or("unknown error");
             let msg = if counts.errored == 1 {
-                format!("Image failed: {first_err}")
+                format!("Could not process the image: {first_err}")
             } else {
-                format!("{} failed — first: {first_err}", crate::gui::views::fmt::count(counts.errored, "image", "images"))
+                format!("Could not process {} \u{2014} first: {first_err}", crate::gui::views::fmt::count(counts.errored, "image", "images"))
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
@@ -1641,7 +1641,7 @@ mod timeline_contract_tests {
         app.end_unlanded_run(1, 0, Engine::Upscale, prunr_core::CoreError::Cancelled);
         assert_eq!(app.toasts.last_for_test(), Some(("info", "Upscale cancelled")));
         app.end_unlanded_run(1, 0, Engine::Colorize, prunr_core::CoreError::Inference("no memory".into()));
-        assert_eq!(app.toasts.last_for_test(), Some(("error", "Colorize failed: Inference error: no memory")));
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Colorize did not finish: no memory")));
     }
 
     /// Refine's after-the-model knobs re-finish the kept upscale; a Scale

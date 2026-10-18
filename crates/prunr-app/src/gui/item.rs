@@ -311,7 +311,7 @@ pub(crate) fn source_unreadable(err: std::io::Error) -> String {
     } else if err.get_ref().is_some_and(|inner| inner.is::<FileChanged>()) {
         err.to_string()
     } else {
-        format!("Failed to load: {err}")
+        format!("Could not read the file: {err}")
     }
 }
 

@@ -207,7 +207,7 @@ impl PrunrApp {
             DragReady::Ready { ids, paths, failed } => {
                 for id in failed {
                     let name = self.batch.find_by_id(id).map_or("an image", |i| i.filename.as_str()).to_string();
-                    self.toasts.error(format!("Drag export failed for {name}"));
+                    self.toasts.error(format!("Could not drag {name} out. Save it instead."));
                 }
                 (ids, paths)
             }
@@ -240,7 +240,7 @@ impl PrunrApp {
             );
             if let Err(e) = result {
                 DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
-                self.toasts.error(format!("Drag failed: {e}"));
+                self.toasts.error(format!("Could not drag out: {e}"));
             }
         }
     }
@@ -345,14 +345,14 @@ fn spawn_save_single(
         let depth = ExportDepth::default();
         let mut outcome = match one.image.load().map(|rgba| write_composite(&path, &rgba, &one.bg, format, &depth)) {
             Some(Ok(())) => Ok("Saved".to_string()),
-            Some(Err(e)) => Err(format!("Save failed: {e}")),
-            None => Err("Save failed: the image could not be read".to_string()),
+            Some(Err(e)) => Err(format!("Could not save: {e}")),
+            None => Err("Could not save: the image could not be read".to_string()),
         };
         let folder = path.parent().unwrap_or(Path::new("."));
         if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             let msg = outcome.unwrap_or_else(|failed| failed);
-            outcome = Err(format!("{msg}; depth map failed: {e}"));
+            outcome = Err(format!("{msg}; could not save the depth map: {e}"));
         }
         let _ = tx.send(outcome);
     });
@@ -525,9 +525,9 @@ mod toast_kind_tests {
     fn an_image_that_will_not_load_is_an_error() {
         let mut app = PrunrApp::new_for_test();
         app.handle_open_path("/nonexistent/prunr-test/missing.png".into());
-        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not load image")));
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not open missing.png: not an image Prunr can read")));
         app.handle_open_bytes(vec![1, 2, 3], "junk".into());
-        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not load image")));
+        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not open junk: not an image Prunr can read")));
     }
 
     #[test]
@@ -563,7 +563,7 @@ mod toast_kind_tests {
         app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("missing/out.png"));
         let (level, caption) = save_toast(&mut app);
         assert_eq!(level, "error");
-        assert!(caption.starts_with("Save failed: "), "{caption}");
+        assert!(caption.starts_with("Could not save: "), "{caption}");
     }
 
     #[test]

@@ -38,7 +38,7 @@ impl PrunrApp {
 
     pub fn handle_open_path(&mut self, path: PathBuf) {
         let Some(dims) = prunr_core::image_dimensions_from_path(&path) else {
-            self.status_error("Could not load image");
+            self.status_error(&format!("Could not open {}: not an image Prunr can read", display_name(&path, "the file")));
             return;
         };
         let filename = display_name(&path, "image");
@@ -48,7 +48,8 @@ impl PrunrApp {
     /// Open an image from raw bytes; an empty name reads as "image".
     pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
         let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else {
-            self.status_error("Could not load image");
+            let what = if name.is_empty() { "the image" } else { name.as_str() };
+            self.status_error(&format!("Could not open {what}: not an image Prunr can read"));
             return;
         };
         let name = if name.is_empty() { "image".into() } else { name };

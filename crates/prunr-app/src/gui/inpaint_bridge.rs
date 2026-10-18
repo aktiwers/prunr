@@ -402,7 +402,7 @@ fn poll_spawn_result(
             for params in pending {
                 let _ = res_tx.send(InpaintBridgeResult::Error {
                     item_id: params.item_id,
-                    error: format!("inpaint subprocess spawn failed: {e}"),
+                    error: format!("Could not start the eraser: {e}"),
                 });
                 inflight_generations.remove(&params.item_id);
             }
@@ -457,7 +457,12 @@ fn end_if_dead(
     let Some(reason) = s.died() else { return };
     tracing::warn!(%reason, in_flight = inflight_generations.len(), "eraser worker ended");
     *sub_state = SubState::Idle;
-    fail_inflight(inflight_generations, res_tx, &format!("The eraser stopped: {reason}. Erase again."));
+    let why = if crate::subprocess::manager::out_of_memory(&reason) {
+        "The eraser ran out of memory. Try a lighter eraser or a smaller region."
+    } else {
+        "The eraser stopped unexpectedly. Erase again."
+    };
+    fail_inflight(inflight_generations, res_tx, why);
 }
 
 /// End every in-flight stroke with `error`.

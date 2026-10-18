@@ -370,14 +370,14 @@ fn download_attempt(
     let _ = std::fs::remove_file(&partial);
 
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
-        .map_err(|e| DlError::fatal(format!("HTTP client init failed: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("Could not start the download: {e}")))?;
 
     let response = client.get(url).send()
         .map_err(|e| DlError::transient(format!("Network error: {e}")))?;
 
     let status = response.status();
     if !status.is_success() {
-        let msg = if status.is_server_error() { format!("Server returned {status}") } else { format!("Download failed: {status}") };
+        let msg = if status.is_server_error() { format!("The server answered {status}; try again later") } else { format!("The download was refused ({status})") };
         return Err(DlError::for_status(status, msg));
     }
 

@@ -1053,7 +1053,7 @@ fn read_result_image(
             rgba_image,
             active_provider: active_provider.to_string(),
         })
-        .ok_or_else(|| "Failed to read result from subprocess".to_string())
+        .ok_or_else(|| "The model's result could not be read. Process again.".to_string())
 }
 
 /// Read the segmentation tensor cache from disk.
@@ -1338,7 +1338,7 @@ fn handle_crash_and_retry(
     sent.abandon_spares(true, res_tx);
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
-            let _ = res_tx.send(state.item_failed(tid, crash_reason.clone()));
+            let _ = res_tx.send(state.item_failed(tid, crash_message(&crash_reason).to_string()));
         }
     }
 
@@ -1361,9 +1361,10 @@ fn handle_crash_and_retry(
 
     match on_crash(state.max_jobs) {
         OnCrash::FailInFlight => {
+            tracing::warn!(reason = %crash_reason, "a worker crash failed the image it ran");
             let error = crash_message(&crash_reason);
             for item in re_queued {
-                report_failed(item.id, error.clone(), state, res_tx, ctx);
+                report_failed(item.id, error.to_string(), state, res_tx, ctx);
             }
         }
         OnCrash::RetryWith(jobs) => {
@@ -1395,12 +1396,15 @@ fn on_crash(jobs: usize) -> OnCrash {
     if jobs <= 1 { OnCrash::FailInFlight } else { OnCrash::RetryWith(jobs / 2) }
 }
 
-/// The message an image a crash failed shows.
-fn crash_message(reason: &str) -> String {
-    if reason.contains("out of memory") {
-        format!("{reason} \u{2014} try a smaller model")
+/// What an image a crash failed tells the user; the raw `reason` (a
+/// signal, an exit code) goes to the log.
+fn crash_message(reason: &str) -> &'static str {
+    if crate::subprocess::manager::out_of_memory(reason) {
+        "Ran out of memory. Try a smaller model or fewer images at once."
+    } else if reason.contains("stopped responding") {
+        "The model stopped responding. Process again."
     } else {
-        reason.to_string()
+        "The model stopped unexpectedly. Process again; if it happens again, run prunr --doctor and send the report."
     }
 }
 
@@ -1485,7 +1489,7 @@ impl CachedTensorWork {
     /// file fails the image; its failure drops the cache, so the next
     /// Process starts over.
     fn read_inputs(&self) -> Result<(Vec<f32>, Arc<Vec<u8>>), String> {
-        let data = self.tensor.decompress().ok_or("Tensor cache corrupt")?;
+        let data = self.tensor.decompress().ok_or("The kept cut-out could not be read. Process again.")?;
         let bytes = self.source.load_bytes().map_err(super::item::source_unreadable)?;
         Ok((data, bytes))
     }
@@ -1680,8 +1684,9 @@ mod tests {
         assert_eq!(super::on_crash(4), super::OnCrash::RetryWith(2));
         assert_eq!(super::on_crash(2), super::OnCrash::RetryWith(1));
         assert_eq!(super::on_crash(1), super::OnCrash::FailInFlight);
-        assert!(super::crash_message("Process killed by OS (out of memory)").ends_with("try a smaller model"));
-        assert_eq!(super::crash_message("Process crashed (segmentation fault)"), "Process crashed (segmentation fault)");
+        assert!(super::crash_message("Process killed by OS (out of memory)").starts_with("Ran out of memory"));
+        assert!(super::crash_message("Worker stopped responding (no events for 60s)").starts_with("The model stopped responding"));
+        assert!(super::crash_message("Process crashed (segmentation fault)").starts_with("The model stopped unexpectedly"));
     }
 
     /// Work goes out up to the job limit; the memory pause holds it back
