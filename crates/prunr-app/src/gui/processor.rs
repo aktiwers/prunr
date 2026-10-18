@@ -1316,14 +1316,8 @@ impl Processor {
             let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_generation(dir, item_id, generation);
             let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_generation(dir, item_id, generation);
             let res: Result<(), String> = (|| {
-                let img_bytes = prunr_core::encode_rgba_png(&image)
-                    .map_err(|e| format!("encode source: {e:?}"))?;
-                std::fs::write(&image_path, img_bytes)
-                    .map_err(|e| format!("write source: {e}"))?;
-                let mask_bytes = prunr_core::encode_gray_png(&mask)
-                    .map_err(|e| format!("encode mask: {e:?}"))?;
-                std::fs::write(&mask_path, mask_bytes)
-                    .map_err(|e| format!("write mask: {e}"))
+                crate::subprocess::ipc::write_image(&image_path, &image).map_err(|e| format!("write source: {e}"))?;
+                crate::subprocess::ipc::write_image(&mask_path, &mask).map_err(|e| format!("write mask: {e}"))
             })();
             if let Err(e) = res {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed(e)));
@@ -1353,24 +1347,17 @@ impl Processor {
             match evt {
                 InpaintBridgeResult::Report { item_id, update } => self.report_inpaint(item_id, update),
                 InpaintBridgeResult::Done { item_id, generation, rgba_path, width, height, fill_scale } => {
-                    // The result file is read and decoded off the UI thread
-                    // (a full-size PNG); the capsule ends once it is there.
+                    // The result file is read off the UI thread (a
+                    // full-size image); the capsule ends once it is there.
                     let (tx, sink) = (self.inpaint_tx.clone(), self.inpaint_runs.get(&item_id).cloned());
                     rayon::spawn(move || {
-                        let outcome = match crate::subprocess::ipc::read_and_delete(&rgba_path) {
-                            Some(b) => match image::load_from_memory(&b) {
-                                Ok(img) => {
-                                    let rgba = img.into_rgba8();
-                                    debug_assert_eq!((rgba.width(), rgba.height()), (width, height));
-                                    // Stamp with the dispatch's own generation — drain
-                                    // drops it as stale if a fresher stroke
-                                    // bumped `inpaint_latest_generation` while this
-                                    // one was in the subprocess.
-                                    InpaintOutcome::Done { rgba, fill_scale, generation }
-                                }
-                                Err(e) => InpaintOutcome::Failed(format!("decode SD result: {e}")),
-                            },
-                            None => InpaintOutcome::Failed(format!("read SD result missing: {}", rgba_path.display())),
+                        // Stamp with the dispatch's own generation — drain
+                        // drops it as stale if a fresher stroke bumped
+                        // `inpaint_latest_generation` while this one was
+                        // in the subprocess.
+                        let outcome = match crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height) {
+                            Some(rgba) => InpaintOutcome::Done { rgba, fill_scale, generation },
+                            None => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
                         };
                         let _ = tx.send((item_id, outcome));
                         if let Some(sink) = sink {

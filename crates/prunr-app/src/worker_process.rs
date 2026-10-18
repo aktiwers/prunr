@@ -15,7 +15,7 @@ use prunr_core::{
 };
 
 use prunr_app::subprocess::protocol::*;
-use prunr_app::subprocess::ipc::{read_message, write_message};
+use prunr_app::subprocess::ipc::{read_image, read_message, write_message};
 use prunr_app::subprocess::first_look::{FirstLook, Look, Shown};
 use prunr_app::subprocess::spare_scales::{next_token, SpareScales};
 use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
@@ -1009,27 +1009,10 @@ pub fn run_worker() -> ! {
                     }
                     let _cleanup = Cleanup { in_flight: in_flight_for_thread, cancel: Some(inpaint_cancel) };
                     let result = (|| -> Result<(image::RgbaImage, f32), String> {
-                        // Inner scope drops encoded bytes + DynamicImage as
-                        // soon as `to_rgba8`/`to_luma8` produces the final
-                        // buffer — encoded source (~5–20 MB at 4 K) and
-                        // intermediate DynamicImage (~50 MB RGBA at 4 K)
-                        // would otherwise overlap with model weights.
-                        let image: image::RgbaImage = {
-                            let bytes = std::fs::read(&image_path)
-                                .map_err(|e| format!("read source: {e}"))?;
-                            let _ = std::fs::remove_file(&image_path);
-                            image::load_from_memory(&bytes)
-                                .map_err(|e| format!("decode source: {e}"))?
-                                .into_rgba8()
-                        };
-                        let mask: image::GrayImage = {
-                            let bytes = std::fs::read(&mask_path)
-                                .map_err(|e| format!("read mask: {e}"))?;
-                            let _ = std::fs::remove_file(&mask_path);
-                            image::load_from_memory(&bytes)
-                                .map_err(|e| format!("decode mask: {e}"))?
-                                .to_luma8()
-                        };
+                        let image: image::RgbaImage = read_image(&image_path)
+                            .ok_or_else(|| "read source: missing or short".to_string())?;
+                        let mask: image::GrayImage = read_image(&mask_path)
+                            .ok_or_else(|| "read mask: missing or short".to_string())?;
                         let filled = prunr_core::inpaint::process_inpaint_with(
                             &image, &mask, model_id, sd_req.clone(),
                             sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
@@ -1043,30 +1026,11 @@ pub fn run_worker() -> ! {
                     match result {
                         Ok((rgba, fill_scale)) => {
                             let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
-                            match prunr_core::encode_rgba_png(&rgba) {
-                                Ok(bytes) => {
-                                    if let Err(e) = std::fs::write(&path, &bytes) {
-                                        let _ = evt_tx.send(SubprocessEvent::InpaintError {
-                                            item_id,
-                                            error: format!("write result: {e}"),
-                                        });
-                                        return;
-                                    }
-                                    let _ = evt_tx.send(SubprocessEvent::InpaintDone {
-                                        item_id,
-                                        rgba_path: path,
-                                        width: rgba.width(),
-                                        height: rgba.height(),
-                                        fill_scale,
-                                    });
-                                }
-                                Err(e) => {
-                                    let _ = evt_tx.send(SubprocessEvent::InpaintError {
-                                        item_id,
-                                        error: format!("encode result: {e:?}"),
-                                    });
-                                }
-                            }
+                            let event = match write_result(&path, &rgba) {
+                                Ok(()) => SubprocessEvent::InpaintDone { item_id, rgba_path: path, width: rgba.width(), height: rgba.height(), fill_scale },
+                                Err(error) => SubprocessEvent::InpaintError { item_id, error },
+                            };
+                            let _ = evt_tx.send(event);
                         }
                         Err(e) => {
                             let _ = evt_tx.send(SubprocessEvent::InpaintError {
