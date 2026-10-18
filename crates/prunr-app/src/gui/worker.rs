@@ -83,7 +83,7 @@ struct RunInputs {
 
 impl WorkItem {
     fn read_inputs(&self) -> Result<RunInputs, String> {
-        let bytes = self.source.load_bytes().map_err(super::item::load_failed)?;
+        let bytes = self.source.load_bytes().map_err(super::item::source_unreadable)?;
         let (start, built) = match &self.image {
             Some(run) => run.resolve(self.id, || Ok(Arc::clone(&bytes)))?,
             None => (None, None),
@@ -1486,7 +1486,7 @@ impl CachedTensorWork {
     /// Process starts over.
     fn read_inputs(&self) -> Result<(Vec<f32>, Arc<Vec<u8>>), String> {
         let data = self.tensor.decompress().ok_or("Tensor cache corrupt")?;
-        let bytes = self.source.load_bytes().map_err(super::item::load_failed)?;
+        let bytes = self.source.load_bytes().map_err(super::item::source_unreadable)?;
         Ok((data, bytes))
     }
 }
@@ -1618,7 +1618,7 @@ mod tests {
         let file = ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
 
         let gone = WorkItem { id: 1, run: 0, source: missing.clone(), image: None }.read_inputs();
-        assert!(gone.is_err_and(|e| e.starts_with("Failed to load")));
+        assert!(gone.is_err_and(|e| e.contains("moved or deleted")));
 
         let start = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 255]))));
         let stored = WorkItem { id: 2, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))) };
@@ -1633,7 +1633,7 @@ mod tests {
         let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, mask: MaskSettings::default() };
         assert_eq!(cached.read_inputs().expect("reads").0, vec![0.5; 4]);
         let cached = CachedTensorWork { item_id: 5, tensor, source: missing, mask: MaskSettings::default() };
-        assert!(cached.read_inputs().is_err_and(|e| e.starts_with("Failed to load")));
+        assert!(cached.read_inputs().is_err_and(|e| e.contains("moved or deleted")));
     }
 
     use super::*;

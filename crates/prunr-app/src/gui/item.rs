@@ -276,6 +276,16 @@ impl Thumbnail {
     }
 }
 
+/// The error an image shows when its file cannot be read: one moved or
+/// deleted since it was opened says so.
+pub(crate) fn source_unreadable(err: std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        "The file was moved or deleted since it was opened. Open it again.".to_string()
+    } else {
+        load_failed(err)
+    }
+}
+
 /// The error an image shows when its source can't be read.
 pub(crate) fn load_failed(e: impl std::fmt::Display) -> String {
     format!("Failed to load: {e}")
@@ -1710,6 +1720,16 @@ impl BatchItem {
     /// shows why decoding failed.
     pub(crate) fn land_decode(&mut self, result: Result<Arc<image::RgbaImage>, String>) -> bool {
         self.decode_pending = false;
+        // Its file is read again whenever it is needed: one edited since it
+        // was opened decodes at another size, and is not the photo the
+        // steps were made on.
+        let result = result.and_then(|rgba| {
+            if rgba.dimensions() == self.dimensions {
+                Ok(rgba)
+            } else {
+                Err("The file changed since it was opened. Open it again to use the new version.".to_string())
+            }
+        });
         match result {
             Ok(rgba) => {
                 self.decode_failed = false;
@@ -3415,6 +3435,7 @@ mod tests {
     #[test]
     fn a_decoded_source_replaces_what_was_derived_from_the_old_one() {
         let mut item = fixture_item(1);
+        item.dimensions = (2, 2);
         item.decode_pending = true;
         item.source_dyn = Some(Arc::new(image::DynamicImage::new_rgba8(1, 1)));
         assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(2, 2)))));
@@ -3567,9 +3588,25 @@ mod tests {
 
     /// The first decode of a photo keeps what was made from it before:
     /// its depth map and selection; a different photo landing drops them.
+    /// A photo that decodes at another size than it was opened at is not
+    /// the file that was opened: it is refused with why, not shown in its
+    /// place. A file that is gone says so.
+    #[test]
+    fn a_changed_or_missing_file_says_so() {
+        let mut item = fixture_item(1);
+        item.dimensions = (4, 4);
+        item.source_rgba = None;
+        assert!(!item.land_decode(Ok(Arc::new(image::RgbaImage::new(6, 6)))));
+        assert!(item.source_rgba.is_none() && item.decode_failed);
+        assert!(matches!(item.status(), BatchStatus::Error(e) if e.contains("changed")));
+        let gone = super::source_unreadable(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(gone.contains("moved or deleted"), "{gone}");
+    }
+
     #[test]
     fn the_first_decode_keeps_what_was_made_from_the_photo() {
         let mut item = fixture_item(1);
+        item.dimensions = (1, 1);
         item.source_rgba = None;
         item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
         item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![1])));
