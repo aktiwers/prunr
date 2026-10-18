@@ -36,6 +36,11 @@ pub enum Request {
         name: String,
         #[serde(default)]
         secondary: bool,
+        /// Of several controls named exactly `name`, the last in the
+        /// tree: a surface catalog step (a quick strip and its open
+        /// panel share names; the panel's comes later).
+        #[serde(default)]
+        last: bool,
     },
     /// Press on a control and keep holding; `Move` drags, `Release` lets go.
     Hold { name: String },
@@ -228,8 +233,16 @@ impl Automation {
     /// The one control named `name`, with its centre; a greyed one only
     /// when `greyed_too`.
     fn locate(&self, name: &str, greyed_too: bool) -> Result<(ControlNode, egui::Pos2), String> {
+        self.locate_among(name, greyed_too, false)
+    }
+
+    /// `locate`, or with `last` the last control named exactly `name`.
+    fn locate_among(&self, name: &str, greyed_too: bool, last: bool) -> Result<(ControlNode, egui::Pos2), String> {
         let root = self.snapshot()?;
-        let found = find(&root, name);
+        let mut found = find(&root, name);
+        if last && found.len() > 1 && found.iter().all(|n| n.name.as_deref() == Some(name)) {
+            found.drain(..found.len() - 1);
+        }
         let [target] = found.as_slice() else {
             return Err(format!("{} controls named {name:?}", found.len()));
         };
@@ -262,8 +275,8 @@ impl Automation {
             Request::Tree { all: true } => (0, Response::ok(self.snapshot()?)),
             Request::Tree { all: false } => (0, Response::ok(controls(&self.snapshot()?))),
             Request::Find { name } => (0, Response::ok(find(&self.snapshot()?, &name))),
-            Request::Click { name, secondary } => {
-                let (target, pos) = self.target(&name)?;
+            Request::Click { name, secondary, last } => {
+                let (target, pos) = self.locate_among(&name, false, last)?;
                 let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
                 self.frames.extend([
                     vec![egui::Event::PointerMoved(pos)].into(),
@@ -506,7 +519,7 @@ mod tests {
     #[test]
     fn requests_parse_from_tagged_json() {
         let req: Request = serde_json::from_str(r#"{"cmd":"click","name":"Settings"}"#).unwrap();
-        assert!(matches!(req, Request::Click { ref name, secondary: false } if name == "Settings"));
+        assert!(matches!(req, Request::Click { ref name, secondary: false, last: false } if name == "Settings"));
         let req: Request = serde_json::from_str(r#"{"cmd":"scroll","name":"Silueta","lines":-5}"#).unwrap();
         assert!(matches!(req, Request::Scroll { ref name, lines } if name == "Silueta" && lines == -5.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"scroll_at","x":600,"y":400,"lines":2}"#).unwrap();
