@@ -212,7 +212,7 @@ impl LayerJob {
             .filter_map(|kind| {
                 let layer = render_layer(self, kind, &src, seg.as_ref(), depth)?;
                 let mut bytes = Vec::with_capacity(layer.raw_len() / 2);
-                layer.encode_into(&mut bytes).ok()?;
+                layer.encode_kept_into(&mut bytes).ok()?;
                 Some((make_layer_filename(&self.filename, kind), bytes))
             })
             .collect()
@@ -312,11 +312,19 @@ impl LayerOutput {
         }
     }
 
-    /// The layer as a PNG, streamed into `w`.
+    /// The layer as a fast PNG for a drop, streamed into `w`.
     fn encode_into(&self, w: impl std::io::Write) -> Result<(), prunr_core::CoreError> {
         match self {
             Self::Rgba(rgba) => prunr_core::encode_rgba_png_into(rgba, w),
             Self::Gray(gray) => prunr_core::encode_gray_png_into(gray, w),
+        }
+    }
+
+    /// The layer as a PNG the user keeps (Save layers), compressed like Save.
+    fn encode_kept_into(&self, w: impl std::io::Write) -> Result<(), prunr_core::CoreError> {
+        match self {
+            Self::Rgba(rgba) => prunr_core::ExportFormat::Png.encode_into(rgba, w),
+            Self::Gray(gray) => prunr_core::encode_gray_png_kept_into(gray, w),
         }
     }
 }
@@ -708,6 +716,15 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["photo-subject.png", "photo-mask.png"]);
         assert!(files.iter().all(|(_, bytes)| bytes.starts_with(b"\x89PNG")));
+        for (name, bytes) in &files {
+            let mut kept = Vec::new();
+            match image::load_from_memory(bytes).expect("png") {
+                image::DynamicImage::ImageLuma8(gray) => prunr_core::encode_gray_png_kept_into(&gray, &mut kept),
+                other => prunr_core::ExportFormat::Png.encode_into(&other.to_rgba8(), &mut kept),
+            }
+            .expect("encode");
+            assert!(*bytes == kept, "{name} is compressed like Save");
+        }
     }
 
     /// The layers carry the edits already made to the cut-out, even while
