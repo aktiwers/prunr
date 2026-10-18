@@ -117,10 +117,13 @@ fn colour_bytes_are_rounded_not_truncated() {
         if rel.ends_with("prunr-core/src/math.rs") {
             continue;
         }
+        let core = rel.starts_with("prunr-core/");
         for (n, line) in production_lines(text) {
             let code = code_part(line);
-            if code.contains("255.0) as u8") && !code.contains("round") {
-                found.push(format!("{rel}:{n}: use prunr_core::math::round_u8"));
+            let float = code.contains("255.0) as u8") || (core && code.contains("as f32") && code.contains(") as u8"));
+            let integer = (code.contains("/ 255) as u8") || code.contains("/ 255).clamp(0, 255) as u8")) && !code.contains("+ 127");
+            if (float && !code.contains("round") && !code.contains("+ 0.5") && !code.contains("floor")) || integer {
+                found.push(format!("{rel}:{n}: use prunr_core::math::round_u8, or + 127 before / 255"));
             }
         }
     }

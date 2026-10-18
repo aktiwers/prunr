@@ -506,12 +506,12 @@ impl ComposeMode {
     #[inline]
     pub fn alpha(self, s: i32, e: i32) -> u8 {
         match self {
-            ComposeMode::LinesOnly => (s * e / 255) as u8,
+            ComposeMode::LinesOnly => ((s * e + 127) / 255) as u8,
             ComposeMode::SubjectFilled => s.max(e) as u8,
             ComposeMode::Engraving => (s - e).max(0) as u8,
             // 0.3 * subject + 0.8 * edge, clamped. Sums to > 1.0 on purpose —
             // saturates to fully opaque where subject AND edge both contribute.
-            ComposeMode::Ghost => ((s * 77 + e * 204) / 255).clamp(0, 255) as u8,
+            ComposeMode::Ghost => ((s * 77 + e * 204 + 127) / 255).clamp(0, 255) as u8,
         }
     }
 

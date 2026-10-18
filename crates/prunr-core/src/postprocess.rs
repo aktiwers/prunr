@@ -1206,7 +1206,7 @@ mod tests {
     fn duotone_and_gradient_map_match_their_former_formulas() {
         let blend = |lo: [u8; 3], hi: [u8; 3], t: u16| -> [u8; 3] {
             let inv = 255 - t;
-            std::array::from_fn(|c| ((lo[c] as u16 * inv + hi[c] as u16 * t) / 255) as u8)
+            std::array::from_fn(|c| ((lo[c] as u16 * inv + hi[c] as u16 * t + 127) / 255) as u8)
         };
         let (dark, light) = ([10, 20, 30], [240, 200, 100]);
         let stops = [[0, 0, 80], [200, 0, 120], [255, 140, 0], [255, 255, 200]];
