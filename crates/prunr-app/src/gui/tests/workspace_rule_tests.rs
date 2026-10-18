@@ -108,6 +108,25 @@ fn only_the_cli_and_main_write_to_stderr() {
     report(found, "stderr written outside the CLI");
 }
 
+/// A float colour becomes a byte by rounding: `as u8` truncates, and
+/// every channel comes out half a step dark.
+#[test]
+fn colour_bytes_are_rounded_not_truncated() {
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        if rel.ends_with("prunr-core/src/math.rs") {
+            continue;
+        }
+        for (n, line) in production_lines(text) {
+            let code = code_part(line);
+            if code.contains("255.0) as u8") && !code.contains("round") {
+                found.push(format!("{rel}:{n}: use prunr_core::math::round_u8"));
+            }
+        }
+    }
+    report(found, "colour bytes truncated");
+}
+
 /// A poisoned lock is taken over, not panicked on: one panicking thread
 /// would otherwise take every later user of the lock down with it.
 #[test]

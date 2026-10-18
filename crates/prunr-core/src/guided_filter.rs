@@ -112,7 +112,7 @@ pub fn guided_filter_alpha(
         .zip(guide_f.par_iter())
         .for_each(|(((slot, &ma), &mb), &gf)| {
             let val = (ma * gf + mb).clamp(0.0, 1.0);
-            *slot = (val * 255.0) as u8;
+            *slot = crate::math::round_u8(val * 255.0);
         });
     out
 }

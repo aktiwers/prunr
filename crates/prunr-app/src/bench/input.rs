@@ -70,7 +70,7 @@ pub fn synthetic_photo() -> RgbaImage {
             let shade = 1.0 - 0.3 * head;
             rgb = [230.0 * shade, 190.0 * shade, 160.0 * shade];
         }
-        let [r, g, b] = rgb.map(|c| c.clamp(0.0, 255.0) as u8);
+        let [r, g, b] = rgb.map(prunr_core::math::round_u8);
         Rgba([r, g, b, 255])
     })
 }

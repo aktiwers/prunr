@@ -2174,7 +2174,7 @@ fn minus1_plus1_to_image(arr: &Array4<f32>) -> RgbaImage {
 /// A channel in [-1, 1] as a byte, as the VAE's output is read.
 #[inline]
 fn unit_to_byte(v: f32) -> u8 {
-    ((v + 1.0) * 127.5).clamp(0.0, 255.0) as u8
+    crate::math::round_u8((v + 1.0) * 127.5)
 }
 
 /// A byte (or a mean of bytes) as the [-1, 1] the VAE reads.
@@ -3021,11 +3021,11 @@ mod tests {
         assert!(close(latent_to_rgb(&[1.0, 0.0, 0.0, 0.0], (1, 1), SdLatent::Sdxl)[0], [0.4735, 0.4057, 0.4330]), "row 0 plus the bias");
 
         // With nothing to match, the cells read as the VAE's output does:
-        // (v + 1) · 127.5, truncated, each cell 8 px.
+        // (v + 1) · 127.5, rounded, each cell 8 px.
         let picture = estimate_picture(&x0, (2, 1), SdLatent::Sd15, &[None, None]);
         assert_eq!(picture.dimensions(), (16, 8));
-        assert_eq!(picture.get_pixel(0, 0).0, [172, 156, 168, 255]);
-        assert_eq!(picture.get_pixel(15, 7).0, [73, 60, 0, 255], "below black clamps to 0");
+        assert_eq!(picture.get_pixel(0, 0).0, [172, 157, 169, 255]);
+        assert_eq!(picture.get_pixel(15, 7).0, [73, 61, 0, 255], "below black clamps to 0");
     }
 
     /// The projection is shifted per channel so the cells the crop's own

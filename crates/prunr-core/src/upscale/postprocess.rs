@@ -57,7 +57,7 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
     use rayon::prelude::*;
     img.as_mut().par_chunks_exact_mut(4).zip(bicubic_source.as_raw().par_chunks_exact(4)).for_each(|(px, src)| {
         for c in 0..3usize {
-            px[c] = (px[c] as f32 * w + src[c] as f32 * (1.0 - w)).clamp(0.0, 255.0) as u8;
+            px[c] = crate::math::round_u8(px[c] as f32 * w + src[c] as f32 * (1.0 - w));
         }
         // channel 3 (alpha): from the AI input unchanged
     });

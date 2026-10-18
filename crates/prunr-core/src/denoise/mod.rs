@@ -153,7 +153,7 @@ pub(crate) fn bilateral_filter_channel(
                 let filtered = bilateral_tap(h_pass[y * width + x], &spatial_kernel, range_sigma2, |d| {
                     h_pass[(y as isize + d).clamp(0, height as isize - 1) as usize * width + x]
                 });
-                row_out[x] = filtered.clamp(0.0, 255.0) as u8;
+                row_out[x] = crate::math::round_u8(filtered);
             }
         });
 
@@ -216,7 +216,7 @@ pub fn apply_denoise(img: &RgbaImage, strength: f32) -> RgbaImage {
             let original = originals[i] as f32;
             let filtered = bilateral_out[i] as f32;
             let blended = original * (1.0 - s) + filtered * s;
-            p.0[c] = blended.clamp(0.0, 255.0) as u8;
+            p.0[c] = crate::math::round_u8(blended);
         }
     }
 
@@ -314,7 +314,7 @@ mod tests {
         let want: Vec<u8> = (0..w * h)
             .map(|i| {
                 let (x, y) = (i % w, i / w);
-                tap(hp[i], &|d| hp[clamp(y as isize + d, h) * w + x]).clamp(0.0, 255.0) as u8
+                crate::math::round_u8(tap(hp[i], &|d| hp[clamp(y as isize + d, h) * w + x]))
             })
             .collect();
         assert_eq!(bilateral_filter_channel(&src, w, h, sigma, range), want);

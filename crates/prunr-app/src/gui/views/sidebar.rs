@@ -341,7 +341,7 @@ fn paint_thumbnail(
 
     // Dim to ~40% while being dragged out to an external app.
     let dim = if is_dragging_out { 0.4 } else { 1.0 };
-    let alpha = (fade * dim * 255.0) as u8;
+    let alpha = prunr_core::math::round_u8(fade * dim * 255.0);
     ui.painter().image(
         thumb_tex.id(),
         thumb_rect,

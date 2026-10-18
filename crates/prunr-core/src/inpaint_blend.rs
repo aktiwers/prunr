@@ -186,9 +186,9 @@ pub fn color_match_inpainted(
                     continue;
                 }
                 let p = img_x * 4;
-                row[p] = (row[p] as f32 + offset[0]).clamp(0.0, 255.0) as u8;
-                row[p + 1] = (row[p + 1] as f32 + offset[1]).clamp(0.0, 255.0) as u8;
-                row[p + 2] = (row[p + 2] as f32 + offset[2]).clamp(0.0, 255.0) as u8;
+                row[p] = crate::math::round_u8(row[p] as f32 + offset[0]);
+                row[p + 1] = crate::math::round_u8(row[p + 1] as f32 + offset[1]);
+                row[p + 2] = crate::math::round_u8(row[p + 2] as f32 + offset[2]);
             }
         });
     out
@@ -382,7 +382,7 @@ fn composite_channel(
                 let p = dp.0.offset(pix_off);
                 let cur = *p as f32;
                 let blended = q + w * (cur - q);
-                *p = blended.clamp(0.0, 255.0) as u8;
+                *p = crate::math::round_u8(blended);
             }
         }
         // Capture `dp` whole: its raw-pointer field alone is not Sync.
