@@ -77,8 +77,12 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
 /// as they go, so no Lab copy of either image is kept: no working set
 /// beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
+    color_match_to(target, &LabStats::of(source));
+}
+
+/// `apply_color_match` toward a source whose statistics are `s`.
+fn color_match_to(target: &mut RgbaImage, s: &LabStats) {
     use rayon::prelude::*;
-    let s = LabStats::of(source);
     let t = LabStats::of(target);
     let scale = |i: usize| s.std[i] / t.std[i].max(1e-6);
     let (kl, ka, kb) = (scale(0), scale(1), scale(2));
@@ -91,6 +95,32 @@ pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
         );
         px[..3].copy_from_slice(&[ro, go, bo]);
     });
+}
+
+/// The plain enlargement of the input a Refine blends and colour-matches
+/// toward, with its Lab statistics worked out once, at its first colour
+/// match: a drag re-renders with the same reference every tick.
+pub struct Reference {
+    image: RgbaImage,
+    stats: std::sync::OnceLock<LabStats>,
+}
+
+impl Reference {
+    pub fn new(image: RgbaImage) -> Self {
+        Self { image, stats: std::sync::OnceLock::new() }
+    }
+
+    fn stats(&self) -> &LabStats {
+        self.stats.get_or_init(|| LabStats::of(&self.image))
+    }
+}
+
+impl std::ops::Deref for Reference {
+    type Target = RgbaImage;
+
+    fn deref(&self) -> &RgbaImage {
+        &self.image
+    }
 }
 
 /// Pixels per partial sum in `LabStats::of`.
@@ -205,16 +235,16 @@ impl Refine {
 pub fn refine(
     raw: &std::sync::Arc<RgbaImage>,
     input: &RgbaImage,
-    reference: Option<std::sync::Arc<RgbaImage>>,
+    reference: Option<std::sync::Arc<Reference>>,
     knobs: &Refine,
-) -> (std::sync::Arc<RgbaImage>, Option<std::sync::Arc<RgbaImage>>) {
+) -> (std::sync::Arc<RgbaImage>, Option<std::sync::Arc<Reference>>) {
     use std::sync::Arc;
     if knobs.change_nothing() {
         return (Arc::clone(raw), reference);
     }
     let reference = knobs.needs_reference().then(|| {
         reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
-            Arc::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom))
+            Arc::new(Reference::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom)))
         })
     });
     let blend = reference.as_deref().filter(|_| knobs.blends());
@@ -227,7 +257,7 @@ pub fn refine(
         None => sharpened(raw, knobs.sharpen, knobs.sharpen_sigma),
     };
     if let Some(reference) = reference.as_deref().filter(|_| knobs.color_match) {
-        apply_color_match(&mut shown, reference);
+        color_match_to(&mut shown, reference.stats());
     }
     (Arc::new(shown), reference)
 }
@@ -444,6 +474,24 @@ mod tests {
         assert!(got.pixels().zip(target.pixels()).all(|(a, b)| a.0[3] == b.0[3]), "alpha unchanged");
     }
 
+
+    /// A kept reference colour-matches as the image itself does, its
+    /// statistics worked out on the first match and kept for the next.
+    #[test]
+    fn a_kept_reference_colour_matches_once_worked_out() {
+        use std::sync::Arc;
+        let raw = Arc::new(RgbaImage::from_fn(64, 48, |x, y| image::Rgba([(x * 3) as u8, (y * 5) as u8, 90, 255])));
+        let input = RgbaImage::from_fn(32, 24, |x, y| image::Rgba([(x * 7) as u8, 120, (y * 9) as u8, 255]));
+        let knobs = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: true };
+        let (shown, reference) = refine(&raw, &input, None, &knobs);
+        let reference = reference.expect("built");
+        assert!(reference.stats.get().is_some(), "worked out on the first match");
+        let mut want = (*raw).clone();
+        apply_color_match(&mut want, &reference);
+        assert!(*shown == want);
+        let (again, kept) = refine(&raw, &input, Some(Arc::clone(&reference)), &knobs);
+        assert!(Arc::ptr_eq(&kept.expect("kept"), &reference) && *again == want);
+    }
 
     #[test]
     fn apply_color_match_uniform_source_no_nan() {
