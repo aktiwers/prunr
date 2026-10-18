@@ -86,11 +86,26 @@ impl WorkerLines {
     }
 }
 
-const OUT_OF_MEMORY: &str = "out of memory";
+/// Why a worker died. What the user is told depends on it; `Display` is
+/// the detail for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crash {
+    /// The system killed it (SIGKILL), which on a desktop means memory.
+    OutOfMemory,
+    /// It is alive but sent nothing for too long.
+    Unresponsive,
+    /// A crash or exit, described.
+    Other(String),
+}
 
-/// A `crash_reason` that says the system killed the worker for memory.
-pub fn out_of_memory(reason: &str) -> bool {
-    reason.contains(OUT_OF_MEMORY)
+impl std::fmt::Display for Crash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfMemory => f.write_str("killed by the system (out of memory)"),
+            Self::Unresponsive => f.write_str("stopped responding"),
+            Self::Other(what) => f.write_str(what),
+        }
+    }
 }
 
 impl SubprocessManager {
@@ -506,13 +521,11 @@ impl SubprocessManager {
     }
 
     /// Why the subprocess died, once it has.
-    pub fn died(&mut self) -> Option<String> {
-        (!self.is_alive()).then(|| self.crash_reason())
+    pub fn died(&mut self) -> Option<Crash> {
+        (!self.is_alive()).then(|| self.crash())
     }
 
-    /// Describe why the subprocess died, for the log; `out_of_memory`
-    /// reads it for the user's message.
-    pub fn crash_reason(&mut self) -> String {
+    fn crash(&mut self) -> Crash {
         match self.child.try_wait() {
             Ok(Some(status)) => {
                 #[cfg(unix)]
@@ -520,19 +533,15 @@ impl SubprocessManager {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(signal) = status.signal() {
                         return match signal {
-                            9 => format!("Process killed by OS ({OUT_OF_MEMORY})"),
-                            11 => "Process crashed (segmentation fault)".to_string(),
-                            _ => format!("Process killed by signal {signal}"),
+                            9 => Crash::OutOfMemory,
+                            11 => Crash::Other("crashed (segmentation fault)".into()),
+                            _ => Crash::Other(format!("killed by signal {signal}")),
                         };
                     }
                 }
-                if let Some(code) = status.code() {
-                    format!("Process exited with code {code}")
-                } else {
-                    "Process terminated unexpectedly".to_string()
-                }
+                Crash::Other(status.code().map_or_else(|| "terminated unexpectedly".into(), |code| format!("exited with code {code}")))
             }
-            _ => "Worker process stopped responding".to_string(),
+            _ => Crash::Unresponsive,
         }
     }
 
