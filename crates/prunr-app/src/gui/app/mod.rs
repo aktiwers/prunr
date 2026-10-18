@@ -1439,7 +1439,8 @@ fn save_screenshots(images: Vec<std::sync::Arc<egui::ColorImage>>) {
             tracing::warn!("screenshot dims mismatch — skipping");
             continue;
         };
-        match crate::fs_util::save_image_replacing(&path, &rgba) {
+        // Fast PNG: a capture is read by a script, not kept.
+        match crate::fs_util::write_replacing(&path, |w| prunr_core::encode_rgba_png_into(&rgba, w).map_err(std::io::Error::other)) {
             Ok(()) => tracing::info!(?path, "screenshot saved"),
             Err(e) => tracing::warn!(%e, ?path, "screenshot save failed"),
         }

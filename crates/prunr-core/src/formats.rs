@@ -421,6 +421,19 @@ fn write_fast_png<W: std::io::Write>(w: W, bytes: &[u8], width: u32, height: u32
         .map_err(CoreError::from)
 }
 
+/// How hard a PNG the user saves is compressed. On a 20 MP cut-out:
+/// fast 0.2 s / 27.9 MB, level 4 1.6 s / 13.4 MB, default 4.9 s /
+/// 12.1 MB. Level 4 keeps almost all of the size for a third of the
+/// time; temp, drag-out and clipboard PNGs stay fast.
+const SAVED_PNG: (CompressionType, PngFilter) = (CompressionType::Level(4), PngFilter::Adaptive);
+
+/// Encode `img` as a PNG for a file the user keeps, streamed into `w`.
+pub fn encode_rgba_png_saved_into<W: std::io::Write>(img: &RgbaImage, w: W) -> Result<(), CoreError> {
+    PngEncoder::new_with_quality(w, SAVED_PNG.0, SAVED_PNG.1)
+        .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
+        .map_err(CoreError::from)
+}
+
 /// Encode an RgbaImage as PNG bytes with fast compression. Convenience
 /// wrapper over `encode_rgba_png_into` for callers that need owned bytes
 /// (e.g. shipping over a channel). Streaming callers writing to a file
@@ -480,7 +493,11 @@ impl ExportFormat {
 
     pub fn encode(self, img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
         match self {
-            Self::Png => encode_rgba_png(img),
+            Self::Png => {
+                let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
+                encode_rgba_png_saved_into(img, &mut buf)?;
+                Ok(buf)
+            }
             Self::Jpeg => {
                 const JPEG_QUALITY: u8 = 92;
                 let flat = flatten_on_white(img);
@@ -560,6 +577,16 @@ mod tests {
             assert!(matches!(layer, std::borrow::Cow::Borrowed(_)) && *layer == resampled(&opaque));
             assert!(*build_bg_layer(&seen, 97, 61, fit) == resampled(&seen), "its alpha goes opaque as before");
         }
+    }
+
+    /// A PNG the user saves reads back as the same pixels, smaller than
+    /// the fast one.
+    #[test]
+    fn a_saved_png_is_lossless_and_smaller_than_the_fast_one() {
+        let img = RgbaImage::from_fn(300, 200, |x, y| image::Rgba([(x / 3) as u8, (y / 2) as u8, 120, if x < 150 { 255 } else { 0 }]));
+        let saved = ExportFormat::Png.encode(&img).unwrap();
+        assert_eq!(image::load_from_memory(&saved).unwrap().into_rgba8(), img);
+        assert!(saved.len() < encode_rgba_png(&img).unwrap().len());
     }
 
     /// An opaque image resizes without the alpha weighting to the very
