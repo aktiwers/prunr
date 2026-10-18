@@ -425,7 +425,7 @@ impl BatchManager {
     /// decode, so the image stops waiting for one.
     pub(crate) fn request_decode_source(&self, item_id: u64, source: &ImageSource) {
         let source = source.clone();
-        self.spawn_decode(item_id, move || source.load_bytes().map_err(super::item::load_failed));
+        self.spawn_decode(item_id, move || source.load_bytes().map_err(super::item::source_unreadable));
     }
 
     fn spawn_decode(&self, item_id: u64, bytes: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static) {
@@ -508,7 +508,7 @@ impl BatchManager {
         let slots = self.bg_io.decode_slots.clone();
         std::thread::spawn(move || {
             let _slot = slots.acquire();
-            let load = || source.load_bytes().map_err(super::item::load_failed);
+            let load = || source.load_bytes().map_err(super::item::source_unreadable);
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
             let mut chain_start = None;
