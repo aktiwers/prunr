@@ -128,7 +128,9 @@ pub fn total_ram_bytes() -> u64 {
 /// mount matches.
 pub fn free_space_at(path: &std::path::Path) -> Option<u64> {
     let existing = path.ancestors().find(|p| p.exists())?;
-    let path = existing.canonicalize().unwrap_or_else(|_| existing.to_path_buf());
+    // std's canonicalize gives `\\?\C:\…` on Windows, which no mount
+    // point (`C:\`) prefixes; dunce keeps the plain form.
+    let path = dunce::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
     sysinfo::Disks::new_with_refreshed_list()
         .list()
         .iter()
