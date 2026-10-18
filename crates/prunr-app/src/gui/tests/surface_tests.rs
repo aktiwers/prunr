@@ -616,18 +616,19 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
             app.batch.select_item(0);
             app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
         }
-        // A texture built off the UI thread asks for a frame at once when
-        // it lands; the pace is measured once that work is done.
+        // Work landing off the UI thread (a texture, a startup probe on a
+        // slow runner) asks for one frame at once; the pace is what the
+        // frames settle to, and then holds.
+        let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        let paced = |d: std::time::Duration| d >= std::time::Duration::from_millis(15);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         h.run_steps(3);
-        while h.state().quiet_background_work().is_some() && std::time::Instant::now() < deadline {
+        while !paced(delay(&h)) && std::time::Instant::now() < deadline {
             h.step();
         }
-        h.run_steps(2);
         for _ in 0..3 {
+            assert!(paced(delay(&h)), "{status:?}: the next frame is asked for {:?} ahead", delay(&h));
             h.step();
-            let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
-            assert!(delay >= std::time::Duration::from_millis(15), "{status:?}: the next frame is asked for {delay:?} ahead");
         }
     }
 }

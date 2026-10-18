@@ -113,11 +113,13 @@ fn the_hardware_page_names_every_runtime_control() {
         ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
         ("none installed", HardwareInstallCache::default(), None, vec!["Install OpenVINO Runtime"]),
     ];
-    // Where no runtime is offered for download (Windows), the page has
-    // no install controls and no choice; every control is still named.
+    // Where no runtime is offered for download (Windows), the page has no
+    // install, uninstall or cancel; a runtime installed anyway still gives
+    // the choice. Every control is still named.
     let offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino);
     for (shape, installs, installing, expected) in shapes {
-        let expected = if offered { expected } else { Vec::new() };
+        let download_controls = |name: &&str| name.ends_with("OpenVINO Runtime") || *name == "Cancel";
+        let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
             installs,
@@ -133,7 +135,7 @@ fn the_hardware_page_names_every_runtime_control() {
             assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
         }
         let choice_shown = present.iter().any(|n| n == "Built in");
-        assert_eq!(choice_shown, offered && shape == "both installed", "{shape}: the runtime choice needs two to load");
+        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
     }
 }
 
