@@ -98,8 +98,15 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
         {
             if ort::ep::OpenVINO::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            if ort::ep::CUDA::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::Cuda); }
+            if ort::ep::CUDA::default().is_available().unwrap_or(false) {
+                match provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()) {
+                    Ok(()) => eps.push(EpKind::Cuda),
+                    Err(e) => {
+                        tracing::info!(%e, "CUDA cannot start; sessions run on the CPU");
+                        let _ = GPU_START_NOTE.set(cuda_start_note(&e));
+                    }
+                }
+            }
             #[cfg(windows)]
             if ort::ep::DirectML::default()
                 .is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
@@ -110,6 +117,43 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     }).as_slice()
 }
 
+/// Why the loaded runtime's GPU provider could not start, in the user's
+/// words, when it could not.
+static GPU_START_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Why the GPU provider the runtime carries does not run here, once the
+/// providers have been probed; `None` when it runs or there is none.
+pub fn gpu_start_note() -> Option<&'static str> {
+    GPU_START_NOTE.get().map(String::as_str)
+}
+
+/// Whether `provider` registers on a session builder. A runtime lists a
+/// provider it was built with even where it cannot run; registering is
+/// what loads its libraries and finds the device.
+#[cfg(not(target_os = "macos"))]
+fn provider_starts(provider: ExecutionProviderDispatch) -> Result<(), String> {
+    crate::ort_runtime::session_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|b| b.with_execution_providers([provider]).map(drop).map_err(|e| e.to_string()))
+}
+
+/// The CUDA runtime starts only beside NVIDIA's driver and its CUDA 12
+/// and cuDNN 9 libraries; `err` names the first library the loader
+/// could not find.
+#[cfg(not(target_os = "macos"))]
+fn cuda_start_note(err: &str) -> String {
+    let missing = err
+        .split(": cannot open shared object file")
+        .next()
+        .and_then(|head| head.rsplit(' ').next())
+        .filter(|lib| lib.starts_with("lib") && lib.contains(".so"));
+    match missing {
+        Some(lib) if lib.starts_with("libcuda.so") => "CUDA could not start: no NVIDIA driver was found.".to_string(),
+        Some(lib) => format!("CUDA could not start: {lib} is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr."),
+        None => "CUDA could not start, so models run on the CPU. The log has the details.".to_string(),
+    }
+}
+
 /// Whether DirectML can start a device here. The DirectML runtime, which
 /// Windows ships built in, lists DirectML on every machine; registering
 /// it is what creates the device, and that fails without a DirectX 12
@@ -117,9 +161,7 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
 /// the same runtime and the label says so.
 #[cfg(windows)]
 fn directml_starts() -> bool {
-    let started = crate::ort_runtime::session_builder()
-        .map_err(|e| e.to_string())
-        .and_then(|b| b.with_execution_providers([directml_provider()]).map(drop).map_err(|e| e.to_string()));
+    let started = provider_starts(directml_provider());
     if let Err(e) = &started {
         tracing::info!(%e, "DirectML cannot start a device; sessions run on the CPU");
     }
@@ -911,6 +953,17 @@ mod tests {
             assert_eq!(EpSite::SdPart { part: "unet", ov_device: None }.ov_device(chosen), None);
             assert_eq!(EpSite::SdPart { part: "unet", ov_device: Some("GPU") }.ov_device(chosen), Some("GPU"));
         }
+    }
+
+    /// A CUDA runtime that cannot start says what to install, in words.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_cuda_runtime_that_cannot_start_names_what_is_missing() {
+        let failed = |lib: &str| format!("ORT register CUDA EP failed: provider_bridge_ort.cc:1957 [ONNXRuntimeError] : 1 : FAIL : Failed to load library /x/libonnxruntime_providers_cuda.so with error: {lib}: cannot open shared object file: No such file or directory");
+        assert_eq!(cuda_start_note(&failed("libcublasLt.so.12")), "CUDA could not start: libcublasLt.so.12 is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr.");
+        assert_eq!(cuda_start_note(&failed("libcudnn.so.9")), "CUDA could not start: libcudnn.so.9 is missing. Install NVIDIA's CUDA 12 and cuDNN 9 libraries, then restart Prunr.");
+        assert_eq!(cuda_start_note(&failed("libcuda.so.1")), "CUDA could not start: no NVIDIA driver was found.");
+        assert!(cuda_start_note("CUDA failure 100: no CUDA-capable device is detected").starts_with("CUDA could not start, so"));
     }
 
     #[test]
