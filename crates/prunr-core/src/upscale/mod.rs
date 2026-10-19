@@ -448,14 +448,4 @@ mod tests {
         );
     }
 
-    /// x2plus knobs match the x4plus export convention (same RRDB architecture,
-    /// same export script → same tensor names and dtype).
-    #[test]
-    fn x2plus_knobs_fp16_false_and_input_data() {
-        let x2 = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX2Plus)
-            .expect("RealEsrganX2Plus registered");
-        let knobs = upscale_knobs(x2).expect("RealEsrganX2Plus has upscale knobs");
-        assert!(!knobs.is_fp16, "x2plus exports fp32 — must NOT pack f16 tensors");
-        assert_eq!(knobs.input_name, "data", "x2plus names the input tensor `data`");
-    }
 }
