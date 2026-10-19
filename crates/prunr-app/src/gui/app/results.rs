@@ -78,7 +78,7 @@ impl PrunrApp {
         for crate::gui::processor::LandedFill { item_id, rgba, fill_scale } in results {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.job_is_current() {
-                self.end_stale_run(item_id, "erase");
+                self.end_run_without_result(item_id, "erase", RunLost::ImageChanged);
                 continue;
             }
             self.publish_result(item_id, Arc::new(rgba), "inpaint", ctx);
@@ -211,7 +211,7 @@ impl PrunrApp {
             return false;
         }
         if !item.job_is_current() {
-            self.end_stale_run(item_id, tex_kind);
+            self.end_run_without_result(item_id, tex_kind, RunLost::ImageChanged);
             return false;
         }
         item.applied_recipe = Some(recipe);
@@ -226,15 +226,6 @@ impl PrunrApp {
         );
         self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&shown))));
         true
-    }
-
-    /// A result arrived for a state the image has since left (a knob
-    /// change, a stroke or an undo while the run was under way), so it
-    /// cannot land: the image shows its current state again instead of
-    /// waiting on, and the user hears why. Silent when nothing was awaited
-    /// any more (an undo already showed the earlier state).
-    fn end_stale_run(&mut self, item_id: u64, run: &str) {
-        self.end_run_without_result(item_id, run, RunLost::ImageChanged);
     }
 
     /// The image stops waiting on a run that will give it nothing, and
@@ -699,7 +690,7 @@ impl PrunrApp {
             return;
         }
         if !item.job_is_current() {
-            self.end_stale_run(item_id, "processing");
+            self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
             return;
         }
         let succeeded = result.is_ok();
@@ -920,7 +911,7 @@ impl PrunrApp {
                 item.chain_start_built(run, start);
             }
             if !item.job_is_current() {
-                self.end_stale_run(item_id, "filters");
+                self.end_run_without_result(item_id, "filters", RunLost::ImageChanged);
                 continue;
             }
             match result {
