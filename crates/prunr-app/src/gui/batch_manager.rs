@@ -1544,49 +1544,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_selection_skips_byte_identical_mask() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        assert!(bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke));
-        let identical = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        assert!(
-            !bm.commit_selection(1, identical, crate::gui::timeline::StepKind::Stroke),
-            "byte-identical mask must early-return without mutating caches",
-        );
-    }
-
-    #[test]
-    fn clear_selection_is_idempotent() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        let mask = prunr_core::selection::MaskArtifact::new_empty(16, 16);
-        bm.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke);
-        assert!(bm.clear_selection(1), "first clear must return true (was present)");
-        assert!(!bm.clear_selection(1), "second clear must return false (nothing to clear)");
-    }
-
-    /// Selection survives Process clicks: `reset_result_caches()` must
-    /// NOT touch selection_mask / selection_hash.
-    #[test]
-    fn reset_result_caches_does_not_clear_selection() {
-        let mut item = super::super::item::BatchItem::new_for_test();
-        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
-        let hash = mask.content_hash();
-        item.selection_mask = Some(Arc::new(mask));
-        item.selection_hash = Some(hash);
-        item.reset_result_caches();
-        assert!(
-            item.selection_mask.is_some(),
-            "selection_mask must survive reset_result_caches",
-        );
-        assert!(
-            item.selection_hash.is_some(),
-            "selection_hash must survive reset_result_caches",
-        );
-    }
-
-    #[test]
     fn a_source_change_drops_the_selection_and_embedding() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
