@@ -333,6 +333,18 @@ impl DispatchProgressSlot {
         RunSink { slot: self.clone(), run }
     }
 
+    /// `begin`, unless a run already shows: a run that cannot be cancelled
+    /// must not hide one that can. Checked and taken under one lock.
+    pub fn begin_if_idle(&self, initial: DispatchProgress) -> Option<RunSink> {
+        let mut shown = self.lock();
+        if shown.is_some() {
+            return None;
+        }
+        let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        *shown = Some(initial);
+        Some(RunSink { slot: self.clone(), run })
+    }
+
     /// `None` clears it when the dispatch finishes.
     pub fn set(&self, progress: Option<DispatchProgress>) {
         *self.lock() = progress;
@@ -453,6 +465,20 @@ mod tests {
         let p = DispatchProgress { outer: Some((0, 0)), inner: (1, 8), ..DispatchProgress::new(ProgressKind::Inpaint, "Denoising") };
         assert!(p.fraction().is_none(),
             "zero outer_total is invalid input — must not divide by zero");
+    }
+
+    /// A run that asks only when the slot is idle never takes it from the
+    /// run showing, and shows once that run ends.
+    #[test]
+    fn begin_if_idle_leaves_a_showing_run_alone() {
+        let slot = DispatchProgressSlot::new();
+        let shown = slot.begin(upscale((1, 4)));
+        assert!(slot.begin_if_idle(upscale((2, 9))).is_none(), "a run is showing");
+        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((1, 4)), "the showing run keeps the slot");
+        shown.end();
+        let idle = slot.begin_if_idle(upscale((2, 9))).expect("the slot is idle");
+        assert!(idle.current(), "the new run is the one shown");
+        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((2, 9)));
     }
 
     #[test]
