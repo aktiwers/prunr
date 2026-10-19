@@ -105,17 +105,23 @@ impl PrunrApp {
         tag: &str,
         ctx: &egui::Context,
     ) {
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        item.show_result(Arc::clone(&rgba));
+        self.upload_result(item_id, &rgba, tag, ctx);
+        ctx.request_repaint();
+    }
+
+    /// Build the texture and thumbnail of the result `item_id` now shows.
+    fn upload_result(&mut self, item_id: u64, shown: &Arc<image::RgbaImage>, tag: &str, ctx: &egui::Context) {
         let handles = self.batch.bg_io.tex_prep_handles();
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        item.show_result(Arc::clone(&rgba));
         let source = item.source.clone();
         let target = item.request_result_texture(false);
         Self::spawn_tex_prep(
-            crate::gui::item::Pixels::Resident(Arc::clone(&rgba)), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
+            crate::gui::item::Pixels::Resident(Arc::clone(shown)), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
         );
-        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&rgba))));
-        ctx.request_repaint();
+        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(shown))));
     }
 
     /// Land each run's pictures on their item, one kind per arm. Whether a
@@ -217,14 +223,7 @@ impl PrunrApp {
         item.applied_recipe = Some(recipe);
         item.show_result(Arc::clone(&shown));
         keep(item);
-        let source = item.source.clone();
-        let target = item.request_result_texture(false);
-        Self::spawn_tex_prep(
-            crate::gui::item::Pixels::Resident(Arc::clone(&shown)), item_id,
-            Self::tex_name(tex_kind, item_id, Some(self.result_switch_id)),
-            target, self.batch.bg_io.tex_prep_handles(), ctx.clone(),
-        );
-        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&shown))));
+        self.upload_result(item_id, &shown, tex_kind, ctx);
         true
     }
 
