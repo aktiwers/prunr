@@ -742,16 +742,21 @@ pub(crate) fn effective_cfg(model: prunr_models::ModelId, user_cfg: f32) -> f32 
     }
 }
 
+/// A streaming batch's admission: its RAM budget, the sender the worker
+/// takes the images it admits from, and the batch they join.
+pub(crate) struct Admission {
+    ctrl: AdmissionController,
+    tx: mpsc::Sender<WorkItem>,
+    batch: Option<u64>,
+}
+
 pub(crate) struct Processor {
     pub(crate) worker_tx: mpsc::Sender<WorkerMessage>,
     pub(crate) worker_rx: mpsc::Receiver<WorkerResult>,
     pub(crate) cancels: CancelRegistry,
     pub(crate) live_preview: LivePreview,
     /// Present only during streaming batches.
-    pub(crate) admission: Option<AdmissionController>,
-    pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
-    /// The batch admission feeds: images it admits join that batch.
-    admission_batch: Option<u64>,
+    pub(crate) admission: Option<Admission>,
     /// Re-runs that failed on images still showing an earlier result,
     /// since the last batch ended: their status stays Done, so the end of
     /// the batch must not read as all done.
@@ -846,8 +851,6 @@ impl Processor {
             cancels: CancelRegistry::new(),
             live_preview: LivePreview::default(),
             admission: None,
-            admission_tx: None,
-            admission_batch: None,
             failed_reruns: 0,
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
@@ -1371,7 +1374,7 @@ impl Processor {
     /// newest batch). Release builds no-op on a missing batch so a late
     /// delivery can't take down a real one.
     pub(crate) fn track_streamed(&mut self, id: u64) {
-        let fed = match self.admission_batch {
+        let fed = match self.admission_batch() {
             Some(batch) => self.in_flight.iter_mut().find(|b| b.id == batch),
             None => self.in_flight.last_mut(),
         };
@@ -1397,16 +1400,22 @@ impl Processor {
 
     /// Admission feeds `batch` from now on.
     pub(crate) fn admission_feeds(&mut self, batch: u64) {
-        self.admission_batch = Some(batch);
+        if let Some(admission) = self.admission.as_mut() {
+            admission.batch = Some(batch);
+        }
+    }
+
+    fn admission_batch(&self) -> Option<u64> {
+        self.admission.as_ref().and_then(|a| a.batch)
     }
 
     /// `batch` ended: when admission fed it, admission ends too, and the
     /// images it never admitted come back (they will not run).
     pub(crate) fn end_admission_with(&mut self, batch: u64) -> Vec<u64> {
-        if self.admission_batch != Some(batch) {
+        if self.admission_batch() != Some(batch) {
             return Vec::new();
         }
-        let waiting = self.admission.as_ref().map(|a| a.pending_ids().collect()).unwrap_or_default();
+        let waiting = self.admission.as_ref().map(|a| a.ctrl.pending_ids().collect()).unwrap_or_default();
         self.clear_admission();
         waiting
     }
@@ -1430,7 +1439,7 @@ impl Processor {
     /// done.
     pub(crate) fn take_recipe(&mut self, batch: u64, id: u64) -> Option<ProcessingRecipe> {
         let at = self.in_flight.iter().position(|b| b.id == batch && b.pending.contains(&id))?;
-        let fed = self.admission_batch == Some(batch);
+        let fed = self.admission_batch() == Some(batch);
         let batch = &mut self.in_flight[at];
         batch.pending.remove(&id);
         let recipe = batch.recipe.clone();
@@ -1469,14 +1478,12 @@ impl Processor {
     /// Whether the running batch still has images waiting for room in
     /// the RAM budget: a new batch opened now would orphan them.
     pub(crate) fn admission_still_feeding(&self) -> bool {
-        self.admission.as_ref().is_some_and(AdmissionController::has_pending)
+        self.admission.as_ref().is_some_and(|a| a.ctrl.has_pending())
     }
 
     /// Leaves the cancel registry untouched; the caller's cancel owns it.
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
-        self.admission_tx = None;
-        self.admission_batch = None;
     }
 
     /// Open streamed admission over the full runs queued on `ctrl`: what
@@ -1498,8 +1505,7 @@ impl Processor {
             }
         }
         let (tx, rx) = mpsc::channel();
-        self.admission = Some(ctrl);
-        self.admission_tx = Some(tx);
+        self.admission = Some(Admission { ctrl, tx, batch: None });
         (items, rx)
     }
 
@@ -1510,20 +1516,19 @@ impl Processor {
     /// could not be (the worker is gone): neither started running here.
     pub(crate) fn release_and_admit(&mut self, completed: u64, mut work: impl FnMut(u64) -> Option<WorkItem>) -> Admitted {
         let mut admitted = Admitted::default();
-        let Some(ctrl) = self.admission.as_mut() else { return admitted };
+        let Some(Admission { ctrl, tx, .. }) = self.admission.as_mut() else { return admitted };
         ctrl.release(completed);
         while let Some(next) = ctrl.try_admit_next() {
             let Some(item) = work(next) else {
                 ctrl.release(next);
                 continue;
             };
-            match self.admission_tx.as_ref() {
-                Some(tx) if tx.send(item).is_ok() => admitted.sent.push(next),
-                _ => {
-                    ctrl.release(next);
-                    admitted.lost.push(next);
-                    break;
-                }
+            if tx.send(item).is_ok() {
+                admitted.sent.push(next);
+            } else {
+                ctrl.release(next);
+                admitted.lost.push(next);
+                break;
             }
         }
         let complete = ctrl.is_complete();
@@ -1531,7 +1536,7 @@ impl Processor {
             self.track_streamed(id);
         }
         if complete {
-            let fed = self.admission_batch;
+            let fed = self.admission_batch();
             self.clear_admission();
             // Every image answered: the batch it fed is done.
             if let Some(at) = fed.and_then(|b| self.in_flight.iter().position(|f| f.id == b && f.pending.is_empty())) {
@@ -2538,15 +2543,13 @@ mod tests {
     #[test]
     fn clear_admission_drops_both_sides_but_leaves_cancels() {
         let mut p = fixture();
-        let (tx, _rx) = mpsc::channel::<WorkItem>();
-        p.admission_tx = Some(tx);
+        let (_, _rx) = p.open_admission(controller(1, &[(1, 2)]), |id| Some(test_work(id)));
         p.cancels.request_global_cancel();
-        assert!(p.admission_tx.is_some());
+        assert!(p.admission.is_some());
 
         p.clear_admission();
 
         assert!(p.admission.is_none());
-        assert!(p.admission_tx.is_none());
         assert!(p.cancels.is_cancelled(999),
             "clear_admission must leave cancel registry untouched — that's the caller's protocol");
     }
@@ -2572,7 +2575,7 @@ mod tests {
 
         p.release_and_admit(2, |_| None);
         assert!(rx.try_recv().is_err(), "an image that can't be prepared is not sent");
-        assert!(p.admission.is_none() && p.admission_tx.is_none(), "and holds no budget: every image is through");
+        assert!(p.admission.is_none(), "and holds no budget: every image is through");
     }
 
     /// An image admitted at the start that cannot be sent frees its share
