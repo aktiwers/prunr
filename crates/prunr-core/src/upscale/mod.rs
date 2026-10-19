@@ -60,44 +60,23 @@ fn pack_output(
     packed: &mut [u8],
     is_fp16: bool,
 ) -> Result<(), CoreError> {
-    fn write_u8(packed: &mut [u8], plane: usize, slice: &[f32]) -> Result<(), CoreError> {
-        if slice.len() < 3 * plane {
-            return Err(CoreError::Inference(format!(
-                "upscale: output tensor too small: {} < {}",
-                slice.len(),
-                3 * plane
-            )));
-        }
-        for idx in 0..plane {
-            packed[3 * idx]     = round_u8(slice[idx] * 255.0);
-            packed[3 * idx + 1] = round_u8(slice[plane + idx] * 255.0);
-            packed[3 * idx + 2] = round_u8(slice[2 * plane + idx] * 255.0);
-        }
-        Ok(())
-    }
-
-    if is_fp16 {
-        let arr = value
-            .try_extract_array::<f16>()
-            .map_err(|e| CoreError::Inference(format!("upscale: output extract (f16): {e}")))?
-            .into_dimensionality::<ndarray::Ix4>()
-            .map_err(|e| CoreError::Inference(format!("upscale: output reshape (f16): {e}")))?;
-        let owned: ndarray::Array4<f32> = arr.mapv(|x| x.to_f32());
-        let slice = owned.as_slice().ok_or_else(|| {
-            CoreError::Inference("upscale: output tensor not contiguous (f16)".into())
-        })?;
-        write_u8(packed, plane, slice)
+    let extract_err = |e: ort::Error| CoreError::Inference(format!("upscale: output extract: {e}"));
+    let widened: Vec<f32>;
+    let slice: &[f32] = if is_fp16 {
+        widened = value.try_extract_tensor::<f16>().map_err(extract_err)?.1.iter().map(|x| x.to_f32()).collect();
+        &widened
     } else {
-        let arr = value
-            .try_extract_array::<f32>()
-            .map_err(|e| CoreError::Inference(format!("upscale: output extract: {e}")))?
-            .into_dimensionality::<ndarray::Ix4>()
-            .map_err(|e| CoreError::Inference(format!("upscale: output reshape: {e}")))?;
-        let slice = arr.as_slice().ok_or_else(|| {
-            CoreError::Inference("upscale: output tensor not contiguous".into())
-        })?;
-        write_u8(packed, plane, slice)
+        value.try_extract_tensor::<f32>().map_err(extract_err)?.1
+    };
+    if slice.len() < 3 * plane {
+        return Err(CoreError::Inference(format!("upscale: output tensor too small: {} < {}", slice.len(), 3 * plane)));
     }
+    for idx in 0..plane {
+        packed[3 * idx]     = round_u8(slice[idx] * 255.0);
+        packed[3 * idx + 1] = round_u8(slice[plane + idx] * 255.0);
+        packed[3 * idx + 2] = round_u8(slice[2 * plane + idx] * 255.0);
+    }
+    Ok(())
 }
 
 /// OpenVINO honours `RunOptions::terminate` only between tiles, so its
