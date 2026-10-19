@@ -494,11 +494,11 @@ mod tests {
     #[test]
     fn each_model_shows_only_what_works_with_it() {
         use Surface::*;
-        let all = [Mask, Lines, Effect, Decoration, Background, Upscale, Colorize, SdChips, Brushes, SelectionStrokes, FillRegionKnobs, Faces, Depth];
         let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
         let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces, Depth];
         let erase: &[Surface] = &[Brushes, FillRegionKnobs];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
+        let rorem: &[Surface] = &[Brushes, FillRegionKnobs, RoremChips];
         let upscale: &[Surface] = &[Upscale, Faces];
         let colorize: &[Surface] = &[Colorize];
         let rows: &[(SettingsModel, &[Surface])] = &[
@@ -510,7 +510,7 @@ mod tests {
             (SettingsModel::BigInpaint, erase),
             (SettingsModel::MiganInpaint, erase),
             (SettingsModel::SdInpaint, sd),
-            (SettingsModel::RoremInpaint, erase),
+            (SettingsModel::RoremInpaint, rorem),
             (SettingsModel::RealEsrganUpscale, upscale),
             (SettingsModel::Nomos8kUpscale, upscale),
             (SettingsModel::FourXNmkdSiaxCxUpscale, upscale),
@@ -520,7 +520,7 @@ mod tests {
         ];
         assert_eq!(rows.len(), SettingsModel::ALL.len(), "every model has a row");
         for &(model, shown) in rows {
-            for surface in all {
+            for surface in Surface::ALL {
                 assert_eq!(shows(model, surface), shown.contains(&surface), "{model:?} {surface:?}");
             }
         }
