@@ -2036,12 +2036,22 @@ fn run_sam_encoder_inline(
 }
 
 /// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
+/// One decoder input of `shape`, named in its errors.
+fn decoder_input<D: ndarray::Dimension + 'static>(
+    name: &str,
+    shape: impl ndarray::ShapeBuilder<Dim = D>,
+    data: Vec<f32>,
+) -> Result<ort::value::Tensor<f32>, String> {
+    let array = ndarray::Array::from_shape_vec(shape, data).map_err(|e| format!("decoder: {name} shape: {e}"))?;
+    ort::value::Tensor::from_array(array).map_err(|e| format!("decoder: {name} tensor: {e}"))
+}
+
 fn run_sam_decoder_inline(
     sessions: &SamSessions,
     embedding: &prunr_core::sam::SamEmbedding,
     prompt: &prunr_core::sam::prompt::SamPrompt,
 ) -> Result<prunr_core::sam::SamDecoderOutput, String> {
-    use ort::{inputs, value::{Tensor, TensorRef}};
+    use ort::{inputs, value::TensorRef};
 
     let mut session = sessions.decoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -2056,35 +2066,11 @@ fn run_sam_decoder_inline(
         ([1usize, 64, 128, 128], embedding.high_res_feats_1.as_slice()),
     ).map_err(|e| format!("decoder: high_res_feats_1 tensor: {e}"))?;
 
-    // point_coords [1, N, 2]
     let n_points = prompt.point_labels.len();
-    let coords_arr = ndarray::Array3::from_shape_vec(
-        [1, n_points, 2],
-        prompt.point_coords.clone(),
-    ).map_err(|e| format!("decoder: point_coords shape: {e}"))?;
-    let coords_tensor = Tensor::from_array(coords_arr)
-        .map_err(|e| format!("decoder: point_coords tensor: {e}"))?;
-
-    // point_labels [1, N]
-    let labels_arr = ndarray::Array2::from_shape_vec(
-        [1, n_points],
-        prompt.point_labels.clone(),
-    ).map_err(|e| format!("decoder: point_labels shape: {e}"))?;
-    let labels_tensor = Tensor::from_array(labels_arr)
-        .map_err(|e| format!("decoder: point_labels tensor: {e}"))?;
-
-    // mask_input [1, 1, 256, 256]
-    let mask_arr = ndarray::Array4::from_shape_vec(
-        [1, 1, 256, 256],
-        prompt.mask_input.clone(),
-    ).map_err(|e| format!("decoder: mask_input shape: {e}"))?;
-    let mask_tensor = Tensor::from_array(mask_arr)
-        .map_err(|e| format!("decoder: mask_input tensor: {e}"))?;
-
-    // has_mask_input scalar [1]
-    let has_mask_arr = ndarray::Array1::from_vec(vec![prompt.has_mask_input]);
-    let has_mask_tensor = Tensor::from_array(has_mask_arr)
-        .map_err(|e| format!("decoder: has_mask_input tensor: {e}"))?;
+    let coords_tensor = decoder_input("point_coords", [1, n_points, 2], prompt.point_coords.clone())?;
+    let labels_tensor = decoder_input("point_labels", [1, n_points], prompt.point_labels.clone())?;
+    let mask_tensor = decoder_input("mask_input", [1, 1, 256, 256], prompt.mask_input.clone())?;
+    let has_mask_tensor = decoder_input("has_mask_input", [1], vec![prompt.has_mask_input])?;
 
     let outputs = session.run(inputs![
         "image_embed"       => embed_tensor,
