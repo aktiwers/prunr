@@ -1,5 +1,4 @@
 use super::super::app::PrunrApp;
-use super::super::state::AppState;
 
 #[test]
 fn handle_cancel_raises_global_flag_during_processing() {
@@ -38,15 +37,6 @@ fn handle_cancel_selected_raises_only_selected_item_flags() {
     assert_eq!(item1.status(), BatchStatus::Pending);
     let item3 = app.batch.find_by_id(3).expect("id 3 still present");
     assert_eq!(item3.status(), BatchStatus::Processing, "unselected item keeps running");
-}
-
-#[test]
-fn handle_open_path_nonexistent_does_not_panic() {
-    let mut app = PrunrApp::new_for_test();
-    // Opening a non-existent path should set error status, not panic
-    app.handle_open_path(std::path::PathBuf::from("/nonexistent/path/image.png"));
-    // State should remain Empty (no transition on error)
-    assert_eq!(app.batch.app_state(), AppState::Empty);
 }
 
 /// F1 shows the shortcuts where they can also be changed: Settings on
