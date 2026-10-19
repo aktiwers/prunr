@@ -349,19 +349,20 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
 }
 
 /// Bring `id`'s own weights in before either side is timed, so neither
-/// session time includes the disk: a download is read through once into
-/// the page cache, keeping nothing (holding it would pin hundreds of MB
+/// session time includes the disk: a download (its file, or each part of
+/// a bundle) is read through once into the page cache, keeping nothing (holding it would pin hundreds of MB
 /// per model for the rest of the run); bundled weights decompress into the
 /// copy every session of the process shares.
 fn warm_weights(id: ModelId) {
-    match prunr_models::download_path(id) {
-        Some(path) => {
-            if let Err(e) = std::fs::File::open(&path).and_then(|mut f| std::io::copy(&mut f, &mut std::io::sink())) {
-                tracing::debug!(model = ?id, %e, "could not read the weights ahead");
-            }
-        }
-        None => {
-            let _ = prunr_models::resolve_bytes(id);
+    let downloaded = prunr_models::download_path(id).map(|path| vec![path])
+        .or_else(|| prunr_models::multi_part_paths(id).map(|parts| parts.into_iter().map(|(_, path)| path).collect()));
+    let Some(files) = downloaded else {
+        let _ = prunr_models::resolve_bytes(id);
+        return;
+    };
+    for path in files {
+        if let Err(e) = std::fs::File::open(&path).and_then(|mut f| std::io::copy(&mut f, &mut std::io::sink())) {
+            tracing::debug!(model = ?id, path = %path.display(), %e, "could not read the weights ahead");
         }
     }
 }
