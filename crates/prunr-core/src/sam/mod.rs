@@ -35,11 +35,6 @@ pub struct SamEmbedding {
 }
 
 impl SamEmbedding {
-    /// Stable byte estimate for BatchItem::cache_size.
-    pub const fn expected_bytes() -> usize {
-        (IMAGE_EMBED_LEN + HIGH_RES_0_LEN + HIGH_RES_1_LEN) * 4
-    }
-
     /// Verify the three Vec<f32> lengths match SAM 2 Hiera Small
     /// expected output shapes.
     pub fn validate_shapes(&self) -> Result<(), String> {
@@ -275,11 +270,6 @@ mod tests {
         assert_eq!(cell(&clean, 130, 130), FULL, "the pinhole is filled");
         assert_eq!(cell(&clean, 110, 110), FULL, "the object stays");
         assert_eq!(cell(&clean, 200, 200), 0, "the background stays");
-    }
-
-    #[test]
-    fn expected_bytes_is_16_mb() {
-        assert_eq!(SamEmbedding::expected_bytes(), 16_777_216);
     }
 
     #[test]

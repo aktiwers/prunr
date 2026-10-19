@@ -45,16 +45,6 @@ impl PrunrApp {
         self.load_image_source(ImageSource::file(path), dims, filename);
     }
 
-    /// Open an image from raw bytes; an empty name reads as "image".
-    pub fn handle_open_bytes(&mut self, bytes: Vec<u8>, name: String) {
-        let name = if name.is_empty() { "image".into() } else { name };
-        let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else {
-            self.status_error(&format!("Could not open {name}: not an image Prunr can read"));
-            return;
-        };
-        self.load_image_source(ImageSource::Bytes(Arc::new(bytes)), dims, name);
-    }
-
     /// Open: ask for images; `on_open_picked` imports them.
     pub fn handle_open_dialog(&mut self) {
         self.ask_dialog(DialogRequest::OpenImages);

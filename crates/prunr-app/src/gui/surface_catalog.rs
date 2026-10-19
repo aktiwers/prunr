@@ -190,6 +190,7 @@ pub const VISITS: &[Visit] = &[
 
 /// Modals no click from a fresh window reaches, each with why; their own
 /// tests cover them.
+#[cfg(test)]
 pub const UNVISITED_MODALS: &[(&str, &str)] = &[
     ("license", "opens on downloading a model under a non-commercial license; the store offers no download while every model is installed"),
     ("runtime_prompt", "opens once at first launch, from the hardware probe"),

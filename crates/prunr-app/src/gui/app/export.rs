@@ -526,8 +526,6 @@ mod toast_kind_tests {
         let mut app = PrunrApp::new_for_test();
         app.handle_open_path("/nonexistent/prunr-test/missing.png".into());
         assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not open missing.png: not an image Prunr can read")));
-        app.handle_open_bytes(vec![1, 2, 3], "junk".into());
-        assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not open junk: not an image Prunr can read")));
     }
 
     #[test]
