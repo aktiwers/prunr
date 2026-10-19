@@ -237,29 +237,18 @@ impl SubprocessManager {
                 Ok(ChainInput { path, width: w, height: h })
             })
             .transpose()?;
-
-        self.send_cmd(&SubprocessCommand::ProcessImage {
-            item_id,
-            image_path,
-            chain_input: chain,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
-
-        self.in_flight.insert(item_id);
-        Ok(())
+        self.send_process_image(item_id, image_path, chain)
     }
 
     /// Send an image for processing directly from a file path (no copy).
     /// The subprocess reads the file; caller is responsible for cleanup.
-    pub fn send_image_path(
-        &mut self,
-        item_id: u64,
-        image_path: std::path::PathBuf,
-    ) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::ProcessImage {
-            item_id,
-            image_path,
-            chain_input: None,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
+    pub fn send_image_path(&mut self, item_id: u64, image_path: std::path::PathBuf) -> Result<(), String> {
+        self.send_process_image(item_id, image_path, None)
+    }
+
+    fn send_process_image(&mut self, item_id: u64, image_path: std::path::PathBuf, chain_input: Option<ChainInput>) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::ProcessImage { item_id, image_path, chain_input })
+            .map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
