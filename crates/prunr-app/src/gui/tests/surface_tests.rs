@@ -172,6 +172,21 @@ fn an_erasers_magic_brush_strip_has_the_region_knobs() {
     }
 }
 
+/// An eraser turns the Paint Brush on by itself, at start too; with no
+/// image on the canvas its strip has nothing to paint and stays away.
+#[test]
+fn an_erasers_brush_strip_waits_for_an_image() {
+    let mut h = harness();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::RoremInpaint;
+    h.state_mut().fit_brush_models_to_model();
+    settle(&mut h);
+    assert!(h.state().active_tool().is_some(), "the eraser's brush is on");
+    let present = names(&h);
+    for knob in ["Size", "Try another"] {
+        assert!(!present.iter().any(|n| n == knob), "{knob} shown on the empty canvas: {present:?}");
+    }
+}
+
 #[test]
 fn the_tool_strip_follows_the_magic_brush() {
     let mut h = loaded();
