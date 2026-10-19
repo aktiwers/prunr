@@ -10,20 +10,15 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// Single source of truth for the ONNX Runtime version we ship + offer
-/// for runtime-store install. The pykeio/ort `api-23` feature refuses
-/// a runtime older than 1.23 at load. The macOS wheel's minimum OS is
-/// the Mac app's floor (`LSMinimumSystemVersion`, 14.0 for 1.24), so a
-/// bump checks that too. Drift between the bundled runtime and a
-/// runtime-store upgrade would surprise a user upgrading via
-/// Settings → Hardware.
+/// The ONNX Runtime version we ship and offer for runtime-store install.
+/// The pykeio/ort `api-23` feature refuses a runtime older than 1.23 at
+/// load. The macOS wheel's minimum OS is the Mac app's floor
+/// (`LSMinimumSystemVersion`, 14.0 for 1.24), so a bump checks that too.
 ///
-/// **Upper bound:** pykeio/ort tracks ABI v23 across ORT 1.x. ORT 2.0+
-/// is expected to bump the ABI; bumping this past the 1.x line without
-/// switching the `ort` feature to `api-24` (or whatever the new ABI
-/// becomes) would compile but crash at session creation. Run
-/// `cargo xtask probe-load-dynamic <new-dylib>` before the bump to
-/// confirm — see CLAUDE.md `## Verify before bundling / wiring`.
+/// **Upper bound:** past the 1.x line the ABI is expected to change; a
+/// bump without switching the `ort` API feature compiles but crashes at
+/// session creation. Run `cargo xtask probe-load-dynamic <new-dylib>`
+/// before bumping.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
@@ -110,9 +105,7 @@ pub fn install_subdir(short_name: &str, version: &str) -> String {
 }
 
 /// Reject names that would escape `<data_dir>/runtimes/` when joined
-/// as a single path segment. Defense-in-depth: callers should already
-/// be passing a value produced by `install_subdir`, but a future API
-/// taking a user-supplied `--target` flag could otherwise traverse out.
+/// as a single path segment.
 pub fn validate_subdir(name: &str) -> Result<(), String> {
     if name.is_empty()
         || name == "."
@@ -142,10 +135,8 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
 fn pick_wheel_on(urls: &[serde_json::Value], rid: &str, glibc: (u32, u32)) -> Result<WheelInfo, String> {
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
-        // Reject sdists / non-wheel artifacts up front so a future PyPI
-        // release that includes a wheel-flavour token in a `.tar.gz`
-        // filename can't slip through to `extract_wheel` (which would
-        // fail at `ZipArchive::new` with a confusing error).
+        // An sdist whose name carries a wheel-flavour token would
+        // otherwise fail confusingly in `extract_wheel`.
         if !name.ends_with(".whl") { return None; }
         if !platform_tags(name).any(|tag| tag_fits(tag, rid, glibc)) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
@@ -162,11 +153,8 @@ fn pick_wheel_on(urls: &[serde_json::Value], rid: &str, glibc: (u32, u32)) -> Re
 
 /// Filter + rename for files extracted from an `onnxruntime-*` wheel.
 ///
-/// Path-traversal guard: the result is used as a single filename joined
-/// onto `target_dir`. Reject anything containing `/` or `\\` so a
-/// maliciously-crafted wheel can't escape `target_dir` via
-/// `..\Windows\System32\evil.dll` on Windows or its forward-slash
-/// equivalent on Unix.
+/// Path-traversal guard: the result is joined onto `target_dir` as one
+/// filename, so anything containing `/` or `\\` is rejected.
 pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
     if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
@@ -221,11 +209,8 @@ pub const DOWNLOAD_BACKOFF_BASE_MS: u64 = 500;
 /// connection, SHA256 mismatch) retry; fatal errors (404, user cancel)
 /// fail fast.
 ///
-/// The SHA verification happens INSIDE the attempt (not after `download_wheel`
-/// returns). A transient corruption — CDN edge cache delivering a partial
-/// payload, mid-flight bit flip, MITM-injected garbage — would otherwise
-/// fail fast with one shot at the network; folding it inside lets the
-/// retry loop give it ~3 chances before escalating.
+/// SHA verification runs inside the attempt so a transient corruption
+/// (partial CDN payload, bit flip) gets retried rather than failing.
 pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
     let cancel = Arc::clone(&hooks.cancel);
     retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |attempt| {
@@ -240,12 +225,8 @@ pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result
     }).map_err(|e| e.message)
 }
 
-/// Implemented by error types whose values distinguish transient
-/// errors from fatal ones; each implementor decides which is which.
-/// `retry_with_backoff` consults `is_retryable` to decide between retry
-/// and fail-fast; on cancel during the backoff sleep it constructs a
-/// fresh value via `cancelled()` so each error type picks its own
-/// user-facing wording.
+/// An error that tells transient from fatal. `cancelled()` builds the
+/// value for a cancel during backoff, so each type picks its own wording.
 pub trait Retryable {
     fn is_retryable(&self) -> bool;
     fn cancelled() -> Self;
@@ -297,10 +278,9 @@ pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Clien
         .build()
 }
 
-/// Single download attempt — used by the retry wrapper. Streams chunks,
-/// fires progress per percentage point, polls cancel per chunk.
-/// `Content-Length` not pre-allocated (untrusted; bogus 9999999999 would
-/// OOM). `Vec` grows; resize cost on 80 MB is microseconds.
+/// Streams chunks, fires progress per percentage point, polls cancel per
+/// chunk. `Content-Length` is not pre-allocated: it is untrusted, and a
+/// bogus 9999999999 would OOM.
 fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
@@ -344,9 +324,8 @@ fn download_wheel_attempt(
 /// non-retryable errors (per `Retryable::is_retryable`). Between
 /// attempts, sleeps an exponentially-growing duration starting at
 /// `base_ms` (500 → 1000 → 2000…), polling `cancel` every 50 ms so a
-/// user-cancel during backoff fires promptly. The closure receives the
-/// current attempt index (0-based) for callers that want to log which
-/// retry round triggered.
+/// user-cancel during backoff fires promptly. The closure gets the
+/// 0-based attempt index.
 pub fn retry_with_backoff<F, T, E>(
     cancel: &Arc<AtomicBool>,
     max_attempts: u32,
@@ -383,13 +362,9 @@ where
 /// Caller owns dir creation + safety guards (e.g. refusing
 /// non-`runtimes/` paths) — that's install-time policy.
 ///
-/// Skip-on-collision: when two archive entries map to the same
-/// canonical target (e.g. an `onnxruntime-openvino` wheel that ships
-/// both `libonnxruntime.so` and `libonnxruntime.so.1.24.1` — the
-/// latter via the version-strip arm in `repackage_target_filename`),
-/// keep the first write and skip subsequent ones. Without this guard,
-/// a 0-byte symlink-flattened entry could shadow the real dylib if it
-/// happened to come second in archive order.
+/// When two entries map to the same target (`libonnxruntime.so` and
+/// `libonnxruntime.so.1.24.1`), the first write wins: otherwise a 0-byte
+/// symlink-flattened entry could shadow the real dylib.
 pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathBuf, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("zip parse: {e}"))?;
@@ -402,8 +377,6 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
             continue;
         };
         if !written.insert(target_filename.clone()) {
-            // Already wrote this canonical target — keep the first one,
-            // skip the duplicate.
             continue;
         }
         let dest = target_dir.join(&target_filename);
