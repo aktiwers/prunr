@@ -467,13 +467,9 @@ fn measure_depth(
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     admitted(descriptor)?;
-    let (progress, run) = if slot.read().is_none() {
-        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
-        let run = slot.begin(initial);
-        (prunr_core::Progress::new(Arc::new(run.clone())), Some(run))
-    } else {
-        (prunr_core::Progress::none(), None)
-    };
+    let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
+    let run = slot.begin_if_idle(initial);
+    let progress = run.as_ref().map_or_else(prunr_core::Progress::none, |run| prunr_core::Progress::new(Arc::new(run.clone())));
     let threads = prunr_core::batch::ort_intra_threads(1);
     let result = input.read().map_err(prunr_core::CoreError::ImageFormat)
         .and_then(|photo| {
@@ -1853,9 +1849,7 @@ impl Processor {
         let (stop, current) = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
-        let run = self.dispatch_progress.read().is_none().then(|| {
-            self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id))
-        });
+        let run = self.dispatch_progress.begin_if_idle(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id));
         let progress = PictureSink::of_face_search(item_id, run.clone(), current, self.picture_sender())
             .into_progress()
             .with_cancel(Arc::clone(&stop));
