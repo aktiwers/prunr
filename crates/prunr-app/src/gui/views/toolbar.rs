@@ -61,7 +61,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
 
         let any_ticked = app.batch.any_ticked();
 
-        // ── Left: Open ──
         let open_btn = egui::Button::new(
             RichText::new(format!("{}  Open", ICON_FOLDER_OPEN.codepoint)).color(theme::TEXT_PRIMARY),
         )
@@ -109,10 +108,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
 
-        // Model, groups and presets live on the adjustments toolbar; this
-        // row stays minimal: Open, Model Store, Settings, Help, and the
-        // action cluster.
-
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(|i| i.timeline.can_undo());
             let can_redo = app.batch.any_target_can(|i| i.timeline.can_redo());
@@ -128,7 +123,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        // ── Right group: action buttons ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if any_ticked {
                 let remove_sel_btn = egui::Button::new(

@@ -3,11 +3,7 @@
 //! preset controls. Each group popover lists its knobs in the order the
 //! pipeline applies them.
 //!
-//! View Component discipline: `render` takes `&mut ItemSettings` + a `&AppSettings`
-//! reference for defaults / live-preview flag lookups. Never `&mut PrunrApp`.
-//!
-//! Returns a `ToolbarChange` summarizing WHAT changed so the caller can
-//! invalidate the right textures and schedule live-preview reruns.
+//! `render` takes `&mut ItemSettings` and `&AppSettings`, never `&mut PrunrApp`.
 
 use egui::{Color32, RichText, Ui};
 use egui_material_icons::icons::*;
@@ -29,13 +25,9 @@ use prunr_core::{EdgeScale, LineMode};
 use super::lines_popover::{compose_description, mode_description, mode_label, scale_description, scale_label};
 use super::{differs, model_info, variant_index};
 
-/// Summary of what a toolbar render cycle changed.
-///
-/// Tier flags drive live-preview dispatch; cache-invalidation flags are
-/// granular so we don't clear a still-valid cache (e.g. seg tensor stays
-/// good after a line_mode toggle — only the edge tensor is stale then).
-/// Keeping unrelated caches alive means the user's next mask/edge tweak
-/// can still live-preview without a full Process.
+/// Summary of what a toolbar render cycle changed. Cache-invalidation
+/// flags are granular so a still-valid cache (the seg tensor after a
+/// line_mode toggle) survives and the next tweak can still live-preview.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToolbarChange {
     /// Any chip signalled a committed value (slider released, toggle
@@ -49,7 +41,6 @@ pub struct ToolbarChange {
     pub preset_applied: bool,
     /// Previous `line_mode` when it changed this frame. Drives the
     /// context-sensitive `line_mode_spec(from, current, cached_edge)` path.
-    /// `None` means no transition this frame.
     pub line_mode_from: Option<LineMode>,
     /// `input_transform` flipped this frame. Drives `input_transform_spec`
     /// for precise dispatch; `StaticKnob` excludes context-sensitive knobs.
@@ -78,15 +69,11 @@ pub struct ToolbarChange {
     /// was active — drop the image so the chosen kind takes over.
     pub clear_bg_image: bool,
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
-    /// `None` when no action was clicked this frame.
     pub(crate) selection_action: Option<SelectionAction>,
-    /// User clicked the Paint Brush toggle button.
     pub(crate) toggle_paint: bool,
-    /// User clicked the Magic Brush toggle button.
     pub(crate) toggle_magic: bool,
     /// User clicked the Compare toggle (show the original over the result).
     pub(crate) toggle_compare: bool,
-    /// What the Faces chip changed.
     pub(crate) faces: super::faces_chip::FacesChange,
     /// The Depth chip's "Set focus" was clicked.
     pub(crate) pick_depth_focus: bool,
@@ -152,10 +139,8 @@ fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &Tool
 const BG_COLOR_FALLBACK: [u8; 4] = [255, 255, 255, 255];
 const LINE_COLOR_FALLBACK: [u8; 3] = [0, 0, 0];
 
-/// Render the adjustments toolbar. Returns a `ToolbarChange` summarizing what was edited.
-/// `app_settings` exposes model + preset map. `applied_preset` is read for
-/// the button's modified/clean icon and written in place when the user
-/// applies or saves a preset.
+/// `applied_preset` is read for the button's modified/clean icon and
+/// written in place when the user applies or saves a preset.
 pub(crate) fn render(
     ui: &mut Ui,
     item_settings: &mut ItemSettings,
@@ -737,8 +722,7 @@ fn aggregate_knob(ch: chip::ChipChange, knob: StaticKnob, acc: &mut ToolbarChang
     }
 }
 
-/// Shorthand for chips that return a bool (commit-on-change). Builds a
-/// `ChipChange` where `changed == commit == b` and folds via the catalog.
+/// Shorthand for chips that return a bool (commit-on-change).
 fn aggregate_bool(b: bool, knob: StaticKnob, acc: &mut ToolbarChange) {
     aggregate_knob(chip::ChipChange { changed: b, commit: b }, knob, acc);
 }
@@ -899,9 +883,7 @@ impl BgKind {
     }
 }
 
-/// Editable + display state for the background chip. Grouped because the
-/// chip needs three live-edit fields plus image-availability metadata —
-/// past the param-count alarm without this grouping.
+/// Editable + display state for the background chip.
 struct BgChipState<'a> {
     backdrop: Backdrop,
     bg: &'a mut Option<[u8; 4]>,
@@ -1290,12 +1272,10 @@ pub(super) fn render_model_dropdown(
                 }
             };
             ui.set_width(width);
-            // The list runs down to the window's bottom edge and scrolls
-            // past it. The room is measured from the chip, where the list
-            // opens below it: measured from wherever the popup sits, a list
-            // placed beside the chip would size itself to stay there. The
-            // popup's area also keeps last frame's size as its limit, so
-            // the height is set, not left to grow.
+            // The list runs to the window's bottom edge and scrolls past it.
+            // Room is measured from the chip: a popup placed beside it would
+            // size itself to stay there. The height is set because the
+            // popup's area keeps last frame's size as its limit.
             let frame = ui.spacing().menu_margin.sum().y;
             let room = (ui.ctx().content_rect().bottom() - resp.rect.bottom() - frame - POPUP_GAP - theme::SPACE_MD).max(160.0);
             ui.set_max_height(room);
@@ -1337,9 +1317,8 @@ pub(super) fn render_model_dropdown(
     });
 
     if app_settings.model != prev_model {
-        // Clamp parallel jobs to the new model's safe maximum — a correctness
-        // invariant on app_settings that mustn't leave an invalid value even
-        // if downstream skips persistence.
+        // Clamp parallel jobs to the new model's safe maximum, even if
+        // persistence is skipped downstream.
         let max = app_settings.max_jobs();
         if app_settings.parallel_jobs > max {
             app_settings.parallel_jobs = max;

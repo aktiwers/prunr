@@ -1,13 +1,5 @@
-//! Canvas-side brush input + cursor render.
-//!
-//! Called from the canvas when `brush_state.is_enabled()` and the
-//! result/source texture is showing. Owns:
-//! - the soft circle cursor
-//! - left-press/drag/release pointer wiring → BrushState
-//! - on release: hand the finished stroke back as `BrushAction::Committed`.
-//!
-//! Does NOT own coordinate math beyond the screen→model transform
-//! (canvas owns `compute_img_rect` and zoom/pan).
+//! Canvas-side brush input + cursor render. A finished stroke goes back to
+//! the canvas as `BrushAction::Committed`.
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui};
 
@@ -32,11 +24,9 @@ pub(crate) enum BrushAction {
     None,
 }
 
-/// Handle pointer input + paint cursor for one frame. The canvas calls
-/// this after rendering the image. `img_rect` is the on-screen rect of
-/// the displayed texture (post-zoom, post-pan); the brush works in that
-/// rect's normalized coordinate space, so the underlying texture size
-/// is irrelevant here.
+/// Handle pointer input + paint cursor for one frame. The brush works in
+/// the normalized space of `img_rect` (the on-screen rect after zoom and
+/// pan), so the texture size is irrelevant here.
 pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
@@ -59,11 +49,9 @@ pub(crate) fn handle_input(
         return BrushAction::None;
     }
 
-    // No `ui.interact` here: it would set `egui_wants_pointer_input`,
-    // which the canvas pan handler reads to decide whether to ignore
-    // events. With pan on secondary in brush mode, primary belongs to
-    // the brush and secondary to pan — they don't conflict, so neither
-    // needs widget-level claim. Reading raw input below is enough.
+    // No `ui.interact` here: it would set `egui_wants_pointer_input`, which
+    // the canvas pan handler reads. In brush mode primary is the brush's and
+    // secondary pans, so raw input is enough.
     let (hover, primary_pressed, primary_down, primary_released) = ui.input(|i| {
         (
             i.pointer.hover_pos(),
@@ -116,7 +104,6 @@ pub(crate) fn handle_input(
     BrushAction::None
 }
 
-/// Convert a screen-space pointer to model-grid coordinates.
 pub(super) fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u32) -> Pos2 {
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
@@ -158,10 +145,8 @@ fn draw_trail(ui: &Ui, brush_state: &BrushState, look: CursorLook) {
     draw_trail_for(ui, look, shape, brush_state.trail_stamps());
 }
 
-/// Paint the in-progress trail from an arbitrary stamp iterator. Shared
-/// by Paint Brush (reads `BrushState.trail_stamps`) and Magic Brush
-/// (reads `MagicBrushState.active_trail`). Same visual contract — the
-/// only difference between the two tools is what they commit on release.
+/// Paint the in-progress trail from any stamp iterator; Paint Brush and
+/// Magic Brush differ only in what they commit on release.
 pub(crate) fn draw_trail_for(
     ui: &Ui,
     s: CursorLook,

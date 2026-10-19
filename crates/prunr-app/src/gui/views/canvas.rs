@@ -13,7 +13,6 @@ const CHECKER_TEX_TILES: usize = 16;
 static IS_WAYLAND: LazyLock<bool> = LazyLock::new(|| std::env::var_os("WAYLAND_DISPLAY").is_some());
 
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    // Set background
     let avail_rect = ui.available_rect_before_wrap();
     ui.painter()
         .rect_filled(avail_rect, 0.0, theme::BG_PRIMARY);
@@ -30,17 +29,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let widget_has_pointer = ui.ctx().egui_wants_pointer_input();
     let pointer_blocked = modal_open || widget_has_pointer || dismissable_popup;
     // The brush authors the selection against the source, so it is live
-    // as soon as an image is loaded; segmentation corrections apply once
-    // a result exists.
-    //
-    // While an inpaint stroke is in flight on the selected item, the
-    // brush is locked: another stroke would silently supersede the
-    // first via dispatch_inpaint's generation counter, wasting the
-    // 5+ minutes of CPU work just performed. The capsule's Cancel is
-    // the way out.
-    // A stroke, a Magic Brush click or a focus pick is a step: one taken
-    // while a run is queued or under way on the image would make that
-    // run's result stale, so they wait for it.
+    // once an image is loaded. A stroke, a Magic Brush click or a focus
+    // pick is a step: taken while a run is queued or under way it would
+    // make that run's result stale, so they wait for it.
     let editable = app.batch.selected_item().is_some_and(crate::gui::item::BatchItem::is_idle);
     let app_state = app.batch.app_state();
     let model_has_brushes = shows(app.settings.model, Surface::Brushes);
@@ -63,7 +54,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // in any brush-tool mode so left-click is free for the brush stroke.
     let canvas_gets_pan = canvas_gets_zoom;
     if canvas_gets_zoom {
-        // Handle scroll-wheel zoom (cursor-centered)
         ui.ctx().input(|i| {
             for event in &i.events {
                 if let egui::Event::MouseWheel { delta, modifiers, .. } = event {
@@ -160,8 +150,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let elsewhere = progress.on.filter(|_| !here).and_then(|id| app.batch.find_by_id(id)).map(|i| i.filename.as_str());
         let preview = app.batch.selected_item().filter(|_| here).and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
         if super::progress_widget::render(ui, canvas_rect, img_rect.filter(|_| here), &progress, preview, elsewhere) {
-            // Routing logic is the pure `cancel_target_for` fn — one
-            // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
             if let Some(target) = cancel_target_for(progress.kind) {
                 match target {
@@ -221,10 +209,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         ui.ctx().request_repaint_after(theme::WORK_FRAME);
     }
 
-    // Bottom-left modifier hint — shown whenever Magic Brush is the active
-    // tool (regardless of encoder state) so users discover Shift / Alt
-    // before they need them. Active modifier tints to ACCENT; the rest stays
-    // TEXT_SECONDARY.
+    // Shown whenever a brush tool is active so users discover Shift / Alt
+    // before they need them.
     if app.magic_brush_state.is_active() || app.brush_state.is_enabled() {
         let (shift, alt) = modifier_state(ui);
         let base_color = theme::TEXT_SECONDARY;
@@ -330,15 +316,9 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     }
 }
 
-/// Handle Magic Brush pointer events (click + drag-stroke) on the canvas.
-/// Suppressed when encoder is pending — clicks during "Preparing..." are
-/// silently ignored. Dispatches a SAM decoder job on
-/// every click or completed stroke; modifier keys control mask combination.
-///
-/// Also owns the per-frame visual feedback for the tool: crosshair cursor
-/// icon, brush-shape cursor outline (via `brush_overlay::draw_cursor`),
-/// trail rendering during drag (via `brush_overlay::draw_trail_for`),
-/// and the modifier glyph (+ / −) at the cursor when Shift / Alt is held.
+/// Magic Brush pointer events (click + drag-stroke) on the canvas: every
+/// click or finished stroke dispatches a pick, modifier keys choose how it
+/// combines. Also draws the tool's cursor, trail and modifier glyph.
 fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
     let item = &app.batch.items[idx];
@@ -347,7 +327,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     // `None` while the encoder runs; a pick made then waits for it.
     let embedding = item.magic_brush_embedding.clone();
 
-    // Cursor icon: Crosshair while over the canvas, default elsewhere.
     let hover_pos_for_cursor = ui.ctx().input(|i| i.pointer.hover_pos());
     if hover_pos_for_cursor.is_some_and(|p| canvas_rect.contains(p)) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -400,7 +379,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     }
 
     if released && app.magic_brush_state.active_stroke.len() > 1 {
-        // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
         if by_depth {
@@ -438,7 +416,6 @@ fn source_point(pos: egui::Pos2, img_rect: Rect, (w, h): (u32, u32)) -> Option<(
     })
 }
 
-/// Compute the image rectangle given canvas bounds, texture size, zoom, and pan offset.
 fn compute_img_rect(canvas_rect: Rect, tex_size: Vec2, zoom: f32, pan: Vec2) -> Rect {
     let img_size = tex_size * zoom;
     let center = canvas_rect.center() + pan;
@@ -512,12 +489,10 @@ fn render_empty(ui: &mut egui::Ui) {
     let canvas_rect = ui.available_rect_before_wrap();
     let center = canvas_rect.center();
 
-    // Larger drop zone with logo
     let zone_w = (avail.x * 0.6).clamp(280.0, 500.0);
     let zone_h = 380.0_f32;
     let zone_rect = Rect::from_center_size(center, Vec2::new(zone_w, zone_h));
 
-    // Draw drop zone border
     let border_color = if is_hovered {
         theme::DROP_HOVER_BORDER
     } else {
@@ -530,7 +505,6 @@ fn render_empty(ui: &mut egui::Ui) {
         egui::StrokeKind::Outside,
     );
 
-    // Logo at center-top of drop zone (preserve aspect ratio)
     let logo_max_h = 140.0;
     let logo_aspect = theme::LOGO_ASPECT;
     let logo_w = logo_max_h * logo_aspect;
@@ -543,7 +517,6 @@ fn render_empty(ui: &mut egui::Ui) {
         .fit_to_exact_size(logo_size);
     logo_image.paint_at(ui, logo_rect);
 
-    // Text below logo
     let text_y = logo_rect.max.y + 20.0;
     let painter = ui.painter();
 
@@ -582,10 +555,8 @@ fn render_empty(ui: &mut egui::Ui) {
     let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
 
     let alpha = if phase < TIP_FADE_SECS {
-        // Fading in
         (phase / TIP_FADE_SECS) as f32
     } else if phase > TIP_CYCLE_SECS - TIP_FADE_SECS {
-        // Fading out
         ((TIP_CYCLE_SECS - phase) / TIP_FADE_SECS) as f32
     } else {
         1.0
@@ -715,10 +686,8 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         }
 
-        // Selection overlay — same call as `render_done`. Required here too
-        // because Magic Brush authors selections directly on the source
-        // image, before any Process click; without this the action bar
-        // shows but the user sees no mask.
+        // Magic Brush authors selections on the source before any Process,
+        // so the selection shows here too.
         if let Some(it) = app.batch.selected_item() {
             draw_face_preview(ui, it, img_rect);
             draw_selection(ui, app, it, img_rect);
@@ -726,7 +695,6 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         }
         Some(img_rect)
     } else {
-        // Source not decoded yet — show spinner
         let center = canvas_rect.center();
         ui.put(
             Rect::from_center_size(center, Vec2::splat(40.0)),

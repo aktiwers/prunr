@@ -100,11 +100,8 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
                 ui.painter().rect_filled(fill_rect, 2.0, theme::PROGRESS_FILL);
             }
         } else {
-            // Teach-the-user hint when ≥ 2 checkboxes are set: the canvas
-            // live-preview only updates the viewed image, not the whole
-            // selection. Sits in the statusbar center (between the left
-            // status text and the right metadata) — only visible when the
-            // progress bar isn't occupying that slot.
+            // With two or more images ticked, say that live preview only
+            // updates the viewed image, not the whole selection.
             let ticked_count = app.batch.ticked_count();
             if ticked_count >= 2 {
                 ui.add_space(theme::SPACE_SM);

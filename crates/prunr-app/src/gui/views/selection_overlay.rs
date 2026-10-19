@@ -6,8 +6,7 @@ use egui::{Color32, Rect, Ui};
 
 use crate::gui::item::BatchItem;
 
-/// Called from canvas render after the item image is painted. `img_rect`
-/// is the on-screen rect of the displayed texture (post-zoom).
+/// `img_rect` is the on-screen rect of the displayed texture (post-zoom).
 /// `working`: a run is filling this region, which then breathes in soft
 /// light with a sheen crossing it, inside the brushed shape.
 pub(crate) fn render_selection_overlay(ui: &Ui, item: &BatchItem, img_rect: Rect, working: bool) {
