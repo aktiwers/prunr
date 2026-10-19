@@ -352,7 +352,7 @@ pub fn process_inpaint_with(
     // Hold an Arc through the run so the idle sweep can't drop sessions
     // mid-inference.
     let get_started = Instant::now();
-    let bundle = SdSession::get(id, &req.tuning.session_key(), req.tuning.keep_loaded)?;
+    let bundle = SdSession::get(id, &req.tuning)?;
     let session_ms = get_started.elapsed().as_millis() as u64;
     // `bundle` is declared above the guard so it drops after it: the
     // guard removes the cache's Arc (unless the entry is pinned), then
@@ -1273,6 +1273,18 @@ fn sd_cache() -> &'static Mutex<SdCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Take a failed build's entry out of `cache`, if it is still `slot`'s
+/// (a later build may have replaced it), so the next caller builds again.
+pub(crate) fn forget_failed<K: std::hash::Hash + Eq, T>(
+    cache: &mut HashMap<K, CacheEntry<Arc<OnceLock<T>>>>,
+    key: &K,
+    slot: &Arc<OnceLock<T>>,
+) {
+    if cache.get(key).is_some_and(|e| Arc::ptr_eq(&e.value, slot)) {
+        cache.remove(key);
+    }
+}
+
 /// Drop the cache's `Arc` for `id` unless pinned; in-flight callers keep
 /// theirs. Runs when a stroke ends: holding ~9 GB through the idle
 /// window is worse than a rebuild on the next stroke.
@@ -1290,7 +1302,7 @@ pub(crate) fn release(id: prunr_models::ModelId) {
 /// part runs. A run with the same tuning uses this bundle; it stays
 /// loaded between runs when `tuning.keep_loaded`.
 pub fn load_bundle(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Vec<(&'static str, SessionPick)>, CoreError> {
-    SdSession::get(id, &tuning.session_key(), tuning.keep_loaded).map(|bundle| bundle.picks.clone())
+    SdSession::get(id, tuning).map(|bundle| bundle.picks.clone())
 }
 
 /// Take every loaded bundle out of the cache, kept ones too; they free
@@ -1449,7 +1461,11 @@ fn ensure_sweeper_running() {
 }
 
 impl SdSession {
-    fn get(id: prunr_models::ModelId, key: &SdSessionKey, pin: bool) -> Result<Arc<SdSession>, CoreError> {
+    /// The bundle for `id` under `tuning`, built if no other run has it.
+    /// A build that fails is not kept: the next stroke builds again, so
+    /// freeing memory or fixing an install takes effect at once.
+    fn get(id: prunr_models::ModelId, tuning: &SdTuning) -> Result<Arc<SdSession>, CoreError> {
+        let (key, pin) = (&tuning.session_key(), tuning.keep_loaded);
         ensure_sweeper_running();
         let cache = sd_cache();
         let now = Instant::now();
@@ -1464,14 +1480,18 @@ impl SdSession {
         };
         drop(released);
 
-        slot.get_or_init(|| Self::new_inner(id, key).map(Arc::new))
-            .clone()
-            .map_err(CoreError::Inference)
+        let built = slot.get_or_init(|| Self::new_inner(id, key, tuning.margin_mb).map(Arc::new)).clone();
+        if built.is_err() {
+            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            forget_failed(&mut guard, &(id, key.clone()), &slot);
+        }
+        built.map_err(CoreError::Inference)
     }
 
-    fn new_inner(id: prunr_models::ModelId, session_key: &SdSessionKey) -> Result<SdSession, String> {
-        // Prewarm builds bypass `process_inpaint_with`, so gate here too.
-        check_ram_for(id, &mut SdTuning::default())?;
+    fn new_inner(id: prunr_models::ModelId, session_key: &SdSessionKey, margin_mb: u64) -> Result<SdSession, String> {
+        // Prewarm builds bypass `process_inpaint_with`, so gate here too,
+        // with the margin the user chose.
+        check_ram_for(id, &mut SdTuning { margin_mb, ..SdTuning::default() })?;
         let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
@@ -3561,6 +3581,21 @@ mod tests {
     /// One SD bundle is resident at a time: "keep loaded" pins the
     /// eraser, not every bundle it has used. Switching Fast to Quality
     /// with both pinned held two 2 GB bundles and swapped the machine.
+    #[test]
+    fn a_failed_bundle_build_is_forgotten() {
+        let now = Instant::now();
+        let key = (prunr_models::ModelId::SdV15InpaintFp16, SdTuning::default().session_key());
+        let failed: SdBundleSlot = Arc::new(std::sync::OnceLock::new());
+        let _ = failed.set(Err("needs 15.6 GB".into()));
+        let mut cache: SdCache = HashMap::new();
+        cache.insert(key.clone(), CacheEntry::new(Arc::clone(&failed), now));
+        let other: SdBundleSlot = Arc::new(std::sync::OnceLock::new());
+        forget_failed(&mut cache, &key, &other);
+        assert!(cache.contains_key(&key), "an entry another build replaced it with stays");
+        forget_failed(&mut cache, &key, &failed);
+        assert!(!cache.contains_key(&key), "the failed build is gone, so the next stroke builds again");
+    }
+
     #[test]
     fn admitting_a_bundle_drops_the_other_ones_pinned_or_not() {
         let now = Instant::now();
