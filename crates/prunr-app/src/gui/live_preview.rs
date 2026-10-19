@@ -298,12 +298,6 @@ pub(crate) struct Finished {
     result: Option<PreviewResult>,
 }
 
-impl From<PreviewResult> for Finished {
-    fn from(r: PreviewResult) -> Self {
-        Self { item_id: r.item_id, generation: r.generation, result: Some(r) }
-    }
-}
-
 impl Default for LivePreview {
     fn default() -> Self {
         Self::with_clock(Arc::new(SystemClock))
@@ -497,7 +491,7 @@ impl LivePreview {
                     .zip(seg_model)
                     .map(|(base, model)| (base, mask_recipe, model));
                 // `is_final` is set in `drain_results`, which can read `self.pending`.
-                let _ = tx.send(Finished::from(PreviewResult {
+                let _ = tx.send(Finished { item_id: id, generation, result: Some(PreviewResult {
                     item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                     cutter: seg_model.map(crate::gui::item::Cutter::Model),
                     new_edge, new_bold, new_masked_base,
@@ -514,7 +508,7 @@ impl LivePreview {
                     applied_color_strength,
                     is_final: false,
                     quick,
-                }));
+                }) });
             });
         }
 
@@ -792,16 +786,14 @@ impl EdgePlaneKey {
             fade_pct: fade_pct(settings, has_depth),
         }
     }
-}
 
-/// What the undilated plane depends on: strength and scale, not thickness.
-type EdgeBaseKey = (u32, prunr_core::EdgeScale);
-
-impl EdgePlaneKey {
     fn base_key(self) -> EdgeBaseKey {
         (self.strength_bits, self.scale)
     }
 }
+
+/// What the undilated plane depends on: strength and scale, not thickness.
+type EdgeBaseKey = (u32, prunr_core::EdgeScale);
 
 /// The two planes of one edge scale: the undilated mask (tensor → sigmoid
 /// → Lanczos) and the dilated one a composition draws. Handed to a
@@ -1115,12 +1107,9 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     (Some(Arc::clone(&arc)), Some(arc))
                 })
         };
-        match inputs.kind {
-            PreviewKind::Mask => fresh_base(),
-            PreviewKind::Edge => inputs.cached_masked_base.clone()
-                .map_or_else(fresh_base, |cached| (Some(cached), None)),
-            PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 | PreviewKind::Photo => unreachable!("run_preview finishes these kinds itself"),
-        }
+        inputs.cached_masked_base.clone()
+            .filter(|_| inputs.kind == PreviewKind::Edge)
+            .map_or_else(fresh_base, |cached| (Some(cached), None))
     } else {
         (None, None)
     };
@@ -1370,7 +1359,7 @@ mod tests {
     /// A worker's non-final Mask result for item `id` under `generation`.
     fn send_result(lp: &LivePreview, id: u64, generation: u64) {
         let result = PreviewResult { generation, is_final: false, ..PreviewResult::mask_for_test(id, Arc::new(RgbaImage::new(1, 1))) };
-        lp.result_tx.send(result.into()).unwrap();
+        lp.result_tx.send(Finished { item_id: id, generation, result: Some(result) }).unwrap();
     }
 
     #[test]
