@@ -900,7 +900,7 @@ pub fn run_worker() -> ! {
 
             SubprocessCommand::CancelItem { item_id } => cancels.cancel(item_id),
 
-            SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
+            SubprocessCommand::Inpaint(InpaintJob { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen }) => {
                 // Own thread, so inpaint doesn't block batched seg work. `in_flight` makes a
                 // concurrent `Shutdown` wait for it; `Cleanup::drop` decrements, panics included.
                 in_flight.fetch_add(1, Ordering::AcqRel);
