@@ -660,31 +660,28 @@ impl PrunrApp {
         seg: Option<crate::gui::worker::CompressedTensor>,
         edges: Option<crate::gui::worker::CompressedEdgeTensors>,
     ) {
-        let is_selected = self.batch.is_selected(item_id);
         let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
             tracing::info!(item_id, batch, "a run's answer dropped: its batch no longer awaits the image");
             return;
         };
         let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
         self.processor.cut_times.ended(item_id, landed);
-        self.land_cut(ctx, item_id, is_selected, result, seg, edges, recipe_snapshot);
+        self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot);
         // Every answer the batch took frees the image's share of the RAM
         // budget, however it landed.
         self.admission_release_and_admit(item_id);
     }
 
-    // args are one batch answer's fields, unpacked by its one caller
-    #[allow(clippy::too_many_arguments)]
     fn land_cut(
         &mut self,
         ctx: &egui::Context,
         item_id: u64,
-        is_selected: bool,
         result: Result<prunr_core::ProcessResult, String>,
         seg: Option<crate::gui::worker::CompressedTensor>,
         edges: Option<crate::gui::worker::CompressedEdgeTensors>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
     ) {
+        let is_selected = self.batch.is_selected(item_id);
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
