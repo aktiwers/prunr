@@ -7,10 +7,8 @@
 //! `<model_stable_name>-<model_version>-ort<runtime>-v<format>`.
 //! Bumping any component invalidates the cache automatically.
 //!
-//! EP names match `OrtEngine::active_provider()`'s output (`"OpenVINO"`,
-//! `"CUDA"`, `"CoreML"`, `"DirectML"`, `"CPU"`) and the existing
-//! `ep_compat.json` cache keys — strings rather than `EpKind` because
-//! the CPU provider has no `EpKind`.
+//! EP names are `OrtEngine::active_provider()` strings (`"OpenVINO"`,
+//! `"CPU"`, …) rather than `EpKind`, because the CPU provider has no `EpKind`.
 
 use std::path::{Path, PathBuf};
 use prunr_models::ModelId;
@@ -20,15 +18,11 @@ use crate::engine::Weights;
 /// the `ort` crate version bumps — cached optimized graphs and EP
 /// blobs are not portable across ORT versions, and we don't put the
 /// ORT version in the key directly because `ort` doesn't expose it
-/// at compile time. Old directories under a previous version stay on
-/// disk but are never read; the auto-GC at session-build time and
-/// the "Clear compiled-model cache" Settings button both reclaim them.
+/// at compile time. Old directories are never read; GC reclaims them.
 const CACHE_FORMAT_VERSION: u32 = 1;
 
-/// Maximum recursion depth for `walk_dir_size`. Bounds the worst case
-/// for an adversarial / corrupted cache directory with deeply nested
-/// symlinks; cache layout is two levels deep in normal operation, so
-/// 16 has plenty of headroom while still terminating.
+/// Recursion bound for `walk_dir_size`, so a symlink loop terminates;
+/// the cache is two levels deep.
 const MAX_WALK_DEPTH: u32 = 16;
 
 /// Root cache directory: `<data>/prunr/ep_cache/`, on macOS
@@ -80,9 +74,8 @@ pub fn remove_retired_root() -> u64 {
     }
 }
 
-/// Pure path builder — no filesystem side effects. Use this from any
-/// read-only check. Callers that actually need the directory to exist
-/// should use `cache_dir_for` instead, which creates it.
+/// Pure path builder — no filesystem side effects; `cache_dir_for`
+/// creates the directory.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
     let key = cache_key(id, crate::ort_runtime::runtime_tag())?;
@@ -114,10 +107,8 @@ pub fn cache_dir_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
 
 /// Pure path to the ORT-graph-optimized model file for `(id, ep_name)`
 /// built from `weights`: each copy of the weights optimizes to a graph
-/// of its own. **No filesystem side effects** — mirrors the
-/// `cache_path_for` / `cache_dir_for` split. Read sites poll this and
-/// `fs::read` the path directly; write sites must call `cache_dir_for`
-/// first to ensure the parent directory exists.
+/// of its own. No filesystem side effects: writers call `cache_dir_for`
+/// first so the parent directory exists.
 pub fn optimized_model_path(id: ModelId, ep_name: &str, weights: Weights) -> Option<PathBuf> {
     cache_path_for(id, ep_name).map(|d| d.join(optimized_file_name(weights)))
 }
@@ -252,12 +243,9 @@ pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> 
 /// older prunr install or model bump left it behind. Best-effort —
 /// any I/O error logs and falls back to leaving entries alone.
 ///
-/// Same-version processes race idempotently — each computes the same
-/// current key, leaves it alone, and the `remove_dir_all` loser sees
-/// `NotFound`. Cross-version processes (rare: user upgrades while a
-/// prior instance still runs) degrade benignly: the upgraded process
-/// deletes the old key before the old process opens it, so the old
-/// process gets a cache miss and rebuilds cold rather than crashing.
+/// Safe across processes: same-version ones agree on the current key
+/// and the `remove_dir_all` loser sees `NotFound`; an older instance
+/// still running just gets a cache miss and rebuilds cold.
 pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
     let Some(current_path) = cache_path_for(id, ep_name) else { return };
     remove_shared_graph(&current_path);
@@ -265,8 +253,6 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
     let Some(current_name) = current_path.file_name().map(|n| n.to_owned()) else { return };
     let our_prefix = format!("{}-", id.stable_name());
 
-    // `read_dir` returns `Err(NotFound)` when the directory hasn't been
-    // created yet — common before any session has populated the cache.
     let entries = match std::fs::read_dir(&ep_dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -307,9 +293,7 @@ fn remove_shared_graph(entry: &Path) {
 }
 
 /// Wipe every compiled-model cache entry for `id` across **all** EP
-/// subdirs. Called when an OnDemand model is uninstalled via Model
-/// Store — the source weights are gone so the cached compiled
-/// artifacts can never be used again. Returns total bytes reclaimed
+/// subdirs, once its weights are gone. Returns total bytes reclaimed
 /// (best-effort; based on a pre-removal walk).
 pub fn clear_for_model(id: ModelId) -> u64 {
     let Some(root) = cache_root() else { return 0 };
@@ -367,10 +351,7 @@ pub fn clear_all() -> u64 {
     bytes
 }
 
-/// Recursive directory size with depth bound, for the bytes-reclaimed
-/// reports. Skips entries beyond
-/// `MAX_WALK_DEPTH` so a symlink loop terminates instead of stack-
-/// overflowing.
+/// Directory size in bytes, skipping entries past `MAX_WALK_DEPTH`.
 fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
     if depth > MAX_WALK_DEPTH { return Ok(0); }
     let mut total = 0u64;

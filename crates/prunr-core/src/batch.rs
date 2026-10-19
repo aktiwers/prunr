@@ -31,30 +31,22 @@ pub fn engine_pool_size(model: ModelKind, jobs: usize, cpu_only: bool, provider:
 /// parallel-build path uses the global pool and could deadlock under
 /// nested rayon.
 ///
-/// During parallel build (`pool_size > 1`, non-DirectML) the peak RSS
-/// briefly doubles relative to sequential build because both ORT
-/// sessions hold their working set live at the same time
-/// (~400 MB-1 GB peak for 5-13 s instead of staggered ~200-500 MB).
-/// The window is short and the wall-clock win is large; surface only
-/// if a low-RAM user reports OOMing during pool init.
+/// A parallel build briefly doubles peak RSS (~400 MB-1 GB for 5-13 s
+/// instead of staggered ~200-500 MB), accepted for the wall-clock win.
 pub fn create_engine_pool(
     model: ModelKind,
     jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
     let pool_size = engine_pool_size(model, jobs, cpu_only, &OrtEngine::detect_active_provider());
-    // With many engines, distribute CPU threads evenly to avoid oversubscription.
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
         ort_intra_threads(pool_size)
     };
 
-    // Build engines in parallel where the EP allows it. CPU, OpenVINO,
-    // CUDA, CoreML are thread-safe during session creation. DirectML
-    // is NOT — `commit_from_memory` on parallel threads has triggered
-    // AbiCustomRegistry races in the wild — so fall back to sequential
-    // when DirectML is the active provider.
+    // DirectML session creation is not thread-safe: parallel
+    // `commit_from_memory` raced in AbiCustomRegistry.
     let serial = pool_size <= 1 || crate::engine::directml_active();
 
     // Held for the whole pool: a bundled model unpacks once for every
@@ -68,19 +60,14 @@ pub fn create_engine_pool(
     }
 }
 
-/// Calculate ORT intra-op thread count to prevent oversubscription.
-///
-/// Formula: num_cpus / rayon_workers (minimum 1)
-///
-/// With 8 CPUs and 4 rayon workers, each worker's ORT session gets 2 intra-op threads.
-/// Total threads = 4 workers × 2 intra-op = 8 = num_cpus. No oversubscription.
+/// ORT intra-op threads per rayon worker, so workers × threads stays at
+/// num_cpus (minimum 1).
 pub fn ort_intra_threads(rayon_workers: usize) -> usize {
     let cpus = num_cpus::get();
     let workers = rayon_workers.max(1);
     (cpus / workers).max(1)
 }
 
-/// Build a rayon ThreadPool with exactly `jobs` worker threads.
 fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
     ThreadPoolBuilder::new()
         .num_threads(jobs.max(1))
@@ -91,17 +78,12 @@ fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
 /// Process multiple images in parallel using a rayon thread pool.
 ///
 /// # Arguments
-/// - `images`: Slice of image byte slices (PNG, JPEG, WebP, BMP)
-/// - `model`: Which model to use for all images in this batch
+/// - `images`: image bytes (PNG, JPEG, WebP, BMP)
 /// - `jobs`: Desired parallelism; the pool is sized by `engine_pool_size`.
 /// - `progress_for`: the progress handle for image `idx`.
 ///
-/// # Returns
-/// `Vec<Result<ProcessResult, CoreError>>` — one entry per input image, in input order.
-///
-/// # Engine Pool
-/// Engines are created upfront (not per-image). The rayon pool is sized
-/// to match the engine count, so there's no Mutex contention.
+/// Returns one entry per input image, in input order. The rayon pool is
+/// sized to the engine count, so engines see no Mutex contention.
 pub fn batch_process<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -115,9 +97,6 @@ where
 }
 
 /// Like `batch_process` but with custom mask settings.
-///
-/// Uses engine pooling: engines are created upfront (not per-image),
-/// each with num_cpus/engines intra-op threads.
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,

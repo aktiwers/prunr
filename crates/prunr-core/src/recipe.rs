@@ -9,11 +9,8 @@ use crate::types::{ModelKind, EdgeScale, ComposeMode, LineStyle, SubjectEffect, 
 
 /// Tier 1: settings that require AI model inference.
 ///
-/// `line_strength` and `solid_line_color` are NOT here — those are applied
-/// AFTER TEED in the edge postprocess stage and live in `EdgeRecipe`.
-/// This lets a `line_strength` tweak fire a Tier 2 (EdgeRerun) instead of
-/// a full re-inference, as long as the cached edge tensor is still valid
-/// (i.e. `uses_edge_detection` hasn't changed).
+/// `line_strength` and `solid_line_color` live in `EdgeRecipe`: they apply
+/// after TEED, so a tweak is an EdgeRerun on the cached edge tensor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct InferenceRecipe {
     pub model: ModelKind,
@@ -63,7 +60,6 @@ impl From<&crate::EdgeSettings> for EdgeRecipe {
 
 /// Tier 2: mask postprocessing settings (gamma, contrast, edge refinement).
 /// Uses `f32::to_bits()` for exact float comparison.
-/// All fields are `Copy` types (u32, bool, enums), so `MaskRecipe: Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MaskRecipe {
     gamma_bits: u32,
@@ -139,7 +135,7 @@ pub enum OutputScale {
 }
 
 impl Default for OutputScale {
-    /// `X4` = native model output. This is the no-op default (the upscale model is trained at 4×).
+    /// Native model output: the upscale models are trained at 4×.
     fn default() -> Self { OutputScale::X4 }
 }
 
@@ -166,7 +162,6 @@ impl OutputScale {
 /// f32 knobs are kept as their bits so the recipe is `Eq` + `Hash`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct UpscaleRecipe {
-    /// `None` = upscale disabled (no upscale model selected).
     pub model: Option<prunr_models::ModelId>,
     pub output_scale: OutputScale,
     // ----- Tier-1 knobs (re-inference) -----
@@ -237,9 +232,8 @@ pub struct CompositeRecipe {
     /// change with a u64 compare instead of re-hashing every dispatch.
     #[serde(default)]
     pub bg_image_hash: Option<u64>,
-    /// How the bg image is positioned in the frame (Cover / Contain /
-    /// Stretch / Tile / Center). Independent of `bg_image_hash` so a fit
-    /// change with the same image still flips the recipe.
+    /// Independent of `bg_image_hash` so a fit change with the same image
+    /// still flips the recipe.
     #[serde(default)]
     pub bg_image_fit: crate::types::BgImageFit,
     #[serde(default)]
@@ -293,11 +287,8 @@ pub enum RequiredTier {
 }
 
 /// True when two `UpscaleRecipe` values differ ONLY in Tier-2 fields
-/// (sharpen, ai_blend, color_match). Used by `resolve_tier`
-/// to pick between `UpscaleTier2` (cheap, postprocess-only) and
-/// `UpscaleRerun` (re-inference).
+/// (sharpen, ai_blend, color_match).
 fn only_tier2_changed(old: &UpscaleRecipe, new: &UpscaleRecipe) -> bool {
-    // Tier-1 fields MUST be identical to qualify as Tier-2.
     old.model == new.model
         && old.output_scale == new.output_scale
         && old.pre_denoise_bits == new.pre_denoise_bits
@@ -334,11 +325,9 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
             // or input_transform drift is dead state — regenerate the mask
             // without lines instead of dispatching wasted EdgeRerun work.
             (true, false) => return RequiredTier::MaskRerun,
-            // Both edges off: only `input_transform` could differ here, and
-            // it's dead state with edges off (the field's only effect is on
-            // the TEED input). Fall through to mask/edge/composite checks
-            // so a simultaneous mask/edge/composite change still wins; if
-            // nothing else changed the bottom of the function returns Skip.
+            // Both edges off: only the dead `input_transform` can differ.
+            // Fall through so a simultaneous mask/edge/composite change
+            // still wins.
             (false, false) => {}
         }
     }

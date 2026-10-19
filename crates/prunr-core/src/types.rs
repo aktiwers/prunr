@@ -94,10 +94,8 @@ impl From<ModelKind> for prunr_models::ModelId {
 impl TryFrom<prunr_models::ModelId> for ModelKind {
     type Error = prunr_models::ModelId;
 
-    /// Maps seg + upscale + colorize ModelIds to ModelKind. Inpaint / SD / TAESD /
-    /// edge variants have no ModelKind mapping and return `Err(id)`;
-    /// callers must filter by category first (e.g. via `is_upscale()`
-    /// or `uses_segmentation()`) before reaching this conversion.
+    /// Inpaint / SD / TAESD / edge ids have no `ModelKind` and return
+    /// `Err(id)`; callers filter by category first.
     fn try_from(id: prunr_models::ModelId) -> Result<Self, Self::Error> {
         match id {
             prunr_models::ModelId::Silueta => Ok(ModelKind::Silueta),
@@ -117,12 +115,8 @@ impl TryFrom<prunr_models::ModelId> for ModelKind {
 }
 
 /// Line extraction mode. Determines which engines the pipeline uses.
-///
-/// `#[serde(alias = ...)]` preserves backward compatibility with v1 settings
-/// files that used the older `LinesOnly` / `AfterBgRemoval` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LineMode {
-    /// No line extraction
     Off,
     /// Line detection on the original image; segmentation skipped.
     #[serde(alias = "LinesOnly")]
@@ -336,7 +330,6 @@ pub struct EdgeSettings {
     pub solid_line_color: Option<[u8; 3]>,
     /// Dilate edge mask by N pixels after threshold — thickens thin lines.
     pub edge_thickness: u32,
-    /// Which detector output scale to read.
     pub edge_scale: EdgeScale,
     /// How the subject mask and edge mask combine in `LineMode::SubjectOutline`.
     /// Ignored in Off / EdgesOnly. Pure compose-time setting — changing it
@@ -502,7 +495,7 @@ impl ComposeMode {
     }
 
     /// The output alpha for a subject alpha `s` and an edge value `e`,
-    /// both 0..=255. Inlined into the row loops of the edge compositions.
+    /// both 0..=255.
     #[inline]
     pub fn alpha(self, s: i32, e: i32) -> u8 {
         match self {

@@ -26,7 +26,6 @@ pub fn process_image(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) 
     process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress)
 }
 
-/// Process a single image with custom mask settings.
 pub fn process_image_with_mask(
     img_bytes: &[u8],
     engine: &OrtEngine,
@@ -79,12 +78,8 @@ pub fn process_image_from_decoded(
         return Err(CoreError::Cancelled);
     }
 
-    // Inference + postprocess in one IoBinding scope.
-    //
-    // The output tensor view is borrowed from ORT's bound CPU buffer;
-    // postprocess consumes it in-place inside the closure so we never
-    // pay the `try_extract_array().to_owned()` clone (4 MB at BiRefNet
-    // 1024² — was ~11.9% of CLI batch wall time in the perf trace).
+    // Postprocess reads ORT's bound output buffer in place, skipping the
+    // `to_owned()` copy (4 MB at BiRefNet 1024², ~11.9% of CLI batch wall time).
     progress.step(Step::FindingSubject);
 
     let postprocess_opts = PostprocessOpts::new(mask, model);
@@ -123,7 +118,6 @@ pub fn infer_after_first_look(
 }
 
 /// Run inference only (Tier 1). Returns the raw model tensor without postprocessing.
-/// Use with `postprocess::tensor_to_mask()` + `postprocess::apply_mask()` for the full pipeline.
 /// Reports Finding the subject; the caller reports the steps it runs next.
 pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -> Result<crate::types::InferenceResult, CoreError> {
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
@@ -165,12 +159,8 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
             .map(|v| v.to_owned())
     })?;
 
-    // Force standard (row-major C-order, offset 0) layout before flattening.
-    // Some ORT execution providers (DirectML on Windows, plausibly CoreML on
-    // macOS) return tensors with GPU-mapped non-standard layouts; treating
-    // the raw backing Vec as C-order then gives garbage data downstream.
-    // `as_standard_layout()` is a no-op when already standard (CPU EP), and
-    // a single memcpy otherwise — trivial next to inference cost.
+    // Some EPs (DirectML, plausibly CoreML) return non-standard layouts;
+    // reading the backing Vec as C-order then gives garbage.
     let is_std_owned = raw_output.is_standard_layout();
     let h = raw_output.shape()[2];
     let w = raw_output.shape()[3];
@@ -195,9 +185,7 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
         // invariant: as_standard_layout always produces a contiguous view.
         standard.as_slice().unwrap().to_vec()
     };
-    // Diagnostic scans gated on tracing::debug!: each pass walks the
-    // full tensor (~16 MB for BiRefNet 1024²); skipping when the level
-    // isn't enabled saves a per-dispatch read pass.
+    // Walks the full ~16 MB tensor; skip unless DEBUG is on.
     if tracing::enabled!(tracing::Level::DEBUG) {
         let (lo, hi, mean) = crate::math::slice_stats(&tensor_data);
         let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
