@@ -486,7 +486,7 @@ impl PrunrApp {
         mode: prunr_core::selection::BrushMode,
     ) {
         let Some(embedding) = embedding else {
-            self.magic_brush_state.pending_sam_pick = Some(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode });
+            self.magic_brush_state.pending_sam_picks.push(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode });
             return;
         };
         let source_dims = self.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
@@ -513,8 +513,11 @@ impl PrunrApp {
                         let embedding = Arc::new(embedding);
                         item.magic_brush_embedding = Some(Arc::clone(&embedding));
                         tracing::info!(item_id = result.item_id, "SAM encoder embedding cached");
-                        if let Some(pick) = self.magic_brush_state.pending_sam_pick.take_if(|p| p.item_id == result.item_id) {
-                            self.pick_with_sam(pick.item_id, Some(embedding), pick.prompt, pick.mode);
+                        let picks: Vec<_> = self.magic_brush_state.pending_sam_picks
+                            .extract_if(.., |p| p.item_id == result.item_id)
+                            .collect();
+                        for pick in picks {
+                            self.pick_with_sam(pick.item_id, Some(Arc::clone(&embedding)), pick.prompt, pick.mode);
                         }
                     }
                     ctx.request_repaint();
