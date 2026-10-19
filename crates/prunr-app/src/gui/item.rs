@@ -1351,14 +1351,11 @@ impl BatchItem {
             self.edits = made.edits;
             return false;
         }
-        let cleared = made.selection.is_none();
         self.selection_mask = made.selection;
         self.selection_hash = hash;
         self.edits = made.edits;
-        if cleared {
-            self.selection_texture = None;
-            self.selection_tex_pending = None;
-            self.last_decode = None;
+        if self.selection_mask.is_none() {
+            self.invalidate_selection();
         }
         self.drop_correction_cache();
         self.commit(kind);
@@ -1731,16 +1728,12 @@ impl BatchItem {
                 upload(image, super::background_io::TexLanding::Selection { item_id, key, shown, feathered });
             }
             SelectionImage::Full { .. } => {
-                if self.selection_tex_pending == Some(key) {
-                    self.selection_tex_pending = None;
-                }
+                clear_if(&mut self.selection_tex_pending, key);
             }
             // A patch whose base texture has moved on is dropped; the
             // per-frame check asks again against the new base.
             SelectionImage::Patch { base_hash, pos, image } => {
-                if self.selection_tex_pending == Some(key) {
-                    self.selection_tex_pending = None;
-                }
+                clear_if(&mut self.selection_tex_pending, key);
                 if let Some(tex) = self.selection_texture.as_mut().filter(|t| current && t.key == (base_hash, key.1)) {
                     tex.texture.set_partial(pos, &image, egui::TextureOptions::LINEAR);
                     tex.key = key;
@@ -1760,9 +1753,7 @@ impl BatchItem {
         shown: Arc<prunr_core::selection::MaskArtifact>,
         feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
     ) -> bool {
-        if self.selection_tex_pending == Some(key) {
-            self.selection_tex_pending = None;
-        }
+        clear_if(&mut self.selection_tex_pending, key);
         if self.selection_hash != Some(key.0) || self.selection_mask.is_none() {
             return false;
         }
@@ -1804,9 +1795,7 @@ impl BatchItem {
                 true
             }
             None => {
-                if self.backdrop_tex_pending == Some(key) {
-                    self.backdrop_tex_pending = None;
-                }
+                clear_if(&mut self.backdrop_tex_pending, key);
                 false
             }
         }
@@ -1844,9 +1833,7 @@ impl BatchItem {
     /// The backdrop picture uploaded: it shows while it is still the
     /// backdrop. Returns whether it did.
     pub(crate) fn install_backdrop(&mut self, key: u64, texture: super::image_texture::ImageTexture) -> bool {
-        if self.backdrop_tex_pending == Some(key) {
-            self.backdrop_tex_pending = None;
-        }
+        clear_if(&mut self.backdrop_tex_pending, key);
         let current = self.backdrop_key() == Some(key);
         if current {
             self.backdrop_texture = Some((key, texture));
