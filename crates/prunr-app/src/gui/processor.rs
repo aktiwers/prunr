@@ -476,12 +476,12 @@ fn measure_depth(
     job: DepthJob,
     finder: &mut prunr_core::face::LazyFaceFinder,
 ) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
-    let DepthJob { input, cpu_only, faces, .. } = job;
+    let DepthJob { item_id, input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     admitted(descriptor)?;
     let (progress, run) = if slot.read().is_none() {
-        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label());
+        let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
         let run = slot.begin(initial);
         (prunr_core::Progress::new(Arc::new(run.clone())), Some(run))
     } else {
@@ -1126,7 +1126,7 @@ impl Processor {
         // a new stroke starts (and avoids the capsule showing the prior
         // stroke's last step count for one frame).
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint);
+        let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint, item_id);
         let run = self.dispatch_progress.begin(initial);
         let sink = PictureSink::of_run(item_id, run.clone(), self.picture_sender());
         let progress = sink.clone().into_progress().with_cancel(cancel.clone());
@@ -1740,7 +1740,7 @@ impl Processor {
         // Clear any sticky terminate flag from the prior dispatch's cancel.
         let _ = run_options.unterminate();
         // The run shows "Loading the model" until the first tile reports.
-        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale));
+        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale, item_id));
         // Release stores in `begin` pair with the Acquire load in
         // `upscale::tiling::upscale_tiled` (cancel flag) and in
         // `is_upscale_in_flight` (active flag).
@@ -1896,7 +1896,7 @@ impl Processor {
         let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
         admitted(descriptor)?;
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
-        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize));
+        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize, item_id));
         let done = self.colorize.begin(run.clone());
         let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(Arc::clone(&self.colorize.cancel));
         let engine_slot = Arc::clone(&self.colorize.warm);
@@ -1985,8 +1985,8 @@ impl Processor {
 
     /// A run's first snapshot: "Loading the model", counting images when
     /// it is one of several queued.
-    fn queued_initial(&self, kind: super::dispatch_progress::ProgressKind) -> super::dispatch_progress::DispatchProgress {
-        let mut initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label());
+    fn queued_initial(&self, kind: super::dispatch_progress::ProgressKind, item_id: u64) -> super::dispatch_progress::DispatchProgress {
+        let mut initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label()).on(item_id);
         initial.outer = self.queued_run_position();
         initial.outer_unit = initial.outer.map(|_| prunr_core::Unit::Image);
         initial
@@ -2037,7 +2037,7 @@ impl Processor {
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
         let run = self.dispatch_progress.read().is_none().then(|| {
-            self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()))
+            self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id))
         });
         let progress = PictureSink::of_face_search(item_id, run.clone(), current, self.picture_sender())
             .into_progress()

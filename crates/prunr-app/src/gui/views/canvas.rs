@@ -154,8 +154,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
 
     if let Some(progress) = app.processor.dispatch_progress() {
-        let preview = app.batch.selected_item().and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
-        if super::progress_widget::render(ui, canvas_rect, img_rect, &progress, preview) {
+        // A one-image run's tile map belongs over its own image; over
+        // another, only the capsule shows, naming the image it works on.
+        let shown = app.batch.selected_item().map(|i| i.id);
+        let here = progress.is_over(shown);
+        let elsewhere = progress.on.filter(|_| !here).and_then(|id| app.batch.find_by_id(id)).map(|i| i.filename.as_str());
+        let preview = app.batch.selected_item().filter(|_| here).and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
+        if super::progress_widget::render(ui, canvas_rect, img_rect.filter(|_| here), &progress, preview, elsewhere) {
             // Routing logic is the pure `cancel_target_for` fn — one
             // table-tested match instead of an inline copy.
             use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
