@@ -1005,13 +1005,6 @@ fn read_raw_seg_tensor(
     let h = height?;
     let w = width?;
     let expected = (h as usize) * (w as usize);
-    let head: Vec<f32> = data.iter().take(6).copied().collect();
-    tracing::debug!(
-        path = %p.display(), bytes_len = bytes.len(),
-        tensor_len = data.len(), expected_len = expected,
-        h, w, ?head,
-        "parent read seg tensor",
-    );
     if data.len() != expected {
         tracing::error!(
             path = %p.display(),
