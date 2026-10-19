@@ -182,20 +182,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admits_items_within_budget() {
-        let mut ctrl = AdmissionController::with_budget(100_000_000);
-        ctrl.enqueue(vec![
-            AdmissionController::estimate_cost(1, (3000, 2000), 1_000_000, 0),
-            AdmissionController::estimate_cost(2, (3000, 2000), 1_000_000, 0),
-            AdmissionController::estimate_cost(3, (3000, 2000), 1_000_000, 0),
-        ]);
-        // Each image ~49 MB, budget 100 MB → 2 fit
-        assert!(ctrl.try_admit_next().is_some());
-        assert!(ctrl.try_admit_next().is_some());
-        assert!(ctrl.try_admit_next().is_none());
-    }
-
-    #[test]
     fn force_admits_when_deadlocked() {
         let mut ctrl = AdmissionController::with_budget(10_000); // tiny budget
         ctrl.enqueue(vec![

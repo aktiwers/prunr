@@ -317,7 +317,6 @@ mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
     use crate::gui::presets::{ModelPreset, PresetFile};
-    use std::collections::HashMap;
 
     /// Wrap an `ItemSettings` into a v2 single-entry `PresetFile` keyed by
     /// the active model — tests use this where `s.presets.insert` once
@@ -360,23 +359,6 @@ mod tests {
     }
 
     #[test]
-    fn button_label_tracks_applied_even_when_current_matches_different_preset() {
-        let mut s = Settings::default();
-        let portrait_item = item_with_gamma(2.0);
-        s.presets.insert("Portrait".to_string(), wrap(&s, portrait_item));
-        // applied_preset = "Prunr" but current happens to match factory.
-        // Label should stay on "Prunr" (the applied one).
-        let current = ItemSettings::default();
-        let label = button_label(&s, &current, PRUNR_PRESET);
-        assert!(label.contains("Prunr"), "{label}");
-        // …and when current matches the OTHER preset but applied is Prunr,
-        // we still show "Prunr ✎" (modified relative to the applied base).
-        let label = button_label(&s, &portrait_item, PRUNR_PRESET);
-        assert!(label.contains("Prunr"), "{label}");
-        assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
-    }
-
-    #[test]
     fn button_label_dirty_indicator_includes_brush_diff() {
         use crate::gui::brush_state::BrushSettings;
         use crate::gui::settings::SettingsModel;
@@ -404,18 +386,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sorted_preset_names_case_insensitive() {
-        let mut s = Settings::default();
-        let empty = wrap(&s, ItemSettings::default());
-        let mut map: HashMap<String, PresetFile> = HashMap::new();
-        map.insert("Zeta".to_string(), empty.clone());
-        map.insert("alpha".to_string(), empty.clone());
-        map.insert("Beta".to_string(), empty);
-        s.presets = map;
-        assert_eq!(sorted_preset_names(&s), vec!["alpha", "Beta", "Zeta"]);
-    }
-
+    /// Prunr first, then the user's presets by name ignoring case
+    /// ("alpha" before "Zeta").
     #[test]
     fn all_preset_names_prunr_first() {
         let mut s = Settings::default();

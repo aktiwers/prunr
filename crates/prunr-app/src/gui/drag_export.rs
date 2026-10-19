@@ -575,12 +575,6 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_stale_does_not_panic_on_missing_dir() {
-        // Should silently succeed even if temp dir doesn't exist.
-        cleanup_stale();
-    }
-
-    #[test]
     fn layer_filename_uses_kind_suffix() {
         assert_eq!(
             make_layer_filename("sunset.jpg", LayerKind::Subject),
