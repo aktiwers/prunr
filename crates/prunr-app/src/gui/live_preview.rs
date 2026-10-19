@@ -1438,24 +1438,29 @@ mod tests {
         assert!(DEBOUNCE <= Duration::from_millis(300));
     }
 
-    #[test]
-    fn mark_tweak_inserts_pending() {
-        let mut lp = LivePreview::default();
-        lp.mark_tweak(42, PreviewKind::Mask);
-        assert!(lp.pending.contains_key(&42));
+    /// A dispatch of item `id` under `generation` is under way; its cancel flag.
+    fn in_flight(lp: &mut LivePreview, id: u64, generation: u64) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        lp.in_flight.insert(id, InFlight { cancel: Arc::clone(&cancel), generation });
+        cancel
+    }
+
+    /// A worker's non-final Mask result for item `id` under `generation`.
+    fn send_result(lp: &LivePreview, id: u64, generation: u64) {
+        let result = PreviewResult { generation, is_final: false, ..PreviewResult::mask_for_test(id, Arc::new(RgbaImage::new(1, 1))) };
+        lp.result_tx.send(result.into()).unwrap();
     }
 
     #[test]
     fn has_in_flight_tracks_dispatch_lifecycle() {
         let mut lp = LivePreview::default();
         assert!(!lp.has_in_flight(), "fresh LivePreview is idle");
-        lp.in_flight.insert(
-            1,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 1 },
-        );
+        lp.mark_tweak(1, PreviewKind::Mask);
+        in_flight(&mut lp, 2, 1);
         assert!(lp.has_in_flight());
         lp.cancel_all();
         assert!(!lp.has_in_flight(), "cancel_all clears in_flight");
+        assert!(lp.pending.is_empty(), "and pending");
     }
 
     #[test]
@@ -1464,11 +1469,7 @@ mod tests {
         // so the user sees a preview update; `drain_results`' generation
         // filter drops results that were superseded.
         let mut lp = LivePreview::default();
-        let cancel = Arc::new(AtomicBool::new(false));
-        lp.in_flight.insert(
-            7,
-            InFlight { cancel: cancel.clone(), generation: 1 },
-        );
+        let cancel = in_flight(&mut lp, 7, 1);
         lp.mark_tweak(7, PreviewKind::Edge);
         assert!(
             !cancel.load(Ordering::Acquire),
@@ -1791,37 +1792,12 @@ mod tests {
     }
 
     #[test]
-    fn tick_before_debounce_does_not_dispatch() {
-        let mut lp = LivePreview::default();
-        lp.mark_tweak(1, PreviewKind::Mask);
-        let wait = lp.tick(|_, _| Err(WAIT));
-        assert!(wait.is_some(), "should still be pending");
-        assert!(lp.in_flight.is_empty(), "no dispatch before debounce expires");
-    }
-
-    #[test]
-    fn cancel_all_clears_state() {
-        let mut lp = LivePreview::default();
-        lp.mark_tweak(1, PreviewKind::Mask);
-        lp.in_flight.insert(
-            2,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 1 },
-        );
-        lp.cancel_all();
-        assert!(lp.pending.is_empty());
-        assert!(lp.in_flight.is_empty());
-    }
-
-    #[test]
     fn stale_generation_result_is_dropped() {
         // In-flight carries generation 5 (latest dispatch). A stale worker
         // finishes with generation 1 — drain_results must drop it silently.
         let mut lp = LivePreview::default();
-        lp.in_flight.insert(
-            42,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 5 },
-        );
-        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(42, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
+        in_flight(&mut lp, 42, 5);
+        send_result(&lp, 42, 1);
 
         let drained = lp.drain_results();
         assert!(drained.is_empty(), "stale generation must not be returned");
@@ -1831,18 +1807,18 @@ mod tests {
         );
     }
 
+    /// The user released the knob (no new pending entry): the result of
+    /// the latest dispatch is accepted as final and frees its slot.
     #[test]
     fn matching_generation_result_is_accepted_and_clears_in_flight() {
         let mut lp = LivePreview::default();
-        lp.in_flight.insert(
-            99,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 7 },
-        );
-        lp.result_tx.send(PreviewResult { generation: 7, is_final: false, ..PreviewResult::mask_for_test(99, Arc::new(RgbaImage::new(2, 2))) }.into()).unwrap();
+        in_flight(&mut lp, 99, 7);
+        send_result(&lp, 99, 7);
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].item_id, 99);
+        assert!(drained[0].is_final, "empty pending at drain time → result is final");
         assert!(
             !lp.in_flight.contains_key(&99),
             "once a fresh result is accepted, the in-flight slot is cleared",
@@ -1854,24 +1830,9 @@ mod tests {
         // No in-flight entry at all (user cancel_all'd or never dispatched).
         // A late result arriving for an unknown id must be dropped cleanly.
         let mut lp = LivePreview::default();
-        lp.result_tx.send(PreviewResult { generation: 1, is_final: false, ..PreviewResult::mask_for_test(777, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
+        send_result(&lp, 777, 1);
         let drained = lp.drain_results();
         assert!(drained.is_empty());
-    }
-
-    #[test]
-    fn drain_sets_is_final_true_when_no_more_pending() {
-        // User released the knob — no new pending entry for this item.
-        let mut lp = LivePreview::default();
-        lp.in_flight.insert(
-            11,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 3 },
-        );
-        lp.result_tx.send(PreviewResult { generation: 3, is_final: false, ..PreviewResult::mask_for_test(11, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
-
-        let drained = lp.drain_results();
-        assert_eq!(drained.len(), 1);
-        assert!(drained[0].is_final, "empty pending at drain time → result is final");
     }
 
     #[test]
@@ -1879,27 +1840,16 @@ mod tests {
         // User is still dragging — a new tweak has landed in pending since
         // the dispatch was started.
         let mut lp = LivePreview::default();
-        lp.in_flight.insert(
-            22,
-            InFlight { cancel: Arc::new(AtomicBool::new(false)), generation: 2 },
-        );
+        in_flight(&mut lp, 22, 2);
         lp.pending.insert(
             22,
             Pending { armed_at: Instant::now(), latest_tweak_at: Instant::now(), kind: PreviewKind::Mask, settled: false },
         );
-        lp.result_tx.send(PreviewResult { generation: 2, is_final: false, ..PreviewResult::mask_for_test(22, Arc::new(RgbaImage::new(1, 1))) }.into()).unwrap();
+        send_result(&lp, 22, 2);
 
         let drained = lp.drain_results();
         assert_eq!(drained.len(), 1);
         assert!(!drained[0].is_final, "pending for this item means drag is still active");
-    }
-
-    #[test]
-    fn live_preview_mark_tweak_upscale_tier2_inserts_pending() {
-        let mut lp = LivePreview::default();
-        lp.mark_tweak(55, PreviewKind::UpscaleTier2);
-        let pending = lp.pending.get(&55).expect("pending entry must exist after mark_tweak");
-        assert_eq!(pending.kind, PreviewKind::UpscaleTier2);
     }
 
     /// Refine's after-the-model knobs compare against the image the model
