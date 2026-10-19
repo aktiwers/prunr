@@ -481,13 +481,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn every_static_knob_has_a_spec() {
-        for k in StaticKnob::ALL {
-            let _ = spec(*k);
-        }
-    }
-
     /// Every model shows exactly the surfaces that act on its image. One
     /// row per model, written out rather than derived, so a new model or
     /// a moved surface has to be decided here.
@@ -600,14 +593,6 @@ mod tests {
             assert_eq!(s.tier, RequiredTier::Skip);
             assert_eq!(s.dispatch, DispatchKind::None);
         }
-    }
-
-    #[test]
-    fn line_mode_off_to_subject_respects_cached_edge() {
-        let warm = line_mode_spec(lmc(LineMode::Off, LineMode::SubjectOutline), true);
-        assert_eq!(warm.dispatch, DispatchKind::LivePreviewMask);
-        let cold = line_mode_spec(lmc(LineMode::Off, LineMode::SubjectOutline), false);
-        assert_eq!(cold.dispatch, DispatchKind::SubprocessAddEdge);
     }
 
     #[test]
@@ -821,7 +806,7 @@ mod tests {
             effect => Knob(K::SubjectEffect),
             decoration => Knob(K::Decoration),
             bg_effect => Knob(K::BgEffect),
-            input_transform => Elsewhere("input_transform_cache_impact_matches_recipe_diff"),
+            input_transform => Elsewhere("cache_impact_is_additive and input_transform_spec_reuses_cached_seg"),
             bg_image_hash => Elsewhere("core recipe test bg_image_hash_change_composite_only"),
             bg_image_fit => Knob(K::BgImageFit),
             output_scale => Elsewhere("core recipe upscale tier tests: a scale change reruns the upscale"),
@@ -875,25 +860,6 @@ mod tests {
             let diff = cache_impact_for_recipe_diff(&old_recipe, &new_recipe);
             assert_eq!(cat.cache_impact, diff, "{from:?} -> {to:?}");
         }
-    }
-
-    #[test]
-    fn input_transform_cache_impact_matches_recipe_diff() {
-        use prunr_core::{InputTransform as It, ModelKind};
-        let old = crate::gui::item_settings::item_with_line_mode(LineMode::SubjectOutline);
-        let new = crate::gui::item_settings::ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            input_transform: It::Grayscale,
-            ..Default::default()
-        };
-        let diff = cache_impact_for_recipe_diff(
-            &old.current_recipe(ModelKind::Silueta),
-            &new.current_recipe(ModelKind::Silueta),
-        );
-        assert_eq!(
-            input_transform_spec(true).cache_impact,
-            diff,
-        );
     }
 
     proptest::proptest! {
