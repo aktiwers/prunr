@@ -89,56 +89,33 @@ fn has_knobs(style: &SubjectEffect) -> bool {
 /// The picked look's knobs. On the strip only the main one, and none for
 /// a look set by colours.
 fn params(ui: &mut Ui, style: &mut SubjectEffect, quick: bool) -> bool {
-    if !has_knobs(style) {
-        return false;
-    }
-    let mut changed = false;
     match style {
-        SubjectEffect::None | SubjectEffect::Desaturate | SubjectEffect::Invert | SubjectEffect::Sepia => {}
-        SubjectEffect::Threshold { level } => {
-            changed |= chip::slider_row(ui, "Level", level, 0..=255).changed;
-        }
-        SubjectEffect::Posterize { levels } => {
-            changed |= chip::slider_row(ui, "Levels", levels, 2..=8).changed;
-        }
-        SubjectEffect::Solarize { pivot } => {
-            changed |= chip::slider_row(ui, "Pivot", pivot, 0..=255).changed;
-        }
-        SubjectEffect::HueShift { degrees } => {
-            changed |= chip::slider_row(ui, "Degrees", degrees, -180..=180).changed;
-        }
-        SubjectEffect::Saturate { percent } => {
-            changed |= chip::slider_row(ui, "Percent", percent, 0..=300).changed;
-        }
+        SubjectEffect::None | SubjectEffect::Desaturate | SubjectEffect::Invert | SubjectEffect::Sepia => false,
+        SubjectEffect::Threshold { level } => chip::slider_row(ui, "Level", level, 0..=255).changed,
+        SubjectEffect::Posterize { levels } => chip::slider_row(ui, "Levels", levels, 2..=8).changed,
+        SubjectEffect::Solarize { pivot } => chip::slider_row(ui, "Pivot", pivot, 0..=255).changed,
+        SubjectEffect::HueShift { degrees } => chip::slider_row(ui, "Degrees", degrees, -180..=180).changed,
+        SubjectEffect::Saturate { percent } => chip::slider_row(ui, "Percent", percent, 0..=300).changed,
         SubjectEffect::ColorSplash { keep_hue, tolerance } => {
-            changed |= chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
+            let mut changed = chip::slider_row(ui, "Hue (degrees)", keep_hue, 0..=359).changed;
             if !quick {
                 changed |= chip::slider_row(ui, "Tolerance (\u{00b0})", tolerance, 0..=180).changed;
                 chip::kept_hues(ui, *keep_hue, *tolerance);
             }
+            changed
         }
-        SubjectEffect::Pixelate { block_size } => {
-            changed |= chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed;
+        SubjectEffect::Pixelate { block_size } => chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed,
+        SubjectEffect::Halftone { dot_spacing } => chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed,
+        _ if quick => false,
+        SubjectEffect::Duotone { dark: shadows, light: highlights }
+        | SubjectEffect::CrossProcess { shadow: shadows, highlight: highlights } => {
+            chip::color_row(ui, "Shadows", shadows) | chip::color_row(ui, "Highlights", highlights)
         }
-        SubjectEffect::Halftone { dot_spacing } => {
-            changed |= chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed;
-        }
-        _ if quick => {}
-        SubjectEffect::Duotone { dark, light } => {
-            changed |= chip::color_row(ui, "Shadows", dark);
-            changed |= chip::color_row(ui, "Highlights", light);
-        }
-        SubjectEffect::CrossProcess { shadow, highlight } => {
-            changed |= chip::color_row(ui, "Shadows", shadow);
-            changed |= chip::color_row(ui, "Highlights", highlight);
-        }
-        SubjectEffect::GradientMap { stops } => {
-            for (name, stop) in ["Shadow", "Dark mid", "Light mid", "Highlight"].into_iter().zip(stops.iter_mut()) {
-                changed |= chip::color_row(ui, name, stop);
-            }
-        }
+        SubjectEffect::GradientMap { stops } => ["Shadow", "Dark mid", "Light mid", "Highlight"]
+            .into_iter()
+            .zip(stops.iter_mut())
+            .fold(false, |changed, (name, stop)| chip::color_row(ui, name, stop) | changed),
     }
-    changed
 }
 
 /// How a look's tile is drawn: a gradient that suggests it, in the
