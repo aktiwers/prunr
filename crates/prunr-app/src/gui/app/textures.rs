@@ -13,6 +13,15 @@ impl PrunrApp {
         self.reconcile_selected(ctx);
     }
 
+    /// Another image is shown (picked by key or in the list, or just
+    /// loaded): the canvas fits it afresh, leaves Compare and fades it in.
+    pub(crate) fn on_selected_changed(&mut self, ctx: &egui::Context) {
+        self.zoom_state.reset();
+        self.show_original = false;
+        self.canvas_switch_id += 1;
+        self.sync_selected_batch_textures(ctx);
+    }
+
     /// Once per frame. On a selection change (detected here, so no
     /// selection path can forget it): free the background items' results,
     /// restore the selected one from history, leave Compare. Every frame:

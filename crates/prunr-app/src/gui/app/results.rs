@@ -1075,10 +1075,7 @@ impl PrunrApp {
             ctx.request_repaint();
             if loaded_count == 1 && channel_drained {
                 self.batch.selected_index = self.batch.items.len() - 1;
-                self.zoom_state.reset();
-                self.show_original = false;
-                self.canvas_switch_id += 1;
-                self.sync_selected_batch_textures(ctx);
+                self.on_selected_changed(ctx);
             }
             self.auto_process_imported(id_floor);
         }
