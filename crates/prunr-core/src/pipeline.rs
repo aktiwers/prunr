@@ -2,7 +2,7 @@ use image::DynamicImage;
 use ort::{inputs, value::Tensor};
 
 use crate::{
-    engine::{InferenceEngine, OrtEngine},
+    engine::OrtEngine,
     formats::{check_large_image, load_image_from_bytes},
     postprocess::{postprocess, PostprocessOpts},
     preprocess::preprocess,

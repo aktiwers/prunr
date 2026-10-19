@@ -22,7 +22,7 @@ use ort::value::TensorElementType;
 
 use crate::CoreError;
 use crate::math::round_u8;
-use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
+use crate::engine::{GraphOptimizationLevel, OrtEngine};
 
 /// Shared `RunOptions`: another thread calls `terminate()` on it to abort
 /// the running tile within ~50 ms instead of at the next tile boundary.
