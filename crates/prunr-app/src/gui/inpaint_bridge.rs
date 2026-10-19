@@ -457,11 +457,24 @@ fn end_if_dead(
     let Some(reason) = s.died() else { return };
     tracing::warn!(%reason, in_flight = inflight_generations.len(), "eraser worker ended");
     *sub_state = SubState::Idle;
+    remove_dead_stroke_files(crate::subprocess::protocol::ipc_temp_dir(), inflight_generations);
     let why = match reason {
         crate::subprocess::manager::Crash::OutOfMemory => "The eraser ran out of memory. Try a lighter eraser or a smaller region.",
         _ => "The eraser stopped unexpectedly. Erase again.",
     };
     fail_inflight(inflight_generations, res_tx, why);
+}
+
+/// The files the dead worker's strokes left: their source and mask, and
+/// the result it may have begun. A stroke queued since keeps its own,
+/// which a later generation names. On Linux they sit in RAM until quit.
+fn remove_dead_stroke_files(ipc_dir: &std::path::Path, inflight_generations: &HashMap<u64, u64>) {
+    use crate::subprocess::protocol::IpcKind;
+    for (&item_id, &generation) in inflight_generations {
+        let _ = std::fs::remove_file(IpcKind::InpaintImg.path_for_generation(ipc_dir, item_id, generation));
+        let _ = std::fs::remove_file(IpcKind::InpaintMask.path_for_generation(ipc_dir, item_id, generation));
+        let _ = std::fs::remove_file(IpcKind::InpaintOut.path_for(ipc_dir, item_id));
+    }
 }
 
 /// End every in-flight stroke with `error`.
@@ -485,6 +498,32 @@ fn shutdown_ready(sub_state: &mut SubState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dead worker's strokes leave no files behind; a stroke queued since
+    /// (a later generation) and another worker's files are left alone.
+    #[test]
+    fn a_dead_eraser_leaves_no_files_and_spares_the_next_stroke() {
+        use crate::subprocess::protocol::IpcKind;
+        let dir = tempfile::tempdir().unwrap();
+        let ipc = dir.path();
+        let dead = [
+            IpcKind::InpaintImg.path_for_generation(ipc, 1, 3),
+            IpcKind::InpaintMask.path_for_generation(ipc, 1, 3),
+            IpcKind::InpaintOut.path_for(ipc, 1),
+        ];
+        let kept = [
+            IpcKind::InpaintImg.path_for_generation(ipc, 1, 4),
+            IpcKind::InpaintMask.path_for_generation(ipc, 1, 4),
+            IpcKind::InpaintImg.path_for_generation(ipc, 2, 1),
+            IpcKind::Result.path_for(ipc, 1),
+        ];
+        for path in dead.iter().chain(&kept) {
+            std::fs::write(path, b"x").unwrap();
+        }
+        remove_dead_stroke_files(ipc, &HashMap::from([(1, 3)]));
+        assert!(dead.iter().all(|p| !p.exists()), "the dead stroke's files are gone");
+        assert!(kept.iter().all(|p| p.exists()), "the queued stroke's and others' stay");
+    }
 
     /// "Keep the Stable Diffusion eraser loaded" holds it until quit; only
     /// without it does an idle eraser go after the window.
