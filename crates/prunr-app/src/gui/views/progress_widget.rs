@@ -32,12 +32,16 @@ const KEYCAP_SIZE: f32 = 11.0;
 const STOPPING: &str = "Stopping";
 const FINISHING_CURRENT: &str = "Finishing the current tile";
 
-/// The capsule's two lines: what is happening, then how far along.
-fn capsule_lines(progress: &DispatchProgress, now: Instant) -> (&str, Option<String>) {
+/// The capsule's two lines: what is happening, then how far along, led
+/// by the image's name when the run is on an image not on the canvas.
+fn capsule_lines<'a>(progress: &'a DispatchProgress, now: Instant, elsewhere: Option<&str>) -> (&'a str, Option<String>) {
     if progress.cancelling {
         return (STOPPING, Some(FINISHING_CURRENT.to_string()));
     }
-    let detail: Vec<String> = progress.counter_text().into_iter().chain(progress.remaining_text(now)).collect();
+    let detail: Vec<String> = elsewhere.map(str::to_string).into_iter()
+        .chain(progress.counter_text())
+        .chain(progress.remaining_text(now))
+        .collect();
     (progress.step_label.as_ref(), (!detail.is_empty()).then(|| detail.join(" \u{b7} ")))
 }
 
@@ -52,18 +56,18 @@ struct CapsuleText {
     keycap: Arc<Galley>,
 }
 
-fn capsule_text(ui: &egui::Ui, painter: &Painter, progress: &DispatchProgress, max_text: f32, now: Instant) -> CapsuleText {
+fn capsule_text(ui: &egui::Ui, painter: &Painter, progress: &DispatchProgress, max_text: f32, now: Instant, elsewhere: Option<&str>) -> CapsuleText {
     let keys = super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::Cancel);
     let mut h = std::hash::DefaultHasher::new();
     (progress.step_label.as_ref(), progress.cancelling, progress.outer, progress.inner).hash(&mut h);
-    (progress.outer_unit, progress.inner_unit, progress.time_left(now), keys.as_ref(), max_text.to_bits()).hash(&mut h);
+    (progress.outer_unit, progress.inner_unit, progress.time_left(now), keys.as_ref(), max_text.to_bits(), elsewhere).hash(&mut h);
     let key = h.finish();
     let id = egui::Id::new("progress_capsule_text");
     let cached = ui.ctx().data(|d| d.get_temp::<CapsuleText>(id));
     if let Some(text) = cached.filter(|c| c.key == key) {
         return text;
     }
-    let (title, subtitle) = capsule_lines(progress, now);
+    let (title, subtitle) = capsule_lines(progress, now, elsewhere);
     let subtitle_color = if progress.cancelling { theme::CAUTION_TEXT } else { theme::TEXT_SECONDARY };
     let text = CapsuleText {
         key,
@@ -85,6 +89,7 @@ pub(crate) fn render(
     img_rect: Option<Rect>,
     progress: &DispatchProgress,
     preview: Option<egui::TextureId>,
+    elsewhere: Option<&str>,
 ) -> bool {
     let cancelling = progress.cancelling;
     let t = ui.ctx().input(|i| i.time) as f32;
@@ -94,7 +99,7 @@ pub(crate) fn render(
     }
 
     let max_text = (canvas_rect.width() - 260.0).max(CAPSULE_MIN_TEXT_WIDTH);
-    let CapsuleText { title, subtitle, cancel: cancel_label, keycap, .. } = capsule_text(ui, &painter, progress, max_text, Instant::now());
+    let CapsuleText { title, subtitle, cancel: cancel_label, keycap, .. } = capsule_text(ui, &painter, progress, max_text, Instant::now(), elsewhere);
     let subtitle_color = if cancelling { theme::CAUTION_TEXT } else { theme::TEXT_SECONDARY };
     let text_w = subtitle.as_ref().map_or(0.0, |g| g.size().x).max(title.size().x).max(CAPSULE_MIN_TEXT_WIDTH);
 
@@ -252,21 +257,31 @@ mod tests {
     #[test]
     fn the_capsule_names_the_step_then_the_counts() {
         let p = DispatchProgress { inner: (12, 49), ..DispatchProgress::new(ProgressKind::Upscale, Step::Upscaling.label()) };
-        let (title, sub) = capsule_lines(&p, Instant::now());
+        let (title, sub) = capsule_lines(&p, Instant::now(), None);
         assert_eq!(title, "Upscaling");
         assert_eq!(sub.as_deref(), Some("Step 12 of 49"));
+    }
+
+    /// A run on an image not on the canvas names that image first, so it
+    /// does not read as work on the one shown.
+    #[test]
+    fn a_run_on_another_image_names_it() {
+        let p = DispatchProgress { inner: (12, 49), ..DispatchProgress::new(ProgressKind::Upscale, Step::Upscaling.label()) };
+        let (title, sub) = capsule_lines(&p, Instant::now(), Some("beach.jpg"));
+        assert_eq!(title, "Upscaling");
+        assert_eq!(sub.as_deref(), Some("beach.jpg \u{b7} Step 12 of 49"));
     }
 
     #[test]
     fn a_step_with_nothing_counted_is_one_line() {
         let p = DispatchProgress::new(ProgressKind::Seg, Step::LoadingModel.label());
-        assert_eq!(capsule_lines(&p, Instant::now()), ("Loading the model", None));
+        assert_eq!(capsule_lines(&p, Instant::now(), None), ("Loading the model", None));
     }
 
     #[test]
     fn a_cancel_says_stopping_whatever_the_step() {
         let p = DispatchProgress { inner: (3, 8), cancelling: true, ..DispatchProgress::new(ProgressKind::Inpaint, Step::Denoising.label()) };
-        let (title, sub) = capsule_lines(&p, Instant::now());
+        let (title, sub) = capsule_lines(&p, Instant::now(), None);
         assert_eq!(title, STOPPING);
         assert_eq!(sub.as_deref(), Some(FINISHING_CURRENT));
     }

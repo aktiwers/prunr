@@ -84,6 +84,10 @@ pub struct DispatchProgress {
     pub finished: Arc<[prunr_core::TileRect]>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
+    /// The image a one-image run works on (an upscale, an erase, a face
+    /// search); `None` for a batch. Its tile map belongs over that image
+    /// only.
+    pub on: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,7 +122,19 @@ impl DispatchProgress {
             tile_states: Arc::default(),
             finished: Arc::new([]),
             pace: None,
+            on: None,
         }
+    }
+
+    /// This progress as a run on the image `item_id`.
+    pub fn on(self, item_id: u64) -> Self {
+        Self { on: Some(item_id), ..self }
+    }
+
+    /// Whether this progress belongs over the image `shown`: a batch's
+    /// does everywhere, a one-image run's only over its own image.
+    pub fn is_over(&self, shown: Option<u64>) -> bool {
+        self.on.is_none() || self.on == shown
     }
 
     /// Fold one pipeline report into the snapshot the widgets draw.
@@ -351,6 +367,19 @@ fn capitalise_first(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A batch's progress shows over any image; a one-image run's only
+    /// over its own, so switching images mid-run does not draw the run's
+    /// tiles over the new one.
+    #[test]
+    fn a_runs_progress_shows_over_its_own_image_only() {
+        let batch = DispatchProgress::new(ProgressKind::Seg, "x");
+        assert!(batch.is_over(Some(1)) && batch.is_over(Some(2)) && batch.is_over(None));
+        let run = DispatchProgress::new(ProgressKind::Upscale, "x").on(1);
+        assert!(run.is_over(Some(1)));
+        assert!(!run.is_over(Some(2)), "another image is shown");
+        assert!(!run.is_over(None), "nothing is shown");
+    }
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress { inner, ..DispatchProgress::new(ProgressKind::Upscale, "Upscaling") }
