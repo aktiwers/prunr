@@ -231,11 +231,7 @@ impl Settings {
         if is_v1 && !settings.presets.contains_key(LEGACY_PRESET) {
             let legacy_item = migrate_v1_item_settings(&value);
             if legacy_item != ItemSettings::default() {
-                let file = super::presets::PresetFile::single(DEFAULT_PRESET_MODEL, super::presets::ModelPreset {
-                    item_settings: legacy_item,
-                    brush: Default::default(),
-                    sd: None,
-                });
+                let file = super::presets::PresetFile::of_item_settings(legacy_item);
                 let _ = super::presets_fs::save(LEGACY_PRESET, &file);
                 settings.presets.insert(LEGACY_PRESET.to_string(), file);
             }

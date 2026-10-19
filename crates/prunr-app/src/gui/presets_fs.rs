@@ -19,7 +19,7 @@ use super::item_settings::ItemSettings;
 use super::presets::{
     model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
 };
-use super::settings::{DEFAULT_PRESET_MODEL, PRUNR_PRESET};
+use super::settings::PRUNR_PRESET;
 use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
 const PRESETS_SUBDIR: &str = "prunr/presets";
@@ -75,11 +75,7 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
         return None;
     }
     let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
-    Some(PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
-        item_settings,
-        brush: Default::default(),
-        sd: None,
-    }))
+    Some(PresetFile::of_item_settings(item_settings))
 }
 
 /// A malformed file is skipped with a warning, so one broken preset
@@ -189,15 +185,6 @@ fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()
     crate::fs_util::write_bytes_replacing(path, json.as_bytes())
 }
 
-fn merge_into(
-    file: &mut PresetFile,
-    model_id: prunr_models::ModelId,
-    mp: ModelPreset,
-) {
-    file.format_version = PRESET_FORMAT_VERSION;
-    file.models.insert(model_id_key(model_id), mp);
-}
-
 /// Write a preset off the UI thread, after every config write asked for
 /// before it. "Prunr" is never written.
 pub(crate) fn queue_save(name: &str, file: &PresetFile) {
@@ -220,7 +207,8 @@ pub(crate) fn queue_delete(name: &str) {
 /// come straight from `model_preset.sd.schedulers`: the caller carries
 /// over any prior bundles it wants to keep.
 pub(crate) fn merged(mut file: PresetFile, model_id: prunr_models::ModelId, model_preset: ModelPreset) -> PresetFile {
-    merge_into(&mut file, model_id, model_preset);
+    file.format_version = PRESET_FORMAT_VERSION;
+    file.models.insert(model_id_key(model_id), model_preset);
     file
 }
 
@@ -234,12 +222,7 @@ pub fn seed_builtins_once() {
         // batch reusing a name, must keep the user's file.
         let Some(path) = preset_path(name) else { continue };
         if path.exists() { continue; }
-        let file = PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
-            item_settings,
-            brush: Default::default(),
-            sd: None,
-        });
-        let _ = save(name, &file);
+        let _ = save(name, &PresetFile::of_item_settings(item_settings));
     }
     let _ = std::fs::write(&marker, b"");
 }

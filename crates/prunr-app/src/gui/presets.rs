@@ -17,8 +17,6 @@ use super::item_settings::ItemSettings;
 
 pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
 
-fn default_format_version() -> u32 { PRESET_FORMAT_VERSION }
-
 /// The `PresetFile.models` key; the same Debug-name format as
 /// `Settings.accepted_licenses`.
 pub(crate) fn model_id_key(id: ModelId) -> String {
@@ -43,7 +41,7 @@ pub(crate) struct PresetFile {
 impl Default for PresetFile {
     fn default() -> Self {
         Self {
-            format_version: default_format_version(),
+            format_version: PRESET_FORMAT_VERSION,
             models: HashMap::new(),
         }
     }
@@ -55,6 +53,11 @@ impl PresetFile {
             format_version: PRESET_FORMAT_VERSION,
             models: HashMap::from([(model_id_key(model), preset)]),
         }
+    }
+
+    /// A preset of image settings alone, filed under the default model.
+    pub(crate) fn of_item_settings(item_settings: ItemSettings) -> Self {
+        Self::single(super::settings::DEFAULT_PRESET_MODEL, ModelPreset { item_settings, ..Default::default() })
     }
 }
 
@@ -190,23 +193,17 @@ pub(crate) fn sd_preset_for_save(brush: &BrushSettings, model: ModelId) -> Optio
     if !model.is_sd_family() {
         return None;
     }
-    let mut schedulers = HashMap::new();
-    schedulers.insert(
-        brush.sd_scheduler,
-        SdSchedulerBundle {
-            steps: brush.sd_steps,
-            guidance_scale: brush.sd_guidance_scale,
-        },
-    );
-    let sd = SdPreset {
+    Some(SdPreset {
         prompt: brush.sd_prompt.clone(),
         negative_prompt: brush.sd_negative_prompt.clone(),
         use_taesd: brush.sd_use_taesd,
         seed: brush.sd_seed,
         active_scheduler: brush.sd_scheduler,
-        schedulers,
-    };
-    Some(sd)
+        schedulers: HashMap::from([(
+            brush.sd_scheduler,
+            SdSchedulerBundle { steps: brush.sd_steps, guidance_scale: brush.sd_guidance_scale },
+        )]),
+    })
 }
 
 /// Apply-time fuse: produce a unified `BrushSettings` from a stored
