@@ -611,6 +611,7 @@ mod tests {
             },
             SubprocessEvent::InpaintDone {
                 item_id: 3,
+                generation: 1,
                 rgba_path: PathBuf::from("/tmp/y"),
                 width: 100,
                 height: 100,
@@ -618,6 +619,7 @@ mod tests {
             },
             SubprocessEvent::InpaintError {
                 item_id: 4,
+                generation: 1,
                 error: "lama session failed".into(),
             },
         ];

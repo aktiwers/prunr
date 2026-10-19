@@ -1224,11 +1224,11 @@ impl Processor {
                 return;
             }
             let job = crate::subprocess::protocol::InpaintJob {
-                item_id, model_id: tuning.model, image_path, mask_path, sd_req,
+                item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
                 feather_px: tuning.feather_px,
                 sharpen: tuning.sharpen,
             };
-            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch { job, generation });
+            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(job));
         });
     }
 
