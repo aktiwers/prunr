@@ -796,7 +796,7 @@ fn decode_tile(
 }
 
 /// No masked pixel inside `tile`, read in place.
-fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
+fn rect_is_empty(mask: &GrayImage, tile: &Bbox) -> bool {
     let w = mask.width() as usize;
     let raw = mask.as_raw();
     (tile.y..tile.y + tile.h).all(|y| {
@@ -809,21 +809,12 @@ fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
 
-/// One planned inpaint tile, in image pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TilePlacement {
-    pub x: u32,
-    pub y: u32,
-    pub w: u32,
-    pub h: u32,
-}
-
 /// Lay tiles across `(width, height)` with `OVERLAP` overlap. Tiles at
 /// the right/bottom edges shift back to keep `TILE × TILE` inside the
 /// image. An image within TILE on both axes is one tile at its own size.
-pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
+pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<Bbox> {
     if width <= TILE && height <= TILE {
-        return vec![TilePlacement { x: 0, y: 0, w: width, h: height }];
+        return vec![Bbox { x: 0, y: 0, w: width, h: height }];
     }
     let step = TILE - OVERLAP;
     let mut xs: Vec<u32> = (0..)
@@ -856,7 +847,7 @@ pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
         for &x in &xs {
             let w = TILE.min(width - x);
             let h = TILE.min(height - y);
-            out.push(TilePlacement { x, y, w, h });
+            out.push(Bbox { x, y, w, h });
         }
     }
     out
@@ -867,13 +858,13 @@ pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
 /// one model run, and the most photo around the hole. On the grid a
 /// small stroke over a seam would run up to four tiles, each seeing it
 /// at its edge.
-fn tile_around(bbox: Bbox, width: u32, height: u32) -> Option<TilePlacement> {
+fn tile_around(bbox: Bbox, width: u32, height: u32) -> Option<Bbox> {
     let axis = |start: u32, len: u32, full: u32| {
         let size = TILE.min(full);
         (size == full || len + 2 * OVERLAP <= size).then(|| ((start + len / 2).saturating_sub(size / 2).min(full - size), size))
     };
     let ((x, w), (y, h)) = (axis(bbox.x, bbox.w, width)?, axis(bbox.y, bbox.h, height)?);
-    Some(TilePlacement { x, y, w, h })
+    Some(Bbox { x, y, w, h })
 }
 
 /// Tile blend weight: 0.0 at the edge, smoothstep up to 1.0 at
@@ -931,7 +922,7 @@ where
     let mut color_acc: Vec<[f32; 3]> = vec![[0.0; 3]; bbox_n];
 
     // Only tiles that touch the mask run; they are the tile map's layout.
-    let work: Vec<TilePlacement> = match tile_around(bbox, w, h) {
+    let work: Vec<Bbox> = match tile_around(bbox, w, h) {
         Some(tile) => vec![tile],
         None => plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(mask, t)).collect(),
     };
@@ -1049,7 +1040,7 @@ fn accumulate_tile(
     color_acc: &mut [[f32; 3]],
     weight_acc: &mut [f32],
     tile: &RgbaImage,
-    placement: &TilePlacement,
+    placement: &Bbox,
     bbox: Bbox,
     (img_w, img_h): (u32, u32),
 ) {
@@ -1151,7 +1142,7 @@ mod tests {
             }
             mask.put_pixel(102, 100, Luma([60]));
             let mask_box = mask_bbox(&mask, 1, 0).expect("a mask");
-            let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+            let work: Vec<Bbox> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
             let sink = std::sync::Arc::new(RecordingSink::default());
             let with = tile_compose(&img, &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
             let updates = sink.updates();
@@ -1210,7 +1201,7 @@ mod tests {
             ProgressUpdate::TilePreview(p) => Some(p),
             _ => None,
         }).collect();
-        let work: Vec<TilePlacement> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
+        let work: Vec<Bbox> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
         assert!(work.len() > 1 && parts.len() == work.len(), "one part per tile the mask touches");
         for (t, part) in work.iter().zip(&parts) {
             let rect = (t.x, t.y, t.w, t.h);
@@ -1708,7 +1699,7 @@ mod tests {
     #[test]
     fn plan_tiles_keeps_a_photo_up_to_one_tile_whole() {
         for (w, h) in [(400, 300), (TILE, TILE)] {
-            assert_eq!(plan_tiles(w, h), [TilePlacement { x: 0, y: 0, w, h }], "{w}×{h}");
+            assert_eq!(plan_tiles(w, h), [Bbox { x: 0, y: 0, w, h }], "{w}×{h}");
         }
     }
 
