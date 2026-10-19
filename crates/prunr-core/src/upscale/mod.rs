@@ -93,16 +93,21 @@ fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
     }
 }
 
-/// Runs the model at its `native_scale` (output / input size, from the
-/// REGISTRY). Alpha is NOT handled here; the public callers compose it.
-fn run_upscale_native(
+/// Upscale on a caller-owned engine, so a warm engine skips the 1-3 s
+/// Level3 graph-optimization stall. Runs at the model's native scale,
+/// then Lanczos3-resamples to `scale` when they differ; alpha is
+/// resampled separately. Peak RAM as `upscale_rgba`.
+pub fn upscale_rgba_with_engine(
     input: &RgbaImage,
     engine: &OrtEngine,
-    descriptor: &prunr_models::ModelDescriptor,
-    native_scale: u32,
+    model_id: prunr_models::ModelId,
+    scale: u32,
     progress: &Progress,
     terminate: Option<&Arc<UpscaleRunOptions>>,
 ) -> Result<RgbaImage, CoreError> {
+    let descriptor = prunr_models::descriptor(model_id)
+        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
+    let knobs = upscale_knobs(descriptor)?;
     let tile_size = descriptor
         .recommended_tile
         .map(|tile| tile_for_provider(tile, engine.active_provider()))
@@ -112,7 +117,6 @@ fn run_upscale_native(
         )))?;
 
     let tile_multiple = descriptor.tile_size_multiple;
-    let knobs = upscale_knobs(descriptor)?;
     let overlap = knobs.tile_overlap();
 
     let input_name = knobs.input_name;
@@ -127,7 +131,7 @@ fn run_upscale_native(
             .and_then(|vt| vt.tensor_type());
         Ok(matches!(dtype, Some(TensorElementType::Float16)))
     })?;
-    let ns = native_scale;
+    let ns = knobs.native_scale;
 
     let run_tile = |rgb_tile: &RgbImage, padded_w: u32, padded_h: u32| -> Result<RgbImage, CoreError> {
         const INV_255: f32 = 1.0 / 255.0;
@@ -158,7 +162,8 @@ fn run_upscale_native(
     };
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
-    upscale_tiled(input, ns, cfg, run_tile, progress)
+    let native = upscale_tiled(input, ns, cfg, run_tile, progress)?;
+    Ok(fit_to_scale(native, input, scale))
 }
 
 /// `rgb` as a planar CHW tensor of `shape`, each channel value mapped
@@ -191,26 +196,6 @@ fn classify_run_error(err: ort::Error) -> CoreError {
     } else {
         CoreError::Inference(format!("upscale: inference failed: {msg}"))
     }
-}
-
-/// Upscale on a caller-owned engine, so a warm engine skips the 1-3 s
-/// Level3 graph-optimization stall. Runs at the model's native scale,
-/// then Lanczos3-resamples to `scale` when they differ; alpha is
-/// resampled separately. Peak RAM as `upscale_rgba`.
-pub fn upscale_rgba_with_engine(
-    input: &RgbaImage,
-    engine: &OrtEngine,
-    model_id: prunr_models::ModelId,
-    scale: u32,
-    progress: &Progress,
-    terminate: Option<&Arc<UpscaleRunOptions>>,
-) -> Result<RgbaImage, CoreError> {
-    let descriptor = prunr_models::descriptor(model_id)
-        .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
-
-    let knobs = upscale_knobs(descriptor)?;
-    let native_result = run_upscale_native(input, engine, descriptor, knobs.native_scale, progress, terminate)?;
-    Ok(fit_to_scale(native_result, input, scale))
 }
 
 /// Bring the model's native output to `scale ×` the input: returned as
