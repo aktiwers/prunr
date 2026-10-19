@@ -1,21 +1,9 @@
-//! Processing-pipeline coordinator: subprocess worker channels, admission
-//! control, live preview, and per-batch dispatch state.
+//! Processing-pipeline coordinator: worker channels, cancellation, live
+//! preview, admission, and the dispatch-time recipe that attributes a
+//! result to the settings that made it while the user keeps editing.
 //!
-//! Owns:
-//! - The worker bridge channels (`worker_tx` / `worker_rx`) — UI thread sends
-//!   `WorkerMessage`, drains `WorkerResult` non-blockingly each frame.
-//! - The shared cancellation flag (`Arc<AtomicBool>`) — read by the worker
-//!   bridge to short-circuit a batch in flight.
-//! - The in-process Tier 2 live-preview dispatcher.
-//! - Admission controller state during streaming batches.
-//! - The dispatch-time recipe snapshot (used to attribute completed results
-//!   to the settings that produced them, even if the user keeps editing).
-//!
-//! Does NOT own:
-//! - The worker bridge thread itself — that's spawned by `worker::spawn_worker`
-//!   at app startup. We just hold the channel ends.
-//! - `BatchManager` (per the cross-coordinator borrow rule). Methods that
-//!   operate on the batch take `&mut BatchManager` per call, never as a field.
+//! Does NOT own the worker bridge thread (only its channel ends) or
+//! `BatchManager`, which methods borrow per call.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -90,21 +78,16 @@ impl CancelRegistry {
     }
 }
 
-/// Active dispatch's recipe + the set of items still expected to deliver.
-/// All items in a batch share one recipe (the toolbar broadcasts current
-/// settings at dispatch). `take_recipe` removes an item; the slot self-
-/// cleans when the last pending item completes — so a late ImageDone after
-/// a settings edit can't pick up the wrong recipe.
+/// Active dispatch's recipe and the items still to deliver. The slot
+/// empties with the last one, so a late ImageDone after a settings edit
+/// can't pick up the wrong recipe.
 struct InFlightBatch {
     /// The id the worker's completion names it by.
     id: u64,
     recipe: ProcessingRecipe,
     pending: HashSet<u64>,
-    /// Total items registered for this dispatch — frozen at
-    /// `track_dispatch` time. Used by `current_dispatch_progress` to
-    /// report "done / total" scoped to the *current* dispatch, so
-    /// previously-Done items from prior dispatches don't inflate the
-    /// counter when the user reprocesses a single item.
+    /// Frozen at dispatch, so progress counts only this dispatch, not
+    /// items processed before it.
     total: usize,
 }
 
@@ -113,13 +96,10 @@ pub(crate) enum InpaintOutcome {
     /// `fill_scale` is how large the fill ran (1 is full size);
     /// `generation` is the dispatch's own, so a fresher stroke wins.
     Done { rgba: image::RgbaImage, fill_scale: f32, generation: u64 },
-    /// Drives the "Erase cancelled" toast so the user gets explicit
-    /// feedback that Esc / the Cancel button took effect (vs. a silent
-    /// failure or a stale-result drop).
+    /// Shows "Erase cancelled", so Esc / Cancel reads as taken, not lost.
     Cancelled,
-    /// A non-Cancelled error (e.g. the SD-bundle RAM guard refused to
-    /// load), shown as a toast so the user sees WHY the stroke did
-    /// nothing instead of guessing it was lost.
+    /// Any other error (e.g. the SD RAM guard refused to load), shown so
+    /// the user sees why the stroke did nothing.
     Failed(String),
 }
 
@@ -130,9 +110,7 @@ pub(crate) struct LandedFill {
     pub fill_scale: f32,
 }
 
-/// Result from a background SAM encoder thread. Carries the embedding or
-/// a human-readable error string. The item_id lets pump_sam_encoder_results
-/// route the result to the right BatchItem even if the user switched selection.
+/// The item_id routes the result even if the user switched images.
 pub(crate) struct SamEncoderResult {
     pub(crate) item_id: u64,
     pub(crate) result: Result<prunr_core::sam::SamEmbedding, String>,
@@ -148,10 +126,9 @@ pub(crate) struct FacesResult {
     pub(crate) stopped: bool,
 }
 
-/// Single-slot warm engine for an in-process model run (upscale,
-/// colorize). Shared with the dispatch thread so session construction
-/// (seconds on a cold EP) never runs on the GUI thread; single-slot
-/// because caching several engines of one kind is YAGNI.
+/// Warm engine for an in-process run (upscale, colorize), shared with the
+/// dispatch thread so a session build (seconds on a cold EP) never runs on
+/// the GUI thread.
 type WarmEngine =
     Arc<Mutex<Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)>>>;
 
@@ -215,9 +192,7 @@ struct RunQueue {
     total: u32,
 }
 
-/// An in-process model run, one at a time (upscale, colorize): its
-/// in-flight and cancel flags, the channel its result comes back on, and
-/// its warm engine.
+/// An in-process model run, one at a time (upscale, colorize).
 struct RunSlot<R> {
     active: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -622,12 +597,8 @@ impl prunr_core::ProgressSink for PictureSink {
     }
 }
 
-/// Result delivered from a background upscale thread back to the main thread.
-/// Keyed on `item_id`; only one upscale is in flight at a time (gated by
-/// `can_process_intent`), so generation-based stale-drop is not needed today.
-/// The `recipe` is captured at dispatch time so the pump can stamp
-/// `item.applied_recipe` against what actually ran — drift between the
-/// running dispatch and a user mid-edit is invisible to the recipe.
+/// `recipe` is captured at dispatch, so `applied_recipe` names what ran,
+/// not an edit made mid-run.
 pub(crate) struct UpscaleResult {
     pub item_id: u64,
     /// The image's run it answers.
@@ -659,9 +630,6 @@ pub(crate) struct ColorizeOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
-/// Pure admission check: returns `true` when `free_ram_mb >= working_set_mb`.
-/// Extracted as a free function so unit tests can exercise it without
-/// constructing a `Processor`.
 pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
     free_ram_mb >= working_set_mb
 }
@@ -693,8 +661,7 @@ pub(crate) fn build_inference_input(input: &Arc<image::RgbaImage>, pre_denoise: 
     }
 }
 
-/// Eraser-specific tuning passed from `BrushSettings` into the dispatch.
-/// Bundled into a struct to keep `dispatch_inpaint` from sprawling.
+/// Eraser tuning from `BrushSettings`, captured at dispatch.
 #[derive(Clone, Debug)]
 pub(crate) struct InpaintTuning {
     pub sharpen: f32,
@@ -702,28 +669,21 @@ pub(crate) struct InpaintTuning {
     pub grow_px: f32,
     /// How large the hole is filled.
     pub fill_scale: prunr_core::inpaint::FillScale,
-    /// Which eraser model runs (LaMaFp32, BigLaMa, …). For
-    /// SD-family models, the choice between `SdV15InpaintFp16`
-    /// (standard SD weights) and `SdV15LcmInpaintFp16` (LCM weights)
-    /// is driven by the user's scheduler pick upstream
-    /// (`Settings::lcm_routing_active`).
+    /// For SD, standard vs LCM weights are already resolved from the
+    /// scheduler pick.
     pub model: prunr_models::ModelId,
     /// SD-only: text prompt; ignored for LaMa-family models.
     pub sd_prompt: String,
     pub sd_negative_prompt: String,
     pub sd_guidance_scale: f32,
-    /// SD-only: scheduler kind. Carried through to the worker via
-    /// `SdInpaintRequest::scheduler` so the right denoise math runs.
     pub sd_scheduler: super::brush_state::SdScheduler,
-    /// SD-only: number of denoise steps.
     pub sd_steps: u32,
     /// RORem only: its denoise steps.
     pub rorem_steps: u32,
-    /// SD-only: pinned RNG seed for reproducibility. `None` = random.
+    /// SD-only: `None` = random seed.
     pub sd_seed: Option<u64>,
-    /// SD-only: post-gate TAESD selection — already resolved by the
-    /// caller against user preference + install state. Dispatch
-    /// consumes verbatim; no further gating, no scheduler coupling.
+    /// SD-only: already resolved against preference and install state;
+    /// used verbatim.
     pub use_taesd: bool,
     /// SD-only: how the pipeline runs, planned by the caller from the
     /// settings and the free RAM.
@@ -762,16 +722,11 @@ impl Default for InpaintTuning {
     }
 }
 
-/// The CFG an SD dispatch runs with.
-///
-/// `model` is the *actually-dispatched* model id (after
-/// `Settings::lcm_routing_active` resolution upstream). The clamp
-/// derives from the model, NOT from the user's scheduler request —
-/// picking the LCM scheduler without the LCM bundle installed must NOT
-/// clamp CFG against standard SD weights.
+/// The CFG an SD dispatch runs with. The clamp follows the dispatched
+/// `model`, NOT the scheduler pick: the LCM scheduler without the LCM
+/// bundle installed must not clamp CFG on standard SD weights.
 pub(crate) fn effective_cfg(model: prunr_models::ModelId, user_cfg: f32) -> f32 {
-    // LCM weights are calibrated for low CFG (model card: 1.0–2.0).
-    // Standard SD passes the user's CFG straight through.
+    // LCM weights are calibrated for CFG 1.0–2.0 (model card).
     if model == prunr_models::ModelId::SdV15LcmInpaintFp16 {
         user_cfg.clamp(1.0, 2.0)
     } else {
@@ -782,14 +737,10 @@ pub(crate) fn effective_cfg(model: prunr_models::ModelId, user_cfg: f32) -> f32 
 pub(crate) struct Processor {
     pub(crate) worker_tx: mpsc::Sender<WorkerMessage>,
     pub(crate) worker_rx: mpsc::Receiver<WorkerResult>,
-    /// Cancellation state shared with the worker bridge. `global` stops the
-    /// whole batch; per-item entries drop individual items at the next
-    /// dispatch check.
     pub(crate) cancels: CancelRegistry,
     pub(crate) live_preview: LivePreview,
-    /// Active admission controller (present only during streaming batches).
+    /// Present only during streaming batches.
     pub(crate) admission: Option<AdmissionController>,
-    /// Sender for streaming additional items to the worker.
     pub(crate) admission_tx: Option<mpsc::Sender<WorkItem>>,
     /// The batch admission feeds: images it admits join that batch.
     admission_batch: Option<u64>,
@@ -807,53 +758,32 @@ pub(crate) struct Processor {
     next_batch: u64,
     /// The progress run the in-flight batch shows through.
     seg_run: Option<super::dispatch_progress::RunSink>,
-    /// Inpaint dispatch state. Per-item generation counter discards
-    /// stale results when the user paints a fresh stroke before the
-    /// previous one finishes. `inpaint_pending` is the count of
-    /// dispatches not yet drained — the canvas reads it via
-    /// `is_inpaint_in_flight` to show a progress overlay.
+    /// The per-item generation drops a result a fresher stroke overtook;
+    /// `inpaint_pending` counts dispatches not yet drained.
     inpaint_tx: mpsc::Sender<(u64, InpaintOutcome)>,
     inpaint_rx: mpsc::Receiver<(u64, InpaintOutcome)>,
     inpaint_latest_generation: HashMap<u64, u64>,
     inpaint_pending: HashMap<u64, u32>,
-    /// Per-item cancel flag for the in-flight inpaint stroke. The flag
-    /// is checked between LaMa tiles and between SD UNet steps; when
-    /// set, the rayon job returns `CoreError::Cancelled` early and the
-    /// drain path ignores the result. Cancel button + Esc key both
-    /// flip the flag for the currently-selected item.
+    /// Checked between LaMa tiles and between SD UNet steps.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The run each in-flight eraser stroke reports to.
     inpaint_runs: HashMap<u64, PictureSink>,
-    /// Channels to the dedicated SD-inpaint subprocess bridge thread.
-    /// LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path; only
-    /// SD-family dispatches go through these. Bridge spawns the
-    /// subprocess lazily and drops it on a 5-min idle timer.
+    /// SD-family erasers only; the rest run in process. The bridge spawns
+    /// its subprocess lazily and drops it after 5 min idle.
     inpaint_bridge_tx: mpsc::Sender<InpaintBridgeMsg>,
     inpaint_bridge_rx: mpsc::Receiver<InpaintBridgeResult>,
-    /// The upscale run: a single image is upscaled on a background
-    /// thread; live tile progress is published to `dispatch_progress`
-    /// (the canvas overlay reads it); the thread checks the cancel flag
-    /// between tiles. Its warm engine is kept across consecutive upscales
-    /// so the second click skips the 1-3s graph-optimization stall
-    /// (Level3 for ESRGAN, Level2 for HAT); evicted on a switch away from
-    /// the cached ModelKind and on full release.
+    /// Cancel is checked between tiles. The warm engine spares the next
+    /// upscale the 1-3 s graph-optimisation stall; evicted on a model
+    /// switch and on full release.
     upscale: RunSlot<UpscaleResult>,
     /// The images still to run after the one in flight, when Process was
     /// pressed with several ticked: an upscale or colorize takes one image
     /// at a time.
     run_queue: Mutex<RunQueue>,
-    /// Shared ORT `RunOptions` for the in-flight upscale session. The GUI
-    /// thread calls `.terminate()` on this from `cancel_upscale()` to
-    /// abort the running `Session::run` within ~50ms instead of waiting
-    /// for the next tile boundary's cancel-flag check. Reset via
-    /// `.unterminate()` before each new dispatch.
-    ///
-    /// Lazy because `RunOptions::new()` requires the ORT runtime to be
-    /// loaded — `Processor::new()` runs from tests that don't init ORT,
-    /// and an eager construction blocks on dlopen of the unloaded
-    /// runtime (deadlock observed 2026-05-16 in the workspace lib test
-    /// pass). First dispatch (which already requires ORT) initializes
-    /// the slot; cancel before any dispatch is a no-op.
+    /// `terminate()` aborts the running `Session::run` within ~50 ms
+    /// instead of at the next tile. Lazy: `RunOptions::new()` needs the
+    /// ORT runtime loaded, and tests build a Processor without it (eager
+    /// construction deadlocks on dlopen).
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
     /// The pictures runs make for their items (`PictureSink`).
     picture_tx: mpsc::Sender<RunPicture>,
@@ -861,16 +791,10 @@ pub(crate) struct Processor {
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
-    /// The colorize run. Its cancel flag is read before and after the
-    /// model's one run; its engine is released with every other session
-    /// on a model switch.
+    /// Its cancel flag is read before and after the model's one run.
     colorize: RunSlot<ColorizeResult>,
-    /// SAM 2 encoder results channel. The rayon job sends here when
-    /// the embedding is ready (or an error). Drained each frame from
-    /// pump_sam_encoder_results (called via drain_background_channels).
     sam_encoder_tx: mpsc::Sender<SamEncoderResult>,
     sam_encoder_rx: mpsc::Receiver<SamEncoderResult>,
-    /// SAM 2 decoder results channel. One result per click/stroke dispatch.
     sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
     sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
     sam_sessions: SamSessionSlot,
@@ -1110,11 +1034,9 @@ impl Processor {
         self.upscale.in_flight() || self.colorize.in_flight()
     }
 
-    /// Per-item generation counter ensures a fresh stroke supersedes the
-    /// previous in-flight job at drain time — see `drain_inpaint_results`.
-    /// SD-family models route through the inpaint subprocess bridge for
-    /// process isolation; LaMa / Big-LaMa / MI-GAN stay on the in-process
-    /// rayon path (low RAM footprint, no isolation pressure).
+    /// A fresh stroke supersedes the one in flight by generation. SD runs
+    /// in the subprocess bridge for isolation; the LaMa family is small
+    /// enough to run in process.
     pub(crate) fn dispatch_inpaint(
         &mut self,
         item_id: u64,
@@ -1126,11 +1048,8 @@ impl Processor {
         *latest += 1;
         let generation = *latest;
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
-        // Replace any prior cancel flag + progress sink — the new
-        // dispatch supersedes its predecessor anyway, so wiring fresh
-        // ones avoids a stale earlier-stroke cancel firing the moment
-        // a new stroke starts (and avoids the capsule showing the prior
-        // stroke's last step count for one frame).
+        // Fresh flag and sink: a stale cancel of the earlier stroke must
+        // not fire on this one.
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint, item_id);
         let run = self.dispatch_progress.begin(initial);
@@ -1174,10 +1093,6 @@ impl Processor {
         });
     }
 
-    /// Cancel every in-flight inpaint stroke. Used by `handle_cancel`
-    /// (Esc) so it doesn't have to iterate `batch.items` on the GUI
-    /// side — coordinator pattern: PrunrApp delegates, Processor owns
-    /// the in-flight set. Idempotent and cheap (HashMap walk).
     pub(crate) fn cancel_all_inpaints(&self) {
         for flag in self.inpaint_cancels.values() {
             flag.store(true, std::sync::atomic::Ordering::Release);
@@ -1187,11 +1102,8 @@ impl Processor {
         }
     }
 
-    /// Cancel any in-flight inpaint stroke for `item_id`. The local
-    /// flag and the capsule's "Stopping" show at once; for SD
-    /// strokes the bridge kills the subprocess, ending every SD stroke.
-    /// A LaMa stroke stops at its next tile; ORT has no per-op cancel
-    /// hook. Idempotent.
+    /// For SD the bridge kills the subprocess, ending every SD stroke; a
+    /// LaMa stroke stops at its next tile (ORT has no per-op cancel).
     pub(crate) fn cancel_inpaint(&self, item_id: u64) {
         if let Some(flag) = self.inpaint_cancels.get(&item_id) {
             flag.store(true, std::sync::atomic::Ordering::Release);
@@ -1209,14 +1121,8 @@ impl Processor {
         });
     }
 
-    /// Tell the inpaint bridge to drop its cached subprocess. Idempotent;
-    /// no-op when the bridge is already idle. Called by
-    /// `apply_toolbar_change` on every model switch so a previous
-    /// SD-family model's ~200 MB residual subprocess (bundle was
-    /// already released by `inpaint_sd::release` on dispatch
-    /// completion, but the worker process itself stays alive for the
-    /// 5-min idle window) doesn't pin RAM the user no longer wants
-    /// allocated.
+    /// Drop the bridge's idle SD subprocess (~200 MB even with the bundle
+    /// released). Idempotent.
     pub(crate) fn release_inpaint_subprocess(&self) {
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Release);
     }
@@ -1234,12 +1140,8 @@ impl Processor {
         !self.in_flight.is_empty()
     }
 
-    /// Tell the seg/edge worker bridge to drop its warm subprocess.
-    /// Idempotent; no-op when nothing is warm. Symmetric with
-    /// `release_inpaint_subprocess` — both fire on model switch so a
-    /// previous model's engine pool (BiRefNetLite ~2 GB, U2Net
-    /// ~800 MB, …) isn't held across the user's "I'm done with that
-    /// model" signal.
+    /// Drop the seg/edge worker's warm subprocess (BiRefNetLite ~2 GB,
+    /// U2Net ~800 MB). Idempotent.
     pub(crate) fn release_seg_warm(&mut self) {
         self.seg_warm_due = None;
         let _ = self.worker_tx.send(WorkerMessage::ReleaseWarm);
@@ -1279,11 +1181,6 @@ impl Processor {
         lock_warm_engine(&self.upscale.warm)
     }
 
-    /// SD inpaint dispatch via the dedicated subprocess bridge. Encodes
-    /// the (already-Arc'd) image + binary mask to PNG temp files,
-    /// writes them, and sends an `InpaintBridgeMsg::Dispatch`. The
-    /// bridge handles subprocess lifecycle. Bridge results stream back
-    /// via `pump_inpaint_subprocess` (called once per frame).
     fn dispatch_inpaint_sd(
         &mut self,
         item_id: u64,
@@ -1293,19 +1190,15 @@ impl Processor {
         tuning: &InpaintTuning,
         progress: prunr_core::Progress,
     ) {
-        // PNG-encode + temp-file write is 150-300 ms per stroke at 4K
-        // — moving it onto rayon keeps the egui frame loop responsive
-        // mid-paint. Mask construction (`region_mask`, `grow_mask`)
-        // is also CPU work and rides along.
+        // PNG-encode + temp-file write is 150-300 ms per stroke at 4K:
+        // off the UI thread.
         let image = image.clone();
         let correction = correction.clone();
         let tuning = tuning.clone();
         let bridge_tx = self.inpaint_bridge_tx.clone();
         let inpaint_tx = self.inpaint_tx.clone();
-        // Cancel flag the parent already inserted into `inpaint_cancels`
-        // — the rayon job checks it before any work and before the
-        // bridge dispatch so a mid-encode Esc doesn't end up running
-        // the SD bundle on a stroke the user already discarded.
+        // Checked before the work and before the bridge dispatch, so a
+        // mid-encode Esc never runs the SD bundle on a discarded stroke.
         let cancel = self.inpaint_cancels.get(&item_id).cloned();
         rayon::spawn(move || {
             let cancelled = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
@@ -1332,9 +1225,6 @@ impl Processor {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed(e)));
                 return;
             }
-            // Esc landed during the encode — drop the work before the
-            // bridge sees it. Temp files we just wrote are abandoned;
-            // the next dispatch's generation-bump renames over them.
             if cancelled() {
                 let _ = std::fs::remove_file(&image_path);
                 let _ = std::fs::remove_file(&mask_path);
@@ -1349,8 +1239,6 @@ impl Processor {
         });
     }
 
-    /// Drain bridge events, forward into the existing inpaint result
-    /// channel + progress sinks. Called once per frame from app pump.
     pub(crate) fn pump_inpaint_subprocess(&mut self) {
         while let Ok(evt) = self.inpaint_bridge_rx.try_recv() {
             match evt {
@@ -1360,10 +1248,6 @@ impl Processor {
                     // full-size image); the capsule ends once it is there.
                     let (tx, sink) = (self.inpaint_tx.clone(), self.inpaint_runs.get(&item_id).cloned());
                     rayon::spawn(move || {
-                        // Stamp with the dispatch's own generation — drain
-                        // drops it as stale if a fresher stroke bumped
-                        // `inpaint_latest_generation` while this one was
-                        // in the subprocess.
                         let outcome = match crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height) {
                             Some(rgba) => InpaintOutcome::Done { rgba, fill_scale, generation },
                             None => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
@@ -1375,9 +1259,7 @@ impl Processor {
                     });
                 }
                 InpaintBridgeResult::Error { item_id, error } => {
-                    // Translate bridge sentinels to user-facing text at
-                    // this seam so `drain_inpaint_results` doesn't have
-                    // to know about IPC strings.
+                    // IPC sentinels become user text here, at the seam.
                     use crate::subprocess::protocol::{is_cancel_error, MEMORY_PRESSURE_ABORT_MSG};
                     let outcome = if is_cancel_error(&error) {
                         InpaintOutcome::Cancelled
@@ -1411,34 +1293,19 @@ impl Processor {
         }
     }
 
-    /// Drain in-flight inpaint results.
-    ///
-    /// Returns `(committed_results, cancelled_item_ids, errors)`.
-    /// - `committed_results` only carries the latest-generation finished
-    ///   strokes (stale ones are silently dropped).
-    /// - `cancelled_item_ids` lists items whose stroke was cancelled
-    ///   by the user — the GUI surfaces a toast for each so the user
-    ///   gets explicit feedback that Esc/Cancel took effect.
-    /// - `errors` carries the item and user-visible message for any non-Cancelled
-    ///   dispatch failure (e.g. SD RAM-guard refusal). The GUI shows
-    ///   each as an error toast — without this surface the user sees
-    ///   the stroke "do nothing" with no idea why.
+    /// `(fills, cancelled_ids, errors)`: fills only of each item's newest
+    /// stroke (stale ones dropped); errors are user-visible messages.
     pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<LandedFill>, Vec<u64>, Vec<(u64, String)>) {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
         let mut errors = Vec::new();
         while let Ok((item_id, outcome)) = self.inpaint_rx.try_recv() {
-            // Every drained result decrements pending — stale ones
-            // count too, since the rayon job that produced them has
-            // run to completion.
+            // Stale results count too: their job has finished.
             if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
             }
-            // Reclaim the per-item cancel/progress entries once nothing
-            // else is in flight for this id. Without this they accumulate
-            // for the life of the session — `cancel_all_inpaints` walks
-            // them all, and Esc-after-50-strokes ends up firing 50
-            // no-op IPC cancels.
+            // Without this the entries pile up for the session and Esc
+            // after 50 strokes fires 50 no-op IPC cancels.
             if self.inpaint_pending.get(&item_id).copied().unwrap_or(0) == 0 {
                 self.inpaint_cancels.remove(&item_id);
                 self.inpaint_runs.remove(&item_id);
@@ -1457,14 +1324,10 @@ impl Processor {
         (out, cancelled, errors)
     }
 
-    /// True while a dispatched inpaint job hasn't drained yet for `item_id`.
-    /// Canvas reads this to render a "Erasing..." overlay during LaMa work.
     pub(crate) fn is_inpaint_in_flight(&self, item_id: u64) -> bool {
         self.inpaint_pending.get(&item_id).copied().unwrap_or(0) > 0
     }
 
-    /// True while ANY item has an in-flight inpaint job. Status bar
-    /// reads this to override the "All done" text during LaMa work.
     pub(crate) fn any_inpaint_in_flight(&self) -> bool {
         self.inpaint_pending.values().any(|&c| c > 0)
     }
@@ -1514,10 +1377,9 @@ impl Processor {
         Some((done as u32, total as u32))
     }
 
-    /// Add a streamed (admission-pool) item to the batch admission feeds
-    /// (without one, the newest batch). The `debug_assert` catches
-    /// "admission ran without a tracked batch" in tests; release builds
-    /// no-op so a late delivery can't take down a real batch.
+    /// Add a streamed item to the batch admission feeds (without one, the
+    /// newest batch). Release builds no-op on a missing batch so a late
+    /// delivery can't take down a real one.
     pub(crate) fn track_streamed(&mut self, id: u64) {
         let fed = match self.admission_batch {
             Some(batch) => self.in_flight.iter_mut().find(|b| b.id == batch),
@@ -1599,8 +1461,8 @@ impl Processor {
         batch.pending.into_iter().collect()
     }
 
-    /// Drop every batch regardless of pending. Called on user cancel so a
-    /// late delivery can't reattribute.
+    /// Drop every batch regardless of pending, so a late delivery after a
+    /// cancel can't reattribute.
     pub(crate) fn drain_recipes(&mut self) {
         self.in_flight.clear();
         self.end_seg_run();
@@ -1620,10 +1482,7 @@ impl Processor {
         self.admission.as_ref().is_some_and(AdmissionController::has_pending)
     }
 
-    /// Drop admission state so no further items are admitted. Called on
-    /// cancel (user or worker-side) and by the cancelled-message handler.
-    /// Leaves the cancel registry untouched — that's owned by the caller's
-    /// cancel protocol.
+    /// Leaves the cancel registry untouched; the caller's cancel owns it.
     pub(crate) fn clear_admission(&mut self) {
         self.admission = None;
         self.admission_tx = None;
@@ -1693,16 +1552,8 @@ impl Processor {
         admitted
     }
 
-    /// Spawn a background thread that upscales the input and posts the
-    /// result back through `pump_upscale_results`. The caller is
-    /// responsible for having verified that the model is installed before
-    /// dispatching.
-    ///
-    /// `model_id` is the model to run (`upscale::model_for_scale`), which
-    /// may be Real-ESRGAN's 2x model for a 2x Real-ESRGAN upscale.
-    ///
-    /// Refused (logged, nothing spawned) when free RAM is below the
-    /// model's working set.
+    /// The caller has checked the model is installed. Refused (logged,
+    /// nothing spawned) when free RAM is below the model's working set.
     pub(crate) fn dispatch_upscale(
         &mut self,
         item_id: u64,
@@ -1743,37 +1594,29 @@ impl Processor {
                     .expect("RunOptions::new requires an initialized ORT runtime"),
             )
         });
-        // Clear any sticky terminate flag from the prior dispatch's cancel.
+        // A prior cancel's terminate flag is sticky.
         let _ = run_options.unterminate();
-        // The run shows "Loading the model" until the first tile reports.
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale, item_id));
-        // Release stores in `begin` pair with the Acquire load in
-        // `upscale::tiling::upscale_tiled` (cancel flag) and in
-        // `is_upscale_in_flight` (active flag).
         let done = self.upscale.begin(run.clone());
         let progress = PictureSink::of_run(item_id, run, self.picture_sender())
             .into_progress()
             .with_cancel(Arc::clone(&self.upscale.cancel));
 
         let engine_slot = Arc::clone(&self.upscale.warm);
-        // Shared with the GUI thread's `cancel_upscale()` — terminating
-        // this RunOptions aborts the running `Session::run` mid-tile.
         let run_options_for_thread = Arc::clone(run_options);
 
         std::thread::spawn(move || {
             let result = caught(|| {
                 // Decode and Denoise run before the model: the row-parallel
-                // rayon inside apply_denoise must not nest in ORT's thread pool
-                // (the pattern that deadlocked apply_background_color, b2306bb).
+                // rayon inside apply_denoise must not nest in ORT's thread
+                // pool (nesting deadlocks).
                 let input = input.read().map_err(prunr_core::CoreError::ImageFormat).inspect_err(|err| {
                     tracing::error!(item_id, %err, "upscale dispatch: input unreadable");
                 })?;
                 let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
-                // Session construction runs here, not on the GUI thread: a cold
-                // EP (OpenVINO compiles the graph) can take tens of seconds and
-                // the window must stay responsive so Cancel is reachable. The
-                // thread holds its own Arc, so a model swap that evicts the slot
-                // mid-run never invalidates this session.
+                // Built here, not on the GUI thread: a cold EP can take tens
+                // of seconds and Cancel must stay reachable. The thread's own
+                // Arc survives a model swap evicting the slot mid-run.
                 let engine_for_thread = ensure_warm_engine(
                     &engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only }, intra_threads,
                 )
@@ -1799,27 +1642,13 @@ impl Processor {
         Ok(())
     }
 
-    /// Cancel any in-flight upscale dispatch.
-    ///
-    /// Two-stage abort:
-    /// 1. `RunOptions::terminate()` signals ORT to abort the running
-    ///    `Session::run` within ~50ms — much shorter than waiting for
-    ///    the next tile boundary's cancel-flag check (5-15 s on CPU
-    ///    EP). The worker thread sees a "terminate flag" error from
-    ///    ORT, which `classify_run_error` maps to `CoreError::Cancelled`.
-    /// 2. The atomic flag still gets set as a safety net — it handles
-    ///    the case where the worker happens to be BETWEEN tiles when
-    ///    cancel fires (no running session.run to terminate).
-    ///
-    /// Idempotent.
+    /// `terminate()` aborts the running `Session::run` within ~50 ms
+    /// rather than at the next tile (5-15 s on CPU); the flag covers a
+    /// cancel landing between tiles. Idempotent.
     pub(crate) fn cancel_upscale(&self) {
-        // Esc and the model-change hook call this unconditionally.
-        // Release pairs with Acquire in `upscale::tiling::upscale_tiled`.
         if !self.upscale.cancel() {
             return;
         }
-        // The terminate call returns immediately; ORT aborts the running
-        // session as soon as it checks between kernel launches.
         let terminate_ok = self
             .upscale_run_options
             .get()
@@ -1851,14 +1680,10 @@ impl Processor {
         pictures
     }
 
-    /// Drain completed upscale results from the background thread.
-    /// Non-blocking; returns an empty `Vec` when nothing is ready. Caller
-    /// applies each result to the matching `BatchItem`.
     pub(crate) fn pump_upscale_results(&mut self) -> Vec<UpscaleResult> {
         self.upscale.drain()
     }
 
-    /// `true` while a colorize run is in flight.
     pub fn is_colorize_in_flight(&self) -> bool {
         self.colorize.in_flight()
     }
@@ -1894,9 +1719,7 @@ impl Processor {
         }
     }
 
-    /// Colorize `input` on a background thread; the result comes back
-    /// through `pump_colorize_results`. Refused (logged) when free RAM is
-    /// below the model's working set.
+    /// Refused (logged) when free RAM is below the model's working set.
     pub(crate) fn dispatch_colorize(&mut self, item_id: u64, run_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
         let kind = super::settings::COLORIZER;
         let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
@@ -1998,18 +1821,12 @@ impl Processor {
         initial
     }
 
-    /// Drain finished colorize runs. Non-blocking.
     pub(crate) fn pump_colorize_results(&mut self) -> Vec<ColorizeResult> {
         self.colorize.drain()
     }
 
-    /// Dispatch the SAM 2 encoder for `item_id`. Runs once per source image;
-    /// the result is cached on `BatchItem.magic_brush_embedding`. Admission
-    /// gate: refuses when `available_ram_mb < 800 MB`.
-    ///
-    /// Returns `Err(reason)` synchronously on admission failure (caller shows
-    /// a toast). Returns `Ok(())` after spawning the background rayon job;
-    /// the result arrives via `pump_sam_encoder_results`.
+    /// Runs once per source image; `Err(reason)` at once when under
+    /// 800 MB RAM is free.
     pub(crate) fn dispatch_sam_encoder(
         &self,
         item_id: u64,
@@ -2109,12 +1926,9 @@ impl Processor {
         self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
     }
 
-    /// Dispatch the SAM 2 decoder for a click or stroke. No admission gate —
-    /// the decoder model is small (~20 MB) and runs quickly. The embedding
-    /// is the cached output from a prior `dispatch_sam_encoder` call.
-    /// Decoding the logits into a source-resolution mask happens on the
-    /// worker too, so the UI thread only merges the result; the logits
-    /// come back with it for later re-thresholding.
+    /// No admission gate: the decoder is ~20 MB. The mask is built on the
+    /// worker too, so the UI thread only merges it; the logits come back
+    /// for re-thresholding.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
         let tx = self.sam_decoder_tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
@@ -2181,9 +1995,6 @@ fn extract_f32(
         .into_raw_vec_and_offset().0)
 }
 
-/// Run the SAM 2 encoder on the cached session: preprocess the source,
-/// run inference, marshal the three named outputs into a SamEmbedding.
-///
 /// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_encoder_inline(
     sessions: &SamSessions,
@@ -2206,15 +2017,9 @@ fn run_sam_encoder_inline(
     let outputs = session.run(inputs![input_name => &tensor])
         .map_err(|e| format!("encoder session.run: {e}"))?;
 
-    // Address by NAME — vietanhdev's SAM 2 ONNX export emits outputs
-    // in the order high_res_feats_0, high_res_feats_1, image_embed,
-    // which is the reverse of the documented logical order. Indexing
-    // by name keeps the dispatch immune to export-order changes.
-    //
-    // Expected shapes (from SAM 2 Hiera Small):
-    //   image_embed      [1, 256, 64, 64]   — 1_048_576 f32
-    //   high_res_feats_0 [1, 32, 256, 256]  — 2_097_152 f32
-    //   high_res_feats_1 [1, 64, 128, 128]  — 1_048_576 f32
+    // By NAME: the export emits outputs in reverse of the documented
+    // order. Shapes: image_embed [1,256,64,64], high_res_feats_0
+    // [1,32,256,256], high_res_feats_1 [1,64,128,128].
     let image_embed = extract_f32(&outputs, "image_embed", "encoder")?;
     let high_res_feats_0 = extract_f32(&outputs, "high_res_feats_0", "encoder")?;
     let high_res_feats_1 = extract_f32(&outputs, "high_res_feats_1", "encoder")?;
@@ -2229,10 +2034,6 @@ fn run_sam_encoder_inline(
     Ok(embedding)
 }
 
-/// Run the SAM 2 decoder on the cached session: pack the embedding +
-/// prompt into 7 named inputs, run inference, marshal the two outputs
-/// (masks + iou_predictions) into SamDecoderOutput.
-///
 /// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
 fn run_sam_decoder_inline(
     sessions: &SamSessions,
@@ -2294,9 +2095,7 @@ fn run_sam_decoder_inline(
         "has_mask_input"    => &has_mask_tensor,
     ]).map_err(|e| format!("decoder session.run: {e}"))?;
 
-    // Outputs: masks [1, 3, 256, 256] and iou_predictions [1, 3].
-    // Address by name for the same export-order resilience as the
-    // encoder path above.
+    // By name: masks [1, 3, 256, 256] and iou_predictions [1, 3].
     let masks = extract_f32(&outputs, "masks", "decoder")?;
     let iou_raw = extract_f32(&outputs, "iou_predictions", "decoder")?;
 
