@@ -163,10 +163,8 @@ impl PrunrApp {
         if matches!(kind, PreviewKind::UpscaleTier2) {
             need(Need::KeptUpscale)?;
             let upscale = item.kept_upscale().ok_or(Verdict::Never(Reason::UpscaleFirst))?.clone();
-            let knobs = item.settings.upscale_refine();
             return Ok(DispatchInputs {
                 upscale: Some(upscale),
-                upscale_tier2_knobs: Some(knobs),
                 faces: item.faces_input(crate::gui::item::FaceStage::Upscale),
                 // `original` is unread by a Refine preview, which re-finishes the kept run.
                 ..DispatchInputs::new(kind, version, Arc::new(image::RgbaImage::new(0, 0)), item.settings)

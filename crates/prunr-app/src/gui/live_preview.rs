@@ -474,7 +474,7 @@ impl LivePreview {
                 let seg_model = inputs.seg_model();
                 // Patched into applied_recipe.upscale on landing, so the next diff
                 // sees Skip and mark_tweak stops re-firing after the drag.
-                let applied_tier2_knobs = inputs.upscale_tier2_knobs;
+                let applied_tier2_knobs = matches!(inputs.kind, PreviewKind::UpscaleTier2).then(|| inputs.settings.upscale_refine());
                 let applied_color_strength = matches!(inputs.kind, PreviewKind::ColorizeTier2).then_some(inputs.settings.color_strength());
                 let applied_depth = inputs.settings.depth;
                 let quick = inputs.quick;
@@ -638,8 +638,6 @@ pub struct DispatchInputs {
     /// For `PreviewKind::UpscaleTier2` only — the kept upscale run, which
     /// Tier-2 re-finishes. `None` for other kinds.
     pub(crate) upscale: Option<crate::gui::item::UpscaleCache>,
-    /// For `PreviewKind::UpscaleTier2` only — snapshot of the Refine knobs.
-    pub upscale_tier2_knobs: Option<prunr_core::upscale::Refine>,
     /// For `PreviewKind::ColorizeTier2` only — the kept colorize run,
     /// re-rendered at `settings.color_strength()`.
     pub(crate) colorize: Option<crate::gui::item::ColorizeCache>,
@@ -721,7 +719,6 @@ impl DispatchInputs {
             cached_masked_base: None,
             correction: None,
             upscale: None,
-            upscale_tier2_knobs: None,
             colorize: None,
             faces: None,
             depth: None,
@@ -956,10 +953,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "no upscale run kept");
             return RunOutput::default();
         };
-        let Some(knobs) = inputs.upscale_tier2_knobs else {
-            tracing::debug!(event = "upscale_tier2_run_abort", reason = "upscale_tier2_knobs is None");
-            return RunOutput::default();
-        };
+        let knobs = inputs.settings.upscale_refine();
         if inputs.quick {
             // Sharpen's radius is in output pixels; the plain enlargement
             // is made at the frame's size and not kept.
@@ -1812,13 +1806,6 @@ mod tests {
         }
         let raw_arc = Arc::new(raw_buf);
 
-        let knobs = prunr_core::upscale::Refine {
-            sharpen: 0.0,
-            sharpen_sigma: 2.0,
-            ai_blend: 1.0,
-            color_match: false,
-        };
-
         // Calling run_preview with UpscaleTier2 + valid buffers must produce
         // an RGBA output. It must NOT attempt inference (no ORT session in this
         // process — the result is proof the code path avoids it).
@@ -1827,10 +1814,9 @@ mod tests {
         let output = run_preview(
             DispatchInputs {
                 upscale: Some(crate::gui::item::UpscaleCache::new(raw_arc.clone(), raw_arc.clone(), None)),
-                upscale_tier2_knobs: Some(knobs),
                 ..DispatchInputs::new(
                     PreviewKind::UpscaleTier2, 0,
-                    Arc::clone(&raw_arc), ItemSettings::default(),
+                    Arc::clone(&raw_arc), ItemSettings { sharpen: 0.0, ai_blend: 1.0, color_match: false, ..ItemSettings::default() },
                 )
             },
             &cancel,
@@ -1902,12 +1888,11 @@ mod tests {
             assert_eq!(settled.dimensions(), (w, h), "{kind:?}");
         }
         let big = Arc::new(RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 150, 255])));
-        let knobs = prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.5, color_match: true };
+        let refine = ItemSettings { sharpen: 0.5, ai_blend: 0.5, color_match: true, ..settings };
         let upscale = |quick: bool| DispatchInputs {
             quick,
             upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&big), Arc::new(RgbaImage::new(w / 4, h / 4)), None)),
-            upscale_tier2_knobs: Some(knobs),
-            ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), settings)
+            ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&photo), refine)
         };
         let colorize = |quick: bool| DispatchInputs {
             quick,
@@ -1993,8 +1978,7 @@ mod tests {
                     quick: true,
                     quick_photo: kept_upscale.clone(),
                     upscale: Some(crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None)),
-                    upscale_tier2_knobs: Some(prunr_core::upscale::Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.6, color_match: true }),
-                    ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(RgbaImage::new(1, 1)), ItemSettings::default())
+                    ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::new(RgbaImage::new(1, 1)), ItemSettings { sharpen: 0.5, ai_blend: 0.6, color_match: true, ..ItemSettings::default() })
                 }),
                 ("colorize quick", DispatchInputs {
                     quick: true,
