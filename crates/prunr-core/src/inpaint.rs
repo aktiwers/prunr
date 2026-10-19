@@ -497,7 +497,8 @@ fn ensure_lama_sweeper_running() {
 
 impl LamaSession {
     /// Built once on first use and released after `crate::IDLE_RELEASE`
-    /// without a `get()`; in-flight callers hold their own `Arc`.
+    /// without a `get()`; in-flight callers hold their own `Arc`. A build
+    /// that fails is not kept, so the next stroke tries again.
     fn get(id: prunr_models::ModelId, cpu_only: bool) -> Result<Arc<LamaSession>, CoreError> {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
@@ -515,9 +516,12 @@ impl LamaSession {
         drop(idle);
 
         // Concurrent callers block on the OnceLock and share one build.
-        slot.get_or_init(|| Self::new_inner(id, cpu_only).map(Arc::new))
-            .clone()
-            .map_err(CoreError::Inference)
+        let built = slot.get_or_init(|| Self::new_inner(id, cpu_only).map(Arc::new)).clone();
+        if built.is_err() {
+            let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::inpaint_sd::forget_failed(&mut guard, &(id, cpu_only), &slot);
+        }
+        built.map_err(CoreError::Inference)
     }
 
     fn new_inner(id: prunr_models::ModelId, cpu_only: bool) -> Result<LamaSession, String> {
