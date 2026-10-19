@@ -469,13 +469,6 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::SpareEdge.prefix(),
 ];
 
-/// File-name prefixes owned by the inpaint subprocess.
-pub const INPAINT_PREFIXES: &[&str] = &[
-    IpcKind::InpaintImg.prefix(),
-    IpcKind::InpaintMask.prefix(),
-    IpcKind::InpaintOut.prefix(),
-];
-
 /// File-name prefixes the CLI parent owns *across* worker crashes.
 /// `cli_ds_*` are the downscaled temps the CLI writes once before the
 /// run_batch loop and re-sends on every retry from `valid_paths[idx]`.
@@ -947,28 +940,6 @@ mod tests {
         }
     }
 
-    /// Symmetric direction: an inpaint-scoped cleanup leaves seg files alone.
-    /// No production caller targets only inpaint today, but the prefix table
-    /// already declares them — pinning the contract avoids accidental
-    /// asymmetry (e.g. a future inpaint-only cancel path that wipes the
-    /// seg pipeline).
-    #[test]
-    fn sweep_dir_with_prefix_inpaint_scope_is_symmetric() {
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        let seg = ["chain_1.raw", "result_1.raw"];
-        let inpaint = ["inpaint-img-1-0.png", "inpaint-out-1.png"];
-        poison(dir, &seg);
-        poison(dir, &inpaint);
-
-        super::sweep_dir_with_prefix(dir, INPAINT_PREFIXES);
-
-        for f in &seg {
-            assert!(dir.join(f).exists(), "seg file {f} must survive an inpaint-scoped cleanup");
-        }
-        assert_gone(dir, &inpaint);
-    }
-
     /// Files matching no supplied prefix are left in place — the sweep is
     /// "remove only what I own", not "remove everything except what I name."
     #[test]
@@ -983,26 +954,23 @@ mod tests {
         assert!(dir.join("unrelated.txt").exists());
     }
 
-    /// Inventory of IPC filename kinds; keep in sync with new IPC writers
-    /// (and with `SEG_PIPELINE_PREFIXES` / `INPAINT_PREFIXES`). Pinning the
-    /// inventory in one place documents the naming contract; it does not
-    /// catch drift on its own — a new writer that lands without updating
-    /// this list AND the prefix tables would still slip through.
+    /// Every temp-file kind has an owner that removes it after a crash:
+    /// the seg pipeline's sweep, the CLI's end-of-batch sweep, or the
+    /// eraser bridge's per-stroke removal. A new kind fails to compile here
+    /// until it is given one.
     #[test]
-    fn every_ipc_filename_in_tree_matches_a_known_prefix() {
-        let production_filenames = [
-            "chain_42.raw", "cli_ds_0.img", "edge_5.bin", "spare_edge_5.raw", "input_3.img",
-            "orig_3.img", "result_3.raw", "seg_3.png", "tensor_3.raw",
-            "inpaint-img-7-0.png", "inpaint-mask-7-0.png", "inpaint-out-7.png",
-        ];
-        for name in &production_filenames {
-            assert!(
-                SEG_PIPELINE_PREFIXES.iter()
-                    .chain(INPAINT_PREFIXES.iter())
-                    .chain(CLI_PERSISTENT_PREFIXES.iter())
-                    .any(|p| name.starts_with(p)),
-                "filename {name} matches no prefix in SEG_PIPELINE_PREFIXES + INPAINT_PREFIXES + CLI_PERSISTENT_PREFIXES"
-            );
+    fn every_ipc_kind_has_an_owner_that_cleans_it() {
+        use IpcKind::*;
+        let owner = |kind: IpcKind| match kind {
+            Input | Chain | Seg | Tensor | Orig | Result | Edge | SpareEdge => Some(SEG_PIPELINE_PREFIXES),
+            CliDs => Some(CLI_PERSISTENT_PREFIXES),
+            InpaintImg | InpaintMask | InpaintOut => None,
+        };
+        let kinds = [Input, Chain, Seg, Tensor, Orig, Result, Edge, SpareEdge, CliDs, InpaintImg, InpaintMask, InpaintOut];
+        for kind in kinds {
+            if let Some(prefixes) = owner(kind) {
+                assert!(prefixes.contains(&kind.prefix()), "{kind:?} is swept by its owner's prefixes");
+            }
         }
     }
 
