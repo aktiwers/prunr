@@ -242,10 +242,6 @@ pub fn sd_ram_fit(id: prunr_models::ModelId, free_mb: u64, margin_mb: u64) -> Sd
     }
 }
 
-fn available_ram_mb() -> Option<u64> {
-    available_ram_bytes().map(|b| b / (1024 * 1024))
-}
-
 /// A built bundle for `id` is in the cache, so its working set is
 /// already counted in the RSS rather than in the free RAM.
 fn resident(id: prunr_models::ModelId) -> bool {
@@ -311,20 +307,7 @@ impl Default for SdInpaintRequest {
     }
 }
 
-pub fn process_inpaint(
-    image: &RgbaImage,
-    mask: &GrayImage,
-    id: prunr_models::ModelId,
-    num_steps: u32,
-) -> Result<RgbaImage, CoreError> {
-    process_inpaint_with(
-        image, mask, id,
-        SdInpaintRequest { num_inference_steps: num_steps, ..Default::default() },
-        &crate::progress::Progress::none(),
-    ).map(|f| f.rgba)
-}
-
-/// `process_inpaint` with every knob; a cancel lands within one UNet step.
+/// The SD fill of `mask` in `image`; a cancel lands within one UNet step.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -816,7 +799,7 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || text_embedding_f16(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode_masked(vae, &padded_image, &padded_mask));
+            let vae_h = s.spawn(|| vae_encode(vae, image_to_minus1_plus1_masked(&padded_image, &padded_mask)));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.map(|h| h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))?)
@@ -831,8 +814,8 @@ fn run_one_tile(
             Ok((cond, uncond, vae, mask_lat))
         })?;
 
-    let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
-    let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
+    let masked_latent_f16 = masked_latent.mapv(f16::from_f32);
+    let mask_latent_f16 = mask_latent.mapv(f16::from_f32);
     // The loop needs only the f16 copies; the f32 ones would otherwise
     // live through the whole UNet loop.
     drop(masked_latent);
@@ -848,10 +831,9 @@ fn run_one_tile(
 
     let scale = req.guidance_scale;
     let predict = |latent: &[f32], t: i64| {
-        let latent_f16 = f32_to_f16_view(
-            ndarray::ArrayView4::from_shape(latent_dim, latent)
-                .expect("latent_dim matches the latent's length by construction"),
-        );
+        let latent_f16 = ndarray::ArrayView4::from_shape(latent_dim, latent)
+            .expect("latent_dim matches the latent's length by construction")
+            .mapv(f16::from_f32);
         let latent_in_f16 = concat_inpaint_input_f16(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
@@ -1472,8 +1454,8 @@ impl SdSession {
         type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;
         const PARTS: [(&str, SmokeFn); 4] = [
             ("text_encoder", smoke_test_text_encoder),
-            ("vae_encoder",  smoke_test_vae_encoder),
-            ("vae_decoder",  smoke_test_vae_decoder),
+            ("vae_encoder",  |s, label| smoke_test_vae(s, label, (1, 3, SD_TILE as usize, SD_TILE as usize))),
+            ("vae_decoder",  |s, label| smoke_test_vae(s, label, (1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize))),
             ("unet",         smoke_test_unet),
         ];
 
@@ -1696,14 +1678,6 @@ fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     smoke_run_single(s, label, &t)
 }
 
-fn smoke_test_vae_encoder(s: &mut Session, label: &str) -> Result<(), String> {
-    smoke_test_vae(s, label, (1, 3, SD_TILE as usize, SD_TILE as usize))
-}
-
-fn smoke_test_vae_decoder(s: &mut Session, label: &str) -> Result<(), String> {
-    smoke_test_vae(s, label, (1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize))
-}
-
 fn smoke_test_vae(s: &mut Session, label: &str, shape: (usize, usize, usize, usize)) -> Result<(), String> {
     let t = tensor_in(Array4::<f32>::zeros(shape), input_is_f32(s, 0))
         .map_err(|e| format!("{label}: smoke input: {e}"))?;
@@ -1730,7 +1704,7 @@ fn tensor_in(arr: Array4<f32>, f32_input: bool) -> ort::Result<ort::value::DynVa
     if f32_input {
         Ok(Tensor::from_array(arr)?.into_dyn())
     } else {
-        Ok(Tensor::from_array(f32_to_f16_4d(&arr))?.into_dyn())
+        Ok(Tensor::from_array(arr.mapv(f16::from_f32))?.into_dyn())
     }
 }
 
@@ -1821,7 +1795,7 @@ fn text_embedding_f16(bundle: &SdSession, prompt: &str) -> Result<Arc<Array3<f16
     if let Some(e) = hit {
         return Ok(e);
     }
-    let emb = Arc::new(f32_to_f16_3d(&encode_text(bundle, prompt)?));
+    let emb = Arc::new(encode_text(bundle, prompt)?.mapv(f16::from_f32));
     let mut cache = bundle.text_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Cond and uncond encode in parallel; the same prompt twice keeps one.
     if let Some((_, e)) = cache.iter().find(|(p, _)| p == prompt) {
@@ -1857,18 +1831,7 @@ pub(crate) enum VaeBackend<'a> {
     Taesd(&'a TaesdSession),
 }
 
-/// VAE-encode the masked-image variant directly from source + mask,
-/// without an intermediate masked RGBA copy.
-fn vae_encode_masked(
-    backend: &VaeBackend,
-    image: &RgbaImage,
-    mask: &GrayImage,
-) -> Result<Array4<f32>, CoreError> {
-    let input = image_to_minus1_plus1_masked(image, mask);
-    vae_encode_from_input(backend, input)
-}
-
-fn vae_encode_from_input(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
+fn vae_encode(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
     let f32_input = matches!(backend, VaeBackend::Standard(b) if b.vae_f32);
     let t = tensor_in(input, f32_input)
         .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
@@ -1905,7 +1868,7 @@ fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, C
             Ok(minus1_plus1_to_image(&arr))
         }
         VaeBackend::Taesd(taesd) => {
-            let latent_f16 = f32_to_f16_4d(latent);
+            let latent_f16 = latent.mapv(f16::from_f32);
             let t = Tensor::from_array(latent_f16)
                 .map_err(|e| CoreError::Inference(format!("TAESD decoder: input tensor: {e}")))?;
             let mut session = taesd.decoder.lock()
@@ -1994,18 +1957,6 @@ fn unet_step_batched(
 //
 // The FP16 exports take f16 (an f32 VAE is flagged by
 // `SdSession::vae_f32`); all other math stays f32, narrowed only here.
-
-fn f32_to_f16_3d(arr: &Array3<f32>) -> Array3<f16> {
-    arr.mapv(f16::from_f32)
-}
-
-fn f32_to_f16_view(view: ndarray::ArrayView4<'_, f32>) -> Array4<f16> {
-    view.mapv(f16::from_f32)
-}
-
-fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
-    f32_to_f16_view(arr.view())
-}
 
 /// An output as f32, whichever precision the export emits.
 fn extract<D: ndarray::Dimension>(
@@ -2288,7 +2239,7 @@ pub(crate) fn process_rss_mb() -> Option<u64> {
 /// need is not free; when only the tall crop's extra is missing, the
 /// plan falls back to tiles instead. Unknown free RAM passes.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) -> Result<(), String> {
-    let Some(free_mb) = available_ram_mb() else { return Ok(()) };
+    let Some(free_mb) = available_ram_bytes().map(|b| b / (1024 * 1024)) else { return Ok(()) };
     fit_ram(id, tuning, free_mb, resident(id))
 }
 
