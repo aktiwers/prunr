@@ -447,5 +447,4 @@ mod tests {
             "RealEsrganX4Plus names the input tensor `data`"
         );
     }
-
 }

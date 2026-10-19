@@ -853,33 +853,12 @@ mod tests {
     }
 
     #[test]
-    fn test_core_error_model_variant() {
-        let err = CoreError::Model("test error".to_string());
-        assert_eq!(err.to_string(), "Model error: test error");
-    }
-
-    #[test]
-    fn test_inference_error_display() {
-        let err = CoreError::Inference("ort failed".into());
-        assert_eq!(err.to_string(), "Inference error: ort failed");
-    }
-
-    #[test]
-    fn test_image_format_error_display() {
-        let err = CoreError::ImageFormat("bad format".into());
-        assert_eq!(err.to_string(), "Image format error: bad format");
-    }
-
-    #[test]
-    fn test_large_image_error_display() {
-        let err = CoreError::LargeImage {
-            width: 9000,
-            height: 5000,
-            limit: 8000,
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("9000"), "Expected message to contain '9000', got: {}", msg);
-        assert!(msg.contains("8000"), "Expected message to contain '8000', got: {}", msg);
+    fn each_error_kind_names_itself_in_its_text() {
+        assert_eq!(CoreError::Model("test error".to_string()).to_string(), "Model error: test error");
+        assert_eq!(CoreError::Inference("ort failed".into()).to_string(), "Inference error: ort failed");
+        assert_eq!(CoreError::ImageFormat("bad format".into()).to_string(), "Image format error: bad format");
+        let msg = CoreError::LargeImage { width: 9000, height: 5000, limit: 8000 }.to_string();
+        assert!(msg.contains("9000") && msg.contains("8000"), "{msg}");
     }
 
     #[test]
@@ -893,6 +872,8 @@ mod tests {
     #[test]
     fn edge_scale_default_is_fused() {
         assert_eq!(EdgeScale::default(), EdgeScale::Fused);
+        // Settings and presets saved before edge_scale load as Fused.
+        assert_eq!(EdgeSettings::default().edge_scale, EdgeScale::Fused);
     }
 
     #[test]
@@ -967,12 +948,4 @@ mod tests {
             assert_eq!(layered.drawn_scales(), &[EdgeScale::Fine, EdgeScale::Bold]);
         }
     }
-
-    #[test]
-    fn edge_settings_default_has_fused_scale() {
-        // Loading old settings/preset files that lack edge_scale must fall
-        // back to Fused.
-        assert_eq!(EdgeSettings::default().edge_scale, EdgeScale::Fused);
-    }
-
 }

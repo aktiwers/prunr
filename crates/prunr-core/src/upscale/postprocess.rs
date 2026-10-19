@@ -336,84 +336,40 @@ mod tests {
         }
     }
 
+    /// A bright dot on dark: a positive strength keeps or boosts the dot
+    /// and pulls its neighbours down; a negative one blurs, dimming the
+    /// dot and lifting them.
     #[test]
-    fn apply_sharpen_negative_strength_blurs() {
-        // Single bright pixel (200,200,200) on dark background (10,10,10).
-        // After blur (strength < 0), bright pixel dims and neighbours brighten.
-        let mut img = make_image(7, 7, [10, 10, 10, 255]);
-        img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
-        let center_before = img.get_pixel(3, 3).0[0];
-        img = sharpened(&img, -1.0, 1.0);
-        let center_after = img.get_pixel(3, 3).0[0];
-        let neighbor_after = img.get_pixel(3, 2).0[0];
-        assert!(
-            center_after < center_before,
-            "blur must dim the bright center pixel: before={center_before} after={center_after}"
-        );
-        assert!(
-            neighbor_after > 10,
-            "blur must brighten neighbours: got {neighbor_after}"
-        );
-    }
-
-    #[test]
-    fn apply_sharpen_positive_strength_sharpens() {
-        // Single bright pixel. After sharpen (strength > 0), neighbours
-        // should be dimmer than the original background.
-        let mut img = make_image(7, 7, [10, 10, 10, 255]);
-        img.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
-        let center_before = img.get_pixel(3, 3).0[0];
-        img = sharpened(&img, 1.0, 1.0);
-        let center_after = img.get_pixel(3, 3).0[0];
-        // After sharpening the center is boosted (clamped at 255) and
-        // neighbours are pulled down.
-        assert!(
-            center_after >= center_before,
-            "sharpen must keep/boost bright center: before={center_before} after={center_after}"
-        );
-        let neighbor_after = img.get_pixel(3, 2).0[0];
-        assert!(
-            neighbor_after < 10 || neighbor_after == 0,
-            "sharpen must dim dark neighbours: got {neighbor_after}"
-        );
+    fn apply_sharpen_sign_picks_sharpen_or_blur() {
+        let mut dot = make_image(7, 7, [10, 10, 10, 255]);
+        dot.put_pixel(3, 3, Rgba([200, 200, 200, 255]));
+        let sharp = sharpened(&dot, 1.0, 1.0);
+        assert!(sharp.get_pixel(3, 3).0[0] >= 200, "the dot keeps or gains: {:?}", sharp.get_pixel(3, 3));
+        assert!(sharp.get_pixel(3, 2).0[0] < 10, "the neighbour darkens: {:?}", sharp.get_pixel(3, 2));
+        let soft = sharpened(&dot, -1.0, 1.0);
+        assert!(soft.get_pixel(3, 3).0[0] < 200, "the dot dims: {:?}", soft.get_pixel(3, 3));
+        assert!(soft.get_pixel(3, 2).0[0] > 10, "the neighbour lifts: {:?}", soft.get_pixel(3, 2));
     }
 
     // ── apply_ai_blend ───────────────────────────────────────────────────
 
+    /// The AI weight lerps from the bicubic source (0) to the model's
+    /// RGB (1, unchanged); alpha always comes from the model.
     #[test]
-    fn apply_ai_blend_weight_one_is_identity() {
-        let src = make_image(4, 4, [0, 0, 255, 255]);
-        let orig_ai = make_image(4, 4, [255, 0, 0, 255]);
-        let mut ai = orig_ai.clone();
-        apply_ai_blend(&mut ai, &src, 1.0);
-        assert_eq!(ai.as_raw(), orig_ai.as_raw());
-    }
-
-    #[test]
-    fn apply_ai_blend_weight_zero_replaces_rgb() {
+    fn apply_ai_blend_lerps_rgb_toward_the_source() {
         let src = make_image(4, 4, [0, 0, 255, 128]); // blue bicubic
-        let mut ai = make_image(4, 4, [255, 0, 0, 255]); // red AI
-        apply_ai_blend(&mut ai, &src, 0.0);
-        for p in ai.pixels() {
-            assert_eq!(p.0[0], 0, "R should be 0 (full bicubic blue)");
-            assert_eq!(p.0[1], 0, "G should be 0");
-            assert_eq!(p.0[2], 255, "B should be 255");
-            assert_eq!(p.0[3], 255, "alpha from AI input, not bicubic");
-        }
-    }
-
-    #[test]
-    fn apply_ai_blend_weight_half_mixes() {
-        let src = make_image(4, 4, [0, 0, 255, 255]); // blue
-        let mut ai = make_image(4, 4, [255, 0, 0, 255]); // red
-        apply_ai_blend(&mut ai, &src, 0.5);
-        for p in ai.pixels() {
-            let r = p.0[0];
-            let b = p.0[2];
-            assert!((r as i32 - 127).abs() <= 1, "R should be ~127, got {r}");
-            assert_eq!(p.0[1], 0);
-            assert!((b as i32 - 127).abs() <= 1, "B should be ~127, got {b}");
-            assert_eq!(p.0[3], 255);
+        let ai = make_image(4, 4, [255, 0, 0, 255]); // red AI
+        for (weight, want) in [(1.0, [255, 0, 127]), (0.0, [0, 0, 255]), (0.5, [127, 0, 127])] {
+            let mut out = ai.clone();
+            apply_ai_blend(&mut out, &src, weight);
+            if weight == 1.0 {
+                assert_eq!(out, ai, "weight 1 is the model's output");
+                continue;
+            }
+            for p in out.pixels() {
+                assert!(p.0[..3].iter().zip(want).all(|(&got, w)| got.abs_diff(w) <= 1), "weight {weight}: {p:?}");
+                assert_eq!(p.0[3], 255, "alpha from AI input, not bicubic");
+            }
         }
     }
 
@@ -551,5 +507,4 @@ mod tests {
             "color match must decrease mean B (warm source): before={mean_b_before:.1} after={mean_b_after:.1}"
         );
     }
-
 }

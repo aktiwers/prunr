@@ -591,21 +591,14 @@ mod tests {
     }
 
     #[test]
-    fn add_mask_dimension_mismatch_returns_err() {
+    fn merging_planes_of_other_sizes_is_an_error() {
         let a = MaskArtifact::new_empty(4, 4);
-        let b = MaskArtifact::new_empty(8, 8);
         assert!(matches!(
-            a.add_mask(&b),
+            a.add_mask(&MaskArtifact::new_empty(8, 8)),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (8, 8) })
         ));
-    }
-
-    #[test]
-    fn merge_stroke_dimension_mismatch_returns_err() {
-        let a = MaskArtifact::new_empty(4, 4);
-        let b = MaskArtifact::new_empty(2, 8);
         assert!(matches!(
-            a.merge_stroke(&b),
+            a.merge_stroke(&MaskArtifact::new_empty(2, 8)),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
     }
@@ -656,20 +649,6 @@ mod tests {
         assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
     }
 
-    /// A soft stroke keeps hardness, strength and direction in the plane
-    /// `apply_correction` reads, cell for cell.
-    #[test]
-    fn paint_stroke_keeps_sign_and_softness() {
-        let mut stroke = MaskArtifact::new_empty(32, 32);
-        let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
-        paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
-        assert!(stroke.cells().iter().any(|&v| v < 0), "subtract stroke must be negative");
-        assert!(
-            stroke.cells().iter().any(|&v| v < 0 && v > -FULL),
-            "soft falloff must survive as intermediate magnitudes"
-        );
-    }
-
     /// Painting into a plane an undo snapshot still shares must not
     /// change the snapshot.
     #[test]
@@ -698,6 +677,7 @@ mod tests {
             }
         }
         assert!(faint_touched > 0, "a soft stroke must have cells below the threshold");
+        assert!(selection.cells().iter().all(|&v| v <= 0), "a Subtract stroke stays negative");
     }
 
     #[test]

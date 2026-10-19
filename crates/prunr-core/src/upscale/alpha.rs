@@ -17,20 +17,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alpha_lanczos3_produces_correct_output_dimensions() {
-        let rgba = RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 128]));
-        let out = upscale_alpha_lanczos3(&rgba, 800, 400);
-        assert_eq!(out.width(), 800);
-        assert_eq!(out.height(), 400);
-    }
-
-    #[test]
     fn alpha_lanczos3_preserves_uniform_input() {
-        let rgba = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 200]));
-        let out = upscale_alpha_lanczos3(&rgba, 256, 256);
-        // Sample center; Lanczos3 has minor ringing at edges but center is
-        // flat-region exact within u8 rounding.
-        let center = out.get_pixel(128, 128).0[0];
+        let rgba = RgbaImage::from_pixel(64, 32, image::Rgba([0, 0, 0, 200]));
+        let out = upscale_alpha_lanczos3(&rgba, 256, 128);
+        assert_eq!(out.dimensions(), (256, 128));
+        // Lanczos3 rings a little at the edges; the flat centre is exact
+        // within u8 rounding.
+        let center = out.get_pixel(128, 64).0[0];
         assert!((center as i32 - 200).abs() <= 2, "expected ~200, got {center}");
     }
 }

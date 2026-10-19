@@ -734,17 +734,12 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_svg_detects_xml_prologue() {
+    fn looks_like_svg_detects_xml_prologue_and_not_rasters() {
         assert!(looks_like_svg(SAMPLE_SVG));
         assert!(looks_like_svg(b"<svg xmlns='...'><circle/></svg>"));
         assert!(looks_like_svg(b"\xEF\xBB\xBF<svg/>"), "BOM-prefixed SVG");
         assert!(looks_like_svg(b"  \n\t<svg/>"), "leading whitespace");
-    }
-
-    #[test]
-    fn looks_like_svg_rejects_raster_formats() {
-        let png = minimal_png_bytes();
-        assert!(!looks_like_svg(&png));
+        assert!(!looks_like_svg(&minimal_png_bytes()));
         assert!(!looks_like_svg(b"\xff\xd8\xff\xe0JFIF"), "JPEG header");
         assert!(!looks_like_svg(b"GIF89a"), "GIF header");
         assert!(!looks_like_svg(b""), "empty buffer");
@@ -805,17 +800,16 @@ mod tests {
 
     #[test]
     fn test_check_large_image_over_limit() {
-        // Create a thin but wide image > 8000px
+        // A thin but wide image past 8000 px.
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(9000, 100));
-        let result = check_large_image(&img);
-        assert!(result.is_some(), "Expected LargeImage error for 9000px wide image");
-        match result.unwrap() {
-            CoreError::LargeImage { width, height: _, limit } => {
+        match check_large_image(&img) {
+            Some(CoreError::LargeImage { width, height: _, limit }) => {
                 assert_eq!(width, 9000);
                 assert_eq!(limit, LARGE_IMAGE_LIMIT);
             }
             other => panic!("Expected LargeImage, got {:?}", other),
         }
+        assert!(check_large_image(&DynamicImage::ImageRgb8(image::RgbImage::new(800, 600))).is_none());
     }
 
     #[test]
@@ -824,12 +818,6 @@ mod tests {
         assert!(!exceeds_large_image_limit(l, l));
         assert!(exceeds_large_image_limit(l + 1, 1));
         assert!(exceeds_large_image_limit(1, l + 1));
-    }
-
-    #[test]
-    fn test_check_large_image_under_limit() {
-        let img = DynamicImage::ImageRgb8(image::RgbImage::new(800, 600));
-        assert!(check_large_image(&img).is_none());
     }
 
     #[test]

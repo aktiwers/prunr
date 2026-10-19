@@ -443,22 +443,18 @@ mod tests {
         GrayImage::from_pixel(w, h, Luma([0]))
     }
 
+    /// With nothing to match or blend against (no mask, a mask of another
+    /// size, or a mask over all of it so no photo rings it), the fill
+    /// stays as it is.
     #[test]
-    fn color_match_empty_mask_is_noop() {
+    fn colour_match_and_seam_blend_without_a_ring_leave_the_fill() {
         let src = solid(64, 64, [200, 200, 200, 255]);
         let inp = solid(64, 64, [50, 50, 50, 255]);
-        let mask = empty_mask(64, 64);
-        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
-        assert_eq!(out, inp);
-    }
-
-    #[test]
-    fn color_match_dim_mismatch_is_noop() {
-        let src = solid(64, 64, [200, 200, 200, 255]);
-        let inp = solid(64, 64, [50, 50, 50, 255]);
-        let mask = empty_mask(32, 32);
-        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
-        assert_eq!(out, inp);
+        for mask in [empty_mask(64, 64), empty_mask(32, 32), GrayImage::from_pixel(64, 64, Luma([255]))] {
+            assert_eq!(applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8)), inp, "{:?}", mask.dimensions());
+        }
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &empty_mask(64, 64), 4, 1e-3, 8.0));
+        assert_eq!(out, inp, "seam blend, no mask");
     }
 
     #[test]
@@ -481,18 +477,6 @@ mod tests {
         );
         let outside = out.get_pixel(0, 0);
         assert_eq!(outside[0], 200);
-    }
-
-    /// All-mask image: every pixel is inside the mask, so the source
-    /// ring is empty (`src_count == 0`). Function must fall through
-    /// gracefully and return the input unchanged.
-    #[test]
-    fn color_match_all_mask_returns_input() {
-        let src = solid(64, 64, [200, 200, 200, 255]);
-        let inp = solid(64, 64, [50, 50, 50, 255]);
-        let mask = GrayImage::from_pixel(64, 64, Luma([255]));
-        let out = applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8));
-        assert_eq!(out, inp);
     }
 
     /// Bbox-crop contract: pixels outside the mask's expanded bbox must
@@ -523,15 +507,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn seam_blend_empty_mask_is_noop() {
-        let src = solid(64, 64, [200, 200, 200, 255]);
-        let inp = solid(64, 64, [50, 50, 50, 255]);
-        let mask = empty_mask(64, 64);
-        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
-        assert_eq!(out, inp);
     }
 
     #[test]

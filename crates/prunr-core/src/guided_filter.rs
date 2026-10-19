@@ -298,37 +298,23 @@ mod tests {
         out
     }
 
-    /// Against the brute-force reference on a grid where windows are
-    /// clipped at every border and a 12×12 interior is not clipped at all.
+    /// Against the brute-force reference: a 16×16 grid where windows clip
+    /// at every border around an unclipped 12×12 interior, and a wider
+    /// than tall one with a larger radius, so rows and columns clip
+    /// differently.
     #[test]
-    fn test_box_filter_interior_fast_path_matches_brute_force() {
-        let (w, h, r) = (16u32, 16u32, 2u32);
-        let data: Vec<f32> = (0..(w * h) as usize)
-            .map(|i| ((i as f32) * 0.137).sin())
-            .collect();
-        let actual = box_filter(&data, w, h, r);
-        let expected = brute_force_box(&data, w, h, r);
-        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
-            let (x, y) = (i as u32 % w, i as u32 / w);
-            assert!((a - e).abs() < 1e-4,
-                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
-        }
-    }
-
-    /// Same brute-force check on a wider-than-tall image with a larger
-    /// radius, so the row and column windows clip differently.
-    #[test]
-    fn test_box_filter_chunked_vertical_pass_matches_brute_force() {
-        let (w, h, r) = (48u32, 24u32, 3u32);
-        let data: Vec<f32> = (0..(w * h) as usize)
-            .map(|i| ((i as f32) * 0.071 + (i as f32).sqrt()).cos())
-            .collect();
-        let actual = box_filter(&data, w, h, r);
-        let expected = brute_force_box(&data, w, h, r);
-        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
-            let (x, y) = (i as u32 % w, i as u32 / w);
-            assert!((a - e).abs() < 1e-4,
-                "box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+    fn test_box_filter_matches_brute_force() {
+        let index = |n: u32| (0..n).map(|i| i as f32);
+        for (w, h, r, data) in [
+            (16u32, 16u32, 2u32, index(16 * 16).map(|i| (i * 0.137).sin()).collect::<Vec<f32>>()),
+            (48, 24, 3, index(48 * 24).map(|i| (i * 0.071 + i.sqrt()).cos()).collect()),
+        ] {
+            let actual = box_filter(&data, w, h, r);
+            let expected = brute_force_box(&data, w, h, r);
+            for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                assert!((a - e).abs() < 1e-4, "{w}x{h} r{r}: box_filter mismatch at ({x},{y}): actual={a} expected={e}");
+            }
         }
     }
 }
