@@ -810,7 +810,7 @@ fn spawn_and_initial_burst(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> Option<InitialBurst> {
-    drop_cancelled_pending(state, cancels, res_tx, ctx);
+    drop_cancelled_pending(state, |id| cancels.is_cancelled(id), res_tx, ctx);
     let total_pending = state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
     if total_pending == 0 {
         let _ = res_tx.send(state.complete_event());
@@ -1070,7 +1070,7 @@ fn top_up(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    drop_cancelled_pending(state, cancels, res_tx, ctx);
+    drop_cancelled_pending(state, |id| cancels.is_cancelled(id), res_tx, ctx);
     while room_to_send(sent.working(), state.max_jobs, sub.should_pause_admission()) > 0 {
         match send_next(sub, state, sent, cancels, res_tx, ctx) {
             SendOutcome::Sent | SendOutcome::Failed => {}
@@ -1181,24 +1181,17 @@ enum Refused {
 
 fn drop_cancelled_pending(
     state: &mut BatchRunState,
-    cancels: &super::processor::CancelRegistry,
+    is_cancelled: impl Fn(u64) -> bool,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
+    // One look per image: a cancel landing mid-scan must not take an image
+    // off the queue without its report.
     let mut cancelled: Vec<u64> = Vec::new();
-    for item in &state.pending {
-        if cancels.is_cancelled(item.id) { cancelled.push(item.id); }
-    }
-    for w in &state.pending_tier2 {
-        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
-    }
-    for w in &state.pending_add_edge {
-        if cancels.is_cancelled(w.item_id) { cancelled.push(w.item_id); }
-    }
-    if cancelled.is_empty() { return; }
-    state.pending.retain(|item| !cancels.is_cancelled(item.id));
-    state.pending_tier2.retain(|w| !cancels.is_cancelled(w.item_id));
-    state.pending_add_edge.retain(|w| !cancels.is_cancelled(w.item_id));
+    let mut keep = |id: u64| !is_cancelled(id) || { cancelled.push(id); false };
+    state.pending.retain(|item| keep(item.id));
+    state.pending_tier2.retain(|w| keep(w.item_id));
+    state.pending_add_edge.retain(|w| keep(w.item_id));
     for id in cancelled {
         report_cancelled(id, state, res_tx, ctx);
     }
@@ -1600,6 +1593,42 @@ mod tests {
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
+    }
+
+    /// A cancel that lands while the queues are scanned: every image
+    /// taken off them is reported, or it would wait for an answer forever.
+    #[test]
+    fn every_image_dropped_as_cancelled_is_reported() {
+        let cfg = ProcessingConfig {
+            engines: EngineSpec { model: ModelKind::Silueta, jobs: 2, cpu_only: false },
+            run: RunSettings::neutral(),
+            first_look: Shown::default(),
+            on_screen: Shown::default(),
+        };
+        let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
+        let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), mask: MaskSettings::default() };
+        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
+        let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
+        // Image 1 is cancelled from the start; 2 and 3 from their second look on.
+        let looks = std::cell::RefCell::new(std::collections::HashMap::<u64, u32>::new());
+        let is_cancelled = |id: u64| {
+            let mut looks = looks.borrow_mut();
+            let n = looks.entry(id).or_default();
+            *n += 1;
+            id == 1 || *n > 1
+        };
+        let (tx, rx) = mpsc::channel();
+        drop_cancelled_pending(&mut state, is_cancelled, &tx, &egui::Context::default());
+        drop(tx);
+        let mut seen: Vec<u64> = rx.iter().filter_map(|r| match r {
+            WorkerResult::BatchItemDone { item_id, .. } => Some(item_id),
+            _ => None,
+        }).collect();
+        seen.extend(state.pending.iter().map(|w| w.id));
+        seen.extend(state.pending_tier2.iter().map(|w| w.item_id));
+        seen.sort_unstable();
+        assert_eq!(seen, vec![1, 2, 3], "each image is still queued or reported, once");
     }
 
     /// A crash halves the jobs and runs the images again; at one job the
