@@ -786,9 +786,22 @@ impl OrtEngine {
 }
 
 /// Whether sessions on `provider` run on the host CPU: the CPU provider,
-/// and OpenVINO, which this app configures for no other device.
+/// and OpenVINO unless the user let its engines use the Intel GPU.
 pub fn runs_on_host_cpu(provider: &str) -> bool {
-    provider.eq_ignore_ascii_case(CPU_NAME) || provider.eq_ignore_ascii_case(OPENVINO_NAME)
+    on_host_cpu(provider, openvino_on_gpu())
+}
+
+/// Whether OpenVINO engines in this process may use the Intel GPU.
+pub fn openvino_on_gpu() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    { intel_gpu_chosen() }
+    #[cfg(target_os = "macos")]
+    { false }
+}
+
+fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
+    provider.eq_ignore_ascii_case(CPU_NAME)
+        || (provider.eq_ignore_ascii_case(OPENVINO_NAME) && !openvino_on_gpu)
 }
 
 /// Whether `model` runs on the accelerator `provider`: not declared
@@ -968,6 +981,16 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With Intel graphics on, OpenVINO engines are sized like a GPU's;
+    /// without it they share the host CPU.
+    #[test]
+    fn openvino_is_the_host_cpu_unless_it_may_use_the_intel_gpu() {
+        assert!(on_host_cpu(OPENVINO_NAME, false));
+        assert!(!on_host_cpu(OPENVINO_NAME, true));
+        assert!(on_host_cpu(CPU_NAME, true), "the CPU provider is the CPU either way");
+        assert!(!on_host_cpu("CUDA", false));
+    }
 
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
     /// behind it, only when the user chose it; fills never do, and an SD

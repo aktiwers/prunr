@@ -294,7 +294,7 @@ impl Settings {
     }
 
     /// Whether models run on the host CPU: "CPU only", no accelerator, or
-    /// OpenVINO, which the app runs on the CPU.
+    /// OpenVINO without Intel graphics.
     pub fn runs_on_host_cpu(&self) -> bool {
         prunr_core::engine::runs_on_host_cpu(self.effective_backend()) || self.active_backend.is_empty()
     }
@@ -778,7 +778,8 @@ mod tests {
     #[test]
     fn openvino_and_cpu_only_count_as_the_host_cpu() {
         let mut s = Settings::default();
-        for (backend, cpu_only, host) in [("OpenVINO", false, true), ("CPU", false, true), ("", false, true), ("CUDA", false, false), ("CUDA", true, true), ("DirectML", false, false)] {
+        let openvino_host = !prunr_core::engine::openvino_on_gpu();
+        for (backend, cpu_only, host) in [("OpenVINO", false, openvino_host), ("CPU", false, true), ("", false, true), ("CUDA", false, false), ("CUDA", true, true), ("DirectML", false, false)] {
             s.active_backend = backend.into();
             s.processor = if cpu_only { ComputeMode::CpuOnly } else { ComputeMode::Auto };
             assert_eq!(s.runs_on_host_cpu(), host, "{backend} cpu_only={cpu_only}");
