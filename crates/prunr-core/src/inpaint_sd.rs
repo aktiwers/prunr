@@ -1723,22 +1723,43 @@ fn size_ids(h: u32, w: u32) -> ndarray::Array2<f16> {
 
 fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
     let l = SD_LATENT_SIDE as usize;
-    let lat = Array4::<f16>::zeros((1, 9, l, l));
-    let ts = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(0.0));
-    let lat_t = Tensor::from_array(lat).map_err(|e| format!("{label}: smoke latent: {e}"))?;
-    let ts_t = Tensor::from_array(ts).map_err(|e| format!("{label}: smoke ts: {e}"))?;
     let emb_t = if takes_size_ids(s) {
         Tensor::from_array(size_ids(SD_TILE, SD_TILE)).map(|t| t.into_dyn())
     } else {
         Tensor::from_array(Array3::<f16>::zeros((1, CLIP_SEQ_LEN, 768))).map(|t| t.into_dyn())
     }.map_err(|e| format!("{label}: smoke conditioning: {e}"))?;
-    let [n0, n1, n2] = take_three_inputs(s, label)?;
-    s.run(inputs![
+    let names = take_three_inputs(s, label)?;
+    run_unet(s, &names, Array4::<f16>::zeros((1, 9, l, l)), 0, emb_t)
+        .map(drop)
+        .map_err(|e| format!("{label}: smoke {e}"))
+}
+
+/// One UNet run of each batch row of `latent` at timestep `t`.
+fn run_unet<'s>(
+    session: &'s mut Session,
+    [n0, n1, n2]: &[String; 3],
+    latent: Array4<f16>,
+    t: i64,
+    cond: ort::value::DynValue,
+) -> Result<ort::session::SessionOutputs<'s>, String> {
+    // Exact in f16: every timestep of SD's 1000-step grid fits the mantissa.
+    let ts = ndarray::Array1::<f16>::from_elem(latent.dim().0, f16::from_f32(t as f32));
+    let lat_t = Tensor::from_array(latent).map_err(|e| format!("latent tensor: {e}"))?;
+    let ts_t = Tensor::from_array(ts).map_err(|e| format!("timestep tensor: {e}"))?;
+    session.run(inputs![
         n0.as_str() => &lat_t,
         n1.as_str() => &ts_t,
-        n2.as_str() => &emb_t,
-    ]).map_err(|e| format!("{label}: smoke run: {e}"))?;
-    Ok(())
+        n2.as_str() => &cond,
+    ]).map_err(|e| format!("run: {e}"))
+}
+
+/// `run_unet` on the bundle's UNet, its noise prediction as f32.
+fn unet_run(bundle: &SdSession, latent: Array4<f16>, t: i64, cond: ort::value::DynValue, label: &str) -> Result<Array4<f32>, CoreError> {
+    let mut session = bundle.unet.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outputs = run_unet(&mut session, &bundle.unet_inputs, latent, t, cond)
+        .map_err(|e| CoreError::Inference(format!("SD {label}: {e}")))?;
+    extract::<ndarray::Ix4>(&outputs[0], label)
 }
 
 fn take_first_input(s: &Session, label: &str) -> Result<String, String> {
@@ -1897,25 +1918,11 @@ fn unet_step(
     t: i64,
     cond: Cond<'_>,
 ) -> Result<Array4<f32>, CoreError> {
-    // Exact in f16: every timestep of SD's 1000-step grid fits the mantissa.
-    let timestep = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(t as f32));
-    let lat_t = Tensor::from_array(latent_9ch_f16)
-        .map_err(|e| CoreError::Inference(format!("SD unet: latent tensor: {e}")))?;
-    let ts_t = Tensor::from_array(timestep)
-        .map_err(|e| CoreError::Inference(format!("SD unet: timestep tensor: {e}")))?;
     let cond_t = match cond {
         Cond::Text(emb) => Tensor::from_array(emb.clone()).map(|t| t.into_dyn()),
         Cond::Size(h, w) => Tensor::from_array(size_ids(h, w)).map(|t| t.into_dyn()),
     }.map_err(|e| CoreError::Inference(format!("SD unet: conditioning tensor: {e}")))?;
-    let mut session = bundle.unet.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![
-        bundle.unet_inputs[0].as_str() => &lat_t,
-        bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &cond_t,
-    ])
-        .map_err(|e| CoreError::Inference(format!("SD unet: run: {e}")))?;
-    extract::<ndarray::Ix4>(&outputs[0], "unet")
+    unet_run(bundle, latent_9ch_f16, t, cond_t, "unet")
 }
 
 /// Cond and uncond stacked on the batch axis, one UNet run per step.
@@ -1934,23 +1941,9 @@ fn unet_step_batched(
     let text_pair = ndarray::concatenate(
         Axis(0), &[text_emb_cond_f16.view(), text_emb_uncond_f16.view()],
     ).map_err(|e| CoreError::Inference(format!("SD unet batched: text concat: {e}")))?;
-    let timestep = ndarray::Array1::<f16>::from_elem(2, f16::from_f32(t as f32));
-
-    let lat_t = Tensor::from_array(latent_pair)
-        .map_err(|e| CoreError::Inference(format!("SD unet batched: latent tensor: {e}")))?;
-    let ts_t = Tensor::from_array(timestep)
-        .map_err(|e| CoreError::Inference(format!("SD unet batched: timestep tensor: {e}")))?;
     let emb_t = Tensor::from_array(text_pair)
         .map_err(|e| CoreError::Inference(format!("SD unet batched: text tensor: {e}")))?;
-    let mut session = bundle.unet.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = session.run(inputs![
-        bundle.unet_inputs[0].as_str() => &lat_t,
-        bundle.unet_inputs[1].as_str() => &ts_t,
-        bundle.unet_inputs[2].as_str() => &emb_t,
-    ])
-        .map_err(|e| CoreError::Inference(format!("SD unet batched: run: {e}")))?;
-    extract::<ndarray::Ix4>(&outputs[0], "unet (batched)")
+    unet_run(bundle, latent_pair, t, emb_t.into_dyn(), "unet (batched)")
 }
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
