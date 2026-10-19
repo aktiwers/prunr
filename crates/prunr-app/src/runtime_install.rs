@@ -422,10 +422,7 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
-    if target.exists() {
-        std::fs::remove_dir_all(&target).map_err(|e| format!("clean NVIDIA libraries: {e}"))?;
-    }
-    std::fs::rename(&staging, &target).map_err(|e| format!("move NVIDIA libraries into place: {e}"))?;
+    move_into_place(&staging, &target, &[])?;
     let _ = tx.send(InstallEvent::Done { install_dir: target });
     Ok(())
 }
@@ -459,11 +456,30 @@ fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String
     let library = ri::extract_wheel(bytes, &staging).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
-    if target_dir.exists() {
-        std::fs::remove_dir_all(target_dir).map_err(|e| format!("clean install dir: {e}"))?;
-    }
-    std::fs::rename(&staging, target_dir).map_err(|e| format!("move install into place: {e}"))?;
+    // The NVIDIA libraries live inside the CUDA install and come from
+    // their own download; a reinstall of the runtime keeps them.
+    move_into_place(&staging, target_dir, &[prunr_core::ort_runtime::NVIDIA_LIBS_DIR])?;
     Ok(target_dir.join(library.file_name().ok_or("extracted library has no name")?))
+}
+
+/// Replace `target` with the whole `staging` folder, carrying the `kept`
+/// subfolders of the old `target` over.
+fn move_into_place(staging: &Path, target: &Path, kept: &[&str]) -> Result<(), String> {
+    for name in kept {
+        let old = target.join(name);
+        if old.exists() {
+            std::fs::rename(&old, staging.join(name)).map_err(|e| format!("keep {name}: {e}"))?;
+        }
+    }
+    if target.exists() {
+        if let Err(e) = std::fs::remove_dir_all(target) {
+            for name in kept {
+                let _ = std::fs::rename(staging.join(name), target.join(name));
+            }
+            return Err(format!("clean install dir: {e}"));
+        }
+    }
+    std::fs::rename(staging, target).map_err(|e| format!("move install into place: {e}"))
 }
 
 #[cfg(test)]
@@ -522,6 +538,27 @@ mod tests {
         assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"the working one");
         let left: Vec<_> = std::fs::read_dir(store.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
+    }
+
+    /// Reinstalling the CUDA runtime keeps the NVIDIA libraries inside it
+    /// and replaces everything else.
+    #[test]
+    fn a_reinstall_keeps_the_nvidia_libraries() {
+        let store = tempfile::tempdir().unwrap();
+        let target = store.path().join("cuda-1.24.1-linux-x64");
+        let staging = store.path().join(".cuda-1.24.1-linux-x64.staging");
+        let nvidia = prunr_core::ort_runtime::NVIDIA_LIBS_DIR;
+        std::fs::create_dir_all(target.join(nvidia)).unwrap();
+        std::fs::write(target.join(nvidia).join("libcudnn.so.9"), b"downloaded").unwrap();
+        std::fs::write(target.join("libonnxruntime.so"), b"old").unwrap();
+        std::fs::write(target.join("stale"), b"old").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("libonnxruntime.so"), b"new").unwrap();
+        move_into_place(&staging, &target, &[nvidia]).unwrap();
+        assert_eq!(std::fs::read(target.join(nvidia).join("libcudnn.so.9")).unwrap(), b"downloaded");
+        assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"new");
+        assert!(!target.join("stale").exists(), "the rest is replaced");
+        assert!(!staging.exists());
     }
 
     /// Windows offers no download (DirectML is built in, OpenVINO's wheel
