@@ -2238,15 +2238,12 @@ impl BatchItem {
     /// A live render landed on the shown step, from `start`, cut by
     /// `cutter` (`None`: it cut nothing).
     pub(crate) fn record_photo_pass(&mut self, start: Option<RunStart>, cutter: Option<Cutter>) {
-        let cutter = cutter.or_else(|| match &self.timeline.current().origin {
-            // A pass that cut nothing keeps who cut the step.
-            Some(origin) if origin.engine == Engine::Segment => origin.cutter,
-            // On a step nobody cut (an erase, the photo) it records that no
-            // model did: unrecorded reads as the kept segmentation's cut,
-            // which may be an undone one.
-            _ => Some(Cutter::NoModel),
-        });
-        self.record_origin(Engine::Segment, start, cutter);
+        // A pass that cut nothing keeps who cut the step; on a step nobody
+        // cut (an erase, the photo) it records that no model did, since an
+        // unrecorded cutter reads as the kept segmentation's cut, which may
+        // be an undone one.
+        let cutter = cutter.or_else(|| self.shown_cutter()).unwrap_or(Cutter::NoModel);
+        self.record_origin(Engine::Segment, start, Some(cutter));
     }
 
     /// The shown step's origin when a run of `engine` would redo that step.

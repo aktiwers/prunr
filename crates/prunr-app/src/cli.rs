@@ -849,7 +849,7 @@ fn run_inpaint(args: &Cli) -> i32 {
             return 1;
         }
     };
-    let result = finalize_inpaint(raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0, prunr_core::inpaint_blend::EdgeColour::AlongEdge);
+    let result = finalize_inpaint(raw, &img, &mask, DEFAULT_EDGE_BLEND_PX, 0.0, prunr_core::inpaint_blend::EdgeColour::default());
     if let Err(e) = prunr_app::fs_util::save_image_replacing(&out_path, &result) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;

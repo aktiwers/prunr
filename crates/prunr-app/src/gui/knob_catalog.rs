@@ -184,7 +184,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Colorize => role == Colorize,
         Surface::SdChips => model == SettingsModel::SdInpaint,
         Surface::RoremChips => model == SettingsModel::RoremInpaint,
-        Surface::FillChips => role == Erase && !matches!(model, SettingsModel::SdInpaint | SettingsModel::RoremInpaint),
+        Surface::FillChips => matches!(model, SettingsModel::Inpaint | SettingsModel::BigInpaint | SettingsModel::MiganInpaint),
         Surface::Brushes => !matches!(role, Upscale | Colorize),
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
