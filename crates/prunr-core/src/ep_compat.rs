@@ -81,20 +81,40 @@ fn cache_path() -> Option<PathBuf> {
 /// failed (`prunr_models::content_tag`). The model's own weights keep the
 /// historic key, so entries written before weights were told apart still
 /// read, as failures of those. The EP part keeps the historic `Display`
-/// strings ("OpenVINO", "CUDA", "CoreML", "DirectML").
+/// strings ("OpenVINO", "CUDA", "CoreML", "DirectML"), plus `"+gpu"` for
+/// an OpenVINO session on the Intel GPU, so a GPU failure does not bar
+/// OpenVINO on the CPU once the switch is off.
 fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
-    key_with(ep, model, weights, prunr_models::content_tag(model))
+    key_with(ep, model, weights, prunr_models::content_tag(model), on_intel_gpu(ep, model))
 }
 
-fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Option<u64>) -> String {
+/// Whether `model`'s session on `ep` asks for the Intel GPU: OpenVINO
+/// engines with the switch on. Fills stay on the CPU, and SD parts carry
+/// their own device.
+fn on_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        ep == EpKind::OpenVino
+            && crate::engine::openvino_on_gpu()
+            && prunr_models::descriptor(model).is_some_and(|d| d.category != prunr_models::ModelCategory::Inpaint)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (ep, model);
+        false
+    }
+}
+
+fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Option<u64>, intel_gpu: bool) -> String {
     let copy = match weights {
         Weights::Fp32 => "",
         Weights::Fp16 => "/fp16",
         Weights::Int8 => "/int8",
     };
+    let device = if intel_gpu { "+gpu" } else { "" };
     match tag {
-        Some(tag) => format!("{ep}::{model:?}{copy}@{tag:016x}"),
-        None => format!("{ep}::{model:?}{copy}"),
+        Some(tag) => format!("{ep}{device}::{model:?}{copy}@{tag:016x}"),
+        None => format!("{ep}{device}::{model:?}{copy}"),
     }
 }
 
@@ -214,7 +234,7 @@ mod tests {
     #[test]
     fn key_format_is_stable_openvino() {
         assert_eq!(
-            key(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32),
+            key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None, false),
             "OpenVINO::Silueta",
         );
         assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
@@ -244,11 +264,29 @@ mod tests {
     #[test]
     fn a_new_download_of_a_model_is_a_new_key() {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(1));
-        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(2)));
+        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(1), false);
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(2), false));
         assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
-        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None), "OpenVINO::Silueta",
+        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None, false), "OpenVINO::Silueta",
             "built-in models keep the historic key; the app version scopes them");
+    }
+
+    /// A failure on the Intel GPU is its own key: turning the switch off
+    /// tries OpenVINO on the CPU again. Fills never ask for the GPU.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_intel_gpu_failure_has_its_own_key() {
+        let silueta = prunr_models::ModelId::Silueta;
+        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, true), "OpenVINO+gpu::Silueta");
+        assert_ne!(
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, true),
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, false),
+        );
+        if crate::engine::openvino_on_gpu() {
+            assert!(on_intel_gpu(EpKind::OpenVino, silueta));
+        }
+        assert!(!on_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::LaMaFp32), "a fill stays on the CPU");
+        assert!(!on_intel_gpu(EpKind::Cuda, silueta));
     }
 
     /// Each copy of the weights fails on its own key; the model's own
@@ -257,7 +295,7 @@ mod tests {
     #[test]
     fn each_copy_of_the_weights_has_its_own_key() {
         let u2net = prunr_models::ModelId::U2net;
-        let keys = [Weights::Fp32, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0)));
+        let keys = [Weights::Fp32, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0), false));
         assert_eq!(keys, [
             "OpenVINO::U2net@0000000000005ca0",
             "OpenVINO::U2net/fp16@0000000000005ca0",
