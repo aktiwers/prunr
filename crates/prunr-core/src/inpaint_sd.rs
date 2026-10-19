@@ -366,8 +366,10 @@ pub fn process_inpaint_with(
     };
     // One session for every region the fill scale fills on its own. The
     // fit reads the tall crop as the RAM gate above left it.
-    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), progress, |img, m, progress| {
-        paint_regions(&bundle, &vae, img, m, &req, progress)
+    // A scaled-down region's Feather band is that much narrower.
+    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), progress, |img, m, at, progress| {
+        let scaled = SdInpaintRequest { soft_edge_px: req.soft_edge_px * at, ..req.clone() };
+        paint_regions(&bundle, &vae, img, m, &scaled, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     tracing::info!(
@@ -2148,12 +2150,31 @@ fn gaussian(rng: &mut ChaCha8Rng, n: usize) -> Vec<f32> {
 }
 
 /// How far in from the region's edge each pixel lies, over `width_px`:
-/// 0 outside and at the edge, 1 from `width_px` in (the box share of
-/// region around a pixel is ½ at the edge and 1 once the box is inside).
+/// 0 outside, rising from the edge to 1 at `width_px` in. `fill_region`
+/// grows by 4-neighbour steps, so the distance is counted the same way
+/// (city-block): everything painted lies more than the Feather in and is
+/// filled in full, whatever its shape; only the Feather band fades.
 fn edge_ramp(mask: &GrayImage, width_px: f32) -> Vec<f32> {
-    let inside: Vec<f32> = mask.as_raw().iter().map(|&v| if v > IN_HOLE { 1.0 } else { 0.0 }).collect();
-    let share = crate::guided_filter::box_filter(&inside, mask.width(), mask.height(), width_px.round().max(1.0) as u32);
-    inside.iter().zip(share).map(|(&i, s)| i * ((s - 0.5) * 2.0).clamp(0.0, 1.0)).collect()
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let far = (w + h) as u32;
+    let mut d: Vec<u32> = mask.as_raw().iter().map(|&v| if v > IN_HOLE { far } else { 0 }).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if x > 0 { d[i] = d[i].min(d[i - 1] + 1); }
+            if y > 0 { d[i] = d[i].min(d[i - w] + 1); }
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            if x + 1 < w { d[i] = d[i].min(d[i + 1] + 1); }
+            if y + 1 < h { d[i] = d[i].min(d[i + w] + 1); }
+        }
+    }
+    // The region's outermost pixels lie 1 in; the band's innermost `width_px`.
+    let span = (width_px - 1.0).max(1.0);
+    d.iter().map(|&d| if d == 0 { 0.0 } else { ((d as f32 - 1.0) / span).clamp(0.0, 1.0) }).collect()
 }
 
 /// The pixel ramp as one value per latent cell: its 8×8 block's mean.
@@ -3140,7 +3161,7 @@ mod tests {
         }
         let sink = Arc::new(RecordingSink::default());
         let fit = crate::inpaint::Fit { long: 448, short: 448 };
-        crate::inpaint::fill_at_scale(&photo, &hole, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, p| {
+        crate::inpaint::fill_at_scale(&photo, &hole, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, _, p| {
             paint_regions_with(img, m, SD_TILE, p, fake_fill)
         }).expect("fill");
         let found = places(&sink.updates());
@@ -3307,6 +3328,27 @@ mod tests {
         assert!(at(16) < 0.2, "at the edge: {}", at(16));
         assert!(at(20) > at(17) && at(20) < 1.0, "rising");
         assert_eq!(at(40), 1.0, "the core");
+    }
+
+    /// Whatever its shape, everything painted is filled in full: only the
+    /// Feather band `fill_region` added fades into the photo. A speck and
+    /// a disc, each grown by Expand and Feather.
+    #[test]
+    fn the_soft_edge_fills_everything_painted_in_full() {
+        for (grow, feather) in [(0.0, 24.0), (2.0, 24.0), (2.0, 4.0), (16.0, 22.0)] {
+            for radius in [1i32, 10] {
+                let painted = GrayImage::from_fn(200, 200, |x, y| {
+                    let (dx, dy) = (x as i32 - 100, y as i32 - 100);
+                    Luma([if dx * dx + dy * dy <= radius * radius { 255 } else { 0 }])
+                });
+                let region = crate::inpaint_blend::fill_region(&painted, grow, feather);
+                let ramp = edge_ramp(&region, feather);
+                let least = painted.as_raw().iter().zip(&ramp).filter(|(&p, _)| p > 127).map(|(_, &r)| r).fold(1.0f32, f32::min);
+                assert_eq!(least, 1.0, "grow {grow}, feather {feather}, radius {radius}");
+                let outer = region.as_raw().iter().zip(&ramp).filter(|(&m, _)| m > 127).map(|(_, &r)| r).fold(1.0f32, f32::min);
+                assert!(outer < 0.2, "the band fades to the photo at the edge: {outer}");
+            }
+        }
     }
 
     /// Each scheduler's latent gets cleaner step by step, ending (almost)
