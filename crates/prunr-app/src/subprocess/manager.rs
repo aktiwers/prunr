@@ -299,7 +299,7 @@ impl SubprocessManager {
     /// Send an AddEdgeInference command (seg cached, run TEED on masked).
     /// Writes the seg tensor + original image bytes to temp files. The worker
     /// reads the seg tensor without deleting it and hands the path back as
-    /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
+    /// `tensor_cache` on `ImageDone`, so the parent's reader takes
     /// ownership — no extra copy round-trip.
     pub fn send_add_edge_inference(
         &mut self,
@@ -612,9 +612,7 @@ mod tests {
                 width: 100,
                 height: 100,
                 active_provider: "CPU".into(),
-                tensor_cache_path: None,
-                tensor_cache_height: None,
-                tensor_cache_width: None,
+                tensor_cache: None,
                 edge_cache: None,
                 spare_scales: None,
             },

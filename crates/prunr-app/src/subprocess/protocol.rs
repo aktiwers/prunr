@@ -118,7 +118,7 @@ pub enum SubprocessCommand {
         item_id: u64,
         image_path: std::path::PathBuf,
         /// Path to temp file with the cached raw f32 seg tensor. It
-        /// is NOT deleted by the worker: it comes back as `tensor_cache_path` on
+        /// is NOT deleted by the worker: it comes back as `tensor_cache` on
         /// `ImageDone` for the parent to read-and-delete, saving a copy.
         seg_tensor_path: std::path::PathBuf,
         seg_tensor_height: u32,
@@ -202,6 +202,14 @@ pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) 
     prunr_core::Progress::new(std::sync::Arc::new(IpcProgress { item_id, tx }))
 }
 
+/// A raw f32 segmentation tensor a worker left in a file, `height` × `width`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TensorCacheFile {
+    pub path: std::path::PathBuf,
+    pub height: u32,
+    pub width: u32,
+}
+
 /// The line detector's planes (f32 probabilities, pre-threshold) a
 /// worker wrote for an image: `scales`' planes one after another in that
 /// order, each at its own size, `edge_scale_dims` of the base `height` ×
@@ -246,11 +254,9 @@ pub enum SubprocessEvent {
         width: u32,
         height: u32,
         active_provider: String,
-        /// Path to cached raw segmentation tensor (Tier 1 output).
-        /// Only present for full pipeline runs, not RePostProcess.
-        tensor_cache_path: Option<std::path::PathBuf>,
-        tensor_cache_height: Option<u32>,
-        tensor_cache_width: Option<u32>,
+        /// The raw segmentation tensor (Tier 1 output). Only present for
+        /// full pipeline runs, not RePostProcess.
+        tensor_cache: Option<TensorCacheFile>,
         /// The line detector's planes, for Tier 2 edge reruns. Only
         /// present when the run used TEED (EdgesOnly or SubjectOutline).
         #[serde(default)]
@@ -594,9 +600,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 active_provider: "CPU".into(),
-                tensor_cache_path: None,
-                tensor_cache_height: None,
-                tensor_cache_width: None,
+                tensor_cache: None,
                 edge_cache: None,
                 spare_scales: None,
             },
@@ -700,9 +704,7 @@ mod tests {
             width: 1000,
             height: 1000,
             active_provider: "CPU".to_string(),
-            tensor_cache_path: Some(PathBuf::from("/tmp/tensor.bin")),
-            tensor_cache_height: Some(320),
-            tensor_cache_width: Some(320),
+            tensor_cache: Some(TensorCacheFile { path: PathBuf::from("/tmp/tensor.bin"), height: 320, width: 320 }),
             edge_cache: None,
             spare_scales: None,
         });
@@ -712,9 +714,7 @@ mod tests {
             width: 500,
             height: 500,
             active_provider: "CoreML".to_string(),
-            tensor_cache_path: None,
-            tensor_cache_height: None,
-            tensor_cache_width: None,
+            tensor_cache: None,
             edge_cache: Some(EdgeCacheFile {
                 path: PathBuf::from("/tmp/edge.bin"),
                 height: 480,

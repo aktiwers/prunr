@@ -634,18 +634,16 @@ pub fn run_worker() -> ! {
                     let mut spare_token = None;
                     match result {
                         Ok(pr) => {
-                            let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
-                                let tp = IpcKind::Tensor.path_for(&ipc, item_id);
-                                match std::fs::write(&tp, prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata)) {
-                                    Ok(()) => (Some(tp), Some(th), Some(tw)),
+                            let tensor_cache = tensor_for_cache.as_ref().and_then(|(tdata, height, width)| {
+                                let path = IpcKind::Tensor.path_for(&ipc, item_id);
+                                match std::fs::write(&path, prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata)) {
+                                    Ok(()) => Some(TensorCacheFile { path, height: *height, width: *width }),
                                     Err(e) => {
-                                        tracing::error!(item_id, %e, path = %tp.display(), "seg tensor write failed");
-                                        (None, None, None)
+                                        tracing::error!(item_id, %e, path = %path.display(), "seg tensor write failed");
+                                        None
                                     }
                                 }
-                            } else {
-                                (None, None, None)
-                            };
+                            });
 
                             let edge_cache = edge_tensor_for_cache.as_ref()
                                 .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
@@ -667,9 +665,7 @@ pub fn run_worker() -> ! {
                                         width: w,
                                         height: h,
                                         active_provider,
-                                        tensor_cache_path: tcp,
-                                        tensor_cache_height: tch,
-                                        tensor_cache_width: tcw,
+                                        tensor_cache,
                                         edge_cache,
                                         spare_scales,
                                     });
@@ -752,9 +748,7 @@ pub fn run_worker() -> ! {
                                     width: w,
                                     height: h,
                                     active_provider: String::new(),
-                                    tensor_cache_path: None,
-                                    tensor_cache_height: None,
-                                    tensor_cache_width: None,
+                                    tensor_cache: None,
                                     edge_cache: None,
                                     spare_scales: None,
                                 },
@@ -809,7 +803,7 @@ pub fn run_worker() -> ! {
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
-                    // back as tensor_cache_path — the parent's read_raw_seg_tensor
+                    // back as tensor_cache — the parent's read_raw_seg_tensor
                     // reads-and-deletes it. So here we `read`, not `read_and_delete`.
                     let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
                         let raw_bytes = std::fs::read(&seg_tensor_path)
@@ -864,9 +858,7 @@ pub fn run_worker() -> ! {
                                     // tier; parent treats it like a Tier 2 rerun
                                     // and keeps the existing backend label.
                                     active_provider: String::new(),
-                                    tensor_cache_path: Some(seg_tensor_path.clone()),
-                                    tensor_cache_height: Some(seg_tensor_height),
-                                    tensor_cache_width: Some(seg_tensor_width),
+                                    tensor_cache: Some(TensorCacheFile { path: seg_tensor_path.clone(), height: seg_tensor_height, width: seg_tensor_width }),
                                     edge_cache,
                                     spare_scales,
                                 });
