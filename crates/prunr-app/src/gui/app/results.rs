@@ -273,7 +273,7 @@ impl PrunrApp {
             progress.last_event = event.clone();
             let name = progress.target.display_name();
             let outcome = match event {
-                InstallEvent::Done { .. } => Ok(format!("{name} installed. Restart Prunr to use them")),
+                InstallEvent::Done { .. } => Ok(format!("{name} installed. Restart Prunr to apply")),
                 InstallEvent::Failed { error } => {
                     tracing::warn!(target = name, %error, "install failed");
                     Err(format!("Could not install {name}: {error}"))
