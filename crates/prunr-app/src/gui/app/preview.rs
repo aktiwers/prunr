@@ -553,25 +553,8 @@ mod upscale_tier2_routing_tests {
         );
     }
 
-    /// The fixed path: both recipes use RealEsrganX4Plus. Sharpen-only
-    /// diff must resolve to UpscaleTier2.
-    #[test]
-    fn tier2_chain_correct_model_kind_routes_sharpen_to_upscale_tier2() {
-        let old_s = ItemSettings { sharpen: 0.0, ..ItemSettings::default() };
-        let new_s = ItemSettings { sharpen: 0.5, ..old_s };
-
-        let old_recipe = upscale_recipe_for(&old_s); // applied_recipe at Tier-1 result time
-        let new_recipe = upscale_recipe_for(&new_s); // fixed path: same model kind used
-        assert_eq!(
-            resolve_tier(&old_recipe, &new_recipe),
-            RequiredTier::UpscaleTier2,
-            "sharpen-only diff with matching RealEsrganX4Plus model in both recipes \
-             must resolve to UpscaleTier2 — this is the contract that enables live preview",
-        );
-    }
-
-    /// Same as above but for each Tier-2 knob, ensuring each independently
-    /// triggers the live-preview dispatch.
+    /// The fixed path: both recipes use RealEsrganX4Plus, and each Tier-2
+    /// knob alone resolves to UpscaleTier2, the live-preview dispatch.
     #[test]
     fn tier2_chain_each_knob_individually_routes_to_upscale_tier2() {
         let base = ItemSettings {
