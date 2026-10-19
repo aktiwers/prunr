@@ -180,58 +180,6 @@ impl RuntimeId {
     }
 }
 
-/// NVIDIA's CUDA 12 and cuDNN 9 libraries the CUDA runtime links, as the
-/// PyPI wheels that carry them: (package, pinned version). ORT asks for
-/// any 12.x / 9.x; these are the newest at pinning.
-pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
-    ("nvidia-cuda-runtime-cu12", "12.9.79"),
-    ("nvidia-cublas-cu12", "12.9.2.10"),
-    ("nvidia-cudnn-cu12", "9.27.0.42"),
-    ("nvidia-cufft-cu12", "11.4.1.4"),
-    ("nvidia-curand-cu12", "10.3.10.19"),
-    ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
-];
-
-/// The NVIDIA libraries' download, for the button that offers them.
-pub const NVIDIA_DOWNLOAD_LABEL: &str = "1.7 GB";
-
-/// The settings key the NVIDIA libraries' license acceptance is kept under.
-pub const NVIDIA_LICENSE_KEY: &str = "NvidiaCudaLibraries";
-
-/// The licenses the NVIDIA libraries come under: the CUDA EULA and the
-/// cuDNN license.
-pub const NVIDIA_LICENSE_URLS: [&str; 2] = [
-    "https://docs.nvidia.com/cuda/eula/index.html",
-    "https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html",
-];
-
-/// Where the NVIDIA libraries go: inside the CUDA runtime's install, so
-/// uninstalling it removes them too.
-pub fn nvidia_libraries_dir() -> Option<PathBuf> {
-    RuntimeId::Cuda.install_dir().map(|d| d.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR))
-}
-
-pub fn nvidia_libraries_installed() -> bool {
-    nvidia_libraries_dir().is_some_and(|d| d.join("libcudnn.so.9").is_file())
-}
-
-/// What one install fetches: a runtime, or the NVIDIA libraries the CUDA
-/// runtime needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallTarget {
-    Runtime(RuntimeId),
-    NvidiaLibraries,
-}
-
-impl InstallTarget {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Runtime(rt) => rt.display_name(),
-            Self::NvidiaLibraries => "NVIDIA libraries",
-        }
-    }
-}
-
 /// Which runtime every process loads: the one built into the app (the
 /// DirectML build on Windows) or a Runtime Store install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,16 +265,12 @@ pub struct InstallHandle {
 }
 
 /// Final event is either `Done` or `Failed`; channel closes after.
-pub fn start_install(target: InstallTarget) -> InstallHandle {
+pub fn start_install(runtime: RuntimeId) -> InstallHandle {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
-        let installed = match target {
-            InstallTarget::Runtime(rt) => run_install(rt, &tx, cancel_for_thread),
-            InstallTarget::NvidiaLibraries => run_nvidia_install(&tx, cancel_for_thread),
-        };
-        if let Err(e) = installed {
+        if let Err(e) = run_install(runtime, &tx, cancel_for_thread) {
             let _ = tx.send(InstallEvent::Failed { error: e });
         }
     });
@@ -386,53 +330,8 @@ fn run_install(
     Ok(())
 }
 
-/// Download each NVIDIA wheel in turn (one in memory at a time, the
-/// largest 766 MB), extract its libraries into a staging folder, and move
-/// that into place once all are there.
-fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) -> Result<(), String> {
-    let _ = tx.send(InstallEvent::Preparing);
-    let target = nvidia_libraries_dir().ok_or("could not resolve user data dir")?;
-    if !RuntimeId::Cuda.is_installed() {
-        return Err("install CUDA Runtime first".to_string());
-    }
-    let wheels = NVIDIA_WHEELS.iter()
-        .map(|(package, version)| query_pypi_package(package, version))
-        .collect::<Result<Vec<_>, _>>()?;
-    let total: u64 = wheels.iter().map(|w| w.size_bytes).sum();
-    let staging = target.with_file_name(format!(".{}.staging", prunr_core::ort_runtime::NVIDIA_LIBS_DIR));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
-    }
-    std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
-    let fetched = (|| {
-        let mut done = 0u64;
-        for wheel in &wheels {
-            let mut on_progress = |so_far: u64, _: u64| {
-                let _ = tx.send(InstallEvent::Downloading { bytes_so_far: done + so_far, total_bytes: total });
-            };
-            let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(&cancel) };
-            let bytes = ri::download_wheel(wheel, &mut hooks)?;
-            let _ = tx.send(InstallEvent::Extracting);
-            ri::extract_nvidia_wheel(&bytes, &staging)?;
-            done += wheel.size_bytes;
-        }
-        Ok::<(), String>(())
-    })();
-    if let Err(e) = fetched {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(e);
-    }
-    move_into_place(&staging, &target, &[])?;
-    let _ = tx.send(InstallEvent::Done { install_dir: target });
-    Ok(())
-}
-
 fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
-    query_pypi_package(rt.pypi_package(), rt.ort_version())
-}
-
-fn query_pypi_package(package: &str, version: &str) -> Result<ri::WheelInfo, String> {
-    let url = format!("https://pypi.org/pypi/{package}/{version}/json");
+    let url = format!("https://pypi.org/pypi/{}/{}/json", rt.pypi_package(), rt.ort_version());
     let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {e}"))?;
     let resp = client.get(&url).send()
         .map_err(|e| format!("PyPI query failed: {e}"))?;
@@ -456,30 +355,11 @@ fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String
     let library = ri::extract_wheel(bytes, &staging).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
-    // The NVIDIA libraries live inside the CUDA install and come from
-    // their own download; a reinstall of the runtime keeps them.
-    move_into_place(&staging, target_dir, &[prunr_core::ort_runtime::NVIDIA_LIBS_DIR])?;
+    if target_dir.exists() {
+        std::fs::remove_dir_all(target_dir).map_err(|e| format!("clean install dir: {e}"))?;
+    }
+    std::fs::rename(&staging, target_dir).map_err(|e| format!("move install into place: {e}"))?;
     Ok(target_dir.join(library.file_name().ok_or("extracted library has no name")?))
-}
-
-/// Replace `target` with the whole `staging` folder, carrying the `kept`
-/// subfolders of the old `target` over.
-fn move_into_place(staging: &Path, target: &Path, kept: &[&str]) -> Result<(), String> {
-    for name in kept {
-        let old = target.join(name);
-        if old.exists() {
-            std::fs::rename(&old, staging.join(name)).map_err(|e| format!("keep {name}: {e}"))?;
-        }
-    }
-    if target.exists() {
-        if let Err(e) = std::fs::remove_dir_all(target) {
-            for name in kept {
-                let _ = std::fs::rename(staging.join(name), target.join(name));
-            }
-            return Err(format!("clean install dir: {e}"));
-        }
-    }
-    std::fs::rename(staging, target).map_err(|e| format!("move install into place: {e}"))
 }
 
 #[cfg(test)]
@@ -538,27 +418,6 @@ mod tests {
         assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"the working one");
         let left: Vec<_> = std::fs::read_dir(store.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
-    }
-
-    /// Reinstalling the CUDA runtime keeps the NVIDIA libraries inside it
-    /// and replaces everything else.
-    #[test]
-    fn a_reinstall_keeps_the_nvidia_libraries() {
-        let store = tempfile::tempdir().unwrap();
-        let target = store.path().join("cuda-1.24.1-linux-x64");
-        let staging = store.path().join(".cuda-1.24.1-linux-x64.staging");
-        let nvidia = prunr_core::ort_runtime::NVIDIA_LIBS_DIR;
-        std::fs::create_dir_all(target.join(nvidia)).unwrap();
-        std::fs::write(target.join(nvidia).join("libcudnn.so.9"), b"downloaded").unwrap();
-        std::fs::write(target.join("libonnxruntime.so"), b"old").unwrap();
-        std::fs::write(target.join("stale"), b"old").unwrap();
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("libonnxruntime.so"), b"new").unwrap();
-        move_into_place(&staging, &target, &[nvidia]).unwrap();
-        assert_eq!(std::fs::read(target.join(nvidia).join("libcudnn.so.9")).unwrap(), b"downloaded");
-        assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"new");
-        assert!(!target.join("stale").exists(), "the rest is replaced");
-        assert!(!staging.exists());
     }
 
     /// Windows offers no download (DirectML is built in, OpenVINO's wheel
