@@ -4400,7 +4400,6 @@ dependencies = [
  "arboard",
  "bincode",
  "bytemuck",
- "bytes",
  "clap",
  "dirs",
  "drag",
@@ -4435,7 +4434,6 @@ dependencies = [
  "windows 0.62.2",
  "windows-sys 0.59.0",
  "winresource",
- "zip",
  "zstd",
 ]
 
@@ -7345,7 +7343,6 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2",
- "zip",
  "zstd",
 ]
 

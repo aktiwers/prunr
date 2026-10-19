@@ -54,8 +54,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-zip = { workspace = true }
-bytes = { workspace = true }
 
 [dev-dependencies]
 prunr-core = { path = "../prunr-core", features = ["test-utils"] }

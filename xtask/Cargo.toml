@@ -20,7 +20,6 @@ prunr-runtime-install = { path = "../crates/prunr-runtime-install" }
 ort = { workspace = true }
 ndarray = { workspace = true }
 # Extract OpenVINO ORT bundles from PyPI .whl files (zip archives).
-zip = { workspace = true }
 
 # Read/write PNGs for the `render-golden-diff` subcommand.
 image = { workspace = true }
