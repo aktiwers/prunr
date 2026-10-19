@@ -12,7 +12,7 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 /// Write a single message: [4-byte LE length][bincode payload].
 ///
 /// Does NOT flush — callers in a write loop let the BufWriter coalesce
-/// frames. Call `flush_writer` explicitly before the stream closes or
+/// frames. Flush the writer explicitly before the stream closes or
 /// before a blocking read-response cycle where the peer must see the
 /// frame before sending a reply.
 pub fn write_message<W: Write, T: serde::Serialize>(
@@ -25,12 +25,6 @@ pub fn write_message<W: Write, T: serde::Serialize>(
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&payload)?;
     Ok(())
-}
-
-/// Flush the writer. Call after the last `write_message` in a session so
-/// any coalesced frames reach the peer before the pipe closes.
-pub fn flush_writer<W: Write>(writer: &mut BufWriter<W>) -> io::Result<()> {
-    writer.flush()
 }
 
 /// Read a single message: [4-byte LE length][bincode payload].

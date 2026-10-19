@@ -5,7 +5,7 @@
 //! process OOMs, the parent detects the crash and retries with reduced
 //! concurrency.
 
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -298,11 +298,11 @@ pub fn run_worker() -> ! {
                 if write_message(&mut writer, &evt).is_err() {
                     break;
                 }
-                if prunr_app::subprocess::ipc::flush_writer(&mut writer).is_err() {
+                if writer.flush().is_err() {
                     break;
                 }
             }
-            let _ = prunr_app::subprocess::ipc::flush_writer(&mut writer);
+            let _ = writer.flush();
         })
         .expect("failed to spawn writer thread");
 

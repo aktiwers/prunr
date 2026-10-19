@@ -457,24 +457,19 @@ pub const CLI_PERSISTENT_PREFIXES: &[&str] = &[
     IpcKind::CliDs.prefix(),
 ];
 
-/// Cleanup scoped to a single subprocess's owned filenames. Use from
-/// crash-recovery paths so the wipe doesn't race a sibling subprocess
-/// writing the shared dir.
-pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
-    sweep_dir_with_prefix(ipc_temp_dir(), prefixes);
-}
-
-/// Crash-recovery cleanup for the seg / CLI subprocess. Leaves a sibling
-/// inpaint subprocess's `inpaint-*` files and the CLI's retry inputs alone.
+/// Crash-recovery cleanup for the seg / CLI subprocess, scoped to its own
+/// file names so it doesn't race a sibling writing the shared dir: a
+/// sibling inpaint subprocess's `inpaint-*` files and the CLI's retry
+/// inputs are left alone.
 pub fn cleanup_seg_pipeline_temps() {
-    cleanup_ipc_temp_for_prefix(SEG_PIPELINE_PREFIXES);
+    sweep_dir_with_prefix(ipc_temp_dir(), SEG_PIPELINE_PREFIXES);
 }
 
 /// End-of-batch cleanup for CLI-owned downscaled temps. Call once the
 /// run_batch loop has fully exited so the worker has stopped reading
 /// from `cli_ds_*` paths. Idempotent.
 pub fn cleanup_cli_persistent_temps() {
-    cleanup_ipc_temp_for_prefix(CLI_PERSISTENT_PREFIXES);
+    sweep_dir_with_prefix(ipc_temp_dir(), CLI_PERSISTENT_PREFIXES);
 }
 
 #[cfg(test)]
