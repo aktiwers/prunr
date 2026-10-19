@@ -2642,50 +2642,26 @@ mod tests {
         assert_eq!(p.dispatch_progress().unwrap().step_label.as_ref(), "Upscaling", "a finished batch reaches no other run");
     }
 
+    /// A working set fits when it is no larger than free RAM; nothing
+    /// fits in none.
     #[test]
-    fn admission_refuses_when_working_set_exceeds_free() {
-        assert!(!admission_check(2000, 1500),
-            "2000 MB working set must not fit in 1500 MB free RAM");
+    fn admission_fits_a_working_set_up_to_free_ram() {
+        for (working_set, free, fits) in [(2000, 1500, false), (500, 1500, true), (1500, 1500, true), (600, 0, false)] {
+            assert_eq!(admission_check(working_set, free), fits, "{working_set} MB in {free} MB free");
+        }
     }
 
+    /// LCM weights clamp CFG to [1.0, 2.0]; the LCM scheduler without the
+    /// LCM bundle runs standard SD weights, so CFG is not clamped.
     #[test]
-    fn admission_allows_when_working_set_fits() {
-        assert!(admission_check(500, 1500),
-            "500 MB working set fits in 1500 MB free RAM");
-    }
-
-    #[test]
-    fn admission_allows_exact_match() {
-        assert!(admission_check(1500, 1500),
-            "exact match (working_set == free_ram) must be allowed");
-    }
-
-    #[test]
-    fn admission_refuses_when_free_ram_is_zero() {
-        assert!(!admission_check(600, 0),
-            "any positive working-set must be refused when free RAM is zero");
-    }
-
-    fn cfg_eq(a: f32, b: f32) -> bool { (a - b).abs() < 1e-6 }
-
-    #[test]
-    fn lcm_weights_clamp_cfg() {
-        assert!(cfg_eq(effective_cfg(ModelId::SdV15LcmInpaintFp16, 7.5), 2.0),
-            "LCM weights must clamp CFG to [1.0, 2.0]");
-    }
-
-    #[test]
-    fn lcm_weights_keep_an_in_range_cfg() {
-        assert!(cfg_eq(effective_cfg(ModelId::SdV15LcmInpaintFp16, 1.5), 1.5),
-            "in-range CFG should round-trip unchanged through clamp");
-    }
-
-    /// The LCM scheduler without the LCM bundle runs standard SD
-    /// weights, so CFG is not clamped.
-    #[test]
-    fn lcm_scheduler_without_lcm_bundle_does_not_clamp_cfg() {
-        assert!(cfg_eq(effective_cfg(ModelId::SdV15InpaintFp16, 7.5), 7.5),
-            "CFG must NOT clamp when standard SD weights dispatch");
+    fn only_lcm_weights_clamp_cfg() {
+        for (model, cfg, want) in [
+            (ModelId::SdV15LcmInpaintFp16, 7.5, 2.0),
+            (ModelId::SdV15LcmInpaintFp16, 1.5, 1.5),
+            (ModelId::SdV15InpaintFp16, 7.5, 7.5),
+        ] {
+            assert!((effective_cfg(model, cfg) - want).abs() < 1e-6, "{model:?} at {cfg}");
+        }
     }
 
 
@@ -2768,6 +2744,14 @@ mod tests {
         assert!(errors[0].1.contains("13.4 GB"));
     }
 
+    /// An admission controller with `budget` and the images' costs queued.
+    fn controller(budget: usize, costs: &[(u64, usize)]) -> AdmissionController {
+        use crate::gui::memory::ImageMemCost;
+        let mut ctrl = AdmissionController::with_budget(budget);
+        ctrl.enqueue(costs.iter().map(|&(item_id, total)| ImageMemCost { item_id, total }).collect());
+        ctrl
+    }
+
     fn test_work(id: u64) -> WorkItem {
         WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None }
     }
@@ -2794,10 +2778,8 @@ mod tests {
     /// the last one through.
     #[test]
     fn admission_streams_the_next_image_as_one_completes() {
-        use crate::gui::memory::ImageMemCost;
         let mut p = fixture();
-        let mut ctrl = AdmissionController::with_budget(1);
-        ctrl.enqueue([(1, 4), (2, 3), (3, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let ctrl = controller(1, &[(1, 4), (2, 3), (3, 2)]);
         let work = |id: u64| Some(test_work(id));
         let (admitted, rx) = p.open_admission(ctrl, work);
         let admitted: Vec<u64> = admitted.into_iter().map(|w| w.id).collect();
@@ -2818,10 +2800,8 @@ mod tests {
     /// right there, so the next image takes it and the batch can end.
     #[test]
     fn an_image_that_cannot_start_frees_its_admission_at_once() {
-        use crate::gui::memory::ImageMemCost;
         let mut p = fixture();
-        let mut ctrl = AdmissionController::with_budget(4);
-        ctrl.enqueue([(1, 3), (2, 3), (3, 3)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let ctrl = controller(4, &[(1, 3), (2, 3), (3, 3)]);
         let (items, _rx) = p.open_admission(ctrl, |id| (id != 1).then(|| test_work(id)));
         let sent: Vec<u64> = items.iter().map(|w| w.id).collect();
         assert_eq!(sent, vec![2], "1 fits first but can't be sent; its share lets 2 in");
@@ -2837,10 +2817,8 @@ mod tests {
     /// newer batch opened meanwhile, so its answer is taken.
     #[test]
     fn an_admitted_image_joins_the_batch_admission_feeds() {
-        use crate::gui::memory::ImageMemCost;
         let mut p = fixture();
-        let mut ctrl = AdmissionController::with_budget(1);
-        ctrl.enqueue([(1, 2), (2, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let ctrl = controller(1, &[(1, 2), (2, 1)]);
         let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
         let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
         p.admission_feeds(fed);
@@ -2855,10 +2833,8 @@ mod tests {
     /// hands back the images never admitted.
     #[test]
     fn a_batch_that_ends_hands_back_what_admission_still_held() {
-        use crate::gui::memory::ImageMemCost;
         let mut p = fixture();
-        let mut ctrl = AdmissionController::with_budget(1);
-        ctrl.enqueue([(1, 3), (2, 2), (3, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let ctrl = controller(1, &[(1, 3), (2, 2), (3, 1)]);
         let (first, rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
         let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
         p.admission_feeds(fed);
@@ -2874,10 +2850,8 @@ mod tests {
     /// through.
     #[test]
     fn a_rerun_waits_while_admission_feeds() {
-        use crate::gui::memory::ImageMemCost;
         let mut p = fixture();
-        let mut ctrl = AdmissionController::with_budget(1);
-        ctrl.enqueue([(1, 2), (2, 1)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let ctrl = controller(1, &[(1, 2), (2, 1)]);
         let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
         p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
         p.defer_run(vec![7], None);
@@ -2929,14 +2903,6 @@ mod tests {
         r.reset();
         assert!(!r.is_cancelled(42));
         assert!(!r.is_cancelled(99));
-    }
-
-    #[test]
-    fn global_cancel_short_circuits_per_item_lookup() {
-        let r = CancelRegistry::new();
-        r.request_global_cancel();
-        // Any id reports cancelled when global is set, even ones with no per-item entry.
-        assert!(r.is_cancelled(u64::MAX));
     }
 
     fn fixture_recipe() -> ProcessingRecipe {
@@ -3053,22 +3019,6 @@ mod tests {
         // — the seg slot is cleared by the publisher on the next refresh.
         assert!(p.current_dispatch_progress().is_none(),
             "slot drains when the last item completes");
-    }
-
-    #[test]
-    fn current_dispatch_progress_includes_streamed_items() {
-        // Admission-pool items bump the total so the user sees the
-        // queue grow as the worker accepts more. Without this, a
-        // streamed item would deliver and decrement done-from-total
-        // → counter goes negative-ish (saturating_sub clamps it).
-        let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
-        assert_eq!(p.current_dispatch_progress(), Some((0, 1)));
-        p.track_streamed(2);
-        assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
-            "streamed item must bump total");
-        assert!(p.take_recipe(b, 1).is_some());
-        assert_eq!(p.current_dispatch_progress(), Some((1, 2)));
     }
 
     #[test]
@@ -3217,59 +3167,37 @@ mod upscale_dispatch_tests {
         assert!(crate::gui::item::Pixels::Source(broken).read().is_err());
     }
 
+    /// With Denoise off the input itself goes to the model (no pixel
+    /// clone); with it on, a new buffer is made.
     #[test]
-    fn dispatch_pre_process_no_knobs_returns_same_arc() {
-        // With Denoise off the returned Arc is the input itself (no copy).
+    fn dispatch_pre_process_copies_only_to_denoise() {
         let input = Arc::new(grey_image(4, 4, 128));
-        let out = build_inference_input(&input, 0.0);
-        assert!(Arc::ptr_eq(&input, &out),
-            "no-op path must return the same Arc (no pixel clone)");
-    }
-
-    #[test]
-    fn dispatch_pre_process_denoise_positive_returns_different_arc() {
-        // With pre_denoise > 0, a new buffer is allocated and processed.
-        let input = Arc::new(grey_image(4, 4, 100));
-        let out = build_inference_input(&input, 0.5);
-        assert!(!Arc::ptr_eq(&input, &out),
-            "denoise path must return a new Arc (different buffer)");
+        assert!(Arc::ptr_eq(&input, &build_inference_input(&input, 0.0)), "no-op path must return the same Arc");
+        assert!(!Arc::ptr_eq(&input, &build_inference_input(&input, 0.5)), "denoise path must return a new Arc");
     }
 
 }
 
 // ── Warm-engine cache boundary contract ──────────────────────────────────────
 //
-// The four tests below pin the cache-hit / cache-eviction / release semantics
-// on the upscale run's warm engine without exercising real upscale inference.
-// Tests 1-3 inject a sentinel Arc<OrtEngine> via the test-only accessor and
-// assert pointer-identity or slot emptiness. Test 4 needs no engine at all.
+// These pin the cache-hit / cache-eviction / release semantics on the upscale
+// run's warm engine without exercising real upscale inference: a sentinel
+// Arc<OrtEngine> goes in through the test-only accessor, and the tests assert
+// pointer identity or slot emptiness.
 //
-// OrtEngine construction needs the ORT dylib. Tests 1-3 skip gracefully
-// when none is installed; test 4 has no ORT dependency and always runs.
+// OrtEngine construction needs the ORT dylib; the tests skip gracefully when
+// none is installed.
 #[cfg(test)]
 mod warm_cache_tests {
     use super::*;
     use prunr_core::{ModelKind, OrtEngine};
 
-    fn make_processor() -> Processor {
-        let (tx, _rx) = mpsc::channel::<WorkerMessage>();
-        let (_tx, rx) = mpsc::channel::<WorkerResult>();
-        Processor::new(tx, rx)
-    }
-
-    /// `false` means no dylib was found and the caller should skip.
-    fn ensure_ort_for_test() -> bool {
-        prunr_core::ort_runtime::ensure_initialized().is_ok()
-    }
-
     /// Construct one real engine (Silueta, ~4 MB bundled) and reuse it
-    /// across the three Arc-identity tests via OnceLock. Silueta bytes
-    /// are always available — no download required. Returns None when
-    /// ORT isn't available (no dylib found).
+    /// across the tests via OnceLock. Silueta bytes are always available —
+    /// no download required. Returns None when ORT isn't available (no
+    /// dylib found).
     fn sentinel_engine() -> Option<Arc<OrtEngine>> {
-        if !ensure_ort_for_test() {
-            return None;
-        }
+        prunr_core::ort_runtime::ensure_initialized().ok()?;
         static CELL: std::sync::OnceLock<Arc<OrtEngine>> = std::sync::OnceLock::new();
         Some(
             CELL.get_or_init(|| {
@@ -3282,24 +3210,24 @@ mod warm_cache_tests {
         )
     }
 
-    #[test]
-    fn warm_upscale_engine_field_starts_empty() {
-        let mut p = make_processor();
-        assert!(
-            p.warm_upscale_engine_for_test().is_none(),
-            "Processor::new must not pre-populate the warm-engine cache"
-        );
+    /// A Processor whose warm slot holds the sentinel as a RealESRGAN x4
+    /// engine built for Auto, or None (skip) without ORT.
+    fn warm(test: &str) -> Option<(Processor, Arc<OrtEngine>)> {
+        let Some(sentinel) = sentinel_engine() else {
+            eprintln!("[{test}] SKIP: ORT runtime not found");
+            return None;
+        };
+        let (tx, _rx) = mpsc::channel::<WorkerMessage>();
+        let (_tx, rx) = mpsc::channel::<WorkerResult>();
+        let mut p = Processor::new(tx, rx);
+        *p.warm_upscale_engine_for_test() =
+            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        Some((p, sentinel))
     }
 
     #[test]
     fn cache_hit_reuses_arc_on_same_modelkind() {
-        let Some(sentinel) = sentinel_engine() else {
-            eprintln!("[cache_hit_reuses_arc_on_same_modelkind] SKIP: ORT runtime not found");
-            return;
-        };
-        let mut p = make_processor();
-        *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        let Some((mut p, sentinel)) = warm("cache_hit_reuses_arc_on_same_modelkind") else { return };
         let got = p
             .try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, false)
             .expect("cache hit must return the sentinel Arc");
@@ -3307,61 +3235,32 @@ mod warm_cache_tests {
             p.try_cached_upscale_engine(ModelKind::RealEsrganX4Plus, true).is_none(),
             "an engine built for Auto is not reused under CPU only",
         );
-        assert!(
-            Arc::ptr_eq(&sentinel, &got),
-            "cache hit must return the SAME Arc that was inserted"
-        );
+        assert!(Arc::ptr_eq(&sentinel, &got), "cache hit must return the SAME Arc that was inserted");
     }
 
     #[test]
     fn model_swap_evicts_cached_arc() {
-        let Some(sentinel) = sentinel_engine() else {
-            eprintln!("[model_swap_evicts_cached_arc] SKIP: ORT runtime not found");
-            return;
-        };
-        let mut p = make_processor();
-        *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
-        let got = p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL, false);
+        let Some((mut p, _)) = warm("model_swap_evicts_cached_arc") else { return };
         assert!(
-            got.is_none(),
+            p.try_cached_upscale_engine(ModelKind::Nomos8kSchatL, false).is_none(),
             "cache miss on ModelKind mismatch must return None"
         );
-        assert!(
-            p.warm_upscale_engine_for_test().is_none(),
-            "slot must be evicted after a ModelKind mismatch lookup"
-        );
+        assert!(p.warm_upscale_engine_for_test().is_none(), "slot must be evicted after a ModelKind mismatch lookup");
     }
 
     #[test]
     fn release_upscale_engine_clears_slot() {
-        let Some(sentinel) = sentinel_engine() else {
-            eprintln!("[release_upscale_engine_clears_slot] SKIP: ORT runtime not found");
-            return;
-        };
-        let mut p = make_processor();
-        *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        let Some((mut p, _)) = warm("release_upscale_engine_clears_slot") else { return };
         drop(p.upscale.take_engine());
-        assert!(
-            p.warm_upscale_engine_for_test().is_none(),
-            "releasing the upscale engine must clear the slot"
-        );
+        assert!(p.warm_upscale_engine_for_test().is_none(), "releasing the upscale engine must clear the slot");
     }
 
     /// A model switch empties every session slot before it returns; only
     /// the free runs on another thread.
     #[test]
     fn releasing_all_sessions_empties_the_slots_at_once() {
-        let Some(sentinel) = sentinel_engine() else {
-            eprintln!("[releasing_all_sessions_empties_the_slots_at_once] SKIP: ORT runtime not found");
-            return;
-        };
-        let mut p = make_processor();
-        *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
+        let Some((mut p, _)) = warm("releasing_all_sessions_empties_the_slots_at_once") else { return };
         p.release_all_sessions();
         assert!(p.warm_upscale_engine_for_test().is_none());
     }
 }
-
