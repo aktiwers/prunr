@@ -356,7 +356,7 @@ impl PrunrApp {
     }
 
     /// Streaming admission for >1 Tier 1 items, so the batch stays within
-    /// memory: admits what fits now; more follow via `admission_tx` as
+    /// memory: admits what fits now; more follow through the admission's sender as
     /// earlier items free memory.
     fn dispatch_with_admission(
         &mut self,
