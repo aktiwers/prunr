@@ -5,7 +5,7 @@ use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
 use super::harness::{
-    assert_all_controls_named, click, harness, harness_builder, loaded, names, new_app, settle, tree,
+    assert_all_controls_named, click, harness, harness_builder, loaded, names, new_app, settle, settle_until_shown, tree,
 };
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
@@ -53,7 +53,7 @@ fn a_press_off_the_image_never_becomes_a_magic_brush_pick() {
         app.batch.select_item(0);
         app.magic_brush_state.activate();
     }
-    settle(&mut h);
+    settle_until_shown(&mut h);
     let on_image = egui::pos2(600.0, 480.0);
     let off_image = egui::pos2(40.0, 25.0); // the top toolbar
     press(&mut h, off_image, true);

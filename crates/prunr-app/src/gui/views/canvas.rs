@@ -234,7 +234,7 @@ fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, (shift, subtract): (boo
 /// `None` with no item, or none with a texture to paint over yet.
 fn brush_target(app: &PrunrApp, canvas_rect: Rect) -> Option<(usize, Rect)> {
     let item = app.batch.selected_item()?;
-    if item.result_texture.is_none() && item.source_texture.is_none() {
+    if !item.on_canvas() {
         return None;
     }
     let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
