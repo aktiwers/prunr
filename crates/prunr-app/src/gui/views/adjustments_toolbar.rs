@@ -425,9 +425,7 @@ fn render_mask_group(
                 mask_refine(ui, s, change, false);
                 hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
                 ui.add_enabled_ui(s.refine_edges, |ui| {
-                    let mut radius = s.guided_radius as u32;
-                    let r = chip::slider_row(ui, "Edge width (px)", &mut radius, 1..=64);
-                    s.guided_radius = radius.min(255) as u8;
+                    let r = chip::slider_row(ui, "Edge width (px)", &mut s.guided_radius, 1..=64);
                     aggregate_knob(r, StaticKnob::GuidedRadius, change);
                     let mut detail = detail_from_epsilon(s.guided_epsilon);
                     let dt = chip::slider_row_f32(ui, "Detail", &mut detail, 0.0..=1.0, false, fmt::percent);
@@ -563,9 +561,7 @@ fn line_detail(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
 }
 
 fn line_width(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
-    let mut thickness = s.edge_thickness as u32;
-    let t = chip::slider_row(ui, "Line width (px)", &mut thickness, 0..=20);
-    s.edge_thickness = thickness.min(255) as u8;
+    let t = chip::slider_row(ui, "Line width (px)", &mut s.edge_thickness, 0..=20);
     aggregate_knob(t, StaticKnob::EdgeThickness, change);
 }
 
@@ -731,6 +727,7 @@ fn aggregate_bool(b: bool, knob: StaticKnob, acc: &mut ToolbarChange) {
 /// actual recipe diff so a no-op preset pick doesn't spawn a subprocess.
 fn mark_preset_apply(acc: &mut ToolbarChange) {
     acc.preset_applied = true;
+    acc.brush_settings_committed = true;
     acc.commit = true;
     acc.render_repaint = true;
 }
@@ -872,13 +869,12 @@ impl BgKind {
     fn of(backdrop: Backdrop) -> Self {
         use prunr_core::BgEffect;
         match backdrop {
-            Backdrop::Transparent => Self::Transparent,
+            Backdrop::Transparent | Backdrop::Effect(BgEffect::None) => Self::Transparent,
             Backdrop::Color(_) => Self::Solid,
             Backdrop::Image(_) => Self::Image,
             Backdrop::Effect(BgEffect::BlurredSource { .. }) => Self::BlurredSource,
             Backdrop::Effect(BgEffect::DesaturatedSource) => Self::DesaturatedSource,
             Backdrop::Effect(BgEffect::LensBlur { .. }) => Self::LensBlur,
-            Backdrop::Effect(BgEffect::None) => Self::Transparent,
         }
     }
 }
@@ -1145,13 +1141,11 @@ pub(super) fn render_reset_preset_cluster(
         let reset_target = app_settings.default_preset.clone();
         app_settings.apply_preset(&reset_target, item_settings);
         *presets.applied = reset_target;
-        change.brush_settings_committed = true;
         mark_preset_apply(change);
     }
 
     if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets) {
         *presets.applied = name;
-        change.brush_settings_committed = true;
         mark_preset_apply(change);
     }
 }
