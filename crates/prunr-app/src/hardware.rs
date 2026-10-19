@@ -63,6 +63,17 @@ pub struct HardwareProfile {
 }
 
 impl HardwareProfile {
+    /// Whether `rt` has a device to run on here: CUDA an NVIDIA card,
+    /// MIGraphX an AMD one, OpenVINO any computer (its CPU plugin).
+    pub fn runs(&self, rt: crate::runtime_install::RuntimeId) -> bool {
+        use crate::runtime_install::RuntimeId;
+        match rt {
+            RuntimeId::OpenVino => true,
+            RuntimeId::Cuda => self.dgpu == Some(GpuVendor::Nvidia),
+            RuntimeId::MiGraphX => self.recommends_rocm(),
+        }
+    }
+
     pub fn recommends_openvino(&self) -> bool {
         self.igpu == Some(GpuVendor::Intel)
     }
@@ -402,6 +413,24 @@ fn displays_from_lspci(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Settings offers a runtime only where it has a device: an Intel-only
+    /// computer sees OpenVINO alone, CUDA needs an NVIDIA card, MIGraphX an
+    /// AMD one.
+    #[test]
+    fn a_runtime_is_offered_only_for_hardware_it_runs_on() {
+        use super::{CpuVendor, GpuVendor, HardwareProfile};
+        use crate::runtime_install::RuntimeId::{Cuda, MiGraphX, OpenVino};
+        let machine = |dgpu, igpu| HardwareProfile {
+            cpu_vendor: CpuVendor::Intel, cpu_brand: String::new(), dgpu, igpu,
+            suits_directml: false, os: "linux", arch: "x86_64",
+        };
+        let runs = |p: &HardwareProfile| [OpenVino, Cuda, MiGraphX].map(|rt| p.runs(rt));
+        assert_eq!(runs(&machine(None, Some(GpuVendor::Intel))), [true, false, false], "Intel only");
+        assert_eq!(runs(&machine(Some(GpuVendor::Nvidia), Some(GpuVendor::Intel))), [true, true, false], "NVIDIA card");
+        assert_eq!(runs(&machine(Some(GpuVendor::Amd), None)), [true, false, true], "AMD card");
+        assert_eq!(runs(&machine(None, Some(GpuVendor::Amd))), [true, false, false], "an AMD APU is not offered ROCm");
+    }
+
     #[test]
     fn the_cpu_label_names_the_vendor_once() {
         assert_eq!(cpu_label(CpuVendor::Intel, "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz"), "Intel Core i7-6700 CPU @ 3.40GHz");

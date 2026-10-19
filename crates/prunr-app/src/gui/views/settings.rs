@@ -507,7 +507,9 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         if ctx.installs.built_in_gpu {
             rows.row("DirectML runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the CPU without one.", |_| {});
         }
-        for &rt in ctx.offered {
+        // A runtime for hardware this computer lacks would install and
+        // never start; one installed anyway stays, to uninstall.
+        for &rt in ctx.offered.iter().filter(|&&rt| ctx.installs.has_runtime(rt) || p.runs(rt)) {
             runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
         }
         if RuntimeChoice::ALL.iter().filter(|&&c| ctx.installs.can_load(c)).count() > 1 {
