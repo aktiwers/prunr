@@ -8,10 +8,8 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::subprocess::manager::{InpaintJob, SubprocessManager};
-use crate::subprocess::protocol::SubprocessEvent;
-use prunr_core::inpaint_sd::SdInpaintRequest;
-use prunr_models::ModelId;
+use crate::subprocess::manager::SubprocessManager;
+use crate::subprocess::protocol::{InpaintJob, SubprocessEvent};
 use prunr_core::IDLE_RELEASE;
 
 
@@ -34,16 +32,7 @@ pub enum InpaintBridgeMsg {
     /// One SD inpaint stroke; image + mask are temp-file PNGs the worker
     /// decodes. `generation` round-trips on `Done` so the GUI can drop a
     /// stroke a fresher one superseded.
-    Dispatch {
-        item_id: u64,
-        generation: u64,
-        model_id: ModelId,
-        image_path: std::path::PathBuf,
-        mask_path: std::path::PathBuf,
-        sd_req: Option<SdInpaintRequest>,
-        feather_px: f32,
-        sharpen: f32,
-    },
+    Dispatch { job: InpaintJob, generation: u64 },
     /// Kill the subprocess; every in-flight stroke ends Cancelled.
     Cancel,
     /// Release the subprocess regardless of in-flight state: unlike Cancel,
@@ -125,15 +114,11 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 },
             };
             match msg {
-                InpaintBridgeMsg::Dispatch { item_id, generation, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
+                InpaintBridgeMsg::Dispatch { job, generation } => {
                     last_used = Instant::now();
-                    keep_loaded = sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
-                    inflight_generations.insert(item_id, generation);
-                    let params = InpaintJob {
-                        item_id, model_id, image_path, mask_path,
-                        sd_req, feather_px, sharpen,
-                    };
-                    handle_dispatch(&mut sub_state, &mut inflight_generations, &res_tx, params);
+                    keep_loaded = job.sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
+                    inflight_generations.insert(job.item_id, generation);
+                    handle_dispatch(&mut sub_state, &mut inflight_generations, &res_tx, job);
                 }
                 InpaintBridgeMsg::Cancel => {
                     // SD's UNet `run()` can't be interrupted mid-step, so only a kill

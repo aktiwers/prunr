@@ -131,23 +131,7 @@ pub enum SubprocessCommand {
     /// Inpaint a region with `model_id` and the full post-process (color
     /// match, seam-guided blend, sharpen), returning the finished RGBA. Runs
     /// its own session, independent of the seg/edge engine pool.
-    Inpaint {
-        item_id: u64,
-        model_id: ModelId,
-        /// The photo as `ipc::write_image` writes it.
-        image_path: std::path::PathBuf,
-        /// Single-channel mask, the same way: 255 = inpaint here, 0 = keep.
-        mask_path: std::path::PathBuf,
-        /// SD-specific knobs. `None` for LaMa / Big-LaMa / MI-GAN.
-        sd_req: Option<SdInpaintRequest>,
-        /// Seam-blend feather override (px). 0 ⇒ pipeline default.
-        #[serde(default)]
-        feather_px: f32,
-        /// Unsharp-mask strength applied inside the painted region.
-        /// 0 ⇒ skip sharpen.
-        #[serde(default)]
-        sharpen: f32,
-    },
+    Inpaint(InpaintJob),
     /// Cancel one item by id — worker emits `ImageError { error:
     /// CANCELLED_ERR_MSG }` at the next dispatch check.
     CancelItem { item_id: u64 },
@@ -169,6 +153,26 @@ pub enum SubprocessCommand {
         on_screen: Option<u64>,
     },
     Shutdown,
+}
+
+/// One inpaint stroke, as the app's bridge queues it and the worker runs it.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct InpaintJob {
+    pub item_id: u64,
+    pub model_id: ModelId,
+    /// The photo as `ipc::write_image` writes it.
+    pub image_path: std::path::PathBuf,
+    /// Single-channel mask, the same way: 255 = inpaint here, 0 = keep.
+    pub mask_path: std::path::PathBuf,
+    /// SD-specific knobs. `None` for LaMa / Big-LaMa / MI-GAN.
+    pub sd_req: Option<SdInpaintRequest>,
+    /// Seam-blend feather override (px). 0 ⇒ pipeline default.
+    #[serde(default)]
+    pub feather_px: f32,
+    /// Unsharp-mask strength applied inside the painted region.
+    /// 0 ⇒ skip sharpen.
+    #[serde(default)]
+    pub sharpen: f32,
 }
 
 /// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
@@ -505,7 +509,7 @@ mod tests {
             SubprocessCommand::ProcessImage { .. } => 1,
             SubprocessCommand::RePostProcess { .. } => 2,
             SubprocessCommand::AddEdgeInference { .. } => 3,
-            SubprocessCommand::Inpaint { .. } => 4,
+            SubprocessCommand::Inpaint(_) => 4,
             SubprocessCommand::CancelItem { .. } => 5,
             SubprocessCommand::Configure { .. } => 6,
             SubprocessCommand::Shutdown => 7,
@@ -564,7 +568,7 @@ mod tests {
                 model: ModelKind::Silueta,
                 mask: MaskSettings::default(),
             },
-            SubprocessCommand::Inpaint {
+            SubprocessCommand::Inpaint(InpaintJob {
                 item_id: 1,
                 model_id: prunr_models::ModelId::LaMaFp32,
                 image_path: path(),
@@ -572,7 +576,7 @@ mod tests {
                 sd_req: None,
                 feather_px: 0.0,
                 sharpen: 0.0,
-            },
+            }),
             SubprocessCommand::CancelItem { item_id: 1 },
             SubprocessCommand::Configure { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default(), first_look: None, on_screen: None },
             SubprocessCommand::Shutdown,
@@ -739,7 +743,7 @@ mod tests {
 
     #[test]
     fn command_inpaint_sd_roundtrip() {
-        roundtrip(&SubprocessCommand::Inpaint {
+        roundtrip(&SubprocessCommand::Inpaint(InpaintJob {
             item_id: 12,
             model_id: prunr_models::ModelId::SdV15InpaintFp16,
             image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-12"),
@@ -757,7 +761,7 @@ mod tests {
             }),
             feather_px: 4.5,
             sharpen: 0.6,
-        });
+        }));
     }
 
     #[test]
