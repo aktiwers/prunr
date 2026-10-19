@@ -10,9 +10,8 @@ use crate::subprocess::ipc::read_and_delete;
 pub(crate) use crate::subprocess::first_look::Shown;
 use prunr_core::IDLE_RELEASE as WARM_IDLE;
 
-/// Maximum time the subprocess may stay silent with in-flight work before we
-/// treat it as a hung crash. Real batches emit Progress events every few
-/// hundred ms; 60s of silence means something is wrong.
+/// Silence with work in flight before the subprocess counts as hung; real
+/// batches report every few hundred ms.
 const HANG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Graceful-shutdown budget when a warm worker is released. The bridge
@@ -51,9 +50,7 @@ fn idle_after_run(model: ModelKind) -> Duration {
     if super::memory::working_set_mb(model) >= HEAVY_WORKING_SET_MB { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
 }
 
-/// True when the subprocess is alive but hasn't produced events for too long.
-/// Pure so it's unit-testable — the event loop calls this each iteration and
-/// treats `true` as a crash, reusing the existing re-queue + retry path.
+/// Alive but silent too long; the event loop treats it as a crash.
 fn is_stalled(
     last_event_age: Duration,
     in_flight_count: usize,
@@ -167,8 +164,8 @@ pub struct RawSegTensor {
     pub model: ModelKind,
 }
 
-/// Zstd-compressed tensor stored in BatchItem. Trades ~1ms decompress for ~3-4x RAM savings.
-/// Cloning shares the bytes, so an export can take it to its thread.
+/// ~1 ms to decompress for ~3-4x less RAM. Cloning shares the bytes, so an
+/// export can take it to its thread.
 #[derive(Clone)]
 pub struct CompressedTensor {
     compressed: std::sync::Arc<[u8]>,
@@ -178,8 +175,7 @@ pub struct CompressedTensor {
 }
 
 impl CompressedTensor {
-    /// Compress raw tensor data with zstd (level 1 for speed).
-    /// Returns None if compression fails (caller skips caching).
+    /// zstd level 1, for speed. `None`: the caller skips caching.
     pub fn from_raw(tc: RawSegTensor) -> Option<Self> {
         let compressed = zstd::encode_all(
             crate::subprocess::ipc::f32s_as_le_bytes(&tc.data),
@@ -188,13 +184,11 @@ impl CompressedTensor {
         Some(Self { compressed: compressed.into(), height: tc.height, width: tc.width, model: tc.model })
     }
 
-    /// Decompress to raw f32 tensor data for Tier 2 dispatch.
     pub fn decompress(&self) -> Option<Vec<f32>> {
         let bytes = zstd::decode_all(&*self.compressed).ok()?;
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
     }
 
-    /// Compressed size in bytes (for budget tracking).
     pub fn compressed_size(&self) -> usize {
         self.compressed.len()
     }
@@ -232,8 +226,7 @@ pub struct CompressedEdgeTensors {
 }
 
 impl CompressedEdgeTensors {
-    /// Compress every scale the run made with zstd level 1, in parallel
-    /// via rayon. Returns None when it made none or a compression fails.
+    /// `None` when the run made no scale or a compression fails.
     pub fn from_raw(raw: RawEdgeTensors) -> Option<Self> {
         use rayon::prelude::*;
         let parts: Vec<Option<std::sync::Arc<[u8]>>> = raw.tensors.par_iter().map(|t| {
@@ -285,10 +278,8 @@ impl CompressedEdgeTensors {
         scales.iter().all(|&s| self.tensors[s as usize].is_some())
     }
 
-    /// Decompress one scale's tensor; `None` when the cache lacks it.
-    /// Called per-dispatch in the hot path, so wrap the result in
-    /// `Arc<Vec<f32>>` + a scale discriminator at the call site
-    /// (BatchItem::volatile_edge_tensor) to amortise across a drag.
+    /// `None` when the cache lacks it. Hot path: callers keep the result
+    /// as `Arc<Vec<f32>>` keyed by scale to amortise across a drag.
     pub fn decompress(&self, scale: EdgeScale) -> Option<Vec<f32>> {
         let bytes = zstd::decode_all(&**self.tensors[scale as usize].as_ref()?).ok()?;
         Some(crate::subprocess::ipc::le_bytes_to_f32s(&bytes))
@@ -309,7 +300,6 @@ impl CompressedEdgeTensors {
         Some(prunr_core::EdgeInferenceResult { tensors, height: self.height, width: self.width })
     }
 
-    /// Total compressed bytes across every scale (for budget tracking).
     pub fn compressed_size(&self) -> usize {
         self.tensors.iter().flatten().map(|t| t.len()).sum()
     }
@@ -394,22 +384,15 @@ pub(crate) enum WorkerMessage {
         /// The id its completion names (`Processor::track_dispatch`).
         batch: u64,
         items: Vec<WorkItem>,
-        /// Tier 2 items: re-postprocess from cached tensor (skip inference).
         tier2_items: Vec<CachedTensorWork>,
-        /// AddEdgeInference items: cached seg tensor + TEED on masked image.
-        /// Used for Off → SubjectOutline transitions so enabling the outline
-        /// doesn't force a full seg re-inference.
+        /// Cached seg tensor + TEED on the masked image, so turning the
+        /// outline on needs no seg re-run.
         add_edge_items: Vec<CachedTensorWork>,
         config: Box<ProcessingConfig>,
         cancels: super::processor::CancelRegistry,
-        /// Channel for additional items admitted by the memory controller.
         additional_items_rx: Option<mpsc::Receiver<WorkItem>>,
     },
-    /// Drop any warm seg subprocess so its engine pool's resident RAM
-    /// is reclaimed. Sent by the GUI on every `model_changed` so a
-    /// previous model (e.g. BiRefNetLite at ~2 GB) doesn't pin
-    /// memory across the user's "I'm done with that model" signal.
-    /// Idempotent; no-op when nothing is warm.
+    /// Drop any warm seg subprocess (BiRefNetLite holds ~2 GB). Idempotent.
     ReleaseWarm,
     /// Load this config's model now, replacing a warm worker that does
     /// not fit it: a switch to a cut-out model, so its first Process
@@ -444,11 +427,9 @@ pub enum WorkerResult {
         batch: u64,
         item_id: u64,
         result: Result<ProcessResult, String>,
-        /// Cached segmentation tensor from Tier 1 (for future mask-tier
-        /// reruns), compressed on the bridge thread.
+        /// For later mask-only reruns; compressed on the bridge thread.
         seg: Option<CompressedTensor>,
-        /// Multi-scale TEED output — every scale, cached so a switch needs no run.
-        /// Only populated when the run used edge detection.
+        /// Only when the run used edge detection.
         edges: Option<CompressedEdgeTensors>,
     },
     /// The line scales a run left for after its result, under the token
@@ -459,28 +440,19 @@ pub enum WorkerResult {
     /// Batch `batch` is over.
     BatchComplete { batch: u64 },
     Cancelled,
-    /// Subprocess crashed — retrying with reduced concurrency.
     SubprocessRetry {
         reduced_jobs: usize,
         re_queued_count: usize,
     },
-    /// Subprocess reported the EP it actually built the session with. Sent
-    /// once per subprocess spawn, before the first image completes, so the
-    /// statusbar label corrects any mismatch with the startup guess from
-    /// `OrtEngine::detect_active_provider` (e.g. CUDA driver installed but
-    /// EP init fell back to DirectML at runtime).
+    /// The EP the subprocess actually built, once per spawn: corrects the
+    /// startup guess (e.g. CUDA driver installed but EP init fell back).
     BackendReady(String),
 }
 
-/// Spawn the worker bridge thread. Receives `WorkerMessage` from the UI,
-/// translates to subprocess IPC, handles crash+retry, sends `WorkerResult` back.
-///
-/// When `prewarm` is `Some`, the bridge boots a subprocess with that config
-/// at startup. A batch reuses the warm worker when its model, processor
-/// and pool size fit (`EngineSpec::reusable_by`) and sends it the
-/// run's mask and Sketch settings; the worker that ran a batch stays warm
-/// after it (`idle_after_run`), so the next Process skips the model load.
-/// A model switch (`ReleaseWarm`), a crash or Cancel drops it.
+/// The worker bridge thread: UI messages to subprocess IPC, with crash
+/// retry. A batch reuses the warm worker when it fits; the worker that ran
+/// a batch stays warm after it so the next Process skips the model load.
+/// A model switch, a crash or Cancel drops it.
 pub(crate) fn spawn_worker(
     ctx: egui::Context,
     prewarm: Option<EngineSpec>,
@@ -491,12 +463,8 @@ pub(crate) fn spawn_worker(
     std::thread::Builder::new()
         .name("prunr-bridge".into())
         .spawn(move || {
-            // Pre-warm: try to spawn a subprocess with the startup config
-            // before any message arrives. Blocks this thread for the model-
-            // load duration (UI stays responsive — bridge has its own
-            // thread). If a Process click arrives during warm-up, it
-            // queues on msg_rx and gets picked up once the sub is live.
-            // The warm worker and when it is released if still unused.
+            // Blocks this thread for the model load; a Process sent
+            // meanwhile queues on msg_rx.
             let mut warm: Option<WarmWorker> = prewarm.and_then(|spec| spawn_warm(spec, &res_tx, &ctx));
 
             loop {
@@ -578,15 +546,13 @@ pub(crate) fn spawn_worker(
     (msg_tx, res_rx)
 }
 
-/// Batch-wide state carried across subprocess spawns. `max_jobs` starts at
-/// `config.jobs` and halves on each crash retry; `completed` lets the crash
-/// handler skip already-delivered items when re-queueing in-flight work.
+/// Batch-wide state carried across subprocess spawns. `max_jobs` halves on
+/// each crash retry; `completed` keeps delivered items out of a re-queue.
 struct BatchRunState {
     config: ProcessingConfig,
     pending: VecDeque<WorkItem>,
     pending_tier2: VecDeque<CachedTensorWork>,
     pending_add_edge: VecDeque<CachedTensorWork>,
-    /// Items admitted by the memory controller after the batch started.
     additional_rx: Option<mpsc::Receiver<WorkItem>>,
     completed: std::collections::HashSet<u64>,
     batch: u64,
@@ -701,9 +667,7 @@ impl SentWork {
     }
 }
 
-/// Outcome of one subprocess's event loop. `Cancelled` means the user cancel
-/// was already propagated (sub killed, IPC cleaned, `WorkerResult::Cancelled`
-/// sent) — caller returns immediately.
+/// `Cancelled`: the cancel is already fully handled; the caller returns.
 enum EventLoopOutcome {
     Finished,
     Crashed(crate::subprocess::manager::Crash),
@@ -717,17 +681,13 @@ enum WaitAction {
     Sleep,    // producer still connected, nothing available yet
 }
 
-/// Run a batch with automatic retry on subprocess crash.
-/// Reduces concurrency (jobs) on each crash: jobs → jobs/2 → 1.
-/// If even 1 job crashes, marks remaining items as "insufficient memory".
+/// Retries a crash with jobs halved down to 1.
 #[tracing::instrument(
     skip_all,
     fields(
         tier1_count = state.pending.len(),
         tier2_count = state.pending_tier2.len(),
-        // Snapshot of the user's requested job count — tracing fields are
-        // captured at span entry. The effective count halves on each crash
-        // retry; see the per-spawn span on `SubprocessManager::spawn`.
+        // Captured at span entry: the requested count, before any halving.
         initial_jobs = state.max_jobs,
     ),
 )]
@@ -796,8 +756,6 @@ fn run_batch_with_retry(
     }
 }
 
-/// Emit the first-frame "Loading model..." status so the UI shows activity
-/// before the subprocess reports its own progress.
 fn emit_loading_status(
     state: &BatchRunState,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -816,8 +774,7 @@ fn emit_loading_status(
     }
 }
 
-/// When the batch queues are empty, check if the admission controller has
-/// more to send. Returns immediately — the caller owns the sleep/cancel cadence.
+/// Never blocks: the caller owns the sleep/cancel cadence.
 fn poll_additional_items(state: &mut BatchRunState) -> WaitAction {
     if !state.nothing_pending() {
         return WaitAction::Continue;
@@ -844,10 +801,8 @@ struct InitialBurst {
     engines: EngineSpec,
 }
 
-/// Spawn a subprocess (or accept a warm one), give it the batch's run
-/// settings, and send the initial burst (Tier 2 first — no inference
-/// needed — then Tier 1 up to `max_jobs`). On spawn failure, reports
-/// errors for every pending item and sends `BatchComplete`; returns `None`.
+/// On spawn failure every pending item errors and the batch completes;
+/// returns `None`.
 fn spawn_and_initial_burst(
     warm: Option<(SubprocessManager, EngineSpec)>,
     state: &mut BatchRunState,
@@ -855,8 +810,6 @@ fn spawn_and_initial_burst(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> Option<InitialBurst> {
-    // Drop anything cancelled before spawn — they don't count toward
-    // `effective_jobs` and shouldn't occupy burst slots either.
     drop_cancelled_pending(state, cancels, res_tx, ctx);
     let total_pending = state.pending.len() + state.pending_tier2.len() + state.pending_add_edge.len();
     if total_pending == 0 {
@@ -864,8 +817,7 @@ fn spawn_and_initial_burst(
         ctx.request_repaint();
         return None;
     }
-    // Cap engines at the number of Tier 1 items — Tier 2 + AddEdge don't
-    // use the seg engine pool.
+    // Cached-tensor work doesn't use the seg engine pool.
     let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
     let (mut sub, engines) = match warm {
@@ -908,8 +860,6 @@ fn configure(sub: &mut SubprocessManager, state: &mut BatchRunState) {
     state.told_on_screen = on_screen;
 }
 
-/// Drive one subprocess through its lifecycle — poll events, admit more work
-/// on ImageDone, detect crash / hang, stop on Finished or cancel.
 fn run_event_loop(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
@@ -920,8 +870,6 @@ fn run_event_loop(
 ) -> EventLoopOutcome {
     let mut last_event_at = Instant::now();
     let mut subprocess_finished = false;
-    // Items we've already told the subprocess to cancel — avoids re-sending
-    // `CancelItem` every iteration while we wait for the ImageError echo.
     let mut cancel_notified: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
     while !subprocess_finished {
@@ -931,8 +879,6 @@ fn run_event_loop(
             return EventLoopOutcome::Cancelled;
         }
 
-        // Notify subprocess of newly cancelled in-flight items so it can drop
-        // them at the next dispatch check instead of finishing the work.
         forward_item_cancels(sub, sent, cancels, &mut cancel_notified);
         if state.config.first_look.get() != state.told_first_look || state.config.on_screen.get() != state.told_on_screen {
             configure(sub, state);
@@ -950,13 +896,8 @@ fn run_event_loop(
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::Unresponsive);
         }
 
-        // Block up to 50 ms for the next event. Wakes immediately when
-        // an event arrives so admission/pump latency tracks worker
-        // throughput, not the old fixed 50 ms sleep tail. The watchdog
-        // above runs once per iteration — well within HANG_TIMEOUT.
         for event in sub.poll_events_blocking(Duration::from_millis(50)) {
-            // Every event — Progress, ImageDone, ImageError, RssUpdate
-            // (emitted per-completion, not on a timer) — proves liveness.
+            // Any event proves liveness.
             last_event_at = Instant::now();
             if matches!(event, SubprocessEvent::Finished) {
                 subprocess_finished = true;
@@ -966,7 +907,6 @@ fn run_event_loop(
         }
         top_up(sub, state, sent, cancels, res_tx, ctx);
 
-        // If everything drained and no more coming, mark finished.
         if sent.is_empty() && matches!(poll_additional_items(state), WaitAction::Complete) {
             subprocess_finished = true;
         }
@@ -974,9 +914,8 @@ fn run_event_loop(
     EventLoopOutcome::Finished
 }
 
-/// Route one `SubprocessEvent` to its handler. `Finished` is handled by the
-/// event loop itself (sets the exit flag); `RssUpdate` is absorbed by
-/// `SubprocessManager` internally.
+/// `Finished` is the event loop's own; `SubprocessManager` absorbs
+/// `RssUpdate`.
 fn handle_subprocess_event(
     event: SubprocessEvent,
     state: &mut BatchRunState,
@@ -1054,7 +993,6 @@ fn read_result_image(
         .ok_or_else(|| "The model's result could not be read. Process again.".to_string())
 }
 
-/// Read the segmentation tensor cache from disk.
 fn read_raw_seg_tensor(
     path: Option<&std::path::PathBuf>,
     height: Option<u32>,
@@ -1124,7 +1062,6 @@ fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
     max_jobs.saturating_sub(working)
 }
 
-/// Send pending work up to the job limit.
 fn top_up(
     sub: &mut SubprocessManager,
     state: &mut BatchRunState,
@@ -1142,7 +1079,6 @@ fn top_up(
     }
 }
 
-/// What `send_next` did.
 enum SendOutcome {
     Sent,
     /// The next work could not be read or handed over: it failed and went
@@ -1304,10 +1240,8 @@ fn report_failed(
     ctx.request_repaint();
 }
 
-/// Cancel path: kill the child immediately and clean up. We used to send
-/// `Cancel` + sleep 200ms to let the child emit `Finished`, but killing the
-/// process is instant and orphaned IPC temps are swept by the prefix-scoped
-/// cleanup — the politeness delay just made "Cancel all" feel laggy.
+/// Kill the child at once: orphaned IPC temps are swept by the
+/// prefix-scoped cleanup, and a polite shutdown made Cancel feel laggy.
 fn cancel_subprocess(
     sub: &mut SubprocessManager,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -1330,9 +1264,8 @@ fn handle_crash_and_retry(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
-    // Tier 2 + AddEdge can't be re-queued — their tensor data is owned by the
-    // IPC temp file, already cleaned up. Parent errors the item so a follow-up
-    // Process runs the full pipeline.
+    // Cached-tensor work can't be re-queued: its tensor's IPC temp file is
+    // gone. Erroring it makes the next Process run the full pipeline.
     sent.abandon_spares(true, res_tx);
     for tid in sent.tier2_ids.into_iter().chain(sent.add_edge_ids) {
         if !state.completed.contains(&tid) {
@@ -1405,8 +1338,6 @@ fn crash_message(crash: &crate::subprocess::manager::Crash) -> &'static str {
     }
 }
 
-/// Emit `BatchItemDone(Err)` for every pending Tier 1 + Tier 2 item that
-/// hasn't already completed. Used on spawn failure and at max-retries.
 fn emit_pending_errors(
     state: &BatchRunState,
     err_msg: &str,
@@ -1423,9 +1354,8 @@ fn emit_pending_errors(
     }
 }
 
-/// After a subprocess finishes its sent work, decide whether the batch is
-/// done or more is to come. Returns `false` when the batch is done
-/// (BatchComplete already sent); `true` to loop back with the same worker.
+/// `false`: the batch is done (BatchComplete sent); `true`: loop back with
+/// the same worker.
 fn finalize_or_continue(
     state: &mut BatchRunState,
     res_tx: &mpsc::Sender<WorkerResult>,
@@ -1437,7 +1367,6 @@ fn finalize_or_continue(
             ctx.request_repaint();
             false
         }
-        // Sleep: more might be coming — loop back.
         WaitAction::Continue | WaitAction::Sleep => true,
     }
 }
@@ -1468,8 +1397,7 @@ fn spawn_warm(
     }
 }
 
-/// Send a WorkItem to the subprocess via temp file IPC. A chained cut's
-/// start is built here and reported back.
+/// A chained cut's start is built here and reported back.
 fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc::Sender<WorkerResult>) -> Result<(), Refused> {
     let RunInputs { bytes, start, built } = item.read_inputs().map_err(Refused::Unreadable)?;
     if let Some(image) = built {
