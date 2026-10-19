@@ -159,6 +159,9 @@ pub enum SubprocessCommand {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct InpaintJob {
     pub item_id: u64,
+    /// The stroke on this item; names its files and comes back on its
+    /// Done or Error, since strokes on one item can run at once.
+    pub generation: u64,
     pub model_id: ModelId,
     /// The photo as `ipc::write_image` writes it.
     pub image_path: std::path::PathBuf,
@@ -282,6 +285,7 @@ pub enum SubprocessEvent {
     /// `rgba_path`. Same read-and-delete contract as `ImageDone.result_path`.
     InpaintDone {
         item_id: u64,
+        generation: u64,
         rgba_path: std::path::PathBuf,
         width: u32,
         height: u32,
@@ -291,6 +295,7 @@ pub enum SubprocessEvent {
     /// Inpaint dispatch failed (model missing, ORT error, IO error).
     InpaintError {
         item_id: u64,
+        generation: u64,
         error: String,
     },
     /// Current RSS of the subprocess (sent after each image).
@@ -420,15 +425,15 @@ impl IpcKind {
     }
 
     /// Build a path for a generation-suffixed inpaint file:
-    /// `<ipc>/<prefix><id>-<generation>.<ext>`. Only valid for `InpaintImg` /
-    /// `InpaintMask` (the inpaint worker rewrites these per stroke and
-    /// the generation suffix prevents stale-file races).
+    /// `<ipc>/<prefix><id>-<generation>.<ext>`. Only valid for the three
+    /// inpaint kinds: strokes on one item can run at once, so each stroke's
+    /// files carry its generation.
     pub fn path_for_generation(self, ipc_dir: &std::path::Path, id: u64, generation: u64) -> std::path::PathBuf {
         // A full assert, not a debug one: a wrong variant would produce
         // e.g. `result_5-0.raw` in release, a name no reader expects.
         assert!(
-            matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask),
-            "path_for_generation only valid for InpaintImg / InpaintMask; got {self:?}"
+            matches!(self, IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut),
+            "path_for_generation only valid for the inpaint kinds; got {self:?}"
         );
         ipc_dir.join(format!("{}{id}-{generation}.{}", self.prefix(), self.ext()))
     }
@@ -571,6 +576,7 @@ mod tests {
             },
             SubprocessCommand::Inpaint(InpaintJob {
                 item_id: 1,
+                generation: 1,
                 model_id: prunr_models::ModelId::LaMaFp32,
                 image_path: path(),
                 mask_path: path(),
@@ -601,8 +607,8 @@ mod tests {
             },
             SubprocessEvent::SpareEdgeScales { item_id: 1, token: 1, outcome: SpareOutcome::Skipped },
             SubprocessEvent::ImageError { item_id: 1, error: "failed".into() },
-            SubprocessEvent::InpaintDone { item_id: 1, rgba_path: path(), width: 2, height: 2, fill_scale: 1.0 },
-            SubprocessEvent::InpaintError { item_id: 1, error: "failed".into() },
+            SubprocessEvent::InpaintDone { item_id: 1, generation: 1, rgba_path: path(), width: 2, height: 2, fill_scale: 1.0 },
+            SubprocessEvent::InpaintError { item_id: 1, generation: 1, error: "failed".into() },
             SubprocessEvent::RssUpdate { rss_bytes: 1 },
             SubprocessEvent::Finished,
             SubprocessEvent::InitError { error: "failed".into() },
@@ -740,6 +746,7 @@ mod tests {
     fn command_inpaint_sd_roundtrip() {
         roundtrip(&SubprocessCommand::Inpaint(InpaintJob {
             item_id: 12,
+            generation: 3,
             model_id: prunr_models::ModelId::SdV15InpaintFp16,
             image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-12"),
             mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-12"),
@@ -763,6 +770,7 @@ mod tests {
     fn event_inpaint_done_and_error_roundtrip() {
         roundtrip(&SubprocessEvent::InpaintDone {
             item_id: 11,
+            generation: 3,
             rgba_path: std::path::PathBuf::from("/tmp/prunr-inpaint-out-11"),
             width: 1920,
             height: 1080,
@@ -770,6 +778,7 @@ mod tests {
         });
         roundtrip(&SubprocessEvent::InpaintError {
             item_id: 11,
+            generation: 3,
             error: "lama session failed: tensor shape mismatch".into(),
         });
     }

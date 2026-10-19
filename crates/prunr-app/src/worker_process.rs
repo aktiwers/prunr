@@ -883,7 +883,7 @@ pub fn run_worker() -> ! {
 
             SubprocessCommand::CancelItem { item_id } => cancels.cancel(item_id),
 
-            SubprocessCommand::Inpaint(InpaintJob { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen }) => {
+            SubprocessCommand::Inpaint(InpaintJob { item_id, generation, model_id, image_path, mask_path, sd_req, feather_px, sharpen }) => {
                 // Own thread, so inpaint doesn't block batched seg work. `in_flight` makes a
                 // concurrent `Shutdown` wait for it; `Cleanup::drop` decrements, panics included.
                 in_flight.fetch_add(1, Ordering::AcqRel);
@@ -939,16 +939,17 @@ pub fn run_worker() -> ! {
                     drop(_cleanup);
                     match result {
                         Ok((rgba, fill_scale)) => {
-                            let path = IpcKind::InpaintOut.path_for(&ipc_dir_for_spawn, item_id);
+                            let path = IpcKind::InpaintOut.path_for_generation(&ipc_dir_for_spawn, item_id, generation);
                             let event = match write_result(&path, &rgba) {
-                                Ok(()) => SubprocessEvent::InpaintDone { item_id, rgba_path: path, width: rgba.width(), height: rgba.height(), fill_scale },
-                                Err(error) => SubprocessEvent::InpaintError { item_id, error },
+                                Ok(()) => SubprocessEvent::InpaintDone { item_id, generation, rgba_path: path, width: rgba.width(), height: rgba.height(), fill_scale },
+                                Err(error) => SubprocessEvent::InpaintError { item_id, generation, error },
                             };
                             let _ = evt_tx.send(event);
                         }
                         Err(e) => {
                             let _ = evt_tx.send(SubprocessEvent::InpaintError {
                                 item_id,
+                                generation,
                                 error: e,
                             });
                         }
@@ -964,6 +965,7 @@ pub fn run_worker() -> ! {
                     let _ = std::fs::remove_file(&mask_path_on_spawn_err);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
                         item_id,
+                        generation,
                         error: format!("inpaint thread spawn failed: {e}"),
                     });
                 }
