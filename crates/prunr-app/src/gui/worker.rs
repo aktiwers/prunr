@@ -1700,33 +1700,15 @@ mod tests {
         assert_eq!(super::room_to_send(3, 2, false), 0, "fewer jobs after a crash");
     }
 
+    /// A worker is hung only when it sits on work past the timeout: an
+    /// idle one waiting for admission is not, and the bound is strict, so
+    /// one reporting every `hang_timeout` on the dot is not either.
     #[test]
-    fn is_stalled_false_when_no_work_in_flight() {
-        // Idle subprocess waiting for admission is NOT a stall — we only flag
-        // the subprocess as hung if it's sitting on work it hasn't reported.
-        assert!(!is_stalled(Duration::from_secs(120), 0, Duration::from_secs(60)));
+    fn a_worker_is_stalled_only_with_work_past_the_timeout() {
+        let s = Duration::from_secs;
+        for (silence, in_flight, stalled) in [(120, 0, false), (61, 1, true), (59, 1, false), (60, 1, false), (90, 5, true)] {
+            assert_eq!(is_stalled(s(silence), in_flight, s(60)), stalled, "{silence} s silent, {in_flight} in flight");
+        }
     }
 
-    #[test]
-    fn is_stalled_true_when_silence_exceeds_timeout_with_work() {
-        assert!(is_stalled(Duration::from_secs(61), 1, Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn is_stalled_false_when_under_timeout() {
-        assert!(!is_stalled(Duration::from_secs(59), 1, Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn is_stalled_at_exact_boundary_is_false() {
-        // Strict `>` not `>=`: a subprocess that emits an event every
-        // `hang_timeout` seconds on the dot is not considered stalled.
-        assert!(!is_stalled(Duration::from_secs(60), 1, Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn is_stalled_scales_with_in_flight_count() {
-        // Any non-zero in-flight count triggers the detector given silence.
-        assert!(is_stalled(Duration::from_secs(90), 5, Duration::from_secs(60)));
-    }
 }

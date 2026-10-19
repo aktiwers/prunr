@@ -502,40 +502,28 @@ impl DragKey {
 mod tests {
     use super::*;
 
+    /// A drag file is named by the source's stem and what it holds; an
+    /// unprocessed image keeps its own name, a nameless one is "image".
     #[test]
-    fn make_filename_uses_source_stem_with_mode_suffix() {
-        assert_eq!(
-            make_filename("sunset.jpg", true, LineMode::Off),
-            "sunset.prunr.png"
-        );
-        assert_eq!(
-            make_filename("sunset.jpg", true, LineMode::EdgesOnly),
-            "sunset-lines.png"
-        );
-        assert_eq!(
-            make_filename("sunset.jpg", true, LineMode::SubjectOutline),
-            "sunset.prunr-lines.png"
-        );
-    }
-
-    #[test]
-    fn make_filename_unprocessed_preserves_original() {
-        assert_eq!(
-            make_filename("photo.webp", false, LineMode::Off),
-            "photo.webp"
-        );
-    }
-
-    #[test]
-    fn make_filename_handles_weird_names() {
-        assert_eq!(
-            make_filename("no-extension", true, LineMode::Off),
-            "no-extension.prunr.png"
-        );
-        assert_eq!(
-            make_filename("", true, LineMode::Off),
-            "image.prunr.png"
-        );
+    fn drag_files_are_named_by_the_source_and_what_they_hold() {
+        for (source, processed, mode, want) in [
+            ("sunset.jpg", true, LineMode::Off, "sunset.prunr.png"),
+            ("sunset.jpg", true, LineMode::EdgesOnly, "sunset-lines.png"),
+            ("sunset.jpg", true, LineMode::SubjectOutline, "sunset.prunr-lines.png"),
+            ("photo.webp", false, LineMode::Off, "photo.webp"),
+            ("no-extension", true, LineMode::Off, "no-extension.prunr.png"),
+            ("", true, LineMode::Off, "image.prunr.png"),
+        ] {
+            assert_eq!(make_filename(source, processed, mode), want);
+        }
+        for (source, kind, want) in [
+            ("sunset.jpg", LayerKind::Subject, "sunset-subject.png"),
+            ("sunset.jpg", LayerKind::Lines, "sunset-lines.png"),
+            ("sunset.jpg", LayerKind::Mask, "sunset-mask.png"),
+            ("", LayerKind::Subject, "image-subject.png"),
+        ] {
+            assert_eq!(make_layer_filename(source, kind), want);
+        }
     }
 
     /// A ticked image off screen has its result parked in the history; a
@@ -572,30 +560,6 @@ mod tests {
         for p in [&pa[0], &pb[0]] {
             let _ = std::fs::remove_file(p);
         }
-    }
-
-    #[test]
-    fn layer_filename_uses_kind_suffix() {
-        assert_eq!(
-            make_layer_filename("sunset.jpg", LayerKind::Subject),
-            "sunset-subject.png"
-        );
-        assert_eq!(
-            make_layer_filename("sunset.jpg", LayerKind::Lines),
-            "sunset-lines.png"
-        );
-        assert_eq!(
-            make_layer_filename("sunset.jpg", LayerKind::Mask),
-            "sunset-mask.png"
-        );
-    }
-
-    #[test]
-    fn layer_filename_falls_back_on_empty_source() {
-        assert_eq!(
-            make_layer_filename("", LayerKind::Subject),
-            "image-subject.png"
-        );
     }
 
     #[test]

@@ -403,10 +403,25 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
 mod tests {
     use super::*;
 
+    /// A preset name becomes a file name inside the presets folder:
+    /// separators, control characters, leading dots and an embedded ".."
+    /// cannot reach outside it, and an empty name falls back.
     #[test]
-    fn sanitize_strips_path_separators() {
-        assert_eq!(sanitize_filename("foo/bar"), "foobar");
-        assert_eq!(sanitize_filename("foo\\bar"), "foobar");
+    fn a_preset_name_stays_inside_the_presets_folder() {
+        for (name, file) in [
+            ("foo/bar", "foobar"),
+            ("foo\\bar", "foobar"),
+            // Slash stripped to "..etc", then the leading dots.
+            ("../etc", "etc"),
+            ("foo..bar", "foo_bar"),
+            (".hidden", "hidden"),
+            ("good\x00bad\x01name", "goodbadname"),
+            ("  Portrait  ", "Portrait"),
+            ("", "preset"),
+            ("   ", "preset"),
+        ] {
+            assert_eq!(sanitize_filename(name), file, "{name:?}");
+        }
     }
 
     /// A preset a newer Prunr saved is left out, not read as defaults, and
@@ -422,37 +437,6 @@ mod tests {
         assert!(name_refusal(" future ", &newer).is_some());
         assert_eq!(name_refusal("Other", &newer), None);
         assert!(name_refusal("prunr", &HashSet::new()).is_some(), "Prunr stays reserved");
-    }
-
-    #[test]
-    fn sanitize_rejects_parent_traversal() {
-        // "../etc": slash stripped → "..etc" → leading dots stripped → "etc".
-        // Output is confined to presets dir (no slashes possible anymore).
-        assert_eq!(sanitize_filename("../etc"), "etc");
-        // "foo..bar": no leading dot, so embedded ".." replaced with "_".
-        assert_eq!(sanitize_filename("foo..bar"), "foo_bar");
-    }
-
-    #[test]
-    fn sanitize_strips_leading_dot() {
-        assert_eq!(sanitize_filename(".hidden"), "hidden");
-    }
-
-    #[test]
-    fn sanitize_strips_control_chars() {
-        let name = "good\x00bad\x01name";
-        assert_eq!(sanitize_filename(name), "goodbadname");
-    }
-
-    #[test]
-    fn sanitize_trims_whitespace() {
-        assert_eq!(sanitize_filename("  Portrait  "), "Portrait");
-    }
-
-    #[test]
-    fn sanitize_empty_falls_back() {
-        assert_eq!(sanitize_filename(""), "preset");
-        assert_eq!(sanitize_filename("   "), "preset");
     }
 
     #[test]

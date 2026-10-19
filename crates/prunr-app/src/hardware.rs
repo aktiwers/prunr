@@ -431,30 +431,17 @@ mod tests {
         assert_eq!(non_empty_lines("NVIDIA GeForce RTX 4090 (driver 32.0.15.6094)\r\n\r\n"), ["NVIDIA GeForce RTX 4090 (driver 32.0.15.6094)"]);
     }
 
+    /// The vendor id decides; without one, the brand string does.
     #[test]
-    fn classify_intel_via_vendor_id() {
-        assert_eq!(classify_cpu_vendor("GenuineIntel", ""), CpuVendor::Intel);
-    }
-
-    #[test]
-    fn classify_amd_via_vendor_id() {
-        assert_eq!(classify_cpu_vendor("AuthenticAMD", ""), CpuVendor::Amd);
-    }
-
-    #[test]
-    fn classify_apple_falls_back_to_brand() {
-        assert_eq!(
-            classify_cpu_vendor("", "Apple M3 Pro"),
-            CpuVendor::Apple,
-        );
-    }
-
-    #[test]
-    fn classify_amd_via_ryzen_brand_when_vendor_id_missing() {
-        assert_eq!(
-            classify_cpu_vendor("", "AMD Ryzen 9 7950X"),
-            CpuVendor::Amd,
-        );
+    fn the_cpu_vendor_comes_from_the_vendor_id_or_the_brand() {
+        for (vendor_id, brand, want) in [
+            ("GenuineIntel", "", CpuVendor::Intel),
+            ("AuthenticAMD", "", CpuVendor::Amd),
+            ("", "Apple M3 Pro", CpuVendor::Apple),
+            ("", "AMD Ryzen 9 7950X", CpuVendor::Amd),
+        ] {
+            assert_eq!(classify_cpu_vendor(vendor_id, brand), want, "{vendor_id:?} {brand:?}");
+        }
     }
 
     #[test]

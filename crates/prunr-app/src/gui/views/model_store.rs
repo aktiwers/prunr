@@ -422,16 +422,6 @@ pub(crate) fn render_license_dialog(
 mod tests {
     use super::*;
 
-    fn dl_idle() -> DownloadState { DownloadState::Idle }
-    fn dl_in_progress() -> DownloadState { DownloadState::InProgress { bytes_so_far: 1, total_bytes: 100 } }
-    fn dl_verifying() -> DownloadState { DownloadState::Verifying }
-    fn dl_done() -> DownloadState { DownloadState::Done }
-    fn dl_failed_network() -> DownloadState {
-        DownloadState::Failed { error: "timeout".into() }
-    }
-    fn dl_failed_disk_full() -> DownloadState {
-        DownloadState::Failed { error: "No space left on device".into() }
-    }
     fn synthetic(gpu: prunr_models::GpuRequirement) -> prunr_models::ModelDescriptor {
         prunr_models::ModelDescriptor {
             id: prunr_models::ModelId::Migan, // any id; tests don't dispatch
@@ -466,79 +456,36 @@ mod tests {
     fn synthetic_bundled() -> prunr_models::ModelDescriptor {
         prunr_models::ModelDescriptor {
             id: prunr_models::ModelId::Silueta,
-            display_name: "test",
-            description: "test",
             category: prunr_models::ModelCategory::Segmentation,
             source: ModelSource::Bundled {
                 license: prunr_models::LicenseInfo { author: "test", license: "MIT", license_url: "", source_url: "" },
             },
-            version: "1.0.0",
-            gpu: prunr_models::GpuRequirement::None,
-            incompatible_eps: &[],
-            working_set_mb: 100,
-            parallel_jobs_pay_on_cpu: false,
-            tile_size_multiple: None,
-            recommended_tile: None,
-            attribution_required: false,
-            upscale: None,
+            ..synthetic(prunr_models::GpuRequirement::None)
         }
     }
 
+    /// What a card's button offers, by install and download state. A
+    /// failure the network retry gave up on (disk full, 404, bad checksum)
+    /// can still be retried by hand once the cause is fixed.
     #[test]
-    fn bundled_always_renders_as_none() {
-        let d = synthetic_bundled();
-        assert_eq!(card_action(&d, true, &dl_idle()), CardAction::Bundled);
-        assert_eq!(card_action(&d, false, &dl_failed_network()), CardAction::Bundled);
-    }
-
-    #[test]
-    fn ondemand_idle_uninstalled_is_download() {
+    fn a_cards_action_follows_its_install_and_download() {
+        let failed = |error: &str| DownloadState::Failed { error: error.into() };
+        let bundled = synthetic_bundled();
+        assert_eq!(card_action(&bundled, true, &DownloadState::Idle), CardAction::Bundled);
+        assert_eq!(card_action(&bundled, false, &failed("timeout")), CardAction::Bundled);
         let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, false, &dl_idle()), CardAction::Download);
-    }
-
-    #[test]
-    fn ondemand_done_installed_is_delete() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, true, &dl_done()), CardAction::Delete);
-    }
-
-    #[test]
-    fn ondemand_in_progress_is_cancel() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, false, &dl_in_progress()), CardAction::Cancel);
-    }
-
-    #[test]
-    fn ondemand_verifying_is_verifying_disabled() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        let a = card_action(&d, false, &dl_verifying());
-        assert_eq!(a, CardAction::Verifying);
-        assert!(!action_enabled(a));
-    }
-
-    #[test]
-    fn ondemand_failed_network_uninstalled_is_retry_clickable() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        let a = card_action(&d, false, &dl_failed_network());
-        assert_eq!(a, CardAction::Retry);
-        assert!(action_enabled(a));
-    }
-
-    /// A failure the network retry gave up on (disk full, 404, bad
-    /// checksum) can still be retried by hand once the cause is fixed.
-    #[test]
-    fn ondemand_failed_disk_full_uninstalled_is_retry_clickable() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        let a = card_action(&d, false, &dl_failed_disk_full());
-        assert_eq!(a, CardAction::Retry);
-        assert!(action_enabled(a));
-    }
-
-    #[test]
-    fn ondemand_failed_but_already_installed_shows_delete() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        assert_eq!(card_action(&d, true, &dl_failed_network()), CardAction::Delete);
+        for (installed, state, action, enabled) in [
+            (false, DownloadState::Idle, CardAction::Download, true),
+            (true, DownloadState::Done, CardAction::Delete, true),
+            (false, DownloadState::InProgress { bytes_so_far: 1, total_bytes: 100 }, CardAction::Cancel, true),
+            (false, DownloadState::Verifying, CardAction::Verifying, false),
+            (false, failed("timeout"), CardAction::Retry, true),
+            (false, failed("No space left on device"), CardAction::Retry, true),
+            (true, failed("timeout"), CardAction::Delete, true),
+        ] {
+            let a = card_action(&d, installed, &state);
+            assert_eq!((a, action_enabled(a)), (action, enabled), "installed={installed} {state:?}");
+        }
     }
 
     // ── Hardware advisory ─────────────────────────────────────────────
@@ -546,27 +493,21 @@ mod tests {
     // source/install/download_state. Tests here pin the *advisory* surface.
 
     #[test]
-    fn hardware_advisory_required_warns_on_cpu() {
-        let d = synthetic(prunr_models::GpuRequirement::Required);
-        let tip = d.hardware_advisory("CPU").expect("Required must warn on CPU");
+    fn a_gpu_model_warns_on_the_cpu_only() {
+        use prunr_models::GpuRequirement::{None as NoGpu, Recommended, Required};
+        let tip = synthetic(Required).hardware_advisory("CPU").expect("Required must warn on CPU");
         assert!(tip.contains("Very slow") || tip.to_lowercase().contains("gpu"),
             "advisory should warn about CPU performance: {tip}");
-        assert!(d.hardware_advisory("CUDA").is_none());
-        assert!(d.hardware_advisory("CoreML").is_none());
-    }
-
-    #[test]
-    fn hardware_advisory_recommended_warns_on_cpu_only() {
-        let d = synthetic(prunr_models::GpuRequirement::Recommended);
-        assert!(d.hardware_advisory("CPU").is_some());
-        assert!(d.hardware_advisory("CUDA").is_none());
-    }
-
-    #[test]
-    fn hardware_advisory_none_never_warns() {
-        let d = synthetic(prunr_models::GpuRequirement::None);
-        assert!(d.hardware_advisory("CPU").is_none());
-        assert!(d.hardware_advisory("CUDA").is_none());
+        for (gpu, backend, warns) in [
+            (Required, "CUDA", false),
+            (Required, "CoreML", false),
+            (Recommended, "CPU", true),
+            (Recommended, "CUDA", false),
+            (NoGpu, "CPU", false),
+            (NoGpu, "CUDA", false),
+        ] {
+            assert_eq!(synthetic(gpu).hardware_advisory(backend).is_some(), warns, "{gpu:?} on {backend}");
+        }
     }
 
     // ── License gating ─────────────────────────────────────────────────
@@ -581,12 +522,8 @@ mod tests {
         // want; behaviour under test is the gate itself, not the writer.
         s.accepted_licenses.push(format!("{:?}", prunr_models::ModelId::SdV15InpaintFp16));
         assert!(!requires_license_gate(prunr_models::ModelId::SdV15InpaintFp16, &s));
-    }
-
-    #[test]
-    fn license_gate_passes_for_non_restricted_models() {
-        let s = super::super::super::settings::Settings::default();
-        assert!(!requires_license_gate(prunr_models::ModelId::U2net, &s));
+        assert!(!requires_license_gate(prunr_models::ModelId::U2net, &s), "no license to accept");
         assert!(!requires_license_gate(prunr_models::ModelId::LaMaFp32, &s));
     }
+
 }
