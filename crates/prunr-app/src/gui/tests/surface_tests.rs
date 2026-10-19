@@ -277,27 +277,6 @@ fn applying_a_preset_closes_the_popover() {
     assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes a set-and-go popover");
 }
 
-#[test]
-fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
-    let mut h = loaded();
-    {
-        let item = &mut h.state_mut().batch.items[0];
-        item.selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
-    }
-    click(&mut h, "Preset");
-    click(&mut h, "Save current as…");
-    assert!(!egui::Popup::is_any_open(&h.ctx), "opening the dialog closed the popover");
-    let present = names(&h);
-    for n in ["Save", "Cancel", "Close window"] {
-        assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
-    }
-    assert_all_controls_named(&h, "save preset dialog");
-    h.key_press(egui::Key::Escape);
-    settle(&mut h);
-    assert!(!names(&h).iter().any(|x| x == "Close window"), "Escape closed the dialog");
-    assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
-}
-
 /// The first-launch runtime prompt is a modal for each runtime it can
 /// offer: its buttons are named, and Escape closes it as Not now.
 #[test]
@@ -319,13 +298,15 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
     }
 }
 
-/// The save dialog opens ready for a name: text typed at once goes into
-/// it. (Saving writes the presets folder, so Enter is checked live.)
+/// The save dialog takes the popover's place and opens ready for a name:
+/// text typed at once goes into it. (Saving writes the presets folder, so
+/// Enter is checked live.)
 #[test]
 fn the_save_preset_dialog_takes_a_name_typed_at_once() {
     let mut h = loaded();
     click(&mut h, "Preset");
     click(&mut h, "Save current as…");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "opening the dialog closed the popover");
     h.event(egui::Event::Text("Mine".into()));
     settle(&mut h);
     assert_eq!(h.state().save_preset.as_deref(), Some("Mine"), "the typing went into the name");

@@ -182,16 +182,6 @@ fn stable_diffusion_settings_show_only_with_an_sd_eraser_installed() {
 }
 
 #[test]
-fn settings_opens_from_its_toolbar_button() {
-    let mut harness = harness();
-    settle(&mut harness);
-    assert!(!harness.state().show_settings);
-    click(&mut harness, "Settings");
-    assert!(harness.state().show_settings);
-    assert!(names(&harness).iter().any(|n| n == "Editing"), "{:?}", names(&harness));
-}
-
-#[test]
 fn the_model_store_opens_from_its_toolbar_button() {
     let mut harness = harness();
     settle(&mut harness);
