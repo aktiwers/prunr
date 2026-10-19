@@ -98,9 +98,8 @@ const RENDER_BANNED: [(&str, &str); 11] = [
 
 /// Render-code lines that match a banned pattern and are fine, each with
 /// why: `(file, the line's text, reason)`.
-const RENDER_ALLOWED: [(&str, &str, &str); 2] = [
-    ("gui/views/canvas.rs", "ctx.load_texture(\"checker_dark\"", "a 2 KB checker made once (OnceLock)"),
-    ("gui/views/canvas.rs", "ctx.load_texture(\"checker_light\"", "a 2 KB checker made once (OnceLock)"),
+const RENDER_ALLOWED: [(&str, &str, &str); 1] = [
+    ("gui/views/canvas.rs", "ctx.load_texture(name, build_checker_image(", "a 2 KB checker made once per tone (OnceLock)"),
 ];
 
 #[test]

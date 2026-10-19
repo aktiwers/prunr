@@ -50,9 +50,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
     let canvas_gets_zoom = !pointer_blocked;
-    // Pan binding: primary (left) drag normally; secondary (right) drag
-    // in any brush-tool mode so left-click is free for the brush stroke.
-    let canvas_gets_pan = canvas_gets_zoom;
     if canvas_gets_zoom {
         ui.ctx().input(|i| {
             for event in &i.events {
@@ -70,7 +67,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         });
     }
-    if canvas_gets_pan {
+    // Pan binding: primary (left) drag normally; secondary (right) drag
+    // in any brush-tool mode so left-click is free for the brush stroke.
+    if canvas_gets_zoom {
         ui.ctx().input(|i| {
             // Click+drag pan: enter panning ONLY on a fresh press inside the canvas.
             // This avoids false pan when egui's pointer state is desynced — e.g. after
@@ -105,31 +104,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         .map(|i| (i.id, i.frame_size()));
     if let Some((item_id, tex_size)) = frame {
         app.zoom_state.follow_frame(item_id, tex_size);
-        let canvas_size = canvas_rect.size();
-
-        if app.zoom_state.pending_fit_zoom {
-            app.zoom_state.pending_fit_zoom = false;
-            let fit = fit_zoom(canvas_size, tex_size);
-            // Only toggle back if zoom is already at fit (keyboard shortcut).
-            // previous_zoom == 1.0 means this is a fresh image switch — always fit.
-            if (app.zoom_state.zoom - fit).abs() < 0.001 && app.zoom_state.previous_zoom != 1.0 {
-                app.zoom_state.zoom = app.zoom_state.previous_zoom;
-            } else {
-                app.zoom_state.previous_zoom = app.zoom_state.zoom;
-                app.zoom_state.zoom = fit;
-                app.zoom_state.pan_offset = Vec2::ZERO;
-            }
-        }
-        if app.zoom_state.pending_actual_size {
-            app.zoom_state.pending_actual_size = false;
-            if (app.zoom_state.zoom - 1.0).abs() < 0.001 {
-                app.zoom_state.zoom = app.zoom_state.previous_zoom;
-            } else {
-                app.zoom_state.previous_zoom = app.zoom_state.zoom;
-                app.zoom_state.zoom = 1.0;
-                app.zoom_state.pan_offset = Vec2::ZERO;
-            }
-        }
+        app.zoom_state.apply_pending(fit_zoom(canvas_rect.size(), tex_size));
     }
 
     let img_rect = match app_state {
@@ -675,24 +650,19 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         );
         let alpha = prunr_core::math::round_u8(fade * 255.0);
         if fade < 1.0 { ui.ctx().request_repaint(); }
-        if let Some(item) = app.batch.selected_item() {
-            // Undone back to the original: the source reveals over the cut.
-            if item.reveal_progress().is_some() {
-                draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-            }
-            // A drag on a photo with no result yet (No model's first one)
-            // shows its quick frames over it.
-            let texture = item.quick.texture().or(item.photo_look.as_ref()).unwrap_or(texture);
-            paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+        // Undone back to the original: the source reveals over the cut.
+        if item.reveal_progress().is_some() {
+            draw_checkerboard(ui, img_rect, app.settings.dark_checker);
         }
-
+        // A drag on a photo with no result yet (No model's first one)
+        // shows its quick frames over it.
+        let texture = item.quick.texture().or(item.photo_look.as_ref()).unwrap_or(texture);
+        paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
         // Magic Brush authors selections on the source before any Process,
         // so the selection shows here too.
-        if let Some(it) = app.batch.selected_item() {
-            draw_face_preview(ui, it, img_rect);
-            draw_selection(ui, app, it, img_rect);
-            draw_found_faces(ui, app, it, img_rect);
-        }
+        draw_face_preview(ui, item, img_rect);
+        draw_selection(ui, app, item, img_rect);
+        draw_found_faces(ui, app, item, img_rect);
         Some(img_rect)
     } else {
         let center = canvas_rect.center();
@@ -827,17 +797,12 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
     static LIGHT: OnceLock<TextureHandle> = OnceLock::new();
     static DARK: OnceLock<TextureHandle> = OnceLock::new();
 
-    if dark {
-        DARK.get_or_init(|| {
-            let (light, dark) = theme::CHECKER_DARK_MODE;
-            ctx.load_texture("checker_dark", build_checker_image(light, dark), TextureOptions::NEAREST)
-        }).clone()
+    let (cell, name, (light, dark)) = if dark {
+        (&DARK, "checker_dark", theme::CHECKER_DARK_MODE)
     } else {
-        LIGHT.get_or_init(|| {
-            let (light, dark) = theme::CHECKER_LIGHT_MODE;
-            ctx.load_texture("checker_light", build_checker_image(light, dark), TextureOptions::NEAREST)
-        }).clone()
-    }
+        (&LIGHT, "checker_light", theme::CHECKER_LIGHT_MODE)
+    };
+    cell.get_or_init(|| ctx.load_texture(name, build_checker_image(light, dark), TextureOptions::NEAREST)).clone()
 }
 
 /// What sits behind `item`'s result, painted into `rect` under it. Until a
