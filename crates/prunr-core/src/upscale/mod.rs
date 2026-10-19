@@ -1,8 +1,10 @@
-//! Tile-based ONNX upscale dispatch. RGB through the model with
-//! overlap-blend; alpha resampled with Lanczos3 in parallel.
+//! ONNX upscale dispatch: RGB through the model in overlap-blended tiles,
+//! or part by part for a model that normalizes over its whole input;
+//! alpha resampled with Lanczos3 apart.
 
 mod tiling;
 mod alpha;
+pub(crate) mod blocks;
 pub mod postprocess;
 
 pub use postprocess::{sharpened, apply_ai_blend, apply_color_match, refine, Reference, Refine};
@@ -108,6 +110,17 @@ pub fn upscale_rgba_with_engine(
     let descriptor = prunr_models::descriptor(model_id)
         .ok_or_else(|| CoreError::Model(format!("{model_id:?} not found in REGISTRY")))?;
     let knobs = upscale_knobs(descriptor)?;
+    if let Some(net) = engine.parts() {
+        let running = blocks::Running { net, terminate: terminate.map(Arc::as_ref) };
+        let rgb = blocks::upscale_by_parts(&running, input, knobs.native_scale, progress)?;
+        let alpha = upscale_alpha_lanczos3(input, rgb.width(), rgb.height());
+        let native = RgbaImage::from_fn(rgb.width(), rgb.height(), |x, y| {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            image::Rgba([r, g, b, alpha.get_pixel(x, y).0[0]])
+        });
+        drop((rgb, alpha));
+        return Ok(fit_to_scale(native, input, scale));
+    }
     let tile_size = descriptor
         .recommended_tile
         .map(|tile| tile_for_provider(tile, engine.active_provider()))
@@ -217,26 +230,31 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
-/// holds at its peak, besides the input and the model: the tiler's
-/// buffers at the model's own scale, or the resample to `scale` when
-/// that is larger.
+/// holds at its peak, besides the input and the model: the tiler's or
+/// the part-by-part run's buffers at the model's own scale, or the
+/// resample to `scale` when that is larger.
 pub fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
     let descriptor = prunr_models::descriptor(model);
     let native = descriptor.and_then(|d| d.upscale.as_ref()).map_or(scale, |k| k.native_scale);
-    // A model without a tile size refuses to run; count the whole height.
-    let tile = descriptor.and_then(|d| d.recommended_tile).unwrap_or(in_h);
-    let tiled = tiling::tiled_peak_bytes(in_w, in_h, native, tile);
+    let run = match descriptor.and_then(|d| d.part_layout()) {
+        Some(layout) => blocks::peak_bytes(layout, in_w, in_h, native),
+        None => {
+            // A model without a tile size refuses to run; count the whole height.
+            let tile = descriptor.and_then(|d| d.recommended_tile).unwrap_or(in_h);
+            tiling::tiled_peak_bytes(in_w, in_h, native, tile)
+        }
+    };
     if native == scale {
-        return tiled;
+        return run;
     }
     let pixels = |s: u32| u64::from(in_w) * u64::from(in_h) * u64::from(s) * u64::from(s);
-    tiled.max(pixels(native) * 4 + pixels(scale) * 5)
+    run.max(pixels(native) * 4 + pixels(scale) * 5)
 }
 
 /// Builds its own engine; for callers without a warm engine (CLI, tests).
 ///
-/// Peak working-set RAM (additive to the `upscale_tiled` accumulators
-/// documented in `tiling.rs`):
+/// Peak working-set RAM of a tiled model (`peak_bytes` counts a model run
+/// in parts too), additive to the tiler's accumulators:
 ///   - Tile input scratch: `3 × padded_w × padded_h × 4 bytes` (f32 CHW).
 ///     ~3 MB at 512-tile.
 ///   - Tile output scratch: `3 × out_w × out_h bytes` (u8 HWC).

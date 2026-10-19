@@ -48,8 +48,9 @@ pub enum ModelId {
     /// restoration upscaler — handles noise and JPEG artifacts on real
     /// photos. WTFPL — no attribution required.
     FourXNmkdSuperscale,
-    /// 4xNomos2 RealPLKSR with DySample (fp32). OnDemand. Fast photo
-    /// upscaler trained on JPEG-degraded photos. CC-BY-4.0.
+    /// 4xNomos2 RealPLKSR with DySample (fp32). MultiPartOnDemand, cut
+    /// at its norms. Fast photo upscaler trained on JPEG-degraded photos.
+    /// CC-BY-4.0.
     FourXNomos2RealPlksr,
     /// SAM 2.1 Hiera Small. Two-part bundled pair (encoder + decoder
     /// ONNX). Apache 2.0 from Meta. Used by Magic Brush.
@@ -362,7 +363,28 @@ pub struct UpscaleModelKnobs {
     /// (pixel_unshuffle) but is NOT window-attention; conflating the two
     /// costs it ~7% throughput from an over-wide overlap.
     pub uses_window_attention: bool,
+    /// `Some` when the network normalizes over its whole input
+    /// (GroupNorm): tiles normalized apart leave seams, so it ships cut at
+    /// its norms and runs part by part.
+    pub parts: Option<PartLayout>,
 }
+
+/// A network run part by part: its feature channels, and how far each
+/// part reads around a pixel (input pixels, rounded up), so a crop's
+/// middle is exact that far in from a neighbour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartLayout {
+    pub features: usize,
+    pub head: usize,
+    pub block: usize,
+    pub tail: usize,
+}
+
+/// The keys a model run in parts names its files by: its head, its tail
+/// and its norms' weights (JSON); its blocks are the rest, in key order.
+pub const PART_HEAD: &str = "head";
+pub const PART_TAIL: &str = "tail";
+pub const PART_NORMS: &str = "norms";
 
 impl UpscaleModelKnobs {
     /// Tile overlap in pixels: 32 for window-attention transformers
@@ -374,6 +396,14 @@ impl UpscaleModelKnobs {
 }
 
 impl ModelDescriptor {
+    pub fn part_layout(&self) -> Option<PartLayout> {
+        self.upscale.and_then(|k| k.parts)
+    }
+
+    pub fn runs_in_parts(&self) -> bool {
+        self.part_layout().is_some()
+    }
+
     /// Upstream author and licence; every model carries one, bundled
     /// ones too, since Settings › Credits is where they are credited.
     pub fn license(&self) -> LicenseInfo {
@@ -881,6 +911,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: false,
             native_scale: 4,
             uses_window_attention: false,
+            parts: None,
         }),
     },
     ModelDescriptor {
@@ -915,6 +946,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: true,
             native_scale: 4,
             uses_window_attention: true,
+            parts: None,
         }),
     },
     ModelDescriptor {
@@ -953,6 +985,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: false,
             native_scale: 2,
             uses_window_attention: false,
+            parts: None,
         }),
     },
     ModelDescriptor {
@@ -991,6 +1024,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: false,
             native_scale: 4,
             uses_window_attention: false,
+            parts: None,
         }),
     },
     ModelDescriptor {
@@ -998,32 +1032,71 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "4xNomos2 RealPLKSR",
         description: "Fast photo upscaler trained on compressed photos. Natural skin and hair texture; can invent texture on flat areas like snow.",
         category: ModelCategory::Upscale,
-        source: ModelSource::OnDemand {
-            filename: "4xNomos2_realplksr_dysample.onnx",
-            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos2_realplksr_dysample.onnx",
-            sha256: "ec435c52cfc68bdf9b3e4b757bdd8078ce5daea70ff439a7e68de1a17262e24d",
-            size_mb: 30,
+        // Phhofm's 4xNomos2_realplksr_dysample from our dynamic-shape
+        // export (his published ONNX is fixed at 256 × 256; on 256 × 256
+        // crops the two agree to the bit at 8 bits), cut at its 28
+        // GroupNorms (head, each block up to its norm, tail, the norms'
+        // weights) so it runs part by part without tile seams.
+        source: ModelSource::MultiPartOnDemand {
+            subdir: "4xNomos2_realplksr_dysample-parts-1.0.0",
+            parts: &[
+                ModelPart { key: PART_HEAD, filename: "nomos2-head.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-head.onnx", sha256: "8af91428f3b0da13ff3f6e2907ccc42522a6d60153b88d884035f2cd25c9b6aa", size_bytes: 9722 },
+                ModelPart { key: "block01", filename: "nomos2-block01.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block01.onnx", sha256: "ca135e009bab895383e775a8450fe2faaa381f7d96e08576f15aa3580cc1d719", size_bytes: 1091260 },
+                ModelPart { key: "block02", filename: "nomos2-block02.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block02.onnx", sha256: "136a13fd1970785efc2f69f0da652374ad15b74db3332dd8ff6a9af582d2f070", size_bytes: 1091393 },
+                ModelPart { key: "block03", filename: "nomos2-block03.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block03.onnx", sha256: "45b0ec3d00fd4bab3c24e60ad232e1cd37ff441d64306598f4bc47d66295ee30", size_bytes: 1091471 },
+                ModelPart { key: "block04", filename: "nomos2-block04.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block04.onnx", sha256: "7da56a7f879cc4739dac9fafad8371d6062acbd0044d46e8905133f72c61bd26", size_bytes: 1091479 },
+                ModelPart { key: "block05", filename: "nomos2-block05.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block05.onnx", sha256: "5654a15170857bf0bf7de2493a53a379ea5c66909e2f48515221c515ea1d13dd", size_bytes: 1091479 },
+                ModelPart { key: "block06", filename: "nomos2-block06.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block06.onnx", sha256: "1f1d4560a79f717f138864dbb145ac3e6087ef609e516fb5aa04d4a7996ac52a", size_bytes: 1091479 },
+                ModelPart { key: "block07", filename: "nomos2-block07.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block07.onnx", sha256: "8849c3983181982e610369b082dbad70f59a5166511ee0788e56d7bc5b928391", size_bytes: 1091479 },
+                ModelPart { key: "block08", filename: "nomos2-block08.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block08.onnx", sha256: "e25db5fdb325981f27c74368699094fbe5119d404cfb42bb6e4849dbf3dd8642", size_bytes: 1091479 },
+                ModelPart { key: "block09", filename: "nomos2-block09.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block09.onnx", sha256: "367a9038f4fcb08450e6f9c588fed736105320701200f605142287873c8e63b0", size_bytes: 1091479 },
+                ModelPart { key: "block10", filename: "nomos2-block10.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block10.onnx", sha256: "528c2a139036e18f53eee2486c7afa51379b970f97bfe3705095982f2300112b", size_bytes: 1091618 },
+                ModelPart { key: "block11", filename: "nomos2-block11.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block11.onnx", sha256: "62a681b85ff06bc997e76903ccec63eca78e26cdb8fa283621a2407b52bec75f", size_bytes: 1091677 },
+                ModelPart { key: "block12", filename: "nomos2-block12.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block12.onnx", sha256: "37efa2382acba7ea7d6bed52174d5605e5ecba4e26968ada721a0e268abf249a", size_bytes: 1091677 },
+                ModelPart { key: "block13", filename: "nomos2-block13.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block13.onnx", sha256: "f70c910d5cf484cb906a74ff83f33cef0bb507d89d06f97c3b46d57e774b4a0b", size_bytes: 1091677 },
+                ModelPart { key: "block14", filename: "nomos2-block14.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block14.onnx", sha256: "cac696854692d047d1cb4beb03a25ccebdba5a24c80fea5979a4eb4b05565f32", size_bytes: 1091677 },
+                ModelPart { key: "block15", filename: "nomos2-block15.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block15.onnx", sha256: "b634dfe0c4d5c157efdfa56a4b6c1e09849d97d2d42d4135917716ad5b6aae36", size_bytes: 1091677 },
+                ModelPart { key: "block16", filename: "nomos2-block16.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block16.onnx", sha256: "5ae7ce5487044f76d7c5db2a84bfa6f16cea3a9a55278edde668c230f3657fe7", size_bytes: 1091685 },
+                ModelPart { key: "block17", filename: "nomos2-block17.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block17.onnx", sha256: "792f4019f812c7b67e94449f12caea6686a9b413ef50a9d09ab22e785459900c", size_bytes: 1091685 },
+                ModelPart { key: "block18", filename: "nomos2-block18.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block18.onnx", sha256: "ff0125a593de52c5cc78556f2b92dfaf744b43d68a693f40d815a2b055a27e68", size_bytes: 1091689 },
+                ModelPart { key: "block19", filename: "nomos2-block19.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block19.onnx", sha256: "10ca58f4f763130017f0b17b6a26f5e53fca7630ec84d275d545d9333cd65398", size_bytes: 1091721 },
+                ModelPart { key: "block20", filename: "nomos2-block20.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block20.onnx", sha256: "1be962e8dff96968c3416ea3c9e85948fe31cc51187cdffd6b00f872c61c378c", size_bytes: 1091728 },
+                ModelPart { key: "block21", filename: "nomos2-block21.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block21.onnx", sha256: "347fc043f1a1734951f8e9377978c0daf0b8dcf5fb581d963b55af3ab06802af", size_bytes: 1091770 },
+                ModelPart { key: "block22", filename: "nomos2-block22.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block22.onnx", sha256: "de72dadfc0535342138243442c86d0487d72cfe646b7de6475093c9911b1839a", size_bytes: 1091770 },
+                ModelPart { key: "block23", filename: "nomos2-block23.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block23.onnx", sha256: "25e91ffe7553ecfa95fb2804666dc8e0674f7a50ca331322de8856145a9ae9d2", size_bytes: 1091770 },
+                ModelPart { key: "block24", filename: "nomos2-block24.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block24.onnx", sha256: "4b968f7c966c8b4c1aa931125964b432b138913005035519a0c3bc77aa68b460", size_bytes: 1091770 },
+                ModelPart { key: "block25", filename: "nomos2-block25.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block25.onnx", sha256: "7dc372d0d2c3f62fcd8e6cd72778e80ab05cd9089ba416a3758faae2740d2e38", size_bytes: 1091770 },
+                ModelPart { key: "block26", filename: "nomos2-block26.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block26.onnx", sha256: "b50dd916f41b73876e884aeb05d58ae5f674b5bb9bf584a3aed9bc463bef5b19", size_bytes: 1091770 },
+                ModelPart { key: "block27", filename: "nomos2-block27.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block27.onnx", sha256: "f39cb2de5874b3f78a840bd7c907897c6ac104b207a87334f6a2035002ae4959", size_bytes: 1091770 },
+                ModelPart { key: "block28", filename: "nomos2-block28.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-block28.onnx", sha256: "25d0db817decbffbaff2f5de994917252529b5d11e8591e63dc3c3a37381dcfe", size_bytes: 1091770 },
+                ModelPart { key: PART_TAIL, filename: "nomos2-tail.onnx", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-tail.onnx", sha256: "258d899da150dbdcc2d2a5809b933a330e426e72d682630551b176440f4b54b1", size_bytes: 238202 },
+                ModelPart { key: PART_NORMS, filename: "nomos2-norms.json", url: "https://github.com/aktiwers/prunr/releases/download/models-v1/nomos2-norms.json", sha256: "415fe6133be0b69c15b7c32115dad65351fdab798d472d9bad89cfea67193ef1", size_bytes: 77124 },
+            ],
             license: LicenseInfo {
-                author: "Philip Hofmann (Phhofm)",
+                author: "Philip Hofmann (Phhofm); cut into parts by Prunr",
                 license: "CC-BY-4.0",
                 license_url: "https://creativecommons.org/licenses/by/4.0/",
                 source_url: "https://github.com/Phhofm/models/releases/tag/4xNomos2_realplksr_dysample",
             },
-            fp16: None,
+            license_acceptance_required: false,
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 800,
+        working_set_mb: 750,
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
-        recommended_tile: Some(512),
+        recommended_tile: None,
         attribution_required: true,
         upscale: Some(UpscaleModelKnobs {
             input_name: "input",
             is_fp16: false,
             native_scale: 4,
             uses_window_attention: false,
+            // The head's 3 × 3; a block's two 3 × 3, its 17 × 17 and its
+            // attention's 3 × 3; the tail's 3 × 3 and DySample's sampling
+            // offsets (16 measured to keep the tail exact).
+            parts: Some(PartLayout { features: 64, head: 2, block: 12, tail: 16 }),
         }),
     },
     ModelDescriptor {
@@ -1062,6 +1135,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             is_fp16: false,
             native_scale: 4,
             uses_window_attention: false,
+            parts: None,
         }),
     },
     ModelDescriptor {
@@ -1455,6 +1529,27 @@ pub fn data_dir() -> Option<std::path::PathBuf> {
 
 pub fn on_demand_dir() -> Option<std::path::PathBuf> {
     data_dir().map(|d| d.join("models"))
+}
+
+/// Files an earlier version downloaded into `on_demand_dir` that nothing
+/// reads now. A model that changes its files adds the old names here, so
+/// an update leaves nothing behind.
+const RETIRED_FILES: &[&str] = &[
+    // Nomos2 in one piece, before it shipped in parts.
+    "4xNomos2_realplksr_dysample.onnx",
+];
+
+/// Remove the retired files; the bytes freed. Run off the UI thread.
+pub fn remove_retired_files() -> u64 {
+    on_demand_dir().map_or(0, |dir| remove_retired_in(&dir, RETIRED_FILES))
+}
+
+fn remove_retired_in(dir: &std::path::Path, names: &[&str]) -> u64 {
+    names.iter().map(|name| {
+        let path = dir.join(name);
+        let bytes = std::fs::metadata(&path).map_or(0, |m| if m.is_file() { m.len() } else { 0 });
+        if bytes > 0 && std::fs::remove_file(&path).is_ok() { bytes } else { 0 }
+    }).sum()
 }
 
 /// Where user-installed ONNX Runtime builds live, one subdir per
@@ -2092,6 +2187,26 @@ mod tests {
         }
     }
 
+    /// A network that normalizes over its whole input ships cut at its
+    /// norms: a head, its blocks, a tail and the norms' weights, which
+    /// the part-by-part runner reads by these keys. Only Nomos2 is one.
+    #[test]
+    fn a_whole_input_norm_upscaler_ships_in_parts() {
+        let parted: Vec<ModelId> = REGISTRY.iter().filter(|d| d.runs_in_parts()).map(|d| d.id).collect();
+        assert_eq!(parted, [ModelId::FourXNomos2RealPlksr]);
+        for id in parted {
+            let ModelSource::MultiPartOnDemand { parts, .. } = descriptor(id).unwrap().source else { panic!("{id:?} is not in parts") };
+            let keys: Vec<&str> = parts.iter().map(|p| p.key).collect();
+            for key in [PART_HEAD, PART_TAIL, PART_NORMS] {
+                assert!(keys.contains(&key), "{id:?} lacks {key}");
+            }
+            let blocks: Vec<&&str> = keys.iter().filter(|k| k.starts_with("block")).collect();
+            assert_eq!(blocks.len(), 28, "{id:?}: its 28 blocks");
+            assert!(blocks.windows(2).all(|w| w[0] < w[1]), "blocks in order by key");
+            assert!(parts.iter().all(|p| p.sha256.len() == 64 && p.size_bytes > 0 && p.url.ends_with(p.filename)));
+        }
+    }
+
     /// Each upscaler's dispatch knobs, as its export needs them: the
     /// input tensor's name and type, its native scale, the 32 px overlap
     /// a window-attention transformer needs (16 px for a CNN), and the
@@ -2100,12 +2215,13 @@ mod tests {
     fn every_upscaler_carries_the_knobs_its_export_needs() {
         // (id, input, fp16, native scale, window attention, tile multiple, overlap, tile)
         let table = [
-            (ModelId::RealEsrganX4Plus, "data", false, 4, false, None, 16, 512),
-            (ModelId::RealEsrganX2Plus, "data", false, 2, false, Some(2), 16, 512),
-            (ModelId::Nomos8kSchatL, "input", true, 4, true, Some(16), 32, 256),
-            (ModelId::FourXNmkdSiaxCx, "data", false, 4, false, None, 16, 512),
-            (ModelId::FourXNmkdSuperscale, "data", false, 4, false, None, 16, 512),
-            (ModelId::FourXNomos2RealPlksr, "input", false, 4, false, None, 16, 512),
+            (ModelId::RealEsrganX4Plus, "data", false, 4, false, None, 16, Some(512)),
+            (ModelId::RealEsrganX2Plus, "data", false, 2, false, Some(2), 16, Some(512)),
+            (ModelId::Nomos8kSchatL, "input", true, 4, true, Some(16), 32, Some(256)),
+            (ModelId::FourXNmkdSiaxCx, "data", false, 4, false, None, 16, Some(512)),
+            (ModelId::FourXNmkdSuperscale, "data", false, 4, false, None, 16, Some(512)),
+            // Run in parts, never tiled.
+            (ModelId::FourXNomos2RealPlksr, "input", false, 4, false, None, 16, None),
         ];
         assert_eq!(table.len(), ids_in(ModelCategory::Upscale).len(), "a row for every upscaler");
         for (id, input, fp16, scale, window, multiple, overlap, tile) in table {
@@ -2113,9 +2229,37 @@ mod tests {
             let knobs = desc.upscale.unwrap_or_else(|| panic!("{id:?} has upscale knobs"));
             assert_eq!(
                 (knobs.input_name, knobs.is_fp16, knobs.native_scale, knobs.uses_window_attention, desc.tile_size_multiple, knobs.tile_overlap(), desc.recommended_tile),
-                (input, fp16, scale, window, multiple, overlap, Some(tile)),
+                (input, fp16, scale, window, multiple, overlap, tile),
                 "{id:?}",
             );
+        }
+    }
+
+    /// The sweep removes the retired names it finds and nothing else.
+    #[test]
+    fn the_retired_sweep_removes_only_retired_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("old.onnx"), b"old").expect("write");
+        std::fs::write(dir.path().join("kept.onnx"), b"kept").expect("write");
+        std::fs::create_dir(dir.path().join("old-dir")).expect("mkdir");
+        assert_eq!(remove_retired_in(dir.path(), &["old.onnx", "missing.onnx", "old-dir"]), 3);
+        assert!(!dir.path().join("old.onnx").exists());
+        assert!(dir.path().join("kept.onnx").is_file());
+        assert!(dir.path().join("old-dir").is_dir(), "a folder is never swept");
+    }
+
+    /// A retired name is never one a model downloads now.
+    #[test]
+    fn no_retired_file_is_one_a_model_reads() {
+        for d in REGISTRY {
+            let live: Vec<&str> = match d.source {
+                ModelSource::OnDemand { filename, fp16, .. } => std::iter::once(filename).chain(fp16.map(|v| v.filename)).collect(),
+                ModelSource::MultiPartOnDemand { subdir, .. } => vec![subdir],
+                ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => Vec::new(),
+            };
+            for name in live {
+                assert!(!RETIRED_FILES.contains(&name), "{:?} reads {name}", d.id);
+            }
         }
     }
 
