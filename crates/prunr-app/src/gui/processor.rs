@@ -1040,6 +1040,12 @@ impl Processor {
         self.dispatch_progress.read()
     }
 
+    /// An encoder run finishing for `item_id`.
+    #[cfg(test)]
+    pub(crate) fn land_sam_encoder_for_test(&self, item_id: u64, embedding: prunr_core::sam::SamEmbedding) {
+        let _ = self.sam_encoder_tx.send(SamEncoderResult { item_id, result: Ok(embedding) });
+    }
+
     #[cfg(test)]
     pub(crate) fn land_inpaint_for_test(&mut self, item_id: u64, rgba: image::RgbaImage) {
         self.land_inpaint_scaled_for_test(item_id, rgba, 1.0);
