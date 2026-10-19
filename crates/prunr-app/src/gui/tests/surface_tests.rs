@@ -38,6 +38,39 @@ fn scroll(h: &mut Harness<'_, PrunrApp>, lines: f32) {
     h.step();
 }
 
+/// A Magic Brush stroke starts only where it is pressed on the image: a
+/// press elsewhere (a toolbar button, the strip) carried onto the image
+/// picks nothing, while a click on the image picks. A pick made before
+/// the image is encoded is held, so the held list counts them.
+#[test]
+fn a_press_off_the_image_never_becomes_a_magic_brush_pick() {
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        let item = push_test_item(app, 1);
+        item.dimensions = (800, 600);
+        super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+    }
+    settle(&mut h);
+    let on_image = egui::pos2(600.0, 480.0);
+    let off_image = egui::pos2(40.0, 25.0); // the top toolbar
+    press(&mut h, off_image, true);
+    for x in [560.0, 600.0, 640.0] {
+        pointer_to(&mut h, egui::pos2(x, 480.0));
+    }
+    press(&mut h, egui::pos2(640.0, 480.0), false);
+    settle(&mut h);
+    assert!(h.state().magic_brush_state.pending_sam_picks.is_empty(), "a press off the image picked");
+
+    pointer_to(&mut h, on_image);
+    press(&mut h, on_image, true);
+    press(&mut h, on_image, false);
+    settle(&mut h);
+    assert_eq!(h.state().magic_brush_state.pending_sam_picks.len(), 1, "a click on the image picks");
+}
+
 #[test]
 fn canvas_zooms_while_a_popover_is_open() {
     let mut h = loaded();

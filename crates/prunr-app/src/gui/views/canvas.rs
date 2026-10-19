@@ -319,15 +319,13 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
     let screen_to_src = |pos: egui::Pos2| source_point(pos, img_rect, (source_w, source_h));
 
-    let (clicked, drag_started, dragging, released, hover_pos) = ui.ctx().input(|i| {
-        let hover = i.pointer.hover_pos();
-        let on_image = hover.is_some_and(|p| img_rect.contains(p));
-        let clicked = i.pointer.primary_clicked() && on_image;
-        let drag_started = i.pointer.primary_pressed() && on_image;
-        let dragging = i.pointer.primary_down() && on_image;
-        let released = i.pointer.primary_released();
-        (clicked, drag_started, dragging, released, hover)
+    let (clicked, pressed, down, released, hover_pos) = ui.ctx().input(|i| {
+        let p = &i.pointer;
+        (p.primary_clicked(), p.primary_pressed(), p.primary_down(), p.primary_released(), p.hover_pos())
     });
+    // On the image, and not on a control drawn over it (the strip).
+    let layer = ui.layer_id();
+    let on_image = hover_pos.is_some_and(|p| img_rect.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer));
 
     // What a click or stroke selects with: the depth map, or SAM. A SAM
     // pick made before the encoder has finished waits for the embedding.
@@ -335,11 +333,13 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
 
     let screen_radius = look.radius;
 
-    if drag_started {
+    // A stroke starts only where it is pressed on the image: a press on a
+    // button carried onto it, or a release the window never got, picks
+    // nothing. The stroke holds its points from that press on.
+    if pressed {
         app.magic_brush_state.clear_stroke();
     }
-
-    if dragging {
+    if down && on_image && (pressed || !app.magic_brush_state.active_stroke.is_empty()) {
         if let Some(pos) = hover_pos {
             if let Some((px, py)) = screen_to_src(pos) {
                 let state = &mut app.magic_brush_state;
@@ -353,6 +353,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             }
         }
     }
+    let pressed_here = !app.magic_brush_state.active_stroke.is_empty();
 
     if released && app.magic_brush_state.active_stroke.len() > 1 {
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
@@ -366,7 +367,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 Err(e) => tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}"),
             }
         }
-    } else if clicked {
+    } else if clicked && on_image && pressed_here {
         if let Some((px, py)) = hover_pos.and_then(screen_to_src) {
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
@@ -378,6 +379,8 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
                 app.pick_with_sam(item_id, embedding, prompt, mode);
             }
         }
+    }
+    if released {
         app.magic_brush_state.clear_stroke();
     }
 }
