@@ -103,15 +103,7 @@ fn morphology_step_into(mask: &GrayImage, out: &mut GrayImage, dilate: bool) {
             let s = y + 1 < h_us && raw[(y + 1) * w_us + x] > 127;
             let e = x + 1 < w_us && raw[y * w_us + x + 1] > 127;
             let we = x > 0 && raw[y * w_us + x - 1] > 127;
-            let bit = if dilate {
-                center || n || s || e || we
-            } else {
-                center
-                    && (y > 0 && n)
-                    && (y + 1 < h_us && s)
-                    && (x + 1 < w_us && e)
-                    && (x > 0 && we)
-            };
+            let bit = if dilate { center || n || s || e || we } else { center && n && s && e && we };
             buf[y * w_us + x] = if bit { 255 } else { 0 };
         }
     }
