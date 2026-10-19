@@ -404,6 +404,10 @@ mod tests {
         })
     }
 
+    fn mask_with(settings: crate::MaskSettings) -> MaskRecipe {
+        MaskRecipe::from(&settings)
+    }
+
     fn make_recipe(model: ModelKind, gamma: f32, bg: Option<[u8; 3]>) -> ProcessingRecipe {
         ProcessingRecipe {
             inference: InferenceRecipe {
@@ -435,80 +439,10 @@ mod tests {
     }
 
     #[test]
-    fn identical_recipes_skip() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = a.clone();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::Skip);
-    }
-
-    #[test]
-    fn bg_color_change_composite_only() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = make_recipe(ModelKind::Silueta, 1.0, Some([255, 0, 0]));
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
-    }
-
-    #[test]
-    fn bg_image_hash_change_composite_only() {
-        // bg_image is a render-time / save-time texture — same tier
-        // class as bg_color (no inference, no postprocess).
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = make_recipe(ModelKind::Silueta, 1.0, None);
-        b.composite.bg_image_hash = Some(0xdeadbeef);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
-    }
-
-    #[test]
-    fn bg_image_fit_change_composite_only() {
-        // Same image, different fit (Cover → Tile) — pure render math change.
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = make_recipe(ModelKind::Silueta, 1.0, None);
-        b.composite.bg_image_fit = crate::types::BgImageFit::Tile;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
-    }
-
-    #[test]
-    fn gamma_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = make_recipe(ModelKind::Silueta, 1.5, None);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn model_change_full_pipeline() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = make_recipe(ModelKind::BiRefNetLite, 1.0, None);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
-    }
-
-    #[test]
-    fn float_bits_equality() {
-        let a = mask(1.0, 0.5, 0.0, true);
-        let b = mask(1.0, 0.5, 0.0, true);
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn float_bits_inequality() {
         let a = mask(1.0, 0.5, 0.0, true);
         let b = mask(1.0, 0.50001, 0.0, true);
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn line_strength_change_edge_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.edge.line_strength_bits = 0.8f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
-    }
-
-    #[test]
-    fn solid_line_color_change_edge_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.edge.solid_line_color = Some([255, 0, 0]);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
     }
 
     #[test]
@@ -524,128 +458,6 @@ mod tests {
                 assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun, "{from:?} → {to:?}");
             }
         }
-    }
-
-    #[test]
-    fn edge_thickness_change_edge_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.edge.edge_thickness = 3;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
-    }
-
-    #[test]
-    fn contrast_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask(1.0, 0.5, 0.0, false);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    /// An outline or shadow is drawn from the mask, so changing one
-    /// re-runs the mask from the kept cut-out data, never the model.
-    #[test]
-    fn decoration_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = crate::MaskRecipe::from(&crate::MaskSettings {
-            decoration: crate::Decoration { outline_width: 6.0, ..crate::Decoration::default() },
-            ..crate::MaskSettings::default()
-        });
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn edge_shift_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask(1.0, 0.0, 2.0, false);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn refine_edges_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask(1.0, 0.0, 0.0, true);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn enable_edge_detection_with_seg_stable_is_add_edge_inference() {
-        // Off → SubjectOutline: uses_segmentation stays true, uses_edge_detection
-        // flips false → true. Seg tensor cached → skip seg re-inference.
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.inference.uses_edge_detection = true;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
-    }
-
-    #[test]
-    fn disable_edge_detection_with_seg_stable_is_mask_rerun() {
-        // SubjectOutline → Off: uses_segmentation stays true, uses_edge_detection
-        // flips true → false. Seg tensor still cached; MaskRerun regenerates the
-        // result without edges.
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.inference.uses_edge_detection = true;
-        let mut b = a.clone();
-        b.inference.uses_edge_detection = false;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn seg_flag_flip_still_full_pipeline() {
-        // EdgesOnly ↔ SubjectOutline (or Off ↔ EdgesOnly): uses_segmentation
-        // flips — cached tensors from one mode aren't valid for the other, so
-        // the tier must drop all caches and re-infer.
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.inference.uses_segmentation = false;
-        a.inference.uses_edge_detection = true; // EdgesOnly
-        let mut b = a.clone();
-        b.inference.uses_segmentation = true;
-        b.inference.uses_edge_detection = true; // SubjectOutline
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
-    }
-
-    #[test]
-    fn enable_edge_with_mask_change_still_add_edge_inference() {
-        // AddEdgeInference takes priority over MaskRerun when both apply —
-        // the worker handles this by re-masking from the cached seg as part
-        // of the AddEdgeInference flow anyway, so a separate MaskRerun would
-        // be redundant.
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.inference.uses_edge_detection = true;
-        b.mask = mask(1.5, 0.0, 0.0, false); // mask also changed
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
-    }
-
-    #[test]
-    fn edges_only_mode_still_honours_edge_rerun() {
-        // EdgesOnly: uses_segmentation = false. Mask fields become no-ops at
-        // the ItemSettings → ProcessingRecipe boundary, but if a recipe directly
-        // toggles line_strength, resolve_tier still returns EdgeRerun.
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.inference.uses_segmentation = false;
-        a.inference.uses_edge_detection = true;
-        let mut b = a.clone();
-        b.edge.line_strength_bits = 0.2f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::EdgeRerun);
-    }
-
-    #[test]
-    fn input_transform_change_with_edges_on_is_add_edge_inference() {
-        // Per InferenceRecipe.input_transform doc-comment: changing the
-        // pre-inference image transform invalidates the edge tensor cache
-        // because TEED sees different input. With seg + edges both on
-        // and the model unchanged, the tier must re-run TEED only —
-        // seg tensor stays valid because seg is run on the original image
-        // before the transform reaches the edge leg.
-        let mut a = make_recipe(ModelKind::Silueta, 1.0, None);
-        a.inference.uses_edge_detection = true;
-        let mut b = a.clone();
-        b.inference.input_transform = InputTransform::Grayscale;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::AddEdgeInference);
     }
 
     /// Table-driven test: single source of truth for tier priority ordering.
@@ -692,6 +504,28 @@ mod tests {
             r.inference.input_transform = it;
             r
         };
+        let with = |edit: fn(&mut ProcessingRecipe)| {
+            let mut r = base.clone();
+            edit(&mut r);
+            r
+        };
+        // Whole-photo lines: edges on, no cut-out.
+        let lines_only = || {
+            let mut r = edges_on();
+            r.inference.uses_segmentation = false;
+            r
+        };
+        let upscaled = || {
+            let mut r = base.clone();
+            r.upscale.model = Some(prunr_models::ModelId::RealEsrganX4Plus);
+            r
+        };
+        let with_upscale = |edit: fn(&mut UpscaleRecipe)| {
+            let mut r = upscaled();
+            edit(&mut r.upscale);
+            r
+        };
+        let colorized = || make_recipe(ModelKind::DdcolorTiny, 1.0, None);
 
         // (name, old, new, expected)
         let cases: Vec<(&str, ProcessingRecipe, ProcessingRecipe, RequiredTier)> = vec![
@@ -771,6 +605,74 @@ mod tests {
                 r.edge.line_strength_bits = 0.2f32.to_bits();
                 r
             }, RequiredTier::FullPipeline),
+            ("bg image only → composite", base.clone(), with(|r| r.composite.bg_image_hash = Some(0xdeadbeef)), RequiredTier::CompositeOnly),
+            ("bg image fit only → composite", base.clone(), with(|r| r.composite.bg_image_fit = crate::types::BgImageFit::Tile), RequiredTier::CompositeOnly),
+            ("line colour only → edge", base.clone(), with(|r| r.edge.solid_line_color = Some([255, 0, 0])), RequiredTier::EdgeRerun),
+            ("line thickness only → edge", base.clone(), with(|r| r.edge.edge_thickness = 3), RequiredTier::EdgeRerun),
+            ("contrast only → mask", base.clone(), with(|r| r.mask = mask(1.0, 0.5, 0.0, false)), RequiredTier::MaskRerun),
+            ("edge shift only → mask", base.clone(), with(|r| r.mask = mask(1.0, 0.0, 2.0, false)), RequiredTier::MaskRerun),
+            ("refine edges only → mask", base.clone(), with(|r| r.mask = mask(1.0, 0.0, 0.0, true)), RequiredTier::MaskRerun),
+            // An outline or shadow is drawn from the mask, never the model.
+            ("decoration only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings {
+                decoration: crate::Decoration { outline_width: 6.0, ..crate::Decoration::default() },
+                ..crate::MaskSettings::default()
+            })), RequiredTier::MaskRerun),
+            ("guided radius only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { guided_radius: 16, ..Default::default() })), RequiredTier::MaskRerun),
+            ("guided epsilon only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { guided_epsilon: 2e-3, ..Default::default() })), RequiredTier::MaskRerun),
+            ("feather only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { feather: 1.5, ..Default::default() })), RequiredTier::MaskRerun),
+            // Off → SubjectOutline: the kept cut-out data stays; only the lines run.
+            ("edges off→on → add_edge", base.clone(), edges_on(), RequiredTier::AddEdgeInference),
+            ("edges on→off → mask", edges_on(), base.clone(), RequiredTier::MaskRerun),
+            // AddEdgeInference re-masks from the kept data as part of its run.
+            ("edges off→on + gamma → add_edge", base.clone(), {
+                let mut r = edges_on();
+                r.mask = mask(1.5, 0.0, 0.0, false);
+                r
+            }, RequiredTier::AddEdgeInference),
+            // EdgesOnly ↔ SubjectOutline: the kept data of one mode is not
+            // valid for the other.
+            ("segmentation flip → full", lines_only(), edges_on(), RequiredTier::FullPipeline),
+            ("whole-photo lines + line strength → edge", lines_only(), {
+                let mut r = lines_only();
+                r.edge.line_strength_bits = 0.2f32.to_bits();
+                r
+            }, RequiredTier::EdgeRerun),
+            ("upscale scale → upscale", upscaled(), with_upscale(|u| u.output_scale = OutputScale::X2), RequiredTier::UpscaleRerun),
+            ("upscale model → upscale", upscaled(), with_upscale(|u| u.model = Some(prunr_models::ModelId::Nomos8kSchatL)), RequiredTier::UpscaleRerun),
+            ("upscale pre-denoise → upscale", upscaled(), with_upscale(|u| u.pre_denoise_bits = 0.6_f32.to_bits()), RequiredTier::UpscaleRerun),
+            ("upscale sharpen → upscale tier 2", upscaled(), with_upscale(|u| u.sharpen_bits = 0.5_f32.to_bits()), RequiredTier::UpscaleTier2),
+            ("upscale AI blend → upscale tier 2", upscaled(), with_upscale(|u| u.ai_blend_bits = 0.4_f32.to_bits()), RequiredTier::UpscaleTier2),
+            ("upscale colour match → upscale tier 2", upscaled(), with_upscale(|u| u.color_match = true), RequiredTier::UpscaleTier2),
+            ("upscale pre-denoise + sharpen → upscale", upscaled(), with_upscale(|u| {
+                u.pre_denoise_bits = 0.4_f32.to_bits();
+                u.sharpen_bits = 0.5_f32.to_bits();
+            }), RequiredTier::UpscaleRerun),
+            ("upscale + bg → upscale", base.clone(), {
+                let mut r = with_upscale(|u| u.output_scale = OutputScale::X4);
+                r.composite.bg_color = Some([255, 0, 0]);
+                r
+            }, RequiredTier::UpscaleRerun),
+            ("upscale + gamma → mask", base.clone(), {
+                let mut r = with_upscale(|u| u.output_scale = OutputScale::X2);
+                r.mask = mask(2.2, 0.0, 0.0, false);
+                r
+            }, RequiredTier::MaskRerun),
+            ("colorize strength → colorize tier 2", colorized(), {
+                let mut r = colorized();
+                r.colorize.strength_bits = 0.4_f32.to_bits();
+                r
+            }, RequiredTier::ColorizeTier2),
+            ("colorize strength + bg → colorize tier 2", colorized(), {
+                let mut r = colorized();
+                r.colorize.strength_bits = 0.4_f32.to_bits();
+                r.composite.bg_color = Some([1, 2, 3]);
+                r
+            }, RequiredTier::ColorizeTier2),
+            ("to the colorizer → full", base.clone(), {
+                let mut r = colorized();
+                r.colorize.strength_bits = 0.4_f32.to_bits();
+                r
+            }, RequiredTier::FullPipeline),
         ];
 
         for (name, old, new, expected) in &cases {
@@ -780,94 +682,6 @@ mod tests {
                 "table row {name:?}: expected {expected:?}",
             );
         }
-    }
-
-    #[test]
-    fn guided_radius_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = MaskRecipe::from(&crate::MaskSettings {
-            guided_radius: 16,
-            ..Default::default()
-        });
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn guided_epsilon_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = MaskRecipe::from(&crate::MaskSettings {
-            guided_epsilon: 2e-3,
-            ..Default::default()
-        });
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn feather_change_mask_rerun() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = MaskRecipe::from(&crate::MaskSettings {
-            feather: 1.5,
-            ..Default::default()
-        });
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    fn upscale_with_scale(model: Option<prunr_models::ModelId>, scale: OutputScale) -> UpscaleRecipe {
-        UpscaleRecipe { model, output_scale: scale, ..UpscaleRecipe::default() }
-    }
-
-    #[test]
-    fn upscale_rerun_when_only_upscale_recipe_changed() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
-        let mut c = a.clone();
-        c.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X2);
-        assert_eq!(resolve_tier(&b, &c), RequiredTier::UpscaleRerun);
-    }
-
-    #[test]
-    fn upscale_rerun_when_only_upscale_model_changed() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut old = a.clone();
-        old.upscale = upscale_with_scale(Some(prunr_models::ModelId::Nomos8kSchatL), OutputScale::X4);
-        let mut new = a.clone();
-        new.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
-        assert_eq!(resolve_tier(&old, &new), RequiredTier::UpscaleRerun);
-    }
-
-    #[test]
-    fn mask_rerun_when_mask_and_upscale_both_changed() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = a.clone();
-        b.mask = mask(2.2, 0.0, 0.0, false);
-        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X2);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::MaskRerun);
-    }
-
-    #[test]
-    fn composite_only_when_only_composite_changed_upscale_unchanged() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = make_recipe(ModelKind::Silueta, 1.0, Some([0, 0, 0]));
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::CompositeOnly);
-    }
-
-    #[test]
-    fn skip_when_upscale_disabled_and_other_recipe_identical() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let b = a.clone();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::Skip);
-    }
-
-    #[test]
-    fn upscale_rerun_outranks_composite_when_both_changed() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = make_recipe(ModelKind::Silueta, 1.0, Some([255, 0, 0]));
-        b.upscale = upscale_with_scale(Some(prunr_models::ModelId::RealEsrganX4Plus), OutputScale::X4);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
     }
 
     #[test]
@@ -926,94 +740,6 @@ mod tests {
         assert_eq!(hash_of(&a), hash_of(&b));
     }
 
-
-    fn make_upscale_recipe_with_model() -> ProcessingRecipe {
-        let mut r = make_recipe(ModelKind::Silueta, 1.0, None);
-        r.upscale = UpscaleRecipe {
-            model: Some(prunr_models::ModelId::RealEsrganX4Plus),
-            ..UpscaleRecipe::default()
-        };
-        r
-    }
-
-    #[test]
-    fn upscale_tier1_change_returns_upscale_rerun() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.pre_denoise_bits = 0.6_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
-    }
-
-    #[test]
-    fn output_scale_change_returns_upscale_rerun() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.output_scale = OutputScale::X2;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
-    }
-
-    #[test]
-    fn sharpen_change_returns_upscale_tier2() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.sharpen_bits = 0.5_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
-    }
-
-    #[test]
-    fn ai_blend_change_returns_upscale_tier2() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.ai_blend_bits = 0.4_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
-    }
-
-    #[test]
-    fn color_match_toggle_returns_upscale_tier2() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.color_match = true;
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleTier2);
-    }
-
-    #[test]
-    fn mixed_tier1_and_tier2_change_returns_upscale_rerun() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.pre_denoise_bits = 0.4_f32.to_bits();
-        b.upscale.sharpen_bits = 0.5_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
-    }
-
-    fn make_colorize_recipe() -> ProcessingRecipe {
-        make_recipe(ModelKind::DdcolorTiny, 1.0, None)
-    }
-
-    #[test]
-    fn colorize_strength_change_returns_colorize_tier2() {
-        let a = make_colorize_recipe();
-        let mut b = a.clone();
-        b.colorize.strength_bits = 0.4_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::ColorizeTier2);
-    }
-
-    #[test]
-    fn switching_to_the_colorizer_returns_full_pipeline() {
-        let a = make_recipe(ModelKind::Silueta, 1.0, None);
-        let mut b = make_colorize_recipe();
-        b.colorize.strength_bits = 0.4_f32.to_bits();
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::FullPipeline);
-    }
-
-    #[test]
-    fn colorize_strength_and_bg_change_returns_colorize_tier2() {
-        let a = make_colorize_recipe();
-        let mut b = a.clone();
-        b.colorize.strength_bits = 0.4_f32.to_bits();
-        b.composite.bg_color = Some([1, 2, 3]);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::ColorizeTier2, "colorize outranks composite");
-    }
-
     #[test]
     fn colorize_recipe_defaults_to_full_strength_and_loads_when_missing() {
         assert_eq!(ColorizeRecipe::default().strength(), 1.0);
@@ -1034,11 +760,4 @@ mod tests {
         assert_eq!(back, r);
     }
 
-    #[test]
-    fn model_swap_within_upscale_returns_upscale_rerun() {
-        let a = make_upscale_recipe_with_model();
-        let mut b = a.clone();
-        b.upscale.model = Some(prunr_models::ModelId::Nomos8kSchatL);
-        assert_eq!(resolve_tier(&a, &b), RequiredTier::UpscaleRerun);
-    }
 }
