@@ -407,23 +407,14 @@ impl Settings {
     }
 
     pub fn has_accepted_license(&self, id: prunr_models::ModelId) -> bool {
-        self.has_accepted(&super::presets::model_id_key(id))
+        let key = super::presets::model_id_key(id);
+        self.accepted_licenses.iter().any(|s| s == &key)
     }
 
     /// Persists; idempotent (no duplicate, no extra write).
     pub fn accept_license(&mut self, id: prunr_models::ModelId) {
-        self.accept(&super::presets::model_id_key(id));
-    }
-
-    /// Whether the license kept under `key` was accepted.
-    pub fn has_accepted(&self, key: &str) -> bool {
-        self.accepted_licenses.iter().any(|s| s == key)
-    }
-
-    /// `accept_license` for a license kept under `key`.
-    pub fn accept(&mut self, key: &str) {
-        if !self.has_accepted(key) {
-            self.accepted_licenses.push(key.to_string());
+        if !self.has_accepted_license(id) {
+            self.accepted_licenses.push(super::presets::model_id_key(id));
             self.save();
         }
     }

@@ -88,7 +88,6 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
             if ort::ep::OpenVINO::default()
                 .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
             if ort::ep::CUDA::default().is_available().unwrap_or(false) {
-                crate::ort_runtime::preload_nvidia_libraries();
                 match provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()) {
                     Ok(()) => eps.push(EpKind::Cuda),
                     Err(e) => {
@@ -189,6 +188,18 @@ impl GpuStartFailure {
             None => StartFailure::Other,
         };
         Self { stack, why }
+    }
+
+    /// Where the user finds how to install what is missing: the stack's
+    /// libraries or its driver are theirs to install, not the app's.
+    pub fn install_guide(&self) -> Option<&'static str> {
+        match self.why {
+            StartFailure::MissingLibrary(_) | StartFailure::NoDriver => Some(match self.stack {
+                GpuStack::Cuda => "https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements",
+                GpuStack::Rocm => "https://onnxruntime.ai/docs/execution-providers/MIGraphX-ExecutionProvider.html",
+            }),
+            StartFailure::NoDevice | StartFailure::Other => None,
+        }
     }
 
     /// The failure in the user's words.

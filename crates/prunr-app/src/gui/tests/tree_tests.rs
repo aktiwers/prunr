@@ -74,7 +74,7 @@ fn the_hardware_page_names_every_runtime_control() {
     both.next_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
     let mut built_in_only = HardwareInstallCache::default();
     built_in_only.built_in_gpu = true;
-    let installing = Some((crate::runtime_install::InstallTarget::Runtime(RuntimeId::OpenVino), "Downloading 40% (32/80 MB)".to_string()));
+    let installing = Some((RuntimeId::OpenVino, "Downloading 40% (32/80 MB)".to_string()));
     let shapes = [
         ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
         ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
@@ -94,7 +94,6 @@ fn the_hardware_page_names_every_runtime_control() {
             active_provider: "DirectML".into(),
             sd_margin_mb: 2048,
             gpu_failure: None,
-            nvidia_libraries: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -108,47 +107,40 @@ fn the_hardware_page_names_every_runtime_control() {
     }
 }
 
-/// The NVIDIA libraries are offered only while the loaded CUDA runtime
-/// is missing a library: Download then, Cancel while they install, and
-/// neither for a missing driver or once they are there.
+/// A CUDA runtime that cannot start for a missing library or driver
+/// points the way to install it; Prunr offers no download of NVIDIA's
+/// stack. No card, or another failure, has nothing to install.
 #[test]
-fn the_nvidia_libraries_are_offered_only_when_cuda_needs_them() {
+fn a_cuda_runtime_missing_its_stack_points_to_the_install_guide() {
     use crate::gui::hardware_cache::HardwareInstallCache;
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
-    use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
+    use crate::runtime_install::{RuntimeChoice, RuntimeId};
     use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
     static MISSING: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(String::new()) };
     static NO_DRIVER: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDriver };
+    static NO_CARD: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDevice };
     if !RuntimeId::OFFERED.contains(&RuntimeId::Cuda) {
         return;
     }
     let mut on_cuda = HardwareInstallCache::default();
     on_cuda.cuda = true;
     on_cuda.loaded_runtime = Some(RuntimeChoice::Store(RuntimeId::Cuda));
-    let installing = Some((InstallTarget::NvidiaLibraries, "Downloading 10% (170/1700 MB)".to_string()));
-    let shapes = [
-        ("missing a library", &MISSING, None, false, Some("Download NVIDIA libraries")),
-        ("installing", &MISSING, installing, false, Some("Cancel")),
-        ("no driver", &NO_DRIVER, None, false, None),
-        ("installed", &MISSING, None, true, None),
-    ];
-    for (shape, failure, installing, nvidia_libraries, expected) in shapes {
+    for (shape, failure, guide) in [("missing a library", &MISSING, true), ("no driver", &NO_DRIVER, true), ("no card", &NO_CARD, false)] {
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
             installs: on_cuda,
-            installing,
+            installing: None,
             active_provider: "CPU".into(),
             sd_margin_mb: 2048,
             gpu_failure: Some(failure),
-            nvidia_libraries,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert_all_controls_named(&harness, shape);
         let present = names(&harness);
-        for name in ["Download NVIDIA libraries", "Cancel"] {
-            assert_eq!(present.iter().any(|n| n == name), expected == Some(name), "{shape}: {name}: {present:?}");
-        }
+        let link = tree(&harness).iter().any(|n| n.name.as_deref() == Some("How to install"));
+        assert_eq!(link, guide, "{shape}: the install guide link");
+        assert!(!present.iter().any(|n| n.contains("Download")), "{shape}: no download offered: {present:?}");
     }
 }
 
