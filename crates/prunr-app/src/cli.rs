@@ -716,13 +716,7 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
             return 1;
         }
     }
-    let engine = match load_engine(model, args.cpu, "upscale") {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 1;
-        }
-    };
+    let Some(engine) = load_engine(model, args.cpu, "upscale") else { return 1 };
     let refine = prunr_core::upscale::Refine {
         sharpen: args.sharpen.clamp(-1.0, 1.0),
         sharpen_sigma: scale.sharpen_sigma(),
@@ -744,18 +738,7 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
 /// Colorize mode: colour each input with DDColor at `--color-strength`.
 /// The model loads once for the whole batch.
 fn run_colorize(args: &Cli) -> i32 {
-    let model = crate::gui::settings::COLORIZER.into();
-    if !prunr_models::is_available(model) {
-        eprintln!("error: {}", prunr_models::not_installed_error(model));
-        return 1;
-    }
-    let engine = match load_engine(model, args.cpu, "colorize") {
-        Ok(engine) => engine,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 1;
-        }
-    };
+    let Some(engine) = load_engine(crate::gui::settings::COLORIZER.into(), args.cpu, "colorize") else { return 1 };
     let strength = args.color_strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX);
     run_each_input(args, "_color.png", "Colorizing", |img| {
         let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
@@ -765,11 +748,16 @@ fn run_colorize(args: &Cli) -> i32 {
 }
 
 /// `model`'s session as the app builds it: every core, the model's graph
-/// optimisation level, the CPU alone with `--cpu`. The error is the line
-/// to print.
-fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Result<prunr_core::OrtEngine, String> {
+/// optimisation level, the CPU alone with `--cpu`. A model not installed
+/// or not loading is reported here.
+fn load_engine(model: prunr_models::ModelId, cpu: bool, what: &str) -> Option<prunr_core::OrtEngine> {
+    if !prunr_models::is_available(model) {
+        eprintln!("error: {}", prunr_models::not_installed_error(model));
+        return None;
+    }
     prunr_core::OrtEngine::for_model(model, prunr_core::batch::ort_intra_threads(1), cpu)
-        .map_err(|e| format!("cannot load the {what} model: {e}"))
+        .map_err(|e| eprintln!("error: cannot load the {what} model: {e}"))
+        .ok()
 }
 
 /// Read each input, `run` it, and save it beside the input with `suffix`
