@@ -1,29 +1,14 @@
-//! One-file-per-preset store for sharing presets between users.
+//! One JSON file per preset in the config dir's `presets/`, named by the
+//! sanitized preset name, so a user shares one by sending the file. JSON
+//! because shared files must stay human-readable and hand-editable.
 //!
-//! Presets live as individual JSON files in `~/.config/prunr/presets/`
-//! (or the platform-equivalent config dir). Filename = preset name + ".json"
-//! (with path-unsafe characters sanitized). To share a preset, a user sends
-//! the `.json` file; the receiver drops it into the folder and the preset
-//! appears in their dropdown on the next launch. JSON is the format because
-//! the sharing workflow needs human-readable, hand-editable files — binary
-//! formats would be faster to parse but break that.
+//! Old preset files MUST keep loading as `ItemSettings` grows:
+//! - every field reads from default (`#[serde(default)]` on the struct);
+//! - a renamed field keeps `#[serde(alias = "old_name")]`;
+//! - a type change that breaks existing JSON (e.g. `u8` → enum) bumps the
+//!   format version with a migration in `parse_preset_value`.
 //!
-//! ## Forward-compatibility contract (read before editing `ItemSettings`)
-//!
-//! Old preset files MUST keep loading when we add new fields. The rule:
-//!
-//! - Every field in `ItemSettings` must have `#[serde(default)]` OR a
-//!   `Default` impl that covers the whole struct (we use the latter via
-//!   `#[serde(default)]` on the struct itself — see `item_settings.rs`).
-//! - Never rename a field without also adding a `#[serde(alias = "old_name")]`.
-//! - Never change a field's type in a way that breaks existing JSON
-//!   (e.g. `u8` → enum). If you must, bump a format version and add a
-//!   migration path in `parse_preset_value`.
-//!
-//! The `loads_preset_with_unknown_fields` and
-//! `loads_empty_preset_as_defaults` tests at the bottom of this file are
-//! the tripwires — if you add a field without `#[serde(default)]`, they
-//! will fail and tell you what's missing.
+//! The tests below are the tripwires.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -37,22 +22,15 @@ use super::presets::{
 use super::settings::{DEFAULT_PRESET_MODEL, PRUNR_PRESET};
 use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
-/// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
 
-/// File extension for preset files.
 const PRESET_EXT: &str = "json";
 
-/// Marker file written after the first successful seed of the curated
-/// built-in presets. Presence = "don't seed again on this install." Lets
-/// users delete any built-in they don't want without having it re-appear
-/// on next launch. Bump the suffix (`_v2`, `_v3`, ...) when shipping a
-/// fresh batch of curated presets — the old marker won't gate the new
-/// batch.
+/// Present once the built-ins were seeded, so a deleted built-in stays
+/// deleted. Bump the suffix when shipping a fresh batch of built-ins.
 const SEED_MARKER: &str = ".builtins_seeded_v2";
 
-/// Resolve the presets directory, creating it if needed. Returns `None` if
-/// the platform config dir can't be resolved (very rare).
+/// Created if needed; `None` without a platform config dir.
 pub(crate) fn presets_dir() -> Option<PathBuf> {
     let base = super::settings::config_root()?;
     let dir = base.join(PRESETS_SUBDIR);
@@ -60,19 +38,15 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Resolve the on-disk path for a preset name, rejecting "Prunr" (reserved)
-/// and returning `None` when the config dir is unavailable.
+/// `None` for the reserved "Prunr" or without a config dir.
 pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
     if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
     let dir = presets_dir()?;
     Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
 }
 
-/// Sanitize a preset name into a filesystem-safe stem.
-///
-/// Strips path separators, parent-traversal (`..`), control chars, and the
-/// leading-dot convention (no hidden files). Trims whitespace. Empty
-/// results map to `preset` so a malformed name still yields a valid path.
+/// Strips path separators, `..`, control chars and leading dots (no
+/// hidden files); an empty result becomes `preset`.
 pub fn sanitize_filename(name: &str) -> String {
     let mut out: String = name
         .trim()
@@ -91,19 +65,12 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
-/// Wrap a v1 preset file (raw `ItemSettings` shape, no `format_version`
-/// key) into a v2 `PresetFile`. v1 files predate per-model bundling, so
-/// they carry no model identity — every v1 file wraps under the
-/// default model (`DEFAULT_PRESET_MODEL`). The resolver pulls Prunr-floor brush/sd values at
-/// apply-time, so missing brush/sd is not data loss.
-///
-/// Returns `None` when the JSON does not parse as `ItemSettings` — caller
-/// logs and skips. Successful migrations are read-only on disk; the v2
-/// shape only persists once the user explicitly re-saves the preset.
+/// A v1 file (raw `ItemSettings`, no model) wraps under
+/// `DEFAULT_PRESET_MODEL`; brush and SD values come from the factory floor
+/// at apply time. The file on disk stays v1 until the user re-saves it.
 fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
-    // Reject non-objects up front — `#[serde(default)]` on ItemSettings
-    // makes empty arrays / unrelated maps deserialize to a fully-default
-    // ItemSettings, which would silently mask a corrupt file.
+    // `#[serde(default)]` would read an array or unrelated value as a
+    // fully-default ItemSettings, masking a corrupt file.
     if !value.is_object() {
         return None;
     }
@@ -115,16 +82,8 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
     }))
 }
 
-/// Load every preset file in the directory into a map. Malformed files
-/// are skipped (with a `warn!` for the user's log) so 9 of 10 valid
-/// presets still load when one is broken.
-///
-/// v1 files (raw `ItemSettings` shape, no `format_version` key) are
-/// auto-wrapped into a v2 `PresetFile` envelope on load; the on-disk
-/// file is untouched until the user explicitly re-saves it. v2 files
-/// deserialize directly.
-///
-/// Called once at startup from `Settings::load`, before the first frame.
+/// A malformed file is skipped with a warning, so one broken preset
+/// doesn't hide the rest.
 pub(crate) fn load_all() -> (HashMap<String, PresetFile>, HashSet<String>) {
     let Some(dir) = presets_dir() else { return Default::default() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return Default::default() };
@@ -194,8 +153,8 @@ fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skippe
     }
 }
 
-/// Load a single preset file from disk, or why it was left out:
-/// unreadable, malformed, matching neither format, or a newer Prunr's.
+/// The preset, or why it was left out: unreadable, malformed, matching
+/// neither format, or a newer Prunr's.
 fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
     let data = std::fs::read(path).map_err(|e| {
         tracing::warn!(?path, %e, "skipping unreadable preset");
@@ -211,8 +170,7 @@ fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
     })
 }
 
-/// Write a preset to disk. Overwrites any existing file of the same name.
-/// "Prunr" is rejected — that name is synthetic and cannot be persisted.
+/// Overwrites a file of the same name; "Prunr" is refused.
 pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
     write_preset(&writable_path(name)?, values)
 }
@@ -266,21 +224,14 @@ pub(crate) fn merged(mut file: PresetFile, model_id: prunr_models::ModelId, mode
     file
 }
 
-/// Write the curated built-in presets to disk on first run. No-op when the
-/// seed marker already exists — users can delete any built-in and the
-/// deletion sticks.
+/// No-op once the seed marker exists.
 pub fn seed_builtins_once() {
     let Some(dir) = presets_dir() else { return };
     let marker = dir.join(SEED_MARKER);
     if marker.exists() { return; }
     for (name, item_settings) in builtin_presets() {
-        // Skip if a preset file with this name already exists. Protects
-        // user customisations against two edge cases:
-        //   1. A mid-seed crash (some presets saved, marker not yet written)
-        //      → next launch re-seeds, but won't overwrite files saved in
-        //      the previous partial run.
-        //   2. A future `_v3` seed that reuses a name the user edited under
-        //      `_v2` — keeps their version, skips the rename.
+        // Never overwrite: a re-seed after a mid-seed crash, or a new
+        // batch reusing a name, must keep the user's file.
         let Some(path) = preset_path(name) else { continue };
         if path.exists() { continue; }
         let file = PresetFile::single(DEFAULT_PRESET_MODEL, ModelPreset {
@@ -293,9 +244,6 @@ pub fn seed_builtins_once() {
     let _ = std::fs::write(&marker, b"");
 }
 
-/// Factory list of curated named presets. Each covers a visually-distinct
-/// look and showcases a combination of the compose / line / fill enums
-/// that a user would otherwise need several chip clicks to discover.
 fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
     let base = ItemSettings::default();
     vec![
