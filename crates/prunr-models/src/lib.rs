@@ -1,13 +1,8 @@
-// Production: models are embedded as pre-compressed zstd blobs and decompressed at runtime.
-// Development: --features dev-models loads from the filesystem so model changes
-// do not trigger recompilation of the prunr-models crate.
+// Release builds embed models as zstd blobs; `--features dev-models` reads
+// them from disk so model changes do not recompile this crate.
 //
-// IMPORTANT: This crate has NO dependencies on other WORKSPACE CRATES.
-// Third-party libraries (serde, zstd, dirs) are fine; the rule is about
-// crate-graph layering. The arrow is prunr-app -> prunr-core ->
-// prunr-models (never in reverse).
-//
-// Models are declared in `REGISTRY`; bytes are resolved via `resolve_bytes`.
+// This crate depends on no other workspace crate: prunr-app -> prunr-core ->
+// prunr-models, never in reverse.
 
 use std::sync::Arc;
 
@@ -24,7 +19,6 @@ pub enum ModelId {
     Migan,
     /// Stable Diffusion 1.5 Inpainting (FP16). Multi-part bundle:
     /// UNet + VAE encode + VAE decode + text encoder. ~2 GB total.
-    /// GPU-required (`GpuRequirement::Required`).
     SdV15InpaintFp16,
     /// LCM-distilled SD 1.5 Inpainting (FP16). Same UNet architecture as
     /// `SdV15InpaintFp16` but trained to converge in ~4 steps instead of
@@ -58,9 +52,7 @@ pub enum ModelId {
     /// upscaler trained on JPEG-degraded photos. CC-BY-4.0.
     FourXNomos2RealPlksr,
     /// SAM 2.1 Hiera Small. Two-part bundled pair (encoder + decoder
-    /// ONNX). Apache 2.0 from Meta. Used by Magic Brush for selection
-    /// authoring. Encoder cached on BatchItem; decoder runs per
-    /// click/stroke.
+    /// ONNX). Apache 2.0 from Meta. Used by Magic Brush.
     Sam21HieraSmall,
     /// GFPGAN v1.4 face restorer. OnDemand bundle; Apache-2.0. Faces are
     /// found by the bundled `YuNet`.
@@ -102,9 +94,8 @@ impl ModelId {
         }
     }
 
-    /// Canonical iteration of every variant. Drift catcher: a test below
-    /// uses an exhaustive `match` so a new variant fails the test build
-    /// until it's added here too.
+    /// Every variant. A test's exhaustive `match` fails the build until a
+    /// new variant is added here too.
     pub const ALL: &'static [ModelId] = &[
         ModelId::Silueta,
         ModelId::U2net,
@@ -131,12 +122,9 @@ impl ModelId {
         ModelId::DepthAnythingV2Small,
     ];
 
-    /// Stable string identifier used as a persistent key (cache
-    /// directory names, config file fields, IPC payloads). Returned
-    /// as `&'static str` so callers can embed it without allocation.
-    /// **Do not change existing variant strings** — they're stamped
-    /// into user data on disk; renaming silently invalidates every
-    /// existing cache entry. Adding new variants is fine.
+    /// Persistent key (cache directory names, config fields, IPC payloads).
+    /// **Do not change existing strings**: they are stamped into user data
+    /// on disk, and renaming silently invalidates every cache entry.
     pub fn stable_name(&self) -> &'static str {
         match self {
             ModelId::Silueta => "silueta",
@@ -267,8 +255,7 @@ pub enum ModelSource {
 }
 
 impl ModelSource {
-    /// Short label for diagnostics + dropdown badges. Adding a variant
-    /// fails this match loudly — there's no `_ =>` fall-through.
+    /// Short label for diagnostics + dropdown badges.
     pub fn kind_label(&self) -> &'static str {
         match self {
             ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => "Bundled",
@@ -321,28 +308,17 @@ pub struct ModelDescriptor {
     pub version: &'static str,
     pub gpu: GpuRequirement,
     /// EPs known to fail this specific model export. Checked before
-    /// the dynamic compat cache so first-time users skip the failed-
-    /// load tax. Verified causes; speculative listings are cargo-cult.
-    /// Empty `&[]` means "no static incompatibilities — try every
-    /// available EP." See `is_ep_compatible` for the helper.
+    /// the dynamic compat cache so first-time users skip the failed
+    /// load. List verified causes only.
     ///
-    /// Stays `&str`-typed even after `prunr-core::EpKind` exists: this
-    /// crate is a leaf with no workspace deps, and pulling `prunr-core`
-    /// in just to spell the EP names would be a layering inversion.
-    /// Callers convert via `EpKind::Display` at the boundary.
+    /// `&str`, not `EpKind`: this crate has no workspace deps.
     pub incompatible_eps: &'static [&'static str],
-    /// Expected steady-state resident RSS contribution in MB when this
-    /// model is loaded and running on a typical input. Used as:
-    ///  - For Segmentation / EdgeDetection: per-engine cost in
-    ///    `AdmissionController` — multiplied by the engine pool size
-    ///    to reserve weights + ORT workspace for the batch window.
-    ///  - For Inpaint: single-shot pre-flight gate. `dispatch_inpaint`
-    ///    refuses to dispatch when `available_ram_mb < working_set_mb`.
+    /// Resident RSS in MB while this model is loaded and running on a
+    /// typical input, load-transient peaks included. Segmentation / edge:
+    /// the per-engine admission cost; inpaint: the pre-flight RAM gate.
     ///
-    /// Empirically calibrated. Conservative > optimistic — under-counting
-    /// causes OOMs that crash the GUI; over-counting just throttles
-    /// admission. The number includes load-transient peaks (OpenVINO
-    /// graph creation, sequential VAE+UNet+text-encoder loads for SD).
+    /// Err high: under-counting causes OOMs that crash the GUI;
+    /// over-counting only throttles admission.
     pub working_set_mb: u32,
     /// For a segmentation model: whether a batch on the host CPU runs
     /// faster with an engine per job. One run of a heavy model already
@@ -361,27 +337,20 @@ pub struct ModelDescriptor {
     /// Hardware-aware downsizing may reduce this when RAM is tight.
     /// `None` = caller picks; only required for tile-based models.
     pub recommended_tile: Option<u32>,
-    /// License mandates in-product credit (CC-BY family). Surfaces a
-    /// "CC-BY" badge in Settings → Model credits and sorts the row
-    /// to the top. BSD / MIT / Apache stay `false` even though
-    /// rows are still shown.
+    /// License mandates in-product credit (CC-BY family): a "CC-BY" badge
+    /// in Settings → Model credits, sorted to the top.
     pub attribution_required: bool,
-    /// Per-model knobs for the upscale dispatch path. `Some` only on
-    /// upscale-category entries — the dispatch reads these instead of
-    /// branching on `ModelId` in core. `None` for every other model.
+    /// Upscale dispatch knobs; `Some` only on upscale-category entries.
     pub upscale: Option<UpscaleModelKnobs>,
 }
 
-/// ONNX export contract for an upscale model. Centralises the bits the
-/// upscale dispatcher needs to know per-model so adding another model
-/// is a pure data edit, not a code change in `prunr-core/src/upscale`.
+/// ONNX export contract for an upscale model.
 #[derive(Debug, Clone, Copy)]
 pub struct UpscaleModelKnobs {
     /// Name of the input tensor in the ONNX graph. RealESRGAN exports
     /// as `"data"`; Phhofm's HAT-L (Nomos8kSCHAT-L) as `"input"`.
     pub input_name: &'static str,
-    /// `true` when the export expects fp16 inputs and emits fp16
-    /// outputs. Drives the tensor-packing branch in `upscale_rgba`.
+    /// `true` when the export expects fp16 inputs and emits fp16 outputs.
     pub is_fp16: bool,
     /// Native output scale of the ONNX graph. x2plus is the only
     /// native-2× upscale model.
@@ -389,11 +358,9 @@ pub struct UpscaleModelKnobs {
     /// `true` for window-attention transformers (HAT, Swin), `false`
     /// for CNN-style RRDB.
     ///
-    /// Distinct from `tile_size_multiple`: x2plus has
-    /// `tile_size_multiple=Some(2)` because pixel_unshuffle requires
-    /// even input dimensions, but it is NOT window-attention.
-    /// Conflating the two costs x2plus ~7% throughput from an
-    /// over-wide overlap.
+    /// Distinct from `tile_size_multiple`: x2plus needs even dimensions
+    /// (pixel_unshuffle) but is NOT window-attention; conflating the two
+    /// costs it ~7% throughput from an over-wide overlap.
     pub uses_window_attention: bool,
 }
 
@@ -640,7 +607,6 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // SD 1.5 Inpainting FP16: GPU-required CreativeML-licensed bundle.
     ModelDescriptor {
         id: ModelId::SdV15InpaintFp16,
         display_name: "Eraser (Stable Diffusion 1.5)",
@@ -701,9 +667,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // Released at https://github.com/aktiwers/prunr/releases/tag/lcm-inpaint-v1.0.1
-    // (1.0.1: exported with dynamic batch and spatial axes, so guided
-    // steps batch into one UNet call and crops other than 512² load).
+    // Exported with dynamic batch and spatial axes, so guided steps batch
+    // into one UNet call and crops other than 512² load.
     ModelDescriptor {
         id: ModelId::SdV15LcmInpaintFp16,
         display_name: "Eraser (Stable Diffusion 1.5, fast)",
@@ -838,7 +803,6 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // Released at https://github.com/aktiwers/prunr/releases/tag/taesd-v1.0.0.
     ModelDescriptor {
         id: ModelId::TaesdFp16,
         display_name: "Fast decoder (TAESD)",
@@ -935,10 +899,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 license_url: "https://creativecommons.org/licenses/by/4.0/",
                 source_url: "https://github.com/Phhofm/models/tree/main/4xNomos8kSCHAT-L",
             },
-            // Phhofm's official Nomos8k release is already fp16 — the
-            // main file at the URL above is the fp16 variant. No
-            // sibling download needed (engine reads `is_fp16: true`
-            // from UpscaleModelKnobs and dispatches accordingly).
+            // The release is already fp16 (`is_fp16: true`): no sibling.
             fp16: None,
         },
         version: "1.0.0",
@@ -1162,9 +1123,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         attribution_required: false,
         upscale: None,
     },
-    // SAM 2.1 Hiera Small: Magic Brush. Apache 2.0 from Meta.
-    // Two ONNX files: the heavy encoder runs once per image, the decoder
-    // per click/stroke. Bundled to avoid a first-run download gate.
+    // The heavy encoder runs once per image, the decoder per click/stroke.
+    // Bundled to avoid a first-run download gate.
     ModelDescriptor {
         id: ModelId::Sam21HieraSmall,
         display_name: "Magic Brush (SAM 2.1 Hiera Small)",
@@ -1342,19 +1302,13 @@ pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Error variants for `resolve_part_bytes`. Each arm is locally
-/// verifiable from the call site and carries the minimal context
-/// needed to surface a diagnostic.
 #[derive(Debug, PartialEq)]
 pub enum ResolveError {
-    /// ModelId not found in REGISTRY.
     NotInRegistry,
     /// Model is Bundled or single-file OnDemand — has no named parts.
     NotMultiPart,
-    /// Part key not present in this bundle's parts list.
     UnknownPart(String),
-    /// File exists in the registry but could not be read from disk
-    /// (not yet downloaded, or I/O error).
+    /// Not yet downloaded, or an I/O error.
     Io(String),
 }
 
@@ -1372,24 +1326,14 @@ fn resolve_bytes_from(id: ModelId, downloads: Option<&std::path::Path>) -> Optio
     match desc.source {
         ModelSource::Bundled { .. } => Some(bundled_bytes(id)),
         ModelSource::OnDemand { filename, .. } => read_on_demand(downloads?, filename).map(Arc::new),
-        // Multi-part models aren't a single byte-blob — callers go
-        // through `resolve_part_bytes(id, key)` or `multi_part_paths(id)`
-        // and load each part separately.
+        // Multi-part models load each part via `resolve_part_bytes`.
         ModelSource::MultiPartOnDemand { .. } | ModelSource::MultiPartBundled { .. } => None,
     }
 }
 
-/// Resolve bytes for a specific part of a multi-part model.
-///
-/// Handles both `MultiPartOnDemand` (reads from `on_demand_dir`) and
-/// `MultiPartBundled` (decompresses from the embedded zstd blob, cached
-/// for the process lifetime). Returns `Err` if the model is not in
-/// REGISTRY, is not multi-part, the part key is unknown, or — for
-/// on-demand bundles only — the file cannot be read from disk. The
-/// UnknownPart check happens before any disk I/O or decompression.
-///
-/// Used by Magic Brush dispatch to load SAM 2 encoder and decoder
-/// ONNX files separately so each drives its own OrtEngine session.
+/// Resolve bytes for one part of a multi-part model, on-demand (read
+/// from disk) or bundled (unpacked). The part key is checked before any
+/// disk I/O or decompression.
 pub fn resolve_part_bytes(
     id: ModelId,
     part_key: &str,
@@ -1416,8 +1360,6 @@ pub fn resolve_part_bytes(
 }
 
 /// User-facing error string when an OnDemand model isn't yet installed.
-/// Single source of truth for the "go download it" guidance — referenced
-/// by both `engine.rs` and `inpaint.rs` so the wording stays consistent.
 pub fn not_installed_error(id: ModelId) -> String {
     let name = display_name(id);
     format!("{name} is not installed. Open the Model Store from the model dropdown to download it.")
@@ -1439,10 +1381,8 @@ pub fn download_path(id: ModelId) -> Option<std::path::PathBuf> {
     Some(on_demand_dir()?.join(filename))
 }
 
-/// Resolve absolute paths to every part of a multi-part bundle. Returns
-/// `None` for non-MultiPart entries or when the bundle isn't installed.
-/// Inference modules (e.g. `prunr-core::inpaint::sd`) iterate the
-/// returned slice to load each part by its `key`.
+/// Absolute paths to every part of a multi-part bundle; `None` for
+/// non-MultiPart entries or when the bundle isn't fully installed.
 pub fn multi_part_paths(id: ModelId) -> Option<Vec<(&'static str, std::path::PathBuf)>> {
     let desc = descriptor(id)?;
     let ModelSource::MultiPartOnDemand { subdir, parts, .. } = desc.source else { return None };
@@ -1508,13 +1448,11 @@ impl SdLatent {
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:
 /// `~/Library/Application Support/prunr/`, Windows: `%APPDATA%\prunr\`.
-/// Returns `None` when the platform's data dir can't be resolved (rare —
-/// typically only on stripped-down test envs). Does NOT create the dir.
+/// Does NOT create the dir.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     dirs::data_dir().map(|d| d.join("prunr"))
 }
 
-/// Where on-demand models are stored. Subdir of `data_dir()`.
 pub fn on_demand_dir() -> Option<std::path::PathBuf> {
     data_dir().map(|d| d.join("models"))
 }
@@ -1525,16 +1463,14 @@ pub fn runtime_store_dir() -> Option<std::path::PathBuf> {
     data_dir().map(|d| d.join("runtimes"))
 }
 
-/// Pure helper: read `dir/filename` as bytes, or None if missing/unreadable.
-/// SHA verification happens at download time, not load time — re-hashing
-/// 200+ MB on every app launch would be wasteful.
+/// SHA verification happens at download time, not load time: re-hashing
+/// 200+ MB on every launch would be wasteful.
 fn read_on_demand(dir: &std::path::Path, filename: &str) -> Option<Vec<u8>> {
     std::fs::read(dir.join(filename)).ok()
 }
 
-/// OnDemand ids are unreachable here — `resolve_bytes` routes them
-/// through the disk read path. The panic guards against a REGISTRY
-/// row that says `Bundled` but lists no match arm below.
+/// The panic guards against a REGISTRY row that says `Bundled` but has
+/// no match arm below.
 fn bundled_bytes(id: ModelId) -> Arc<Vec<u8>> {
     match id {
         ModelId::Silueta => silueta_bytes(),
@@ -1560,8 +1496,6 @@ fn bundled_bytes(id: ModelId) -> Arc<Vec<u8>> {
         | ModelId::RoremFp16
         | ModelId::DdcolorTiny
         | ModelId::DepthAnythingV2Small => {
-            // OnDemand / MultiPart in REGISTRY — resolve_bytes routes
-            // via disk (or via `multi_part_paths`), not here.
             panic!("bundled_bytes called for non-Bundled model {id:?} — REGISTRY/source mismatch");
         }
     }
@@ -1647,11 +1581,8 @@ bundled_model!(yunet_bytes, "face_detection_yunet_2026may.onnx", 1024 * 1024, "Y
 bundled_model!(sam2_encoder_bytes, "sam2.1_hiera_small.encoder.onnx", 200 * 1024 * 1024, "SAM 2 encoder");
 bundled_model!(sam2_decoder_bytes, "sam2.1_hiera_small.decoder.onnx", 32 * 1024 * 1024, "SAM 2 decoder");
 
-/// Dispatcher for `MultiPartBundled` byte resolution. Mirrors the
-/// `bundled_bytes(id)` pattern but keyed by `(ModelId, part_key)`.
-/// Adding a new `MultiPartBundled` REGISTRY row means adding an arm
-/// here AND a per-part accessor above. The fallback panic guards
-/// against a REGISTRY row that declares a part with no backing bytes.
+/// A new `MultiPartBundled` REGISTRY row needs an arm here AND a
+/// per-part accessor above; the panic catches a part with no bytes.
 fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> Arc<Vec<u8>> {
     match (id, part_key) {
         (ModelId::Sam21HieraSmall, "encoder") => sam2_encoder_bytes(),
@@ -1664,9 +1595,8 @@ fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> Arc<Vec<u8>> 
 }
 
 // ── Optimized model variants (FP16 for GPU, INT8 for CPU) ───────────────────
-// Generated by: python scripts/convert_models.py
-// Returns None when the variant hasn't been generated yet, or when the model
-// has no optimized variant (TEED, LaMa). Caller falls back to FP32.
+// `None` when the variant isn't on disk or the model has none; the caller
+// falls back to FP32.
 
 pub fn model_fp16_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "fp16")
@@ -1728,8 +1658,6 @@ fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
         }
     }
 
-    // OnDemand-installed sibling: fetcher writes both fp32 and fp16
-    // siblings into on_demand_dir() when `OnDemand.fp16` is set.
     if let Some(dir) = on_demand_dir() {
         let path = dir.join(&filename);
         if path.is_file() {
