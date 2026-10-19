@@ -21,9 +21,7 @@
 //!   ORT graph optimization + UNet activations together push 6-10 GB
 //!   transient on this codepath; the floor protects against swap thrash.
 //! - Idle bundle release (`crate::IDLE_RELEASE`) drops the cached 4
-//!   ORT sessions after no use — reclaims ~4-6 GB so users who erased
-//!   ten minutes ago aren't carrying SD weights for the rest of the
-//!   session.
+//!   ORT sessions after no use, reclaiming ~4-6 GB.
 //!
 //! When the user picks the LCM scheduler on the SD chip (and the LCM
 //! bundle is installed), the dispatcher routes to the LCM-distilled
@@ -92,7 +90,7 @@ const CLIP_BOS: i64 = 49406;
 const CLIP_EOS: i64 = 49407;
 
 /// Inputs to one SD inpaint call; the defaults are an empty-prompt
-/// unconditional inpaint. Serde-derived so this struct can also ride `SubprocessCommand::Inpaint`
+/// unconditional inpaint. Serde-derived so it crosses the worker IPC
 /// without a wire mirror.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SdInpaintRequest {
@@ -109,11 +107,8 @@ pub struct SdInpaintRequest {
     pub seed: Option<u64>,
     /// When true, swap the SD bundle's standard VAE legs for TAESD — a
     /// distilled ~1M-param VAE pair (~3× faster decode, slight quality
-    /// cost). Caller sets this when fast mode is on AND the TAESD
-    /// bundle is installed; if the bundle isn't installed yet, the
-    /// dispatcher silently falls back to standard VAE.
+    /// cost). Falls back to the standard VAE when TAESD isn't installed.
     pub use_taesd: bool,
-    /// Which scheduler runs the denoise loop.
     #[serde(default)]
     pub scheduler: SchedulerKind,
     /// How the pipeline runs for this stroke; see `plan_tuning`.
@@ -316,8 +311,6 @@ impl Default for SdInpaintRequest {
     }
 }
 
-/// Public entry. Dispatched from `inpaint::process_inpaint` when the
-/// caller selects an SD-family model id.
 pub fn process_inpaint(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -331,9 +324,7 @@ pub fn process_inpaint(
     ).map(|f| f.rgba)
 }
 
-/// Full-knob entry; the `inpaint::process_inpaint` shim calls this with
-/// defaults.
-/// See `inpaint::process_inpaint_with` for the progress contract.
+/// `process_inpaint` with every knob; a cancel lands within one UNet step.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -379,8 +370,6 @@ pub fn process_inpaint_with(
     // the last reference goes and the ORT bundle is freed.
     let _release_guard = ReleaseOnDrop(id);
     let run_started = Instant::now();
-    // TAESD when the request asks for it and it is installed, else the
-    // standard VAE.
     let taesd = if req.use_taesd && sd_spec(id).latent.takes_taesd() { TaesdSession::get().ok() } else { None };
     let vae: VaeBackend = match taesd.as_ref() {
         Some(t) => VaeBackend::Taesd(t),
@@ -440,7 +429,6 @@ fn paint_regions_with(
         .map(|((x, y, w, h), _)| TileRect::of_pixels(x, y, w, h, img_w, img_h))
         .collect());
     let mut tile_idx: u32 = 0;
-    // One crop or tile starts: the outer count, and the tile map's cell.
     let start = |idx: u32| {
         progress.outer(idx, outer_total, Unit::Crop);
         progress.tile(idx, false);
@@ -449,8 +437,6 @@ fn paint_regions_with(
     for (component, plan) in components.iter().zip(&plans) {
         if progress.is_cancelled() { return Err(CoreError::Cancelled); }
         if let RegionPlan::Tiles(tiles) = plan {
-            // Longer than `max_side` on an axis: overlapping 512² tiles
-            // with alpha-blended seams.
             tracing::info!(
                 comp = ?component, n_tiles = tiles.len(),
                 "SD: tiling oversized component",
@@ -480,8 +466,6 @@ fn paint_regions_with(
 /// gives a smooth fade; lower values risk a visible grid edge, higher
 /// values waste compute (more overlap = more tiles per bbox).
 const TILE_OVERLAP_PX: u32 = SD_TILE / 4;
-/// Distance the tile anchor advances per step. SD_TILE - overlap so
-/// adjacent tiles share a TILE_OVERLAP_PX column/row.
 const TILE_STEP_PX: u32 = SD_TILE - TILE_OVERLAP_PX;
 
 #[derive(Debug, Clone, Copy)]
@@ -535,20 +519,14 @@ fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
 fn tile_count(span: u32) -> u32 {
     if span <= SD_TILE { 1 }
     else {
-        // Number of step-advances needed beyond the first tile, ceiling.
         let extra = span - SD_TILE;
         extra.div_ceil(TILE_STEP_PX) + 1
     }
 }
 
-/// Composite a painted tile into `canvas` with linear-alpha feathering
-/// at edges that abut neighbour tiles. Outside the feather zones the
-/// painted tile fully replaces the canvas; inside, it ramps from 0 at
-/// the tile edge to 1 at TILE_OVERLAP_PX into the tile.
-///
-/// For non-masked pixels the feather is a no-op anyway (both source
-/// and painted carry identical pixels via run_one_tile's composite),
-/// so we don't need to know the mask here — we just blend everything.
+/// Composite a painted tile into `canvas`, ramping alpha from 0 at an
+/// edge that abuts a neighbour tile to 1 at TILE_OVERLAP_PX in. No mask
+/// needed: outside it the painted tile already carries the source pixels.
 fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &TileWindow) {
     let cw = canvas.width();
     let pw = painted.width();
@@ -563,7 +541,6 @@ fn blend_tile(canvas: &mut image::RgbaImage, painted: &image::RgbaImage, tile: &
             let src = ((y * pw + x) * 4) as usize;
             let dst = (((tile.y + y) * cw + (tile.x + x)) * 4) as usize;
             if a >= 1.0 {
-                // Full replace — copy source bytes, skip the lerp.
                 raw_canvas[dst..dst + 4].copy_from_slice(&raw_painted[src..src + 4]);
             } else {
                 let inv = 1.0 - a;
@@ -678,7 +655,6 @@ pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
                 if x > bbox.x_max { bbox.x_max = x; }
                 if y < bbox.y_min { bbox.y_min = y; }
                 if y > bbox.y_max { bbox.y_max = y; }
-                // 4-connectivity: up / down / left / right.
                 if x > outer.x {
                     push_if_unvisited(x - 1, y, map, raw, &mut visited, &mut queue);
                 }
@@ -822,16 +798,12 @@ fn run_one_tile(
     let mut timer = TileTimer::start();
 
 
-    // CFG threshold: above 1.0 we run the UNet TWICE per step (cond +
-    // uncond) and blend by `guidance_scale`. At ≤1.0 the cond pass is
-    // all the user wants, so we skip the second to halve UNet cost.
+    // Guidance above 1.0 runs the UNet twice per step (cond + uncond).
     // A baked-in prompt runs unguided: there is no prompt to steer by.
     let prompted = bundle.text_encoder.is_some();
     let use_cfg = prompted && req.guidance_scale > 1.0 + 1e-3;
 
-    // Pre-loop independent ops in parallel: text encode (cond + uncond
-    // when CFG), VAE encode, mask-to-latent. Each ORT call holds a
-    // distinct session mutex (or none) so they run concurrently.
+    // These run concurrently: each ORT call holds a distinct session mutex.
     if prompted {
         progress.step(Step::ReadingPrompt);
     }
@@ -861,9 +833,8 @@ fn run_one_tile(
 
     let masked_latent_f16 = f32_to_f16_4d(&masked_latent);
     let mask_latent_f16 = f32_to_f16_4d(&mask_latent);
-    // Free the f32 originals — the loop only needs the f16 mirrors,
-    // and these buffers would otherwise sit alive across the entire
-    // 20-step UNet loop, the longest-lived stage of the pipeline.
+    // The loop needs only the f16 copies; the f32 ones would otherwise
+    // live through the whole UNet loop.
     drop(masked_latent);
     drop(mask_latent);
     let prelude_ms = timer.lap();
@@ -875,11 +846,8 @@ fn run_one_tile(
     let latent_dim = (1_usize, 4_usize, lh, lw);
     let noise: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
 
-    // With CFG: noise_pred = uncond + scale * (cond - uncond). Without
-    // CFG: just one UNet pass with cond.
     let scale = req.guidance_scale;
     let predict = |latent: &[f32], t: i64| {
-        // Zero-copy view of the latent — only the Array4<f16> output stays.
         let latent_f16 = f32_to_f16_view(
             ndarray::ArrayView4::from_shape(latent_dim, latent)
                 .expect("latent_dim matches the latent's length by construction"),
@@ -904,7 +872,6 @@ fn run_one_tile(
 
     let unet_ms = timer.lap();
 
-    // VAE decode — wrap final buf into Array4 (no extra allocation).
     let final_array = ndarray::Array4::from_shape_vec(latent_dim, latent_buf)
         .expect("latent_dim matches latent_buf length by construction");
     progress.step(Step::DecodingResult);
@@ -1166,9 +1133,8 @@ fn cfg_noise_pred(
 
 // ── Session bundle ──────────────────────────────────────────────────────
 
-/// Tiny distilled VAE pair (~1M params each). Drop-in for SD's standard
-/// VAE legs when fast mode is on. No idle release — total memory cost
-/// is ~10 MB so keeping it cached forever is fine.
+/// Tiny distilled VAE pair (~1M params each). Never idle-released: it
+/// costs ~10 MB.
 pub(crate) struct TaesdSession {
     encoder: Mutex<Session>,
     decoder: Mutex<Session>,
@@ -1178,12 +1144,7 @@ pub(crate) struct TaesdSession {
 
 impl TaesdSession {
     fn get() -> Result<Arc<TaesdSession>, CoreError> {
-        // Single global cache cell; `OnceLock::new()` is `const` so we
-        // need no outer lazy wrapper. `get_or_init` runs the build
-        // closure exactly once across concurrent callers.
-        // CoreError isn't Clone, so we round-trip the build error
-        // through a String — the stored Result must be cloneable so
-        // every caller can take an owned copy of the cached outcome.
+        // CoreError isn't Clone, so the cached build error is a String.
         static CACHE: OnceLock<Result<Arc<TaesdSession>, String>> = OnceLock::new();
         CACHE.get_or_init(|| Self::new_inner().map(Arc::new).map_err(|e| e.to_string()))
             .clone()
@@ -1201,10 +1162,7 @@ impl TaesdSession {
         let decoder_path = by_key.get("decoder")
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
 
-        // Build encoder + decoder in parallel — saves ~1-2 s of cold
-        // start. Each session is ~5 MB; aggregate peak RSS during
-        // parallel build is well under 50 MB. No DirectML carve-out
-        // needed since TAESD has no GPU EP ladder.
+        // In parallel: saves ~1-2 s of cold start; each session is ~5 MB.
         let build = |path: &PathBuf, label: &'static str| -> Result<Session, CoreError> {
             crate::ort_runtime::session_builder()?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -1247,10 +1205,8 @@ pub(crate) struct SdSession {
     /// into the UNet (RORem), whose third UNet input is SDXL's size
     /// conditioning instead of a text embedding.
     text_encoder: Option<TextEncoder>,
-    /// Discovered input names per session (positional order from the ONNX).
-    /// SD exports use stable names (sample / timestep / encoder_hidden_states
-    /// or time_ids for UNet, sample for VAEs, input_ids for text encoder) but
-    /// we look them up by introspection so a non-standard export still works.
+    /// Input names in the ONNX's positional order, read from the session
+    /// so a non-standard export still works.
     unet_inputs: [String; 3],
     vae_encoder_input: String,
     vae_decoder_input: String,
@@ -1281,9 +1237,6 @@ struct TextEncoder {
 /// callers keep their own clone — no use-after-free.
 /// Errors cache the load-failure string so a missing bundle doesn't
 /// retry-and-error every stroke; eviction lets the next try refresh.
-///
-/// `pub(crate)` so `inpaint::LamaSession` can reuse the same cache shape
-/// without duplicating struct + sweep helper.
 pub(crate) struct CacheEntry<T> {
     pub(crate) value: T,
     pub(crate) last_used: Instant,
@@ -1298,15 +1251,9 @@ impl<T> CacheEntry<T> {
     }
 }
 
-/// Per-id deferred bundle. The outer `Arc<OnceLock<...>>` is what closes
-/// the build race: two concurrent `get()` callers both find the same
-/// `Arc<OnceLock>` in the cache, both call `get_or_init` on it, and the
-/// `OnceLock` semantics guarantee the build closure runs **once** —
-/// the second caller blocks until the first finishes and gets the same
-/// stored `Result`. Before this, both callers would each build a full
-/// ~15 GB bundle in parallel; the loser's bundle was dropped 3 ms later,
-/// nearly OOMing the box (`SD session bundle dropped` immediately after
-/// `SD session bundle loaded` in the trace).
+/// Per-id deferred bundle. The shared `OnceLock` makes concurrent
+/// `get()` callers wait on one build: two parallel ~15 GB builds nearly
+/// OOMed the box.
 type SdBundleSlot = Arc<std::sync::OnceLock<Result<Arc<SdSession>, String>>>;
 pub(crate) type SdCache = HashMap<(prunr_models::ModelId, SdSessionKey), CacheEntry<SdBundleSlot>>;
 
@@ -1315,14 +1262,9 @@ fn sd_cache() -> &'static Mutex<SdCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Drop the cached entry for `id`, releasing the cache's `Arc` ref.
-/// In-flight callers keep their own `Arc<SdSession>` so the bundle
-/// stays valid until the dispatch finishes; once the last `Arc` drops,
-/// the `Drop` impl runs and the ORT session is released. Used by
-/// `process_inpaint_with` to drop the SD bundle the moment a stroke
-/// completes — on memory-constrained machines holding 9 GB through
-/// the 5-min idle window is worse than paying the rebuild on the
-/// next stroke.
+/// Drop the cache's `Arc` for `id` unless pinned; in-flight callers keep
+/// theirs. Runs when a stroke ends: holding ~9 GB through the idle
+/// window is worse than a rebuild on the next stroke.
 pub(crate) fn release(id: prunr_models::ModelId) {
     let cache = sd_cache();
     let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1422,10 +1364,8 @@ pub(crate) fn sweep_and_log<K: std::hash::Hash + Eq, T>(
 }
 
 impl<V, E> CacheEntry<Arc<OnceLock<Result<V, E>>>> {
-    /// Refresh `last_used` unless the slot already holds an Err —
-    /// otherwise a sticky build failure would keep refreshing its idle
-    /// timer on every retry and never evict. Healthy or in-flight slots
-    /// refresh.
+    /// Refresh `last_used` unless the slot holds an Err: a sticky build
+    /// failure refreshed on every retry would never evict.
     pub(crate) fn touch(&mut self, now: Instant) {
         if !matches!(self.value.get(), Some(Err(_))) {
             self.last_used = now;
@@ -1465,16 +1405,13 @@ pub(crate) fn warm_touch<K: std::hash::Hash + Eq, V>(cache: &Mutex<HashMap<K, Ca
     }
 }
 
-/// Background sweeper interval. 60 s gives reclaim within ~1 minute of
-/// the idle threshold without burning CPU; the sweep itself is a single
-/// HashMap::retain over <10 entries so it's free.
+/// Reclaim lands within ~1 minute of the idle threshold; the sweep
+/// itself is near free (<10 entries).
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Spawn a daemon thread named `thread` that evicts idle entries of
-/// `cache` every `SWEEP_INTERVAL`, even when no caller invokes `get()`.
-/// Without it, RAM doesn't reclaim until the user touches the model
-/// again — which defeats the point of the idle release. Callers start it
-/// once through their own `OnceLock` so threads don't accumulate.
+/// `cache` every `SWEEP_INTERVAL`, so RAM reclaims even when nobody calls
+/// `get()`. Start it once per cache (behind a `OnceLock`).
 pub(crate) fn spawn_idle_sweeper<K, T>(
     thread: &'static str,
     cache: fn() -> &'static Mutex<HashMap<K, CacheEntry<T>>>,
@@ -1506,8 +1443,7 @@ impl SdSession {
         let cache = sd_cache();
         let now = Instant::now();
 
-        // Cache lock held only for the HashMap lookup and at most one
-        // Arc<OnceLock> allocation — never for the bundle build.
+        // Never hold the cache lock through the bundle build.
         let (slot, released): (SdBundleSlot, _) = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let idle = sweep_and_log(&mut guard, now, "SD: released idle session bundle(s)");
@@ -1517,29 +1453,22 @@ impl SdSession {
         };
         drop(released);
 
-        // Build outside the cache lock — see `SdBundleSlot` docs.
         slot.get_or_init(|| Self::new_inner(id, key).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
     }
 
     fn new_inner(id: prunr_models::ModelId, session_key: &SdSessionKey) -> Result<SdSession, String> {
-        // Defense-in-depth: prewarm builds bypass `process_inpaint_with`,
-        // so the gate has to fire here too. Same helper as the dispatch
-        // entry — single source of truth for threshold + wording.
+        // Prewarm builds bypass `process_inpaint_with`, so gate here too.
         check_ram_for(id, &mut SdTuning::default())?;
         let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
 
-        // The four parts touch disjoint sessions; build them in parallel.
-        // DirectML stays sequential — same AbiCustomRegistry race as
-        // `batch::create_engine_pool`. Parallel build holds all four
-        // optimization scratch arenas live concurrently; the
-        // `working_set_mb` guard above bounds the peak.
-        // We still log the winning EP per part so partial GPU
-        // fall-through (e.g. UNet CUDA, VAEs CPU) is debuggable.
+        // Parts build in parallel (the `working_set_mb` gate above bounds
+        // the four scratch arenas); DirectML stays sequential, its session
+        // build races in AbiCustomRegistry.
         type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;
         const PARTS: [(&str, SmokeFn); 4] = [
             ("text_encoder", smoke_test_text_encoder),
@@ -1567,9 +1496,6 @@ impl SdSession {
                 wanted.par_iter().map(build).collect::<Result<_, _>>()?
             };
 
-        // Match by key so the destructure below survives reordering of
-        // PARTS. `IndexedParallelIterator::collect` preserves order, so
-        // this is defensive — cheap at N=4.
         let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
         let mut take = |want: &str| -> Result<Session, String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
@@ -1617,10 +1543,8 @@ impl SdSession {
     }
 }
 
-/// SD bundle's GPU EP ladder: try CUDA / CoreML / DirectML in platform
-/// order, smoke-test each, fall back to CPU. Each part's smoke test is
-/// supplied by the caller because input shapes/types differ per ONNX
-/// file.
+/// Try each GPU EP in platform order with the part's smoke test (input
+/// shapes differ per part), then fall back to CPU.
 fn build_part_with_ep_ladder(
     id: prunr_models::ModelId,
     key: &str,
@@ -1734,11 +1658,9 @@ fn sd_base_builder(mem: SdMemPlan, lean: bool) -> Result<ort::session::builder::
         .map_err(|e| format!("SD: threads: {e}"))
 }
 
-/// Path-based ORT-graph-optimization cache for SD's `commit_from_file`
-/// pattern. On hit returns the cached optimized.onnx path so the load
-/// skips graph optimization; on miss returns the source path with
-/// `with_optimized_model_path` set so ORT writes the optimized graph.
-/// Best-effort — any error logs and falls back to the uncached path.
+/// The optimized-graph cache for a `commit_from_file` load: on hit the
+/// cached graph's path, on miss the source path with a draft that writes
+/// the optimized graph. Best-effort: any error falls back to the source.
 fn sd_apply_path_cache<'a>(
     builder: ort::session::builder::SessionBuilder,
     source_path: &'a Path,
@@ -1764,9 +1686,8 @@ fn sd_apply_path_cache<'a>(
     (builder, Cow::Borrowed(source_path), draft)
 }
 
-// Per-part smoke tests. Each runs ONE forward pass with zero-valued
-// inputs of the model's expected shape/type — catches EP/op
-// incompatibilities at session-build time rather than at first stroke.
+// Per-part smoke tests: one zero-input forward pass catches EP/op
+// incompatibilities at build time rather than at the first stroke.
 
 fn smoke_test_text_encoder(s: &mut Session, label: &str) -> Result<(), String> {
     let tokens = clip_tokenize("");
@@ -1871,16 +1792,14 @@ fn take_three_inputs(s: &Session, label: &str) -> Result<[String; 3], String> {
 /// `tokenizer(text, padding="max_length", truncation=True)` shape:
 /// `[BOS, t_0, t_1, …, EOS, EOS pad, …]` of length 77. Empty string
 /// degenerates to `[BOS, EOS, EOS, …]` — the unconditional encoding.
-/// SD 1.5 ONNX exports use `int32` for `input_ids`; tokenizer returns
-/// `u16` so we cast on copy.
+/// SD 1.5 ONNX exports take `int32` `input_ids`.
 fn clip_tokenize(text: &str) -> Array2<i32> {
     use std::sync::OnceLock;
     static T: OnceLock<instant_clip_tokenizer::Tokenizer> = OnceLock::new();
     let tokenizer = T.get_or_init(instant_clip_tokenizer::Tokenizer::new);
 
-    // Tokenizer's `encode` produces the inner tokens (no BOS/EOS) into a
-    // user-supplied Vec; we wrap with the special tokens + truncate +
-    // pad to 77 ourselves so the framing matches diffusers exactly.
+    // `encode` yields no BOS/EOS; the framing is added here to match
+    // diffusers exactly.
     let mut inner: Vec<instant_clip_tokenizer::Token> = Vec::new();
     tokenizer.encode(text, &mut inner);
     let max_inner = CLIP_SEQ_LEN - 2; // leave room for BOS + at least one EOS
@@ -1930,11 +1849,9 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
 
 // ── VAE encode / decode ────────────────────────────────────────────────
 
-/// Pluggable VAE backend. `Standard` uses the SdSession's VAE legs
-/// (~80M params each, baked into SD 1.5). `Taesd` uses a tiny distilled
-/// pair (~1M params each, ~3× faster decode). The latter doesn't apply
-/// the 0.18215 scaling factor — TAESD bakes it into the model — so the
-/// scale step is conditional.
+/// `Standard` is the bundle's own VAE (~80M params a leg); `Taesd` a
+/// distilled pair (~1M params, ~3× faster decode) with the latent scale
+/// baked into the model, so only `Standard` scales.
 pub(crate) enum VaeBackend<'a> {
     Standard(&'a SdSession),
     Taesd(&'a TaesdSession),
@@ -2017,9 +1934,7 @@ fn unet_step(
     t: i64,
     cond: Cond<'_>,
 ) -> Result<Array4<f32>, CoreError> {
-    // Timestep is integer-valued at the diffusers level but flows through
-    // sinusoidal embeddings inside the UNet, so the f16 cast is precision-
-    // safe (timesteps fit in the f16 mantissa for SD's 1000-step grid).
+    // Exact in f16: every timestep of SD's 1000-step grid fits the mantissa.
     let timestep = ndarray::Array1::<f16>::from_elem(1, f16::from_f32(t as f32));
     let lat_t = Tensor::from_array(latent_9ch_f16)
         .map_err(|e| CoreError::Inference(format!("SD unet: latent tensor: {e}")))?;
@@ -2040,14 +1955,9 @@ fn unet_step(
     extract::<ndarray::Ix4>(&outputs[0], "unet")
 }
 
-/// CFG batched: stack cond + uncond on batch dim 0 and run UNet ONCE
-/// per timestep instead of twice. Most SD-1.5 inpaint ONNX exports
-/// declare a dynamic batch dimension so this just works; if the loaded
-/// model has a static batch=1 the call returns Err and the caller
-/// falls back to sequential `unet_step` × 2 (and remembers to skip
-/// future batched attempts on this session).
-///
-/// Output shape: (2, 4, lh, lw). Row 0 = cond noise pred, row 1 = uncond.
+/// Cond and uncond stacked on the batch axis, one UNet run per step.
+/// Errs on a static batch-1 export. Output (2, 4, lh, lw): row 0 cond,
+/// row 1 uncond.
 fn unet_step_batched(
     bundle: &SdSession,
     latent_9ch_f16: &Array4<f16>,
@@ -2082,10 +1992,8 @@ fn unet_step_batched(
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
 //
-// The FP16 exports take f16 inputs and outputs (a VAE exported in f32
-// is read through `SdSession::vae_f32`). We do scheduler/composite/mask
-// math in f32 (cheap conversion, full precision for short loops) and
-// only narrow at the tensor handoff.
+// The FP16 exports take f16 (an f32 VAE is flagged by
+// `SdSession::vae_f32`); all other math stays f32, narrowed only here.
 
 fn f32_to_f16_3d(arr: &Array3<f32>) -> Array3<f16> {
     arr.mapv(f16::from_f32)
@@ -2099,9 +2007,7 @@ fn f32_to_f16_4d(arr: &Array4<f32>) -> Array4<f16> {
     f32_to_f16_view(arr.view())
 }
 
-/// Try f32 first, fall back to f16; either way return f32 ndarray.
-/// Centralises the "this export might emit either precision" handling
-/// so each session site is one line at the boundary.
+/// An output as f32, whichever precision the export emits.
 fn extract<D: ndarray::Dimension>(
     value: &ort::value::DynValue,
     label: &str,
@@ -2123,13 +2029,11 @@ fn extract<D: ndarray::Dimension>(
 
 // ── Tensor helpers ──────────────────────────────────────────────────────
 
-/// RGBA → NCHW f32 in [-1, 1] for the SD VAE encoder. Alpha dropped;
-/// masked pixels (mask > 127) are filled with the byte-128 mid-gray
-/// value (≈ 0.0039 in [-1, 1]). Binary cliff is intentional — the
-/// SD-1.5 inpaint UNet was trained on binary-zeroed masked-image
-/// latents; partial-alpha blends toward grey at the boundary band
-/// produce a visible grey ghost at inference. `None` mask encodes
-/// the full image without any masking.
+/// RGBA → NCHW f32 in [-1, 1] for the SD VAE encoder, alpha dropped.
+/// Pixels in the hole (`> IN_HOLE`) become byte-128 grey with a binary
+/// cliff: the SD-1.5 inpaint UNet was trained on binary-zeroed masked
+/// latents, and a soft edge comes out as a grey ghost. `None` encodes
+/// the full image.
 fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> Array4<f32> {
     let (w, h) = image.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
@@ -2152,13 +2056,6 @@ fn image_to_minus1_plus1_inner(image: &RgbaImage, mask: Option<&GrayImage>) -> A
             let r = byte_to_unit(f32::from(raw[src]));
             let g = byte_to_unit(f32::from(raw[src + 1]));
             let b = byte_to_unit(f32::from(raw[src + 2]));
-            // Binary cliff: mask > IN_HOLE → fully grey (inpaint
-            // region), else original. The SD-1.5 inpaint UNet was
-            // trained on binary-zeroed masked-image latents — a
-            // partial-alpha blend would put grey-tinted pixels at
-            // the boundary, which the model treats literally and
-            // outputs as a grey ghost. Composite-time softness is
-            // handled by inpaint_feather, not here.
             if m.is_some_and(|m| m[mask_row + x] > IN_HOLE) {
                 buf[dst]             = v_fill;
                 buf[plane + dst]     = v_fill;
@@ -2219,11 +2116,8 @@ fn byte_to_unit(v: f32) -> f32 {
 /// Average-pool 8×8 → 1 (equivalent to `F.interpolate(mode="area")`
 /// in PyTorch, which is what Diffusers uses for mask preprocessing).
 ///
-/// Why average-pool, not nearest-neighbour center-sample: even with
-/// a binary mask, cells that straddle the mask boundary average to
-/// ~0.5, preserving sub-block boundary precision in the latent mask.
-/// Center-sampling throws away that information, producing a jaggy
-/// latent boundary that doesn't faithfully represent the pixel mask.
+/// Not centre-sampled: a cell straddling the boundary averages to ~0.5,
+/// keeping sub-cell edge precision that sampling turns jaggy.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
     let (w, h) = mask.dimensions();
     let (w_us, h_us) = (w as usize, h as usize);
@@ -2255,9 +2149,7 @@ fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
 
 /// Concatenate the three UNet inputs along the channel axis:
 /// [latent (4ch) | mask (1ch) | masked_latent (4ch)] → (1, 9, lh, lw).
-/// f16 variant lives next to the loop site since two of the three inputs
-/// are loop-invariant — we pre-convert them once and pay only the latent
-/// concat per step.
+/// In f16: the two loop-invariant inputs are converted once, before the loop.
 fn concat_inpaint_input_f16(
     latent: &Array4<f16>,
     mask_lat: &Array4<f16>,
@@ -2319,10 +2211,8 @@ fn paste(out: &mut RgbaImage, painted: &RgbaImage, mask: &GrayImage, (ax, ay, aw
 }
 
 /// Classifier-free guidance: `uncond + scale * (cond - uncond)`.
-/// Takes `ArrayView4` so callers can pass batched-UNet slices directly
-/// without two `.to_owned()` allocations per CFG step. Output is built in logical row-
-/// major order via `iter()`, which is correct for non-contiguous
-/// input views (e.g. axis-0 slices of a batched output).
+/// Takes views so batched-UNet slices pass without copies; `iter()`
+/// order is correct for non-contiguous views.
 fn cfg_blend(
     uncond: ndarray::ArrayView4<'_, f32>,
     cond: ndarray::ArrayView4<'_, f32>,
@@ -2335,7 +2225,7 @@ fn cfg_blend(
     Array4::from_shape_vec(uncond.dim(), buf).expect("dim matches by construction")
 }
 
-/// Scheduler step dispatched from `denoise`: the next latent state.
+/// The scheduler's next latent state.
 // `step_idx` is only meaningful to the DPM++ multistep arm, but the
 // dispatch is shared. Threading it through a `StepCtx` struct would
 // force the LCM arm to carry a field it never reads.
@@ -2355,10 +2245,8 @@ fn step_array(
             if is_final_step {
                 s.denoised(latent, noise_pred, t)
             } else {
-                // LCM mixes Gaussian noise back in on every non-final
-                // step. Sample from the same seeded RNG that drove the
-                // initial latent so the whole denoise stays
-                // reproducible from `seed`.
+                // Re-noise from the seeded RNG so the whole denoise
+                // reproduces from `seed`.
                 s.step_at(latent, noise_pred, t, t_prev, &gaussian(rng, latent.len()))
             }
         }
@@ -2368,9 +2256,7 @@ fn step_array(
 
 // ── Safety guards ───────────────────────────────────────────────────────
 
-/// Shared `sysinfo::System` cache for `available_ram_bytes` and
-/// `process_rss_mb`. Two callers, one cell — `refresh_*` calls on
-/// disjoint fields don't conflict.
+/// One `sysinfo::System` for both probes; they refresh disjoint fields.
 fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
     use std::sync::PoisonError;
     static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
@@ -2379,10 +2265,8 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
     f(&mut sys)
 }
 
-/// Cross-platform available-RAM probe. Returns `None` only when sysinfo
-/// can't read the system (CI containers without /proc, exotic platforms);
-/// callers in that case skip the guard rather than fail-closed since
-/// "we couldn't query" doesn't imply "memory is low".
+/// `None` when sysinfo can't read the system; callers then skip the
+/// guard, since an unknown reading doesn't mean memory is low.
 pub(crate) fn available_ram_bytes() -> Option<u64> {
     let avail = with_system(|sys| {
         sys.refresh_memory();
@@ -2391,9 +2275,7 @@ pub(crate) fn available_ram_bytes() -> Option<u64> {
     if avail == 0 { None } else { Some(avail) }
 }
 
-/// Current process RSS in MB. `None` when sysinfo can't read the process
-/// (sandboxed CI, exotic platforms). Used to instrument SD session
-/// load/drop where 4-6 GB swings are easy to hide in aggregate logs.
+/// Current process RSS in MB; `None` when sysinfo can't read the process.
 pub(crate) fn process_rss_mb() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
     with_system(|sys| {
@@ -2445,9 +2327,7 @@ impl Drop for SdSession {
 /// SD-1.5 train-timestep count (`num_train_timesteps` in Diffusers).
 const SD15_NUM_TRAIN_TIMESTEPS: usize = 1000;
 
-/// SD-1.5 `scaled_linear` β schedule, then α̅ = cumprod(1 - β). Shared
-/// across both schedulers — they differ in step formula + timestep
-/// subset, not in the underlying noise schedule.
+/// SD-1.5 `scaled_linear` β schedule, then α̅ = cumprod(1 - β).
 fn compute_alphas_cumprod_sd15() -> Vec<f32> {
     const BETA_START: f32 = 0.00085;
     const BETA_END: f32 = 0.012;
@@ -2465,9 +2345,7 @@ fn compute_alphas_cumprod_sd15() -> Vec<f32> {
     alphas_cumprod
 }
 
-/// Per-train-timestep `ln σ_t` where σ_t = √((1-α̅_t)/α̅_t). Shared
-/// schedule input for any Karras-family scheduler that needs to map
-/// a sampling sigma back to a train timestep.
+/// Per-train-timestep `ln σ_t` where σ_t = √((1-α̅_t)/α̅_t).
 fn compute_log_sigmas_sd15() -> &'static [f32] {
     static CACHE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
@@ -2499,24 +2377,10 @@ fn compute_karras_sigmas(num_inference: usize, sigma_min: f32, sigma_max: f32) -
 /// LCM (Latent Consistency Model) scheduler — port of HuggingFace
 /// Diffusers' `LCMScheduler` for the SD-1.5 LCM distilled checkpoint.
 ///
-/// Differs from DDIM in two ways that matter for our use case:
-///
-/// 1. **Timestep schedule** is *subsampled* from a fixed
-///    `original_inference_steps` skip-step grid (default 50 against
-///    1000 train timesteps), then evenly sampled down to
-///    `num_inference_steps`. DDIM uses a uniform descending grid.
-/// 2. **Step formula** uses a boundary-condition consistency function
-///    `c_skip / c_out` derived from `sigma_data` and a scaled timestep,
-///    mixing the predicted-x0 and the current sample. DDIM uses the
-///    standard `√α x₀ + √(1-α) ε` formula.
-///
-/// LCM weights were *trained* against this update formula. Plugging
-/// LCM weights into DDIM produces drift at every step (the noise
-/// prediction is calibrated for one math, applied via another) — the
-/// over-sharp / off-subject failures we saw on Fast Mode.
-///
-/// Reference: HuggingFace `diffusers/schedulers/scheduling_lcm.py`,
-/// LCM paper arXiv:2310.04378.
+/// Its timesteps subsample a 50-step skip grid and its step is the
+/// `c_skip / c_out` consistency function; LCM weights were trained on
+/// that formula, and through DDIM's they drift every step (over-sharp,
+/// off-subject). Reference: diffusers `scheduling_lcm.py`, arXiv:2310.04378.
 pub struct LcmScheduler {
     alphas_cumprod: Vec<f32>,
     timesteps: Vec<i64>,
@@ -2650,8 +2514,6 @@ pub struct DpmPp2MScheduler {
     pub num_inference: usize,
     /// Previous step's predicted x0 — `None` on first step (first-order
     /// branch), `Some` thereafter (second-order multistep correction).
-    /// Buffer is reused across steps via `clone_from` to avoid a
-    /// per-step allocation.
     prev_model_output: Option<Vec<f32>>,
 }
 
@@ -2661,16 +2523,11 @@ impl DpmPp2MScheduler {
         let sigma_min = log_sigmas[0].exp();
         let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
         let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-        // Terminal sigma = sigma_min. Diffusers' default is 0 with a
-        // `lower_order_final` guard that suppresses the second-order D1
-        // term at the terminal step (which would otherwise propagate
-        // lambda_t = +∞ → d1 = NaN). We force first-order at terminal
-        // AND use sigma_min as belt-and-braces — either guard alone is
-        // sufficient, but both keeps the math finite under any future
-        // refactor of the step dispatch.
+        // Terminal sigma_min, not Diffusers' 0 (λ_t = +∞ → d1 = NaN). The
+        // first-order terminal step guards the same; keep both so the
+        // math stays finite if either changes.
         sigmas.push(sigma_min);
 
-        // Convert each non-terminal sigma to a timestep for UNet input.
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
             .map(|&sigma| sigma_to_t(sigma, log_sigmas))
             .collect();
@@ -2717,10 +2574,8 @@ impl DpmPp2MScheduler {
         let coef = alpha_t * ((-h).exp() - 1.0);
         let ratio = sigma_t_e / sigma_s0_e;
 
-        // Second-order only when NOT at the terminal step.
-        // Diffusers' `lower_order_final=True` (default) forces first-order on
-        // the last step because the per-step sigma drop is largest there and
-        // the D1 correction can overshoot. We mirror that guard here.
+        // First-order on the last step (Diffusers' `lower_order_final`):
+        // the sigma drop is largest there and D1 can overshoot.
         let second_order_prev = self.prev_model_output.as_ref().filter(|_| step_idx + 1 < self.num_inference);
         let next: Vec<f32> = if let Some(m1) = second_order_prev {
             let sigma_s1 = self.sigmas[step_idx - 1];
@@ -2743,7 +2598,6 @@ impl DpmPp2MScheduler {
                 .collect()
         };
 
-        // Reuse the prev-buffer's allocation across steps.
         match &mut self.prev_model_output {
             Some(buf) => buf.clone_from(&m0),
             slot @ None => *slot = Some(m0),
@@ -2760,8 +2614,7 @@ fn sigma_to_alpha_sigma(sigma: f32) -> (f32, f32) {
     (alpha, sigma * alpha)
 }
 
-/// Log-SNR λ(σ) = ln(α) − ln(σ_eff). Used by all multistep
-/// schedulers in lambda-space update formulas.
+/// Log-SNR λ(σ) = ln(α) − ln(σ_eff).
 fn sigma_to_lambda(sigma: f32) -> f32 {
     let (alpha, sigma_eff) = sigma_to_alpha_sigma(sigma);
     alpha.ln() - sigma_eff.ln()
@@ -2783,7 +2636,6 @@ fn convert_epsilon_to_x0(sample: &[f32], eps: &[f32], sigma_edm: f32) -> Vec<f32
 fn sigma_to_t(sigma: f32, log_sigmas: &[f32]) -> i64 {
     let log_sigma = sigma.max(1e-10_f32).ln();
     // Train log-sigmas are ascending (low noise at idx 0 → high at idx N-1).
-    // Find the largest index where log_sigmas[i] <= log_sigma.
     let mut low_idx = 0_usize;
     for (i, &ls) in log_sigmas.iter().enumerate() {
         if ls > log_sigma { break; }
@@ -2808,8 +2660,7 @@ pub enum SchedulerKind {
     DpmPp2MKarras,
 }
 
-/// Runtime-selected scheduler for SD denoise. Constructed worker-side
-/// from `SchedulerKind` carried on `SdInpaintRequest`.
+/// Runtime-selected scheduler for SD denoise.
 pub enum Scheduler {
     Lcm(LcmScheduler),
     DpmPp2M(DpmPp2MScheduler),
