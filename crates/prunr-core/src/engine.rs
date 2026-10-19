@@ -269,6 +269,10 @@ pub(crate) enum EpSite<'a> {
     /// One part of a Stable Diffusion bundle. `ov_device` pins OpenVINO's
     /// device (bench only).
     SdPart { part: &'a str, ov_device: Option<&'a str> },
+    /// One part of a model run part by part: an engine's settings, with
+    /// what each part keeps of its own (CoreML's compiled model) apart
+    /// from the others'.
+    Part { part: &'a str, threads: usize },
 }
 
 /// OpenVINO's device for engines once the user lets it use the Intel GPU.
@@ -298,7 +302,7 @@ impl EpSite<'_> {
     /// shapes), and under AUTO it ran ~10% slower than the CPU.
     fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
         match self {
-            EpSite::Engine { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
+            EpSite::Engine { .. } | EpSite::Part { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
             EpSite::Fill { .. } => None,
             EpSite::SdPart { ov_device, .. } => *ov_device,
         }
@@ -324,7 +328,7 @@ impl EpKind {
                     // Heuristic conv search for the same reason: exhaustive
                     // benchmarks every new shape, the fixed default
                     // algorithm is often the slowest.
-                    EpSite::Engine { .. } => p
+                    EpSite::Engine { .. } | EpSite::Part { .. } => p
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
                         .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
                         .with_tf32(true)
@@ -338,7 +342,7 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
                 let dir = match site {
-                    EpSite::SdPart { part, .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
+                    EpSite::SdPart { part, .. } | EpSite::Part { part, .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
                     EpSite::Engine { .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
                 };
                 coreml_provider(dir.as_deref()).build()
@@ -354,7 +358,7 @@ impl EpKind {
                 // Uncapped, OpenVINO's TBB pool takes every logical core
                 // and oversubscribes against rayon (`sched_yield` ~2% of
                 // CLI batch wall time).
-                EpSite::Engine { threads } | EpSite::Fill { threads } => {
+                EpSite::Engine { threads } | EpSite::Fill { threads } | EpSite::Part { threads, .. } => {
                     let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
                     match site.ov_device(intel_gpu_chosen()) {
                         Some(device) => provider.with_device_type(device),
@@ -380,6 +384,17 @@ impl EpKind {
             },
         };
         dispatch.error_on_failure()
+    }
+
+    fn is_openvino(self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        {
+            self == EpKind::OpenVino
+        }
+        #[cfg(target_os = "macos")]
+        {
+            false
+        }
     }
 
     /// Whether sessions on this provider load and write ORT's
@@ -444,7 +459,7 @@ impl Skip {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) {
+    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) || pools_per_part(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
@@ -455,19 +470,28 @@ fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Op
 
 /// MIGraphX compiles a static graph for each input shape. A fill meets a
 /// new shape with every crop and SD with each tile layout, so each stroke
-/// would recompile for seconds to minutes; erasers stay off it. Engines
-/// see one shape per model and keep it.
+/// would recompile for seconds to minutes; a model run in parts sizes its
+/// crops to the image, so each new size would recompile every part. They
+/// stay off it. Engines see one shape per model and keep it.
 fn compiles_per_shape(model: prunr_models::ModelId, ep: EpKind) -> bool {
     #[cfg(target_os = "linux")]
     {
         ep == EpKind::MiGraphX
-            && prunr_models::descriptor(model).is_some_and(|d| d.category == prunr_models::ModelCategory::Inpaint)
+            && prunr_models::descriptor(model).is_some_and(|d| d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (model, ep);
         false
     }
+}
+
+/// OpenVINO keeps a memory pool per compiled part: 9.7 GB and 73 s
+/// compiling Nomos2's 30 parts on an i7-6700 (2026-10), where the CPU
+/// provider held 0.95 GB, compiled nothing, and ran the same 960×635
+/// image in 67 s against OpenVINO's 55 s.
+fn pools_per_part(model: prunr_models::ModelId, ep: EpKind) -> bool {
+    ep.is_openvino() && prunr_models::descriptor(model).is_some_and(|d| d.runs_in_parts())
 }
 
 /// What a walk down the ladder met: each provider that failed, with its
@@ -624,9 +648,15 @@ impl SessionPick {
 ///
 /// The session is behind a Mutex because `Session::run()` takes `&mut self`.
 pub struct OrtEngine {
-    session: Mutex<Session>,
+    sessions: Sessions,
     pick: SessionPick,
     model_kind: ModelKind,
+}
+
+/// One session, or a model cut into parts that run in turn.
+enum Sessions {
+    One(Mutex<Session>),
+    Parts(Box<crate::upscale::blocks::BlockNet>),
 }
 
 impl OrtEngine {
@@ -703,6 +733,10 @@ impl OrtEngine {
             .ok_or_else(|| CoreError::Model(format!("{model:?} is not a known model")))?;
         let kind = ModelKind::try_from(model)
             .map_err(|id| CoreError::Model(format!("{id:?} has no session kind")))?;
+        if let (Some(layout), Some(knobs)) = (descriptor.part_layout(), descriptor.upscale) {
+            let net = crate::upscale::blocks::NetShape { layout, image_input: knobs.input_name };
+            return Self::build_parts(kind, net, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor));
+        }
         Self::build_with(kind, intra_threads, gpu_eps_for(cpu_only), cpu_only, crate::upscale::pick_optimization_level(descriptor))
     }
 
@@ -747,7 +781,7 @@ impl OrtEngine {
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ep = CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             return Ok(Self {
-                session: Mutex::new(session),
+                sessions: Sessions::One(Mutex::new(session)),
                 pick: SessionPick { weights, ..SessionPick::on(CPU_NAME) },
                 model_kind: model,
             });
@@ -779,10 +813,72 @@ impl OrtEngine {
             Ok(session)
         }).map_err(|walk| CoreError::Inference(walk.reason()))?;
         Ok(Self {
-            session: Mutex::new(session),
+            sessions: Sessions::One(Mutex::new(session)),
             pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
             model_kind: model,
         })
+    }
+
+    /// A model cut into parts: every part on one provider, the first in
+    /// the GPU ladder that takes them all, else the CPU. Parts skip the
+    /// optimized-graph cache, which keys one graph per model.
+    fn build_parts(model: ModelKind, net: crate::upscale::blocks::NetShape, intra_threads: usize, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
+        let id: prunr_models::ModelId = model.into();
+        let paths = prunr_models::multi_part_paths(id)
+            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
+        let read = |path: &std::path::Path| std::fs::read(path).map_err(|e| CoreError::Inference(format!("{}: {e}", path.display())));
+        let mut onnx = Vec::with_capacity(paths.len());
+        let mut norms = None;
+        for (key, path) in &paths {
+            if *key == prunr_models::PART_NORMS {
+                norms = Some(read(path)?);
+            } else {
+                onnx.push((*key, read(path)?));
+            }
+        }
+        let norms = norms.ok_or_else(|| CoreError::Model(format!("{id:?}: no {} part", prunr_models::PART_NORMS)))?;
+        let norms = crate::upscale::blocks::Norms::parse(&norms, net.layout.features)?;
+        let commit_all = |ep: Option<EpKind>| -> Result<Vec<(&'static str, Session)>, Miss> {
+            onnx.iter().map(|(key, bytes)| {
+                let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
+                let (builder, coverage, provider) = match ep {
+                    Some(ep) => {
+                        let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
+                        (builder, coverage, ep.provider(id, EpSite::Part { part: key, threads: intra_threads }))
+                    }
+                    None => (builder, crate::ep_coverage::CoverageWatch::default(), CPU::default().with_arena_allocator(false).build()),
+                };
+                let mut built = builder.with_execution_providers([provider])
+                    .map_err(|e| Miss::Unusable(format!("ORT register {} EP failed: {e}", ep.map_or(CPU_NAME, |ep| ep.as_str()))))?;
+                let session = built.commit_from_memory(bytes)
+                    .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({key}): {e}"), suspect_cache: None })?;
+                coverage.report(id, Some(key));
+                Ok((*key, session))
+            }).collect()
+        };
+        let started = Instant::now();
+        let eps = gpu_eps_for(cpu_only);
+        let (sessions, pick) = match (!eps.is_empty()).then(|| walk_ladder("", id, Weights::Fp32, eps, |ep| commit_all(Some(ep)))) {
+            Some(Ok((sessions, ep, failed))) => (sessions, SessionPick { failed, ..SessionPick::on(ep.as_str()) }),
+            walked => {
+                let failed = match walked { Some(Err(walk)) => walk.failed, _ => Vec::new() };
+                let sessions = commit_all(None).map_err(|miss| CoreError::Inference(match miss {
+                    Miss::Unusable(e) | Miss::Failed { error: e, .. } => e,
+                }))?;
+                (sessions, SessionPick { failed, ..SessionPick::on(CPU_NAME) })
+            }
+        };
+        tracing::info!(?model, parts = sessions.len(), provider = %pick.provider, elapsed_ms = started.elapsed().as_millis() as u64, "part sessions committed");
+        let net = crate::upscale::blocks::BlockNet::new(sessions, norms, net)?;
+        Ok(Self { sessions: Sessions::Parts(Box::new(net)), pick, model_kind: model })
+    }
+
+    /// The model's parts, when it runs part by part.
+    pub(crate) fn parts(&self) -> Option<&crate::upscale::blocks::BlockNet> {
+        match &self.sessions {
+            Sessions::Parts(net) => Some(net),
+            Sessions::One(_) => None,
+        }
     }
 
     fn builder_with_base(intra_threads: usize, level: GraphOptimizationLevel) -> Result<ort::session::builder::SessionBuilder, CoreError> {
@@ -860,11 +956,16 @@ impl OrtEngine {
     where
         F: FnOnce(&mut Session) -> Result<T, CoreError>,
     {
-        let mut session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut session = self.one_session()?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut session)
+    }
+
+    /// The session, for a model that runs whole; a parted one has none.
+    fn one_session(&self) -> Result<&Mutex<Session>, CoreError> {
+        match &self.sessions {
+            Sessions::One(session) => Ok(session),
+            Sessions::Parts(_) => Err(CoreError::Inference(format!("{:?} runs part by part, not as one session", self.model_kind))),
+        }
     }
 
     /// Run a one-input f32 model on `data` shaped `shape`, returning its
@@ -910,10 +1011,7 @@ impl OrtEngine {
     where
         F: FnOnce(ndarray::ArrayView4<'_, f32>) -> Result<R, CoreError>,
     {
-        let mut session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut session = self.one_session()?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let input_name = session.inputs()[0].name().to_string();
         let output_name = session.outputs()[0].name().to_string();
 
@@ -1006,16 +1104,29 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 mod tests {
     use super::*;
 
-    /// Erasers never land on MIGraphX, which recompiles per crop size;
-    /// engines still use it.
+    /// Erasers and models run in parts never land on MIGraphX, which
+    /// recompiles per crop size; engines still use it.
     #[cfg(target_os = "linux")]
     #[test]
-    fn erasers_pass_migraphx_over_and_engines_keep_it() {
+    fn erasers_and_parted_models_pass_migraphx_over_and_engines_keep_it() {
         for d in prunr_models::REGISTRY.iter() {
-            let eraser = d.category == prunr_models::ModelCategory::Inpaint;
-            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), eraser || !prunr_models::is_ep_compatible(d.id, "MIGraphX"), "{:?}", d.id);
+            let per_shape = d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts();
+            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), per_shape || !prunr_models::is_ep_compatible(d.id, "MIGraphX"), "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
+    }
+
+    /// A model run in parts passes OpenVINO over, so the app's view of
+    /// where it runs (`model_runs_on`) matches the engine's; other
+    /// providers still take it.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn parted_models_pass_openvino_over_and_keep_cuda() {
+        for d in prunr_models::REGISTRY.iter() {
+            assert_eq!(pools_per_part(d.id, EpKind::OpenVino), d.runs_in_parts(), "{:?}", d.id);
+            assert!(!pools_per_part(d.id, EpKind::Cuda));
+        }
+        assert_eq!(skip_reason(prunr_models::ModelId::FourXNomos2RealPlksr, Weights::Fp32, EpKind::OpenVino), Some(Skip::Declared));
     }
 
     /// With Intel graphics on, OpenVINO engines are sized like a GPU's;

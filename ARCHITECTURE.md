@@ -345,7 +345,7 @@ Feather runs after the guided filter: sharpen to colour edges first, then soften
 
 ## Upscale
 
-Upscaling runs **in-process**: tiled `OrtEngine` inference on a background thread, outside the subprocess (`crates/prunr-core/src/upscale/`). Its tiler is separate from the LaMa inpaint tiler because the two have different shapes: upscale maps an image to scale × its size, while inpaint maps an image and mask to the same size. They share only the smoothstep seam weight.
+Upscaling runs **in-process**: tiled `OrtEngine` inference on a background thread, outside the subprocess (`crates/prunr-core/src/upscale/`), or part by part for a model that normalizes over its whole input. Its tiler is separate from the LaMa inpaint tiler because the two have different shapes: upscale maps an image to scale × its size, while inpaint maps an image and mask to the same size. They share only the smoothstep seam weight.
 
 Models are registry data: tile size, tile multiple, `working_set_mb`, an optional fp16 sibling, and `UpscaleModelKnobs` (native scale, window attention, input name, dtype).
 
@@ -354,7 +354,9 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 | Real-ESRGAN x4plus, 4x NMKD Siax-CX, 4x NMKD Superscale | 4× | 512 | 16 | Level3 |
 | Real-ESRGAN x2plus | 2× | 512, even | 16 | Level2 |
 | 4xNomos8kSCHAT-L (fp16) | 4× | 256, ×16 | 32 | Level2 |
+| 4xNomos2 RealPLKSR | 4× | parts, 256 crops | each part's reach | Level3 |
 
+- **Whole-input norms run part by part.** Nomos2 normalizes its features over the whole image (GroupNorm), so tiles toned on their own statistics leave seams no overlap hides (up to 158/255 on a photo). It ships cut at its 28 norms: 30 ONNX parts and the norms' weights. Each part runs crop by crop with a border covering its reach, and each norm takes the whole image's statistics, so the result matches a one-piece run within 2/255 at the RAM of a tiled one. OpenVINO is passed over for it (a memory pool per compiled part: 9.7 GB against the CPU provider's 0.95 GB).
 - **Level2 for any model with a tile multiple.** Level3 bakes the first tile's shape into the graph, and the next differently padded tile fails.
 - **Overlap follows window attention, not the tile multiple.** Window-attention models need two windows of overlap to hide seams; CNNs need only their receptive field.
 - **fp16 siblings** download automatically when a GPU EP is active. Dispatch reads the loaded session's input dtype, not the registry flag.
@@ -510,8 +512,8 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 |--------|--------|
 | `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED, the YuNet face finder (0.2 MB, so faces are found without a face model) |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, six upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
-| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts); restrictive licenses need an explicit accept |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
+| `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts), 4xNomos2 (cut at its norms); restrictive licenses need an explicit accept |
 
 `resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once; on-demand files are read at each load and dropped once the session has copied them, so a model used once doesn't hold its file's size for the rest of the run; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. In the GUI every surface says the same thing about a model that isn't installed (`views::get_model`: "Get <model> · <size>", from the registry) and opens the Store on that model's section; a chip whose model is missing shows "Get" on its face, and the Model picker lists every model, downloaded or not. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).
 

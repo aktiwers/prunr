@@ -96,13 +96,6 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
         sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
     },
-    // Own dynamic-shape export: Phhofm's published ONNX is fixed at 256×256.
-    ModelSpec {
-        id: prunr_models::ModelId::FourXNomos2RealPlksr,
-        name: "4xNomos2_realplksr_dysample.onnx",
-        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos2_realplksr_dysample.onnx",
-        sha256: "ec435c52cfc68bdf9b3e4b757bdd8078ce5daea70ff439a7e68de1a17262e24d",
-    },
     ModelSpec {
         id: prunr_models::ModelId::DdcolorTiny,
         name: "ddcolor_paper_tiny.onnx",
@@ -185,6 +178,20 @@ mod tests {
                      xtask/src/models.rs or document why this id is dev-mode-only.",
                 );
             }
+        }
+    }
+
+    /// xtask mirrors no downloaded bundle, so a row for one fetches a file
+    /// nothing reads: what a model that moved to parts leaves behind.
+    #[test]
+    fn no_xtask_row_is_for_a_downloaded_bundle() {
+        for spec in MODELS {
+            let source = prunr_models::descriptor(spec.id).map(|d| d.source);
+            assert!(
+                !matches!(source, Some(ModelSource::MultiPartOnDemand { .. })),
+                "xtask row {} is for {:?}, a downloaded bundle",
+                spec.name, spec.id,
+            );
         }
     }
 }

@@ -68,7 +68,13 @@ fn main() {
         worker_process::run_worker();
     }
 
-    std::thread::spawn(prunr_core::cache::remove_retired_root);
+    std::thread::spawn(|| {
+        prunr_core::cache::remove_retired_root();
+        let bytes = prunr_models::remove_retired_files();
+        if bytes > 0 {
+            tracing::info!(bytes, "removed model files an earlier version downloaded");
+        }
+    });
 
     if let Some(cli::Command::Bench(args)) = &cli.command {
         std::process::exit(cli::run_bench(args));

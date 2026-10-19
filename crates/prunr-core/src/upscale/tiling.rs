@@ -229,15 +229,21 @@ impl Band {
     }
 }
 
-/// The finished `tile` at `width × height` for its preview: the model's
-/// output resampled with Lanczos3, with the input's alpha. Costs one
-/// resample of the tile, a small share of its inference.
+/// The finished `tile` at `width × height` for its preview.
 fn preview_tile(input: &RgbaImage, inferred: &RgbImage, tile: &UpscaleTilePlacement, scale: u32, width: u32, height: u32) -> Vec<u8> {
     // A padded tile is copied out first: the filter would pull the padding in.
     let unpadded = (tile.padded_w != tile.w || tile.padded_h != tile.h)
         .then(|| image::imageops::crop_imm(inferred, 0, 0, tile.w * scale, tile.h * scale).to_image());
-    let rgb = crate::formats::resize_rgb_image_lanczos3(unpadded.as_ref().unwrap_or(inferred), width, height);
-    let alpha = GrayImage::from_fn(tile.w, tile.h, |ax, ay| image::Luma([input.get_pixel(tile.x + ax, tile.y + ay)[3]]));
+    preview_with_alpha(input, unpadded.as_ref().unwrap_or(inferred), (tile.x, tile.y, tile.w, tile.h), width, height)
+}
+
+/// `rgb`, the model's output for the `rect` (x, y, w, h) of `input`, at
+/// `width × height` for its preview: resampled with Lanczos3, with the
+/// input's alpha. Costs one resample of the rect, a small share of its
+/// inference.
+pub(super) fn preview_with_alpha(input: &RgbaImage, rgb: &RgbImage, (x, y, w, h): (u32, u32, u32, u32), width: u32, height: u32) -> Vec<u8> {
+    let rgb = crate::formats::resize_rgb_image_lanczos3(rgb, width, height);
+    let alpha = GrayImage::from_fn(w, h, |ax, ay| image::Luma([input.get_pixel(x + ax, y + ay)[3]]));
     let alpha = crate::formats::resize_gray_lanczos3(&alpha, width, height);
     rgb.pixels().zip(alpha.pixels()).flat_map(|(c, a)| [c[0], c[1], c[2], a[0]]).collect()
 }
