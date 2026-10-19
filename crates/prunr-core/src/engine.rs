@@ -419,7 +419,8 @@ pub(crate) enum Miss {
 /// Why the ladder passes a provider over without trying it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// The registry declares the model incompatible with it.
+    /// The registry declares the model incompatible with it, or the
+    /// provider cannot serve the model's kind of session by design.
     Declared,
     /// It failed these weights of the model on an earlier run, under the
     /// same drivers and runtime; skipped until they change or the list is
@@ -438,12 +439,29 @@ impl Skip {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if !prunr_models::is_ep_compatible(model, ep.as_str()) {
+    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
     } else {
         None
+    }
+}
+
+/// MIGraphX compiles a static graph for each input shape. A fill meets a
+/// new shape with every crop and SD with each tile layout, so each stroke
+/// would recompile for seconds to minutes; erasers stay off it. Engines
+/// see one shape per model and keep it.
+fn compiles_per_shape(model: prunr_models::ModelId, ep: EpKind) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        ep == EpKind::MiGraphX
+            && prunr_models::descriptor(model).is_some_and(|d| d.category == prunr_models::ModelCategory::Inpaint)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (model, ep);
+        false
     }
 }
 
@@ -981,6 +999,18 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Erasers never land on MIGraphX, which recompiles per crop size;
+    /// engines still use it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn erasers_pass_migraphx_over_and_engines_keep_it() {
+        for d in prunr_models::REGISTRY.iter() {
+            let eraser = d.category == prunr_models::ModelCategory::Inpaint;
+            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), eraser || !prunr_models::is_ep_compatible(d.id, "MIGraphX"), "{:?}", d.id);
+            assert!(!compiles_per_shape(d.id, EpKind::Cuda));
+        }
+    }
 
     /// With Intel graphics on, OpenVINO engines are sized like a GPU's;
     /// without it they share the host CPU.
