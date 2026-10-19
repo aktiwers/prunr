@@ -278,9 +278,20 @@ pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Clien
         .build()
 }
 
+/// The largest wheel we fetch (cuDNN) is about 770 MB; this leaves room
+/// for a newer one without trusting any size past it.
+const MAX_RESERVE_BYTES: u64 = 1536 * 1024 * 1024;
+
+/// What to reserve for a wheel PyPI says is `size_bytes`: a buffer grown
+/// by doubling holds the old and the new one at once, about 1.5 GB at the
+/// step past 512 MiB. A wrong size only costs regrowth.
+fn reserve_for(size_bytes: u64) -> usize {
+    usize::try_from(size_bytes.min(MAX_RESERVE_BYTES)).unwrap_or(0)
+}
+
 /// Streams chunks, fires progress per percentage point, polls cancel per
 /// chunk. `Content-Length` is not pre-allocated: it is untrusted, and a
-/// bogus 9999999999 would OOM.
+/// bogus 9999999999 would OOM; the PyPI size is, up to a cap.
 fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
@@ -297,7 +308,7 @@ fn download_wheel_attempt(
     let total = response.content_length().unwrap_or(info.size_bytes);
 
     let mut response = response;
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: Vec<u8> = Vec::with_capacity(reserve_for(info.size_bytes));
     let mut chunk = [0u8; 64 * 1024];
     let mut last_pct: u64 = u64::MAX;
     loop {
@@ -440,6 +451,15 @@ pub const DYLIB_NAME: &str = if cfg!(windows) {
 
 #[cfg(test)]
 mod tests {
+    /// A wheel's buffer is reserved whole from its PyPI size, so it never
+    /// regrows; a missing or absurd size reserves nothing past the cap.
+    #[test]
+    fn a_wheel_buffer_is_reserved_from_its_pypi_size_up_to_a_cap() {
+        assert_eq!(super::reserve_for(766_000_000), 766_000_000);
+        assert_eq!(super::reserve_for(0), 0);
+        assert_eq!(super::reserve_for(9_999_999_999), super::MAX_RESERVE_BYTES as usize);
+    }
+
     use super::*;
 
     /// `pick_wheel_on` for a host with glibc 2.28, the oldest that runs
