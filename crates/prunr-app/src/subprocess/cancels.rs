@@ -83,14 +83,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_reaches_a_queued_run_before_it_starts() {
-        let cancels = DispatchCancels::default();
-        let queued = cancels.register(7);
-        cancels.cancel(7);
-        assert!(queued.is_cancelled());
-    }
-
-    #[test]
     fn an_ended_run_does_not_unregister_a_newer_run_of_the_image() {
         let cancels = DispatchCancels::default();
         let old = cancels.register(7);

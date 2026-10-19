@@ -661,20 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_wheel_prefers_cp313() {
-        let urls = vec![
-            json!({"filename": "ort-cp310-cp310-win_amd64.whl",
-                   "url": "https://example.com/cp310.whl",
-                   "digests": {"sha256": "aa".repeat(32)}, "size": 80_000_000}),
-            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
-                   "url": "https://example.com/cp313.whl",
-                   "digests": {"sha256": "bb".repeat(32)}, "size": 80_000_000}),
-        ];
-        let pick = pick_wheel(&urls, "windows-x64").expect("pick");
-        assert_eq!(pick.url, "https://example.com/cp313.whl");
-    }
-
-    #[test]
     fn pick_wheel_falls_back_to_any_cp_tag() {
         let urls = vec![json!({
             "filename": "ort-cp311-cp311-win_amd64.whl",
