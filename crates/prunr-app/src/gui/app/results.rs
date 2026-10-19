@@ -271,24 +271,19 @@ impl PrunrApp {
         let Some(progress) = self.runtime_install.as_mut() else { return };
         while let Ok(event) = progress.rx.try_recv() {
             progress.last_event = event.clone();
-            match event {
-                InstallEvent::Done { .. } => {
-                    let name = progress.target.display_name();
-                    self.toasts.success(format!("{name} installed. Restart Prunr to use them"));
-                    self.runtime_install = None;
-                    self.refresh_install_cache();
-                    return;
-                }
+            let name = progress.target.display_name();
+            let outcome = match event {
+                InstallEvent::Done { .. } => Ok(format!("{name} installed. Restart Prunr to use them")),
                 InstallEvent::Failed { error } => {
-                    let name = progress.target.display_name();
                     tracing::warn!(target = name, %error, "install failed");
-                    self.toasts.error(format!("Could not install {name}: {error}"));
-                    self.runtime_install = None;
-                    self.refresh_install_cache();
-                    return;
+                    Err(format!("Could not install {name}: {error}"))
                 }
-                _ => {}
-            }
+                _ => continue,
+            };
+            self.toasts.outcome(outcome);
+            self.runtime_install = None;
+            self.refresh_install_cache();
+            return;
         }
         ctx.request_repaint();
     }
@@ -947,16 +942,10 @@ impl PrunrApp {
             self.on_copy_done(note, took);
         }
         while let Ok(outcome) = self.batch.bg_io.save_done_rx.try_recv() {
-            match outcome {
-                Ok(msg) => self.toasts.success(msg),
-                Err(msg) => self.toasts.error(msg),
-            };
+            self.toasts.outcome(outcome);
         }
         while let Ok(outcome) = self.batch.bg_io.removed_rx.try_recv() {
-            match outcome {
-                Ok(msg) => self.toasts.success(msg),
-                Err(msg) => self.toasts.error(msg),
-            };
+            self.toasts.outcome(outcome);
             self.refresh_install_cache();
             landed = true;
         }
