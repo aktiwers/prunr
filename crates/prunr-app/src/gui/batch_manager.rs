@@ -378,11 +378,9 @@ impl BatchManager {
 
     fn spawn_decode(&self, item_id: u64, bytes: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static) {
         let tx = self.bg_io.decode_tx.clone();
-        let slots = self.bg_io.decode_slots.clone();
-        std::thread::spawn(move || {
-            // Park here past `available_parallelism()` so a 50-image
-            // Process All doesn't hold 50 × ~80 MB transient peaks.
-            let _slot = slots.acquire();
+        // A slot past `available_parallelism()` waits, so a 50-image
+        // Process All doesn't hold 50 × ~80 MB transient peaks.
+        self.bg_io.decode_slots.spawn(move || {
             // The `DynamicImage` (~50 MB at 4 K RGBA) and the encoded
             // bytes both drop before the channel send, so concurrent
             // decodes don't pile up DynamicImage + RGBA per thread.
@@ -427,9 +425,7 @@ impl BatchManager {
     /// `bg_io.bg_image_rx`.
     pub(crate) fn request_bg_image(&self, item_id: u64, path: std::path::PathBuf, picked: bool) {
         let tx = self.bg_io.bg_image_tx.clone();
-        let slots = self.bg_io.decode_slots.clone();
-        std::thread::spawn(move || {
-            let _slot = slots.acquire();
+        self.bg_io.decode_slots.spawn(move || {
             let result = prunr_core::load_image_from_path(&path)
                 .map(|img| {
                     let hash = super::item::bg_image_content_hash(&img);
@@ -452,9 +448,7 @@ impl BatchManager {
     ) {
         let tx = self.bg_io.filter_only_tx.clone();
         let source = source.clone();
-        let slots = self.bg_io.decode_slots.clone();
-        std::thread::spawn(move || {
-            let _slot = slots.acquire();
+        self.bg_io.decode_slots.spawn(move || {
             let load = || source.load_bytes().map_err(super::item::source_unreadable);
             // Drop bytes / DynamicImage / RGBA before send so concurrent
             // threads don't pile per-image peaks.
@@ -491,10 +485,8 @@ impl BatchManager {
         result: Option<super::item::Pixels>,
     ) {
         let tx = self.bg_io.thumb_tx.clone();
-        let slots = self.bg_io.decode_slots.clone();
         if let Some(result) = result {
-            std::thread::spawn(move || {
-                let _slot = slots.acquire();
+            self.bg_io.decode_slots.spawn(move || {
                 // A parked result unpacks here, off the UI thread.
                 let image = result.load().map(|rgba| {
                     let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
@@ -505,8 +497,7 @@ impl BatchManager {
             });
         } else {
             let source = source.clone();
-            std::thread::spawn(move || {
-                let _slot = slots.acquire();
+            self.bg_io.decode_slots.spawn(move || {
                 // Source bytes, DynamicImage and full RGBA drop before the send: on a
                 // 50-image batch they were N × ~50 MB co-resident.
                 let thumb = (|| -> Option<image::RgbaImage> {

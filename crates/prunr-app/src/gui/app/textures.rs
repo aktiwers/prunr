@@ -118,10 +118,8 @@ impl PrunrApp {
         };
         item.backdrop_tex_pending = Some(key);
         let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
-        let slots = self.batch.bg_io.decode_slots.clone();
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _slot = slots.acquire();
+        self.batch.bg_io.decode_slots.spawn(move || {
             let ci = build().map(|rgba| crate::gui::image_texture::PreparedImage::from_rgba(&rgba));
             let _ = tx.send((item_id, key, ci));
             ctx.request_repaint();
