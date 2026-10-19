@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
-use crate::subprocess::protocol::{EdgeCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
+use crate::subprocess::protocol::{EdgeCacheFile, TensorCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
 use crate::subprocess::manager::{SubprocessManager, WorkerLines};
 use crate::subprocess::ipc::read_and_delete;
 pub(crate) use crate::subprocess::first_look::Shown;
@@ -930,13 +930,11 @@ fn handle_subprocess_event(
         }
         SubprocessEvent::ImageDone {
             item_id, result_path, width, height, active_provider,
-            tensor_cache_path, tensor_cache_height, tensor_cache_width,
-            edge_cache: edge_cache_file, spare_scales,
+            tensor_cache, edge_cache: edge_cache_file, spare_scales,
         } => {
             let result = read_result_image(&result_path, width, height, &active_provider);
-            let seg = read_raw_seg_tensor(
-                tensor_cache_path.as_ref(), tensor_cache_height, tensor_cache_width, state.config.engines.model,
-            ).and_then(CompressedTensor::from_raw);
+            let seg = read_raw_seg_tensor(tensor_cache.as_ref(), state.config.engines.model)
+                .and_then(CompressedTensor::from_raw);
             let edges = read_raw_edge_tensors(edge_cache_file.as_ref())
                 .and_then(|raw| CompressedEdgeTensors::from_raw(RawEdgeTensors { spare: spare_scales, ..raw }));
 
@@ -993,17 +991,11 @@ fn read_result_image(
         .ok_or_else(|| "The model's result could not be read. Process again.".to_string())
 }
 
-fn read_raw_seg_tensor(
-    path: Option<&std::path::PathBuf>,
-    height: Option<u32>,
-    width: Option<u32>,
-    model: ModelKind,
-) -> Option<RawSegTensor> {
-    let p = path?;
+fn read_raw_seg_tensor(file: Option<&TensorCacheFile>, model: ModelKind) -> Option<RawSegTensor> {
+    let TensorCacheFile { path: p, height: h, width: w } = file?;
+    let (h, w) = (*h, *w);
     let bytes = read_and_delete(p)?;
     let data = crate::subprocess::ipc::le_bytes_to_f32s(&bytes);
-    let h = height?;
-    let w = width?;
     let expected = (h as usize) * (w as usize);
     if data.len() != expected {
         tracing::error!(
