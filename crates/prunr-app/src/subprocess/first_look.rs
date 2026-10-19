@@ -65,6 +65,7 @@ impl FirstLook {
     }
 
     /// Whether the first-look model is loaded.
+    #[cfg(test)]
     pub fn is_loaded(&self) -> bool {
         lock(&self.session).is_some()
     }
