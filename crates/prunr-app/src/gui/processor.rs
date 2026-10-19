@@ -1059,7 +1059,7 @@ impl Processor {
         self.inpaint_runs.insert(item_id, sink);
         if tuning.model.is_sd_family() {
             // The SD subprocess reports through the bridge to the run's sink.
-            self.dispatch_inpaint_sd(item_id, generation, &image, &correction, &tuning, progress);
+            self.dispatch_inpaint_sd(item_id, generation, image, correction, tuning, progress);
             return;
         }
         let tx = self.inpaint_tx.clone();
@@ -1182,26 +1182,22 @@ impl Processor {
     }
 
     fn dispatch_inpaint_sd(
-        &mut self,
+        &self,
         item_id: u64,
         generation: u64,
-        image: &super::item::Pixels,
-        correction: &super::item::Region,
-        tuning: &InpaintTuning,
+        image: super::item::Pixels,
+        correction: super::item::Region,
+        tuning: InpaintTuning,
         progress: prunr_core::Progress,
     ) {
         // PNG-encode + temp-file write is 150-300 ms per stroke at 4K:
         // off the UI thread.
-        let image = image.clone();
-        let correction = correction.clone();
-        let tuning = tuning.clone();
         let bridge_tx = self.inpaint_bridge_tx.clone();
         let inpaint_tx = self.inpaint_tx.clone();
-        // Checked before the work and before the bridge dispatch, so a
-        // mid-encode Esc never runs the SD bundle on a discarded stroke.
-        let cancel = self.inpaint_cancels.get(&item_id).cloned();
         rayon::spawn(move || {
-            let cancelled = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+            // Checked before the work and before the bridge dispatch, so a
+            // mid-encode Esc never runs the SD bundle on a discarded stroke.
+            let cancelled = || progress.is_cancelled();
             let send_cancelled = || {
                 let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
             };
