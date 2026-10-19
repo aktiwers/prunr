@@ -137,8 +137,8 @@ pub fn resize_rgb_lanczos3(img: &DynamicImage, dst_width: u32, dst_height: u32) 
     }
 }
 
-/// Load an image from a file path. Format detected by file extension.
-/// Supports PNG, JPEG, WebP, BMP, and SVG (rasterized via resvg).
+/// Format by file extension: PNG, JPEG, WebP, BMP, or SVG (rasterized
+/// via resvg).
 pub fn load_image_from_path(path: &Path) -> Result<DynamicImage, CoreError> {
     if has_svg_extension(path) {
         let bytes = std::fs::read(path).map_err(CoreError::Io)?;
@@ -147,9 +147,8 @@ pub fn load_image_from_path(path: &Path) -> Result<DynamicImage, CoreError> {
     image::open(path).map_err(CoreError::from)
 }
 
-/// Load an image from raw bytes. Format detected by content sniff. SVG is
-/// detected first (XML prologue / `<svg`); otherwise the `image` crate's
-/// magic-byte detection takes over for PNG/JPEG/WebP/BMP.
+/// Format by content sniff: SVG first, then the `image` crate's magic
+/// bytes for PNG/JPEG/WebP/BMP.
 pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     if looks_like_svg(bytes) {
         return rasterize_svg(bytes);
@@ -167,11 +166,8 @@ fn has_svg_extension(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
 }
 
-/// Sniff the leading bytes for an SVG marker. Allows leading whitespace +
-/// optional UTF-8 BOM. Probes only the first 512 bytes. We deliberately
-/// match `<?xml` and `<svg` only — `<!--` and `<!DOCTYPE` would false-
-/// positive on non-SVG XML or HTML; SVG that starts with a leading
-/// comment can still be loaded by extension via `load_image_from_path`.
+/// `<?xml` or `<svg` within the first 512 bytes, after whitespace and a
+/// BOM. Not `<!--` or `<!DOCTYPE`: those match non-SVG XML and HTML.
 fn looks_like_svg(bytes: &[u8]) -> bool {
     let probe = &bytes[..bytes.len().min(512)];
     let probe = probe.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(probe);
@@ -195,9 +191,7 @@ fn rasterize_svg(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
         .ok_or_else(|| CoreError::ImageFormat("SVG render: invalid dimensions".into()))?;
     resvg::render(&tree, Transform::from_scale(scale, scale), &mut pixmap.as_mut());
 
-    // tiny_skia stores premultiplied RGBA; demultiply so the result matches
-    // the alpha convention used by the rest of the pipeline (the seg models
-    // expect straight RGB, and our compositor unmultiplies anyway).
+    // tiny_skia stores premultiplied RGBA; the pipeline is straight alpha.
     let mut rgba = pixmap.take();
     unmultiply_alpha(&mut rgba);
     let img = RgbaImage::from_raw(render_w, render_h, rgba)
@@ -265,9 +259,7 @@ pub fn exceeds_large_image_limit(w: u32, h: u32) -> bool {
     w > LARGE_IMAGE_LIMIT || h > LARGE_IMAGE_LIMIT
 }
 
-/// Check whether the image exceeds the large image limit (8000px in either dimension).
-/// Returns Some(CoreError::LargeImage) if exceeded; None otherwise.
-/// The caller decides what to do: prompt user, auto-downscale, or abort.
+/// `Some(CoreError::LargeImage)` when either side exceeds `LARGE_IMAGE_LIMIT`.
 pub fn check_large_image(img: &DynamicImage) -> Option<CoreError> {
     let (w, h) = (img.width(), img.height());
     if exceeds_large_image_limit(w, h) {
@@ -285,9 +277,7 @@ pub fn fit_long_side(w: u32, h: u32, max_side: u32) -> (u32, u32) {
     (side(w), side(h))
 }
 
-/// Downscale an image so its largest dimension does not exceed max_dim.
-/// Uses Lanczos3 resampling. Preserves aspect ratio.
-/// Default max_dim: DOWNSCALE_TARGET (4096).
+/// Lanczos3 downscale so the long side is at most `max_dim`, aspect kept.
 pub fn downscale_image(img: DynamicImage, max_dim: u32) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let largest = w.max(h);
@@ -328,8 +318,8 @@ pub(crate) fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
 ///   pixels stay transparent
 /// - `Tile`: repeated at native size, fully covers
 ///
-/// Sequential for the same reason as `apply_background_color` (subprocess
-/// rayon worker — nested parallelism deadlocks).
+/// Sequential: it runs inside a subprocess rayon worker, where nested
+/// parallelism deadlocks.
 pub fn apply_background_image(
     img: &mut RgbaImage,
     bg: &DynamicImage,
@@ -406,11 +396,8 @@ fn build_bg_layer(
     std::borrow::Cow::Owned(out)
 }
 
-/// Stream-encode an RgbaImage into a `Write` sink (typically
-/// `BufWriter<File>`). Skips the intermediate `Vec<u8>` that
-/// `encode_rgba_png` allocates — relevant when the caller would
-/// immediately `fs::write` the bytes anyway. Saves 5–30 MB transient
-/// per encode at 4 K. Sink is flushed by the caller.
+/// Fast-compression PNG streamed into `w`, without `encode_rgba_png`'s
+/// intermediate buffer (5–30 MB at 4K). The caller flushes `w`.
 pub fn encode_rgba_png_into<W: std::io::Write>(img: &RgbaImage, w: W) -> Result<(), CoreError> {
     write_fast_png(w, img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
 }
@@ -427,10 +414,7 @@ fn write_kept_png<W: std::io::Write>(w: W, bytes: &[u8], width: u32, height: u32
         .map_err(CoreError::from)
 }
 
-/// Encode an RgbaImage as PNG bytes with fast compression. Convenience
-/// wrapper over `encode_rgba_png_into` for callers that need owned bytes
-/// (e.g. shipping over a channel). Streaming callers writing to a file
-/// should use `encode_rgba_png_into` directly.
+/// `encode_rgba_png_into` as owned bytes.
 pub fn encode_rgba_png(img: &RgbaImage) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(img.as_raw().len() / 2);
     encode_rgba_png_into(img, &mut buf)?;

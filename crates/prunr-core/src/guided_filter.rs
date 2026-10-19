@@ -24,8 +24,6 @@ pub fn guided_filter_alpha(
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
 
-    // Convert guide to grayscale luminance [0,1] and mask to [0,1],
-    // and compute element-wise products for box_filter in one pass.
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
     let mut ii = vec![0.0f32; n]; // I*I
@@ -35,9 +33,7 @@ pub fn guided_filter_alpha(
     const REC601_R: f32 = 0.299;
     const REC601_G: f32 = 0.587;
     const REC601_B: f32 = 0.114;
-    // `guide: &RgbaImage` is part of the signature — 4 bytes per pixel
-    // (RGBA). Hardcoded so `par_chunks_exact(4)` lowers to a tight
-    // stride without runtime division.
+    // A constant so `par_chunks_exact` lowers to a fixed stride.
     const RGBA_BYTES_PER_PIXEL: usize = 4;
     debug_assert_eq!(guide.as_raw().len(), n * RGBA_BYTES_PER_PIXEL);
 
@@ -56,21 +52,17 @@ pub fn guided_filter_alpha(
             *ipv = g * m;
         });
 
-    // --- Box filter calls 1-4 in parallel ---
     // Four row-sum scratches alive at once is the peak of the whole
     // filter. Do NOT pair them to save planes: measured slower (an open
-    // RAM-for-speed trade, see ARCHITECTURE.md).
+    // RAM-for-speed trade).
     let ((mean_i, mean_p), (mean_ii, mean_ip)) = rayon::join(
         || rayon::join(|| box_filter(&guide_f, w, h, radius), || box_filter(&mask_f, w, h, radius)),
         || rayon::join(|| box_filter(&ii, w, h, radius), || box_filter(&ip, w, h, radius)),
     );
     drop(mask_f);
 
-    // Compute a and b element-wise: a = cov_ip / (var_i + eps), b = mean_p - a * mean_i.
-    // Reuse ii/ip buffers for a/b to avoid allocation.
-    // `var_i.max(0.0)` guards against sub-epsilon negative variance from f32
-    // rounding on flat regions — would otherwise feed `/(var+eps)` a value
-    // below `eps` and amplify noise on completely uniform input.
+    // f32 rounding on flat regions can push var_i below zero, which
+    // `/(var + eps)` would amplify into noise: hence `.max(0.0)`.
     let mut a_buf = ii; // reuse
     let mut b_buf = ip; // reuse
     a_buf
@@ -91,8 +83,7 @@ pub fn guided_filter_alpha(
 
     drop((mean_ii, mean_ip));
 
-    // --- Box filter calls 5-6 in parallel, into the two means that are
-    // no longer needed (saves faulting in two fresh planes) ---
+    // Into the two spent means: saves faulting in two fresh planes.
     let (mut mean_a, mut mean_b) = (mean_i, mean_p);
     rayon::join(
         || box_filter_into(&a_buf, w, h, radius, &mut mean_a),
@@ -100,10 +91,8 @@ pub fn guided_filter_alpha(
     );
     drop((a_buf, b_buf));
 
-    // Output: q = mean_a * I_original + mean_b. Reuse the `guide_f`
-    // luminance buffer instead of recomputing 0.299·R + 0.587·G +
-    // 0.114·B per output pixel — saves ~3 mul + 2 add per pixel
-    // (~36 M FMAs at 4K); every other plane is already freed.
+    // q = mean_a · I + mean_b, reusing the `guide_f` luminance rather
+    // than recomputing it per pixel.
     let mut out = GrayImage::new(w, h);
     out.as_mut()
         .par_iter_mut()
@@ -119,10 +108,6 @@ pub fn guided_filter_alpha(
 
 /// O(1)-per-pixel box mean, windows clipped at the borders and averaged
 /// over the pixels they cover.
-///
-/// Returns a newly-allocated output buffer. For inner-loop callers that
-/// run many filters in sequence, use [`box_filter_into`] to reuse a
-/// caller-owned output buffer and skip the per-call allocation.
 pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
     let mut out = vec![0.0f32; src.len()];
     box_filter_into(src, w, h, radius, &mut out);
@@ -140,8 +125,8 @@ pub(crate) fn box_blur3_into(buf: &mut Vec<f32>, w: u32, h: u32, radius: u32, sc
     }
 }
 
-/// Buffer-reusing variant: writes the filtered result into `dst` (which
-/// must equal `src.len()`). One `src`-sized scratch holds the row sums.
+/// [`box_filter`] into `dst` (same length as `src`). One `src`-sized
+/// scratch holds the row sums.
 ///
 /// Two sliding-window passes (rows, then columns) with f64 running sums.
 /// Do NOT go back to an f32 integral image: its sums grow with the area
