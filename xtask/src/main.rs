@@ -21,12 +21,8 @@ fn zst_sibling(onnx_path: &Path) -> PathBuf {
     onnx_path.with_extension("onnx.zst")
 }
 
-/// Copy `src` to where the app downloads `id` (the registry-versioned
-/// filename in the user data dir), so the production OnDemand path
-/// (`prunr_models::resolve_bytes`) resolves it without filesystem-shim
-/// heuristics. Bundled and multi-part models have no such place and
-/// are skipped: bundled ones live in the binary, and the production
-/// DownloadManager handles multi-part bundles.
+/// Copy `src` to where the app downloads `id`, so dev runs take the
+/// production OnDemand path. Bundled and multi-part models are skipped.
 fn mirror_to_user_data_dir(src: &Path, id: prunr_models::ModelId) -> anyhow::Result<()> {
     let Some(dst) = prunr_models::download_path(id) else { return Ok(()) };
     if let Some(dir) = dst.parent() {
@@ -82,9 +78,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
         value::Tensor,
     };
 
-    // ort::Error is generic; anyhow::Context's blanket impl doesn't fit,
-    // so we wrap each ORT-returning call with anyhow!. Use a small alias
-    // to keep the wrapping uniform.
+    // ort::Error doesn't fit anyhow::Context's blanket impl.
     fn ort_err<E: std::fmt::Display>(stage: &'static str) -> impl FnOnce(E) -> anyhow::Error {
         move |e| anyhow::anyhow!("{stage}: {e}")
     }
@@ -253,9 +247,7 @@ fn fetch_models() -> anyhow::Result<()> {
         mirror_to_user_data_dir(&dest, spec.id)?;
     }
 
-    // Catch any models with stale .zst (.onnx newer than .zst, or .zst missing).
-    // Belt-and-braces for the case where someone fetched models with an older
-    // xtask and the .zst step never ran.
+    // Recompress a stale or missing .zst (e.g. fetched by an older xtask).
     for spec in MODELS {
         let dest = Path::new(MODELS_DIR).join(spec.name);
         if !dest.exists() { continue; }
@@ -293,15 +285,12 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Download + extract a `onnxruntime-*` PyPI wheel.
 ///
 /// Default target: `<user data>/prunr/runtimes/<package>-<version>-<rid>/`
-/// (the runtime store, hot-loaded by `ort_runtime::resolve_dylib_path`).
+/// (the runtime store).
 ///
-/// `--stage-to <DIR>`: extract directly into `<DIR>/` instead of the
-/// runtime store. CI release packaging uses this to bundle the default
-/// runtime next to the binary (the CPU build on Linux, the DirectML
-/// build with its DirectML.dll on Windows), satisfying `bundled_dylib`'s
-/// `<exe>/runtime/libonnxruntime.{so,dylib,dll}` lookup. Path-safety
-/// guard (refuse to wipe a path whose parent isn't `runtimes`) does
-/// NOT apply when staging — caller picks the path.
+/// `--stage-to <DIR>`: extract into `<DIR>/` instead; CI release packaging
+/// bundles the default runtime next to the binary this way. The guard
+/// that refuses to wipe a path whose parent isn't `runtimes` does NOT
+/// apply when staging.
 ///
 /// Usage:
 ///   cargo xtask install-runtime <package> <version> [target-name]
@@ -311,12 +300,6 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 ///   cargo xtask install-runtime onnxruntime-openvino 1.24.1
 ///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
 ///   cargo xtask install-runtime onnxruntime-directml 1.24.1 --stage-to runtime-stage
-///
-/// Skips Python bindings (`onnxruntime_pybind11_state.cpython-*.so`,
-/// `*.py` sources) since prunr links via Rust ort. Strips the version
-/// suffix off `libonnxruntime.so.<ver>` (Linux) and
-/// `libonnxruntime.<ver>.dylib` (macOS) so the canonical name is what
-/// `prunr_app::ort_runtime::resolve_dylib_path()` picks up.
 fn install_runtime() -> anyhow::Result<()> {
     use prunr_runtime_install as ri;
     let package = std::env::args().nth(2)
@@ -324,8 +307,6 @@ fn install_runtime() -> anyhow::Result<()> {
     let version = std::env::args().nth(3)
         .ok_or_else(|| anyhow::anyhow!("missing <version> arg, e.g. 1.24.1"))?;
 
-    // Either `--stage-to <DIR>` (CI bundle path) or a positional
-    // target-name (runtime store path under data_dir).
     let mut stage_to: Option<PathBuf> = None;
     let mut target_name: Option<String> = None;
     let extra: Vec<String> = std::env::args().skip(4).collect();
@@ -337,9 +318,7 @@ fn install_runtime() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("--stage-to requires a directory argument"))?));
             i += 2;
         } else if arg.starts_with("--") {
-            // Fail loud on unknown flags so a typo like `--stagee-to`
-            // doesn't silently get swallowed as a positional target-name
-            // and create `<data_dir>/runtimes/--stagee-to/`.
+            // A typo like `--stagee-to` must not become a target-name.
             anyhow::bail!("unknown flag: {arg}");
         } else {
             target_name = Some(arg.clone());
@@ -356,10 +335,7 @@ fn install_runtime() -> anyhow::Result<()> {
     println!("Package:  {package} {version}");
 
     let target_dir = if let Some(stage) = &stage_to {
-        // Defense-in-depth: reject absolute paths and any `..`
-        // component so a typo like `--stage-to ..` (which would
-        // delete the parent of cwd a few lines below via
-        // `remove_dir_all`) fails loud instead of damaging.
+        // The target is wiped below: a typo like `--stage-to ..` must fail.
         if stage.is_absolute() {
             anyhow::bail!("--stage-to must be a relative path: {}", stage.display());
         }
@@ -397,8 +373,7 @@ fn install_runtime() -> anyhow::Result<()> {
         }
     };
     let mut hooks = ri::DownloadHooks::progress_only(&mut on_progress);
-    // SHA verification is folded into download_wheel's retry loop —
-    // bytes returning here are already verified.
+    // Already SHA-verified inside the retry loop.
     let bytes = ri::download_wheel(&wheel, &mut hooks).map_err(|e| anyhow::anyhow!(e))?;
 
     if target_dir.exists() {
@@ -419,17 +394,10 @@ fn install_runtime() -> anyhow::Result<()> {
 
 /// Render side-by-side `<before | after | diff>` triptych PNGs for any
 /// `expected.png` under `crates/prunr-core/tests/golden_data/{postprocess,e2e}/`
-/// that differs from its `git HEAD` version. Run after `UPDATE_GOLDEN=1 cargo
-/// test ...` regenerates expected PNGs — the triptychs let a reviewer visually
-/// inspect a math-changing refactor before committing the golden update.
+/// that differs from its `git HEAD` version, after `UPDATE_GOLDEN=1 cargo
+/// test ...` regenerates them.
 ///
-/// "before" = bytes from `git show HEAD:<path>`
-/// "after"  = bytes on disk (the regenerated expected.png)
-/// "diff"   = per-pixel max channel diff, scaled ×4 + clamped to 255 for
-///            visibility (small differences would otherwise be invisible).
-///
-/// Output: `golden-diffs/<tier>/<id>.png` (the directory is gitignored —
-/// triptychs are reviewer artifacts, not committed).
+/// Output: `golden-diffs/<tier>/<id>.png` (gitignored).
 ///
 /// Args (positional, all optional):
 ///   render-golden-diff [--phase postprocess|e2e|both] [--id <pattern>]
@@ -577,7 +545,7 @@ fn render_golden_diff() -> anyhow::Result<()> {
 }
 
 enum GitShowErr {
-    /// File doesn't exist in HEAD (a brand-new fixture). Caller should skip.
+    /// File doesn't exist in HEAD (a brand-new fixture).
     NotInIndex,
     /// Anything else (binary not present, repo not initialized, etc).
     Other(String),
