@@ -52,6 +52,13 @@ impl Toasts {
         #[cfg(test)] self.2.push(("error", caption.clone()));
         self.0.error(wrap(&caption))
     }
+    /// A success toast for `Ok`, an error toast for `Err`.
+    pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
+        match outcome {
+            Ok(caption) => self.success(caption),
+            Err(caption) => self.error(caption),
+        }
+    }
 
     #[cfg(test)]
     pub fn len_for_test(&self) -> usize {
