@@ -8,8 +8,6 @@ use image::RgbaImage;
 
 use crate::color::{lab_to_srgb, srgb_to_lab};
 
-// ── Public API ─────────────────────────────────────────────────────────────
-
 /// `src` through an unsharp mask. `strength` in [-1.0, 1.0]: 0 changes
 /// nothing, positive sharpens (`in + strength · (in − blur)`), negative
 /// blends toward the blur. `sigma` is the blur radius in output pixels;
@@ -35,15 +33,10 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
     out
 }
 
-/// Per-pixel lerp from the AI upscale toward a bicubic-resized
-/// version of the original source. `weight` is the AI weight:
-///   - 1.0 = full AI (no-op early return).
-///   - 0.0 = full bicubic.
-///
-/// Caller MUST ensure `bicubic_source.dimensions() == img.dimensions()`.
-/// Enforced by `debug_assert_eq!`; release builds cap iteration to the
-/// shorter pixel count rather than panicking.
-/// Alpha is from the AI input — NOT lerped from bicubic.
+/// Per-pixel lerp from the AI upscale toward a bicubic-resized source;
+/// `weight` is the AI share (1.0 = unchanged, 0.0 = full bicubic). Alpha
+/// stays the AI's. `bicubic_source` must match `img`'s size; release
+/// builds stop at the shorter pixel count rather than panic.
 pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f32) {
     debug_assert_eq!(
         img.dimensions(),
@@ -59,31 +52,21 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
         for c in 0..3usize {
             px[c] = crate::math::round_u8(px[c] as f32 * w + src[c] as f32 * (1.0 - w));
         }
-        // channel 3 (alpha): from the AI input unchanged
     });
 }
 
-/// Reinhard Lab-space mean+stddev color transfer. Snaps `target`'s
-/// per-channel Lab statistics to match `source`. Compensates for
-/// the upscale model's color drift.
-///
-/// `source` and `target` may have different dimensions — the
-/// transfer uses image-wide statistics, not per-pixel pairing.
-///
-/// Variance guard: `stddev.max(1e-6)` before division. Without
-/// this, a uniform-color source (stddev = 0) produces NaN pixels.
-///
-/// Alpha unchanged. Rows run in parallel and the statistics are folded
-/// as they go, so no Lab copy of either image is kept: no working set
-/// beyond a few numbers per thread.
+/// Reinhard Lab mean+stddev transfer of `source`'s statistics onto
+/// `target`, against the model's colour drift. Sizes may differ (image-wide
+/// statistics). Alpha unchanged. Statistics fold as rows go, so no Lab
+/// copy is kept: no working set beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     color_match_to(target, &LabStats::of(source));
 }
 
-/// `apply_color_match` toward a source whose statistics are `s`.
 fn color_match_to(target: &mut RgbaImage, s: &LabStats) {
     use rayon::prelude::*;
     let t = LabStats::of(target);
+    // A uniform-colour target (stddev 0) would otherwise give NaN pixels.
     let scale = |i: usize| s.std[i] / t.std[i].max(1e-6);
     let (kl, ka, kb) = (scale(0), scale(1), scale(2));
     target.as_mut().par_chunks_exact_mut(4).for_each(|px| {

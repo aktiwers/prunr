@@ -1,8 +1,5 @@
-//! SAM 2 inference primitives — encoder preprocessing, decoder prompt
-//! construction, and decoder output → MaskArtifact conversion.
-//!
-//! ORT-free so it stays unit-testable; the session run lives with the
-//! caller.
+//! SAM 2 tensors in and out, ORT-free so it stays unit-testable; the
+//! session run lives with the caller.
 
 use rayon::prelude::*;
 
@@ -11,11 +8,10 @@ use crate::selection::{BrushMode, FULL};
 pub mod preprocess;
 pub mod prompt;
 
-/// Encoder input edge length. SAM 2 Hiera Small is fixed at 1024×1024.
+/// SAM 2 Hiera Small is fixed at 1024×1024.
 pub const SAM_ENCODER_INPUT: u32 = 1024;
 
-/// Decoder mask output resolution. SAM 2 emits 256×256 logits;
-/// caller upsamples to source resolution.
+/// SAM 2 emits 256×256 logits; the caller upsamples to source resolution.
 pub const SAM_MASK_RESOLUTION: u32 = 256;
 
 /// Element counts of the SAM 2 Hiera Small encoder outputs.
@@ -23,7 +19,6 @@ const IMAGE_EMBED_LEN: usize = 256 * 64 * 64;
 const HIGH_RES_0_LEN: usize = 32 * 256 * 256;
 const HIGH_RES_1_LEN: usize = 64 * 128 * 128;
 
-/// Cached encoder output for one source image.
 #[derive(Debug)]
 pub struct SamEmbedding {
     /// f32[1, 256, 64, 64] ≈ 4 MB
@@ -35,8 +30,6 @@ pub struct SamEmbedding {
 }
 
 impl SamEmbedding {
-    /// Verify the three Vec<f32> lengths match SAM 2 Hiera Small
-    /// expected output shapes.
     pub fn validate_shapes(&self) -> Result<(), String> {
         for (name, len, expected) in [
             ("image_embed", self.image_embed.len(), IMAGE_EMBED_LEN),
@@ -51,8 +44,6 @@ impl SamEmbedding {
     }
 }
 
-/// Decoder output as returned by the ORT session. Consumed by
-/// `decode_to_mask_artifact`.
 pub struct SamDecoderOutput {
     /// 3 candidates × SAM_MASK_RESOLUTION² logits.
     pub masks: Vec<f32>,
@@ -145,11 +136,10 @@ fn remove_small_regions(logits: &mut [f32], threshold: f32) {
     }
 }
 
-/// Pick the candidate with the highest predicted IoU; bilinear-upsample
-/// its 256×256 logits to source resolution; keep the pixels whose
-/// probability reaches the reading's confidence (see `confidence_logit`),
-/// signed by `mode`. Higher confidence keeps the sure core of the object,
-/// lower grows into the uncertain rim.
+/// The highest-IoU candidate, bilinear-upsampled to source resolution:
+/// pixels whose probability reaches the reading's confidence, signed by
+/// `mode`. Higher confidence keeps the sure core of the object, lower
+/// grows into the uncertain rim.
 ///
 /// Peak working set: source_w * source_h bytes output + 256*256*4 bytes
 /// slice view (read-only). At 4K source: ~8 MB output.

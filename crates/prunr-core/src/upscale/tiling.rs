@@ -35,24 +35,18 @@ use image::{GrayImage, RgbImage, RgbaImage};
 use crate::CoreError;
 use super::alpha::upscale_alpha_lanczos3;
 
-/// Tile dispatch configuration shared by the planner and the tiler.
 #[derive(Debug, Clone, Copy)]
 pub struct TilingConfig {
     /// Tile edge length in input pixels.
     pub tile_size: u32,
-    /// Window-size multiple constraint: both tile W and H are padded to the
-    /// nearest multiple before the model sees them (HAT-L window_size = 16).
-    /// `None` means no constraint.
+    /// Tile W and H are padded to a multiple of this before the model sees
+    /// them (HAT-L window_size = 16).
     pub tile_multiple: Option<u32>,
-    /// Overlap in input pixels between adjacent tiles. Smoothstep-blended.
+    /// In input pixels; smoothstep-blended.
     pub overlap: u32,
 }
 
-/// Location and dimensions of one tile within the input image.
-///
-/// Carries the model-padded dimensions (`padded_w` / `padded_h`) alongside
-/// the input-space dimensions; `inpaint::TilePlacement` does not need
-/// padding so it is a distinct, narrower type.
+/// One tile in input space, plus the padded size the model sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpscaleTilePlacement {
     pub x: u32,
@@ -65,12 +59,9 @@ pub struct UpscaleTilePlacement {
     pub padded_h: u32,
 }
 
-/// Plan a grid of overlapping tiles that covers the entire image.
-///
-/// `cfg.tile_multiple`: if `Some(m)`, each tile is padded so its dimensions
-/// are multiples of `m` (required for transformer models with a window
-/// constraint such as HAT's 16-px window). The tiler pads bottom-right
-/// and the caller trims the output back to `w × h`.
+/// Overlapping tiles covering the image. With `cfg.tile_multiple` each
+/// tile is padded bottom-right to that multiple, and the output trimmed
+/// back to `w × h`.
 pub fn plan_upscale_tiles(
     width: u32,
     height: u32,
@@ -114,19 +105,12 @@ fn axis_starts(len: u32, tile_size: u32, step: u32) -> Vec<u32> {
     starts
 }
 
-/// Upscale an RGBA image tile-by-tile, blending overlapping regions with a
-/// smoothstep weight function to hide tile seams.
+/// Upscale tile by tile, smoothstep-blending overlaps to hide seams; alpha
+/// is Lanczos3-upscaled separately.
 ///
 /// `run_tile(rgb_tile, padded_w, padded_h)` must return an RGB image of
-/// dimensions `scale * padded_w × scale * padded_h`. The caller pads
-/// bottom-right before the call; `upscale_tiled` reads the unpadded region
-/// of the result directly during blend (no separate trim allocation).
-///
-/// Alpha is upscaled independently via Lanczos3 and merged into the final
-/// `RgbaImage`.
-///
-/// Reports the tile layout and each tile through `progress`, and returns
-/// `Err(CoreError::Cancelled)` before the next tile once it is cancelled.
+/// `scale * padded_w × scale * padded_h`. Returns `Cancelled` before the
+/// next tile once `progress` is cancelled.
 pub fn upscale_tiled<F>(
     input: &RgbaImage,
     scale: u32,
@@ -167,11 +151,6 @@ where
         let inferred = run_tile(&padded_tile, tile.padded_w, tile.padded_h)?;
         band.finish_above(tile.y * scale, &mut out_img);
 
-        // Blend the unpadded `tile.w * scale × tile.h * scale` region of
-        // `inferred` into the accumulator with smoothstep weights. The taper
-        // only applies on sides where an adjacent tile exists — image-
-        // boundary sides always get weight 1.0 so corner pixels are never
-        // zeroed by the taper.
         let out_tile_x = tile.x * scale;
         let out_tile_y = tile.y * scale;
         let out_tile_w = tile.w * scale;
@@ -268,11 +247,8 @@ fn extract_rgb_tile(input: &RgbaImage, tile: &UpscaleTilePlacement) -> RgbImage 
     image::DynamicImage::ImageRgba8(cropped).to_rgb8()
 }
 
-/// Smoothstep weight for a single axis, respecting whether adjacent tiles
-/// exist on each side. Image-boundary sides (`has_low = false` or
-/// `has_high = false`) receive weight 1.0 rather than tapering toward 0 —
-/// there is no neighboring tile there, so the taper would zero pixels that
-/// have no alternative contributor.
+/// Smoothstep weight for one axis. Sides without a neighbouring tile stay
+/// at 1.0: tapering there would zero pixels no other tile covers.
 fn blend_weight_sided(x: u32, edge: u32, size: u32, has_low: bool, has_high: bool) -> f32 {
     let t_low = if has_low && x < edge {
         x as f32 / edge as f32

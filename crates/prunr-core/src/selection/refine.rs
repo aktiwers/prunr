@@ -5,9 +5,8 @@
 
 use super::{CellRect, MaskArtifact, FULL};
 
-/// 8-connected boundary scan. Returns source-pixel coords of selected
-/// pixels with at least one unselected or out-of-bounds neighbour.
-/// Empty mask returns Vec::new(). Complexity is O(w*h).
+/// Source-pixel coords of selected pixels with at least one unselected
+/// or out-of-bounds neighbour (8-connected).
 pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     let (w, h) = (mask.width as usize, mask.height as usize);
     if w == 0 || h == 0 {
@@ -44,7 +43,6 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     out
 }
 
-/// Bounding rectangle of the selected cells.
 fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
     mask.bounds_where(MaskArtifact::is_selected)
 }

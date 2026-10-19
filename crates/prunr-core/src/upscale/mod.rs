@@ -24,22 +24,13 @@ use crate::CoreError;
 use crate::math::round_u8;
 use crate::engine::{GraphOptimizationLevel, InferenceEngine, OrtEngine};
 
-/// Shared `RunOptions` handle used by callers that want to terminate a
-/// running upscale session mid-tile. The owning thread holds the `Arc`
-/// and passes it through the dispatch path; another thread (typically
-/// the GUI's Cancel handler) calls `terminate()` on the same `RunOptions`
-/// to abort the C++ `Session::run` within ~50ms instead of waiting for
-/// the next tile-boundary cancel-flag check.
+/// Shared `RunOptions`: another thread calls `terminate()` on it to abort
+/// the running tile within ~50 ms instead of at the next tile boundary.
 pub type UpscaleRunOptions = RunOptions<NoSelectedOutputs>;
 
-/// Select the ORT graph optimization level for a given model descriptor.
-///
-/// Window-attention transformers (HAT, Swin) use Level2 because Level3
-/// bakes the first tile's input shape into the graph during session init.
-/// A subsequent tile with different dimensions then hits an irrecoverable
-/// shape-mismatch (observed against 4xNomos8kSCHAT-L: Level3 panics with
-/// `Attempting to get index by a name which does not exist:
-/// InsertedPrecisionFreeCast_…`; Level2 succeeds across all tile sizes).
+/// Window-attention transformers (HAT, Swin) use Level2: Level3 bakes the
+/// first tile's input shape into the graph, and a later tile of another
+/// size fails (4xNomos8kSCHAT-L: `InsertedPrecisionFreeCast_…` not found).
 pub(crate) fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
     if descriptor.tile_size_multiple.is_some() {
         GraphOptimizationLevel::Level2
@@ -48,11 +39,8 @@ pub(crate) fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor
     }
 }
 
-/// Per-model upscale knobs from the REGISTRY. The descriptor's
-/// `upscale: Option<UpscaleModelKnobs>` is `Some` only for
-/// upscale-category entries; this helper unwraps with an
-/// `Inference` error so a non-upscale `ModelId` reaching here fails
-/// loud at the dispatch boundary rather than at the ORT session.
+/// Errors on a non-upscale model, so it fails at the dispatch boundary
+/// rather than in the ORT session.
 fn upscale_knobs(descriptor: &prunr_models::ModelDescriptor)
     -> Result<&prunr_models::UpscaleModelKnobs, CoreError>
 {
@@ -64,10 +52,8 @@ fn upscale_knobs(descriptor: &prunr_models::ModelDescriptor)
     })
 }
 
-/// CHW f32-or-f16 → HWC u8 inline pack, run inside the session lock so
-/// the ORT-borrowed slice doesn't need an `into_owned()` copy. `is_fp16`
-/// selects which dtype to extract; both paths normalise to f32 before
-/// the clamp + cast.
+/// CHW f32-or-f16 → HWC u8, run inside the session lock so the
+/// ORT-borrowed slice needs no `into_owned()` copy.
 fn pack_output(
     value: &ort::value::DynValue,
     plane: usize,
@@ -96,9 +82,6 @@ fn pack_output(
             .map_err(|e| CoreError::Inference(format!("upscale: output extract (f16): {e}")))?
             .into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("upscale: output reshape (f16): {e}")))?;
-        // f16 → f32 conversion is required before clamp/cast; the f16
-        // payload from ORT is borrowed, so the owned f32 buffer here is
-        // unavoidable.
         let owned: ndarray::Array4<f32> = arr.mapv(|x| x.to_f32());
         let slice = owned.as_slice().ok_or_else(|| {
             CoreError::Inference("upscale: output tensor not contiguous (f16)".into())
@@ -131,15 +114,8 @@ fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
     }
 }
 
-/// Run a model at its native output scale (no downscale). Internal only.
-///
-/// `native_scale` is the number of times larger the model output is than
-/// the input (e.g. 4 for RealESRGAN-x4plus, 2 for RealESRGAN-x2plus).
-/// The value is read from the REGISTRY and passed in by callers rather than
-/// inferred here, so neither this function nor `upscale_rgba` needs to know
-/// which model it is running.
-///
-/// Alpha is NOT handled here — the public callers compose it.
+/// Runs the model at its `native_scale` (output / input size, from the
+/// REGISTRY). Alpha is NOT handled here; the public callers compose it.
 fn run_upscale_native(
     input: &RgbaImage,
     engine: &OrtEngine,
@@ -161,14 +137,9 @@ fn run_upscale_native(
     let overlap = knobs.tile_overlap();
 
     let input_name = knobs.input_name;
-    // Probe the actual loaded session's input dtype. The REGISTRY's
-    // `knobs.is_fp16` flag describes the MAIN ONNX URL; when the engine
-    // loaded the fp16 sibling on a GPU, the
-    // graph expects fp16 inputs even though the REGISTRY knob still
-    // reads false. Without this probe the dispatch would feed fp32
-    // tensors into an fp16 graph and ORT errors with "Unexpected input
-    // data type" (observed 2026-05-16 against Siax-CX / Superscale fp16
-    // variants on OpenVINO).
+    // Probe the loaded session, not `knobs.is_fp16`: the engine may have
+    // loaded the fp16 sibling on a GPU, and fp32 tensors into an fp16
+    // graph fail with "Unexpected input data type".
     let is_fp16 = engine.with_session(|session| {
         let dtype = session
             .inputs()
@@ -188,10 +159,6 @@ fn run_upscale_native(
         let plane = (out_w * out_h) as usize;
         let mut packed = vec![0u8; 3 * plane];
 
-        // Only the session's dtype gets a buffer. When `terminate` is
-        // Some, the session.run is wired through RunOptions so another
-        // thread can abort the running tile — on EPs that honour it (CPU
-        // does; OpenVINO only returns at the tile boundary).
         let tensor = if is_fp16 {
             chw_tensor(rgb_tile, shape, |v| f16::from_f32(v * INV_255))?
         } else {
@@ -236,11 +203,8 @@ where
         .map_err(|e| CoreError::Inference(format!("upscale: input tensor: {e}")))
 }
 
-/// Map an ORT run-time error to a `CoreError`. ORT reports a session
-/// aborted via `RunOptions::terminate()` as a generic error containing
-/// "terminate flag" in its message; surface that as `Cancelled` so the
-/// dispatcher's existing cancellation handling (toast, no error log)
-/// fires instead of treating it as a real inference failure.
+/// ORT reports a `terminate()` abort only as a generic error mentioning
+/// "terminate flag"; it maps to `Cancelled`, not an inference failure.
 fn classify_run_error(err: ort::Error) -> CoreError {
     let msg = err.to_string();
     if msg.contains("terminate flag") || msg.contains("Exiting due to terminate") {
@@ -250,18 +214,10 @@ fn classify_run_error(err: ort::Error) -> CoreError {
     }
 }
 
-/// Engine-parameterized upscale. Caller constructs and owns the
-/// `OrtEngine`; used by the Processor's warm-engine cache so the
-/// 1-3 s Level3 graph-optimization stall is paid only on the first
-/// dispatch.
-///
-/// Behavior:
-///   - scale = 4: runs the model at its native 4× scale and returns.
-///   - scale = 2: for 4× models, runs at 4× then Lanczos3 downscales to 2×.
-///     For native-2× models (x2plus), runs at native scale directly.
-///   - Alpha is upscaled independently via Lanczos3.
-///
-/// Peak working-set RAM: same as `upscale_rgba` (see that doc).
+/// Upscale on a caller-owned engine, so a warm engine skips the 1-3 s
+/// Level3 graph-optimization stall. Runs at the model's native scale,
+/// then Lanczos3-resamples to `scale` when they differ; alpha is
+/// resampled separately. Peak RAM as `upscale_rgba`.
 pub fn upscale_rgba_with_engine(
     input: &RgbaImage,
     engine: &OrtEngine,
