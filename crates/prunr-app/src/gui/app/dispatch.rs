@@ -44,9 +44,8 @@ impl PrunrApp {
     /// Start the next queued upscale, colorize or erase when the slot is free,
     /// with the shown image's settings, as a batch of cut-outs runs.
     pub(super) fn dispatch_next_queued_run(&mut self) {
-        // An image gone from the batch, or one without a run, passes its
-        // turn on: nothing else would call this again for the rest.
-        // Each queued image gets one turn per call.
+        // An image gone, or one without a run, passes its turn on: nothing
+        // else would call this again. One turn per queued image per call.
         for _ in 0..self.processor.queued_run_count() {
             let Some(item_id) = self.processor.next_queued_run() else { return };
             // Its selection is still being made: it waits at the back, and
@@ -129,9 +128,8 @@ impl PrunrApp {
         let Some(item) = self.batch.find_by_id(item_id) else { return false };
         let Some(model_id) = self.settings.model.to_model_id() else { return false };
         let output_scale = item.settings.output_scale;
-        // Capture the recipe at dispatch time so the pump can stamp
-        // `item.applied_recipe` against what actually ran (not what the
-        // user has tweaked to since).
+        // The recipe at dispatch time, so `applied_recipe` stamps what ran,
+        // not what the user tweaked since.
         let Some(model_kind) = self.settings.model.dispatch_model_kind() else {
             tracing::error!(?model_id, "upscale dispatch skipped: ModelId has no ModelKind mapping");
             return false;
@@ -187,9 +185,8 @@ impl PrunrApp {
     pub(crate) fn dispatch_inpaint_for_item(&mut self, idx: usize) -> bool {
         let item = &self.batch.items[idx];
         let item_id = item.id;
-        // selection_mask is the single source of truth for the inpaint
-        // region. It persists across Process, so Reprocess is available
-        // whenever any selection exists — no separate "last_inpaint" cache.
+        // selection_mask is the only inpaint region; it persists across
+        // Process, so Reprocess works whenever a selection exists.
         let Some(selection) = item.selection_mask.as_ref().cloned() else {
             tracing::debug!(item_id, "inpaint dispatch skipped: no selection_mask");
             return false;
@@ -260,11 +257,10 @@ impl PrunrApp {
         }
     }
 
-    /// Collect and send batch items matching `filter` for processing.
-    /// Uses tier routing: compares each item's applied_recipe against current
-    /// settings to determine the minimum work needed (skip / mask rerun / full).
-    /// `step`: the undo step the results record, or `None` to fill in the
-    /// shown one (a re-run a knob change asked for).
+    /// Tier routing: each item's applied_recipe against the current
+    /// settings picks the least work (skip / mask rerun / full). `step`:
+    /// the undo step the results record, or `None` to fill in the shown
+    /// one (a re-run a knob change asked for).
     pub(super) fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         // One gate for every caller: a batch opened while admission still
         // feeds another would take its images' answers and wait behind it.
@@ -275,19 +271,15 @@ impl PrunrApp {
             return;
         }
         self.batch.fit_line_modes_to(self.settings.model);
-        // Pure filter mode: No model AND line_mode = Off. Skip inference +
-        // subprocess entirely. (No model + EdgesOnly still needs TEED,
-        // so falls through to the normal path with a dummy ModelKind — the
-        // seg engine won't spawn because needs_segmentation is false.)
+        // No model with line_mode Off skips inference; No model + EdgesOnly
+        // still needs TEED and falls through.
         let is_pure_filter = self.settings.model.to_model_kind().is_none()
             && self.run_settings().line_mode == prunr_core::LineMode::Off;
         if is_pure_filter {
             self.process_filter_only(filter, step);
             return;
         }
-        // No-model-but-EdgesOnly falls through with the placeholder. The
-        // subprocess Init still receives this field; `needs_segmentation`
-        // is false for EdgesOnly so the seg model never loads.
+        // The placeholder never loads: `needs_segmentation` is false for EdgesOnly.
         let model: prunr_core::ModelKind = self.settings.model
             .to_model_kind()
             .unwrap_or(super::NO_MODEL_RECIPE_KIND);
@@ -328,10 +320,8 @@ impl PrunrApp {
         }
     }
 
-    /// Filter-only Process path (model=`None`). Dispatches each target item
-    /// to a background thread via `BatchManager::request_filter_only` so the
-    /// UI stays responsive on large batches. Results land on
-    /// `bg_io.filter_only_rx`, drained in `drain_background_channels`.
+    /// Filter-only Process (model `None`), off the UI thread so large
+    /// batches stay responsive.
     fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         let settings = self.run_settings();
         let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
@@ -351,7 +341,6 @@ impl PrunrApp {
     }
 
     /// Tell the user when some items were skipped. Three shapes:
-    /// nothing-skipped (silent), all-skipped, partially-skipped.
     fn notify_skip(&mut self, skipped: usize, processing: usize) {
         if skipped == 0 { return; }
         let msg = if processing == 0 {
@@ -366,10 +355,9 @@ impl PrunrApp {
         self.toasts.info(msg);
     }
 
-    /// Dispatch with streaming admission — used when >1 Tier 1 items so the
-    /// batch doesn't blow past memory limits. Admits what fits now; the
-    /// worker bridge receives more items via `admission_tx` as earlier items
-    /// complete and free memory.
+    /// Streaming admission for >1 Tier 1 items, so the batch stays within
+    /// memory: admits what fits now; more follow via `admission_tx` as
+    /// earlier items free memory.
     fn dispatch_with_admission(
         &mut self,
         tier1_ids: &HashSet<u64>,
@@ -388,8 +376,6 @@ impl PrunrApp {
                 item.full_run_work()
             }));
 
-        // All Tier 1 items failed load_bytes AND no Tier 2 / add-edge work —
-        // skip dispatch.
         if initial_items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() {
             self.processor.clear_admission();
             return;
@@ -409,7 +395,6 @@ impl PrunrApp {
     ) {
         let items = self.batch.full_run_work(tier1_ids);
 
-        // If all prep failed, don't dispatch an empty batch.
         if items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() { return; }
 
         self.dispatch_batch(items, mask_work, add_edge_work, model, jobs, None);
@@ -421,7 +406,6 @@ impl PrunrApp {
         self.batch.selected_idx_clamped().map(|i| self.batch.items[i].settings).unwrap_or_default()
     }
 
-    /// Build and send a WorkerMessage::BatchProcess with current settings.
     fn dispatch_batch(
         &mut self,
         items: Vec<crate::gui::worker::WorkItem>,

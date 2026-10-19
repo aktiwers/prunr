@@ -39,14 +39,9 @@ impl PrunrApp {
         self.processor.live_preview.render_now(item_id, PreviewKind::Mask);
     }
 
-    /// Per-model interpretation rule for a newly-committed selection.
-    /// Called after every commit, and again when a result lands, so the BG-removal
-    /// continuous-auto-apply UX is preserved while SD / LaMa wait for
-    /// explicit Process.
-    ///
-    /// IMPORTANT: every call site that calls `BatchManager::commit_selection`
-    /// MUST follow up with this method. Pairing the two prevents per-model
-    /// dispatch rules from drifting between input surfaces.
+    /// Every `BatchManager::commit_selection` call site MUST follow up with
+    /// this, so the per-model rule cannot drift between input surfaces; it
+    /// runs again when a result lands.
     pub(crate) fn apply_selection_to_active_model(&mut self, item_id: u64) {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         // A cut-out re-cuts at once; the eraser's region waits for Process;
@@ -162,19 +157,11 @@ impl PrunrApp {
         }
     }
 
-    /// Dispatch a selection action (Delete / Copy / Cut / Invert / Clear).
-    /// Called from `apply_toolbar_change` and from keyboard shortcuts that
-    /// have a live selection.
-    ///
-    /// - Delete: scales alpha by coverage inside the selection on
-    ///   `result_rgba`, as one undo step so Cmd+Z can
-    ///   restore it.
-    /// - Copy: copies selection-masked pixels to the system clipboard. No
-    ///   undo step — non-destructive read.
+    /// - Delete: scales alpha by coverage inside the selection, one undo step.
+    /// - Copy: selection-masked pixels to the clipboard; no undo step.
     /// - Cut: Copy + Delete in one undo step, not two.
-    /// - Invert: replaces the selection mask with its complement and
-    ///   commits it like any other author.
-    /// - Clear: removes the selection mask entirely.
+    /// - Invert: the selection's complement, committed like any author.
+    /// - Clear: removes the selection.
     pub(crate) fn handle_selection_action(
         &mut self,
         idx: usize,
@@ -315,13 +302,12 @@ impl PrunrApp {
         self.batch.items[idx].commit(StepKind::Edit);
     }
 
-    /// Eager encoder: once Magic Brush has been used, the selected image
-    /// gets an embedding as soon as it has a decoded source, so the tool
-    /// is ready the moment it is turned on again. Runs from
-    /// `reconcile_selected` every frame. With the tool off it waits for
-    /// the warm sessions and an idle item, and a refusal is remembered
-    /// instead of retried; with the tool on, admission or encoder failure
-    /// turns the tool off, so this cannot retry in a loop.
+    /// Once Magic Brush has been used, the selected image gets an embedding
+    /// as soon as it has a decoded source, so the tool is ready the moment
+    /// it is turned on again. With the tool off it waits for the warm
+    /// sessions and an idle item, and a refusal is remembered instead of
+    /// retried; with the tool on, admission or encoder failure turns the
+    /// tool off, so this cannot retry in a loop.
     pub(super) fn ensure_magic_embedding_for_selected(&mut self, ctx: &egui::Context) {
         if !self.magic_brush_ready_ahead() || self.magic_brush_state.has_pending_encoder() {
             return;
@@ -516,8 +502,6 @@ impl PrunrApp {
 
     /// Keep the selected image's embedding current, then drain SAM encoder
     /// and decoder results from the background rayon threads.
-    /// Encoder results: write embedding to BatchItem, clear encoder_pending.
-    /// Decoder results: convert to MaskArtifact, apply modifier, commit.
     pub(super) fn pump_sam_results(&mut self, ctx: &egui::Context) {
         use crate::gui::processor::DecodedSelection;
         let encoder_results = self.processor.pump_sam_encoder_results();

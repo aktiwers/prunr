@@ -142,9 +142,7 @@ impl PrunrApp {
         self.batch.request_decode_source(id, &self.batch.items[idx].source);
     }
 
-    /// Spawn ColorImage preparation threads for whichever textures are missing.
-    /// The actual `ctx.load_texture()` call happens in `drain_background_channels`
-    /// after the prepared ColorImage arrives on `tex_prep_rx`.
+    /// Prepares the missing textures off-thread; `drain_background_channels` uploads them.
     fn request_selected_textures(&mut self, idx: usize, ctx: &egui::Context) {
         let item_id = self.batch.items[idx].id;
 
@@ -192,10 +190,8 @@ impl PrunrApp {
         ctx: egui::Context,
     ) {
         std::thread::spawn(move || {
-            // Park here past `available_parallelism()` so a Process All
-            // batch-completion burst doesn't hold N × ~50 MB ColorImage
-            // peaks simultaneously. Same slot pool as the bg-io decode /
-            // thumbnail / filter spawns.
+            // Park past `available_parallelism()` so a Process All burst doesn't
+            // hold N × ~50 MB ColorImages at once.
             let queued = std::time::Instant::now();
             let _slot = handles.slots.acquire();
             let waited_ms = queued.elapsed().as_millis() as u64;

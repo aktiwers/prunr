@@ -45,15 +45,10 @@ impl PrunrApp {
         self.quiet_background_work()
     }
 
-    /// Catch any drift between the active item's `applied_recipe.mask`
-    /// and the recipe derived from current settings. Safety net for
-    /// non-toolbar state mutations (brush commits, hotkeys) so they
-    /// never silently fail to update the result.
-    ///
-    /// Active-item only by design — the only drift surfaces today
-    /// (brush, undo/redo) act on the selected item; widening to the
-    /// full batch would do per-frame work for items the user isn't
-    /// editing for no current benefit.
+    /// Catch drift between the active item's `applied_recipe.mask` and the
+    /// recipe from current settings: a safety net for non-toolbar edits
+    /// (brush commits, hotkeys). Active item only: brush and undo/redo, the
+    /// only drift sources, act on the selected item.
     pub(crate) fn recipe_drift_tripwire(&mut self) {
         // Only a cut-out or the filters apply the mask settings; firing a
         // preview over an erase or an upscale would clobber it with the
@@ -101,10 +96,8 @@ impl PrunrApp {
     pub(super) fn pump_live_preview(&mut self, ctx: &egui::Context) {
         self.recipe_drift_tripwire();
 
-        // Dispatch phase: tick() invokes the closure for each item whose
-        // debounce expired this frame. The closure borrows `batch.items`
-        // mutably so `build_preview_inputs` can hold the run's start on
-        // the item for the drag session.
+        // The closure borrows `batch.items` mutably so `build_preview_inputs`
+        // can hold the run's start on the item for the drag session.
         let role = self.settings.model.role();
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
@@ -207,12 +200,9 @@ impl PrunrApp {
         if matches!(kind, PreviewKind::Mask) && !is_filter_only && seg_model.is_none() {
             return Err(Verdict::Never(Reason::ProcessAgain));
         }
-        // A run on top of an earlier result (an erase, a hand edit) keeps
-        // it: the preview starts where Process would, the shown step's own
-        // start when it redoes that step.
-        // The run's start when stored packed is read back on the render's
-        // thread; held on the item while previews start from it, so it is
-        // not packed away between ticks.
+        // The preview starts where Process would, keeping an earlier erase or
+        // hand edit; the start is held on the item while previews read it, so
+        // it is not packed away between ticks.
         let start = item.run_start(Engine::Segment);
         let (original, original_from) = match start.as_ref() {
             Some(s) => match s.image.loaded() {
@@ -247,10 +237,8 @@ impl PrunrApp {
         let packed_primary = (edge_tensor.is_none() && has_scale(primary)).then_some(primary);
         let bold = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. }) && has_scale(prunr_core::EdgeScale::Bold);
         match kind {
-            // Mask kind without a seg tensor is the filter-only path:
-            // `run_preview` applies effect to the raw source. No tensor
-            // required. Edge kind still needs an edge tensor (nothing to
-            // preview without one).
+            // Mask without a seg tensor is the filter-only path (effects on
+            // the raw source); Edge has nothing to preview without a tensor.
             PreviewKind::Edge if edge_tensor.is_none() && packed_primary.is_none() => {
                 return Err(match need(Need::Idle) {
                     Ok(()) => Verdict::Never(Reason::LinesNotRun),
@@ -314,11 +302,9 @@ impl PrunrApp {
         Some(crate::gui::live_preview::DepthInput { map, look, photo })
     }
 
-    /// Critical: do NOT null `result_texture` here — the old texture must stay
-    /// visible until the newly-built one lands via `drain_background_channels`.
-    /// Clearing it causes the canvas to flash black for a frame (no texture
-    /// to draw → BG_PRIMARY shows). Instead we spawn a tex prep for the new
-    /// RGBA directly and let drain swap it in atomically when ready.
+    /// Do NOT null `result_texture` here: the old texture stays until the new
+    /// one lands via `drain_background_channels`, or the canvas flashes black
+    /// for a frame.
     pub(crate) fn apply_completed_previews(
         &mut self,
         ctx: &egui::Context,
@@ -397,9 +383,7 @@ impl PrunrApp {
                 if let (Some(reference), Some(run)) = (r.new_reference, item.upscale.as_mut()) {
                     run.reference = Some(reference);
                 }
-                // Mark the dispatched MaskRecipe as applied so the
-                // recipe-drift tripwire doesn't immediately re-fire on
-                // a result it has already consumed.
+                // Mark the recipe applied so the drift tripwire doesn't re-fire on it.
                 if let Some(applied) = item.applied_recipe.as_mut() {
                     applied.mask = r.applied_mask;
                     applied.depth = r.applied_depth;
@@ -453,10 +437,8 @@ impl PrunrApp {
                 }
                 (item.id, item.source.clone(), r.is_final, new_rgba)
             };
-            // On the drag-settled result only, regenerate the sidebar
-            // thumbnail, the old one shown until the new one lands. Mid-drag
-            // results skip this (is_final false) so a drag does not make a
-            // thumbnail per render.
+            // Only the drag-settled result regenerates the sidebar thumbnail,
+            // not every mid-drag render.
             if is_final {
                 if let Some(item) = self.batch.find_by_id_mut(item_id) {
                     item.thumb.asked();

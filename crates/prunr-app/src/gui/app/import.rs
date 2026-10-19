@@ -10,7 +10,6 @@ use crate::gui::system_bridge::{DialogRequest, OPEN_EXTENSIONS};
 use super::PrunrApp;
 
 impl PrunrApp {
-    /// Sync after batch modification — clamp index and refresh canvas.
     fn sync_after_batch_change(&mut self) {
         self.batch.clamp_selected_index();
         if !self.batch.items.is_empty() {
@@ -18,7 +17,6 @@ impl PrunrApp {
         }
     }
 
-    /// Core image loading: creates a BatchItem from a source + dimensions.
     fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String) {
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
         let id = self.push_new_item(source, dims, name);
@@ -45,7 +43,6 @@ impl PrunrApp {
         self.load_image_source(ImageSource::file(path), dims, filename);
     }
 
-    /// Open: ask for images; `on_open_picked` imports them.
     pub fn handle_open_dialog(&mut self) {
         self.ask_dialog(DialogRequest::OpenImages);
     }
@@ -82,7 +79,6 @@ impl PrunrApp {
         }
     }
 
-    /// Add an image to the batch from raw bytes (clipboard/paste).
     pub fn add_to_batch(&mut self, bytes: Vec<u8>, filename: String) {
         let Some(dims) = prunr_core::image_dimensions_from_bytes(&bytes) else { return };
         self.add_to_batch_source(ImageSource::Bytes(Arc::new(bytes)), dims, filename);
@@ -91,13 +87,9 @@ impl PrunrApp {
     fn add_to_batch_source(&mut self, source: ImageSource, dims: (u32, u32), filename: String) {
         self.push_new_item(source, dims, filename);
 
-        // NOTE: do NOT touch `zoom_state` here. The callers that actually
-        // change selection to the newly-added item (DnD inline single-file,
-        // force-select-after-drain) own the full `zoom_state.reset()`, so
-        // `previous_zoom` and `pan_offset` are cleared along with the flag.
-        // Setting only `pending_fit_zoom` here would leak stale toggle-state
-        // (previous_zoom) from the prior image into the fit logic, which can
-        // mis-fire `canvas.rs`'s "toggle-back to previous_zoom" branch.
+        // Do NOT touch `zoom_state` here: the callers that select the new item
+        // own the full reset; setting only `pending_fit_zoom` would leak the
+        // previous image's `previous_zoom` into the fit logic.
         self.pending_batch_sync = true;
     }
 
@@ -133,16 +125,13 @@ impl PrunrApp {
             "drag-and-drop received",
         );
 
-        // Collect paths (need background I/O) and inline bytes (already in memory)
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut inline_items: Vec<(Arc<[u8]>, String)> = Vec::new();
         let mut saw_self_drop = false;
 
         for file in dropped {
             if let Some(path) = file.path {
-                // Reject self-originated drops: our own drag-out writes temp files
-                // under prunr-drag/. Dropping those back onto the canvas would
-                // reopen them as new images.
+                // Our own drag-out's temp files would reopen as new images.
                 if crate::gui::drag_export::is_self_drop(&path) {
                     saw_self_drop = true;
                     continue;
@@ -183,10 +172,9 @@ pub(super) fn display_name(path: &Path, fallback: &str) -> String {
     path.file_name().and_then(|n| n.to_str()).unwrap_or(fallback).to_string()
 }
 
-/// Resolve a list of dropped paths: directories expand to their immediate
-/// supported-image children (no recursion). Returns `(resolved_paths,
-/// any_dir_was_empty)` — the second flag drives a "no images in folder"
-/// toast at the call site.
+/// Resolve dropped paths: directories expand to their immediate
+/// supported-image children (no recursion). The flag is set when a
+/// dropped directory held no images.
 fn expand_dropped_paths(input: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
     let mut out = Vec::with_capacity(input.len());
     let mut any_empty_dir = false;

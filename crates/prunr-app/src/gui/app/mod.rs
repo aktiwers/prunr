@@ -43,8 +43,7 @@ const ASYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const NO_MODEL_RECIPE_KIND: prunr_core::ModelKind = prunr_core::ModelKind::BiRefNetLite;
 
 /// Days the user is left alone after dismissing the first-launch
-/// runtime prompt. 14 picked to balance "don't nag" with "remind on a
-/// reasonable cadence as the SD experience improves."
+/// runtime prompt.
 const RUNTIME_PROMPT_SNOOZE_DAYS: i64 = 14;
 
 /// Replaced wholesale (never mutated in place) so the borrow checker
@@ -63,7 +62,6 @@ pub struct PrunrApp {
     /// Directory of the most recently opened file (for save dialog default)
     pub(crate) last_open_dir: Option<std::path::PathBuf>,
 
-    /// Processing pipeline — worker channels, admission, live preview, dispatch state.
     pub(crate) processor: super::processor::Processor,
 
     pub(crate) status: super::status_state::StatusState,
@@ -72,7 +70,6 @@ pub struct PrunrApp {
     /// so the rest of `PrunrApp` doesn't carry their import surface.
     pub(crate) system: super::system_bridge::SystemBridge,
 
-    // UI state
     pub(crate) show_cli_help: bool,
     pub(crate) show_pipeline_flow: bool,
 
@@ -98,20 +95,16 @@ pub struct PrunrApp {
     title_state: TitleState,
 
     /// Last `(item_id, MaskSettings)` `recipe_drift_tripwire` proved
-    /// drift-free. Skipping `MaskRecipe::from` on a per-frame match
-    /// avoids ~60 recipe constructions/sec while the user sits idle on
-    /// a Done item with no settings tweaks. Cleared on drift or item
-    /// switch — the worst case re-pays a single frame.
+    /// drift-free, so an idle frame skips `MaskRecipe::from`. Cleared on
+    /// drift or item switch.
     last_drift_check: Option<(u64, prunr_core::MaskSettings)>,
 
-    // Batch state — items, selection, lifecycle, memory, textures, bg_io
     pub(crate) batch: super::batch_manager::BatchManager,
     /// User explicitly hid the sidebar via Tab / configured hotkey.
     pub(crate) sidebar_hidden: bool,
     /// User explicitly hid the adjustments toolbar (rows 2 + 3) via Shift+H.
     pub(crate) adjustments_hidden: bool,
 
-    // Settings
     pub(crate) show_settings: bool,
     pub(crate) settings: Settings,
     /// Which Settings tab the modal is showing; not persisted.
@@ -156,10 +149,8 @@ pub struct PrunrApp {
 
     /// Set by add_to_batch — forces the selection-change work in the next logic()
     pending_batch_sync: bool,
-    /// Toast notification system
     pub(crate) toasts: super::toasts::Toasts,
 
-    // ── Drag-out (OS drag to external apps) ────────────────────────────────
     pub(crate) drag_export: super::drag_export_state::DragExportState,
 
     /// The control socket, when `PRUNR_CONTROL_PORT` is set.
@@ -175,14 +166,11 @@ const SETTINGS_SAVE_DELAY: std::time::Duration = std::time::Duration::from_milli
 
 impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        // Worker is spawned below after prewarm is created
         let worker_ctx = cc.egui_ctx.clone();
 
-        // Initialize material icons font
         egui_material_icons::initialize(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
-        // Set dark visuals
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
         // Customize visuals — suppress all bright/red borders
@@ -222,7 +210,6 @@ impl PrunrApp {
         }
         cc.egui_ctx.set_global_style(style);
 
-        // Housekeeping: clean up stale temp files from prior sessions.
         super::drag_export::cleanup_stale();
         super::history_disk::cleanup_stale();
 
@@ -256,11 +243,9 @@ impl PrunrApp {
                 crate::gui::views::get_model::label(d.id),
             ));
 
-        // Subprocess worker: inference runs in a child process for OOM
-        // isolation. Pre-warm a subprocess with the startup config so the
-        // first Process click skips the 1–5s model-load cost. Filter-only
-        // mode (SettingsModel::None) skips pre-warm — no ORT session
-        // needed for pure CPU filters.
+        // Inference runs in a child process for OOM isolation; pre-warming it
+        // spares the first Process click the 1–5 s model load. No model's
+        // filters need no ORT session, so no pre-warm.
         let prewarm = Self::initial_engines(&settings);
         let (worker_tx, worker_rx) = spawn_worker(worker_ctx, prewarm);
 
@@ -458,9 +443,8 @@ impl PrunrApp {
             save_preset: None,
             settings_save_due: None,
         };
-        // `--open <path>` (or PRUNR_OPEN_FILE env var) — pre-load on launch.
-        // Reads the env once; clears it so a child subprocess doesn't inherit
-        // and re-load again on a worker spawn.
+        // `--open <path>` arrives as PRUNR_OPEN_FILE, read once and cleared
+        // so a worker subprocess doesn't inherit it and load it again.
         let preload = std::env::var_os("PRUNR_OPEN_FILE")
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
@@ -469,11 +453,9 @@ impl PrunrApp {
         if let Some(path) = preload {
             import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![path]);
         }
-        // Test-harness escape hatch: PRUNR_OPEN_TAB pre-selects a Settings
-        // tab and auto-opens the modal at startup. Lets the harness capture
-        // each tab without driving mouse clicks (unreliable under Xephyr's
-        // coord-space mismatch). Values are `SettingsTab` labels
-        // (case-sensitive). Not exposed on --help.
+        // Test harness: PRUNR_OPEN_TAB opens Settings on that tab (a
+        // case-sensitive `SettingsTab` label); clicks are unreliable under
+        // Xephyr. Not exposed on --help.
         if let Some(name) = std::env::var_os("PRUNR_OPEN_TAB") {
             unsafe { std::env::remove_var("PRUNR_OPEN_TAB"); }
             if let Some(s) = name.to_str() {
@@ -566,12 +548,10 @@ impl PrunrApp {
         let have = item.bg_image.as_ref().map(|b| b.hash);
         if want.map(|nz| nz.get()) == have { return; }
         let Some(want_hash) = want else {
-            // Preset has no bg image — drop the stale bytes.
             item.clear_bg_image();
             return;
         };
         let want_hash_u64 = want_hash.get();
-        // New hash from preset — try to reload via the persisted path map.
         let path = self.settings.bg_image_paths.get(&want_hash_u64).cloned();
         let Some(path) = path else {
             // Hash isn't in our path map (preset shared from another user,
@@ -594,10 +574,9 @@ impl PrunrApp {
         self.process_items(|item| ids.contains(&item.id), Some(StepKind::Process));
     }
 
-    /// Single source of truth for the Process / Reprocess action.
-    /// Routes between upscale dispatch, inpaint dispatch (eraser models),
-    /// and the seg pipeline, with consistent gating. All input surfaces —
-    /// the toolbar button and the Cmd+R shortcut — call this.
+    /// Process / Reprocess: routes between upscale, inpaint (eraser models)
+    /// and the seg pipeline behind one gate; the toolbar button and Cmd+R
+    /// both call this.
     pub fn handle_process_intent(&mut self) {
         if !self.can_process_intent() {
             return;
@@ -951,9 +930,8 @@ impl PrunrApp {
         }
     }
 
-    /// Cancel only the in-flight inpaint stroke for `item_id`. Used by
-    /// the capsule's Cancel button — `handle_cancel` cancels
-    /// everything (batch + all inpaint), this scopes to one stroke.
+    /// Cancel only the in-flight inpaint stroke for `item_id`: the
+    /// capsule's Cancel button.
     pub fn cancel_inpaint_for(&mut self, item_id: u64) {
         if self.processor.is_inpaint_in_flight(item_id) {
             self.processor.cancel_inpaint(item_id);
@@ -1243,12 +1221,8 @@ impl eframe::App for PrunrApp {
         if let Some(wait) = until_pill.filter(|wait| !wait.is_zero()) {
             ctx.request_repaint_after(wait);
         }
-        // Keep the event loop awake while any async texture / decode work is
-        // pending. `ctx.request_repaint()` from the tex_prep / decode threads
-        // is supposed to wake egui, but some compositors (notably Wayland)
-        // drop thread-initiated wake-ups when the window is idle, leaving the
-        // canvas stuck on the old image until a mouse event fires. Polling
-        // from the UI thread is reliable.
+        // Poll while async texture / decode work is pending: some compositors
+        // (notably Wayland) drop thread-initiated wake-ups on an idle window.
         if self.batch.has_pending_work() {
             ctx.request_repaint_after(ASYNC_POLL);
         }
@@ -1295,13 +1269,10 @@ impl eframe::App for PrunrApp {
 
         self.render_modal_overlays(ui.ctx());
 
-        // Consume pending drag-out (sidebar set this when a drag escaped the sidebar).
-        // Runs after sidebar renders so the user sees the drag cursor leave the area.
+        // After the sidebar renders, so the drag cursor visibly leaves it.
         if let Some(ids) = self.drag_export.pending.take() {
             self.initiate_drag_out(ids, frame, ui.ctx());
-            // Clear egui's internal drag state — the OS drag session has taken over.
-            // Without this, egui keeps showing the DnD crosshair cursor because it
-            // still thinks an internal drag is in progress.
+            // The OS drag has taken over; otherwise egui keeps its DnD cursor.
             ui.ctx().stop_dragging();
         }
         // A drag waiting for its files starts once they are written.
@@ -1320,14 +1291,10 @@ impl PrunrApp {
         self.batch.fit_line_modes_to(self.settings.model);
         self.settings.on_model_change_resolve_brush();
         self.fit_brush_models_to_model();
-        // Cancel any in-flight upscale or colorize when the user
-        // changes model mid-run — the result would land on the
-        // wrong selection otherwise.
+        // A run of the old model would land on the wrong selection.
         self.processor.cancel_runs();
-        // Drop every item's kept upscale and colorize run — the buffers
-        // were produced by the previous model. A subsequent Tier-2
-        // preview tick would otherwise display the old model's output
-        // under the new model's knobs.
+        // The kept runs came from the old model; a Tier-2 tick would show
+        // them under the new model's knobs.
         for item in &mut self.batch.items {
             item.invalidate_upscale_cache();
             item.invalidate_colorize_cache();

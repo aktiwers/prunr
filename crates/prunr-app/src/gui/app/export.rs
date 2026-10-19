@@ -31,8 +31,7 @@ impl PrunrApp {
 
     pub fn handle_save_selected(&mut self) {
         let has_selection = self.batch.items.iter().any(|i| i.ticked);
-        // Layers mode: always folder-picker, regardless of selection count.
-        // The filenames are derived from each item's source stem + layer suffix.
+        // Layers mode always picks a folder, whatever is ticked.
         if self.saves_layers() {
             self.save_layers_to_folder(has_selection);
             return;
@@ -89,7 +88,6 @@ impl PrunrApp {
         spawn_save_layers(folder, jobs, format, tx);
     }
 
-    /// No checkboxes selected — save just the currently-viewed result.
     fn save_current_to_file(&mut self) {
         self.save_item_to_file(self.batch.selected_index);
     }
@@ -157,10 +155,8 @@ impl PrunrApp {
         spawn_save_batch(folder, items, self.settings.export_format, tx);
     }
 
-    /// Initiate an OS drag-out for the given batch item IDs.
-    /// On Windows/macOS: calls the `drag` crate with PNG temp files.
-    /// On Linux: a one-time fallback toast, no files written (winit and the
-    /// drag crate conflict on Linux).
+    /// Windows/macOS: PNG temp files through the `drag` crate. Linux: a
+    /// one-time toast and no files (winit and the drag crate conflict there).
     pub fn initiate_drag_out(&mut self, ids: Vec<u64>, frame: &eframe::Frame, ctx: &egui::Context) {
         if !crate::gui::drag_export::DRAG_OUT_SUPPORTED {
             if !self.drag_export.linux_notified {
@@ -271,12 +267,9 @@ impl PrunrApp {
     }
 
     pub fn handle_copy(&mut self) {
-        // Selection rules:
-        // - 0 ticked → copy the currently-viewed result (original behavior).
-        // - 1 ticked → copy that one (even if not the currently-viewed item).
-        // - 2+ ticked → copy the first, show a hint toast about drag-out.
-        //   (System clipboards can't hold multiple images as bitmaps; drag-out
-        //    is the native multi-image export path.)
+        // 0 ticked → the shown result; 1 → that one, even if not shown;
+        // 2+ → the first, with a toast pointing at drag-out (system
+        // clipboards hold one image).
         let shown = |b: &BatchItem| (b.export_image(), b.export_bg());
         let ticked: Vec<_> = self.batch.items.iter().filter(|b| b.ticked).map(shown).collect();
         let (to_copy, multi_hint) = match ticked.len() {
@@ -332,9 +325,8 @@ struct SaveOne {
     depth: Option<crate::gui::item::DepthExport>,
 }
 
-/// Encode + write one image on a background thread, then send the result
-/// toast text on `tx`. Stays at module scope so neither save method needs
-/// `&mut self` once they've kicked off the work.
+/// Encode + write one image on a background thread, then send the
+/// toast text on `tx`.
 fn spawn_save_single(
     path: PathBuf,
     one: SaveOne,
