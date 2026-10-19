@@ -92,27 +92,16 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     loop {
         // Blocks up to 100 ms, so a Dispatch or Cancel wakes the thread at once
         // while the subprocess drain below keeps a 100 ms cadence when idle.
-        let first = msg_rx.recv_timeout(Duration::from_millis(100));
-        let mut pending_msg = match first {
+        let first = match msg_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(msg) => Some(msg),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
+            // A sender gone mid-drain lands here on the next tick.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 shutdown_ready(&mut sub_state);
                 return;
             }
         };
-        loop {
-            let msg = match pending_msg.take() {
-                Some(m) => m,
-                None => match msg_rx.try_recv() {
-                    Ok(m) => m,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        shutdown_ready(&mut sub_state);
-                        return;
-                    }
-                },
-            };
+        for msg in first.into_iter().chain(std::iter::from_fn(|| msg_rx.try_recv().ok())) {
             match msg {
                 InpaintBridgeMsg::Dispatch { job, generation } => {
                     last_used = Instant::now();
