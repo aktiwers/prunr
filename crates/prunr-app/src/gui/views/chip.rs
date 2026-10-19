@@ -591,7 +591,7 @@ fn paint_handle(ui: &Ui, resp: &Response, fraction: f32) {
 }
 
 /// A list row's fill: the purple wash when picked, a faint one on hover.
-fn row_wash(resp: &Response, selected: bool) -> Color32 {
+pub(super) fn row_wash(resp: &Response, selected: bool) -> Color32 {
     if selected {
         theme::ROW_PICKED
     } else if resp.hovered() {
