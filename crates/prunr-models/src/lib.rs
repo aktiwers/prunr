@@ -1941,22 +1941,13 @@ mod tests {
     #[test]
     fn is_sd_family_routes_only_sd_models_to_subprocess() {
         // SD-family routes to the dedicated subprocess (5-10 GB bundle
-        // — process isolation prevents an OOM from killing the GUI).
-        assert!(ModelId::SdV15InpaintFp16.is_sd_family());
-        assert!(ModelId::SdV15LcmInpaintFp16.is_sd_family());
-        assert!(ModelId::RoremFp16.is_sd_family());
-        // Smaller inpaint models stay in-process (no isolation pressure,
-        // lower latency, no subprocess spin-up cost).
-        assert!(!ModelId::LaMaFp32.is_sd_family());
-        assert!(!ModelId::BigLaMa.is_sd_family());
-        assert!(!ModelId::Migan.is_sd_family());
-        // Non-inpaint models — predicate must be False so a future
-        // misdispatch doesn't accidentally route through the bridge.
-        assert!(!ModelId::Silueta.is_sd_family());
-        assert!(!ModelId::U2net.is_sd_family());
-        assert!(!ModelId::BiRefNetLite.is_sd_family());
-        assert!(!ModelId::Teed.is_sd_family());
-        assert!(!ModelId::TaesdFp16.is_sd_family());
+        // — process isolation prevents an OOM from killing the GUI);
+        // LaMa, Big-LaMa and MI-GAN stay in-process, as does every
+        // non-inpaint model.
+        for &id in ModelId::ALL {
+            let sd = matches!(id, ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 | ModelId::RoremFp16);
+            assert_eq!(id.is_sd_family(), sd, "{id:?}");
+        }
     }
 
     #[test]
@@ -2055,16 +2046,6 @@ mod tests {
     }
 
     #[test]
-    fn read_on_demand_returns_bytes_when_file_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("blob.onnx"), b"hello-bytes").unwrap();
-        assert_eq!(
-            read_on_demand(dir.path(), "blob.onnx").as_deref(),
-            Some(b"hello-bytes".as_slice()),
-        );
-    }
-
-    #[test]
     fn a_download_is_read_for_each_load_and_not_kept() {
         let dir = tempfile::tempdir().unwrap();
         let ModelSource::OnDemand { filename, .. } = descriptor(ModelId::U2net).unwrap().source else {
@@ -2109,29 +2090,17 @@ mod tests {
     /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
     #[test]
     fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
-        assert!(!is_ep_compatible(ModelId::Silueta, "OpenVINO"));
-        assert!(!is_ep_compatible(ModelId::Silueta, "openvino"));
-        assert!(!is_ep_compatible(ModelId::Silueta, "OPENVINO"));
-    }
-
-    #[test]
-    fn is_ep_compatible_silueta_other_eps_allowed() {
-        assert!(is_ep_compatible(ModelId::Silueta, "CPU"));
-        assert!(is_ep_compatible(ModelId::Silueta, "CUDA"));
-        assert!(is_ep_compatible(ModelId::Silueta, "CoreML"));
-        assert!(is_ep_compatible(ModelId::Silueta, "DirectML"));
-    }
-
-    /// Models with an empty `incompatible_eps` list must accept every EP
-    /// — the `unwrap_or(true)` default for unknown models, plus the
-    /// `iter().any` over `[]` short-circuits to `false`, so the helper
-    /// returns `true`.
-    #[test]
-    fn is_ep_compatible_empty_list_accepts_every_ep() {
+        for ep in ["OpenVINO", "openvino", "OPENVINO"] {
+            assert!(!is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
+        }
+        for ep in ["CPU", "CUDA", "CoreML", "DirectML"] {
+            assert!(is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
+        }
+        // An empty list accepts every provider.
         for ep in ["CPU", "CUDA", "CoreML", "DirectML", "OpenVINO"] {
-            assert!(is_ep_compatible(ModelId::U2net, ep), "U2Net + {ep}");
-            assert!(is_ep_compatible(ModelId::BiRefNetLite, ep), "BiRefNet + {ep}");
-            assert!(is_ep_compatible(ModelId::SdV15InpaintFp16, ep), "SD15 + {ep}");
+            for id in [ModelId::U2net, ModelId::BiRefNetLite, ModelId::SdV15InpaintFp16] {
+                assert!(is_ep_compatible(id, ep), "{id:?} + {ep}");
+            }
         }
     }
 
@@ -2168,19 +2137,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn upscale_descriptors_have_recommended_tile() {
-        for desc in REGISTRY {
-            if desc.category == ModelCategory::Upscale {
-                assert!(
-                    desc.recommended_tile.is_some(),
-                    "{:?} is Upscale category but recommended_tile=None",
-                    desc.id
-                );
-            }
-        }
-    }
-
     /// `upscale: Option<UpscaleModelKnobs>` carries the per-model
     /// dispatch knobs the upscale path reads (input-tensor name, fp16
     /// flag). It must be `Some` iff `category == Upscale` — a mismatch
@@ -2208,12 +2164,31 @@ mod tests {
         }
     }
 
+    /// Each upscaler's dispatch knobs, as its export needs them: the
+    /// input tensor's name and type, its native scale, the 32 px overlap
+    /// a window-attention transformer needs (16 px for a CNN), and the
+    /// tile multiple HAT's windows and RRDB's pixel_unshuffle demand.
     #[test]
-    fn hat_family_has_tile_size_multiple() {
-        let nomos = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
-        assert_eq!(nomos.tile_size_multiple, Some(16));
-        let esrgan = descriptor(ModelId::RealEsrganX4Plus).expect("RealEsrganX4Plus in REGISTRY");
-        assert_eq!(esrgan.tile_size_multiple, None);
+    fn every_upscaler_carries_the_knobs_its_export_needs() {
+        // (id, input, fp16, native scale, window attention, tile multiple, overlap, tile)
+        let table = [
+            (ModelId::RealEsrganX4Plus, "data", false, 4, false, None, 16, 512),
+            (ModelId::RealEsrganX2Plus, "data", false, 2, false, Some(2), 16, 512),
+            (ModelId::Nomos8kSchatL, "input", true, 4, true, Some(16), 32, 256),
+            (ModelId::FourXNmkdSiaxCx, "data", false, 4, false, None, 16, 512),
+            (ModelId::FourXNmkdSuperscale, "data", false, 4, false, None, 16, 512),
+            (ModelId::FourXNomos2RealPlksr, "input", false, 4, false, None, 16, 512),
+        ];
+        assert_eq!(table.len(), ids_in(ModelCategory::Upscale).len(), "a row for every upscaler");
+        for (id, input, fp16, scale, window, multiple, overlap, tile) in table {
+            let desc = descriptor(id).unwrap_or_else(|| panic!("{id:?} in REGISTRY"));
+            let knobs = desc.upscale.unwrap_or_else(|| panic!("{id:?} has upscale knobs"));
+            assert_eq!(
+                (knobs.input_name, knobs.is_fp16, knobs.native_scale, knobs.uses_window_attention, desc.tile_size_multiple, knobs.tile_overlap(), desc.recommended_tile),
+                (input, fp16, scale, window, multiple, overlap, Some(tile)),
+                "{id:?}",
+            );
+        }
     }
 
     // ── RealEsrganX2Plus tests ────────────────────────────────────────────
@@ -2236,115 +2211,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn x2plus_upscale_knobs_match_x4plus() {
-        let x2 = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
-        let x4 = descriptor(ModelId::RealEsrganX4Plus).expect("x4plus in REGISTRY");
-        let k2 = x2.upscale.expect("x2plus must have upscale knobs");
-        let k4 = x4.upscale.expect("x4plus must have upscale knobs");
-        assert_eq!(k2.input_name, "data");
-        assert_eq!(k4.input_name, "data");
-        assert!(!k2.is_fp16);
-        assert!(!k4.is_fp16);
-    }
-
-    #[test]
-    fn x2plus_is_upscale_category() {
-        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
-        assert_eq!(desc.category, ModelCategory::Upscale);
-    }
-
-    #[test]
-    fn x2plus_recommended_tile_set() {
-        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
-        assert_eq!(desc.recommended_tile, Some(512));
-    }
-
-    #[test]
-    fn x2plus_tile_size_multiple_is_some_2() {
-        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
-        assert_eq!(desc.tile_size_multiple, Some(2),
-            "pixel_unshuffle asserts even H/W — tile_size_multiple must be Some(2)");
-    }
-
-    // ── native_scale + uses_window_attention knob tests ──────────────────
-
-    #[test]
-    fn x4plus_native_scale_is_4_no_window_attention() {
-        let desc = descriptor(ModelId::RealEsrganX4Plus).expect("x4plus in REGISTRY");
-        let knobs = desc.upscale.expect("x4plus must have upscale knobs");
-        assert_eq!(knobs.native_scale, 4, "RealEsrganX4Plus is a native-4× model");
-        assert!(
-            !knobs.uses_window_attention,
-            "RealEsrganX4Plus is CNN/RRDB — no window-attention overlap needed"
-        );
-    }
-
-    #[test]
-    fn nomos8k_native_scale_is_4_with_window_attention() {
-        let desc = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
-        let knobs = desc.upscale.expect("Nomos8kSchatL must have upscale knobs");
-        assert_eq!(knobs.native_scale, 4, "Nomos8kSCHAT-L is a native-4× model");
-        assert!(
-            knobs.uses_window_attention,
-            "Nomos8kSCHAT-L is HAT-L (window-attention transformer) — needs 32-px overlap"
-        );
-    }
-
-    #[test]
-    fn x2plus_native_scale_is_2_no_window_attention() {
-        let desc = descriptor(ModelId::RealEsrganX2Plus).expect("x2plus in REGISTRY");
-        let knobs = desc.upscale.expect("x2plus must have upscale knobs");
-        assert_eq!(knobs.native_scale, 2, "RealEsrganX2Plus is a native-2× model");
-        assert!(
-            !knobs.uses_window_attention,
-            "RealEsrganX2Plus is CNN/RRDB — has tile_size_multiple=Some(2) for pixel_unshuffle but NOT window-attention"
-        );
-    }
-
-    #[test]
-    fn tile_overlap_branches_on_window_attention() {
-        let nomos = descriptor(ModelId::Nomos8kSchatL).expect("Nomos8kSchatL in REGISTRY");
-        let esrgan = descriptor(ModelId::RealEsrganX4Plus).expect("RealEsrganX4Plus in REGISTRY");
-        let esrgan2 = descriptor(ModelId::RealEsrganX2Plus).expect("RealEsrganX2Plus in REGISTRY");
-        assert_eq!(nomos.upscale.unwrap().tile_overlap(), 32);
-        assert_eq!(esrgan.upscale.unwrap().tile_overlap(), 16);
-        assert_eq!(esrgan2.upscale.unwrap().tile_overlap(), 16);
-    }
-
     // ── NMKD community RRDB models ────────────────────────────────────────
-
-    #[test]
-    fn nmkd_siax_cx_in_all() {
-        assert!(ModelId::ALL.contains(&ModelId::FourXNmkdSiaxCx));
-    }
-
-    #[test]
-    fn nmkd_superscale_in_all() {
-        assert!(ModelId::ALL.contains(&ModelId::FourXNmkdSuperscale));
-    }
-
-    #[test]
-    fn nmkd_siax_cx_descriptor_complete() {
-        let desc = descriptor(ModelId::FourXNmkdSiaxCx).expect("FourXNmkdSiaxCx in REGISTRY");
-        assert_eq!(desc.category, ModelCategory::Upscale);
-        let knobs = desc.upscale.expect("FourXNmkdSiaxCx must have upscale knobs");
-        assert_eq!(knobs.native_scale, 4, "Siax-CX is native-4×");
-        assert!(!knobs.uses_window_attention, "Siax-CX is RRDB/CNN — 16 px overlap");
-        assert_eq!(knobs.input_name, "data");
-        assert!(!knobs.is_fp16);
-    }
-
-    #[test]
-    fn nmkd_superscale_descriptor_complete() {
-        let desc = descriptor(ModelId::FourXNmkdSuperscale).expect("FourXNmkdSuperscale in REGISTRY");
-        assert_eq!(desc.category, ModelCategory::Upscale);
-        let knobs = desc.upscale.expect("FourXNmkdSuperscale must have upscale knobs");
-        assert_eq!(knobs.native_scale, 4);
-        assert!(!knobs.uses_window_attention);
-        assert_eq!(knobs.input_name, "data");
-        assert!(!knobs.is_fp16);
-    }
 
     #[test]
     fn nmkd_models_have_wtfpl_license() {
@@ -2455,18 +2322,6 @@ mod tests {
     }
 
     #[test]
-    fn sam2_has_encoder_and_decoder_parts() {
-        let desc = descriptor(ModelId::Sam21HieraSmall).unwrap();
-        let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
-            panic!("expected MultiPartBundled");
-        };
-        assert_eq!(parts.len(), 2);
-        let keys: Vec<&str> = parts.iter().map(|p| p.key).collect();
-        assert!(keys.contains(&"encoder"));
-        assert!(keys.contains(&"decoder"));
-    }
-
-    #[test]
     fn sam2_license_is_apache_2_no_acceptance_required() {
         let desc = descriptor(ModelId::Sam21HieraSmall).unwrap();
         let ModelSource::MultiPartBundled { license, .. } = desc.source else {
@@ -2485,18 +2340,13 @@ mod tests {
         let ModelSource::MultiPartBundled { parts, .. } = desc.source else {
             panic!("expected MultiPartBundled");
         };
+        assert_eq!(parts.len(), 2);
         let filenames: std::collections::HashSet<&str> =
             parts.iter().map(|p| p.filename).collect();
         assert_eq!(filenames.len(), parts.len(),
             "every part must have a distinct filename");
         assert!(parts.iter().any(|p| p.key == "encoder" && p.filename.contains("encoder")));
         assert!(parts.iter().any(|p| p.key == "decoder" && p.filename.contains("decoder")));
-    }
-
-    #[test]
-    fn sam2_is_always_available_when_bundled() {
-        assert!(is_available(ModelId::Sam21HieraSmall),
-            "MultiPartBundled SAM 2 must report available without disk presence");
     }
 
     /// `resolve_part_bytes` for a bundled multi-part returns real bytes —
