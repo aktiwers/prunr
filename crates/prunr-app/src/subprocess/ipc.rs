@@ -110,9 +110,7 @@ pub fn read_result_rgba(path: &std::path::Path, w: u32, h: u32) -> Option<image:
 }
 
 /// View an f32 slice as raw bytes. Zero-copy on little-endian hosts (every
-/// platform we target). The returned slice borrows from `data`; the caller
-/// feeds it straight into `fs::write` / `zstd::encode_all` / similar
-/// byte-sinks without an intermediate Vec.
+/// platform we target), so callers feed it to a byte sink without a copy.
 pub fn f32s_as_le_bytes(data: &[f32]) -> &[u8] {
     // Safety (documented via bytemuck::Pod): f32 is POD; on little-endian
     // targets (x86_64, aarch64, wasm32) the in-memory layout is already LE.

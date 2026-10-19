@@ -39,13 +39,11 @@ pub struct SubprocessManager {
     stdin_writer: BufWriter<std::process::ChildStdin>,
     /// Channel from the reader thread (reads child stdout → events).
     event_rx: mpsc::Receiver<ReaderEvent>,
-    /// Items currently being processed by this subprocess.
     in_flight: HashSet<u64>,
     /// RSS limit: pause admission when child RSS exceeds this.
     rss_limit: u64,
     /// Resume threshold (hysteresis): resume when RSS drops below this.
     rss_resume: u64,
-    /// Whether admission is paused due to high RSS.
     rss_paused: bool,
     /// Counter into `RSS_LIMIT_REFRESH_EVERY`: re-query system memory
     /// every Nth `RssUpdate` so a sibling subprocess loading a 5 GB
@@ -53,15 +51,11 @@ pub struct SubprocessManager {
     rss_update_count: u32,
 }
 
-/// Refresh `rss_limit` every Nth `RssUpdate` from the child. Children
-/// emit one RssUpdate per finished job, so this re-queries every 16th
-/// job — cheap enough (one `sysinfo::refresh_memory` ≈ a few ms) and
-/// responsive enough for cross-subprocess pressure shifts.
+/// Children emit one `RssUpdate` per finished job, so system memory is
+/// re-queried every 16th job (a few ms each).
 const RSS_LIMIT_REFRESH_EVERY: u32 = 16;
 
-/// Events from the reader thread.
 enum ReaderEvent {
-    /// Successfully read a subprocess event.
     Event(SubprocessEvent),
     /// Reader thread exited (child stdout closed or error).
     Disconnected,
@@ -125,11 +119,8 @@ impl SubprocessManager {
         Self::spawn_inner(model, jobs, mask, cpu_only, lines, false)
     }
 
-    /// Spawn a SD-inpaint-only subprocess. The worker skips engine
-    /// creation when `inpaint_only` is set, so the seg fields on
-    /// `Init` are dead weight at this stage — we pass placeholders.
-    /// Used by the inpaint bridge for SD models so an OOM during the
-    /// bundle build kills the subprocess, not the GUI.
+    /// Spawn a SD-inpaint-only subprocess, so an OOM during the bundle build
+    /// kills it rather than the GUI. The seg fields on `Init` are placeholders.
     pub fn spawn_inpaint_only() -> Result<(Self, String), String> {
         Self::spawn_inner(
             ModelKind::Silueta, 1,
@@ -148,11 +139,8 @@ impl SubprocessManager {
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
         let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct, scales: edge_scales } = lines;
-        // Stale-file cleanup is owned by `ipc_temp_dir()`'s init-time
-        // sweep. Spawning a subprocess must NOT touch the temp dir —
-        // callers like the CLI downscale path and the inpaint bridge's
-        // lazy first-dispatch write input files BEFORE spawn, so a
-        // spawn-time wipe would race those writes.
+        // Spawn must NOT touch the temp dir: the CLI and the inpaint bridge write
+        // inputs before spawning. `ipc_temp_dir()`'s init-time sweep owns cleanup.
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed to get current exe: {e}"))?;
 
@@ -165,8 +153,7 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to spawn worker: {e}"))?;
         let (mut stdin_writer, event_rx) = attach(&mut child)?;
 
-        // Send Init command — flush immediately so the child's blocking
-        // `read_message` sees it without waiting for the buffer to fill.
+        // Flushed at once: the child's blocking `read_message` waits on it.
         write_message(&mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, cpu_only, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
@@ -176,14 +163,9 @@ impl SubprocessManager {
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
         flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
 
-        // Wait for Ready or InitError. The seg/edge subprocess loads
-        // engine pools at Init (CoreML first-run compilation alone can
-        // take 2–5 min on slow Macs), so it gets the long 300s budget.
-        // The inpaint-only subprocess skips engine creation entirely
-        // (`process_inpaint_with` builds the bundle lazily on first
-        // dispatch), so a 30s budget is plenty AND bounds the bridge's
-        // pre-Ready hang when something like an OpenVINO `is_available()`
-        // probe wedges the worker thread before it can send Ready.
+        // Seg/edge workers build engine pools at Init (a CoreML first-run compile
+        // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
+        // bounds a pre-Ready hang such as a wedged OpenVINO probe.
         let init_timeout = if inpaint_only {
             std::time::Duration::from_secs(30)
         } else {
@@ -253,16 +235,12 @@ impl SubprocessManager {
         image_bytes: &[u8],
         chain_input: Option<(&image::RgbaImage, u32, u32)>,
     ) -> Result<(), String> {
-        // Write image bytes to temp file
         let image_path = super::protocol::IpcKind::Input.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write input temp file: {e}"))?;
 
-        // Write chain input to temp file if present. Propagate write
-        // errors — discarding them produced a `ChainInput` pointing at
-        // a missing or partially-written file, which the worker silently
-        // dropped via `RgbaImage::from_raw -> None`, processing the
-        // *original* image instead of the chained input.
+        // Propagate write errors: a missing or partial chain file made the worker
+        // silently process the original image instead.
         let chain = chain_input
             .map(|(rgba, w, h)| -> Result<ChainInput, String> {
                 let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
@@ -480,9 +458,6 @@ impl SubprocessManager {
             ReaderEvent::Event(e) => e,
             ReaderEvent::Disconnected => return None,
         };
-        // Re-derive RSS thresholds periodically so a sibling subprocess
-        // (e.g. inpaint loading a 5 GB SD bundle after seg started)
-        // shifts our pause/resume bands accordingly.
         if matches!(evt, SubprocessEvent::RssUpdate { .. }) {
             self.rss_update_count = self.rss_update_count.wrapping_add(1);
             if self.rss_update_count.is_multiple_of(RSS_LIMIT_REFRESH_EVERY) {
@@ -501,7 +476,6 @@ impl SubprocessManager {
         Some(evt)
     }
 
-    /// Check if the subprocess is still alive.
     pub fn is_alive(&mut self) -> bool {
         match self.child.try_wait() {
             Ok(Some(_)) => false, // exited
@@ -545,7 +519,6 @@ impl SubprocessManager {
         }
     }
 
-    /// Kill the subprocess forcefully.
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait(); // reap zombie
@@ -582,10 +555,7 @@ fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mps
     Ok((BufWriter::new(child_stdin), event_rx))
 }
 
-/// (rss_limit, rss_resume) derived from the current system available
-/// memory. Called at spawn and re-called every `RSS_LIMIT_REFRESH_EVERY`
-/// `RssUpdate` events so the pause/resume bands track sibling
-/// subprocesses' allocations.
+/// (rss_limit, rss_resume) from the system's current available memory.
 fn current_rss_thresholds() -> (u64, u64) {
     let available = crate::hardware::available_ram_bytes_now();
     let limit = (available as f64 * 0.80) as u64;
