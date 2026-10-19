@@ -177,7 +177,7 @@ impl LayerJob {
             item_id: item.id,
             filename: item.filename.clone(),
             settings: item.settings,
-            start: item.run_start(super::item::Engine::Segment).map(|s| s.image),
+            start: item.run_start(super::item::Engine::Segment),
             source_rgba: item.source_rgba.clone(),
             source: item.source.clone(),
             correction: item.correction(style, action),

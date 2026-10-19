@@ -1793,21 +1793,21 @@ mod timeline_contract_tests {
         let painted = app.batch.items[0].timeline.current().selection.clone().expect("the stroke's region");
         let item = &mut app.batch.items[0];
         assert!(item.reroll().is_none(), "nothing generated yet");
-        let first_start = item.run_start(Engine::Erase).map(|s| s.dims);
+        let first_start = item.run_start(Engine::Erase).map(|s| s.dims());
         item.start_erase(Some(1));
         item.result_rgba = Some(px(10));
         item.invalidate_selection();
         item.finish_job();
         let r = item.reroll().expect("a generated fill can be re-rolled");
         assert!(Arc::ptr_eq(&r.region, &painted), "the region painted for it");
-        assert_eq!(r.start.as_ref().map(|s| s.dims), first_start);
+        assert_eq!(r.start.as_ref().map(|s| s.dims()), first_start);
         item.start_reroll(r, 2);
         item.result_rgba = Some(px(20));
         item.finish_job();
         assert_eq!(item.shown_seed(), Some(2));
         let again = item.reroll().expect("re-rolls chain");
         assert!(Arc::ptr_eq(&again.region, &painted));
-        assert_eq!(again.start.as_ref().map(|s| s.dims), first_start, "still from the pre-erase image");
+        assert_eq!(again.start.as_ref().map(|s| s.dims()), first_start, "still from the pre-erase image");
         let _ = item.undo_step();
         assert_eq!(item.shown_seed(), Some(1), "undo shows the fill before");
     }

@@ -1570,7 +1570,7 @@ impl BatchItem {
     /// Hold the start a render read back, while it is still the start a
     /// run redoes from.
     pub(crate) fn keep_loaded_start(&mut self, start: Arc<image::RgbaImage>) {
-        if self.run_start(Engine::Segment).is_some_and(|s| s.image.holds(&start)) {
+        if self.run_start(Engine::Segment).is_some_and(|s| s.holds(&start)) {
             self.start_photo = Some(start);
         }
     }
@@ -2117,8 +2117,7 @@ impl BatchItem {
     /// file: it becomes the step's start, as an earlier image would be.
     pub(crate) fn chain_start_built(&mut self, run: u64, image: Arc<image::RgbaImage>) {
         if let Some(job) = self.job.as_mut().filter(|j| j.run == run && j.keep.is_some()) {
-            let dims = image.dimensions();
-            job.start = Some(RunStart { image: super::timeline::Stored::new(image), dims });
+            job.start = Some(super::timeline::Stored::new(image));
         }
     }
 
@@ -2126,7 +2125,7 @@ impl BatchItem {
     /// chained cut, the cut-out it keeps.
     pub(crate) fn job_run_image(&self) -> Option<super::worker::RunImage> {
         let job = self.job.as_ref()?;
-        let start = job.start.as_ref().map(|s| Pixels::Parked(Arc::clone(&s.image)));
+        let start = job.start.as_ref().map(|s| Pixels::Parked(Arc::clone(s)));
         match &job.keep {
             // The decoded photo spares the bridge decoding the file again.
             Some(cutout) => Some(super::worker::RunImage::Kept {
@@ -2198,7 +2197,7 @@ impl BatchItem {
     }
 
     fn start_faced(&self, engine: Engine) -> bool {
-        self.run_start(engine).is_some_and(|s| self.timeline.image_faced(&s.image))
+        self.run_start(engine).is_some_and(|s| self.timeline.image_faced(&s))
     }
 
     /// The photo at `stage` already has restored faces from an earlier
@@ -2268,7 +2267,7 @@ impl BatchItem {
 
     /// The size of the image the next upscale by `model` starts from.
     pub(crate) fn next_upscale_dims(&self, model: prunr_core::ModelKind) -> (u32, u32) {
-        self.next_upscale_start(model).map_or(self.dimensions, |s| s.dims)
+        self.next_upscale_start(model).map_or(self.dimensions, |s| s.dims())
     }
 
     /// A colorize lands: its step is recorded, and the run is kept for
@@ -2323,7 +2322,7 @@ impl BatchItem {
     /// The shown result as a run's start (`None`: the original shows).
     fn shown_start(&self) -> Option<RunStart> {
         // The stored step knows its size: a parked result is not the photo's size.
-        self.timeline.current().result.clone().map(|image| RunStart { dims: image.dims(), image })
+        self.timeline.current().result.clone()
     }
 
     /// The photo Restore faces works on at `stage`: the shown upscale's
@@ -2335,7 +2334,7 @@ impl BatchItem {
         }
         match stage {
             FaceStage::Upscale => self.kept_upscale().map(|run| FacePhoto::Upscaled(Arc::clone(&run.raw))),
-            FaceStage::Photo => self.run_start(Engine::Segment).map(|s| FacePhoto::Start(s.image))
+            FaceStage::Photo => self.run_start(Engine::Segment).map(FacePhoto::Start)
                 .or_else(|| self.source_rgba.clone().map(FacePhoto::Original)),
         }
     }
@@ -2398,7 +2397,7 @@ impl BatchItem {
     /// The pixels a run of `engine` starts from (`None`: the original).
     #[cfg(test)]
     pub(crate) fn run_input(&self, engine: Engine) -> Option<Arc<image::RgbaImage>> {
-        self.run_start(engine).and_then(|s| s.image.load())
+        self.run_start(engine).and_then(|s| s.load())
     }
 
     /// What an upscale or colorize run of `engine` reads: where its
@@ -2409,7 +2408,7 @@ impl BatchItem {
 
     /// The pixels a run from `start` reads (`None`: the photo).
     pub(crate) fn pixels_from(&self, start: Option<&RunStart>) -> Pixels {
-        start.map_or_else(|| self.photo_pixels(), |s| Pixels::Parked(Arc::clone(&s.image)))
+        start.map_or_else(|| self.photo_pixels(), |s| Pixels::Parked(Arc::clone(s)))
     }
 
     /// Where the faces are in the original photo, when a Faces search has
@@ -2426,7 +2425,7 @@ impl BatchItem {
 
     /// The size of the image a run of `engine` starts from.
     pub(crate) fn run_input_dims(&self, engine: Engine) -> (u32, u32) {
-        self.run_start(engine).map_or(self.dimensions, |s| s.dims)
+        self.run_start(engine).map_or(self.dimensions, |s| s.dims())
     }
 
     /// Whether a run of `engine` starts from an earlier result rather than
@@ -2439,7 +2438,7 @@ impl BatchItem {
     /// loaded when the run is sent.
     #[cfg(test)]
     pub(crate) fn job_input(&self) -> Option<Arc<image::RgbaImage>> {
-        self.job.as_ref()?.start.as_ref()?.image.load()
+        self.job.as_ref()?.start.as_ref()?.load()
     }
 
     /// What a full run on this image sends: its file and the pixels the
@@ -2856,7 +2855,7 @@ impl BatchItem {
     pub(crate) fn backdrop_photo(&self) -> Option<BackdropPhoto> {
         let edited = self.timeline.latest_run().and_then(|o| o.start.as_ref());
         match edited {
-            Some(start) => Some(BackdropPhoto::Edited(Arc::clone(&start.image))),
+            Some(start) => Some(BackdropPhoto::Edited(Arc::clone(start))),
             None => self.source_rgba.clone().map(BackdropPhoto::Original),
         }
     }
@@ -3058,11 +3057,11 @@ mod tests {
     /// on screen and in export alike.
     #[test]
     fn the_effect_background_follows_the_photo_the_cut_out_was_made_from() {
-        use crate::gui::timeline::{Origin, RunStart, Stored};
+        use crate::gui::timeline::{Origin, Stored};
         let mut item = fixture_item(1);
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([250, 250, 250, 255]))));
         let erased = Stored::new(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([10, 10, 10, 255]))));
-        item.timeline.current_mut().origin = Some(Origin::new(Engine::Segment, Some(RunStart { image: erased, dims: (4, 2) })));
+        item.timeline.current_mut().origin = Some(Origin::new(Engine::Segment, Some(erased)));
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
         let cut_out = Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 0, 0])));
         assert_eq!(item.export_bg().bake(&cut_out, &ExportDepth::default()).get_pixel(0, 0).0, [10, 10, 10, 255], "export: the edited photo behind");

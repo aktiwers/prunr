@@ -825,7 +825,7 @@ impl PrunrApp {
         let item = &self.batch.items[idx];
         let Some(reroll) = item.reroll() else { return };
         let source = match reroll.start.as_ref() {
-            Some(s) => crate::gui::item::Pixels::Parked(Arc::clone(&s.image)),
+            Some(s) => crate::gui::item::Pixels::Parked(Arc::clone(s)),
             None => item.photo_pixels(),
         };
         let region = crate::gui::item::Region::Stored(Arc::clone(&reroll.region));

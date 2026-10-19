@@ -608,7 +608,7 @@ pub struct DispatchInputs {
     /// The run's start when it is stored packed: the render's thread reads
     /// it back into `original` and hands it back, so the UI thread never
     /// unpacks it.
-    pub(crate) original_from: Option<OriginalFrom>,
+    pub(crate) original_from: Option<crate::gui::timeline::StoredImage>,
     /// Where the preview starts when that is an earlier result (`None`: the
     /// source), recorded as the step's start on landing.
     pub(crate) start: Option<crate::gui::timeline::RunStart>,
@@ -736,7 +736,7 @@ impl DispatchInputs {
     pub(crate) fn can_be_quick(&self) -> bool {
         let (w, h) = match self.kind {
             PreviewKind::Mask | PreviewKind::Edge => self.original_from.as_ref()
-                .map_or(self.original.dimensions(), |from| from.dims),
+                .map_or(self.original.dimensions(), |from| from.dims()),
             PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
             PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
             PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
@@ -938,13 +938,6 @@ pub(crate) struct Unpacked {
     pub(crate) edge: Option<(crate::gui::worker::CompressedEdgeTensors, prunr_core::EdgeScale, Arc<Vec<f32>>)>,
 }
 
-/// The run's start image a render draws on, stored packed, with its size.
-#[derive(Clone)]
-pub(crate) struct OriginalFrom {
-    pub(crate) image: crate::gui::timeline::StoredImage,
-    pub(crate) dims: (u32, u32),
-}
-
 /// Runs on a rayon worker. Honours `refine_edges`: the guided filter adds
 /// ~50-150 ms per tick at 4K, but without it the three refine knobs would
 /// do nothing in live preview.
@@ -998,7 +991,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     let mut inputs = inputs;
     let built_start = match inputs.original_from.take() {
         Some(from) => {
-            let Some(start) = from.image.load() else { return RunOutput::default() };
+            let Some(start) = from.load() else { return RunOutput::default() };
             inputs.original = Arc::clone(&start);
             Some(start)
         }
