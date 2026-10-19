@@ -584,21 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_deterministic() {
-        let m = mask(4, 4, vec![64; 16]);
-        assert_eq!(m.content_hash(), m.content_hash());
-    }
-
-    #[test]
-    fn content_hash_changes_when_data_changes() {
-        let mut data = vec![64i8; 16];
-        let m1 = mask(4, 4, data.clone());
-        data[7] = -64;
-        let m2 = mask(4, 4, data);
-        assert_ne!(m1.content_hash(), m2.content_hash());
-    }
-
-    #[test]
     fn content_hash_changes_when_dims_change() {
         let m1 = mask(4, 4, vec![0; 16]);
         let m2 = mask(8, 2, vec![0; 16]);

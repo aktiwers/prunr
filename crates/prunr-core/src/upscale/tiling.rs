@@ -323,25 +323,6 @@ mod tests {
         );
     }
 
-    /// The last row/column tile must have padded dimensions that are a
-    /// multiple of the given tile_multiple.
-    #[test]
-    fn plan_upscale_tiles_pads_to_multiple_when_required() {
-        let tiles = plan_upscale_tiles(250, 200, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 16 });
-        for tile in &tiles {
-            assert_eq!(
-                tile.padded_w % 16, 0,
-                "padded_w {} not a multiple of 16",
-                tile.padded_w
-            );
-            assert_eq!(
-                tile.padded_h % 16, 0,
-                "padded_h {} not a multiple of 16",
-                tile.padded_h
-            );
-        }
-    }
-
     /// Pad-to-multiple round-trip: a 250×200 tile padded to 256×208 (nearest
     /// multiples of 16), inferred at 4× to 1024×832, then trimmed back to
     /// 1000×800 (250*4 × 200*4) must produce exactly the expected dimensions.

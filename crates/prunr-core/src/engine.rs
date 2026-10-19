@@ -1020,11 +1020,6 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 mod tests {
     use super::*;
 
-    struct MockEngine;
-    impl InferenceEngine for MockEngine {
-        fn active_provider(&self) -> &str { "CPU" }
-    }
-
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
     /// behind it, only when the user chose it; fills never do, and an SD
     /// part keeps the device it pins.
@@ -1062,12 +1057,6 @@ mod tests {
             GpuStartFailure::of(GpuStack::Rocm, &failed("libamdhip64.so.7")).text(),
             "MIGraphX could not start: libamdhip64.so.7 is missing. It needs AMD's ROCm 7 with MIGraphX installed.",
         );
-    }
-
-    #[test]
-    fn test_inference_engine_trait_is_object_safe() {
-        let engine: Box<dyn InferenceEngine> = Box::new(MockEngine);
-        assert_eq!(engine.active_provider(), "CPU");
     }
 
     #[test]

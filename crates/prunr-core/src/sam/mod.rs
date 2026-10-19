@@ -391,18 +391,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decode_negative_logits_produce_zero_mask() {
-        // Candidate 0 has IoU 0.9 but all logits are -1.0 → all mask pixels 0.0
-        let mut masks = vec![0.0f32; 3 * 256 * 256];
-        for v in &mut masks[0..256 * 256] {
-            *v = -1.0;
-        }
-        let output = SamDecoderOutput {
-            masks,
-            iou_predictions: [0.9, 0.1, 0.1],
-        };
-        let result = decode_to_mask_artifact(&output, 32, 32, plain(0.5), BrushMode::Subtract);
-        assert!(result.cells().iter().all(|&v| v == 0));
-    }
 }

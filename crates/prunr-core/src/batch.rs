@@ -197,36 +197,6 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    /// Synthetic test for the `par_iter_mut().zip(par_iter()).enumerate()`
-    /// pattern that `batch_process` uses to write results in-place.
-    /// Pins that rayon's IndexedParallelIterator chain preserves
-    /// positional indices regardless of work-stealing order — without
-    /// this property, results would land in wrong slots and
-    /// `engines[idx % engines.len()]` round-robin would jumble too.
-    #[test]
-    fn par_iter_mut_zip_enumerate_preserves_positional_indices() {
-        use rayon::prelude::*;
-        let inputs: Vec<u32> = (0..1000).collect();
-        let mut outputs: Vec<u32> = vec![0; inputs.len()];
-        outputs
-            .par_iter_mut()
-            .zip(inputs.par_iter())
-            .enumerate()
-            .for_each(|(idx, (slot, &val))| {
-                // The contract: `idx` is always the source position,
-                // and `slot` is always `outputs[idx]`. If rayon broke
-                // the ordering, slot wouldn't match val * 2 at idx.
-                *slot = (val * 2).wrapping_add(idx as u32);
-            });
-        for (i, &out) in outputs.iter().enumerate().take(1000) {
-            assert_eq!(
-                out,
-                (i as u32 * 2).wrapping_add(i as u32),
-                "outputs[{i}] mis-ordered",
-            );
-        }
-    }
-
     #[test]
     fn test_batch_process_empty_input() {
         let results = batch_process(

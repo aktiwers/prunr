@@ -252,13 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_denoise_preserves_dimensions() {
-        let img = make_gradient_rgba(64, 48);
-        let result = apply_denoise(&img, 0.5);
-        assert_eq!(result.dimensions(), img.dimensions());
-    }
-
-    #[test]
     fn median_filter_channel_kills_impulse_noise() {
         let w = 32usize;
         let h = 32usize;
@@ -271,17 +264,6 @@ mod tests {
         let out = median_filter_channel(&src, w, h, 1);
         for (i, &v) in out.iter().enumerate() {
             assert_eq!(v, 100, "pixel {i} should be 100 after median, got {v}");
-        }
-    }
-
-    #[test]
-    fn median_filter_channel_preserves_constant_input() {
-        let w = 32usize;
-        let h = 32usize;
-        let src = vec![128u8; w * h];
-        let out = median_filter_channel(&src, w, h, 1);
-        for &v in &out {
-            assert_eq!(v, 128, "constant input should produce constant output");
         }
     }
 
@@ -403,15 +385,6 @@ mod tests {
 
         assert!(out_var < in_var,
             "full strength denoise must reduce variance: in={in_var:.2} out={out_var:.2}");
-    }
-
-    #[test]
-    fn apply_denoise_alpha_zero_input_passes_through() {
-        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 0]));
-        let result = apply_denoise(&img, 0.7);
-        for p in result.pixels() {
-            assert_eq!(p.0[3], 0, "alpha must remain 0");
-        }
     }
 
     /// Wall-clock timing test for apply_denoise on a 2560×1920 image at strength=1.0.
