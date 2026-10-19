@@ -143,8 +143,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 
     // The strip sits on the foreground layer, above the modals' level:
-    // under an open modal it would draw over the modal.
-    if let Some(tool) = app.active_tool().filter(|_| !modal_open) {
+    // under an open modal it would draw over the modal. With no image there
+    // is nothing to paint (an eraser's brush is on from the start).
+    if let Some(tool) = app.active_tool().filter(|_| !modal_open && app.batch.selected_item().is_some()) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),

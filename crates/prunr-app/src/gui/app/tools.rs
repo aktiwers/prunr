@@ -376,7 +376,7 @@ impl PrunrApp {
     /// After a model switch: a model without brushes turns them off and
     /// frees Magic Brush (its sessions and each image's 16 MB embedding),
     /// so nothing encodes behind an upscale; one with brushes warms it.
-    pub(super) fn fit_brush_models_to_model(&mut self) {
+    pub(crate) fn fit_brush_models_to_model(&mut self) {
         if self.magic_brush_wanted() {
             if self.magic_brush_ready_ahead() {
                 self.processor.warm_sam_sessions();
