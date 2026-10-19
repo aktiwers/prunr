@@ -1,12 +1,9 @@
 //! Coordinator for on-demand model downloads.
 //!
-//! Concurrency cap: 1 active download at a time. Additional `start_download`
-//! calls queue in submission order — keeps bandwidth + disk pressure
-//! predictable, and a fresh stroke from the user can't stack 5 simultaneous
-//! 800 MB downloads.
-//!
-//! HTTP + SHA + atomic-write logic lives in `download_to_file` so the
-//! state machine here stays testable without a network.
+//! One active download at a time; more queue in submission order, so a
+//! burst of strokes can't stack five 800 MB downloads. HTTP, SHA and the
+//! atomic write live in `download_to_file`, so the state machine here is
+//! testable without a network.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -102,15 +99,13 @@ impl DownloadManager {
         }
     }
 
-    /// Returns drained events so the UI can fan them out to toasts /
-    /// repaints — the manager itself owns no UI state.
+    /// Drained events for the UI to fan out; the manager owns no UI state.
     pub(crate) fn pump(&mut self) -> Vec<DownloadEvent> {
         let mut out = Vec::new();
         while let Ok(event) = self.progress_rx.try_recv() {
             self.apply_event(&event);
             out.push(event);
         }
-        // If nothing is active and there's a queued model, kick the next.
         if self.active.is_none() {
             if let Some(next) = self.queue.pop_front() {
                 self.kick_off(next);
@@ -174,9 +169,7 @@ impl DownloadManager {
         let Some(dir) = self.prepare_dir(id, None) else { return };
         let dest = dir.join(filename);
         let fp16_dest = fp16.as_ref().map(|v| dir.join(v.filename));
-        // Combined byte budget for progress: main file + optional fp16
-        // companion. The UI bar tracks both as one logical download so
-        // the user sees a single progress trajectory.
+        // Main file + optional fp16 companion count as one download, one bar.
         let main_bytes = (size_mb as u64) * 1024 * 1024;
         let fp16_bytes = fp16.as_ref().map(|v| (v.size_mb as u64) * 1024 * 1024).unwrap_or(0);
         let total = main_bytes + fp16_bytes;
@@ -231,11 +224,9 @@ impl DownloadManager {
         });
     }
 
-    /// Multi-part dispatch: download each part sequentially under
-    /// `<on_demand_dir>/<subdir>/`, aggregating progress so the UI's
-    /// `InProgress { bytes_so_far, total_bytes }` tracks the bundle as a
-    /// whole. Already-renamed parts are skipped on retry — gives the
-    /// user effective resume across cancels without HTTP Range support.
+    /// Download each part in turn under `<on_demand_dir>/<subdir>/`, progress
+    /// counted over the bundle. Parts already renamed are skipped on retry:
+    /// resume across cancels without HTTP Range.
     fn kick_off_multi(
         &mut self,
         id: ModelId,
@@ -285,10 +276,8 @@ impl DownloadManager {
         });
     }
 
-    /// Common state-machine prelude for any active download (single or
-    /// multi-part): seed `InProgress`, register the cancel flag, mark
-    /// `id` as the currently active download. Returns the cancel flag
-    /// for the worker thread.
+    /// Seed `InProgress`, register the cancel flag and mark `id` active; the
+    /// flag goes to the worker thread.
     fn begin_active(&mut self, id: ModelId, total_bytes: u64) -> Arc<AtomicBool> {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flags.insert(id, cancel.clone());
@@ -334,13 +323,10 @@ fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEve
     }
 }
 
-/// Download `url` to `dest`, verifying SHA256 against `expected_sha`.
-/// Writes to a `<dest>.partial` sidecar; renames to `dest` only after
-/// verification passes. Wraps `download_attempt` in the shared retry
-/// loop (`prunr_runtime_install::retry_with_backoff`) so transient
-/// network errors (timeout, 5xx) get up to 3 tries with exponential
-/// backoff. Fatal errors (404, SHA mismatch, disk full, user cancel)
-/// fail fast without retry.
+/// Download `url` to `dest` via a `.partial` sidecar, renamed only once its
+/// SHA256 matches. Transient network errors (timeout, 5xx) get up to 3
+/// tries with backoff; fatal ones (404, SHA mismatch, disk full, cancel)
+/// fail fast.
 fn download_to_file(
     url: &str,
     dest: &Path,

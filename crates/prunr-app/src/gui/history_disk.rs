@@ -22,7 +22,6 @@ pub(super) fn read_dims(header: &[u8; 8]) -> (u32, u32) {
     (u32::from_le_bytes([w0, w1, w2, w3]), u32::from_le_bytes([h0, h1, h2, h3]))
 }
 
-/// Compress an RgbaImage to a zstd buffer in RAM.
 pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<Vec<u8>> {
     let (w, h) = (rgba.width(), rgba.height());
     // zstd-level-1 on natural-image RGBA hits ~2:1 in practice.
@@ -36,7 +35,6 @@ pub fn compress_to_ram(rgba: &image::RgbaImage) -> std::io::Result<Vec<u8>> {
     Ok(raw)
 }
 
-/// Decompress a `compress_to_ram` buffer back to an RgbaImage.
 pub fn decompress_from_bytes(bytes: &[u8]) -> std::io::Result<image::RgbaImage> {
     let mut decoder = zstd::Decoder::new(bytes)?;
     let mut header = [0u8; 8];

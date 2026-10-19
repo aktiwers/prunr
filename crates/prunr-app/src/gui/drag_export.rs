@@ -28,7 +28,6 @@ use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
 /// The `drag` crate needs a GTK window on Linux, which eframe can't give it.
 pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 
-/// Subdirectory name under temp_dir for prunr drag files.
 const DRAG_SUBDIR: &str = "prunr-drag";
 
 /// The drag folder's name. A test process writes to its own: every test
@@ -62,8 +61,8 @@ fn item_dir(item_id: u64) -> PathBuf {
     dir
 }
 
-/// Check whether a path was created by our own drag-out (i.e. lives under prunr-drag/).
-/// Used to reject self-originated drops so our own thumbnails can't be re-ingested.
+/// Whether `path` came from our own drag-out, so our own files can't be
+/// re-ingested on drop.
 pub(crate) fn is_self_drop(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == drag_subdir())
 }
@@ -114,11 +113,9 @@ pub(crate) fn export_name(source_filename: &str, format: prunr_core::ExportForma
     format!("{}{}", source_stem(source_filename), format.result_suffix())
 }
 
-/// Build a human-friendly filename stem for a batch item given its processing mode.
-///
-/// Naming convention: `.prunr` is a tool tag (signals "Prunr touched this") that
-/// sits between the source stem and the `.png` extension; the lines-only mode
-/// keeps a plain hyphen suffix because it isn't a Prunr-branded output kind.
+/// The drag filename for an item. `.prunr` is a tool tag between stem and
+/// extension; lines-only keeps a plain hyphen suffix since it isn't a
+/// Prunr-branded output kind.
 fn make_filename(source_filename: &str, has_result: bool, line_mode: LineMode) -> String {
     if !has_result {
         // No processing yet — drag source as-is with original extension.
