@@ -2281,6 +2281,7 @@ mod timeline_contract_tests {
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         assert!(app.batch.clear_selection(1));
         assert!(app.batch.items[0].selection_mask.is_none());
+        assert!(!app.batch.clear_selection(1), "nothing left to clear: no second step");
         app.handle_undo(&ctx);
         assert!(app.batch.items[0].selection_mask.is_some());
     }

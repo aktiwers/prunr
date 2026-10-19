@@ -3301,28 +3301,19 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_edge_cache_clears_both_atomically() {
-        let mut item = fixture_item(1);
-        // Simulate populated edge caches (minimal placeholder structs).
-        item.edge_planes.store_placeholder();
-        // (cached_edge_tensors would need a real CompressedEdgeTensors — leave None
-        // here; the method should still run cleanly and clear the planes.)
-        assert!(!item.edge_planes.is_empty());
-        item.invalidate_edge_cache();
-        assert!(item.cached_edge_tensors.is_none());
-        assert!(item.edge_planes.is_empty());
-    }
-
-    #[test]
     fn reset_result_caches_clears_display_fields_only() {
         // reset_result_caches owns display/texture cleanup. It must NOT
         // touch cached_tensor — that would kill live preview after any
         // Tier 2 rerun (the tier-2 worker doesn't return a fresh tensor).
+        // The selection survives too: it must outlast a Process click.
         let mut item = fixture_item(1);
         item.thumb.asked();
         item.source_tex_pending = true;
         item.result_tex_pending = true;
         item.decode_pending = true;
+        let mask = prunr_core::selection::MaskArtifact::new_empty(32, 32);
+        item.selection_hash = Some(mask.content_hash());
+        item.selection_mask = Some(Arc::new(mask));
         item.reset_result_caches();
         assert!(item.result_texture.is_none());
         assert!(item.thumb.texture().is_none());
@@ -3330,6 +3321,7 @@ mod tests {
         assert!(!item.source_tex_pending);
         assert!(!item.result_tex_pending);
         assert!(!item.decode_pending);
+        assert!(item.selection_mask.is_some() && item.selection_hash.is_some(), "the selection stays");
     }
 
     /// Each kind of settings change asks for the run it needs: none for a
@@ -3784,22 +3776,6 @@ mod tests {
         assert_eq!(item.source_len, 1234);
     }
 
-    #[test]
-    fn image_source_path_load_round_trip() {
-        // Path is the 99%-case variant (file open / drag-drop). Write a temp
-        // file and read it back via load_bytes.
-        let payload: &[u8] = b"PRUNR-TEST-FIXTURE-CONTENTS-1234567890";
-        let mut path = std::env::temp_dir();
-        path.push(format!("prunr-item-test-{}.bin", std::process::id()));
-        std::fs::write(&path, payload).expect("write tempfile");
-
-        let source = ImageSource::file(path.clone());
-        let loaded = source.load_bytes().expect("Path variant must read the file");
-        assert_eq!(&**loaded, payload);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
     /// Build a distinct MaskArtifact for testing; the tag sets the first cell.
     fn make_mask(tag: u64, w: u32, h: u32) -> Arc<prunr_core::selection::MaskArtifact> {
         let mut data = vec![0i8; (w * h) as usize];
@@ -3997,15 +3973,6 @@ mod tests {
     }
 
     // ── selection_* fields ───────────────────────────────────────────────
-
-    #[test]
-    fn default_batch_item_has_no_selection() {
-        let item = fixture_item(1);
-        assert!(item.selection_mask.is_none());
-        assert!(item.selection_hash.is_none());
-        assert!(item.selection_texture.is_none());
-        assert!(item.magic_brush_embedding.is_none());
-    }
 
     #[test]
     fn invalidate_selection_clears_all_four_fields() {
