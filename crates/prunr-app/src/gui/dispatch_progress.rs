@@ -507,19 +507,21 @@ mod tests {
         assert_eq!(at(0, 10, 20), None, "nothing done, nothing to go on");
     }
 
-    /// A face search shows Cancel and stops on it; it used to have no
-    /// target, so the button and Esc did nothing while it ran.
+    /// Each run's Cancel stops that run. A face search and an erase run
+    /// once had a Cancel that did nothing; Seg must reset the batch, not
+    /// cancel an erase. A depth run is too short to cancel.
     #[test]
-    fn cancel_target_faces_stops_the_search() {
-        assert_eq!(cancel_target_for(ProgressKind::Faces), Some(CancelTarget::Faces));
-    }
-
-    /// The capsule shows an erase run whichever image is on screen, and
-    /// its Cancel stops that run: a button that showed and did nothing
-    /// was the bug.
-    #[test]
-    fn cancel_target_eraser_stops_the_run_shown() {
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint), Some(CancelTarget::Inpaint));
+    fn each_run_kind_cancels_its_own_run() {
+        for (kind, target) in [
+            (ProgressKind::Seg, Some(CancelTarget::SegBatchAndReset)),
+            (ProgressKind::Inpaint, Some(CancelTarget::Inpaint)),
+            (ProgressKind::Upscale, Some(CancelTarget::Upscale)),
+            (ProgressKind::Colorize, Some(CancelTarget::Colorize)),
+            (ProgressKind::Faces, Some(CancelTarget::Faces)),
+            (ProgressKind::Depth, None),
+        ] {
+            assert_eq!(cancel_target_for(kind), target, "{kind:?}");
+        }
     }
 
     /// A run that was replaced, or has ended, can still have a report in
@@ -553,45 +555,4 @@ mod tests {
         assert!(p.cancelling, "a late step must not hide the cancel");
     }
 
-    #[test]
-    fn cancel_target_upscale_ignores_item() {
-        // Upscale is single-flight on the Processor; the item handle
-        // is irrelevant — there's only one upscale to cancel.
-        assert_eq!(
-            cancel_target_for(ProgressKind::Upscale),
-            Some(CancelTarget::Upscale),
-        );
-        assert_eq!(
-            cancel_target_for(ProgressKind::Upscale),
-            Some(CancelTarget::Upscale),
-        );
-    }
-
-    #[test]
-    fn a_depth_run_has_no_cancel() {
-        assert_eq!(cancel_target_for(ProgressKind::Depth), None);
-    }
-
-    #[test]
-    fn cancel_target_colorize_ignores_item() {
-        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
-        assert_eq!(cancel_target_for(ProgressKind::Colorize), Some(CancelTarget::Colorize));
-    }
-
-    #[test]
-    fn cancel_target_seg_routes_to_batch_reset() {
-        // Seg Cancel → batch cancel, not an inpaint cancel.
-        // A future refactor that maps
-        // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
-        // fails this assertion before users see a dropped click.
-        assert_eq!(
-            cancel_target_for(ProgressKind::Seg),
-            Some(CancelTarget::SegBatchAndReset),
-        );
-        assert_eq!(
-            cancel_target_for(ProgressKind::Seg),
-            Some(CancelTarget::SegBatchAndReset),
-            "seg routes to batch reset regardless of selection",
-        );
-    }
 }

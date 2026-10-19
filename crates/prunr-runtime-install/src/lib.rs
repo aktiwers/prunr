@@ -701,26 +701,35 @@ mod tests {
             "must skip sdist and pick the .whl");
     }
 
+    /// What a wheel's entry is kept as, if at all.
     #[test]
-    fn repackage_keeps_capi_dylib() {
-        // Versioned forms strip to the canonical name.
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so.1.24.1").as_deref(),
-            Some("libonnxruntime.so"),
-        );
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.1.24.1.dylib").as_deref(),
-            Some("libonnxruntime.dylib"),
-        );
-        // Canonical forms pass through unchanged.
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so").as_deref(),
-            Some("libonnxruntime.so"),
-        );
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.dylib").as_deref(),
-            Some("libonnxruntime.dylib"),
-        );
+    fn repackage_keeps_the_runtime_libraries_and_nothing_else() {
+        for (entry, kept) in [
+            // Versioned forms strip to the canonical name; canonical ones pass.
+            ("onnxruntime/capi/libonnxruntime.so.1.24.1", Some("libonnxruntime.so")),
+            ("onnxruntime/capi/libonnxruntime.1.24.1.dylib", Some("libonnxruntime.dylib")),
+            ("onnxruntime/capi/libonnxruntime.so", Some("libonnxruntime.so")),
+            ("onnxruntime/capi/libonnxruntime.dylib", Some("libonnxruntime.dylib")),
+            // The DirectML wheel's onnxruntime.dll delay-loads DirectML.dll
+            // from its own folder; without it there the system's older copy loads.
+            ("onnxruntime/capi/DirectML.dll", Some("DirectML.dll")),
+            ("onnxruntime/capi/onnxruntime.dll", Some("onnxruntime.dll")),
+            // The CUDA provider and the shared bridge it loads through stay;
+            // the TensorRT provider does not.
+            ("onnxruntime/capi/libonnxruntime_providers_cuda.so", Some("libonnxruntime_providers_cuda.so")),
+            ("onnxruntime/capi/libonnxruntime_providers_shared.so", Some("libonnxruntime_providers_shared.so")),
+            ("onnxruntime/capi/libonnxruntime_providers_tensorrt.so", None),
+            ("onnxruntime/capi/onnxruntime_pybind11_state.so", None),
+            ("onnxruntime/capi/__init__.py", None),
+            ("onnxruntime/__init__.py", None),
+            // A separator after `capi/` could escape the target dir: `/` on
+            // Unix, `\` on Windows.
+            ("onnxruntime/capi/../etc/passwd", None),
+            ("onnxruntime/capi/..\\Windows\\evil.dll", None),
+            ("onnxruntime/capi/sub\\file.so", None),
+        ] {
+            assert_eq!(repackage_target_filename(entry).as_deref(), kept, "{entry}");
+        }
     }
 
     /// The Windows release ships the DirectML runtime as its default:
@@ -739,28 +748,6 @@ mod tests {
         ] {
             assert!(yml.contains(&line), "release.yml no longer has `{line}`");
         }
-    }
-
-    /// The DirectML wheel's `onnxruntime.dll` delay-loads `DirectML.dll`
-    /// from its own folder; without it there the system's older copy loads.
-    #[test]
-    fn repackage_keeps_the_directml_dll_beside_the_runtime() {
-        for name in ["DirectML.dll", "onnxruntime.dll"] {
-            assert_eq!(
-                repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(),
-                Some(name),
-            );
-        }
-    }
-
-    /// The CUDA wheel keeps its CUDA provider and the shared bridge it
-    /// loads through; the TensorRT provider stays behind.
-    #[test]
-    fn repackage_keeps_the_cuda_provider_and_drops_tensorrt() {
-        for name in ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so"] {
-            assert_eq!(repackage_target_filename(&format!("onnxruntime/capi/{name}")).as_deref(), Some(name));
-        }
-        assert!(repackage_target_filename("onnxruntime/capi/libonnxruntime_providers_tensorrt.so").is_none());
     }
 
     /// An NVIDIA wheel gives up its shared libraries by file name, and
@@ -796,31 +783,6 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(std::fs::read(dir.path().join("libcurand.so.10")).unwrap(), b"elf");
         assert!(extract_nvidia_wheel(&wheel(&["nvidia/curand/include/curand.h"]), dir.path()).is_err());
-    }
-
-    #[test]
-    fn repackage_drops_python_files_and_pybind() {
-        assert!(repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none());
-        assert!(repackage_target_filename("onnxruntime/capi/__init__.py").is_none());
-        assert!(repackage_target_filename("onnxruntime/__init__.py").is_none());
-    }
-
-    /// Path-traversal guard: any embedded `/` or `\\` after the
-    /// `onnxruntime/capi/` prefix must be rejected so a maliciously
-    /// crafted wheel can't escape `target_dir`. The forward-slash check
-    /// covers Unix; the backslash check covers Windows.
-    #[test]
-    fn repackage_rejects_path_traversal_in_entry_name() {
-        // forward slash (Unix-style traversal)
-        assert!(repackage_target_filename("onnxruntime/capi/../etc/passwd").is_none());
-        // backslash (Windows-style traversal)
-        assert!(repackage_target_filename("onnxruntime/capi/..\\Windows\\evil.dll").is_none());
-        assert!(repackage_target_filename("onnxruntime/capi/sub\\file.so").is_none());
-        // sanity: the canonical no-separator forms still pass
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so"),
-            Some("libonnxruntime.so".to_string()),
-        );
     }
 
     #[test]
