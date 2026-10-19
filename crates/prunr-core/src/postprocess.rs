@@ -14,8 +14,6 @@ use crate::types::{MaskSettings, ModelKind};
 const ROW_PAR_THRESHOLD: usize = 512 * 512;
 
 /// Bundle of stable inputs shared by every postprocess entry point.
-/// Adding a new optional field here is preferable to adding another
-/// positional parameter to six functions.
 #[derive(Clone, Copy)]
 pub struct PostprocessOpts<'a> {
     pub mask_settings: &'a MaskSettings,
@@ -33,9 +31,8 @@ impl<'a> PostprocessOpts<'a> {
     }
 }
 
-/// Postprocess raw ONNX model output into a transparent RGBA image.
-/// Allocates the RGBA buffer once and reuses it for guided filter (if enabled)
-/// and final mask application — avoids two 4×width×height allocations.
+/// Raw ONNX output → transparent RGBA. One RGBA buffer serves both the
+/// guided filter and the final mask application.
 pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba, opts: &PostprocessOpts<'_>) -> RgbaImage {
     let mut rgba = original.as_rgba().into_owned();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
@@ -45,8 +42,7 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba,
     rgba
 }
 
-/// Postprocess from a flat f32 tensor slice. Used by subprocess paths where
-/// tensor data arrives via IPC as a Vec<f32> that needs reshaping to [1,1,H,W].
+/// `postprocess` from a flat `[1,1,H,W]` tensor, as it arrives over IPC.
 pub fn postprocess_from_flat(
     tensor: &[f32],
     tensor_h: usize,
@@ -120,9 +116,8 @@ pub fn tensor_to_mask_from_flat(
 /// Convert raw ONNX tensor to a full-resolution grayscale mask (Tier 2).
 /// Applies normalization, gamma, resize, edge shift, guided filter, feather and contrast.
 pub fn tensor_to_mask(raw: ArrayView4<f32>, original: &DynamicImage, opts: &PostprocessOpts<'_>) -> GrayImage {
-    // Materializing rgba here is wasteful when neither the guided filter nor
-    // the image's own transparency needs it; callers on the hot path should
-    // use `postprocess()` which shares the RGBA buffer.
+    // Converts to RGBA even when nothing needs it: hot-path callers use
+    // `postprocess()`, which shares the RGBA buffer.
     let owned;
     let base = match original.as_rgba8() {
         Some(rgba) => Some(rgba),
@@ -213,7 +208,6 @@ fn tensor_to_mask_core(
     let mask = GrayImage::from_raw(sw as u32, sh as u32, mask_buf)
         .expect("mask buffer size matches dimensions");
 
-    // Resize mask back to original dimensions (SIMD-accelerated Lanczos3)
     let mut mask = resize_gray_lanczos3(&mask, ow, oh);
 
     // Edge shift: positive erodes (shrinks foreground), negative dilates (expands it)
@@ -232,9 +226,8 @@ fn tensor_to_mask_core(
         }
     }
 
-    // Feather runs AFTER refine_edges: guided filter snaps the mask to color
-    // edges first (sharpening); feather is the final softening pass on top.
-    // Running feather first and then refine would have them fight each other.
+    // Feather runs AFTER refine: sharpen-then-soften; the other order
+    // makes the two fight.
     if mask_settings.feather > 0.0 {
         feather_mask(&mut mask, mask_settings.feather);
     }
@@ -436,8 +429,7 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
         }
         SubjectEffect::CrossProcess { shadow, highlight } => {
             // Split-tone by luma: pixels below 128 bend toward `shadow`,
-            // above bend toward `highlight`. Preserves midtones, lifts
-            // shadows + warms highlights (or whatever the user picked).
+            // above toward `highlight`; midtones stay.
             apply_pixelwise(rgba, |p| {
                 let y = luma_u8(p[0], p[1], p[2]);
                 let (target, t) = if y < 128 {
@@ -498,8 +490,7 @@ fn gradient_map(rgba: &mut RgbaImage, stops: &[[u8; 3]]) {
     });
 }
 
-/// Rec. 709 luma of an 8-bit RGB triple. Used by every grayscale / duotone /
-/// threshold / splash variant.
+/// Rec. 709 luma of an 8-bit RGB triple.
 #[inline]
 pub(crate) fn luma_u8(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000) as u8
@@ -561,8 +552,7 @@ pub fn apply_bg_effect(rgba: &mut RgbaImage, photo: &RgbaImage, effect: crate::t
 }
 
 /// Convert RGB (0-255) to HSV with H in 0..=359°, S and V in 0..=255.
-/// Called per-pixel on the 4K live-preview hot path — `#[inline]` lets LLVM
-/// fold it through the caller's arithmetic.
+/// Inlined: it runs per pixel on the 4K live-preview hot path.
 #[inline]
 pub(crate) fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
     let rf = r as f32 / 255.0;
@@ -618,14 +608,9 @@ fn hue_distance(a: i32, b: i32) -> i32 {
 }
 
 /// Write the mask into an existing RGBA buffer's alpha channel in place.
-/// Used by `postprocess()` to avoid a second full-resolution RGBA allocation.
 ///
-/// Above `ROW_PAR_THRESHOLD` pixels the work splits across rows — each
-/// rayon task owns a disjoint horizontal strip, matching the buffer's
-/// row-major memory layout so writes stay cache-friendly. Below the
-/// threshold the serial loop wins: rayon's fan-out costs more than this
-/// loop does on a small image. The loop is memory-bandwidth-bound, so
-/// the speedup ceiling is ~1.1-1.2× on 4K regardless of core count.
+/// Row-parallel above `ROW_PAR_THRESHOLD`. Memory-bound: ~1.1-1.2× at 4K
+/// whatever the core count.
 fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
     let width = rgba.width() as usize;
     let row_bytes = width * 4;
@@ -681,10 +666,8 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
     }
 }
 
-/// Bbox-cropped 3-box blur at `radius`: pixels outside the `mask +
-/// 3·radius` margin can't receive any weight from inside, so the
-/// full-image variant would just walk zeros there. Bit-exact output,
-/// ~96 MB → bbox-sized peak working set on 4K masks with small regions.
+/// 3-box blur at `radius`, cropped to the mask's bbox plus the 3·radius
+/// reach: bit-exact, with a bbox-sized peak instead of ~96 MB at 4K.
 fn box_blur(mask: &mut GrayImage, radius: u32) {
     if radius == 0 { return; }
     // 3-box kernel total reach is 3·radius from each source pixel.

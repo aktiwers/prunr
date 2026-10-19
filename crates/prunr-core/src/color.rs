@@ -2,8 +2,6 @@
 //! colour apart (Reinhard colour match, colorization), and the 8-bit
 //! RGB blend the fills and line colours share.
 
-// ── sRGB ↔ linear helpers ──────────────────────────────────────────────────
-
 /// `srgb_to_linear` of each 8-bit value, so per-pixel conversions skip
 /// the `powf`. Built from the same expression, so results are identical.
 fn srgb_u8_to_linear(v: u8) -> f32 {
@@ -31,8 +29,6 @@ fn linear_to_srgb(v: f32) -> f32 {
         1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
-
-// ── CIE XYZ ↔ Lab (D65) ──────────────────────────────────────────────────
 
 /// Linear sRGB → CIE XYZ D65.
 /// Bradford-adapted D65 matrix from IEC 61966-2-1.
@@ -62,7 +58,6 @@ const LAB_OFFSET: f32 = 4.0 / 29.0;
 
 #[inline(always)]
 fn lab_f(t: f32) -> f32 {
-    // CIE standard cube-root nonlinearity
     const DELTA3: f32 = LAB_DELTA * LAB_DELTA * LAB_DELTA;           // ≈ 0.008856
     const INV3DELTA2: f32 = 1.0 / (3.0 * LAB_DELTA * LAB_DELTA); // ≈ 7.787
     if t > DELTA3 {

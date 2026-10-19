@@ -61,7 +61,6 @@ const _: () = {
 };
 
 impl EdgeEngine {
-    /// Create a new TEED edge detection engine.
     pub fn new() -> Result<Self, CoreError> {
         let edge_bytes = prunr_models::teed_bytes();
         let session = crate::ort_runtime::session_builder()?
@@ -112,14 +111,11 @@ impl EdgeEngine {
     /// | 640×480   | 0.9 MB      | 3.7 MB | 4.9 MB             | 2.5 MB      |
     /// | 1280×960  | 3.7 MB      | 15 MB  | 20 MB              | 4.9 MB      |
     ///
-    /// Both runs' inputs are built before the session lock is taken, so
-    /// with several images in flight one image's conversion never holds
-    /// up another's run. The runs go one after the other, each run's
-    /// input and outputs dropped before the next, so the peak is the
-    /// 1280×960 run plus the 2.5 MB already kept, the 3.7 MB base input
-    /// waiting for it and the resized photo the caller keeps. A whole
-    /// Sketch on a 20 MP photo peaks at about 0.9 GB resident in the CLI
-    /// (DexiNed: 1.4 GB).
+    /// Inputs are built before the session lock is taken, so one image's
+    /// conversion never holds up another's run. Runs go one at a time,
+    /// each dropping its tensors first: the peak is the 1280×960 run plus
+    /// the kept planes, the waiting base input and the caller's resized
+    /// photo. A whole Sketch on a 20 MP photo peaks at ~0.9 GB in the CLI.
     pub fn infer_input(&self, input: &EdgeInput, scales: &[EdgeScale]) -> Result<EdgeInferenceResult, CoreError> {
         let wants = |s: EdgeScale| scales.contains(&s);
         let (fine_h, fine_w) = edge_scale_dims(EdgeScale::Fine, BASE_H, BASE_W);
@@ -309,11 +305,8 @@ pub fn edge_plane(
     thickened_edges(&base, thickness).unwrap_or(base)
 }
 
-/// Composite a dilated edge plane and the subject mask using a named
-/// `ComposeMode` formula. Used by `LineMode::SubjectOutline` — picks how
-/// the two cached masks combine into the final alpha. All modes run at
-/// compose time on already-cached tensors, so switching modes is instant
-/// in live preview.
+/// Composite a dilated edge plane and the subject mask by a `ComposeMode`
+/// formula, on cached planes only, so a mode switch needs no new run.
 ///
 /// `base` carries the subject silhouette in its alpha channel. With a
 /// `solid_line_color`, line pixels are blended toward that color weighted
@@ -415,10 +408,9 @@ where
         });
 }
 
-/// Compose two dilated edge planes from different detector scales with
-/// independent colours. Used by `LineStyle::DualScale` — fine details at
-/// `fine_color`, structural edges at `bold_color`. Alpha merges via the
-/// same ComposeMode formulas, using the max of the two edges.
+/// Two dilated edge planes from different detector scales, fine at
+/// `fine_color` and bold at `bold_color`; alpha merges by `ComposeMode`
+/// over the max of the two.
 pub fn compose_edges_dual_styled(
     fine_mask: &image::GrayImage,
     bold_mask: &image::GrayImage,
@@ -464,9 +456,8 @@ fn blend_rgb(rgb: &mut [u8], target: [u8; 3], weight: u16) {
     rgb.copy_from_slice(&lerp_rgb([rgb[0], rgb[1], rgb[2]], target, weight));
 }
 
-/// Compose subject outline: builds the edge mask(s) from a detector result
-/// and calls `compose_edges_styled` (or `compose_edges_dual_styled` for
-/// `LineStyle::DualScale`) onto the supplied masked subject RGBA.
+/// The edge mask(s) of a detector result composed onto the masked
+/// subject RGBA.
 pub fn compose_subject_outline(
     edge_res: &EdgeInferenceResult,
     masked_rgba: &RgbaImage,
@@ -540,12 +531,8 @@ pub fn compose_whole_photo(
     compose_subject_outline(edge_res, &crate::formats::rgba_view(original), &lines_only, fade)
 }
 
-/// Pre-process an image according to the user's `InputTransform`. The
-/// identity (`None`) case returns `Cow::Borrowed(img)` and skips the
-/// `to_rgba8()` clone (~32 MB at 4K). Transformed arms must allocate
-/// — `to_rgba8()` already takes a clone-only fast path when the input
-/// is `ImageRgba8`, so there's no further alloc to skip without taking
-/// ownership of the input.
+/// `img` under the user's `InputTransform`; borrowed for the identity,
+/// which skips a ~32 MB clone at 4K.
 pub fn apply_input_transform<'a>(
     img: &'a DynamicImage,
     transform: crate::types::InputTransform,

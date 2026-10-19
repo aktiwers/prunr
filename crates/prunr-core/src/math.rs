@@ -66,11 +66,8 @@ pub fn pct(v: u8) -> f32 {
     f32::from(v.min(100)) / 100.0
 }
 
-/// Single-pass min / max / mean over a slice.
-///
-/// Returns `(f32::INFINITY, f32::NEG_INFINITY, 0.0)` for an empty slice —
-/// the unchanged sentinel encodes "no data" without forcing callers to
-/// branch on `len()` themselves before logging the stats.
+/// Single-pass min / max / mean over a slice; `(INFINITY, NEG_INFINITY,
+/// 0.0)` for an empty one.
 #[inline]
 pub fn slice_stats(s: &[f32]) -> (f32, f32, f32) {
     let (lo, hi, sum) = if s.len() >= 512 * 512 {

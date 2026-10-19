@@ -18,8 +18,6 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     match model {
         ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img),
         ModelKind::BiRefNetLite => preprocess_birefnet(img),
-        // Upscale models run through a separate tiled RGB pipeline; they
-        // never enter the segmentation preprocess path.
         ModelKind::RealEsrganX4Plus
         | ModelKind::Nomos8kSchatL
         | ModelKind::RealEsrganX2Plus
@@ -41,15 +39,9 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let scale: [f32; 3] = std::array::from_fn(|c| inv_div / IMAGENET_STD[c]);
     let bias: [f32; 3] = std::array::from_fn(|c| IMAGENET_MEAN[c] / IMAGENET_STD[c]);
 
-    // `Array4::zeros` writes 12 MB at BiRefNet 1024² before the loop
-    // overwrites every element. `uninit` skips the zero-fill — saves
-    // ~3 ms of memory bandwidth per dispatch (~3% of the 100 ms live
-    // preview budget at 1024²). Loop body is interleaved (one source
-    // pixel → three plane writes per iter) so `raw[base..base+3]` is
-    // read once while it's still hot in L1; the previously-attempted
-    // split-pass form did 3× source traversal for no vectorization
-    // gain (stride-3 u8→f32 gather defeats LLVM's loop vectorizer
-    // either way — verified with `--emit=asm`).
+    // `uninit` skips a 12 MB zero-fill at 1024² (~3 ms per dispatch).
+    // Interleaved writes read each source pixel once; a split-pass form
+    // tripled source reads and still did not vectorize.
     let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, s, s));
     let plane_size = s * s;
     // invariant: `out` is a freshly allocated `Array4` (standard layout, contiguous).
