@@ -133,8 +133,10 @@ pub enum Surface {
     Colorize,
     /// The Stable Diffusion eraser's Quality, Prompt and Advanced chips.
     SdChips,
-    /// The RORem eraser's Advanced chip: steps and seed.
+    /// The RORem eraser's Advanced chip: steps, seed and the edge.
     RoremChips,
+    /// The other erasers' Advanced chip: the edge.
+    FillChips,
     /// Paint and Magic Brush, the selection on the image and its actions.
     Brushes,
     /// The Paint Brush's mode (Restore/Erase or Add/Subtract), Hardness
@@ -150,7 +152,7 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Mask,
         Self::Lines,
         Self::Effect,
@@ -160,6 +162,7 @@ impl Surface {
         Self::Colorize,
         Self::SdChips,
         Self::RoremChips,
+        Self::FillChips,
         Self::Brushes,
         Self::SelectionStrokes,
         Self::FillRegionKnobs,
@@ -181,6 +184,7 @@ pub fn shows(model: SettingsModel, surface: Surface) -> bool {
         Surface::Colorize => role == Colorize,
         Surface::SdChips => model == SettingsModel::SdInpaint,
         Surface::RoremChips => model == SettingsModel::RoremInpaint,
+        Surface::FillChips => role == Erase && !matches!(model, SettingsModel::SdInpaint | SettingsModel::RoremInpaint),
         Surface::Brushes => !matches!(role, Upscale | Colorize),
         Surface::SelectionStrokes => matches!(role, Cutout | Filters),
         Surface::FillRegionKnobs => role == Erase,
@@ -223,6 +227,7 @@ pub(crate) fn surface_gate(surface: Surface, g: &GateContext) -> Option<&'static
         Surface::Lines => needs(Need::Processed),
         Surface::SdChips
         | Surface::RoremChips
+        | Surface::FillChips
         | Surface::Brushes
         | Surface::SelectionStrokes
         | Surface::FillRegionKnobs
@@ -477,7 +482,7 @@ mod tests {
         use Surface::*;
         let cutout: &[Surface] = &[Mask, Lines, Effect, Decoration, Background, Brushes, SelectionStrokes, Faces];
         let filters: &[Surface] = &[Lines, Effect, Background, Brushes, SelectionStrokes, Faces, Depth];
-        let erase: &[Surface] = &[Brushes, FillRegionKnobs];
+        let erase: &[Surface] = &[Brushes, FillRegionKnobs, FillChips];
         let sd: &[Surface] = &[Brushes, FillRegionKnobs, SdChips];
         let rorem: &[Surface] = &[Brushes, FillRegionKnobs, RoremChips];
         let upscale: &[Surface] = &[Upscale, Faces];

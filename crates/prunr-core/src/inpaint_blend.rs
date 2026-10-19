@@ -180,6 +180,146 @@ pub fn color_match_inpainted(
         });
 }
 
+/// Color-correct the fill point by point along its edge: at each fill
+/// pixel within `ring_px` of the edge, the photo's mean just outside less
+/// the fill's mean just inside (one `ring_px` box), spread over the whole
+/// region by push-pull interpolation and faded out over `reach_px` from
+/// the edge. A region bordering different surroundings (dark hair on one
+/// side, pale sky on the other) then meets each, which one mean shift for
+/// the region cannot; the fade keeps a difference that is content, not
+/// cast (an edge across a face), from spreading through the fill.
+///
+/// Leaves `inpainted` as it is when the mask is empty, dimensions
+/// disagree, or no fill pixel has photo within `ring_px`.
+///
+/// Peak working set, n = mask bbox plus `ring_px` (f32): the inside mask,
+/// both box counts, both box sums, the offset and its weight, and the
+/// pyramid above them (a third of n each) = **about 9.4 × n × 4 B**;
+/// channels run in turn.
+///
+/// | bbox      | peak f32 working set |
+/// |-----------|----------------------|
+/// |  500²     | ~9 MB                |
+/// | 1000²     | ~38 MB               |
+/// | 2000²     | ~150 MB              |
+pub fn match_colour_along_edge(
+    inpainted: &mut RgbaImage,
+    source: &RgbaImage,
+    mask: &GrayImage,
+    ring_px: u32,
+    reach_px: u32,
+) {
+    if ring_px == 0
+        || inpainted.dimensions() != source.dimensions()
+        || source.dimensions() != mask.dimensions()
+    {
+        return;
+    }
+    let Some(bbox) = mask_bbox(mask, 128, ring_px.max(reach_px) + 1) else {
+        return;
+    };
+    let (bw, bh) = (bbox.w as usize, bbox.h as usize);
+    let (bx, by) = (bbox.x as usize, bbox.y as usize);
+    let img_w = inpainted.width() as usize;
+    let msk = mask.as_raw();
+    let inside: Vec<f32> = (0..bw * bh)
+        .map(|i| if msk[(by + i / bw) * img_w + bx + i % bw] >= 128 { 1.0 } else { 0.0 })
+        .collect();
+    let in_share = box_filter(&inside, bbox.w, bbox.h, ring_px);
+    // A pixel counts as on the edge when photo and fill each fill a fair
+    // part of its box, so both means rest on enough samples.
+    let on_edge: Vec<bool> = inside.iter().zip(&in_share)
+        .map(|(&i, &share)| i > 0.5 && (0.2..=0.8).contains(&share))
+        .collect();
+    if !on_edge.iter().any(|&e| e) {
+        return;
+    }
+    let out_share: Vec<f32> = in_share.iter().map(|s| 1.0 - s).collect();
+    // 1 at the edge, where the fill box is half inside, to 0 once the
+    // `reach_px` box lies wholly in the fill.
+    let fade: Vec<f32> = box_filter(&inside, bbox.w, bbox.h, reach_px.max(1)).iter()
+        .map(|&share| ((1.0 - share) * 2.0).clamp(0.0, 1.0))
+        .collect();
+    let mut plane = vec![0.0f32; bw * bh]; // reused per channel as the masked sum's input
+    let mut offset = vec![0.0f32; bw * bh];
+    let weight: Vec<f32> = on_edge.iter().map(|&e| if e { 1.0 } else { 0.0 }).collect();
+    for c in 0..3 {
+        let read = |img: &RgbaImage, keep_inside: bool, out: &mut [f32]| {
+            let raw = img.as_raw();
+            for (i, slot) in out.iter_mut().enumerate() {
+                let p = ((by + i / bw) * img_w + bx + i % bw) * 4 + c;
+                let side = if keep_inside { inside[i] } else { 1.0 - inside[i] };
+                *slot = raw[p] as f32 * side;
+            }
+        };
+        read(source, false, &mut plane);
+        let photo_sum = box_filter(&plane, bbox.w, bbox.h, ring_px);
+        read(inpainted, true, &mut plane);
+        let fill_sum = box_filter(&plane, bbox.w, bbox.h, ring_px);
+        for i in 0..bw * bh {
+            offset[i] = if on_edge[i] {
+                photo_sum[i] / out_share[i] - fill_sum[i] / in_share[i]
+            } else {
+                0.0
+            };
+        }
+        drop((photo_sum, fill_sum));
+        let field = push_pull(&offset, &weight, bw, bh);
+        let raw = inpainted.as_mut();
+        for i in 0..bw * bh {
+            if inside[i] > 0.5 {
+                let p = ((by + i / bw) * img_w + bx + i % bw) * 4 + c;
+                raw[p] = crate::math::round_u8(raw[p] as f32 + field[i] * fade[i]);
+            }
+        }
+    }
+}
+
+/// Fill the gaps of `value` (known where `weight` > 0) smoothly from the
+/// known samples: halve with weights summed until one cell is left, then
+/// come back up, keeping each known value and taking the coarser level's
+/// (bilinear) everywhere else.
+fn push_pull(value: &[f32], weight: &[f32], w: usize, h: usize) -> Vec<f32> {
+    // Each level: (w, h, weighted sum, weight).
+    let mut levels = vec![(w, h, value.iter().zip(weight).map(|(v, k)| v * k).collect::<Vec<f32>>(), weight.to_vec())];
+    while let Some((lw, lh, sum, wt)) = levels.last().filter(|(lw, lh, ..)| *lw > 1 || *lh > 1) {
+        let (cw, ch) = (lw.div_ceil(2), lh.div_ceil(2));
+        let (mut csum, mut cwt) = (vec![0.0f32; cw * ch], vec![0.0f32; cw * ch]);
+        for y in 0..*lh {
+            for x in 0..*lw {
+                let (i, ci) = (y * lw + x, (y / 2) * cw + x / 2);
+                csum[ci] += sum[i];
+                cwt[ci] += wt[i];
+            }
+        }
+        levels.push((cw, ch, csum, cwt));
+    }
+    let (_, _, sum, wt) = levels.pop().expect("level 0 is always there");
+    let mut coarse: Vec<f32> = sum.iter().zip(&wt).map(|(s, k)| if *k > 0.0 { s / k } else { 0.0 }).collect();
+    let mut coarse_dims = (1usize, 1usize);
+    while let Some((lw, lh, sum, wt)) = levels.pop() {
+        let (cw, ch) = coarse_dims;
+        let sample = |fx: f32, fy: f32| {
+            let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
+            let (x0, y0) = (x0.min(cw - 1), y0.min(ch - 1));
+            let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+            let (tx, ty) = ((fx - x0 as f32).clamp(0.0, 1.0), (fy - y0 as f32).clamp(0.0, 1.0));
+            let top = coarse[y0 * cw + x0] * (1.0 - tx) + coarse[y0 * cw + x1] * tx;
+            let bottom = coarse[y1 * cw + x0] * (1.0 - tx) + coarse[y1 * cw + x1] * tx;
+            top * (1.0 - ty) + bottom * ty
+        };
+        let fine: Vec<f32> = (0..lw * lh).map(|i| {
+            let (x, y) = (i % lw, i / lw);
+            let below = sample((x as f32 - 0.5) / 2.0, (y as f32 - 0.5) / 2.0);
+            let known = wt[i].min(1.0);
+            if wt[i] > 0.0 { known * (sum[i] / wt[i]) + (1.0 - known) * below } else { below }
+        }).collect();
+        coarse = fine;
+        coarse_dims = (lw, lh);
+    }
+    coarse
+}
+
 /// Refine the inpaint↔source seam using a 3-channel guided filter (one
 /// pass per channel, source as guide). Inside the mask boundary band the
 /// output blends from the guided-filter result (at the edge) to the raw
@@ -356,6 +496,27 @@ fn composite_channel(
     });
 }
 
+/// How a fill's colours are brought to the photo around it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EdgeColour {
+    /// Point by point along the edge (`match_colour_along_edge`).
+    #[default]
+    AlongEdge,
+    /// One shift for the whole region (`color_match_inpainted`). Where the
+    /// region borders different surroundings it misses each, and the fill
+    /// shows as a lighter or darker patch.
+    WholeArea,
+    /// The fill's own colours.
+    Off,
+}
+
+/// How far in from the edge `EdgeColour::AlongEdge` corrects for a
+/// Feather of `feather_px`: half of it, as measured best on SD 1.5, LaMa,
+/// Big-LaMa and MI-GAN fills (seam step 41-64 % below one shift).
+pub fn edge_colour_reach(feather_px: f32) -> u32 {
+    (feather_px / 2.0).round().max(4.0) as u32
+}
+
 /// The one post-process pipeline for every fill — color match →
 /// seam-guided blend → optional sharpen — so order and constants can't
 /// drift between callers. `mask` is the [`fill_region`];
@@ -366,8 +527,13 @@ pub fn finalize_inpaint(
     mask: &GrayImage,
     feather_px: f32,
     sharpen: f32,
+    colour: EdgeColour,
 ) -> RgbaImage {
-    color_match_inpainted(&mut raw, source, mask, COLOR_MATCH_RING_PX);
+    match colour {
+        EdgeColour::AlongEdge => match_colour_along_edge(&mut raw, source, mask, COLOR_MATCH_RING_PX, edge_colour_reach(feather_px)),
+        EdgeColour::WholeArea => color_match_inpainted(&mut raw, source, mask, COLOR_MATCH_RING_PX),
+        EdgeColour::Off => {}
+    }
     seam_guided_blend(&mut raw, source, mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px);
     crate::inpaint::sharpen_inpainted(&mut raw, mask, sharpen);
     raw
@@ -410,6 +576,39 @@ mod tests {
     }
     fn empty_mask(w: u32, h: u32) -> GrayImage {
         GrayImage::from_pixel(w, h, Luma([0]))
+    }
+
+    /// A fill bordered by two different surroundings meets each along
+    /// its edge; one mean shift for the region leaves both sides off.
+    #[test]
+    fn colour_matched_along_the_edge_meets_each_side() {
+        let (w, h) = (80u32, 40u32);
+        let src = RgbaImage::from_fn(w, h, |x, _| if x < w / 2 { Rgba([200, 40, 40, 255]) } else { Rgba([40, 40, 200, 255]) });
+        let mask = GrayImage::from_fn(w, h, |x, y| Luma([if (10..70).contains(&x) && (10..30).contains(&y) { 255 } else { 0 }]));
+        let fill = RgbaImage::from_fn(w, h, |x, y| if mask.get_pixel(x, y).0[0] >= 128 { Rgba([120, 120, 120, 255]) } else { *src.get_pixel(x, y) });
+        let along = applied(&fill, |f| match_colour_along_edge(f, &src, &mask, COLOR_MATCH_RING_PX, 6));
+        let whole = applied(&fill, |f| color_match_inpainted(f, &src, &mask, COLOR_MATCH_RING_PX));
+        let off = |img: &RgbaImage, x, want: [u8; 4]| {
+            let p = img.get_pixel(x, 11).0;
+            (0..3).map(|c| (p[c] as i32 - want[c] as i32).abs()).sum::<i32>()
+        };
+        let (red, blue) = ([200, 40, 40, 255], [40, 40, 200, 255]);
+        assert!(off(&along, 12, red) < 30 && off(&along, 67, blue) < 30, "each side meets its own surroundings");
+        assert!(off(&whole, 12, red) > 100, "one shift for the region leaves the red side off");
+        assert_eq!(along.get_pixel(5, 5), src.get_pixel(5, 5), "the photo outside is untouched");
+    }
+
+    /// Push-pull keeps every known sample and fills between them smoothly.
+    #[test]
+    fn push_pull_keeps_known_values_and_fills_between() {
+        let (w, h) = (9usize, 1usize);
+        let mut value = vec![0.0; w];
+        let mut weight = vec![0.0; w];
+        (value[0], weight[0]) = (0.0, 1.0);
+        (value[8], weight[8]) = (8.0, 1.0);
+        let out = push_pull(&value, &weight, w, h);
+        assert!((out[0] - 0.0).abs() < 1e-4 && (out[8] - 8.0).abs() < 1e-4, "{out:?}");
+        assert!(out.windows(2).all(|p| p[1] >= p[0] - 1e-4), "monotone between: {out:?}");
     }
 
     /// With nothing to match or blend against (no mask, a mask of another
@@ -576,7 +775,7 @@ mod tests {
         } }
         let mut matched = raw.clone();
         color_match_inpainted(&mut matched, &src, &mask, COLOR_MATCH_RING_PX);
-        assert_eq!(finalize_inpaint(raw, &src, &mask, 0.0, 0.0), matched);
+        assert_eq!(finalize_inpaint(raw, &src, &mask, 0.0, 0.0, EdgeColour::WholeArea), matched);
     }
 
     /// The fill region is the painted one grown by Expand and then by the
@@ -604,10 +803,12 @@ mod tests {
         } }
         let raw = solid(64, 64, [100, 100, 100, 255]);
         let region = fill_region(&painted, 0.0, 12.0);
-        let out = finalize_inpaint(raw.clone(), &src, &region, 12.0, 0.0);
-        let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
-            .map(|(x, y)| out.get_pixel(x, y)[0])
-            .max().unwrap();
-        assert!(brightest <= 110, "object rim ghosted back: {brightest}");
+        for colour in [EdgeColour::AlongEdge, EdgeColour::WholeArea, EdgeColour::Off] {
+            let out = finalize_inpaint(raw.clone(), &src, &region, 12.0, 0.0, colour);
+            let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
+                .map(|(x, y)| out.get_pixel(x, y)[0])
+                .max().unwrap();
+            assert!(brightest <= 110, "{colour:?}: object rim ghosted back: {brightest}");
+        }
     }
 }

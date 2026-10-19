@@ -677,6 +677,11 @@ pub(crate) struct InpaintTuning {
     pub grow_px: f32,
     /// How large the hole is filled.
     pub fill_scale: prunr_core::inpaint::FillScale,
+    pub edge_colour: prunr_core::inpaint_blend::EdgeColour,
+    /// SD and RORem: generate the Feather band last and paste it fading.
+    pub soft_edge: bool,
+    /// SD-only: the sampler chosen apart from the quality.
+    pub sd_sampler: Option<super::brush_state::SdScheduler>,
     /// For SD, standard vs LCM weights are already resolved from the
     /// scheduler pick.
     pub model: prunr_models::ModelId,
@@ -715,6 +720,9 @@ impl Default for InpaintTuning {
             feather_px: 0.0,
             grow_px: 0.0,
             fill_scale: Default::default(),
+            edge_colour: Default::default(),
+            soft_edge: false,
+            sd_sampler: None,
             model: prunr_models::ModelId::LaMaFp32,
             sd_prompt: String::new(),
             sd_negative_prompt: String::new(),
@@ -1069,7 +1077,7 @@ impl Processor {
                 // This path only sees LaMa / Big-LaMa / MI-GAN.
                 let filled = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress)?;
                 progress.step(prunr_core::Step::Blending);
-                let rgba = prunr_core::inpaint_blend::finalize_inpaint(filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen);
+                let rgba = prunr_core::inpaint_blend::finalize_inpaint(filled.rgba, &image, &mask, tuning.feather_px, tuning.sharpen, tuning.edge_colour);
                 Ok((rgba, filled.scale))
             });
             run.end();
@@ -1227,6 +1235,7 @@ impl Processor {
                 item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
                 feather_px: tuning.feather_px,
                 sharpen: tuning.sharpen,
+                edge_colour: tuning.edge_colour,
             };
             let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(job));
         });
@@ -2094,6 +2103,7 @@ pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_s
         seed: tuning.sd_seed,
         tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
         fill_scale: tuning.fill_scale,
+        soft_edge_px: if tuning.soft_edge { tuning.feather_px } else { 0.0 },
         ..Default::default()
     };
     match tuning.model {
@@ -2105,7 +2115,7 @@ pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_s
                 num_inference_steps: tuning.sd_steps,
                 guidance_scale: effective_cfg(tuning.model, tuning.sd_guidance_scale),
                 use_taesd: tuning.use_taesd,
-                scheduler: tuning.sd_scheduler.into(),
+                scheduler: tuning.sd_sampler.unwrap_or(tuning.sd_scheduler).into(),
                 ..base
             })
         }
@@ -2142,6 +2152,41 @@ mod panic_tests {
 #[cfg(test)]
 mod sd_request_tests {
     use super::*;
+
+    /// Soft edge sends the Feather width to SD and RORem and nothing when
+    /// off; a chosen sampler runs instead of the quality's.
+    #[test]
+    fn the_soft_edge_and_the_sampler_reach_the_fill() {
+        use super::super::brush_state::SdScheduler;
+        use prunr_core::inpaint_sd::SchedulerKind;
+        for model in [prunr_models::ModelId::SdV15InpaintFp16, prunr_models::ModelId::RoremFp16] {
+            let on = InpaintTuning { model, feather_px: 22.0, soft_edge: true, ..Default::default() };
+            assert_eq!(sd_request(&on).unwrap().soft_edge_px, 22.0, "{model:?}");
+            let off = InpaintTuning { soft_edge: false, ..on };
+            assert_eq!(sd_request(&off).unwrap().soft_edge_px, 0.0, "{model:?}");
+        }
+        let quality = InpaintTuning {
+            model: prunr_models::ModelId::SdV15InpaintFp16,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            ..Default::default()
+        };
+        assert_eq!(sd_request(&quality).unwrap().scheduler, SchedulerKind::DpmPp2MKarras, "the quality's own");
+        let chosen = InpaintTuning { sd_sampler: Some(SdScheduler::Lcm), ..quality };
+        assert_eq!(sd_request(&chosen).unwrap().scheduler, SchedulerKind::Lcm, "the chosen one");
+    }
+
+    /// A generated fill's soft edge already meets the photo, so its edge
+    /// colour starts off; the other erasers match along the edge.
+    #[test]
+    fn each_eraser_starts_with_its_edge_colour() {
+        use prunr_core::inpaint_blend::EdgeColour;
+        use prunr_models::ModelId::*;
+        for (model, want) in [(SdV15InpaintFp16, EdgeColour::Off), (RoremFp16, EdgeColour::Off), (LaMaFp32, EdgeColour::AlongEdge), (BigLaMa, EdgeColour::AlongEdge), (Migan, EdgeColour::AlongEdge)] {
+            let floor = super::super::brush_state::BrushSettings::floor_for(model);
+            assert_eq!(floor.inpaint_edge_colour, want, "{model:?}");
+            assert!(floor.sd_soft_edge, "{model:?}");
+        }
+    }
 
     /// RORem runs the steps its own chip sets, whatever the SD chips say;
     /// the SD 1.5 settings never reach it, the seed does (for Try another).

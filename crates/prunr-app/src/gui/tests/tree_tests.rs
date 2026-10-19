@@ -29,7 +29,7 @@ fn each_model_toolbar_shows_only_its_chips() {
         ("Refine", &[Surface::Upscale]),
         ("Strength", &[Surface::Colorize]),
         ("Prompt", &[Surface::SdChips]),
-        ("Advanced", &[Surface::SdChips, Surface::RoremChips]),
+        ("Advanced", &[Surface::SdChips, Surface::RoremChips, Surface::FillChips]),
         ("Paint Brush", &[Surface::Brushes]),
         ("Magic Brush", &[Surface::Brushes]),
     ];

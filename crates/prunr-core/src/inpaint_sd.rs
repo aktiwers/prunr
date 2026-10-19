@@ -118,6 +118,11 @@ pub struct SdInpaintRequest {
     /// tiles to fit one crop.
     #[serde(default)]
     pub fill_scale: crate::inpaint::FillScale,
+    /// Width in pixels of the band at the region's edge that is generated
+    /// last, held to the photo until then, and pasted back fading into it
+    /// ("differential diffusion"); 0 pastes the fill with a hard edge.
+    #[serde(default)]
+    pub soft_edge_px: f32,
 }
 
 /// How the SD pipeline runs, built at dispatch (`plan_tuning`) from the
@@ -303,6 +308,7 @@ impl Default for SdInpaintRequest {
             scheduler: SchedulerKind::Lcm,
             tuning: SdTuning::default(),
             fill_scale: Default::default(),
+            soft_edge_px: 0.0,
         }
     }
 }
@@ -850,7 +856,22 @@ fn run_one_tile(
             p.show(x0, progress);
         }
     };
-    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show)?;
+    let soft = (req.soft_edge_px >= 1.0).then(|| edge_ramp(&padded_mask, req.soft_edge_px));
+    let held = match &soft {
+        Some(ramp) => Some(HeldEdge {
+            photo: vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))?.into_raw_vec_and_offset().0,
+            noise: noise.clone(),
+            ramp: ramp_to_latent(ramp, pw, ph),
+            plane: lw * lh,
+        }),
+        None => None,
+    };
+    let pin = |latent: &mut [f32], level: (f32, f32), released: f32| {
+        if let Some(h) = &held {
+            h.hold(latent, level, released);
+        }
+    };
+    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show, pin)?;
 
     let unet_ms = timer.lap();
 
@@ -859,7 +880,10 @@ fn run_one_tile(
     progress.step(Step::DecodingResult);
     let painted = vae_decode(vae, &final_array)?;
     let decode_ms = timer.lap();
-    let out = composite(image, &painted, mask, w, h);
+    let out = match &soft {
+        Some(ramp) => composite_soft(image, &painted, ramp, pw as usize),
+        None => composite(image, &painted, mask, w, h),
+    };
     let steps_run = scheduler.timesteps().len() as u64;
     tracing::info!(
         w, h, steps = steps_run, prelude_ms,
@@ -886,12 +910,14 @@ fn denoise(
     progress: &crate::progress::Progress,
     mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
     mut show: impl FnMut(&[f32]),
+    mut pin: impl FnMut(&mut [f32], (f32, f32), f32),
 ) -> Result<Vec<f32>, CoreError> {
     use crate::progress::{Step, Unit};
     let timesteps = scheduler.timesteps().to_vec();
     let total = timesteps.len() as u32;
     progress.step(Step::Denoising);
     progress.inner(0, total, Unit::Step);
+    pin(&mut latent, scheduler.level(0), 0.0);
     for (i, &t) in timesteps.iter().enumerate() {
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -904,6 +930,7 @@ fn denoise(
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
         latent = step_array(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng);
+        pin(&mut latent, scheduler.level(i + 1), (i + 1) as f32 / total as f32);
         progress.inner(i as u32 + 1, total, Unit::Step);
     }
     Ok(latent)
@@ -2120,6 +2147,81 @@ fn gaussian(rng: &mut ChaCha8Rng, n: usize) -> Vec<f32> {
     (0..n).map(|_| StandardNormal.sample(rng)).collect()
 }
 
+/// How far in from the region's edge each pixel lies, over `width_px`:
+/// 0 outside and at the edge, 1 from `width_px` in (the box share of
+/// region around a pixel is ½ at the edge and 1 once the box is inside).
+fn edge_ramp(mask: &GrayImage, width_px: f32) -> Vec<f32> {
+    let inside: Vec<f32> = mask.as_raw().iter().map(|&v| if v > IN_HOLE { 1.0 } else { 0.0 }).collect();
+    let share = crate::guided_filter::box_filter(&inside, mask.width(), mask.height(), width_px.round().max(1.0) as u32);
+    inside.iter().zip(share).map(|(&i, s)| i * ((s - 0.5) * 2.0).clamp(0.0, 1.0)).collect()
+}
+
+/// The pixel ramp as one value per latent cell: its 8×8 block's mean.
+fn ramp_to_latent(ramp: &[f32], w: u32, h: u32) -> Vec<f32> {
+    let f = VAE_FACTOR as usize;
+    let (w, h) = (w as usize, h as usize);
+    let (lw, lh) = (w.div_ceil(f), h.div_ceil(f));
+    let mut cells = vec![0.0f32; lw * lh];
+    for y in 0..h {
+        for x in 0..w {
+            cells[(y / f) * lw + x / f] += ramp[y * w + x];
+        }
+    }
+    cells.iter_mut().for_each(|c| *c /= VAE_CELL_PIXELS);
+    cells
+}
+
+/// The edge band held to the photo while the fill denoises: a latent
+/// cell whose ramp is below the share of steps run is set back to the
+/// photo noised to the current level, so the band is generated last,
+/// against surroundings already in place.
+///
+/// Peak working set: the photo's latent and the noise, 4 planes each, and
+/// the ramp, one plane (a 768×512 crop: 96×64 cells, ~220 KB).
+struct HeldEdge {
+    photo: Vec<f32>,
+    noise: Vec<f32>,
+    ramp: Vec<f32>,
+    plane: usize,
+}
+
+impl HeldEdge {
+    fn hold(&self, latent: &mut [f32], (signal, noise): (f32, f32), released: f32) {
+        for (cell, &r) in self.ramp.iter().enumerate() {
+            // Released once the steps run reach its share; the core (1)
+            // never is held.
+            if r >= 1.0 || r >= 1.0 - released {
+                continue;
+            }
+            for c in 0..4 {
+                let i = c * self.plane + cell;
+                latent[i] = signal * self.photo[i] + noise * self.noise[i];
+            }
+        }
+    }
+}
+
+/// The fill pasted onto the photo along `ramp`: the photo at the region's
+/// edge, the fill from `ramp` = 1 in. `painted` is the padded crop, read
+/// from its top-left; `pw` its width.
+fn composite_soft(source: &RgbaImage, painted: &RgbaImage, ramp: &[f32], pw: usize) -> RgbaImage {
+    let mut out = source.clone();
+    let w = out.width() as usize;
+    let pnt = painted.as_raw();
+    for (i, px) in out.as_mut().chunks_exact_mut(4).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let a = ramp[y * pw + x];
+        if a <= 0.0 {
+            continue;
+        }
+        let p = (y * pw + x) * 4;
+        for c in 0..3 {
+            px[c] = crate::math::round_u8(px[c] as f32 + (pnt[p + c] as f32 - px[c] as f32) * a);
+        }
+    }
+    out
+}
+
 /// Composite painted output back onto source: source-byte-identical
 /// outside the mask (no VAE round-trip drift), painted bytes inside.
 fn composite(source: &RgbaImage, painted: &RgbaImage, mask: &GrayImage, w: u32, h: u32) -> RgbaImage {
@@ -2625,6 +2727,22 @@ impl Scheduler {
         }
     }
 
+    /// The (signal, noise) scale of the latent before step `k` (`k` = the
+    /// steps run so far): `signal · clean + noise · ε`. After the last
+    /// step, LCM's latent is clean and DPM++'s at its smallest sigma.
+    pub fn level(&self, k: usize) -> (f32, f32) {
+        match self {
+            Scheduler::Lcm(s) => match s.timesteps.get(k) {
+                Some(&t) => {
+                    let a = s.alpha_cumprod(t);
+                    (a.sqrt(), (1.0 - a).sqrt())
+                }
+                None => (1.0, 0.0),
+            },
+            Scheduler::DpmPp2M(s) => sigma_to_alpha_sigma(s.sigmas[k.min(s.sigmas.len() - 1)]),
+        }
+    }
+
     /// What the picture would be if denoising stopped at step
     /// `step_idx`: the clean latent this scheduler's step predicts from
     /// `latent` and the UNet's `noise_pred`.
@@ -2936,7 +3054,7 @@ mod tests {
                         p.show(x0, progress);
                     }
                 };
-                denoise(&mut scheduler, noise, &mut rng, progress, predict, show).expect("denoise")
+                denoise(&mut scheduler, noise, &mut rng, progress, predict, show, |_, _, _| {}).expect("denoise")
             };
             let sink = Arc::new(RecordingSink::default());
             let previewed = run(&Progress::new(sink.clone()).with_tile_previews(64));
@@ -2976,7 +3094,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let called = std::cell::Cell::new(false);
         let predict = |_: &[f32], _: i64| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
-        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {});
+        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {}, |_, _, _| {});
         assert!(matches!(result, Err(CoreError::Cancelled)) && !called.get());
     }
 
@@ -3176,6 +3294,56 @@ mod tests {
         let masked_lat = Array4::<f16>::zeros((1, 4, l, l));
         let cat = concat_inpaint_input_f16(&lat, &mask_lat, &masked_lat);
         assert_eq!(cat.shape(), &[1, 9, l, l]);
+    }
+
+    /// The soft edge's ramp is 0 outside and at the region's edge and 1
+    /// from its width in.
+    #[test]
+    fn the_edge_ramp_rises_from_the_edge_to_the_core() {
+        let mask = GrayImage::from_fn(64, 8, |x, _| Luma([if x >= 16 { 255 } else { 0 }]));
+        let ramp = edge_ramp(&mask, 8.0);
+        let at = |x: usize| ramp[4 * 64 + x];
+        assert_eq!(at(10), 0.0, "outside");
+        assert!(at(16) < 0.2, "at the edge: {}", at(16));
+        assert!(at(20) > at(17) && at(20) < 1.0, "rising");
+        assert_eq!(at(40), 1.0, "the core");
+    }
+
+    /// Each scheduler's latent gets cleaner step by step, ending (almost)
+    /// clean.
+    #[test]
+    fn the_noise_level_falls_step_by_step() {
+        for kind in [SchedulerKind::Lcm, SchedulerKind::DpmPp2MKarras] {
+            let s = Scheduler::new_sd15(kind, 8);
+            let levels: Vec<(f32, f32)> = (0..=8).map(|k| s.level(k)).collect();
+            assert!(levels.windows(2).all(|p| p[1].0 >= p[0].0 && p[1].1 <= p[0].1), "{kind:?}: {levels:?}");
+            assert!(levels[0].1 > 0.9 && levels[8].0 > 0.99, "{kind:?}: starts noisy, ends clean: {levels:?}");
+        }
+    }
+
+    /// A band cell is held to the noised photo until its share of the
+    /// steps has run, then left to the fill; the core is never held.
+    #[test]
+    fn the_edge_band_is_held_until_its_release() {
+        let held = HeldEdge { photo: vec![1.0; 4 * 3], noise: vec![0.0; 4 * 3], ramp: vec![0.0, 0.5, 1.0], plane: 3 };
+        let run = |released| {
+            let mut latent = vec![9.0; 4 * 3];
+            held.hold(&mut latent, (0.5, 0.5), released);
+            [latent[0], latent[1], latent[2]]
+        };
+        assert_eq!(run(0.25), [0.5, 0.5, 9.0], "early: the outside and the band held, the core free");
+        assert_eq!(run(0.5), [0.5, 9.0, 9.0], "halfway: the band at ½ released");
+        assert_eq!(run(1.0), [9.0, 9.0, 9.0], "at the end nothing is held");
+    }
+
+    /// The soft paste keeps the photo at the region's edge and the fill in
+    /// its core, and mixes them along the ramp between.
+    #[test]
+    fn the_soft_paste_fades_from_the_photo_to_the_fill() {
+        let photo = RgbaImage::from_pixel(3, 1, Rgba([0, 0, 0, 255]));
+        let fill = RgbaImage::from_pixel(3, 1, Rgba([200, 200, 200, 255]));
+        let out = composite_soft(&photo, &fill, &[0.0, 0.5, 1.0], 3);
+        assert_eq!([out.get_pixel(0, 0).0[0], out.get_pixel(1, 0).0[0], out.get_pixel(2, 0).0[0]], [0, 100, 200]);
     }
 
     #[test]
