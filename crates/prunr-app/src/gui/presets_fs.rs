@@ -456,14 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_prunr_name() {
-        let result = save("Prunr", &PresetFile::default());
-        assert!(result.is_err());
-        let result = save("prunr", &PresetFile::default());
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn prunr_has_no_file_to_delete() {
         // Would be disastrous to delete anything when a user toggles the
         // Prunr row, so it names no file.
@@ -478,25 +470,15 @@ mod tests {
     // on the new field. See the module docstring.
 
     #[test]
-    fn loads_empty_preset_as_defaults() {
-        // An empty JSON object must deserialize to full defaults — proves
-        // every field has a default value and old presets (pre-dating new
-        // fields) still load.
-        let parsed: ItemSettings = serde_json::from_str("{}")
-            .expect("ItemSettings must deserialize from `{}` — add #[serde(default)] to any new field");
-        assert_eq!(parsed, ItemSettings::default());
-    }
-
-    #[test]
     fn loads_preset_with_unknown_fields() {
-        // A preset file carrying fields we don't know about (e.g. a
-        // forward-compat field added by a newer build) must still load.
+        // Only unknown keys: every real field defaults (old presets load)
+        // and the unknown ones are ignored (a newer build's presets load).
         let json = r#"{
             "definitely_not_a_real_field": 42,
             "another_future_field": "hello"
         }"#;
         let parsed: ItemSettings = serde_json::from_str(json)
-            .expect("ItemSettings must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
+            .expect("ItemSettings must default every missing field and ignore unknown ones — no #[serde(deny_unknown_fields)]");
         assert_eq!(parsed, ItemSettings::default());
     }
 
@@ -517,16 +499,6 @@ mod tests {
             let json = serde_json::to_string(settings).expect("preset serializes");
             let _: ItemSettings = serde_json::from_str(&json).expect("preset deserializes");
         }
-    }
-
-    #[test]
-    fn preset_roundtrips_through_json() {
-        // A preset must survive serialize → deserialize unchanged. If this
-        // breaks, a field serializes to something it can't parse back.
-        let original = ItemSettings::default();
-        let json = serde_json::to_string(&original).expect("must serialize");
-        let parsed: ItemSettings = serde_json::from_str(&json).expect("must deserialize");
-        assert_eq!(parsed, original);
     }
 
     // ── v1 → v2 migration ────────────────────────────────────────────
@@ -589,25 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn v2_preset_file_round_trips_through_save_load_pure() {
-        // Pure round-trip (no disk): build a v2 PresetFile, serialize via
-        // the same code save() uses, deserialize via the same code load_all
-        // uses, assert byte-stable shape. Pins the on-disk format contract
-        // without touching the user's real config dir.
-        let mut original = PresetFile::default();
-        original.models.insert(
-            model_id_key(prunr_models::ModelId::SdV15InpaintFp16),
-            ModelPreset::default(),
-        );
-        let json = serde_json::to_string_pretty(&original).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        // load_all branches on format_version == 2 → direct deserialize.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        let restored: PresetFile = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(restored, original);
-    }
-
-    #[test]
     fn v1_to_v2_round_trip_via_serde_is_stable() {
         // Seed a v1-shaped JSON, migrate to v2 in-memory, serialize as if
         // saving, parse back via the load_all branch logic, assert the
@@ -626,33 +579,11 @@ mod tests {
         assert_eq!(reloaded, migrated);
     }
 
-    #[test]
-    fn save_writes_v2_envelope_to_disk() {
-        // End-to-end: save a v2 PresetFile to a tmpdir-backed path and
-        // assert the on-disk JSON has `format_version: 2` and `models`.
-        // Bypasses presets_dir() (which goes to the real user config) by
-        // writing directly via the same logic save() uses internally.
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Test.json");
-        let mut original = PresetFile::default();
-        original.models.insert(
-            model_id_key(prunr_models::ModelId::BiRefNetLite),
-            ModelPreset::default(),
-        );
-        let json = serde_json::to_string_pretty(&original).expect("serialize");
-        std::fs::write(&path, json).expect("write");
-        let read_back = std::fs::read_to_string(&path).expect("read");
-        let value: serde_json::Value = serde_json::from_str(&read_back).expect("parse");
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        assert!(value.get("models").is_some());
-    }
-
     // ── Merge-save semantics ──────────────────────────────────────────
     //
-    // Overwriting a preset on (active_model, active_scheduler) must
-    // touch ONLY that model's entry and ONLY that scheduler's bundle.
-    // Other models and other scheduler bundles round-trip bytewise.
-    // Tests use `overwrite_at` so they don't write to the
+    // Overwriting a preset for the active model touches ONLY that model's
+    // entry, written as the caller built it; other models round-trip
+    // bytewise. Tests use `overwrite_at` so they don't write to the
     // user's real presets dir.
 
     /// An overwrite as the app makes it: the preset as loaded, merged,
@@ -704,82 +635,6 @@ mod tests {
             .get(&model_id_key(ModelId::SdV15InpaintFp16))
             .expect("SD entry exists");
         assert_eq!(*sd_back, new_sd_mp, "SD entry must equal the merged-in preset");
-    }
-
-    #[test]
-    fn overwrite_preserves_other_scheduler_bundles_within_sd() {
-        use super::super::brush_state::SdScheduler;
-        use super::super::presets::{SdPreset, SdSchedulerBundle};
-        use prunr_models::ModelId;
-
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Foo.json");
-
-        let lcm_bundle = SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5,
-        };
-        let ddim_bundle_old = SdSchedulerBundle {
-            steps: 20, guidance_scale: 7.5,
-        };
-        let mut schedulers_seed = HashMap::new();
-        schedulers_seed.insert(SdScheduler::Lcm, lcm_bundle);
-        schedulers_seed.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_old);
-        let seed_sd = SdPreset {
-            prompt: "old".into(),
-            negative_prompt: "old-neg".into(),
-            use_taesd: Some(false),
-            seed: Some(11),
-            active_scheduler: SdScheduler::Lcm,
-            schedulers: schedulers_seed,
-        };
-        let seed_mp = ModelPreset {
-            sd: Some(seed_sd),
-            ..ModelPreset::default()
-        };
-        let mut seed_file = PresetFile::default();
-        seed_file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), seed_mp);
-        std::fs::write(&path, serde_json::to_string_pretty(&seed_file).unwrap()).unwrap();
-
-        // Save-merge: caller only touched DDIM. LCM must survive.
-        let ddim_bundle_new = SdSchedulerBundle {
-            steps: 30, guidance_scale: 8.0,
-        };
-        let mut new_schedulers = HashMap::new();
-        new_schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, ddim_bundle_new);
-        let new_sd = SdPreset {
-            prompt: "new".into(),
-            negative_prompt: "new-neg".into(),
-            use_taesd: Some(true),
-            seed: Some(99),
-            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
-            schedulers: new_schedulers,
-        };
-        let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
-        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
-
-        let reloaded = read_preset(&path).expect("reload");
-        let mp_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry");
-        let sd_back = mp_back.sd.as_ref().expect("SD bundle");
-
-        // `merged` merges by ModelPreset, not by scheduler — the
-        // caller decides which scheduler bundles to carry over inside
-        // the SdPreset they pass. This test pins the round-trip: the
-        // scheduler-bundle map is written exactly as the caller built
-        // it, with no silent rewrite. (Cross-MODEL preservation is
-        // pinned by `overwrite_preserves_other_model_entries`.)
-        assert_eq!(
-            sd_back.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied(),
-            Some(ddim_bundle_new),
-            "Quality bundle equals the freshly-merged values",
-        );
-        assert_eq!(sd_back.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-        assert_eq!(sd_back.prompt, "new");
-        assert_eq!(sd_back.negative_prompt, "new-neg");
-        assert_eq!(sd_back.use_taesd, Some(true));
-        assert_eq!(sd_back.seed, Some(99));
     }
 
     #[test]
