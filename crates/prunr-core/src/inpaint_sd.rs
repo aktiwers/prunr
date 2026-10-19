@@ -800,7 +800,8 @@ fn run_one_tile(
     }
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
-    let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent) =
+    let soft = (req.soft_edge_px >= 1.0).then(|| edge_ramp(&padded_mask, req.soft_edge_px));
+    let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent, photo_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
             let cond_h = prompted.then(|| s.spawn(|| text_embedding_f16(bundle, &prompt)));
             let uncond_h = neg_prompt.as_ref().map(|np| {
@@ -808,6 +809,8 @@ fn run_one_tile(
                 s.spawn(move || text_embedding_f16(bundle, &np))
             });
             let vae_h = s.spawn(|| vae_encode(vae, image_to_minus1_plus1_masked(&padded_image, &padded_mask)));
+            // The soft edge holds its band to the photo itself, unmasked.
+            let photo_h = soft.is_some().then(|| s.spawn(|| vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.map(|h| h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))?)
@@ -819,7 +822,10 @@ fn run_one_tile(
             };
             let vae = vae_h.join()
                 .map_err(|_| CoreError::Inference("vae encoder thread panicked".into()))??;
-            Ok((cond, uncond, vae, mask_lat))
+            let photo = photo_h.map(|h| h.join()
+                .map_err(|_| CoreError::Inference("vae encoder (photo) thread panicked".into()))?)
+                .transpose()?;
+            Ok((cond, uncond, vae, mask_lat, photo))
         })?;
 
     let masked_latent_f16 = masked_latent.mapv(f16::from_f32);
@@ -858,22 +864,12 @@ fn run_one_tile(
             p.show(x0, progress);
         }
     };
-    let soft = (req.soft_edge_px >= 1.0).then(|| edge_ramp(&padded_mask, req.soft_edge_px));
-    let held = match &soft {
-        Some(ramp) => Some(HeldEdge {
-            photo: vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))?.into_raw_vec_and_offset().0,
-            noise: noise.clone(),
-            ramp: ramp_to_latent(ramp, pw, ph),
-            plane: lw * lh,
-        }),
-        None => None,
-    };
-    let pin = |latent: &mut [f32], level: (f32, f32), released: f32| {
-        if let Some(h) = &held {
-            h.hold(latent, level, released);
-        }
-    };
-    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show, pin)?;
+    let held = soft.as_ref().zip(photo_latent).map(|(ramp, photo)| HeldEdge {
+        photo: photo.into_raw_vec_and_offset().0,
+        noise: noise.clone(),
+        ramp: pool_cells(pw as usize, ph as usize, |i| ramp[i]),
+    });
+    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show, held.as_ref())?;
 
     let unet_ms = timer.lap();
 
@@ -912,14 +908,16 @@ fn denoise(
     progress: &crate::progress::Progress,
     mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
     mut show: impl FnMut(&[f32]),
-    mut pin: impl FnMut(&mut [f32], (f32, f32), f32),
+    held: Option<&HeldEdge>,
 ) -> Result<Vec<f32>, CoreError> {
     use crate::progress::{Step, Unit};
     let timesteps = scheduler.timesteps().to_vec();
     let total = timesteps.len() as u32;
     progress.step(Step::Denoising);
     progress.inner(0, total, Unit::Step);
-    pin(&mut latent, scheduler.level(0), 0.0);
+    if let Some(h) = held {
+        h.hold(&mut latent, scheduler.level(0), 0.0);
+    }
     for (i, &t) in timesteps.iter().enumerate() {
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -932,7 +930,9 @@ fn denoise(
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
         let is_final = i + 1 == timesteps.len();
         latent = step_array(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng);
-        pin(&mut latent, scheduler.level(i + 1), (i + 1) as f32 / total as f32);
+        if let Some(h) = held {
+            h.hold(&mut latent, scheduler.level(i + 1), (i + 1) as f32 / total as f32);
+        }
         progress.inner(i as u32 + 1, total, Unit::Step);
     }
     Ok(latent)
@@ -2092,32 +2092,11 @@ fn byte_to_unit(v: f32) -> f32 {
 /// Not centre-sampled: a cell straddling the boundary averages to ~0.5,
 /// keeping sub-cell edge precision that sampling turns jaggy.
 fn mask_to_latent(mask: &GrayImage) -> Array4<f32> {
-    let (w, h) = mask.dimensions();
-    let (w_us, h_us) = (w as usize, h as usize);
-    const F: usize = VAE_FACTOR as usize;
-    let (lw, lh) = (w_us.div_ceil(F), h_us.div_ceil(F));
-    let mut a = Array4::<f32>::zeros((1, 1, lh, lw));
-    // invariant: freshly allocated, standard layout — the slice view is valid.
-    let buf = a.as_slice_mut().unwrap();
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let f = VAE_FACTOR as usize;
     let raw = mask.as_raw();
-    let inv = 1.0_f32 / (VAE_CELL_PIXELS * 255.0);
-    for ly in 0..lh {
-        for lx in 0..lw {
-            let mut sum = 0_u32;
-            for dy in 0..F {
-                let sy = ly * F + dy;
-                if sy >= h_us { continue; }
-                let row = sy * w_us;
-                for dx in 0..F {
-                    let sx = lx * F + dx;
-                    if sx >= w_us { continue; }
-                    sum += raw[row + sx] as u32;
-                }
-            }
-            buf[ly * lw + lx] = sum as f32 * inv;
-        }
-    }
-    a
+    let cells = pool_cells(w, h, |i| f32::from(raw[i]) / 255.0);
+    Array4::from_shape_vec((1, 1, h.div_ceil(f), w.div_ceil(f)), cells).expect("one value per cell")
 }
 
 /// Concatenate the three UNet inputs along the channel axis:
@@ -2177,15 +2156,17 @@ fn edge_ramp(mask: &GrayImage, width_px: f32) -> Vec<f32> {
     d.iter().map(|&d| if d == 0 { 0.0 } else { ((d as f32 - 1.0) / span).clamp(0.0, 1.0) }).collect()
 }
 
-/// The pixel ramp as one value per latent cell: its 8×8 block's mean.
-fn ramp_to_latent(ramp: &[f32], w: u32, h: u32) -> Vec<f32> {
+/// One value per latent cell: the mean of `value` over its 8×8 block of a
+/// `w × h` plane; a block cut off at the right or bottom counts the
+/// missing pixels as 0.
+fn pool_cells(w: usize, h: usize, value: impl Fn(usize) -> f32) -> Vec<f32> {
     let f = VAE_FACTOR as usize;
-    let (w, h) = (w as usize, h as usize);
-    let (lw, lh) = (w.div_ceil(f), h.div_ceil(f));
-    let mut cells = vec![0.0f32; lw * lh];
+    let lw = w.div_ceil(f);
+    let mut cells = vec![0.0f32; lw * h.div_ceil(f)];
     for y in 0..h {
+        let row = (y / f) * lw;
         for x in 0..w {
-            cells[(y / f) * lw + x / f] += ramp[y * w + x];
+            cells[row + x / f] += value(y * w + x);
         }
     }
     cells.iter_mut().for_each(|c| *c /= VAE_CELL_PIXELS);
@@ -2202,20 +2183,20 @@ fn ramp_to_latent(ramp: &[f32], w: u32, h: u32) -> Vec<f32> {
 struct HeldEdge {
     photo: Vec<f32>,
     noise: Vec<f32>,
+    /// One per latent cell, so its length is a latent plane's.
     ramp: Vec<f32>,
-    plane: usize,
 }
 
 impl HeldEdge {
     fn hold(&self, latent: &mut [f32], (signal, noise): (f32, f32), released: f32) {
+        let plane = self.ramp.len();
         for (cell, &r) in self.ramp.iter().enumerate() {
-            // Released once the steps run reach its share; the core (1)
-            // never is held.
-            if r >= 1.0 || r >= 1.0 - released {
+            // Released once the share of steps run reaches it.
+            if r >= 1.0 - released {
                 continue;
             }
             for c in 0..4 {
-                let i = c * self.plane + cell;
+                let i = c * plane + cell;
                 latent[i] = signal * self.photo[i] + noise * self.noise[i];
             }
         }
@@ -2229,15 +2210,16 @@ fn composite_soft(source: &RgbaImage, painted: &RgbaImage, ramp: &[f32], pw: usi
     let mut out = source.clone();
     let w = out.width() as usize;
     let pnt = painted.as_raw();
-    for (i, px) in out.as_mut().chunks_exact_mut(4).enumerate() {
-        let (x, y) = (i % w, i / w);
-        let a = ramp[y * pw + x];
-        if a <= 0.0 {
-            continue;
-        }
-        let p = (y * pw + x) * 4;
-        for c in 0..3 {
-            px[c] = crate::math::round_u8(px[c] as f32 + (pnt[p + c] as f32 - px[c] as f32) * a);
+    for (y, row) in out.as_mut().chunks_exact_mut(w * 4).enumerate() {
+        for (x, px) in row.chunks_exact_mut(4).enumerate() {
+            let a = ramp[y * pw + x];
+            if a <= 0.0 {
+                continue;
+            }
+            let p = (y * pw + x) * 4;
+            for c in 0..3 {
+                px[c] = crate::math::round_u8(px[c] as f32 + (pnt[p + c] as f32 - px[c] as f32) * a);
+            }
         }
     }
     out
@@ -3075,7 +3057,7 @@ mod tests {
                         p.show(x0, progress);
                     }
                 };
-                denoise(&mut scheduler, noise, &mut rng, progress, predict, show, |_, _, _| {}).expect("denoise")
+                denoise(&mut scheduler, noise, &mut rng, progress, predict, show, None).expect("denoise")
             };
             let sink = Arc::new(RecordingSink::default());
             let previewed = run(&Progress::new(sink.clone()).with_tile_previews(64));
@@ -3115,7 +3097,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let called = std::cell::Cell::new(false);
         let predict = |_: &[f32], _: i64| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
-        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {}, |_, _, _| {});
+        let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {}, None);
         assert!(matches!(result, Err(CoreError::Cancelled)) && !called.get());
     }
 
@@ -3367,7 +3349,7 @@ mod tests {
     /// steps has run, then left to the fill; the core is never held.
     #[test]
     fn the_edge_band_is_held_until_its_release() {
-        let held = HeldEdge { photo: vec![1.0; 4 * 3], noise: vec![0.0; 4 * 3], ramp: vec![0.0, 0.5, 1.0], plane: 3 };
+        let held = HeldEdge { photo: vec![1.0; 4 * 3], noise: vec![0.0; 4 * 3], ramp: vec![0.0, 0.5, 1.0] };
         let run = |released| {
             let mut latent = vec![9.0; 4 * 3];
             held.hold(&mut latent, (0.5, 0.5), released);
