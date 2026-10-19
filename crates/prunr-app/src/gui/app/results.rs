@@ -2381,6 +2381,39 @@ mod depth_tests {
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
     }
 
+    /// A Magic Brush click made while the image is still being encoded
+    /// waits for the embedding and runs when it lands, rather than being
+    /// dropped; the brush turned off meanwhile drops it.
+    #[test]
+    fn a_magic_brush_pick_before_the_embedding_runs_when_it_lands() {
+        use prunr_core::selection::BrushMode;
+        let embedding = || prunr_core::sam::SamEmbedding {
+            image_embed: vec![0.0; 256 * 64 * 64],
+            high_res_feats_0: vec![0.0; 32 * 256 * 256],
+            high_res_feats_1: vec![0.0; 64 * 128 * 128],
+        };
+        let click = || prunr_core::sam::prompt::build_click_prompt(3.0, 3.0, 8, 8);
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        push_test_item(&mut app, 1);
+        app.batch.items[0].dimensions = (8, 8);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+
+        app.pick_with_sam(1, None, click(), BrushMode::Add);
+        assert!(app.magic_brush_state.pending_sam_pick.is_some(), "held until the embedding is there");
+        app.processor.land_sam_encoder_for_test(1, embedding());
+        app.pump_sam_results(&ctx);
+        assert!(app.batch.items[0].magic_brush_embedding.is_some());
+        assert!(app.magic_brush_state.pending_sam_pick.is_none(), "it ran when the embedding landed");
+
+        app.batch.items[0].magic_brush_embedding = None;
+        app.pick_with_sam(1, None, click(), BrushMode::Add);
+        app.magic_brush_state.deactivate();
+        assert!(app.magic_brush_state.pending_sam_pick.is_none(), "the brush turned off drops the waiting pick");
+    }
+
     /// Set focus stores the click as fractions, makes it an undo step and
     /// re-renders the photo.
     #[test]

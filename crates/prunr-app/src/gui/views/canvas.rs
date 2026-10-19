@@ -45,14 +45,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let app_state = app.batch.app_state();
     let model_has_brushes = shows(app.settings.model, Surface::Brushes);
     let brush_active = model_has_brushes && app.brush_state.is_enabled() && editable;
-    // Magic Brush is treated as a brush tool for pan-gate purposes — when
-    // it's active and the encoder is ready, left-drag belongs to the
-    // brush and pan moves to secondary (right) button, matching Paint
-    // Brush. Suppressed while encoder is pending so the "Preparing..."
-    // overlay doesn't accidentally steal pan from a frustrated user.
+    // Magic Brush is treated as a brush tool for pan-gate purposes: left
+    // drag belongs to the brush and pan moves to the secondary (right)
+    // button, matching Paint Brush. That holds while the image is still
+    // being prepared too: a click or stroke then waits and runs once it is
+    // ready, rather than being lost.
     let magic_brush_active = model_has_brushes
         && app.magic_brush_state.is_active()
-        && !app.magic_brush_preparing()
         && editable;
     // Picking the Depth chip's focus takes the next left click too.
     let picking_focus = app.picking_depth_focus && editable;
@@ -206,8 +205,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             handle_brush_input(ui, app, canvas_rect);
         }
 
-        // Magic Brush click/stroke input. Suppressed during encoder run (silently —
-        // clicks while encoder_pending are ignored without a toast).
+        // Magic Brush click/stroke input; one made while the image is still
+        // being prepared waits for it.
         if magic_brush_active && !pointer_blocked {
             handle_magic_brush_input(ui, app, canvas_rect);
         }
@@ -345,10 +344,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let item = &app.batch.items[idx];
     let item_id = item.id;
     let (source_w, source_h) = item.dimensions;
-    // Embedding may be None for one frame between encoder dispatch and
-    // result pump. Cursor + trail should still render so the user gets
-    // immediate feedback that Magic Brush is the active tool; only the
-    // dispatch is gated on a real embedding.
+    // `None` while the encoder runs; a pick made then waits for it.
     let embedding = item.magic_brush_embedding.clone();
 
     // Cursor icon: Crosshair while over the canvas, default elsewhere.
@@ -378,15 +374,9 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         (clicked, drag_started, dragging, released, hover)
     });
 
-    // What a click or stroke selects with: the depth map, or SAM once the
-    // encoder has finished. Until then the cursor and trail above still
-    // draw, so the tool reads as active, and nothing is dispatched.
-    enum Pick { Depth, Sam(std::sync::Arc<prunr_core::sam::SamEmbedding>) }
-    let pick = if app.settings.brush.magic_depth {
-        Pick::Depth
-    } else {
-        match embedding { Some(embedding) => Pick::Sam(embedding), None => return }
-    };
+    // What a click or stroke selects with: the depth map, or SAM. A SAM
+    // pick made before the encoder has finished waits for the embedding.
+    let by_depth = app.settings.brush.magic_depth;
 
     let screen_radius = look.radius;
 
@@ -413,29 +403,25 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         // Stroke completed — dispatch decoder with stroke prompt.
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
-        match &pick {
+        if by_depth {
             // With Depth on a stroke selects like a click where it began.
-            Pick::Depth => app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode),
-            Pick::Sam(embedding) => match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
-                Ok(prompt) => {
-                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
-                }
-                Err(e) => {
-                    tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}");
-                }
-            },
+            app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode);
+        } else {
+            match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
+                Ok(prompt) => app.pick_with_sam(item_id, embedding, prompt, mode),
+                Err(e) => tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}"),
+            }
         }
     } else if clicked {
         if let Some((px, py)) = hover_pos.and_then(screen_to_src) {
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
-            match &pick {
-                Pick::Depth => app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode),
-                Pick::Sam(embedding) => {
-                    let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-                    app.processor.dispatch_sam_decoder(sam_request(app, item_id, embedding.clone(), prompt, mode));
-                }
+            if by_depth {
+                app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode);
+            } else {
+                let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
+                app.pick_with_sam(item_id, embedding, prompt, mode);
             }
         }
         app.magic_brush_state.clear_stroke();
@@ -450,27 +436,6 @@ fn source_point(pos: egui::Pos2, img_rect: Rect, (w, h): (u32, u32)) -> Option<(
         let p = super::brush_overlay::screen_to_model(pos, img_rect, w, h);
         (p.x.min(w as f32 - 1.0), p.y.min(h as f32 - 1.0))
     })
-}
-
-/// Snapshot everything a decoder run needs at click time, so a mode
-/// change while SAM runs cannot re-polarise the result. Confidence is
-/// the exception by design: a later change re-thresholds the stroke.
-fn sam_request(
-    app: &PrunrApp,
-    item_id: u64,
-    embedding: std::sync::Arc<prunr_core::sam::SamEmbedding>,
-    prompt: prunr_core::sam::prompt::SamPrompt,
-    mode: prunr_core::selection::BrushMode,
-) -> crate::gui::processor::SamDecodeRequest {
-    let source_dims = app.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
-    crate::gui::processor::SamDecodeRequest {
-        item_id,
-        embedding,
-        prompt,
-        mode,
-        source_dims,
-        reading: app.settings.brush.magic_reading(),
-    }
 }
 
 /// Compute the image rectangle given canvas bounds, texture size, zoom, and pan offset.

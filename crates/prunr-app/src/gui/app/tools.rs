@@ -488,6 +488,32 @@ impl PrunrApp {
         self.picking_depth_focus = true;
     }
 
+    /// Select with SAM: at once when `embedding` is there, else when the
+    /// image's embedding lands. The decoder run takes the mode as it was
+    /// at the click, so a mode change while SAM runs cannot re-polarise
+    /// the result; Confidence alone may change later and re-threshold.
+    pub(crate) fn pick_with_sam(
+        &mut self,
+        item_id: u64,
+        embedding: Option<Arc<prunr_core::sam::SamEmbedding>>,
+        prompt: prunr_core::sam::prompt::SamPrompt,
+        mode: prunr_core::selection::BrushMode,
+    ) {
+        let Some(embedding) = embedding else {
+            self.magic_brush_state.pending_sam_pick = Some(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode });
+            return;
+        };
+        let source_dims = self.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
+        self.processor.dispatch_sam_decoder(crate::gui::processor::SamDecodeRequest {
+            item_id,
+            embedding,
+            prompt,
+            mode,
+            source_dims,
+            reading: self.settings.brush.magic_reading(),
+        });
+    }
+
     /// Keep the selected image's embedding current, then drain SAM encoder
     /// and decoder results from the background rayon threads.
     /// Encoder results: write embedding to BatchItem, clear encoder_pending.
@@ -500,8 +526,12 @@ impl PrunrApp {
             match result.result {
                 Ok(embedding) => {
                     if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                        item.magic_brush_embedding = Some(std::sync::Arc::new(embedding));
+                        let embedding = Arc::new(embedding);
+                        item.magic_brush_embedding = Some(Arc::clone(&embedding));
                         tracing::info!(item_id = result.item_id, "SAM encoder embedding cached");
+                        if let Some(pick) = self.magic_brush_state.pending_sam_pick.take_if(|p| p.item_id == result.item_id) {
+                            self.pick_with_sam(pick.item_id, Some(embedding), pick.prompt, pick.mode);
+                        }
                     }
                     ctx.request_repaint();
                 }

@@ -25,6 +25,14 @@ pub(crate) struct PendingDepthClick {
     pub(crate) mode: prunr_core::selection::BrushMode,
 }
 
+/// A Magic Brush click or stroke made before its image was encoded: it
+/// runs when the embedding lands.
+pub(crate) struct PendingSamPick {
+    pub(crate) item_id: u64,
+    pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+}
+
 /// Magic Brush tool coordinator.
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
@@ -33,6 +41,7 @@ pub(crate) struct MagicBrushState {
     /// encoded ahead, so the tool is ready whenever it comes back on.
     used: bool,
     pub(crate) pending_depth_click: Option<PendingDepthClick>,
+    pub(crate) pending_sam_pick: Option<PendingSamPick>,
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
     pub(crate) rethreshold_in_flight: bool,
@@ -74,6 +83,7 @@ impl MagicBrushState {
     pub fn deactivate(&mut self) {
         self.active = false;
         self.pending_depth_click = None;
+        self.pending_sam_pick = None;
         self.clear_stroke();
     }
 
