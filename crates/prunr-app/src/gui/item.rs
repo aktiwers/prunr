@@ -46,6 +46,15 @@ impl ColorizeCache {
     }
 }
 
+/// Both empty, or both the very same allocation.
+pub(crate) fn same_arc<T>(a: Option<&Arc<T>>, b: Option<&Arc<T>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// A fresh id for a kept run, for the step it lands on to claim.
 fn next_run() -> u64 {
     static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -553,12 +562,7 @@ pub(crate) struct CorrectionInputs {
 
 impl CorrectionInputs {
     fn same(&self, other: &Self) -> bool {
-        let same_edits = match (&self.edits, &other.edits) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        };
-        same_edits && Arc::ptr_eq(&self.selection, &other.selection) && self.action == other.action
+        same_arc(self.edits.as_ref(), other.edits.as_ref()) && Arc::ptr_eq(&self.selection, &other.selection) && self.action == other.action
     }
 }
 
@@ -822,14 +826,7 @@ impl WarmKey {
     }
 
     fn same(&self, other: &Self) -> bool {
-        fn eq<T>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
-            match (a, b) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            }
-        }
-        eq(&self.result, &other.result) && self.planes.iter().zip(&other.planes).all(|(a, b)| eq(a, b))
+        same_arc(self.result.as_ref(), other.result.as_ref()) && self.planes.iter().zip(&other.planes).all(|(a, b)| same_arc(a.as_ref(), b.as_ref()))
     }
 }
 
@@ -1374,11 +1371,7 @@ impl BatchItem {
     /// its content `hash`) and edits it made, as one undo step of `kind`.
     /// False, and nothing changes, when it made what is already shown.
     pub(crate) fn land_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>, kind: StepKind) -> bool {
-        let same_edits = match (&made.edits, &self.edits) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
+        let same_edits = same_arc(made.edits.as_ref(), self.edits.as_ref());
         let same_selection = match made.selection {
             Some(_) => hash == self.selection_hash,
             None => self.selection_mask.is_none(),

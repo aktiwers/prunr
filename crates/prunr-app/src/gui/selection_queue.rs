@@ -24,14 +24,8 @@ pub(crate) struct SelState {
 impl SelState {
     /// Whether both hold the very same planes.
     pub(crate) fn same(&self, other: &Self) -> bool {
-        fn eq(a: &Option<Arc<MaskArtifact>>, b: &Option<Arc<MaskArtifact>>) -> bool {
-            match (a, b) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            }
-        }
-        eq(&self.selection, &other.selection) && eq(&self.edits, &other.edits)
+        use super::item::same_arc;
+        same_arc(self.selection.as_ref(), other.selection.as_ref()) && same_arc(self.edits.as_ref(), other.edits.as_ref())
     }
 }
 
