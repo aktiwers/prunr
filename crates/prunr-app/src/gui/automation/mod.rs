@@ -353,7 +353,7 @@ impl Automation {
             Request::Open { paths } => {
                 let count = paths.len();
                 for path in paths {
-                    app.handle_open_path(path);
+                    app.handle_open_path(path, ctx);
                 }
                 (0, Response::ok(count))
             }

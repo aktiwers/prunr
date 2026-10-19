@@ -213,10 +213,8 @@ fn render_item_row(
 
     // Click to select (skip if a hover button or the checkbox absorbed the click).
     if !close_clicked && !checkbox_clicked && item_response.clicked() && app.batch.select_item(i) {
-        app.canvas_switch_id += 1;
-        app.zoom_state.reset();
         let egui_ctx = ui.ctx().clone();
-        app.sync_selected_batch_textures(&egui_ctx);
+        app.on_selected_changed(&egui_ctx);
         // Repaint now and shortly after: an evicted result's async tex_prep
         // can land while egui idles, leaving the old image up until the
         // next mouse event.

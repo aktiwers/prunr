@@ -236,6 +236,62 @@ fn imports_are_read_off_the_ui_thread_and_say_what_failed() {
     assert!(warned(&app), "the broken file and the empty folder each say so");
 }
 
+/// Every way another image comes on screen (arrow key, a click in the
+/// list, opening a file, a single import landing) fits it afresh, leaves
+/// Compare and fades it in.
+#[test]
+fn every_selection_change_starts_the_canvas_afresh() {
+    use crate::gui::views::shortcuts::Action;
+    fn dirty(app: &mut PrunrApp) -> u64 {
+        app.zoom_state.zoom = 3.0;
+        app.zoom_state.pan_offset = egui::vec2(40.0, 40.0);
+        app.zoom_state.pending_fit_zoom = false;
+        app.show_original = true;
+        app.canvas_switch_id
+    }
+    fn fresh(app: &PrunrApp, before: u64, path: &str) {
+        assert!(app.canvas_switch_id > before, "{path}: the new image fades in");
+        assert!(app.zoom_state.pending_fit_zoom && app.zoom_state.pan_offset == egui::Vec2::ZERO, "{path}: the canvas fits it afresh");
+        assert!(!app.show_original, "{path}: Compare is left");
+    }
+    let ctx = egui::Context::default();
+
+    let mut app = PrunrApp::new_for_test();
+    push_test_item(&mut app, 1);
+    push_test_item(&mut app, 2);
+    let before = dirty(&mut app);
+    app.perform(Action::NextImage, &ctx);
+    assert_eq!(app.batch.selected_index, 1);
+    fresh(&app, before, "arrow key");
+
+    let dir = tempfile::tempdir().unwrap();
+    let before = dirty(&mut app);
+    app.handle_open_path(png_on_disk(dir.path(), "opened.png"), &ctx);
+    fresh(&app, before, "open");
+
+    let mut app = PrunrApp::new_for_test();
+    let before = dirty(&mut app);
+    crate::gui::app::import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![png_on_disk(dir.path(), "dropped.png")]);
+    let deadline = std::time::Instant::now() + LANDS_WITHIN;
+    while app.batch.items.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        app.drain_background_channels(&ctx);
+    }
+    fresh(&app, before, "import");
+
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        push_test_item(app, 1);
+        push_test_item(app, 2);
+    }
+    settle(&mut h);
+    let before = dirty(h.state_mut());
+    click(&mut h, "test2.png");
+    assert_eq!(h.state().batch.selected_index, 1);
+    fresh(h.state(), before, "list click");
+}
+
 #[test]
 fn a_save_answered_after_its_image_was_removed_saves_nothing() {
     let mut app = PrunrApp::new_for_test();

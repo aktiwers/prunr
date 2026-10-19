@@ -1100,9 +1100,7 @@ impl PrunrApp {
             NavDir::Prev => self.batch.selected_index - 1,
             NavDir::Next => (self.batch.selected_index + 1) % len,
         };
-        self.zoom_state.reset();
-        self.sync_selected_batch_textures(ctx);
-        self.show_original = false;
+        self.on_selected_changed(ctx);
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {

@@ -17,7 +17,7 @@ impl PrunrApp {
         }
     }
 
-    fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String) {
+    fn load_image_source(&mut self, source: ImageSource, dims: (u32, u32), name: String, ctx: &egui::Context) {
         let do_decode = matches!(&source, ImageSource::Bytes(_)); // decode eagerly for in-memory
         let id = self.push_new_item(source, dims, name);
         self.batch.selected_index = self.batch.items.len() - 1;
@@ -29,18 +29,16 @@ impl PrunrApp {
         }
 
         self.status.text = crate::gui::status_state::READY.to_string();
-        self.canvas_switch_id += 1;
-        self.zoom_state.reset();
-        self.show_original = false;
+        self.on_selected_changed(ctx);
     }
 
-    pub fn handle_open_path(&mut self, path: PathBuf) {
+    pub fn handle_open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
         let Some(dims) = prunr_core::image_dimensions_from_path(&path) else {
             self.status_error(&format!("Could not open {}: not an image Prunr can read", display_name(&path, "the file")));
             return;
         };
         let filename = display_name(&path, "image");
-        self.load_image_source(ImageSource::file(path), dims, filename);
+        self.load_image_source(ImageSource::file(path), dims, filename, ctx);
     }
 
     pub fn handle_open_dialog(&mut self) {

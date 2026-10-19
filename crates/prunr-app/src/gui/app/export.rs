@@ -516,7 +516,7 @@ mod toast_kind_tests {
     #[test]
     fn an_image_that_will_not_load_is_an_error() {
         let mut app = PrunrApp::new_for_test();
-        app.handle_open_path("/nonexistent/prunr-test/missing.png".into());
+        app.handle_open_path("/nonexistent/prunr-test/missing.png".into(), &egui::Context::default());
         assert_eq!(app.toasts.last_for_test(), Some(("error", "Could not open missing.png: not an image Prunr can read")));
     }
 
