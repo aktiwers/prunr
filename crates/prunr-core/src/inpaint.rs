@@ -817,31 +817,14 @@ pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<Bbox> {
         return vec![Bbox { x: 0, y: 0, w: width, h: height }];
     }
     let step = TILE - OVERLAP;
-    let mut xs: Vec<u32> = (0..)
-        .map(|i| i * step)
-        .take_while(|&x| x + TILE <= width || x == 0)
-        .collect();
-    if let Some(&last_x) = xs.last() {
-        if last_x + TILE < width {
-            xs.push(width - TILE);
+    let axis = |len: u32| {
+        let mut starts: Vec<u32> = (0..).map(|i| i * step).take_while(|&v| v + TILE <= len || v == 0).collect();
+        if starts.last().is_some_and(|&last| last + TILE < len) {
+            starts.push(len - TILE);
         }
-    }
-    if xs.is_empty() {
-        xs.push(0);
-    }
-    let mut ys: Vec<u32> = (0..)
-        .map(|i| i * step)
-        .take_while(|&y| y + TILE <= height || y == 0)
-        .collect();
-    if let Some(&last_y) = ys.last() {
-        if last_y + TILE < height {
-            ys.push(height - TILE);
-        }
-    }
-    if ys.is_empty() {
-        ys.push(0);
-    }
-
+        starts
+    };
+    let (xs, ys) = (axis(width), axis(height));
     let mut out = Vec::with_capacity(xs.len() * ys.len());
     for &y in &ys {
         for &x in &xs {
