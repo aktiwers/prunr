@@ -1,10 +1,6 @@
-//! State for the OS drag-out feature (drag a thumbnail out of the sidebar
-//! into Files / Finder / Explorer). The actual filesystem write of the PNG
-//! lives in `gui/drag_export.rs`; this module owns the lifecycle state.
-//!
-//! The drag crate's completion callback runs on a separate thread, so the
-//! "active" flag and "items" set are wrapped in `Arc<AtomicBool>` /
-//! `Arc<Mutex<...>>`. Cloned handles are passed into the callback closure.
+//! Lifecycle state for dragging a thumbnail out of the sidebar into a file
+//! manager. The drag crate's completion callback runs on another thread,
+//! hence the `Arc<AtomicBool>` / `Arc<Mutex<..>>` handles.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -57,15 +53,12 @@ pub(crate) struct DragExportState {
     /// One-shot: set by sidebar when a drag escapes the sidebar rect.
     /// Consumed by `ui()` which then invokes the platform drag crate.
     pub(crate) pending: Option<Vec<u64>>,
-    /// True while an OS drag session is in progress. Flipped false by the
-    /// drag crate's completion callback (runs on a separate thread).
-    /// Read by sidebar to dim dragged thumbnails.
+    /// True while an OS drag session runs; the drag crate's callback (another
+    /// thread) clears it.
     pub(crate) active: Arc<AtomicBool>,
-    /// Item IDs currently being dragged — sidebar reads this to dim the
-    /// matching thumbnails. Shared with the drag callback thread.
+    /// Item IDs being dragged, for the sidebar to dim.
     pub(crate) items: Arc<Mutex<HashSet<u64>>>,
-    /// One-time flag: true if we've already shown the "Linux not supported"
-    /// toast this session. Prevents repeat spam on every drag attempt.
+    /// The Linux-unsupported toast was shown this session.
     pub(crate) linux_notified: bool,
     /// The thumbnail under the pointer, since when, and whether it is
     /// pressed: a drag may follow, so its files are written ahead.
@@ -296,16 +289,10 @@ impl DragExportState {
         self.starting = None;
     }
 
-    /// Clear active drag-out state (used on drag end, error, and Linux fallback).
-    ///
-    /// Takes the underlying primitives by reference rather than `&self` so the
-    /// drag crate's completion callback — which runs on a separate thread —
-    /// can call it via cloned `Arc`s without needing the whole `DragExportState`.
-    ///
-    /// Silent-skip on lock poisoning is intentional: the items set is ephemeral
-    /// UI state. If a panic poisoned the lock, propagating that panic to the
-    /// drag callback thread (or worse, to drop) is strictly worse than letting
-    /// the dimmed thumbnails resolve naturally on the next drag attempt.
+    /// Clear active drag-out state. Takes the primitives, not `&self`, so the
+    /// drag crate's completion callback (another thread) can call it through
+    /// cloned `Arc`s. A poisoned lock is skipped on purpose: the set is
+    /// ephemeral UI state, and a panic in the callback is worse than a stale dim.
     pub(crate) fn reset(active: &AtomicBool, items: &Mutex<HashSet<u64>>) {
         active.store(false, Ordering::Release);
         if let Ok(mut set) = items.lock() {

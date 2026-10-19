@@ -1,18 +1,8 @@
-//! Dedicated bridge thread for the SD inpaint subprocess.
-//!
-//! Mirrors `worker.rs`'s seg bridge but scoped to a single
-//! `spawn_inpaint_only` subprocess: it never serves seg/edge work, so the
-//! engine pool is skipped at Init. The subprocess is spawned lazily on
-//! the first SD dispatch and dropped after `IDLE_RELEASE` idle, unless
-//! kept loaded, to release the ~5 GB bundle resident set.
-//!
-//! `Processor` sends `InpaintBridgeMsg` and reads `InpaintBridgeResult`
-//! through a pair of mpsc channels — same pattern as `WorkerMessage` /
-//! `WorkerResult` for seg work.
-//!
-//! LaMa / Big-LaMa / MI-GAN stay on the in-process rayon path
-//! (`Processor::dispatch_inpaint` short-circuits non-SD models). They
-//! don't go near this bridge.
+//! Dedicated bridge thread for the SD inpaint subprocess. It never serves
+//! seg/edge work, so the engine pool is skipped at Init. The subprocess is
+//! spawned lazily on the first SD dispatch and dropped after
+//! `IDLE_RELEASE` idle, unless kept loaded, to release the ~5 GB bundle.
+//! The LaMa family stays on the in-process rayon path.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -33,8 +23,7 @@ fn idle_release_due(no_in_flight: bool, idle: Duration, keep_loaded: bool) -> bo
 
 /// Below this much free RAM the watchdog force-kills the worker.
 /// 1 GB sits below Linux's aggressive-reclaim band and above macOS's
-/// "compressed memory pressure" warning, so kicks before the kernel
-/// starts swap-thrashing on either platform.
+/// memory-pressure warning, so it kicks in before swap-thrashing on either.
 const MEMORY_PRESSURE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// How long a released subprocess gets to exit before it is killed.
@@ -42,13 +31,9 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Parent → bridge messages.
 pub enum InpaintBridgeMsg {
-    /// Dispatch one SD inpaint stroke. Image + mask are temp-file
-    /// PNGs the worker decodes (same shape as
-    /// `SubprocessCommand::Inpaint`). `feather_px` / `sharpen`
-    /// configure the worker-side post-process pass. `generation` is the
-    /// dispatch-time generation counter — round-tripped on `Done` so
-    /// the GUI can drop a stale stroke's result if a fresher stroke
-    /// was dispatched while this one was in flight.
+    /// One SD inpaint stroke; image + mask are temp-file PNGs the worker
+    /// decodes. `generation` round-trips on `Done` so the GUI can drop a
+    /// stroke a fresher one superseded.
     Dispatch {
         item_id: u64,
         generation: u64,
@@ -61,30 +46,19 @@ pub enum InpaintBridgeMsg {
     },
     /// Kill the subprocess; every in-flight stroke ends Cancelled.
     Cancel,
-    /// Release any cached subprocess regardless of in-flight state.
-    /// Differs from Cancel in two ways:
-    ///   1. Idle subprocess (no in-flight) is also killed — Cancel
-    ///      keeps an idle warm subprocess alive for fast next-stroke,
-    ///      Release frees the ~200 MB residual immediately.
-    ///   2. Doesn't surface a "Cancelled" toast — Release is
-    ///      driven by deterministic GUI signals (e.g. model
-    ///      switch) rather than a user-facing Cancel button.
-    ///
-    /// Sent by `apply_toolbar_change` when the user picks a
-    /// non-SD-family eraser model or a non-inpaint model.
+    /// Release the subprocess regardless of in-flight state: unlike Cancel,
+    /// an idle warm one is killed too, freeing its ~200 MB. Sent on a switch
+    /// to a non-SD model.
     Release,
 }
 
-/// Bridge → parent results. One-to-one with the SD-specific subset of
-/// `SubprocessEvent` — the bridge filters out seg events the inpaint-
-/// only subprocess can't emit anyway.
+/// Bridge → parent results: the SD subset of `SubprocessEvent`.
 pub enum InpaintBridgeResult {
     Report { item_id: u64, update: prunr_core::ProgressUpdate },
     Done { item_id: u64, generation: u64, rgba_path: std::path::PathBuf, width: u32, height: u32, fill_scale: f32 },
     Error { item_id: u64, error: String },
 }
 
-/// Spawn the inpaint bridge thread. Returns send/receive channels.
 /// The thread runs until the parent drops the sender.
 pub fn spawn_inpaint_bridge() -> (
     mpsc::Sender<InpaintBridgeMsg>,
@@ -101,22 +75,18 @@ pub fn spawn_inpaint_bridge() -> (
     (msg_tx, res_rx)
 }
 
-/// Spawn lifecycle. `Idle` and `Ready` are the steady states; `Spawning`
-/// is a transient that holds buffered dispatches until the worker
-/// reports Ready. The `Spawning` state exists specifically so a Cancel
-/// during the (potentially 30 s) pre-Ready window doesn't block the
-/// bridge thread — the spawn runs on a helper thread, the bridge polls
-/// for the result via `rx.try_recv()` each loop tick.
+/// Spawn lifecycle. `Spawning` holds buffered dispatches until the worker
+/// reports Ready; the spawn runs on a helper thread polled with
+/// `try_recv`, so a Cancel in the (up to 30 s) pre-Ready window doesn't
+/// block the bridge.
 enum SubState {
     Idle,
     Spawning {
         rx: mpsc::Receiver<Result<(SubprocessManager, String), String>>,
         /// Strokes dispatched mid-spawn, sent in order once `Ready` lands.
         pending: Vec<InpaintJob>,
-        /// Set when a Cancel arrives mid-spawn. The bridge has already
-        /// drained `inflight_generations` and surfaced "Erase cancelled" — when
-        /// the spawn result lands we kill the new subprocess instead of
-        /// promoting it.
+        /// A Cancel arrived mid-spawn (already drained and toasted): kill the
+        /// subprocess when it lands instead of promoting it.
         cancelled: bool,
     },
     Ready(SubprocessManager),
@@ -126,21 +96,13 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     let mut sub_state = SubState::Idle;
     let mut last_used = Instant::now();
     let mut keep_loaded = false;
-    // Per-item dispatch generation. Threaded onto `Done` events so the
-    // GUI's drain path can drop a stale stroke's result if a fresher
-    // stroke superseded it while this one was in flight. The IPC
-    // doesn't carry generation — only the GUI cares about it.
+    // Per-item dispatch generation, threaded onto `Done` so the GUI can drop
+    // a superseded stroke's result; the IPC doesn't carry it.
     let mut inflight_generations: HashMap<u64, u64> = HashMap::new();
 
     loop {
-        // Block up to 100 ms waiting for the next parent message. This
-        // eliminates the fixed 100 ms sleep: a new Dispatch or Cancel
-        // wakes the thread immediately instead of waiting for the next
-        // poll tick. The subprocess event drain below still runs on the
-        // same 100 ms cadence when idle (recv_timeout returns Empty).
-        //
-        // If recv_timeout returns a message we handle it inside the same
-        // try_recv drain loop (first arm `msg`; rest via try_recv).
+        // Blocks up to 100 ms, so a Dispatch or Cancel wakes the thread at once
+        // while the subprocess drain below keeps a 100 ms cadence when idle.
         let first = msg_rx.recv_timeout(Duration::from_millis(100));
         let mut pending_msg = match first {
             Ok(msg) => Some(msg),
@@ -150,7 +112,6 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 return;
             }
         };
-        // Drain parent messages (first is already resolved; rest via try_recv).
         loop {
             let msg = match pending_msg.take() {
                 Some(m) => m,
@@ -175,12 +136,8 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     handle_dispatch(&mut sub_state, &mut inflight_generations, &res_tx, params);
                 }
                 InpaintBridgeMsg::Cancel => {
-                    // SD's UNet `run()` is uninterruptible mid-step;
-                    // flag-flip cancel can't free RAM in time. The
-                    // kill applies to ALL in-flight strokes — one
-                    // user, one Cancel button. Cancel-during-spawn
-                    // surfaces "Erase cancelled" immediately and marks
-                    // the spawn for kill-on-arrival.
+                    // SD's UNet `run()` can't be interrupted mid-step, so only a kill
+                    // frees RAM in time; it ends every in-flight stroke.
                     handle_cancel(&mut sub_state, &mut inflight_generations, &res_tx);
                 }
                 InpaintBridgeMsg::Release => {
@@ -189,18 +146,13 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             }
         }
 
-        // Poll for spawn completion (non-blocking). If the helper
-        // thread finished, transition state and send any pending
-        // dispatches — or kill if Cancel arrived mid-spawn.
         if matches!(sub_state, SubState::Spawning { .. }) {
             poll_spawn_result(&mut sub_state, &mut inflight_generations, &res_tx);
         }
 
-        // Watchdog: catches `working_set_mb` underestimates and
-        // mid-load free-RAM shifts that the pre-flight gate can't see.
-        // Only meaningful once the subprocess is Ready and dispatch
-        // has actually started — during Spawning we haven't loaded
-        // any model yet, so memory pressure is from somewhere else.
+        // Watchdog for `working_set_mb` underestimates and mid-load RAM shifts
+        // the pre-flight gate can't see; only once Ready, since a spawning
+        // worker has loaded nothing yet.
         if !inflight_generations.is_empty() && matches!(sub_state, SubState::Ready(_)) {
             let free = crate::hardware::available_ram_bytes_throttled();
             if free > 0 && free < MEMORY_PRESSURE_THRESHOLD_BYTES {
@@ -218,7 +170,6 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             }
         }
 
-        // Drain subprocess events when Ready.
         if let SubState::Ready(s) = &mut sub_state {
             for evt in s.poll_events() {
                 match evt {
@@ -235,9 +186,8 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                         inflight_generations.remove(&item_id);
                         let _ = res_tx.send(InpaintBridgeResult::Error { item_id, error });
                     }
-                    // Inpaint-only subprocess shouldn't emit seg events,
-                    // but if one slips through, ignore quietly rather
-                    // than misroute it as an inpaint event.
+                    // An inpaint-only subprocess shouldn't emit seg events; ignore one
+                    // rather than misroute it.
                     _ => {}
                 }
             }
@@ -253,9 +203,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     }
 }
 
-/// Routes an incoming `Dispatch` based on current `SubState`. Handles
-/// Idle (kicks an off-thread spawn + queues), Spawning (queues),
-/// Ready (sends straight through).
+/// Idle: spawn off-thread and queue. Spawning: queue. Ready: send.
 fn handle_dispatch(
     sub_state: &mut SubState,
     inflight_generations: &mut HashMap<u64, u64>,
@@ -275,11 +223,9 @@ fn handle_dispatch(
     }
 }
 
-/// Cancel during Idle is a no-op. Cancel during Ready kills the
-/// subprocess. Cancel during Spawning surfaces the cancelled toast
-/// immediately and marks the spawn for kill-on-arrival — the user
-/// gets feedback in <100 ms instead of waiting up to 30 s for the
-/// pre-Ready timeout.
+/// Idle: no-op. Ready: kill. Spawning: toast at once and kill the
+/// subprocess on arrival, so the user gets feedback in <100 ms instead of
+/// after the up-to-30 s pre-Ready timeout.
 fn handle_cancel(
     sub_state: &mut SubState,
     inflight_generations: &mut HashMap<u64, u64>,
@@ -305,13 +251,8 @@ fn handle_cancel(
     }
 }
 
-/// Release any cached subprocess regardless of in-flight state. Differs
-/// from `handle_cancel` in two ways: (1) an idle Ready subprocess is
-/// also killed (no inflight check; the residual ~200 MB is the whole
-/// reason the GUI sent Release), and (2) any in-flight strokes get the
-/// `CANCELLED_ERR_MSG` sentinel so the user still sees a toast — the
-/// GUI typically only sends Release on model-switch, where dropping
-/// the in-flight stroke is the intent anyway.
+/// Unlike `handle_cancel`, an idle Ready subprocess is killed too (freeing
+/// its ~200 MB is the point); in-flight strokes end with `CANCELLED_ERR_MSG`.
 fn handle_release(
     sub_state: &mut SubState,
     inflight_generations: &mut HashMap<u64, u64>,
@@ -335,10 +276,8 @@ fn handle_release(
     }
 }
 
-/// Spawn `SubprocessManager::spawn_inpaint_only` on a one-shot helper
-/// thread so the bridge stays responsive to Cancel during the Init
-/// handshake. Returns the `Spawning` state with the result channel
-/// and the queued dispatch list.
+/// Spawn on a one-shot helper thread so the bridge stays responsive to
+/// Cancel during the Init handshake.
 fn kick_spawn(pending: Vec<InpaintJob>) -> SubState {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -357,12 +296,9 @@ fn kick_spawn(pending: Vec<InpaintJob>) -> SubState {
     SubState::Spawning { rx, pending, cancelled: false }
 }
 
-/// Non-blocking poll for spawn completion. On Ok with `cancelled =
-/// false`, transitions to Ready and replays buffered dispatches.
-/// On Ok with `cancelled = true`, kills the new subprocess and
-/// returns to Idle (toasts already surfaced when Cancel was handled).
-/// On Err, surfaces the error to every queued dispatch and returns
-/// to Idle.
+/// Non-blocking. Ok goes Ready and replays buffered dispatches, or, after
+/// a mid-spawn Cancel, kills the subprocess and goes Idle; Err fails every
+/// queued dispatch.
 fn poll_spawn_result(
     sub_state: &mut SubState,
     inflight_generations: &mut HashMap<u64, u64>,
@@ -410,10 +346,8 @@ fn poll_spawn_result(
     }
 }
 
-/// SIGKILL the Ready subprocess and surface `error_msg` on every
-/// in-flight stroke. No-op when no stroke is in flight (next dispatch
-/// re-spawns lazily). Caller must have asserted `SubState::Ready` —
-/// the function transitions to `Idle` on its way out.
+/// SIGKILL the Ready subprocess, end every in-flight stroke with
+/// `error_msg`, and go Idle. No-op with nothing in flight.
 fn kill_ready_and_drain(
     sub_state: &mut SubState,
     inflight_generations: &mut HashMap<u64, u64>,

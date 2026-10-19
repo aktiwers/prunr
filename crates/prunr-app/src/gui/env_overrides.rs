@@ -1,19 +1,13 @@
-//! Test-harness escape hatches: env-var overrides for per-image knobs.
-//!
-//! Each `PRUNR_*` var is consulted by `apply_to_item_settings` whenever a
-//! new `BatchItem` is created, so a harness can preconfigure the knob state
-//! without driving sliders through xdotool (which is unreliable under
-//! Xephyr's coord-space mismatch).
-//!
-//! Production users never touch these — unset env vars are no-ops.
+//! Test-harness escape hatches: `PRUNR_*` env vars preconfigure each new
+//! `BatchItem`'s knobs, since driving sliders through xdotool is
+//! unreliable under Xephyr. Unset vars are no-ops.
 
 use prunr_core::{BgEffect, SubjectEffect, LineMode};
 
 use super::item_settings::ItemSettings;
 
-/// Apply `PRUNR_*` knob overrides on top of `item`. Unset vars leave fields
-/// untouched. Bad values are silently ignored — defensive parse so a typo
-/// in a harness script doesn't kill the launch.
+/// Bad values are ignored, so a typo in a harness script doesn't kill the
+/// launch.
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read("PRUNR_GAMMA") { item.gamma = v; }
     if let Some(v) = read("PRUNR_CONTRAST") { item.contrast = v; }
@@ -27,9 +21,8 @@ pub fn apply_to_item_settings(item: &mut ItemSettings) {
     if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") { item.bg_effect = v; }
 }
 
-/// `PRUNR_AUTO_PROCESS=1` flips `auto_process_on_import` so imported images
-/// process without the harness having to send `Ctrl+R`. Mirrored on the
-/// `Settings` rather than per-item because that's where the toggle lives.
+/// `PRUNR_AUTO_PROCESS=1` sets `auto_process_on_import`, so imports
+/// process without the harness sending `Ctrl+R`.
 pub fn auto_process_override() -> Option<bool> {
     prunr_core::env::flag("PRUNR_AUTO_PROCESS")
 }
