@@ -175,16 +175,30 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
             }
             app.refresh_install_cache();
         }
-        HardwareSectionIntent::IntelGpu(on) => {
-            match prunr_core::ort_runtime::set_intel_gpu(on) {
-                Ok(()) => app.toasts.info("Restart Prunr to apply"),
-                Err(e) => app.toasts.error(format!("Could not change the Intel graphics setting: {e}")),
-            };
-            app.refresh_install_cache();
-        }
+        HardwareSectionIntent::IntelGpu(on) => match prunr_core::ort_runtime::intel_gpu_file() {
+            Some(file) => {
+                queue_intel_gpu(file, on);
+                // The queued write may not have landed, so a fresh read
+                // could show the old state.
+                app.hardware_install_cache.intel_gpu = on;
+                app.toasts.info("Restart Prunr to apply");
+            }
+            None => {
+                app.toasts.error("Could not change the Intel graphics setting: no user data folder");
+            }
+        },
         HardwareSectionIntent::GetNvidiaLibraries => app.request_nvidia_libraries(),
         HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
         HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
+    }
+}
+
+/// The switch is the file's presence.
+fn queue_intel_gpu(file: std::path::PathBuf, on: bool) {
+    if on {
+        crate::gui::disk_queue::write(file, Vec::new());
+    } else {
+        crate::gui::disk_queue::remove(file);
     }
 }
 
@@ -900,5 +914,28 @@ mod jobs_hint_tests {
             assert!(hint.contains(d.display_name), "{hint:?} names {}", d.display_name);
         }
         assert!(!hint.contains("BiRefNet"), "{hint:?} reads as if only BiRefNet took one at a time");
+    }
+}
+
+#[cfg(test)]
+mod intel_gpu_tests {
+    /// The switch goes through the ordered disk queue: on makes the file
+    /// (and its folder), off removes it, and turning it off when never on
+    /// is fine.
+    #[test]
+    fn the_intel_gpu_switch_turns_on_and_off() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("store").join(prunr_core::ort_runtime::INTEL_GPU_FILE);
+        let set = |on| {
+            super::queue_intel_gpu(file.clone(), on);
+            crate::gui::disk_queue::flush();
+        };
+        set(false);
+        assert!(!file.exists(), "off when never chosen");
+        set(true);
+        assert!(file.is_file());
+        set(true);
+        set(false);
+        assert!(!file.exists());
     }
 }
