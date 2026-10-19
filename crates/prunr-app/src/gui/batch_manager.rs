@@ -207,26 +207,12 @@ impl BatchManager {
 
     /// Selected index clamped to the batch size; `None` when the batch is empty.
     pub(crate) fn selected_idx_clamped(&self) -> Option<usize> {
-        if self.items.is_empty() {
-            None
-        } else {
-            Some(self.selected_index.min(self.items.len() - 1))
-        }
+        (!self.items.is_empty()).then(|| self.selected_index.min(self.items.len() - 1))
     }
 
-    /// Clamp `selected_index` to the batch size (0 on an empty batch);
-    /// `true` when it moved.
-    pub(crate) fn clamp_selected_index(&mut self) -> bool {
-        if self.items.is_empty() {
-            let moved = self.selected_index != 0;
-            self.selected_index = 0;
-            moved
-        } else {
-            let clamped = self.selected_index.min(self.items.len() - 1);
-            let moved = clamped != self.selected_index;
-            self.selected_index = clamped;
-            moved
-        }
+    /// Clamp `selected_index` to the batch size (0 on an empty batch).
+    pub(crate) fn clamp_selected_index(&mut self) {
+        self.selected_index = self.selected_index.min(self.items.len().saturating_sub(1));
     }
 
     /// `true` when the selection changed, so the caller resets the canvas.
