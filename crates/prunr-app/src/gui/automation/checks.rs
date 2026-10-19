@@ -85,7 +85,6 @@ pub fn engineering_word(text: &str) -> Option<&'static str> {
     word.or_else(|| text.split(|c: char| !c.is_alphanumeric()).any(|w| w == "ORT").then_some("ORT"))
 }
 
-/// The British spelling `text` uses, if any.
 pub fn british_word(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     BRITISH_SPELLINGS.iter().find(|w| lower.split(|c: char| !c.is_alphabetic()).any(|t| t.starts_with(*w))).copied()
@@ -136,7 +135,6 @@ pub fn tooltip_copy(tooltips: &[super::record::Tooltip]) -> Vec<Violation> {
         .collect()
 }
 
-/// Each text drawn past its room.
 pub fn clipped(clips: &[super::record::Clip]) -> Vec<Violation> {
     clips
         .iter()
