@@ -543,10 +543,12 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
         }
         // Work landing off the UI thread (a texture, a startup probe on a
         // slow runner) asks for one frame at once; the pace is what the
-        // frames settle to, and then holds.
+        // frames settle to, and then holds. The settle budget is generous:
+        // a loaded machine (an Intel Mac runner, parallel builds) took
+        // over 10 s to land that work, and only a failure waits it out.
         let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         let paced = |d: std::time::Duration| d >= std::time::Duration::from_millis(15);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         h.run_steps(3);
         while !paced(delay(&h)) && std::time::Instant::now() < deadline {
             h.step();
