@@ -1,7 +1,6 @@
-//! SAM 2 decoder prompt construction for clicks and strokes. All
-//! coordinate normalization runs through `normalize` — source-pixel coords are
-//! mapped to 0..SAM_ENCODER_INPUT space; screen-pixel or raw click coords
-//! must NOT reach the decoder, the resulting mask would be off-by-scale.
+//! SAM 2 decoder prompts for clicks and strokes. Every coordinate goes
+//! through `normalize` into 0..SAM_ENCODER_INPUT; screen or raw click
+//! coords reaching the decoder give a mask off by scale.
 
 use super::{SAM_ENCODER_INPUT, SAM_MASK_RESOLUTION};
 
@@ -23,7 +22,6 @@ pub struct SamPrompt {
     pub has_mask_input: f32,
 }
 
-/// Returned when a stroke has zero points.
 #[derive(Debug, thiserror::Error)]
 pub enum PromptError {
     #[error("stroke must have at least one point")]
@@ -57,11 +55,8 @@ pub fn build_click_prompt(
     foreground_prompt(&[(x_pixel, y_pixel)], source_w, source_h)
 }
 
-/// Multi-point stroke prompt. Decimates to at most MAX_STROKE_POINTS evenly-
-/// spaced samples, all foreground. Always appends one padding point at (0,0)
-/// with label -1.0 for SAM 2 robustness.
-///
-/// Returns `Err(PromptError::EmptyStroke)` for zero-length input.
+/// Stroke prompt: at most MAX_STROKE_POINTS evenly spaced foreground
+/// points. Errors on an empty stroke.
 pub fn build_stroke_prompt(
     points: &[(f32, f32)],
     source_w: u32,
@@ -94,8 +89,6 @@ fn foreground_prompt(points: &[(f32, f32)], source_w: u32, source_h: u32) -> Sam
     }
 }
 
-/// Uniform stride decimation: pick `cap` evenly-spaced samples from input.
-/// If input length ≤ cap, returns all points unchanged.
 fn decimate(points: &[(f32, f32)], cap: usize) -> Vec<(f32, f32)> {
     if points.len() <= cap {
         return points.to_vec();

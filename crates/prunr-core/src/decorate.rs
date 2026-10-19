@@ -104,7 +104,7 @@ impl Region {
     }
 }
 
-/// Inclusive bounds of the pixels with any alpha, scanning rows in parallel.
+/// Inclusive bounds of the pixels with any alpha.
 fn alpha_bbox(rgba: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
     let w = rgba.width() as usize;
     rgba.as_raw()

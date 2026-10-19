@@ -1,8 +1,4 @@
-//! SAM 2 encoder input builder.
-//!
-//! RGBA source → 1024×1024 ImageNet-normalized f32 tensor in NCHW layout.
-//!
-//! Peak working set:
+//! Peak working set of the SAM 2 encoder input:
 //! | Stage        | RAM    |
 //! |--------------|--------|
 //! | Input RGBA   | caller-owned, not counted |
@@ -13,16 +9,8 @@
 use super::SAM_ENCODER_INPUT;
 use crate::preprocess::{IMAGENET_MEAN, IMAGENET_STD};
 
-/// Build the SAM 2 encoder input tensor from a source RGBA image.
-///
-/// 1. Stretch-resize to 1024×1024 via SIMD Lanczos3, straight from the
-///    borrowed RGBA (no full-resolution copy).
-/// 2. Drop alpha — SAM 2 encoder is RGB-only.
-/// 3. Normalize per-channel: `(pixel/255.0 - mean) / std`.
-/// 4. Layout: NCHW — output[0..n] = all R values, output[n..2n] = G, output[2n..3n] = B,
-///    where n = 1024*1024.
-///
-/// Returns a `Vec<f32>` of length 3_145_728 (3 × 1024 × 1024).
+/// `source` stretched to 1024² (Lanczos3, no full-resolution copy), alpha
+/// dropped, ImageNet-normalised, NCHW: 3 × 1024² values.
 pub fn preprocess_for_sam(source: &image::RgbaImage) -> Vec<f32> {
     let resized = crate::formats::resize_rgba(
         source,
