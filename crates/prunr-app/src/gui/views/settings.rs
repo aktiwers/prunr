@@ -243,14 +243,7 @@ fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) 
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let fill = if selected {
-            theme::ROW_PICKED
-        } else if resp.hovered() {
-            theme::ROW_HOVER
-        } else {
-            Color32::TRANSPARENT
-        };
-        painter.rect_filled(rect, theme::PILL_RADIUS, fill);
+        painter.rect_filled(rect, theme::PILL_RADIUS, super::chip::row_wash(&resp, selected));
         let mut x = rect.left() + 12.0;
         if let Some(icon) = icon {
             painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(16.0), theme::ACCENT_RING);
