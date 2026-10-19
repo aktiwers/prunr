@@ -192,19 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_single_message() {
-        let mut buf = Vec::new();
-        let msg = TestMsg::Hello { name: "prunr".to_string() };
-        {
-            let mut writer = BufWriter::new(&mut buf);
-            write_message(&mut writer, &msg).unwrap();
-        }
-        let mut reader = BufReader::new(Cursor::new(&buf));
-        let recovered: Option<TestMsg> = read_message(&mut reader).unwrap();
-        assert_eq!(recovered, Some(msg));
-    }
-
-    #[test]
     fn roundtrip_multiple_messages() {
         let mut buf = Vec::new();
         let msgs = vec![
@@ -226,14 +213,6 @@ mod tests {
         // Next read should be EOF
         let eof: Option<TestMsg> = read_message(&mut reader).unwrap();
         assert!(eof.is_none());
-    }
-
-    #[test]
-    fn eof_returns_none() {
-        let buf: Vec<u8> = Vec::new();
-        let mut reader = BufReader::new(Cursor::new(&buf));
-        let result: Option<TestMsg> = read_message(&mut reader).unwrap();
-        assert!(result.is_none());
     }
 
     #[test]
