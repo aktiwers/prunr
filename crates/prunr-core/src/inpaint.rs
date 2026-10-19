@@ -1185,6 +1185,11 @@ fn accumulate_tile(
 mod tests {
     use super::*;
 
+    /// A `w`×`h` mask at 255 over `x0..x1`, `y0..y1`, 0 elsewhere.
+    fn rect_mask(w: u32, h: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> GrayImage {
+        GrayImage::from_fn(w, h, |x, y| Luma([if (x0..x1).contains(&x) && (y0..y1).contains(&y) { 255 } else { 0 }]))
+    }
+
     /// `img` with `f` applied to a copy.
     fn applied(img: &RgbaImage, f: impl FnOnce(&mut RgbaImage)) -> RgbaImage {
         let mut out = img.clone();
@@ -1408,8 +1413,7 @@ mod tests {
             cur
         };
         for (x0, y0, x1, y1) in [(10, 12, 20, 25), (0, 0, 6, 9), (30, 33, 40, 40), (0, 15, 40, 18)] {
-            let mut m = GrayImage::new(40, 40);
-            for y in y0..y1 { for x in x0..x1 { m.put_pixel(x, y, Luma([255])); } }
+            let mut m = rect_mask(40, 40, (x0, y0, x1, y1));
             m.put_pixel(35, 3, Luma([90]));
             for px in [-3, -1, 1, 4, 7] {
                 assert_eq!(grow_mask(&m, px), full(&m, px), "rect {:?} px {px}", (x0, y0, x1, y1));
@@ -1483,12 +1487,7 @@ mod tests {
         let (w, h) = (1100, 700);
         let img = RgbaImage::from_pixel(w, h, Rgba([10, 10, 10, 255]));
         let run = |x0: u32, y0: u32, side: u32| {
-            let mut mask = GrayImage::new(w, h);
-            for y in y0..y0 + side {
-                for x in x0..x0 + side {
-                    mask.put_pixel(x, y, Luma([255]));
-                }
-            }
+            let mask = rect_mask(w, h, (x0, y0, x0 + side, y0 + side));
             let mut tiles = Vec::new();
             tile_compose(&img, &mask, &Progress::none(), |t, m| {
                 tiles.push((t.dimensions(), mask_bbox(m, 1, 0).unwrap()));
@@ -1608,12 +1607,7 @@ mod tests {
     #[test]
     fn auto_shrinks_only_the_regions_that_need_it() {
         let image = RgbaImage::from_pixel(1200, 400, Rgba([10, 20, 30, 255]));
-        let mut mask = GrayImage::new(1200, 400);
-        for y in 50..350 {
-            for x in 100..700 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
+        let mut mask = rect_mask(1200, 400, (100, 50, 700, 350));
         for y in 190..210 {
             for x in 1100..1120 {
                 mask.put_pixel(x, y, Luma([255]));
@@ -1682,12 +1676,7 @@ mod tests {
     #[test]
     fn a_scaled_fill_changes_only_the_hole() {
         let image = RgbaImage::from_pixel(400, 300, Rgba([10, 20, 30, 255]));
-        let mut mask = GrayImage::new(400, 300);
-        for y in 100..180 {
-            for x in 150..270 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
+        let mask = rect_mask(400, 300, (150, 100, 270, 180));
         let hole = mask_bbox(&mask, 128, 0).unwrap();
         let mut seen = None;
         let mut out = image.clone();
@@ -1848,8 +1837,7 @@ mod tests {
             assert_eq!(grown.get_pixel(x, y).0[0], 255, "({x}, {y})");
         }
         assert_eq!(grown.get_pixel(1, 1).0[0], 0, "a diagonal");
-        let mut block = GrayImage::new(5, 5);
-        for y in 1..=3 { for x in 1..=3 { block.put_pixel(x, y, Luma([255])); } }
+        let block = rect_mask(5, 5, (1, 1, 4, 4));
         let shrunk = grow_mask(&block, -1);
         assert_eq!(shrunk.get_pixel(2, 2).0[0], 255, "the centre survives");
         assert_eq!((shrunk.get_pixel(1, 1).0[0], shrunk.get_pixel(1, 2).0[0]), (0, 0), "every pixel with a clear neighbour goes");
@@ -1894,8 +1882,7 @@ mod tests {
     fn sharpen_inpainted_matches_reference_full_image_computation() {
         for (side, x0, y0, x1, y1, amount) in [(48, 0, 0, 16, 16, 0.5), (64, 24, 24, 40, 40, 0.7), (48, 36, 36, 48, 48, 0.5)] {
             let img = gradient_image(side, side);
-            let mut mask = GrayImage::new(side, side);
-            for y in y0..y1 { for x in x0..x1 { mask.put_pixel(x, y, Luma([255])); } }
+            let mask = rect_mask(side, side, (x0, y0, x1, y1));
             assert_bbox_sharpen_matches_reference(&img, &mask, amount);
         }
     }
@@ -1911,12 +1898,7 @@ mod tests {
                 img.put_pixel(x, y, Rgba([x as u8, y as u8, 100, 255]));
             }
         }
-        let mut mask = GrayImage::new(128, 128);
-        for y in 56..72 {
-            for x in 56..72 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
+        let mask = rect_mask(128, 128, (56, 56, 72, 72));
         // Inpaint closure paints the masked region pure red.
         let out = tile_compose(&img, &mask, &Progress::none(), |tile, tile_mask| {
             let mut t = tile.clone();
