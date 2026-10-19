@@ -2341,9 +2341,10 @@ mod depth_tests {
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
     }
 
-    /// A Magic Brush click made while the image is still being encoded
-    /// waits for the embedding and runs when it lands, rather than being
-    /// dropped; the brush turned off meanwhile drops it.
+    /// Magic Brush clicks made while the image is still being encoded wait
+    /// for the embedding and all run when it lands, rather than being
+    /// dropped; another image coming on screen, or the brush turned off,
+    /// drops them.
     #[test]
     fn a_magic_brush_pick_before_the_embedding_runs_when_it_lands() {
         use prunr_core::selection::BrushMode;
@@ -2361,17 +2362,24 @@ mod depth_tests {
         app.batch.select_item(0);
         app.magic_brush_state.activate();
 
+        app.magic_brush_state.note_shown(Some(1), std::time::Instant::now());
         app.pick_with_sam(1, None, click(), BrushMode::Add);
-        assert!(app.magic_brush_state.pending_sam_pick.is_some(), "held until the embedding is there");
+        app.pick_with_sam(1, None, click(), BrushMode::Subtract);
+        assert_eq!(app.magic_brush_state.pending_sam_picks.len(), 2, "both held until the embedding is there");
         app.processor.land_sam_encoder_for_test(1, embedding());
         app.pump_sam_results(&ctx);
         assert!(app.batch.items[0].magic_brush_embedding.is_some());
-        assert!(app.magic_brush_state.pending_sam_pick.is_none(), "it ran when the embedding landed");
+        assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "they ran when the embedding landed");
 
         app.batch.items[0].magic_brush_embedding = None;
         app.pick_with_sam(1, None, click(), BrushMode::Add);
+        app.magic_brush_state.note_shown(Some(2), std::time::Instant::now());
+        assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "another image on screen drops the waiting pick");
+
+        app.magic_brush_state.note_shown(Some(1), std::time::Instant::now());
+        app.pick_with_sam(1, None, click(), BrushMode::Add);
         app.magic_brush_state.deactivate();
-        assert!(app.magic_brush_state.pending_sam_pick.is_none(), "the brush turned off drops the waiting pick");
+        assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "the brush turned off drops the waiting pick");
     }
 
     /// Set focus stores the click as fractions, makes it an undo step and
