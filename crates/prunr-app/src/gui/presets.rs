@@ -1,22 +1,10 @@
-//! Per-model preset schema for v2 preset files.
+//! v2 preset schema: per-model item and brush knobs, plus for SD models
+//! an `SdPreset` of per-scheduler bundles. v1 files migrate in at load.
 //!
-//! `ModelPreset` carries item knobs + brush knobs + (for SD-family
-//! models) an `SdPreset` with per-scheduler tuning bundles. The
-//! one-`ItemSettings`-per-file v1 layout in `presets_fs` is migrated
-//! into a v2 `models[model_id] = ModelPreset` envelope at load time.
-//!
-//! ## Forward-compatibility contract (read before editing any field)
-//!
-//! Every new field on these structs MUST be reachable from default —
-//! that is what the tripwire tests at the bottom enforce. If you add
-//! a field and one of these tests breaks, the fix is `#[serde(default)]`
-//! on the field (or a Default impl that covers the whole struct).
-//!
-//! `models` is keyed by `String` (the `ModelId` Debug name), NOT by
-//! `ModelId` directly: a v2 preset file produced by a future binary
-//! that has a `ModelId::FutureModel` variant we don't know about
-//! must still deserialize cleanly on this binary — unknown string
-//! keys round-trip and are silently skipped at lookup time.
+//! Every new field MUST deserialize from default (`#[serde(default)]`);
+//! the tripwire tests enforce it. `models` is keyed by the `ModelId`
+//! Debug name, not `ModelId`, so a file from a newer binary with models
+//! this one doesn't know still loads; unknown keys are skipped at lookup.
 
 use std::collections::HashMap;
 
@@ -31,11 +19,8 @@ pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
 
 fn default_format_version() -> u32 { PRESET_FORMAT_VERSION }
 
-/// Convert a `ModelId` into the JSON key used in `PresetFile.models`.
-/// Single source of truth — every `models.insert` / `.get` site routes
-/// through this function. Debug-name format matches the on-disk shape
-/// of `Settings.accepted_licenses` so both consent state and preset
-/// keys stay in lockstep.
+/// The `PresetFile.models` key; the same Debug-name format as
+/// `Settings.accepted_licenses`.
 pub(crate) fn model_id_key(id: ModelId) -> String {
     format!("{id:?}")
 }
@@ -141,9 +126,6 @@ pub(crate) struct ResolvedView {
     pub brush: BrushSettings,
 }
 
-/// Overwrite the SD-tuning fields of `brush` from `sd` + the chosen
-/// scheduler's bundle. Single materialise-SD-into-brush operation,
-/// shared by every caller that needs the live values.
 fn apply_sd_to_brush(
     brush: &mut BrushSettings,
     sd: &SdPreset,
@@ -164,12 +146,9 @@ fn apply_sd_to_brush(
     brush.sd_use_taesd = sd.use_taesd;
 }
 
-/// Resolve a preset to live values for the given model.
-///
-/// `scheduler = None` means "use the preset's stored `active_scheduler`"
-/// for SD-family models, and is ignored for non-SD models. `Some(_)`
-/// overrides — the in-session scheduler-change handler passes the
-/// user's pick so the bundle swap doesn't rewrite the preset on disk.
+/// `scheduler`: `None` uses the preset's `active_scheduler` (SD models
+/// only); `Some` overrides it, so an in-session scheduler change doesn't
+/// rewrite the preset on disk.
 pub(crate) fn resolve_preset_for_model(
     file: &PresetFile,
     model: ModelId,

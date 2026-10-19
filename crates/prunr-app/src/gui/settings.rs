@@ -5,15 +5,10 @@ use prunr_core::ModelKind;
 use super::brush_state::BrushSettings;
 use super::item_settings::ItemSettings;
 
-/// Name of the built-in, non-deletable, non-overwritable preset representing
-/// factory defaults. Always present in the preset dropdown; the synthetic
-/// values are `ItemSettings::default()` regardless of what's in the map.
+/// The built-in factory-defaults preset: never deleted or overwritten, and
+/// always `ItemSettings::default()` whatever the map holds.
 pub const PRUNR_PRESET: &str = "Prunr";
 
-/// Global app config. Per-image knobs (gamma, contrast, line mode, bg, ...)
-/// live on `BatchItem.settings: ItemSettings` instead. New images inherit
-/// whichever preset `default_preset` points at; the adjustments toolbar
-/// edits the current image's `ItemSettings` directly.
 const SETTINGS_UNREADABLE: &str = "Your settings could not be read, so Prunr started with its defaults. The old file is kept as settings.json.bad.";
 const SOME_SETTINGS_RESET: &str = "Some settings could not be read and are back to their defaults; the rest are kept. The old file is kept as settings.json.bad.";
 
@@ -26,12 +21,11 @@ fn keep_unreadable(path: &std::path::Path) {
     }
 }
 
+/// Global app config; per-image knobs live on `BatchItem.settings`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub model: SettingsModel,
-    /// Start processing each image automatically on import. Field is
-    /// `#[serde(alias = ...)]` for compatibility with pre-v2 settings
-    /// files that used the old `auto_remove_on_import` name.
+    /// The alias reads pre-v2 settings files.
     #[serde(alias = "auto_remove_on_import")]
     pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
@@ -54,7 +48,7 @@ pub struct Settings {
     #[serde(default)]
     pub auto_hide_adjustments: bool,
     /// Drag-out and Save emit subject/lines/mask PNGs instead of a single
-    /// composite. Single toggle, both export paths.
+    /// composite.
     #[serde(default)]
     pub export_split_layers: bool,
     /// Save also writes each image's depth map as `<stem>-depth.png`.
@@ -63,45 +57,32 @@ pub struct Settings {
     /// File format Save writes (the save dialog's extension can override it).
     #[serde(default)]
     pub export_format: prunr_core::ExportFormat,
-    /// Named presets (excluding the synthetic "Prunr"). Populated from the
-    /// filesystem store at load time; not written to settings.json on save —
-    /// each preset lives as its own file in `~/.config/prunr/presets/` so
-    /// users can share them by dropping JSON files into the folder.
-    /// The `default` + `skip_serializing` pair lets settings.json files
-    /// from builds that embedded presets still load; those embedded
-    /// presets are dropped.
+    /// Named presets (not "Prunr"), loaded from the presets folder where
+    /// each is its own shareable file; never written to settings.json.
+    /// `default` lets old files that embedded presets still load.
     #[serde(default, skip_serializing)]
     pub(crate) presets: HashMap<String, super::presets::PresetFile>,
     /// Names (lowercased) of presets a newer Prunr saved: left out of
     /// `presets`, and never saved over.
     #[serde(skip)]
     pub(crate) newer_presets: std::collections::HashSet<String>,
-    /// Which preset new imports inherit, and what Reset All Knobs restores.
-    /// Always set; defaults to "Prunr". If the named preset goes missing
-    /// (user deleted it out of serde state), resolution falls back to "Prunr".
+    /// Which preset new imports inherit, and what Reset All Knobs restores;
+    /// a missing one falls back to "Prunr".
     #[serde(default = "default_preset_name")]
     pub default_preset: String,
 
-    /// `bg_image_hash` → on-disk path map. Lets a preset that captured a
-    /// bg image reload the image when re-applied (or applied to another
-    /// item). Sharing a preset to another user with no matching path is a
-    /// graceful miss — the bg image clears and the user is toasted.
-    /// Bytes themselves are never persisted; the path is the identity.
+    /// `bg_image_hash` → path, so a preset can reload its bg image; a
+    /// shared preset with no matching path clears the bg with a toast.
     #[serde(default)]
     pub bg_image_paths: HashMap<u64, PathBuf>,
 
-    /// Persisted set of model ids whose restrictive licenses (CreativeML
-    /// Open RAIL-M, NVIDIA SCL, …) the user has explicitly accepted.
-    /// Stored as `ModelId` Debug names so prunr-models stays serde-free.
-    /// Once accepted, the Model Store skips the license dialog on
-    /// subsequent re-downloads of the same model.
+    /// Models whose restrictive licenses the user accepted, as `ModelId`
+    /// Debug names so prunr-models stays serde-free.
     #[serde(default)]
     pub accepted_licenses: Vec<String>,
 
-    /// Per-runtime snooze: unix-second timestamp before which we won't
-    /// re-prompt the user to install. Set when the user clicks "Not now"
-    /// on the first-launch runtime prompt. Cleared on a successful
-    /// install or via "Reset all". Keyed by `RuntimeId` Debug name.
+    /// Unix seconds before which the runtime install prompt stays quiet
+    /// ("Not now"), keyed by `RuntimeId` Debug name.
     #[serde(default)]
     pub runtime_prompt_snoozed_until: std::collections::HashMap<String, i64>,
 
@@ -158,13 +139,9 @@ impl SdMemoryGuard {
 }
 
 impl Settings {
-    /// Should the SD inpaint dispatcher route to the LCM checkpoint?
-    /// True only when ALL of: user picked SD, scheduler is LCM, the
-    /// LCM descriptor is in the registry (artifact published), and
-    /// the bundle is downloaded. When any clause fails, picked_model
-    /// passes through and standard SD runs. Pinned in one place so
-    /// adding a 5th clause (e.g. license-accepted) doesn't silently
-    /// diverge between dispatch and UI gating.
+    /// Route the SD eraser to the LCM checkpoint: SD picked, LCM
+    /// scheduler, and the LCM bundle published and downloaded. Dispatch
+    /// and UI gating both read this.
     pub fn lcm_routing_active(&self, picked_model: prunr_models::ModelId) -> bool {
         use crate::gui::brush_state::SdScheduler;
         picked_model == prunr_models::ModelId::SdV15InpaintFp16
@@ -172,10 +149,7 @@ impl Settings {
             && Self::can_select_lcm_scheduler()
     }
 
-    /// Can the user pick the LCM scheduler entry in the scheduler
-    /// dropdown? True only when the LCM bundle is published in the
-    /// registry AND downloaded. Single definition site so adding a
-    /// future clause (e.g. license-accepted) lands in one place.
+    /// The LCM bundle is published in the registry AND downloaded.
     pub fn can_select_lcm_scheduler() -> bool {
         prunr_models::descriptor(prunr_models::ModelId::SdV15LcmInpaintFp16).is_some()
             && prunr_models::is_available(prunr_models::ModelId::SdV15LcmInpaintFp16)
@@ -200,27 +174,16 @@ impl Settings {
         config_root().map(|d| d.join("prunr").join("settings.json"))
     }
 
-    /// Load from disk, falling back to defaults if missing or corrupt.
-    ///
-    /// Presets come from the filesystem store (`~/.config/prunr/presets/`),
-    /// one JSON file per preset — shareable by dropping a file into the
-    /// folder.
-    ///
-    /// Migrates v1 per-image fields (mask_gamma, bg_color, line_mode, ...)
-    /// into a "Previous defaults" preset file on first load.
     /// The saved settings and presets, and a note for the first frame when
-    /// some did not read.
+    /// some did not read. Missing or corrupt falls back to defaults.
     pub fn load() -> (Self, Option<&'static str>) {
-        // Seed curated built-in presets on first run (idempotent via marker
-        // file). Runs before any load_all() so users see "Comic", "Neon"
-        // etc. in the dropdown on first launch.
+        // Before any load_all(), so the built-ins show on first launch.
         super::presets_fs::seed_builtins_once();
 
         let (mut settings, note) = Self::config_path().map_or_else(|| (Self::default(), None), |path| Self::read(&path));
         let (mut loaded, newer) = super::presets_fs::load_all();
         settings.newer_presets = newer;
-        // Preserve the freshly-migrated "Previous defaults" entry
-        // (load_all picks it up too if save succeeded, but be defensive).
+        // The migrated "Previous defaults" survives a failed save.
         for (k, v) in settings.presets.drain() {
             loaded.entry(k).or_insert(v);
         }
@@ -236,8 +199,7 @@ impl Settings {
     fn read(path: &std::path::Path) -> (Self, Option<&'static str>) {
         let Ok(data) = std::fs::read_to_string(path) else { return (Self::default(), None) };
 
-        // Parse to Value first so we can migrate v1 fields regardless of
-        // whether strict struct parsing succeeds.
+        // Via Value, so v1 fields migrate even when strict parsing fails.
         let mut value: serde_json::Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
@@ -260,9 +222,8 @@ impl Settings {
         };
         settings.brush.fit_sd_to_quality();
 
-        // v1 migration: stash old per-image fields as a "Previous defaults"
-        // preset. User can apply it explicitly if they want their old values
-        // back; new imports still start with factory defaults.
+        // v1 per-image fields become a "Previous defaults" preset; new
+        // imports still start with factory defaults.
         let is_v1 = value.get("mask_gamma").is_some()
             || value.get("apply_bg_color").is_some()
             || value.get("line_mode").is_some();
@@ -299,8 +260,7 @@ impl Settings {
         (serde_json::from_value(merged).unwrap_or_default(), reset)
     }
 
-    /// Save to disk. Errors are silently ignored (best-effort).
-    /// Written off the UI thread, after every save asked for before it.
+    /// Best-effort, off the UI thread, after every earlier save.
     pub fn save(&self) {
         let Some(path) = Self::config_path() else { return };
         match serde_json::to_string_pretty(self) {
@@ -350,15 +310,13 @@ impl Settings {
         if is_accelerator(backend) && prunr_core::engine::model_runs_on(model.model_id(), backend) { backend } else { "CPU" }
     }
 
-    /// Smart default for parallel jobs based on backend and model. In
-    /// filter-only mode (`SettingsModel::None`) the pipeline runs pure CPU
-    /// on already-decoded pixels, so the ORT-memory cap doesn't apply.
+    /// With no model the pipeline is pure CPU on decoded pixels, so the
+    /// ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
         let base = if self.runs_on_host_cpu() { (num_cpus::get() / 2).max(1) } else { 2 };
         self.cap_jobs_for_model(base)
     }
 
-    /// Max recommended parallel jobs based on backend and model.
     pub fn max_jobs(&self) -> usize {
         let base = if self.runs_on_host_cpu() { num_cpus::get() } else { 4 };
         self.cap_jobs_for_model(base)
@@ -400,14 +358,8 @@ impl Settings {
         self.model.to_model_id().unwrap_or(DEFAULT_PRESET_MODEL)
     }
 
-    /// Resolve the active preset to the live `ResolvedView` for the
-    /// active model. `scheduler = None` uses the preset's stored
-    /// `active_scheduler` for SD; `Some(_)` overrides — used by the
-    /// scheduler-change-within-SD handler so a bundle swap doesn't
-    /// rewrite the preset on disk.
-    ///
-    /// Falls back to Prunr (factory defaults) at every level: missing
-    /// preset, missing model entry, missing scheduler bundle.
+    /// `scheduler`: as `resolve_preset_for_model`. Falls back to factory
+    /// defaults at every level.
     pub(crate) fn resolve_active_preset(
         &self,
         scheduler: Option<super::brush_state::SdScheduler>,
@@ -450,9 +402,8 @@ impl Settings {
         }
     }
 
-    /// ItemSettings template for new batch items — the default_preset's
-    /// values, with any `PRUNR_*` knob env-var overrides applied on top
-    /// (test-harness only; production env is empty).
+    /// The default preset's values, with `PRUNR_*` knob env overrides on
+    /// top (test harness only).
     pub fn item_defaults_for_new_item(&self) -> ItemSettings {
         let mut item = self.preset_values(&self.default_preset);
         super::env_overrides::apply_to_item_settings(&mut item);
@@ -463,9 +414,7 @@ impl Settings {
         self.has_accepted(&super::presets::model_id_key(id))
     }
 
-    /// Records license acceptance and persists settings. Idempotent — a
-    /// repeated call is a no-op (no duplicate entries, no extra disk write
-    /// when the entry already exists).
+    /// Persists; idempotent (no duplicate, no extra write).
     pub fn accept_license(&mut self, id: prunr_models::ModelId) {
         self.accept(&super::presets::model_id_key(id));
     }
@@ -543,8 +492,7 @@ fn now_unix_secs() -> i64 {
         .map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// Extract v1 per-image settings from raw JSON into ItemSettings.
-/// Each field is tolerant of missing/wrong-type values (falls back to default).
+/// Each field falls back to default on a missing or wrong-type value.
 fn migrate_v1_item_settings(v: &serde_json::Value) -> ItemSettings {
     use prunr_core::LineMode;
 
@@ -596,45 +544,31 @@ pub enum SettingsModel {
     Silueta,
     U2net,
     BiRefNetLite,
-    /// "Filter-only" mode — no segmentation inference. The pipeline bypasses
-    /// the seg stage entirely and just applies effect / bg_effect to the
-    /// source. TEED still runs if `line_mode == EdgesOnly` (edges don't
-    /// need the seg model); SubjectOutline is invalid without a seg model
-    /// and gets greyed out in the UI.
+    /// Filter-only: no segmentation. Whole-photo lines still run;
+    /// SubjectOutline needs a seg model and is greyed out.
     None,
-    /// Object-removal / inpaint mode (LaMa-fp32 model). Brush is the
-    /// only input; stroke release runs the inpainter over the painted
-    /// region. Bg-removal knobs are inert in this mode.
+    /// LaMa eraser; bg-removal knobs are inert.
     Inpaint,
-    /// Same mode as `Inpaint` but routed to the higher-quality Big-LaMa
-    /// weights. Same architecture, same per-tile cost — different
-    /// training data.
+    /// Big-LaMa: same architecture and cost as LaMa, better weights.
     BigInpaint,
-    /// Lightweight GAN inpainter (~25 MB). Different architecture from
-    /// LaMa: GAN-based, sharper on detail, less smooth on flat
+    /// MI-GAN (~25 MB): sharper on detail than LaMa, less smooth on flat
     /// backgrounds.
     MiganInpaint,
-    /// Stable Diffusion 1.5 Inpainting (FP16). GPU-required, ~2 GB
-    /// multi-part bundle. Generative — produces plausible content
-    /// rather than smooth fills.
+    /// SD 1.5 Inpainting (FP16), ~2 GB bundle: generates content rather
+    /// than smooth fills.
     SdInpaint,
     /// RORem (SDXL tuned for object removal). Fills large holes with
     /// background instead of drawing something new; ~5.5 GB bundle.
     RoremInpaint,
-    /// Real-ESRGAN x4plus upscaler. General-purpose 4× super-resolution.
     RealEsrganUpscale,
-    /// 4xNomos8kSCHAT-L HAT-L upscaler (fp16). Photo-tuned; higher quality
-    /// than Real-ESRGAN, slower on CPU EP.
+    /// HAT-L, photo-tuned: better than Real-ESRGAN, slower on CPU.
     Nomos8kUpscale,
-    /// 4x NMKD Siax-CX (RRDB-23, fp32). Community-trained universal
-    /// upscaler — sharper than x4plus on clean / mildly-compressed photos.
+    /// Sharper than x4plus on clean / mildly-compressed photos.
     FourXNmkdSiaxCxUpscale,
-    /// 4x NMKD Superscale (RRDB-23, fp32). Community-trained restoration
-    /// upscaler — handles noise and JPEG artifacts on real photos.
+    /// Handles noise and JPEG artifacts on real photos.
     FourXNmkdSuperscaleUpscale,
     /// 4xNomos2 RealPLKSR. Fast, natural texture on skin and hair.
     Nomos2Upscale,
-    /// DDColor: colours a black-and-white photo.
     ColorizeDdcolor,
 }
 
@@ -658,16 +592,12 @@ impl SettingsModel {
         Self::ColorizeDdcolor,
     ];
 
-    /// This model's position in `ALL`.
     pub fn index(self) -> usize {
         // every variant is listed in ALL
         Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
     }
 
-    /// Parse a Debug-style name ("Silueta", "U2net", "BiRefNetLite", …) into
-    /// a variant. Used by the harness escape hatch (PRUNR_OPEN_MODEL env
-    /// var) to force the initial model without a full settings.json.
-    /// `None` on unknown / typo input — caller leaves settings.model alone.
+    /// Parse a Debug-style name ("BiRefNetLite"); `None` on unknown input.
     pub fn from_debug_name(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|m| format!("{m:?}") == s)
     }
@@ -678,8 +608,6 @@ impl SettingsModel {
         matches!(self, Self::Silueta | Self::U2net | Self::BiRefNetLite)
     }
 
-    /// True for any object-removal mode. Branches that drive the inpaint
-    /// pipeline (brush auto-enable, popover simplification) check this.
     pub fn is_inpaint(self) -> bool {
         matches!(self, Self::Inpaint | Self::BigInpaint | Self::MiganInpaint | Self::SdInpaint | Self::RoremInpaint)
     }
@@ -690,8 +618,6 @@ impl SettingsModel {
         matches!(self, Self::SdInpaint | Self::RoremInpaint)
     }
 
-    /// True for any super-resolution upscale mode. Dispatch routes through
-    /// `upscale_rgba`; these variants are not seg/inpaint capacity-priced.
     pub fn is_upscale(self) -> bool {
         matches!(
             self,
@@ -733,8 +659,7 @@ impl SettingsModel {
         self.role().edits_cutout()
     }
 
-    /// Convert to `ModelKind`, or `None` for variants outside the
-    /// seg memory-cap model (Inpaint and Upscale both return `None`).
+    /// `None` outside the seg memory-cap models (erasers, upscalers).
     pub fn to_model_kind(self) -> Option<ModelKind> {
         match self {
             Self::Silueta => Some(ModelKind::Silueta),
@@ -755,16 +680,11 @@ impl SettingsModel {
         }
     }
 
-    /// `ModelKind` for any registered model (seg, inpaint, upscale).
-    /// Returns `None` only for `Self::None`. Use this at recipe-diff
-    /// sites where the actually-dispatched model's kind matters; use
-    /// `to_model_kind` only when you specifically need the
-    /// seg-memory-cap-eligible subset.
+    /// Any registered model's kind; `None` only for `Self::None`.
     pub fn dispatch_model_kind(self) -> Option<ModelKind> {
         self.to_model_id().and_then(|id| ModelKind::try_from(id).ok())
     }
 
-    /// Registry id, or `None` for the no-model variant.
     pub const fn to_model_id(self) -> Option<prunr_models::ModelId> {
         match self {
             Self::Silueta => Some(prunr_models::ModelId::Silueta),
