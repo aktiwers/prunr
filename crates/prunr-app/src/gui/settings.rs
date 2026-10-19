@@ -661,23 +661,7 @@ impl SettingsModel {
 
     /// `None` outside the seg memory-cap models (erasers, upscalers).
     pub fn to_model_kind(self) -> Option<ModelKind> {
-        match self {
-            Self::Silueta => Some(ModelKind::Silueta),
-            Self::U2net => Some(ModelKind::U2net),
-            Self::BiRefNetLite => Some(ModelKind::BiRefNetLite),
-            Self::None
-            | Self::Inpaint
-            | Self::BigInpaint
-            | Self::MiganInpaint
-            | Self::SdInpaint
-            | Self::RoremInpaint
-            | Self::RealEsrganUpscale
-            | Self::Nomos8kUpscale
-            | Self::FourXNmkdSiaxCxUpscale
-            | Self::FourXNmkdSuperscaleUpscale
-            | Self::Nomos2Upscale
-            | Self::ColorizeDdcolor => None,
-        }
+        self.uses_segmentation().then(|| self.dispatch_model_kind()).flatten()
     }
 
     /// Any registered model's kind; `None` only for `Self::None`.
@@ -1244,6 +1228,19 @@ mod tests {
         for m in SettingsModel::ALL {
             assert_eq!(m.is_colorize(), m == SettingsModel::ColorizeDdcolor, "{m:?}");
             assert_eq!(m.role() == crate::gui::knob_catalog::ModelRole::Colorize, m.is_colorize(), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_cut_out_models_have_a_seg_model_kind() {
+        for m in SettingsModel::ALL {
+            let expected = match m {
+                SettingsModel::Silueta => Some(ModelKind::Silueta),
+                SettingsModel::U2net => Some(ModelKind::U2net),
+                SettingsModel::BiRefNetLite => Some(ModelKind::BiRefNetLite),
+                _ => None,
+            };
+            assert_eq!(m.to_model_kind(), expected, "{m:?}");
         }
     }
 
