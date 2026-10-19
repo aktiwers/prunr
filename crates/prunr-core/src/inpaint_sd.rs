@@ -2862,46 +2862,6 @@ mod tests {
     use super::*;
     use image::{Luma, Rgba};
 
-    /// LCM timestep schedule matches Diffusers' subsampling pattern: pick
-    /// every k-th index from the reversed `lcm_origin_timesteps`. Values
-    /// computed by running Diffusers' Python `LCMScheduler.set_timesteps(8)`
-    /// and copying the resulting tensor.
-    #[test]
-    fn lcm_timesteps_match_diffusers_reference_for_8_steps() {
-        let s = LcmScheduler::new_sd15(8);
-        let t = s.timesteps();
-        assert_eq!(t.len(), 8);
-        // Reversed lcm_origin = [999, 979, 959, 939, ..., 19].
-        // For 8 inference steps, indices = floor(linspace(0, 50, 8, endpoint=False))
-        //                               = [0, 6, 12, 18, 25, 31, 37, 43]
-        // → reversed[indices] = [999, 879, 759, 639, 499, 379, 259, 139]
-        assert_eq!(t, &[999, 879, 759, 639, 499, 379, 259, 139],
-            "LCM 8-step timesteps must match Diffusers reference");
-    }
-
-    /// 4-step is the canonical "fast preview" LCM count from the paper.
-    /// Pinning it alongside the 8-step reference catches drift in the
-    /// linspace-floor index math at the extremes.
-    #[test]
-    fn lcm_timesteps_match_diffusers_reference_for_4_steps() {
-        let s = LcmScheduler::new_sd15(4);
-        // floor(linspace(0, 50, 4, endpoint=False)) = [0, 12, 25, 37]
-        // → reversed[indices] = [999, 759, 499, 259]
-        assert_eq!(s.timesteps(), &[999, 759, 499, 259],
-            "LCM 4-step timesteps must match Diffusers reference");
-    }
-
-    /// LCM timesteps must descend (driving denoising from high noise
-    /// to low). A regression here
-    /// would silently invert the noise schedule.
-    #[test]
-    fn lcm_timesteps_descend_strictly() {
-        let s = LcmScheduler::new_sd15(8);
-        for w in s.timesteps().windows(2) {
-            assert!(w[0] > w[1], "timesteps must descend: {} → {}", w[0], w[1]);
-        }
-    }
-
 
     /// Final-step LCM reduces to `c_out * pred_x0 + c_skip * sample`
     /// — no noise injection, scaled by the consistency-function
@@ -3320,22 +3280,6 @@ mod tests {
         assert!(last < 50, "last timestep should be near 0, got {last}");
     }
 
-    /// Terminal sigma must be `sigma_min` not 0, otherwise the
-    /// multistep update produces ±∞ / NaN at the last step.
-    #[test]
-    fn dpmpp2m_terminal_step_produces_finite_output() {
-        let mut s = DpmPp2MScheduler::new_sd15(8);
-        let latent = vec![0.5_f32; 4];
-        let noise = vec![0.1_f32; 4];
-        // Prime prev_model_output, then verify the terminal step is finite.
-        // The lower_order_final guard ensures first-order runs at terminal;
-        // sigma_min (not 0) is belt-and-braces so both guards are in place.
-        let _ = s.step(&latent, &noise, 6);
-        let next = s.step(&latent, &noise, 7);
-        assert!(next.iter().all(|v| v.is_finite()),
-            "terminal step produced non-finite values: {next:?}");
-    }
-
     /// Terminal step must take the first-order path even when
     /// `prev_model_output` is populated (lower_order_final guard).
     /// Verified by comparing against a scheduler whose prev is None —
@@ -3358,6 +3302,8 @@ mod tests {
 
         assert_eq!(primed_terminal, fresh_terminal,
             "terminal step must be first-order regardless of prev_model_output");
+        // Terminal sigma is sigma_min, not 0, or the update is ±∞ / NaN.
+        assert!(primed_terminal.iter().all(|v| v.is_finite()), "{primed_terminal:?}");
     }
 
     /// First DPM++ step must use first-order math (no prev output)
@@ -3376,69 +3322,6 @@ mod tests {
         // After first step, latent should have moved.
         assert!(next.iter().any(|&v| (v - 0.5).abs() > 1e-4),
             "first step must produce a non-trivial update");
-    }
-
-    #[test]
-    fn clip_tokenize_empty_prompt_matches_clip_convention() {
-        // Diffusers' tokenizer("") produces [BOS, EOS, EOS, …] of length 77.
-        let toks = clip_tokenize("");
-        assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
-        assert_eq!(toks[(0, 0)], CLIP_BOS as i32);
-        for i in 1..CLIP_SEQ_LEN {
-            assert_eq!(toks[(0, i)], CLIP_EOS as i32, "expected EOS pad at index {i}");
-        }
-    }
-
-    #[test]
-    fn clip_tokenize_real_prompt_starts_with_bos_and_ends_with_eos_padding() {
-        let toks = clip_tokenize("a photo of a cat");
-        assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
-        assert_eq!(toks[(0, 0)], CLIP_BOS as i32);
-        // Last position should be padding EOS — typical short prompts have
-        // their content in the first ~10 positions, EOS at content-end + 1,
-        // and padding EOS through the rest of the 77-slot sequence.
-        assert_eq!(toks[(0, CLIP_SEQ_LEN - 1)], CLIP_EOS as i32);
-        // Prompt actually produced different tokens than empty (otherwise
-        // the tokenizer is broken).
-        let empty = clip_tokenize("");
-        assert_ne!(toks, empty, "real prompt must tokenize differently than empty");
-    }
-
-    #[test]
-    fn cfg_blend_at_scale_one_returns_cond() {
-        let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
-        let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
-        let out = cfg_blend(uncond.view(), cond.view(), 1.0);
-        for &v in out.iter() {
-            assert!((v - 5.0).abs() < 1e-6, "scale=1 should equal cond, got {v}");
-        }
-    }
-
-    #[test]
-    fn cfg_blend_extrapolates_above_scale_one() {
-        let uncond = Array4::<f32>::from_elem((1, 4, 2, 2), 1.0);
-        let cond = Array4::<f32>::from_elem((1, 4, 2, 2), 5.0);
-        // scale=7.5 → 1 + 7.5*(5-1) = 31
-        let out = cfg_blend(uncond.view(), cond.view(), 7.5);
-        for &v in out.iter() {
-            assert!((v - 31.0).abs() < 1e-4, "scale=7.5 expected 31, got {v}");
-        }
-    }
-
-    /// Pin the new headline win: cfg_blend accepts non-contiguous slice
-    /// views (axis-0 slices of a batched UNet output) without needing
-    /// `.to_owned()` per CFG step.
-    #[test]
-    fn cfg_blend_accepts_axis0_slices_directly() {
-        let pair = Array4::<f32>::from_shape_fn((2, 4, 2, 2), |(b, _, _, _)| {
-            if b == 0 { 1.0 } else { 5.0 }
-        });
-        let uncond = pair.slice(ndarray::s![0..1, .., .., ..]);
-        let cond = pair.slice(ndarray::s![1..2, .., .., ..]);
-        let out = cfg_blend(uncond, cond, 7.5);
-        for &v in out.iter() {
-            assert!((v - 31.0).abs() < 1e-4, "expected 31, got {v}");
-        }
     }
 
     #[test]
@@ -3461,21 +3344,6 @@ mod tests {
         let plane = (SD_TILE * SD_TILE) as usize;
         assert!(buf[plane].abs() < 0.01, "G got {}", buf[plane]);
         assert!((buf[plane * 2] - 1.0).abs() < 1e-3, "B got {}", buf[plane * 2]);
-    }
-
-    #[test]
-    fn mask_to_latent_downsamples_boundary_to_64() {
-        // 256×256 mask, half painted: lats should report ~half coverage.
-        let mut m = GrayImage::new(SD_TILE, SD_TILE);
-        for y in 0..SD_TILE {
-            for x in 0..(SD_TILE / 2) {
-                m.put_pixel(x, y, Luma([255]));
-            }
-        }
-        let lat = mask_to_latent(&m);
-        let buf = lat.as_slice().unwrap();
-        let coverage: f32 = buf.iter().sum::<f32>() / buf.len() as f32;
-        assert!((coverage - 0.5).abs() < 0.05, "expected ~0.5 coverage, got {coverage}");
     }
 
     #[test]
@@ -3527,12 +3395,6 @@ mod tests {
         assert_ne!(a, c, "different seed must give different noise");
     }
 
-    #[test]
-    fn mask_components_returns_empty_for_empty_mask() {
-        let m = GrayImage::new(64, 64);
-        assert!(mask_components(&m).is_empty());
-    }
-
     /// TAESD's graph is fixed at 512², so a run with it never plans the
     /// 768 tall crop (it failed and left the region as it was).
     #[test]
@@ -3567,62 +3429,6 @@ mod tests {
         let regions = mask_regions(&m);
         assert_eq!(regions.len(), 2, "{regions:?}");
         assert!(regions.iter().any(|r| r.x_min == 100 && r.x_max == 100 + 19 * 20 + 11));
-    }
-
-    #[test]
-    fn mask_components_separates_disjoint_regions() {
-        // Two clearly-disjoint blobs in opposite corners.
-        let mut m = GrayImage::new(64, 64);
-        m.put_pixel(5, 5, Luma([255]));
-        m.put_pixel(6, 5, Luma([255]));
-        m.put_pixel(5, 6, Luma([255]));
-        m.put_pixel(50, 55, Luma([255]));
-        m.put_pixel(51, 55, Luma([255]));
-        let comps = mask_components(&m);
-        assert_eq!(comps.len(), 2, "expected two components, got {comps:?}");
-        // Components are returned in scan order; first component is upper-left.
-        assert!(comps[0].x_max <= 10);
-        assert!(comps[1].x_min >= 40);
-    }
-
-    #[test]
-    fn mask_components_treats_4_connected_pixels_as_one() {
-        let mut m = GrayImage::new(16, 16);
-        // L-shape: connected via shared edges (4-connectivity).
-        m.put_pixel(2, 2, Luma([255]));
-        m.put_pixel(3, 2, Luma([255]));
-        m.put_pixel(3, 3, Luma([255]));
-        m.put_pixel(3, 4, Luma([255]));
-        let comps = mask_components(&m);
-        assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 2, y_min: 2, x_max: 3, y_max: 4 });
-    }
-
-    #[test]
-    fn mask_components_diagonal_pixels_are_separate_under_4_connectivity() {
-        let mut m = GrayImage::new(16, 16);
-        m.put_pixel(2, 2, Luma([255]));
-        m.put_pixel(3, 3, Luma([255])); // diagonal-only neighbour
-        let comps = mask_components(&m);
-        assert_eq!(comps.len(), 2, "diagonal-only adjacency should split");
-    }
-
-    #[test]
-    fn tile_count_single_when_under_sd_tile() {
-        assert_eq!(tile_count(SD_TILE), 1);
-        assert_eq!(tile_count(SD_TILE - 1), 1);
-        assert_eq!(tile_count(100), 1);
-    }
-
-    #[test]
-    fn tile_count_grows_with_span_at_step_granularity() {
-        // span = SD_TILE + 1 → needs 2 tiles (overlap)
-        assert_eq!(tile_count(SD_TILE + 1), 2);
-        // span = SD_TILE + TILE_STEP_PX → 2 tiles (last tile's right edge
-        // aligns with span end)
-        assert_eq!(tile_count(SD_TILE + TILE_STEP_PX), 2);
-        // span = SD_TILE + TILE_STEP_PX + 1 → 3 tiles
-        assert_eq!(tile_count(SD_TILE + TILE_STEP_PX + 1), 3);
     }
 
     #[test]
@@ -3664,29 +3470,6 @@ mod tests {
         assert_eq!(edge_alpha(TILE_OVERLAP_PX, 512, true, false), 1.0);
         // Both feathers: still 1 in the centre.
         assert_eq!(edge_alpha(SD_TILE / 2, SD_TILE, true, true), 1.0);
-    }
-
-    #[test]
-    fn mask_components_ignores_below_threshold_pixels() {
-        let mut m = GrayImage::new(16, 16);
-        m.put_pixel(5, 5, Luma([100])); // below 127 threshold
-        m.put_pixel(8, 8, Luma([200]));
-        let comps = mask_components(&m);
-        assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 8, y_min: 8, x_max: 8, y_max: 8 });
-    }
-
-    #[test]
-    fn mask_components_finds_tiny_stroke_in_large_image() {
-        // A single pixel far from origin must still be found and produce
-        // the correct absolute bbox after the inner BFS walks bbox-local
-        // coordinates. Pins the bbox-bounded BFS optimisation.
-        let mut m = GrayImage::new(2048, 2048);
-        m.put_pixel(1900, 1850, Luma([200]));
-        m.put_pixel(1901, 1850, Luma([200]));
-        let comps = mask_components(&m);
-        assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0], MaskBbox { x_min: 1900, y_min: 1850, x_max: 1901, y_max: 1850 });
     }
 
     #[test]
@@ -3732,53 +3515,6 @@ mod tests {
         assert_eq!(crop_side(512, SD_CROP_MAX), Some(512));
         assert_eq!(crop_side(513, SD_CROP_MAX), Some(768));
         assert_eq!(padded_dims(700, 300), (704, 512));
-    }
-
-    #[test]
-    fn compute_sd_crop_centres_on_bbox_in_large_image() {
-        let bbox = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1100, y_max: 1100 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
-        assert_eq!((w, h), (SD_TILE, SD_TILE));
-        // Centre of bbox is (1050, 1050); crop top-left should land at
-        // 1050 - 256 = 794.
-        assert_eq!(x, 1050 - SD_TILE / 2);
-        assert_eq!(y, 1050 - SD_TILE / 2);
-    }
-
-    #[test]
-    fn compute_sd_crop_clamps_to_right_edge() {
-        let bbox = MaskBbox { x_min: 3900, y_min: 100, x_max: 3990, y_max: 200 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
-        // Crop must fit inside image; right-edge crop starts at img_w - SD_TILE.
-        assert_eq!(x + w, 4096, "crop must end at right edge");
-        assert_eq!((w, h), (SD_TILE, SD_TILE));
-        // Centre falls in the painted region.
-        assert!(y < bbox.y_min);
-    }
-
-    #[test]
-    fn compute_sd_crop_clamps_to_top_left_corner() {
-        let bbox = MaskBbox { x_min: 5, y_min: 10, x_max: 50, y_max: 60 };
-        let (x, y, _, _) = compute_sd_crop(&bbox, 4096, 4096, SD_TILE).unwrap();
-        // Centre is (27, 35); centre - 256 underflows → saturates at 0.
-        assert_eq!(x, 0);
-        assert_eq!(y, 0);
-    }
-
-    #[test]
-    fn compute_sd_crop_shrinks_to_image_for_small_inputs() {
-        let bbox = MaskBbox { x_min: 10, y_min: 10, x_max: 100, y_max: 100 };
-        let (x, y, w, h) = compute_sd_crop(&bbox, 200, 300, SD_TILE).unwrap();
-        // Image smaller than SD_TILE on both axes → crop is the whole
-        // image.
-        assert_eq!((x, y, w, h), (0, 0, 200, 300));
-    }
-
-    #[test]
-    fn sample_initial_noise_has_correct_shape() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let n = sample_initial_noise(&mut rng, 64, 64);
-        assert_eq!(n.shape(), &[1, 4, SD_LATENT_SIDE as usize, SD_LATENT_SIDE as usize]);
     }
 
     /// A "now" far enough from the clock's origin to subtract minutes from.
@@ -3868,110 +3604,116 @@ mod tests {
         assert_eq!(*warm_entry(&cache, 3, || build(30)).unwrap(), 30, "the failure was not kept");
     }
 
+
+    /// LCM's timesteps are Diffusers' `LCMScheduler.set_timesteps(n)`,
+    /// copied from its Python: every k-th index of the reversed origin
+    /// schedule [999, 979, …, 19], k from floor(linspace(0, 50, n,
+    /// endpoint=False)). 4 steps is the paper's fast preview; the two
+    /// counts catch drift in the index math at the extremes.
     #[test]
-    fn sweep_idle_keeps_pinned_entries() {
-        let now = Instant::now() + Duration::from_secs(3600);
-        let mut cache: HashMap<prunr_models::ModelId, CacheEntry<u8>> = HashMap::new();
-        let mut pinned = CacheEntry::new(1, now - Duration::from_secs(600));
-        pinned.pinned = true;
-        cache.insert(prunr_models::ModelId::SdV15InpaintFp16, pinned);
-        cache.insert(prunr_models::ModelId::LaMaFp32, CacheEntry::new(2, now - Duration::from_secs(600)));
-        assert_eq!(sweep_idle(&mut cache, now, Duration::from_secs(300)), 1);
-        assert!(cache.contains_key(&prunr_models::ModelId::SdV15InpaintFp16));
-    }
-
-    #[test]
-    fn sweep_idle_drops_only_stale_entries() {
-        use prunr_models::ModelId;
-        let now = sweep_now();
-        let idle = Duration::from_secs(300);
-        let fresh = now - Duration::from_secs(60);
-        let stale = now - Duration::from_secs(600);
-
-        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry::new(Arc::new(()), stale));
-        cache.insert(ModelId::LaMaFp32, CacheEntry::new(Arc::new(()), fresh));
-
-        let dropped = sweep_idle(&mut cache, now, idle);
-        assert_eq!(dropped, 1, "exactly one stale entry should evict");
-        assert!(!cache.contains_key(&ModelId::SdV15InpaintFp16),
-            "stale entry must be removed");
-        assert!(cache.contains_key(&ModelId::LaMaFp32),
-            "fresh entry must remain");
-    }
-
-    #[test]
-    fn sweep_idle_releases_arc_so_payload_drops() {
-        use prunr_models::ModelId;
-        let now = sweep_now();
-        let idle = Duration::from_secs(300);
-        let payload = Arc::new(());
-        let weak = Arc::downgrade(&payload);
-
-        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: payload,
-            pinned: false,
-            last_used: now - Duration::from_secs(600),
-        });
-
-        sweep_idle(&mut cache, now, idle);
-        // The cache held the only strong ref; eviction must drop the
-        // payload and release upgrades. This pins the use-after-free
-        // contract — an in-flight caller would still own a clone.
-        assert!(weak.upgrade().is_none(),
-            "evicted payload must be the last strong ref so memory releases");
-    }
-
-    #[test]
-    fn sweep_idle_keeps_entry_at_exactly_the_idle_boundary_safe() {
-        use prunr_models::ModelId;
-        let now = sweep_now();
-        let idle = Duration::from_secs(300);
-        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
-        // Just-under-the-boundary entry must NOT evict.
-        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry {
-            value: Arc::new(()),
-            pinned: false,
-            last_used: now - Duration::from_secs(299),
-        });
-        let dropped = sweep_idle(&mut cache, now, idle);
-        assert_eq!(dropped, 0);
-        assert!(cache.contains_key(&ModelId::SdV15InpaintFp16));
-    }
-
-    /// Pin the contract that closed the OOM race: two concurrent
-    /// `get()` callers see the **same** `OnceLock` slot, so only one
-    /// build runs even though both miss the cache initially. Without
-    /// the fix we'd see `SD session bundle dropped` immediately after
-    /// `SD session bundle loaded` in the logs (both bundles built,
-    /// loser dropped) — and ~30 GB peak RSS.
-    #[test]
-    fn concurrent_get_or_init_runs_build_closure_only_once() {
-        use std::sync::OnceLock as Cell;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let slot: Arc<Cell<u32>> = Arc::new(Cell::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-
-        let handles: Vec<_> = (0..8).map(|_| {
-            let slot = Arc::clone(&slot);
-            let calls = Arc::clone(&calls);
-            std::thread::spawn(move || {
-                *slot.get_or_init(|| {
-                    calls.fetch_add(1, Ordering::Relaxed);
-                    std::thread::sleep(Duration::from_millis(50));
-                    42u32
-                })
-            })
-        }).collect();
-
-        for h in handles {
-            assert_eq!(h.join().unwrap(), 42);
+    fn lcm_timesteps_match_diffusers_reference() {
+        for (steps, want) in [(8, &[999, 879, 759, 639, 499, 379, 259, 139][..]), (4, &[999, 759, 499, 259][..])] {
+            assert_eq!(LcmScheduler::new_sd15(steps).timesteps(), want, "{steps} steps");
         }
-        assert_eq!(calls.load(Ordering::Relaxed), 1,
-            "OnceLock must run the build closure exactly once across concurrent callers");
     }
 
+    /// CFG is `uncond + scale · (cond − uncond)`, read straight from
+    /// axis-0 slices of one batched UNet output: scale 1 is cond itself.
+    #[test]
+    fn cfg_blend_accepts_axis0_slices_directly() {
+        let pair = Array4::<f32>::from_shape_fn((2, 4, 2, 2), |(b, _, _, _)| if b == 0 { 1.0 } else { 5.0 });
+        let uncond = pair.slice(ndarray::s![0..1, .., .., ..]);
+        let cond = pair.slice(ndarray::s![1..2, .., .., ..]);
+        for (scale, want) in [(1.0, 5.0), (7.5, 31.0)] {
+            let out = cfg_blend(uncond, cond, scale);
+            assert!(out.iter().all(|&v| (v - want).abs() < 1e-4), "scale {scale}: {out:?}");
+        }
+    }
+
+    /// Diffusers' tokenizer: BOS, the prompt, then EOS padding to 77; the
+    /// empty prompt is BOS then EOS all the way.
+    #[test]
+    fn clip_tokenize_matches_clip_convention() {
+        let empty = clip_tokenize("");
+        assert_eq!(empty.shape(), [1, CLIP_SEQ_LEN]);
+        assert_eq!(empty[(0, 0)], CLIP_BOS as i32);
+        assert!((1..CLIP_SEQ_LEN).all(|i| empty[(0, i)] == CLIP_EOS as i32), "EOS padding");
+        let toks = clip_tokenize("a photo of a cat");
+        assert_eq!(toks.shape(), [1, CLIP_SEQ_LEN]);
+        assert_eq!((toks[(0, 0)], toks[(0, CLIP_SEQ_LEN - 1)]), (CLIP_BOS as i32, CLIP_EOS as i32));
+        assert_ne!(toks, empty, "a prompt tokenizes differently from none");
+    }
+
+    /// Components are 4-connected runs of pixels above 127, each with its
+    /// absolute bounding box, in scan order.
+    #[test]
+    fn mask_components_finds_4_connected_regions() {
+        let comps = |(w, h): (u32, u32), on: &[(u32, u32, u8)]| {
+            let mut m = GrayImage::new(w, h);
+            for &(x, y, v) in on {
+                m.put_pixel(x, y, Luma([v]));
+            }
+            mask_components(&m)
+        };
+        let bbox = |x_min, y_min, x_max, y_max| MaskBbox { x_min, y_min, x_max, y_max };
+        assert!(comps((64, 64), &[]).is_empty(), "an empty mask");
+        let two = comps((64, 64), &[(5, 5, 255), (6, 5, 255), (5, 6, 255), (50, 55, 255), (51, 55, 255)]);
+        assert_eq!(two, [bbox(5, 5, 6, 6), bbox(50, 55, 51, 55)], "disjoint, in scan order");
+        assert_eq!(comps((16, 16), &[(2, 2, 255), (3, 2, 255), (3, 3, 255), (3, 4, 255)]), [bbox(2, 2, 3, 4)], "an L joined by shared edges");
+        assert_eq!(comps((16, 16), &[(2, 2, 255), (3, 3, 255)]).len(), 2, "diagonal neighbours stay apart");
+        assert_eq!(comps((16, 16), &[(5, 5, 100), (8, 8, 200)]), [bbox(8, 8, 8, 8)], "below the threshold is no mask");
+        // The search walks box-local coordinates; the box comes back absolute.
+        let far = comps((2048, 2048), &[(1900, 1850, 200), (1901, 1850, 200)]);
+        assert_eq!(far, [bbox(1900, 1850, 1901, 1850)], "a tiny stroke far from the origin");
+    }
+
+    #[test]
+    fn tile_count_grows_with_span_at_step_granularity() {
+        // Past one tile the last tile's right edge meets the span's end.
+        for (span, tiles) in [(100, 1), (SD_TILE - 1, 1), (SD_TILE, 1), (SD_TILE + 1, 2), (SD_TILE + TILE_STEP_PX, 2), (SD_TILE + TILE_STEP_PX + 1, 3)] {
+            assert_eq!(tile_count(span), tiles, "span {span}");
+        }
+    }
+
+    /// A crop is centred on its region and slides to stay inside the
+    /// photo; a photo smaller than a tile is the whole crop.
+    #[test]
+    fn compute_sd_crop_centres_on_the_region_inside_the_photo() {
+        let crop = |(x_min, y_min, x_max, y_max): (u32, u32, u32, u32), w: u32, h: u32| {
+            compute_sd_crop(&MaskBbox { x_min, y_min, x_max, y_max }, w, h, SD_TILE).expect("a crop")
+        };
+        let c = 1050 - SD_TILE / 2;
+        assert_eq!(crop((1000, 1000, 1100, 1100), 4096, 4096), (c, c, SD_TILE, SD_TILE), "centred on (1050, 1050)");
+        let (x, y, w, h) = crop((3900, 100, 3990, 200), 4096, 4096);
+        assert_eq!((x + w, w, h), (4096, SD_TILE, SD_TILE), "ends at the right edge");
+        assert!(y < 100);
+        assert_eq!(crop((5, 10, 50, 60), 4096, 4096).0, 0, "the centre less half a tile saturates at 0");
+        assert_eq!(crop((5, 10, 50, 60), 4096, 4096).1, 0);
+        assert_eq!(crop((10, 10, 100, 100), 200, 300), (0, 0, 200, 300), "a small photo is the crop");
+    }
+
+    /// The sweep drops entries idle past the limit, keeps pinned ones and
+    /// ones just under it, and lets go of the payload it held.
+    #[test]
+    fn sweep_idle_drops_only_stale_unpinned_entries() {
+        use prunr_models::ModelId;
+        let now = sweep_now();
+        let ago = |s| now - Duration::from_secs(s);
+        let payload = Arc::new(());
+        let freed = Arc::downgrade(&payload);
+        let mut cache: HashMap<ModelId, CacheEntry<Arc<()>>> = HashMap::new();
+        cache.insert(ModelId::SdV15InpaintFp16, CacheEntry::new(payload, ago(600)));
+        cache.insert(ModelId::LaMaFp32, CacheEntry::new(Arc::new(()), ago(299)));
+        let mut pinned = CacheEntry::new(Arc::new(()), ago(600));
+        pinned.pinned = true;
+        cache.insert(ModelId::Migan, pinned);
+        assert_eq!(sweep_idle(&mut cache, now, Duration::from_secs(300)), 1);
+        assert!(!cache.contains_key(&ModelId::SdV15InpaintFp16), "stale");
+        assert!(cache.contains_key(&ModelId::LaMaFp32), "just under the limit");
+        assert!(cache.contains_key(&ModelId::Migan), "pinned");
+        // The cache held the only strong ref; a caller mid-run would own a clone.
+        assert!(freed.upgrade().is_none(), "the evicted payload is freed");
+    }
 
     /// `image_to_minus1_plus1_masked` must use a binary cliff at byte
     /// 127, NOT a float-alpha blend. A blend toward mid-grey at
