@@ -173,6 +173,19 @@ fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, chain: O
     }
 }
 
+/// The segmentation engines, one per job.
+fn engine_pool(model: prunr_core::ModelKind, jobs: usize, on_cpu: bool) -> Result<Vec<Arc<OrtEngine>>, String> {
+    create_engine_pool(model, jobs, on_cpu).map_err(|e| format!("Engine pool failed: {e}"))
+}
+
+/// Tell the parent the worker could not start, let the writer send it, and exit.
+fn init_failed(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::JoinHandle<()>, error: String) -> ! {
+    let _ = evt_tx.send(SubprocessEvent::InitError { error });
+    drop(evt_tx);
+    let _ = writer.join();
+    std::process::exit(1);
+}
+
 /// The edge detector, built on first need.
 fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), String> {
     if edge_engine.is_none() {
@@ -297,12 +310,7 @@ pub fn run_worker() -> ! {
         model, jobs, mask, cpu_only, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
     else {
-        let _ = evt_tx.send(SubprocessEvent::InitError {
-            error: "Expected Init command".to_string(),
-        });
-        drop(evt_tx);
-        let _ = writer_handle.join();
-        std::process::exit(1);
+        init_failed(evt_tx, writer_handle, "Expected Init command".to_string());
     };
     tracing::info!(
         ?model, jobs, cpu_only, ?line_mode, inpaint_only,
@@ -329,37 +337,20 @@ pub fn run_worker() -> ! {
 
     let line_depth = (!inpaint_only && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
     let mut traced_scales = edge_scales.of(&edge);
-    let mut edge_engine: Option<Arc<EdgeEngine>> = if needs_edge {
-        match EdgeEngine::new() {
-            Ok(e) => Some(Arc::new(e)),
-            Err(e) => {
-                let _ = evt_tx.send(SubprocessEvent::InitError {
-                    error: format!("Edge engine failed: {e}"),
-                });
-                drop(evt_tx);
-                let _ = writer_handle.join();
-                std::process::exit(1);
-            }
+    let mut edge_engine: Option<Arc<EdgeEngine>> = None;
+    if needs_edge {
+        if let Err(error) = ensure_edge_engine(&mut edge_engine) {
+            init_failed(evt_tx, writer_handle, error);
         }
-    } else {
-        None
-    };
+    }
 
-    let mut engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
-        match create_engine_pool(model, jobs, on_cpu) {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = evt_tx.send(SubprocessEvent::InitError {
-                    error: format!("Engine pool failed: {e}"),
-                });
-                drop(evt_tx);
-                let _ = writer_handle.join();
-                std::process::exit(1);
-            }
+    let mut engines: Vec<Arc<OrtEngine>> = Vec::new();
+    if needs_segmentation {
+        match engine_pool(model, jobs, on_cpu) {
+            Ok(pool) => engines = pool,
+            Err(error) => init_failed(evt_tx, writer_handle, error),
         }
-    } else {
-        Vec::new()
-    };
+    }
 
     let active_provider = OrtEngine::detect_active_provider();
     tracing::info!(
@@ -427,7 +418,7 @@ pub fn run_worker() -> ! {
                     }
                     if line_mode != LineMode::EdgesOnly && engines.is_empty() {
                         let started = std::time::Instant::now();
-                        engines = create_engine_pool(model, jobs, on_cpu).map_err(|e| format!("Engine pool failed: {e}"))?;
+                        engines = engine_pool(model, jobs, on_cpu)?;
                         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: engine pool built on first use");
                     }
                     Ok(())
