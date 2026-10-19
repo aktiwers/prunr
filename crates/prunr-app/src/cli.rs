@@ -585,11 +585,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         return 1;
     }
 
-    // Ensure output directory exists for batch input. `create_dir_all`
-    // on an existing *file* path returns Ok on some Unix conditions but
-    // `is_dir()` catches it — `output_path_with_suffix` would then do
-    // `.join(name)` on a file path, producing an invalid path and a
-    // confusing per-image write error.
+    // `create_dir_all` can return Ok on an existing *file*; `is_dir()` catches it.
     if let Some(ref out) = args.output {
         if args.inputs.len() > 1 {
             if let Err(e) = std::fs::create_dir_all(out) {
@@ -876,9 +872,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     0
 }
 
-/// Variant of `output_path` that lets callers override the `.prunr.png`
-/// suffix. Eraser writes `_erased.png`; the BG-removal path keeps its
-/// existing default.
+/// `output_path` with a caller-chosen suffix in place of `.prunr.png`.
 fn output_path_with_suffix(
     input: &std::path::Path,
     output: &Option<PathBuf>,
@@ -896,8 +890,6 @@ fn output_path_with_suffix(
         None => input.with_file_name(name),
     }
 }
-
-// ── Output path helpers ──────────────────────────────────────────────────────
 
 /// Compute output path for an input image.
 /// Batch mode or -o is a directory: write {stem}.prunr.png into that directory.
@@ -924,8 +916,6 @@ fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
     }
 }
 
-// ── Image loading with large-image handling ──────────────────────────────────
-
 fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, CoreError> {
     let img = load_image_from_path(path)?;
     if !quiet {
@@ -936,8 +926,6 @@ fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, Core
     }
     encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
 }
-
-// ── Batch execution path ─────────────────────────────────────────────────────
 
 fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     // Validate and decode --bg-image before setting up progress bars.
@@ -954,14 +942,9 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         None => None,
     };
 
-    // 4 Hz redraw cap (default is 20 Hz). With 1 overall + N spinners
-    // every redraw recomputes every bar's template; on a 6-image batch
-    // the per-tick fan-out cost the perf trace caught was ~13% of
-    // prunr-binary self-time. 4 Hz feels indistinguishable for image
-    // processing cadence and is the standard non-game-CLI rate.
-    // Spinners only on a terminal: elsewhere indicatif draws nothing, and
-    // a result's message (an error above all) would never show. Without
-    // them each result prints a line instead.
+    // 4 Hz redraw cap: at the default 20 Hz, redrawing every bar cost ~13% of
+    // self-time on a 6-image batch. Spinners only on a terminal: elsewhere
+    // indicatif draws nothing, so each result prints a line instead.
     let mp = if !args.quiet && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
         Some(MultiProgress::with_draw_target(
             indicatif::ProgressDrawTarget::stderr_with_hz(4),
@@ -970,7 +953,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         None
     };
 
-    // Overall progress bar: "3/10 images"
     let overall = mp.as_ref().map(|m| {
         let pb = m.add(ProgressBar::new(args.inputs.len() as u64));
         pb.set_style(
@@ -982,7 +964,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         pb
     });
 
-    // Per-image spinners (one per input, added to MultiProgress)
     let spinners: Vec<Option<ProgressBar>> = args.inputs.iter().map(|input| {
         mp.as_ref().map(|m| {
             let pb = m.add(ProgressBar::new_spinner());
@@ -992,12 +973,8 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));
-            // 250 ms tick: the worker emits Progress at fixed
-            // pipeline checkpoints, with multi-second silence across
-            // `session.run()`. Without a tick the spinner glyph would
-            // freeze during the most-uncertain wait. The outer
-            // `MultiProgress` 4 Hz cap throttles total redraws, so
-            // per-spinner cost is bounded regardless of N.
+            // Keeps the spinner moving through the multi-second silence of
+            // `session.run()`; the 4 Hz cap above bounds total redraws.
             pb.enable_steady_tick(std::time::Duration::from_millis(250));
             pb
         })
@@ -1015,7 +992,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
             Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
                 && prunr_core::exceeds_large_image_limit(w, h) =>
             {
-                // Oversized — downscale to temp file, pass temp path to subprocess
                 match downscale_to_png(input, args.quiet) {
                     Ok(bytes) => {
                         let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
@@ -1036,7 +1012,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                 }
             }
             Some(_) => {
-                // Normal size — pass original path directly (zero RAM cost)
                 valid_indices.push(idx);
                 valid_paths.push(input.clone());
             }
@@ -1056,9 +1031,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     let mask = args.mask_settings();
 
     let line_mode = args.line_mode();
-    // Distinguish "flag absent" from "flag set to garbage" (e.g. a
-    // typo'd `--line-color "ff00aa "` with a trailing space) so
-    // automation scripts can detect the failure.
+    // "Absent" and "malformed" differ so scripts can detect a typo'd colour.
     let Ok(solid_line_color) = flag_color("--line-color", args.line_color.as_deref(), "ff00aa") else { return 1 };
     let Ok(bg_color) = flag_color("--bg-color", args.bg_color.as_deref(), "ffffff") else { return 1 };
     // The app's rule: an effect wins over an image, an image over a colour.
@@ -1088,7 +1061,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         &spinners_arc, &inputs_arc, quiet,
     );
 
-    // Compute output paths and write results
     let mut success_count = 0usize;
     let mut fail_count = 0usize;
     fail_count += load_fail_count;
@@ -1103,7 +1075,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 
         match result {
             Ok(pr) => {
-                // Overwrite check
                 if let Err(msg) = check_overwrite(&out_path, args.force) {
                     if let Some(pb) = spinner_opt {
                         pb.finish_with_message(format!("X {} — {msg}", input.display()));
@@ -1172,10 +1143,8 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 
 /// Run batch processing via subprocess with auto-retry on OOM.
 /// Accepts file paths — bytes are read lazily by the subprocess.
-// Single-call CLI dispatch — recipe (model + mask + line_mode + edge + bg*)
-// + runtime knobs (jobs, cpu_only) + UI surface (spinners, paths, quiet)
-// arrive together. A struct split here trades each arg for a field
-// behind a builder no other site reuses.
+// One call site: the recipe, runtime knobs and UI surface arrive together,
+// and a struct would be a builder no other site reuses.
 #[allow(clippy::too_many_arguments)]
 fn run_batch_subprocess(
     valid_paths: &[std::path::PathBuf],
@@ -1209,14 +1178,12 @@ fn run_batch_subprocess(
     loop {
         if pending.is_empty() { break; }
 
-        // Spawn subprocess — cap engines at pending item count
         let effective_jobs = max_jobs.min(pending.len());
         let (mut sub, _provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, cpu_only, lines,
         ) {
             Ok(s) => s,
             Err(e) => {
-                // Can't spawn — fail all remaining
                 for &idx in &pending {
                     results[idx] = Some(Err(CoreError::Model(e.clone())));
                 }
@@ -1226,7 +1193,6 @@ fn run_batch_subprocess(
 
         let mut in_flight: Vec<usize> = Vec::new();
 
-        // Send initial burst
         let burst = max_jobs.min(pending.len());
         for _ in 0..burst {
             if let Some(idx) = pending.pop_front() {
@@ -1239,7 +1205,6 @@ fn run_batch_subprocess(
             }
         }
 
-        // Event loop
         let mut crashed = false;
         loop {
             if !sub.is_alive() && !in_flight.is_empty() {
@@ -1247,10 +1212,7 @@ fn run_batch_subprocess(
                 break;
             }
 
-            // Block up to 50 ms for the next event. Wakes immediately on
-            // arrival — admission follows ImageDone without a sleep-tail
-            // delay — and parks the thread instead of fabricating a poll
-            // every 50 ms.
+            // Wakes on arrival, so admission follows ImageDone without a poll delay.
             let events = sub.poll_events_blocking(std::time::Duration::from_millis(50));
             if events.is_empty() && in_flight.is_empty() && pending.is_empty() {
                 break;
@@ -1286,7 +1248,6 @@ fn run_batch_subprocess(
                             results[ridx] = Some(result);
                         }
 
-                        // Admit next
                         if !sub.should_pause_admission() {
                             if let Some(next) = pending.pop_front() {
                                 let next_id = valid_indices[next] as u64;
@@ -1315,20 +1276,16 @@ fn run_batch_subprocess(
             }
 
             if in_flight.is_empty() && pending.is_empty() { break; }
-            // No sleep here — `poll_events_blocking` above already
-            // waited up to 50 ms (or returned immediately when an event
-            // arrived). Re-sleeping would just stack idle delay.
+            // No sleep here: `poll_events_blocking` already waited.
         }
 
         if crashed {
-            // Re-queue in-flight items
             for idx in in_flight.into_iter().rev() {
                 pending.push_front(idx);
             }
             let old_jobs = max_jobs;
             max_jobs = (max_jobs / 2).max(1);
             if old_jobs == 1 {
-                // Give up on remaining
                 for &idx in &pending {
                     results[idx] = Some(Err(CoreError::Model(
                         "Insufficient memory \u{2014} try a smaller model".into()
@@ -1350,11 +1307,8 @@ fn run_batch_subprocess(
         break;
     }
 
-    // Sweep CLI-owned downscaled temps now the run_batch loop has fully
-    // exited. The crash-recovery path deliberately leaves `cli_ds_*`
-    // alone so retries can re-feed them; this final pass mops up any
-    // that the worker didn't read-and-delete (e.g. on the give-up
-    // branch above).
+    // Crash recovery leaves `cli_ds_*` temps for retries to re-feed; sweep
+    // whatever the worker didn't read-and-delete.
     prunr_app::subprocess::protocol::cleanup_cli_persistent_temps();
 
     // Convert Option<Result> to Result (None should not happen, but handle gracefully)

@@ -21,11 +21,9 @@ pub fn is_cancel_error(error: &str) -> bool {
     error == CANCELLED_ERR_MSG || error == prunr_core::CoreError::Cancelled.to_string()
 }
 
-/// `InpaintBridgeResult::Error.error` value the inpaint bridge emits
-/// when its watchdog kills the subprocess to prevent a system-wide
-/// memory-pressure stall. Routed to a distinct user-facing toast
-/// ("Erase aborted — system memory low") so the user knows the abort
-/// was self-defence, not a stroke-quality failure.
+/// `InpaintBridgeResult::Error.error` value when the bridge's watchdog kills the
+/// subprocess under system memory pressure; it gets its own toast so the user
+/// knows the abort was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
 
 /// The longer side of the preview a run shows while it works: about a
@@ -71,12 +69,9 @@ impl InferredScales {
 /// Parent → Child commands (sent over child's stdin).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum SubprocessCommand {
-    /// Initialize the worker: load model, create engine pool.
-    /// When `inpaint_only` is true the worker SKIPS engine pool creation
-    /// and only handles `Inpaint` commands — the seg/edge fields
-    /// (`model`, `mask`, `line_mode`, `edge`) are ignored. Used by the
-    /// dedicated SD-inpaint subprocess so it doesn't waste GB on a seg
-    /// engine that never runs.
+    /// Initialize the worker: load model, create engine pool. With
+    /// `inpaint_only` no pool is built and the seg/edge fields are ignored, so
+    /// the SD-inpaint worker doesn't waste GB on a seg engine.
     Init {
         model: ModelKind,
         jobs: usize,
@@ -100,7 +95,6 @@ pub enum SubprocessCommand {
     /// the raw image bytes (avoids piping large payloads through stdin).
     ProcessImage {
         item_id: u64,
-        /// Path to temp file containing the source image bytes.
         image_path: std::path::PathBuf,
         /// For a run that starts from an earlier result: path to temp file with its RGBA + dimensions.
         chain_input: Option<ChainInput>,
@@ -114,9 +108,7 @@ pub enum SubprocessCommand {
         tensor_height: u32,
         tensor_width: u32,
         model: ModelKind,
-        /// Path to temp file with original image bytes.
         original_image_path: std::path::PathBuf,
-        /// Updated mask settings for re-postprocessing.
         mask: MaskSettings,
     },
     /// AddEdgeInference tier: seg tensor is cached, run only TEED on the
@@ -124,13 +116,10 @@ pub enum SubprocessCommand {
     /// enabling the outline doesn't re-run seg inference.
     AddEdgeInference {
         item_id: u64,
-        /// Path to temp file with original image bytes.
         image_path: std::path::PathBuf,
-        /// Path to temp file with the cached raw f32 seg tensor. The worker
-        /// does NOT delete this file — it hands the path back as
-        /// `tensor_cache_path` on `ImageDone`, and the parent's reader takes
-        /// ownership (read-and-delete). This preserves the cache without an
-        /// extra copy round-trip.
+        /// Path to temp file with the cached raw f32 seg tensor. It
+        /// is NOT deleted by the worker: it comes back as `tensor_cache_path` on
+        /// `ImageDone` for the parent to read-and-delete, saving a copy.
         seg_tensor_path: std::path::PathBuf,
         seg_tensor_height: u32,
         seg_tensor_width: u32,
@@ -139,16 +128,11 @@ pub enum SubprocessCommand {
         /// Per-item mask settings (may differ from Init's mask).
         mask: MaskSettings,
     },
-    /// Inpaint a region of an image. Worker dispatches to the inpaint
-    /// model named by `model_id` (LaMa / Big-LaMa / MI-GAN / SD 1.5 /
-    /// SD 1.5 LCM), runs the full post-process pipeline (color match +
-    /// seam-guided blend + sharpen) and returns the finished RGBA.
-    /// For SD models, `sd_req` carries prompt + steps + guidance;
-    /// `None` for non-SD models. Independent of the seg/edge engine
-    /// pool — each inpaint model runs its own session inside the worker.
+    /// Inpaint a region with `model_id` and the full post-process (color
+    /// match, seam-guided blend, sharpen), returning the finished RGBA. Runs
+    /// its own session, independent of the seg/edge engine pool.
     Inpaint {
         item_id: u64,
-        /// Which inpaint model to run.
         model_id: ModelId,
         /// The photo as `ipc::write_image` writes it.
         image_path: std::path::PathBuf,
@@ -184,7 +168,6 @@ pub enum SubprocessCommand {
         #[serde(default)]
         on_screen: Option<u64>,
     },
-    /// Shut down gracefully.
     Shutdown,
 }
 
@@ -313,11 +296,8 @@ pub enum SubprocessEvent {
 }
 
 /// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
-/// The OnceLock initializer creates the dir, sweeps any stale files left by
-/// a previous prunr process with the same PID, AND sweeps dead-PID sibling
-/// dirs from past parent crashes — so writers (CLI downscale, inpaint
-/// bridge, manager) never race a later cleanup, and `/dev/shm` doesn't
-/// fill over weeks of OOM-killed parents.
+/// Its one-time init sweeps this PID's stale files and dead-PID sibling dirs,
+/// so writers never race a later cleanup and /dev/shm doesn't fill up.
 pub fn ipc_temp_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -331,11 +311,8 @@ pub fn ipc_temp_dir() -> &'static std::path::Path {
     }).as_path()
 }
 
-/// Body of `ipc_temp_dir()`'s OnceLock init, exposed for unit tests
-/// (the global is process-wide and order-dependent across tests). Tests
-/// pass synthetic PIDs and rely on this NOT sweeping sibling dirs — the
-/// dead-PID sweep lives in `ipc_temp_dir`'s OnceLock body so tests can
-/// drive `init_temp_dir_for_pid` in isolation.
+/// `ipc_temp_dir()`'s init without the dead-PID sweep, so tests can drive
+/// it with synthetic PIDs in isolation.
 fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
     let dir = resolve_temp_dir_path(pid);
     let _ = std::fs::create_dir_all(&dir);
@@ -376,9 +353,8 @@ pub enum IpcKind {
     /// AddEdgeInference path (skip re-running the seg model).
     Seg,
     /// Parent → seg worker: cached segmentation tensor for the
-    /// RePostProcess (Tier 2) path. Distinct from `Seg` despite a
-    /// similar payload — different filename keeps the two cache
-    /// flavours separable in temp dir scans + cleanup.
+    /// RePostProcess path. Distinct from `Seg` so the two cache flavours
+    /// stay separable in temp-dir scans and cleanup.
     Tensor,
     /// Parent → seg worker: original encoded image for a re-postprocess.
     Orig,
@@ -452,12 +428,8 @@ impl IpcKind {
 /// during a dispatch. Crash-recovery cleanup wipes these because the
 /// worker may have died mid-write or with partial input.
 ///
-/// `CliDs` is intentionally excluded: those `cli_ds_*` files are
-/// pre-staged by the CLI parent before the run_batch loop starts and
-/// re-sent on every retry from `valid_paths[idx]`. Including the
-/// prefix here once silently wiped the retry inputs the CLI was about
-/// to feed the re-spawned worker, surfacing as "Insufficient memory"
-/// errors whose real cause was self-inflicted.
+/// `CliDs` is excluded on purpose: the CLI re-sends those on every retry,
+/// and wiping them once surfaced as bogus "Insufficient memory" errors.
 pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::Chain.prefix(),
     IpcKind::Edge.prefix(),
@@ -469,12 +441,8 @@ pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::SpareEdge.prefix(),
 ];
 
-/// File-name prefixes the CLI parent owns *across* worker crashes.
-/// `cli_ds_*` are the downscaled temps the CLI writes once before the
-/// run_batch loop and re-sends on every retry from `valid_paths[idx]`.
-/// Crash-recovery cleanup (`cleanup_seg_pipeline_temps`) deliberately
-/// skips these; the CLI sweeps them itself once the batch loop has
-/// fully exited.
+/// File-name prefixes the CLI parent owns *across* worker crashes: its
+/// downscaled temps, re-sent on every retry, swept once the batch ends.
 pub const CLI_PERSISTENT_PREFIXES: &[&str] = &[
     IpcKind::CliDs.prefix(),
 ];
@@ -487,9 +455,7 @@ pub fn cleanup_ipc_temp_for_prefix(prefixes: &[&str]) {
 }
 
 /// Crash-recovery cleanup for the seg / CLI subprocess. Leaves a sibling
-/// inpaint subprocess's `inpaint-*` files alone, and intentionally
-/// preserves `cli_ds_*` (the CLI's pre-staged retry inputs — see
-/// `CLI_PERSISTENT_PREFIXES`).
+/// inpaint subprocess's `inpaint-*` files and the CLI's retry inputs alone.
 pub fn cleanup_seg_pipeline_temps() {
     cleanup_ipc_temp_for_prefix(SEG_PIPELINE_PREFIXES);
 }

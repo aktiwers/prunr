@@ -28,11 +28,8 @@ const SEG_ENGINE_MISSING: &str = "segmentation engine not initialized";
 /// Small images run in parallel; large images throttle automatically.
 /// Total capacity is set based on available RAM at worker startup.
 ///
-/// Fairness: the wait queue is FIFO. New acquirers may proceed concurrently
-/// with existing holders only if their request still leaves enough units
-/// for the head-of-queue waiter — so a giant image isn't repeatedly skipped
-/// past by a stream of arriving small ones (`notify_all` previously woke
-/// every waiter and the smallest grabbed the lock first).
+/// Fairness: the wait queue is FIFO, and a new acquirer proceeds only if it
+/// still leaves room for the head waiter, so small images can't starve a giant one.
 struct WeightedSemaphore {
     state: Mutex<SemState>,
     available: std::sync::Condvar,
@@ -208,8 +205,7 @@ fn write_edge_cache(
 
 /// Stream an `EdgeInferenceResult`'s non-empty planes to a path as one LE
 /// byte sequence in `EdgeScale` order — the layout `EdgeCacheFile`
-/// names — without the ~16 MB intermediate `Vec<u8>` that
-/// `std::fs::write(path, pack_edge_tensors(res))` would have built.
+/// names — without first building the ~16 MB packed `Vec<u8>`.
 fn write_edge_tensors(
     path: &std::path::Path,
     res: &prunr_core::EdgeInferenceResult,
@@ -272,7 +268,6 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
     }
 }
 
-/// Entry point for `prunr --worker`.
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -280,14 +275,8 @@ pub fn run_worker() -> ! {
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
 
-    // Writer thread: evt_rx → stdout (bincode frames). Flush after
-    // every event — the parent blocks on `recv` waiting for the next
-    // frame, and a coalesced BufWriter would deadlock low-rate event
-    // flows (most importantly the post-Init `Ready` which is the
-    // only frame between the worker reaching the command loop and the
-    // first user dispatch). Per-event flush is one extra `write`
-    // syscall per frame; events are sparse (a few per image plus
-    // occasional Progress), so the cost is unmeasurable.
+    // Writer thread: flush after every event. The parent blocks on each frame,
+    // and a buffered writer would hold back the post-Init `Ready` indefinitely.
     let writer_handle = std::thread::Builder::new()
         .name("worker-writer".into())
         .spawn(move || {
@@ -304,7 +293,6 @@ pub fn run_worker() -> ! {
         })
         .expect("failed to spawn writer thread");
 
-    // Read Init command
     let Ok(Some(SubprocessCommand::Init {
         model, jobs, mask, cpu_only, line_mode, edge, ipc_dir, inpaint_only, line_fade_pct, edge_scales,
     })) = read_message::<_, SubprocessCommand>(&mut reader)
@@ -321,10 +309,8 @@ pub fn run_worker() -> ! {
         "worker: Init received, beginning init sequence",
     );
 
-    // Detect backend. `detect_active_provider` probes
-    // `OpenVINO::is_available` on Linux which has been
-    // observed to hang on some iGPU setups — bracket with tracing so a
-    // future hang is diagnosable from the worker log.
+    // `detect_active_provider` probes OpenVINO, which has hung on some iGPU
+    // setups; the timing log makes such a hang diagnosable.
     let probe_started = std::time::Instant::now();
     tracing::info!("worker: probing detect_active_provider…");
     let has_gpu = !OrtEngine::detect_active_provider().eq_ignore_ascii_case("CPU");
@@ -335,11 +321,8 @@ pub fn run_worker() -> ! {
     );
     let on_cpu = cpu_only || !has_gpu;
 
-    // Inpaint-only subprocess: skip seg/edge engine creation entirely.
-    // Inpaint sessions are built lazily by `process_inpaint_with` on
-    // first dispatch, so the worker can enter the command loop now.
-    // The run settings a `Configure` command replaces; the engines a
-    // later mode needs are built at its first dispatch.
+    // The run settings a `Configure` replaces. Inpaint sessions and a later
+    // mode's engines build lazily at first dispatch.
     let (mut mask, mut line_mode, mut edge) = (mask, line_mode, edge);
     let needs_edge = !inpaint_only && line_mode != LineMode::Off;
     let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
@@ -362,7 +345,6 @@ pub fn run_worker() -> ! {
         None
     };
 
-    // Create segmentation engine pool
     let mut engines: Vec<Arc<OrtEngine>> = if needs_segmentation {
         match create_engine_pool(model, jobs, on_cpu) {
             Ok(e) => e,
@@ -395,9 +377,7 @@ pub fn run_worker() -> ! {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
-        // Fallback to a default (unsized) rayon pool if the sized builder
-        // somehow fails. Default-pool construction failing means rayon itself
-        // can't function; no useful recovery possible.
+        // A default pool failing to build means rayon itself can't run.
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
     // One per dispatch, seg and inpaint alike: a `CancelItem` stops a
@@ -418,7 +398,6 @@ pub fn run_worker() -> ! {
     // but throttles large images (40MP = 40 units → only ~1 at a time).
     let semaphore = Arc::new(WeightedSemaphore::new(64));
 
-    // Main command loop
     loop {
         let cmd = match read_message::<_, SubprocessCommand>(&mut reader) {
             Ok(Some(cmd)) => cmd,
@@ -480,10 +459,8 @@ pub fn run_worker() -> ! {
                 let cancel = cancels.register(item_id);
 
                 pool.spawn(move || {
-                    // Hoist chain_path so every early-return path can clean up
-                    // the parent-written temp files (img + optional chain) via
-                    // `cleanup_ipc_temps`. Forgetting the chain leaks one
-                    // ~50 MB file in `/dev/shm` per cancelled / failed dispatch.
+                    // Hoisted so every early return also cleans the chain input; missing it
+                    // leaks ~50 MB in /dev/shm per cancelled or failed dispatch.
                     let chain_path = chain_input.as_ref().map(|ci| ci.path.clone());
                     let chain_img: Option<image::DynamicImage> = chain_input.and_then(|ci| {
                         let data = std::fs::read(&ci.path).ok()?;
@@ -503,7 +480,6 @@ pub fn run_worker() -> ! {
                         return;
                     }
 
-                    // Read image bytes from temp file
                     let img_bytes = match std::fs::read(&image_path) {
                         Ok(b) => b,
                         Err(e) => {
@@ -512,9 +488,7 @@ pub fn run_worker() -> ! {
                         }
                     };
 
-                    // Weighted semaphore: acquire pixel units proportional to image size.
-                    // Small images run in parallel; large images throttle automatically.
-                    // Guard releases on drop (panic-safe).
+                    // Released on drop, panics included.
                     let weight = pixel_weight(&img_bytes);
                     let sem_guard = sem.acquire(weight);
                     let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(cancel.flag());
@@ -616,8 +590,7 @@ pub fn run_worker() -> ! {
                             }
                         }
                         LineMode::Off => {
-                            // Split pipeline: infer_only → tensor_to_mask → apply_mask
-                            // This captures the raw tensor for future Tier 2 mask reruns.
+                            // Split pipeline so the raw tensor is kept for mask reruns.
                             let Some(eng) = engine.as_ref() else {
                                 fail(SEG_ENGINE_MISSING.into());
                                 return;
@@ -635,7 +608,6 @@ pub fn run_worker() -> ! {
                                 }
                             };
 
-                            // Check large image limit
                             if let Some(err) = prunr_core::check_large_image(original) {
                                 Err(err)
                             } else {
@@ -669,7 +641,6 @@ pub fn run_worker() -> ! {
                                         "worker postprocess result alpha stats",
                                     );
 
-                                    // Stash tensor for cache output
                                     tensor_for_cache = Some((
                                         ir.tensor_data,
                                         th as u32,
@@ -691,7 +662,6 @@ pub fn run_worker() -> ! {
                     let mut spare_token = None;
                     match result {
                         Ok(pr) => {
-                            // Write tensor cache to temp file if available
                             let (tcp, tch, tcw) = if let Some((ref tdata, th, tw)) = tensor_for_cache {
                                 let tp = IpcKind::Tensor.path_for(&ipc, item_id);
                                 let bytes = prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata);
@@ -711,16 +681,12 @@ pub fn run_worker() -> ! {
                                 .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
                             let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
-                            // Write result RGBA to temp file
                             let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
                             let active_provider = pr.active_provider.clone();
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
                             let written = write_result(&result_path, &pr.rgba_image);
-                            // Free the result RGBA (~50 MB at 4 K) before
-                            // posting the event — under N-job parallelism
-                            // this drops N×50 MB of redundant retention
-                            // during the brief window before the next
-                            // dispatch overwrites `pr`.
+                            // Free the ~50 MB result before posting the event; under N jobs it would
+                            // otherwise hold N×50 MB until the next dispatch.
                             drop(pr);
                             match written {
                                 Ok(()) => {
@@ -788,7 +754,6 @@ pub fn run_worker() -> ! {
                     let _sem_guard = sem.acquire(10);
                     let progress = ipc_progress(item_id, evt_tx.clone());
 
-                    // Read tensor from temp file
                     let tensor_result = (|| -> Result<image::RgbaImage, String> {
                         let raw_bytes = std::fs::read(&tensor_path)
                             .map_err(|e| format!("Failed to read tensor: {e}"))?;
@@ -957,14 +922,8 @@ pub fn run_worker() -> ! {
             SubprocessCommand::CancelItem { item_id } => cancels.cancel(item_id),
 
             SubprocessCommand::Inpaint { item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen } => {
-                // Inpaint runs independent of the seg/edge engine pool —
-                // a fresh thread per dispatch keeps inference from
-                // blocking batched seg work. Bump `in_flight` so a
-                // concurrent `Shutdown` waits for the SD UNet loop to
-                // actually finish rather than declaring drain done while
-                // the spawned thread is still alive and queueing events.
-                // Decrement is in `Cleanup::drop` so panics still pair
-                // correctly.
+                // Own thread, so inpaint doesn't block batched seg work. `in_flight` makes a
+                // concurrent `Shutdown` wait for it; `Cleanup::drop` decrements, panics included.
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 let evt_tx = evt_tx.clone();
                 let inpaint_cancel = cancels.register(item_id);
@@ -977,19 +936,12 @@ pub fn run_worker() -> ! {
                 // Clones reserved for the spawn-failure unwind path
                 // — the closure below moves the originals.
                 let evt_tx_on_spawn_err = evt_tx.clone();
-                // Pre-clone the parent-written PNG paths so the spawn-
-                // failure path can delete them. Without this, a thread-
-                // exhaustion error left ~20 MB of `inpaint-img-*` /
-                // `inpaint-mask-*` per failed dispatch in /dev/shm
-                // until the parent restarted (the dead-PID sweep on
-                // next launch was the only collector).
+                // Kept for the spawn-failure path, or each failed dispatch leaves ~20 MB of
+                // input PNGs in /dev/shm.
                 let image_path_on_spawn_err = image_path.clone();
                 let mask_path_on_spawn_err = mask_path.clone();
-                // Use the parent-supplied ipc_dir so the result PNG lands in
-                // the same /dev/shm/prunr-ipc-<parent_pid>/ that the parent
-                // reads from. Calling ipc_temp_dir() here would resolve via
-                // the CHILD's pid, leaking an orphan dir per spawn (no
-                // cleanup ever sweeps it because the child exits).
+                // The parent's ipc_dir: `ipc_temp_dir()` here would resolve via the child's
+                // pid and leak an orphan dir per spawn.
                 let ipc_dir_for_spawn = ipc_dir.clone();
                 let spawn_result = std::thread::Builder::new()
                     .name("prunr-inpaint".into())
@@ -1040,17 +992,12 @@ pub fn run_worker() -> ! {
                         }
                     }
                 });
-                // Builder::spawn returns Result; std::thread::spawn would
-                // panic on resource exhaustion. On failure we've already
-                // bumped `in_flight` and inserted the cancel flag, so
-                // unwind both before erroring out — otherwise the worker
-                // never completes its drain.
+                // `in_flight` and the cancel are already registered; unwind both or the
+                // worker never completes its drain.
                 if let Err(e) = spawn_result {
                     // The dropped closure took the cancel with it.
                     in_flight.fetch_sub(1, Ordering::AcqRel);
-                    // The closure never ran, so its input PNGs are still
-                    // there — clean them before the InpaintError lands so
-                    // /dev/shm doesn't accumulate.
+                    // The closure never ran, so its input PNGs are still there.
                     let _ = std::fs::remove_file(&image_path_on_spawn_err);
                     let _ = std::fs::remove_file(&mask_path_on_spawn_err);
                     let _ = evt_tx_on_spawn_err.send(SubprocessEvent::InpaintError {
@@ -1061,7 +1008,6 @@ pub fn run_worker() -> ! {
             }
             SubprocessCommand::Shutdown => {
                 stopping.store(true, Ordering::Release);
-                // Wait for in-flight to drain
                 while in_flight.load(Ordering::Acquire) > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
