@@ -4,14 +4,14 @@
 //! items, and monitors RSS for admission throttling.
 
 use std::collections::HashSet;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
 use crate::gui::settings::LineMode;
 use super::protocol::*;
-use super::ipc::{write_message, flush_writer, read_message};
+use super::ipc::{write_message, read_message};
 
 /// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
 /// don't carry three parallel args.
@@ -149,7 +149,7 @@ impl SubprocessManager {
             line_fade_pct,
             edge_scales,
         }).map_err(|e| format!("Failed to send Init: {e}"))?;
-        flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
+        stdin_writer.flush().map_err(|e| format!("Failed to flush Init: {e}"))?;
 
         // Seg/edge workers build engine pools at Init (a CoreML first-run compile
         // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
@@ -269,7 +269,7 @@ impl SubprocessManager {
     /// on the child side until the buffer fills.
     fn send_cmd(&mut self, cmd: &SubprocessCommand) -> std::io::Result<()> {
         write_message(&mut self.stdin_writer, cmd)?;
-        flush_writer(&mut self.stdin_writer)
+        self.stdin_writer.flush()
     }
 
     /// Write tensor + image to temp files, then dispatch the caller-built command.

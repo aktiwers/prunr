@@ -23,7 +23,7 @@ use prunr_core::{SubjectEffect, MaskSettings};
 use super::item::{BatchItem, ExportDepth, ImageSource};
 use super::item_settings::ItemSettings;
 use super::settings::LineMode;
-use super::worker::{CompressedEdgeTensors, CompressedTensor, SegBundle};
+use super::worker::{CompressedEdgeTensors, CompressedTensor, RawSegTensor};
 
 /// The `drag` crate needs a GTK window on Linux, which eframe can't give it.
 pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", target_os = "macos"));
@@ -243,7 +243,7 @@ fn render_layer(
     job: &LayerJob,
     kind: LayerKind,
     src: &LayerSource,
-    seg: Option<&SegBundle>,
+    seg: Option<&RawSegTensor>,
     depth: &ExportDepth,
 ) -> Option<LayerOutput> {
     let original = &src.original;
@@ -330,7 +330,7 @@ fn write_layer(
     job: &LayerJob,
     kind: LayerKind,
     src: &LayerSource,
-    seg: Option<&SegBundle>,
+    seg: Option<&RawSegTensor>,
     depth: &ExportDepth,
 ) -> std::io::Result<Option<PathBuf>> {
     let Some(layer) = render_layer(job, kind, src, seg, depth) else { return Ok(None) };

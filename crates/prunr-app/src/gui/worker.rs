@@ -197,6 +197,16 @@ impl CompressedTensor {
     pub fn same(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.compressed, &other.compressed)
     }
+
+    /// Decompress into a bundle. `None` when the stored blob fails to decode.
+    pub fn bundle(&self) -> Option<RawSegTensor> {
+        Some(RawSegTensor {
+            data: self.decompress()?,
+            height: self.height,
+            width: self.width,
+            model: self.model,
+        })
+    }
 }
 
 /// Raw multi-scale TEED output for IPC transfer. `tensors` is indexed by
@@ -302,20 +312,6 @@ impl CompressedEdgeTensors {
 
     pub fn compressed_size(&self) -> usize {
         self.tensors.iter().flatten().map(|t| t.len()).sum()
-    }
-}
-
-pub type SegBundle = RawSegTensor;
-
-impl CompressedTensor {
-    /// Decompress into a bundle. `None` when the stored blob fails to decode.
-    pub fn bundle(&self) -> Option<RawSegTensor> {
-        Some(RawSegTensor {
-            data: self.decompress()?,
-            height: self.height,
-            width: self.width,
-            model: self.model,
-        })
     }
 }
 
