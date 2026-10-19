@@ -964,19 +964,24 @@ impl PanelHeader<'_> {
 /// end, greyed while the group sits at its default. True on the frame
 /// the reset was clicked.
 fn panel_header(ui: &mut Ui, title: &str, header: PanelHeader<'_>, at_default: bool) -> bool {
+    title_row(ui, title, |ui| {
+        let clicked = reset_button(ui, header.reset, !at_default).clicked();
+        if !header.note.is_empty() {
+            ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+        }
+        clicked
+    })
+}
+
+/// A title on the left, `end` laid out from the right edge, and the gap
+/// under the row. Returns what `end` returns.
+fn title_row(ui: &mut Ui, title: &str, end: impl FnOnce(&mut Ui) -> bool) -> bool {
     let clicked = ui
         .horizontal(|ui| {
             let room = crate::gui::automation::record::room(ui);
             let label = ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
             crate::gui::automation::record::clip(ui.ctx(), title, label.rect, room);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let clicked = reset_button(ui, header.reset, !at_default).clicked();
-                if !header.note.is_empty() {
-                    ui.label(RichText::new(header.note).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
-                }
-                clicked
-            })
-            .inner
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), end).inner
         })
         .inner;
     ui.add_space(theme::SPACE_XS);
@@ -1085,21 +1090,9 @@ const STEP_NUMBERS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "
 /// which case Reset is greyed out. Returns true on the frame Reset was
 /// clicked.
 pub(super) fn popover_header(ui: &mut Ui, title: &str, reset: Option<(&str, bool)>) -> bool {
-    let clicked = ui
-        .horizontal(|ui| {
-            let room = crate::gui::automation::record::room(ui);
-            let label = ui.label(RichText::new(title).strong().color(theme::TEXT_PRIMARY));
-            crate::gui::automation::record::clip(ui.ctx(), title, label.rect, room);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                reset.is_some_and(|(tip, at_default)| {
-                    reset_button(ui, "Reset", !at_default).on_hover_text(tip).clicked()
-                })
-            })
-            .inner
-        })
-        .inner;
-    ui.add_space(theme::SPACE_XS);
-    clicked
+    title_row(ui, title, |ui| {
+        reset.is_some_and(|(tip, at_default)| reset_button(ui, "Reset", !at_default).on_hover_text(tip).clicked())
+    })
 }
 
 /// "n tuned", or nothing at the default, for a group chip face.
