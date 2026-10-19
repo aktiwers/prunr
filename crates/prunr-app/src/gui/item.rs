@@ -68,7 +68,7 @@ pub(crate) struct ExportBg {
     backdrop: super::item_settings::Backdrop,
     image: Option<Arc<BgImage>>,
     fit: prunr_core::BgImageFit,
-    photo: Option<BackdropPhoto>,
+    photo: Option<Pixels>,
     /// A lens blur's depth map, and the original an effect is made from
     /// when `photo` has none.
     depth: DepthSource,
@@ -137,25 +137,6 @@ impl DepthExport {
     }
 }
 
-/// The photo an effect background is made from: the image the shown
-/// result's run started from (a photo with an object erased first), or
-/// the original. An edited one is unpacked where it is used, off the UI
-/// thread.
-#[derive(Clone)]
-pub(crate) enum BackdropPhoto {
-    Edited(super::timeline::StoredImage),
-    Original(Arc<image::RgbaImage>),
-}
-
-impl BackdropPhoto {
-    pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
-        match self {
-            BackdropPhoto::Edited(stored) => stored.load(),
-            BackdropPhoto::Original(photo) => Some(Arc::clone(photo)),
-        }
-    }
-}
-
 impl ExportBg {
     /// Nothing goes behind the result: baking returns it as it is.
     pub(crate) fn is_empty(&self) -> bool {
@@ -191,7 +172,7 @@ impl ExportBg {
     /// The photo the effect is made from, and whether it is the original.
     fn photo(&self) -> Option<(Arc<image::RgbaImage>, bool)> {
         let chosen = self.photo.as_ref()
-            .and_then(|p| Some((p.load()?, matches!(p, BackdropPhoto::Original(_)))));
+            .and_then(|p| Some((p.load()?, matches!(p, Pixels::Resident(_)))));
         chosen.or_else(|| self.depth.source.decode_rgba().ok().map(|photo| (photo, true)))
     }
 }
@@ -2812,11 +2793,13 @@ impl BatchItem {
         }
     }
 
-    pub(crate) fn backdrop_photo(&self) -> Option<BackdropPhoto> {
-        let edited = self.timeline.latest_run().and_then(|o| o.start.as_ref());
-        match edited {
-            Some(start) => Some(BackdropPhoto::Edited(Arc::clone(start))),
-            None => self.source_rgba.clone().map(BackdropPhoto::Original),
+    /// The photo an effect background is made from: the image the shown
+    /// result's run started from (`Parked`: a photo with an object erased
+    /// first, unpacked where it is used), or the original (`Resident`).
+    pub(crate) fn backdrop_photo(&self) -> Option<Pixels> {
+        match self.timeline.latest_run().and_then(|o| o.start.as_ref()) {
+            Some(start) => Some(Pixels::Parked(Arc::clone(start))),
+            None => self.source_rgba.clone().map(Pixels::Resident),
         }
     }
 
@@ -2827,7 +2810,7 @@ impl BatchItem {
         let backdrop = self.settings.backdrop();
         let key = backdrop.picture_key()?;
         let key = match (backdrop, self.backdrop_photo()) {
-            (Backdrop::Effect(_), Some(BackdropPhoto::Edited(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
+            (Backdrop::Effect(_), Some(Pixels::Parked(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
             _ => key,
         };
         // A lens blur is made with the depth map, focused on the result's subject.
