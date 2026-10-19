@@ -2235,6 +2235,20 @@ impl BatchItem {
         self.timeline.current_mut().origin = Some(Origin { cutter, ..Origin::new(engine, start) });
     }
 
+    /// A live render landed on the shown step, from `start`, cut by
+    /// `cutter` (`None`: it cut nothing).
+    pub(crate) fn record_photo_pass(&mut self, start: Option<RunStart>, cutter: Option<Cutter>) {
+        let cutter = cutter.or_else(|| match &self.timeline.current().origin {
+            // A pass that cut nothing keeps who cut the step.
+            Some(origin) if origin.engine == Engine::Segment => origin.cutter,
+            // On a step nobody cut (an erase, the photo) it records that no
+            // model did: unrecorded reads as the kept segmentation's cut,
+            // which may be an undone one.
+            _ => Some(Cutter::NoModel),
+        });
+        self.record_origin(Engine::Segment, start, cutter);
+    }
+
     /// The shown step's origin when a run of `engine` would redo that step.
     /// The eraser never redoes: each erase adds to the last.
     fn redo_origin(&self, engine: Engine) -> Option<&Origin> {
@@ -3735,6 +3749,42 @@ mod tests {
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(6), "undo brings back the step's own start");
         assert!(item.run_start(Engine::Segment).is_some());
         assert_eq!(item.run_input_dims(Engine::Upscale), (2, 2));
+    }
+
+    /// Cut out, undo, erase, then a live render with no model (Faces, an
+    /// effect) lands on the erase: the segmentation kept from the undone
+    /// cut must not take the erase for its cut-out, or the next render
+    /// re-cuts the background away.
+    #[test]
+    fn a_render_on_an_erase_after_an_undone_cut_does_not_bring_the_cut_back() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(px(1));
+        item.commit(StepKind::Process);
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
+        assert!(item.shows_cutout());
+        let _ = item.undo_step();
+        assert!(!item.shows_cutout(), "undone: the photo shows");
+
+        item.result_rgba = Some(px(3));
+        item.commit(StepKind::Erase);
+        item.record_origin(Engine::Erase, None, None);
+        assert!(!item.shows_cutout());
+
+        item.record_photo_pass(None, None);
+        assert!(!item.shows_cutout(), "a render that cut nothing is no cut-out");
+        assert!(matches!(item.render_seg(), (None, None)), "so no render re-cuts it");
+    }
+
+    /// A render that cut nothing on a model's cut keeps that cut: a
+    /// stroke still re-cuts it from the kept segmentation.
+    #[test]
+    fn a_render_that_cut_nothing_on_a_cut_keeps_the_cut() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(px(1));
+        item.commit(StepKind::Process);
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
+        item.record_photo_pass(None, None);
+        assert!(item.shows_cutout());
     }
 
     /// A chained cut's start, built where the run reads its file, becomes
