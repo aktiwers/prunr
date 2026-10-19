@@ -187,18 +187,15 @@ mod tests {
         assert_eq!(after_second, 127, "second weaker stroke must not lower the strong stamp");
     }
 
+    /// No radius, no strength, or a stamp wholly off the plane paints
+    /// nothing, and off the plane does not panic.
     #[test]
-    fn paint_circle_zero_radius_no_op() {
-        let mut c = MaskArtifact::new_empty(4, 4);
-        paint_circle(&mut c, 2.0, 2.0, 0.0, add(1.0, 1.0));
-        assert!(c.cells().iter().all(|&v| v == 0));
-    }
-
-    #[test]
-    fn paint_circle_zero_strength_no_op() {
-        let mut c = MaskArtifact::new_empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 3.0, add(1.0, 0.0));
-        assert!(c.cells().iter().all(|&v| v == 0), "strength = 0 produces no stamp");
+    fn paint_circle_with_nothing_to_paint_is_a_no_op() {
+        for (x, y, radius, strength) in [(2.0, 2.0, 0.0, 1.0), (2.0, 2.0, 3.0, 0.0), (-10.0, -10.0, 5.0, 1.0), (100.0, 100.0, 5.0, 1.0)] {
+            let mut c = MaskArtifact::new_empty(4, 4);
+            paint_circle(&mut c, x, y, radius, add(1.0, strength));
+            assert!(c.cells().iter().all(|&v| v == 0), "({x}, {y}) r{radius} s{strength}");
+        }
     }
 
     #[test]
@@ -216,14 +213,6 @@ mod tests {
             "half strength should land near 64, got {}",
             center_half
         );
-    }
-
-    #[test]
-    fn paint_circle_outside_bounds_no_panic() {
-        let mut c = MaskArtifact::new_empty(4, 4);
-        paint_circle(&mut c, -10.0, -10.0, 5.0, add(1.0, 1.0));
-        paint_circle(&mut c, 100.0, 100.0, 5.0, add(1.0, 1.0));
-        assert!(c.cells().iter().all(|&v| v == 0));
     }
 
     #[test]

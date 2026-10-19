@@ -92,52 +92,21 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
+    /// Silueta takes 320², BiRefNet 1024²; values are finite and in the
+    /// normalized range, black included (max_val clamps to 1e-6, not 0),
+    /// and channel 0 is red.
     #[test]
-    fn test_preprocess_output_shape() {
-        let img = solid_rgb_image(128, 64, 32, 640, 480);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        assert_eq!(tensor.shape(), &[1, 3, 320, 320]);
-    }
-
-    #[test]
-    fn test_preprocess_birefnet_shape() {
-        let img = solid_rgb_image(128, 64, 32, 640, 480);
-        let tensor = preprocess(&img, ModelKind::BiRefNetLite);
-        assert_eq!(tensor.shape(), &[1, 3, 1024, 1024]);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "BiRefNet tensor contains NaN/Inf: {val}");
+    fn test_preprocess_shape_range_and_channel_order() {
+        let silueta = preprocess(&solid_rgb_image(128, 64, 32, 640, 480), ModelKind::Silueta);
+        assert_eq!(silueta.shape(), &[1, 3, 320, 320]);
+        let birefnet = preprocess(&solid_rgb_image(128, 64, 32, 640, 480), ModelKind::BiRefNetLite);
+        assert_eq!(birefnet.shape(), &[1, 3, 1024, 1024]);
+        assert!(birefnet.iter().all(|v| v.is_finite()), "BiRefNet tensor contains NaN/Inf");
+        for (r, g, b) in [(100, 150, 200), (0, 0, 0)] {
+            let tensor = preprocess(&solid_rgb_image(r, g, b, 32, 32), ModelKind::Silueta);
+            assert!(tensor.iter().all(|&v| v.is_finite() && v > -5.0 && v < 5.0), "({r}, {g}, {b})");
         }
-    }
-
-    #[test]
-    fn test_preprocess_values_normalized() {
-        let img = solid_rgb_image(100, 150, 200, 320, 320);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "Tensor contains NaN or Inf: {val}");
-            assert!(val > -5.0 && val < 5.0, "Value out of expected range: {val}");
-        }
-    }
-
-    #[test]
-    fn test_preprocess_channel_order() {
-        // Solid red image: R=255, G=0, B=0
-        // After normalization, channel 0 (R) should be much larger than channels 1,2
-        let img = solid_rgb_image(255, 0, 0, 64, 64);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        let r_center = tensor[[0, 0, 160, 160]];
-        let g_center = tensor[[0, 1, 160, 160]];
-        assert!(r_center > g_center, "Channel 0 (R) should be normalized higher than channel 1 (G) for red image");
-    }
-
-    #[test]
-    fn test_preprocess_black_image_no_nan() {
-        // All-black image: max_val = 1e-6 (clamped), pixel/max_val = 0.0
-        // Result = (0.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c] — all finite
-        let img = solid_rgb_image(0, 0, 0, 32, 32);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "Black image produced NaN or Inf: {val}");
-        }
+        let red = preprocess(&solid_rgb_image(255, 0, 0, 64, 64), ModelKind::Silueta);
+        assert!(red[[0, 0, 160, 160]] > red[[0, 1, 160, 160]], "channel 0 is R");
     }
 }

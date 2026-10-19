@@ -759,5 +759,4 @@ mod tests {
         let back: ProcessingRecipe = serde_json::from_value(json).unwrap();
         assert_eq!(back, r);
     }
-
 }

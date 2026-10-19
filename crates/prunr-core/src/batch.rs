@@ -183,18 +183,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ort_intra_threads_at_least_one() {
-        // Even with 0 workers, must return at least 1
+    fn test_ort_intra_threads_formula() {
+        // Even with 0 workers, at least 1.
         assert!(ort_intra_threads(0) >= 1);
         assert!(ort_intra_threads(1) >= 1);
-    }
-
-    #[test]
-    fn test_ort_intra_threads_formula() {
-        let cpus = num_cpus::get();
-        let result = ort_intra_threads(4);
-        let expected = (cpus / 4).max(1);
-        assert_eq!(result, expected);
+        assert_eq!(ort_intra_threads(4), (num_cpus::get() / 4).max(1));
     }
 
     #[test]
@@ -207,5 +200,4 @@ mod tests {
         );
         assert!(results.is_empty());
     }
-
 }

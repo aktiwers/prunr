@@ -273,34 +273,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_shapes_accepts_correct_lengths() {
-        let emb = SamEmbedding {
+    fn validate_shapes_names_the_wrong_length() {
+        let good = || SamEmbedding {
             image_embed: vec![0.0; IMAGE_EMBED_LEN],
             high_res_feats_0: vec![0.0; HIGH_RES_0_LEN],
             high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
         };
-        assert!(emb.validate_shapes().is_ok());
-    }
-
-    #[test]
-    fn validate_shapes_rejects_wrong_image_embed_len() {
-        let emb = SamEmbedding {
-            image_embed: vec![0.0; 42],
-            high_res_feats_0: vec![0.0; HIGH_RES_0_LEN],
-            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
-        };
-        let err = emb.validate_shapes().unwrap_err();
+        assert!(good().validate_shapes().is_ok());
+        let err = SamEmbedding { image_embed: vec![0.0; 42], ..good() }.validate_shapes().unwrap_err();
         assert!(err.contains("image_embed"), "error: {err}");
-    }
-
-    #[test]
-    fn validate_shapes_rejects_wrong_feats_len() {
-        let emb = SamEmbedding {
-            image_embed: vec![0.0; IMAGE_EMBED_LEN],
-            high_res_feats_0: vec![0.0; 1],
-            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
-        };
-        let err = emb.validate_shapes().unwrap_err();
+        let err = SamEmbedding { high_res_feats_0: vec![0.0; 1], ..good() }.validate_shapes().unwrap_err();
         assert!(err.contains("high_res_feats_0"), "error: {err}");
     }
 
@@ -390,5 +372,4 @@ mod tests {
             assert!(result.cells() == expected.as_slice(), "{w}x{h}");
         }
     }
-
 }

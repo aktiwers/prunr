@@ -154,48 +154,17 @@ mod tests {
     }
 
     #[test]
-    fn slice_stats_empty_returns_sentinel() {
-        let (lo, hi, mean) = slice_stats(&[]);
-        assert_eq!(lo, f32::INFINITY);
-        assert_eq!(hi, f32::NEG_INFINITY);
-        assert_eq!(mean, 0.0);
-    }
-
-    #[test]
-    fn slice_stats_single_value() {
-        let (lo, hi, mean) = slice_stats(&[3.5]);
-        assert_eq!(lo, 3.5);
-        assert_eq!(hi, 3.5);
-        assert_eq!(mean, 3.5);
-    }
-
-    #[test]
-    fn slice_stats_mixed_signs() {
-        let (lo, hi, mean) = slice_stats(&[-2.0, 0.0, 2.0, 4.0]);
-        assert_eq!(lo, -2.0);
-        assert_eq!(hi, 4.0);
-        assert_eq!(mean, 1.0);
-    }
-
-    #[test]
-    fn slice_stats_all_equal() {
-        let (lo, hi, mean) = slice_stats(&[7.0; 5]);
-        assert_eq!(lo, 7.0);
-        assert_eq!(hi, 7.0);
-        assert_eq!(mean, 7.0);
-    }
-
-    #[test]
-    fn slice_stats_large_parallel() {
+    fn slice_stats_gives_min_max_and_mean() {
+        assert_eq!(slice_stats(&[]), (f32::INFINITY, f32::NEG_INFINITY, 0.0), "empty: the sentinels");
+        assert_eq!(slice_stats(&[3.5]), (3.5, 3.5, 3.5));
+        assert_eq!(slice_stats(&[-2.0, 0.0, 2.0, 4.0]), (-2.0, 4.0, 1.0));
+        assert_eq!(slice_stats(&[7.0; 5]), (7.0, 7.0, 7.0));
+        // Large enough for the parallel path: sum = (n - 2) - 5 + 10 = n + 3.
         let n = 1024 * 1024;
         let mut data = vec![1.0f32; n];
         data[0] = -5.0;
         data[n - 1] = 10.0;
-        // sum = (n-2)*1.0 + (-5.0) + 10.0 = n - 2 + 5 = n + 3
-        let (lo, hi, mean) = slice_stats(&data);
-        assert_eq!(lo, -5.0);
-        assert_eq!(hi, 10.0);
-        assert_eq!(mean, (n as f32 + 3.0) / n as f32);
+        assert_eq!(slice_stats(&data), (-5.0, 10.0, (n as f32 + 3.0) / n as f32));
     }
 
     #[test]
