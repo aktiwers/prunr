@@ -77,7 +77,6 @@ pub struct FacePlace {
 }
 
 impl FacePlace {
-    /// Where `face`, found in a photo of `photo_size`, sits.
     pub fn of(face: &Face, photo_size: [u32; 2]) -> Self {
         Self { to_crop: Similarity::fit(&face.landmarks, &TEMPLATE), bbox: face.bbox, photo_size }
     }
@@ -623,7 +622,6 @@ struct FaceMask {
     reach: [f32; 4],
 }
 
-/// The face mask of each kind, built once.
 fn face_mask(hair: bool) -> &'static FaceMask {
     static FACE: std::sync::OnceLock<FaceMask> = std::sync::OnceLock::new();
     static WITH_HAIR: std::sync::OnceLock<FaceMask> = std::sync::OnceLock::new();
@@ -723,12 +721,10 @@ fn detail_reach(face: &RestoredFace) -> f32 {
     face.place.to_crop.scale().clamp(0.25, 1.0)
 }
 
-/// A crop's channels as f32 planes.
 fn crop_planes(img: &RgbImage) -> [Vec<f32>; 3] {
     std::array::from_fn(|c| img.pixels().map(|p| f32::from(p[c])).collect())
 }
 
-/// f32 planes back to a crop, rounded and clamped.
 fn crop_image(planes: &[Vec<f32>; 3]) -> RgbImage {
     RgbImage::from_fn(FACE_SIZE, FACE_SIZE, |x, y| {
         let i = (y * FACE_SIZE + x) as usize;
