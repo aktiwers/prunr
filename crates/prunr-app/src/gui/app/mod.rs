@@ -338,7 +338,8 @@ impl PrunrApp {
             Action::Shortcuts => self.toggle_shortcuts_tab(),
             Action::CliHelp => self.show_cli_help ^= true,
             Action::PipelineFlow => self.show_pipeline_flow ^= true,
-            Action::Settings => self.toggle_settings_panel(),
+            Action::Settings if self.show_settings => self.close_settings(),
+            Action::Settings => self.open_settings(),
             Action::PrevImage => self.navigate_batch(ctx, NavDir::Prev),
             Action::NextImage => self.navigate_batch(ctx, NavDir::Next),
             Action::ToggleQueue => self.sidebar_hidden = !self.sidebar_hidden,
@@ -565,15 +566,6 @@ impl PrunrApp {
         self.batch.request_bg_image(id, path, false);
     }
 
-    pub fn handle_remove_bg(&mut self) {
-        let ids: std::collections::HashSet<u64> =
-            self.batch.items_to_process().into_iter().collect();
-        if ids.is_empty() {
-            return;
-        }
-        self.process_items(|item| ids.contains(&item.id), Some(StepKind::Process));
-    }
-
     /// Process / Reprocess: routes between upscale, inpaint (eraser models)
     /// and the seg pipeline behind one gate; the toolbar button and Cmd+R
     /// both call this.
@@ -587,7 +579,10 @@ impl PrunrApp {
             return;
         }
         if !model.is_inpaint() {
-            self.handle_remove_bg();
+            let ids: std::collections::HashSet<u64> = self.batch.items_to_process().into_iter().collect();
+            if !ids.is_empty() {
+                self.process_items(|item| ids.contains(&item.id), Some(StepKind::Process));
+            }
             return;
         }
         let (with_region, without) = self.erase_targets();
@@ -733,17 +728,6 @@ impl PrunrApp {
             Action::Redo => (BatchItem::redo_step, "redone", "Nothing to redo"),
             _ => (BatchItem::undo_step, "undone", "Nothing to undo"),
         };
-        self.step_targets(ctx, ids, step, verb, nothing);
-    }
-
-    fn step_targets(
-        &mut self,
-        ctx: &egui::Context,
-        ids: &[u64],
-        step: crate::gui::item::StepFn,
-        verb: &str,
-        nothing: &str,
-    ) {
         let mut stepped = Vec::new();
         let mut lost = false;
         for &id in ids {
@@ -786,7 +770,8 @@ impl PrunrApp {
     fn cancel_runs_on(&mut self, item_id: u64) {
         let Some(engine) = self.batch.find_by_id(item_id).and_then(|i| i.job.as_ref()).map(|j| j.engine) else { return };
         match engine {
-            Engine::Erase => self.cancel_inpaint_for(item_id),
+            Engine::Erase if self.processor.is_inpaint_in_flight(item_id) => self.processor.cancel_inpaint(item_id),
+            Engine::Erase => {}
             Engine::Upscale => self.processor.cancel_upscale(),
             Engine::Colorize => self.processor.cancel_colorize(),
             Engine::Segment => self.processor.cancels.request_item_cancel(item_id),
@@ -936,14 +921,6 @@ impl PrunrApp {
         }
     }
 
-    /// Cancel only the in-flight inpaint stroke for `item_id`: the
-    /// capsule's Cancel button.
-    pub fn cancel_inpaint_for(&mut self, item_id: u64) {
-        if self.processor.is_inpaint_in_flight(item_id) {
-            self.processor.cancel_inpaint(item_id);
-        }
-    }
-
     pub fn handle_cancel_selected(&mut self) {
         let targets: Vec<u64> = self.batch.ticked_awaiting_cut().collect();
         if targets.is_empty() {
@@ -1049,14 +1026,6 @@ impl PrunrApp {
             self.close_settings();
         } else {
             self.settings_tab = SettingsTab::Shortcuts;
-            self.open_settings();
-        }
-    }
-
-    fn toggle_settings_panel(&mut self) {
-        if self.show_settings {
-            self.close_settings();
-        } else {
             self.open_settings();
         }
     }
