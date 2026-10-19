@@ -1,32 +1,19 @@
-//! In-process live-preview dispatcher for Tier 2 reruns.
-//!
-//! When the user tweaks a mask or edge knob in the adjustments toolbar,
-//! `mark_tweak` registers a pending preview for the affected item. Every
-//! frame, `tick` checks if `DEBOUNCE` has passed since the window's first
-//! tweak and, if so, spawns a background thread to run the Tier 2
-//! postprocess (mask) or edge finalize (edge) on the cached tensor.
+//! In-process live-preview dispatcher for Tier 2 reruns: `mark_tweak`
+//! registers a pending preview, and `tick` runs it on a rayon thread once
+//! `DEBOUNCE` has passed since the window's first tweak. In-process because
+//! the work is pure CPU: no IPC per tick.
 //!
 //! On an image larger than `QUICK_FRAME_SIDE`, a drag's in-between renders
-//! are quick frames. The full-size render goes out when the slider is let
-//! go (`flush`) or held still for `SETTLE_AFTER`, whichever comes first.
+//! are quick frames; the full-size render goes out on release (`flush`) or
+//! after `SETTLE_AFTER` held still.
 //!
-//! Staleness handling: if multiple dispatches are in flight for the same item
-//! (possible during a continuous drag — a new dispatch fires every DEBOUNCE
-//! while earlier ones are still running), `drain_results` drops any result
-//! whose generation doesn't match the most-recently-dispatched generation. The
-//! cancel token is still held per-dispatch but is only triggered on
-//! `cancel_all` (batch clear / shutdown) — letting in-flight dispatches
-//! complete during a drag is what produces live updates mid-drag.
+//! Several dispatches per item can be in flight during a drag;
+//! `drain_results` drops any whose generation isn't the newest.
 //!
-//! **Do not reintroduce per-tweak cancellation.** It was removed on purpose:
-//! `postprocess` doesn't check the cancel token at stage boundaries, so the
-//! token only gates the final `tx.send`. Cancelling mid-drag therefore dropped
-//! every dispatch's result before it could be drained, which is exactly the
-//! "no live preview during drag" bug this module was rewritten to fix.
-//!
-//! No subprocess involved — Tier 2 is pure CPU work, so running it in-process
-//! saves ~20-50ms of IPC overhead per tick and works even outside a batch.
-//! The rayon thread pool handles parallel previews across multiple items.
+//! **Do not reintroduce per-tweak cancellation.** `postprocess` doesn't
+//! check the cancel token between stages, so the token only gates the
+//! final send: cancelling mid-drag dropped every result, leaving no live
+//! preview during the drag. The token fires only on `cancel` / `cancel_all`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,10 +28,9 @@ use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
-/// Build the "masked base" for SubjectOutline live preview — run Tier 2 mask
-/// from the cached seg tensor to reproduce the segmented subject, so edges
-/// composite onto the masked subject instead of the raw photo. Returns None
-/// on postprocess failure; caller falls back to the raw original.
+/// Run Tier 2 mask from the cached seg tensor, so SubjectOutline edges
+/// composite onto the masked subject instead of the raw photo. `None` on
+/// failure; the caller falls back to the raw original.
 fn build_masked_base(
     seg: &SegTensor,
     original: &RgbaImage,
@@ -64,29 +50,24 @@ fn build_masked_base(
     .ok()
 }
 
-/// Throttle cadence for live-preview dispatch during a continuous drag.
-/// 150ms stays above the ~90ms baseline and ~240ms refine_edges worker
-/// cost so dispatches don't pile up for the generation filter to discard.
-/// Release / commit paths call `flush` instead, so the final result on
-/// knob-release lands immediately.
+/// Throttle cadence during a continuous drag: 150 ms stays above the
+/// ~90 ms baseline and ~240 ms refine_edges cost, so dispatches don't pile
+/// up for the generation filter to discard. Release paths `flush` instead.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// How long a drag holds still before its full-size render is made, for
 /// a user who waits with the slider held instead of letting go.
 pub const SETTLE_AFTER: Duration = Duration::from_millis(300);
 
-/// What kind of Tier 2 rerun a tweak needs. Two kinds because they touch
-/// different cached tensors (segmentation vs TEED) and different pipeline
-/// stages.
+/// What kind of Tier 2 rerun a tweak needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
     /// gamma / threshold / edge_shift / refine_edges → Tier 2 mask rerun.
     Mask,
     /// line_strength / solid_line_color → Tier 2 edge rerun.
     Edge,
-    /// sharpen / ai_blend / color_match → Tier-2 upscale postprocess
-    /// on the kept upscale run. No ORT inference — snapshot provides
-    /// the cached buffer directly.
+    /// sharpen / ai_blend / color_match → Refine on the kept upscale run;
+    /// no model run.
     UpscaleTier2,
     /// Strength → re-render the kept colorize run. No model run.
     ColorizeTier2,
@@ -139,9 +120,7 @@ pub(crate) fn finish_upscale(
 pub struct PreviewResult {
     pub item_id: u64,
     pub rgba: Arc<RgbaImage>,
-    /// The preview kind that produced this result. Used by
-    /// `apply_completed_previews` to route kind-specific side-effects
-    /// (e.g. advancing `applied_recipe.upscale` for UpscaleTier2 results).
+    /// The kind that produced this result, for kind-specific side effects.
     pub kind: PreviewKind,
     /// Generation counter — used to discard results from dispatches a
     /// newer one superseded.
@@ -159,9 +138,8 @@ pub struct PreviewResult {
     pub new_edge: Option<(EdgePlanes, EdgePlaneKey)>,
     /// The Bold planes a dual-scale composition built, for the same cache.
     pub new_bold: Option<(EdgePlanes, EdgePlaneKey)>,
-    /// Masked subject base built during this dispatch (SubjectOutline only),
-    /// for the parent to cache so subsequent Edge tweaks whose mask recipe
-    /// matches can skip `postprocess_from_flat`. Keyed by (MaskRecipe, model).
+    /// Masked subject base built here (SubjectOutline only), for the parent
+    /// to cache keyed by (MaskRecipe, model).
     pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
     /// The upscale reference an UpscaleTier2 dispatch built, for the kept
     /// upscale run.
@@ -178,26 +156,21 @@ pub struct PreviewResult {
     pub(crate) new_correction: Option<crate::gui::item::BuiltCorrection>,
     /// The tensors the render unpacked, for the item's hot cache.
     pub(crate) unpacked: Unpacked,
-    /// MaskRecipe snapshot taken when this dispatch was kicked off. The
-    /// parent updates `applied_recipe.mask` to match so the recipe-drift
-    /// tripwire doesn't immediately re-fire on a result it already
-    /// applied.
+    /// MaskRecipe at dispatch; the parent sets `applied_recipe.mask` to it so
+    /// the recipe-drift check doesn't re-fire on a result already applied.
     pub applied_mask: prunr_core::MaskRecipe,
     /// The Depth chip's look this dispatch rendered, for `applied_recipe`.
     pub applied_depth: prunr_core::depth::DepthLook,
-    /// Tier-2 knob values captured at dispatch time. `apply_completed_previews`
-    /// patches `applied_recipe.upscale`'s four Tier-2 fields to match so
-    /// resolve_tier sees Skip (not UpscaleTier2) on the next frame and
-    /// mark_tweak stops firing between settled drags.
-    /// `None` for non-UpscaleTier2 kinds.
+    /// Refine values at dispatch (UpscaleTier2 only), patched into
+    /// `applied_recipe.upscale` so `resolve_tier` sees Skip next frame and a
+    /// settled drag stops re-firing.
     pub applied_tier2_knobs: Option<prunr_core::upscale::Refine>,
     /// The Strength a ColorizeTier2 dispatch rendered, patched into
     /// `applied_recipe.colorize` for the same reason. `None` otherwise.
     pub applied_color_strength: Option<f32>,
-    /// `true` when no further tweaks are pending for this item at drain
-    /// time — the drag has settled and this is the last result of the
-    /// session. Callers gate heavy side-effects (sidebar thumb rebuild)
-    /// on this so the mid-drag sidebar doesn't flicker.
+    /// Nothing more is coming for this item: the drag settled. Heavy side
+    /// effects (thumbnail rebuild) wait for it, so the sidebar doesn't
+    /// flicker mid-drag.
     pub is_final: bool,
     /// A drag's in-between frame of a large image: shown, never kept as
     /// the result (see `QuickFrames`).
@@ -270,14 +243,12 @@ impl QuickFrames {
     }
 }
 
-/// Source of timestamps for `mark_tweak` / `flush` / `tick`. Production
-/// uses the system monotonic clock; tests inject a `MockClock` to drive
-/// synthetic time without sleeping or poking private fields.
+/// Timestamps for `mark_tweak` / `flush` / `tick`; tests inject a fake to
+/// drive time without sleeping.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
-/// Production clock: just delegates to `Instant::now`.
 pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Instant { Instant::now() }
@@ -340,9 +311,7 @@ impl Default for LivePreview {
 }
 
 impl LivePreview {
-    /// Construct with an injected clock. Production callers go through
-    /// `default()` (which uses `SystemClock`); tests pass a fake to drive
-    /// synthetic timestamps.
+    /// With an injected clock; `default()` uses `SystemClock`.
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
@@ -380,13 +349,10 @@ impl LivePreview {
         );
     }
 
-    /// Flush: expire the pending tweak timer so the next `tick` dispatches
-    /// immediately, as the settled render. Used when an edit settles
-    /// (slider released, checkbox toggled, color picked) so the user
-    /// doesn't wait the full debounce. A drag whose last frame was quick
-    /// and has nothing queued gets its full-size render queued.
-    ///
-    /// Idempotent — no-op if there's nothing pending or owed for `item_id`.
+    /// Expire the pending tweak timer so the next `tick` dispatches at once,
+    /// as the settled render: a settled edit (release, toggle, pick) shouldn't
+    /// wait out the debounce. A drag whose last frame was quick gets its
+    /// full-size render queued. No-op with nothing pending or owed.
     pub fn flush(&mut self, item_id: u64) {
         let expired = self.expired_arm();
         if let Some(p) = self.pending.get_mut(&item_id) {
@@ -419,17 +385,13 @@ impl LivePreview {
         now.checked_sub(DEBOUNCE + Duration::from_millis(10)).unwrap_or(now)
     }
 
-    /// Per-frame tick. Returns the time until the next tween we're waiting on
-    /// (useful for `ctx.request_repaint_after`), or `None` if nothing pending.
-    /// That includes a held-still drag's settle: a pointer that does not
-    /// move sends no input, so nothing else would wake the frame loop.
-    ///
-    /// `snapshot` provides per-item inputs (tensors, settings, original image)
-    /// for any dispatches we fire this frame. A dispatch is quick when the
-    /// edit has not settled (a drag's in-between frame) and its image is
-    /// larger than a quick frame. A render that cannot be built yet waits
-    /// for a later tick; one that never can (`Verdict::Never`) is dropped,
-    /// so nothing waits for good.
+    /// Per-frame tick. Returns the time until the next dispatch is due, for
+    /// `request_repaint_after` (a held-still drag sends no input, so nothing
+    /// else would wake the loop), or `None` with nothing pending. `snapshot`
+    /// gives each dispatch its inputs. A dispatch is quick when its edit
+    /// hasn't settled and its image exceeds a quick frame. A render that
+    /// can't be built yet waits; one that never can (`Verdict::Never`) is
+    /// dropped, so nothing waits for good.
     pub(crate) fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
     where
         F: FnMut(u64, PreviewKind) -> Result<DispatchInputs, crate::gui::capability::Verdict>,
@@ -462,11 +424,9 @@ impl LivePreview {
         }
 
         for id in ready_ids {
-            // Peek the pending kind without removing — if the snapshot isn't
-            // ready yet (e.g. `source_rgba` decode in flight after a view
-            // switch), we keep the pending entry so the next tick retries.
-            // Dropping it here silently swallowed the tweak and left the
-            // user thinking live preview was dead.
+            // Peek, don't remove: when the snapshot isn't ready (a decode in
+            // flight after a view switch) the entry stays for the next tick.
+            // Dropping it silently swallowed the tweak.
             let (kind, settled, latest_tweak_at) = match self.pending.get(&id) {
                 Some(p) => (p.kind, p.settled, p.latest_tweak_at),
                 None => continue,
@@ -512,12 +472,8 @@ impl LivePreview {
                 let dispatch_kind = inputs.kind;
                 let mask_recipe = prunr_core::MaskRecipe::from(&inputs.settings.mask_settings());
                 let seg_model = inputs.seg_model();
-                // Capture Tier-2 knob values at dispatch time. When the result
-                // lands, apply_completed_previews patches only the 4 Tier-2
-                // fields (sharpen/ai_blend/color_match) on
-                // applied_recipe.upscale so the next resolve_tier diff sees Skip
-                // instead of UpscaleTier2, stopping the per-frame mark_tweak loop
-                // after the user stops dragging.
+                // Patched into applied_recipe.upscale on landing, so the next diff
+                // sees Skip and mark_tweak stops re-firing after the drag.
                 let applied_tier2_knobs = inputs.upscale_tier2_knobs;
                 let applied_color_strength = matches!(inputs.kind, PreviewKind::ColorizeTier2).then_some(inputs.settings.color_strength());
                 let applied_depth = inputs.settings.depth;
@@ -540,9 +496,7 @@ impl LivePreview {
                 let new_masked_base = output.built_masked_base
                     .zip(seg_model)
                     .map(|(base, model)| (base, mask_recipe, model));
-                // `is_final` is set by `drain_results`, where the UI
-                // thread can read `self.pending` atomically. The worker
-                // ships a placeholder and doesn't care.
+                // `is_final` is set in `drain_results`, which can read `self.pending`.
                 let _ = tx.send(Finished::from(PreviewResult {
                     item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                     cutter: seg_model.map(crate::gui::item::Cutter::Model),
@@ -567,11 +521,9 @@ impl LivePreview {
         wait_for
     }
 
-    /// Drain any completed previews. Returned results are already filtered
-    /// to the latest generation; each result's `is_final` is set to `true`
-    /// iff nothing more is coming for that item — no new tweak pending and
-    /// no full-size render owed — i.e. the drag has settled and this is the
-    /// last result of the session.
+    /// Drain completed previews, filtered to each item's latest generation;
+    /// `is_final` is set when nothing more is coming for the item (no tweak
+    /// pending, no full-size render owed).
     pub fn drain_results(&mut self) -> Vec<PreviewResult> {
         let mut out = Vec::new();
         while let Ok(done) = self.result_rx.try_recv() {
@@ -643,9 +595,8 @@ impl LivePreview {
     }
 }
 
-/// Inputs required to actually run a single preview. Snapshot captures these
-/// on the UI thread (holding the item briefly) and hands them to the worker
-/// so the worker doesn't need a `&mut BatchItem`.
+/// Inputs for one preview, captured on the UI thread so the worker needs
+/// no `&mut BatchItem`.
 pub struct DispatchInputs {
     pub kind: PreviewKind,
     /// The item's timeline version, carried to the result.
@@ -662,15 +613,12 @@ pub struct DispatchInputs {
     /// source), recorded as the step's start on landing.
     pub(crate) start: Option<crate::gui::timeline::RunStart>,
     pub settings: ItemSettings,
-    /// Segmentation tensor (decompressed) + dimensions + model. Required for
-    /// `PreviewKind::Mask` *or* `PreviewKind::Edge` in SubjectOutline mode
-    /// (the edge was computed on top of a segmented subject; preview reuses
-    /// that as the base image).
+    /// Decompressed segmentation tensor + dims + model; needed by Mask, and by
+    /// Edge in SubjectOutline (the subject is the base).
     pub seg_tensor: Option<Arc<SegTensor>>,
     pub edge_tensor: Option<EdgeTensor>,
-    /// Secondary edge tensor for multi-scale LineStyle variants
-    /// (DualScale). Only populated when the style needs it, so single-scale
-    /// dispatches skip the extra zstd decompress.
+    /// Second edge tensor for DualScale styles, only when needed, so
+    /// single-scale dispatches skip a zstd decompress.
     pub secondary_edge_tensor: Option<EdgeTensor>,
     /// The tensors above still packed, unpacked on the render's thread.
     pub(crate) packed: Packed,
@@ -679,9 +627,8 @@ pub struct DispatchInputs {
     pub cached_edge: EdgePlanes,
     /// Same for the Bold scale of a dual-scale style.
     pub cached_bold: EdgePlanes,
-    /// SubjectOutline masked-subject base (output of `postprocess_from_flat`)
-    /// from a previous dispatch whose mask recipe matches the current one.
-    /// Populated when available so Edge tweaks skip Lanczos + guided filter.
+    /// SubjectOutline masked base from a dispatch with the same mask recipe,
+    /// so Edge tweaks skip Lanczos + guided filter.
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
     /// The item's selection, applied to the segmentation mask before the
     /// resize / refine / feather chain (resampled to tensor resolution
@@ -945,7 +892,7 @@ pub struct EdgeTensor {
     pub width: u32,
 }
 
-/// Helper: decompress a `CompressedTensor` into the raw form the preview worker needs.
+/// Decompress a `CompressedTensor` for the preview worker.
 pub fn decompress_seg(ct: &CompressedTensor) -> Option<SegTensor> {
     Some(SegTensor {
         data: ct.decompress()?,
@@ -998,13 +945,9 @@ pub(crate) struct OriginalFrom {
     pub(crate) dims: (u32, u32),
 }
 
-/// Runs on a rayon worker thread.
-///
-/// Respects the user's full mask settings, including `refine_edges`. The
-/// guided filter stage adds ~50-150ms on 4K when enabled, so drag cadence
-/// slows accordingly — but the user opted into that cost when they toggled
-/// Refine Edges on, and without running the filter the three refine knobs
-/// (toggle, guided_radius, guided_epsilon) would be no-ops in live preview.
+/// Runs on a rayon worker. Honours `refine_edges`: the guided filter adds
+/// ~50-150 ms per tick at 4K, but without it the three refine knobs would
+/// do nothing in live preview.
 fn run_preview(mut inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }
     let (correction, built_correction) = inputs.correction.take().map(crate::gui::item::Correction::resolve).unzip();
@@ -1015,8 +958,6 @@ fn run_preview(mut inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
 
 fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
 
-    // UpscaleTier2: no seg/edge tensors involved — run postprocess directly
-    // on the kept upscale run.
     if matches!(inputs.kind, PreviewKind::UpscaleTier2) {
         let Some(upscale) = inputs.upscale else {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "no upscale run kept");
@@ -1174,10 +1115,9 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
         && inputs.seg_tensor.is_some()
         && inputs.edge_tensor.is_some();
 
-    // Resolve the masked base for SubjectOutline mode.
-    // - Mask kind: always rebuild (the mask settings may have just changed).
-    // - Edge kind: reuse cached base if Some (mask settings stable during drag).
-    // When newly built, `built_masked_base` propagates back for caching.
+    // SubjectOutline's masked base: a Mask kind rebuilds it (its settings
+    // just changed); an Edge kind reuses the cached one. A new one goes back
+    // for caching.
     let (masked_base, built_masked_base) = if is_subject_outline {
         let fresh_base = || {
             // invariant: is_subject_outline → seg_tensor is Some.
@@ -1201,10 +1141,8 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     match inputs.kind {
         PreviewKind::Mask => {
             if !is_subject_outline {
-                // Filter-only path: no seg tensor available (model=None, or
-                // item not yet processed). Apply effect directly to the
-                // raw source so the user sees the filter effect without
-                // running inference.
+                // No seg tensor (No model, or not processed yet): the effect
+                // goes straight on the source.
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
                     let mut rgba = (*inputs.original).clone();
                     prunr_core::apply_subject_effect(&mut rgba, inputs.settings.effect);
@@ -1215,8 +1153,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 else { return RunOutput::default(); };
                 return RunOutput { rgba: Some(Arc::new(masked)), ..RunOutput::default() };
             }
-            // SubjectOutline: compose subject + edges via the selected mode.
-            // All modes are compose-time only — no re-inference.
+            // SubjectOutline: compose subject + edges; no model run.
             let Some(base_arc) = masked_base else { return RunOutput::default(); };
             // invariant: is_subject_outline → edge_tensor is Some.
             let edge = inputs.edge_tensor.as_ref().unwrap();
@@ -1282,11 +1219,9 @@ impl LivePreview {
     }
 }
 
-/// Pick between single-scale (`compose_edges_styled`) and dual-scale
-/// (`compose_edges_dual_styled`) composition based on the selected
-/// `LineStyle`. For dual-scale, `primary_mask` is the Fine layer and the
-/// Bold layer comes from `cached_bold` or is built from `secondary_tensor`;
-/// a freshly built Bold plane is returned for caching.
+/// Single- or dual-scale composition per `LineStyle`. Dual-scale takes
+/// `primary_mask` as Fine and Bold from `cached_bold` or
+/// `secondary_tensor`; a freshly built Bold plane is returned for caching.
 fn dispatch_compose(
     primary_mask: &GrayImage,
     base: &image::RgbaImage,
