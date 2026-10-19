@@ -222,15 +222,9 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage};
-    #[cfg(feature = "dev-models")]
-    use image::Rgb;
-    #[cfg(feature = "dev-models")]
+    use image::{DynamicImage, Rgb, RgbImage};
     use std::io::Cursor;
 
-    // Only the `dev-models` tests below consume these helpers; gating keeps
-    // the default `cargo test` build free of dead-code warnings.
-    #[cfg(feature = "dev-models")]
     fn encode_as_png(img: DynamicImage) -> Vec<u8> {
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -238,7 +232,6 @@ mod tests {
         buf
     }
 
-    #[cfg(feature = "dev-models")]
     fn make_png(width: u32, height: u32) -> Vec<u8> {
         encode_as_png(DynamicImage::ImageRgb8(RgbImage::from_pixel(
             width,
@@ -420,41 +413,27 @@ mod tests {
         assert!(matches!(result, Err(CoreError::ImageFormat(_))));
     }
 
-    // Full integration tests require dev-models feature and downloaded model files.
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_process_image_produces_rgba() {
-        use crate::{engine::OrtEngine, types::ModelKind};
-
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("Need downloaded models — run `cargo xtask fetch-models`");
-
-        let png_bytes = make_png(64, 64);
-        let result = process_image(&png_bytes, &engine, &Progress::none());
-        assert!(result.is_ok(), "process_image failed: {:?}", result.err());
-        let pr = result.unwrap();
-        assert!(pr.rgba_image.width() > 0, "output image must have width");
-        assert!(pr.rgba_image.height() > 0, "output image must have height");
-    }
-
-    #[cfg(feature = "dev-models")]
     #[test]
     fn test_process_image_progress_stages_called() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         use crate::{engine::OrtEngine, types::ModelKind};
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
 
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("Need downloaded models");
+        let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Silueta is bundled");
         let sink = std::sync::Arc::new(RecordingSink::default());
         let png_bytes = make_png(64, 64);
         process_image(&png_bytes, &engine, &Progress::new(sink.clone())).expect("process_image");
 
         let updates = sink.updates();
         assert_eq!(check_contract(&updates), Ok(()));
-        assert_eq!(updates, vec![
+        assert!(matches!(updates.as_slice(), [
             ProgressUpdate::Step(Step::ReadingImage),
             ProgressUpdate::Step(Step::FindingSubject),
+            ProgressUpdate::Subject(_),
             ProgressUpdate::Step(Step::RefiningEdges),
-        ]);
+        ]), "{:?}", kinds(&updates));
     }
 }

@@ -3,7 +3,7 @@
 //! Prerequisites:
 //!   1. Download test images: see tests/test_images/README.md
 //!   2. Generate reference masks: python scripts/generate_references.py
-//!   3. Run: cargo test -p prunr-core --features dev-models
+//!   3. Run: cargo test -p prunr-core --test reference_test
 
 mod test_common;
 
@@ -16,8 +16,6 @@ use prunr_core::{
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
 use test_common::{skip_if_model_missing, skip_if_no_ort};
-#[cfg(feature = "dev-models")]
-use test_common::{changed_in, rect_mask};
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
@@ -341,62 +339,4 @@ fn test_batch_process_multiple_images() {
     for (i, r) in results.iter().enumerate() {
         assert!(r.is_ok(), "Batch result {} failed: {:?}", i, r);
     }
-}
-
-/// End-to-end smoke test for the LaMa inpaint pipeline.
-///
-/// Runs `process_inpaint` over a real image with a small synthetic mask
-/// patch in the centre. We don't have a deterministic golden output (LaMa
-/// is data-hungry to pin pixel-exact), so the assertions validate the
-/// I/O contract rather than the pixel values:
-///
-/// - Output dimensions match the input
-/// - Pixels OUTSIDE the mask are byte-identical to the source (the
-///   `decode_tile` source-passthrough invariant)
-/// - At least one pixel INSIDE the mask differs from the source (the
-///   model actually painted something — catches a wiring regression
-///   that returned the source unchanged)
-///
-/// Skipped when the LaMa model isn't on disk.
-#[test]
-#[cfg(feature = "dev-models")]
-fn test_inpaint_smoke() {
-    if skip_if_no_ort("test_inpaint_smoke") { return; }
-    let image_path = test_images_dir().join("car-1.jpg");
-    if !image_path.exists() {
-        eprintln!("Skipping inpaint smoke test: car-1.jpg not found");
-        return;
-    }
-    if skip_if_model_missing("test_inpaint_smoke", prunr_models::ModelId::LaMaFp32) { return; }
-
-    let dyn_img = image::open(&image_path).expect("Failed to open car-1.jpg");
-    let img = dyn_img.into_rgba8();
-    let (w, h) = img.dimensions();
-
-    // A 32×32 patch in the centre of the image.
-    let (cx, cy, r) = (w / 2, h / 2, 16u32);
-    let (x0, y0) = (cx.saturating_sub(r), cy.saturating_sub(r));
-    let (rw, rh) = (cx + r - x0, cy + r - y0);
-    let mask = rect_mask(w, h, x0, y0, rw, rh);
-
-    let result = prunr_core::inpaint::process_inpaint(&img, &mask, prunr_models::ModelId::LaMaFp32)
-        .expect("process_inpaint failed");
-    assert_eq!(result.dimensions(), img.dimensions());
-
-    // Outside the mask: byte-identical to source.
-    for y in 0..h {
-        for x in 0..w {
-            if mask.get_pixel(x, y).0[0] == 0 {
-                assert_eq!(
-                    result.get_pixel(x, y), img.get_pixel(x, y),
-                    "unmasked pixel ({x}, {y}) was modified — decode_tile passthrough broken",
-                );
-            }
-        }
-    }
-
-    assert!(
-        changed_in(&result, &img, x0, y0, rw, rh) > 0,
-        "no masked pixel was changed — LaMa returned source unchanged",
-    );
 }

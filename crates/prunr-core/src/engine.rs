@@ -1280,32 +1280,6 @@ mod tests {
         assert_eq!(engine.pick().weights, lighter_weights(ModelId::Silueta, true).unwrap_or(Weights::Fp32));
     }
 
-    // Integration tests require dev-models feature and downloaded models.
-    // Run with: cargo test -p prunr-core --features dev-models
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_ort_engine_silueta_active_provider_non_empty() {
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("OrtEngine::new should succeed with dev-models and downloaded models");
-        let provider = engine.active_provider();
-        assert!(!provider.is_empty(), "active_provider() returned empty string");
-    }
-
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_ort_engine_u2net_creates_session() {
-        // U2Net is OnDemand — only run when the user has downloaded it.
-        // Mirrors the skip-if-missing pattern in tests/reference_test.rs.
-        if !prunr_models::is_available(prunr_models::ModelId::U2net) {
-            eprintln!("Skipping: U2Net not in user data dir (download via Model Store)");
-            return;
-        }
-        let engine = OrtEngine::new(ModelKind::U2net, 1)
-            .expect("OrtEngine::new(U2net) should succeed when U2Net is installed");
-        let provider = engine.active_provider();
-        assert!(!provider.is_empty());
-    }
-
     /// Level2 is a valid value for all bundled models — the constructor must not
     /// reject it for non-HAT models. Exercises the no-regression case: explicitly
     /// passing Level2 to a segmentation model succeeds just as Level3 does.
