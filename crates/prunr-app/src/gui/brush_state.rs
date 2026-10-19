@@ -49,9 +49,10 @@ pub struct BrushSettings {
     pub inpaint_grow: f32,
     /// Eraser: how large a hole is filled (see `FillScale`).
     pub inpaint_fill_scale: prunr_core::inpaint::FillScale,
-    /// Eraser: how the fill's colours meet the photo around it.
-    #[serde(default)]
-    pub inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour,
+    /// Eraser: how the fill's colours meet the photo around it, when
+    /// chosen; `None` is the eraser's own (`edge_colour`).
+    #[serde(default, rename = "inpaint_edge_color")]
+    pub inpaint_edge_colour: Option<prunr_core::inpaint_blend::EdgeColour>,
     /// SD and RORem: the Feather band is generated last, against the
     /// photo around it, and pasted back fading into it.
     #[serde(default = "default_soft_edge")]
@@ -157,6 +158,10 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
 
 fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
 fn default_soft_edge() -> bool { true }
+pub(crate) fn default_edge_colour(generated: bool) -> prunr_core::inpaint_blend::EdgeColour {
+    use prunr_core::inpaint_blend::EdgeColour;
+    if generated { EdgeColour::Off } else { EdgeColour::AlongEdge }
+}
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
@@ -214,14 +219,9 @@ impl BrushSettings {
 
     /// The settings `model` starts from when no preset has an entry for it.
     pub fn floor_for(model: prunr_models::ModelId) -> Self {
-        // SD draws its own detail; sharpening on top crunches it. Its soft
-        // edge already meets the photo, and a colour shift over it brings
-        // back a lighter or darker rim.
-        if model.is_sd_family() {
-            Self { inpaint_sharpen: 0.0, inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::Off, ..Self::default() }
-        } else {
-            Self::default()
-        }
+        // SD draws its own detail; sharpening on top crunches it.
+        let inpaint_sharpen = if model.is_sd_family() { 0.0 } else { Self::default().inpaint_sharpen };
+        Self { inpaint_sharpen, ..Self::default() }
     }
 
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
@@ -246,6 +246,14 @@ impl BrushSettings {
         let step = (self.radius * 0.25).max(1.0);
         let next = if larger { self.radius + step } else { self.radius - step };
         self.radius = next.round().clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end());
+    }
+
+    /// The edge colour a fill runs with: the one chosen, else the eraser's
+    /// own. A generated fill (SD, RORem) meets the photo through its soft
+    /// edge, and a colour shift over it brings back a lighter or darker
+    /// rim; the others match along the edge.
+    pub fn edge_colour(&self, generated: bool) -> prunr_core::inpaint_blend::EdgeColour {
+        self.inpaint_edge_colour.unwrap_or_else(|| default_edge_colour(generated))
     }
 
     /// How Magic Brush reads the model's output under these settings.
@@ -328,7 +336,7 @@ impl Default for BrushSettings {
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
             inpaint_fill_scale: Default::default(),
-            inpaint_edge_colour: Default::default(),
+            inpaint_edge_colour: None,
             sd_soft_edge: default_soft_edge(),
             sd_sampler: None,
             sd_prompt: String::new(),
@@ -536,7 +544,7 @@ mod tests {
             inpaint_feather: 4.0,
             inpaint_grow: 2.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Auto,
-            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::AlongEdge,
+            inpaint_edge_colour: None,
             sd_soft_edge: true,
             sd_sampler: None,
             sd_prompt: String::new(),
@@ -553,6 +561,20 @@ mod tests {
             magic_depth: false,
             magic_depth_range: 0.08,
         }
+    }
+
+    /// A saved brush that never chose an edge colour (saved before it
+    /// existed too) runs each eraser's own: off for a generated fill, along
+    /// the edge for the others; a chosen one holds for every eraser.
+    #[test]
+    fn an_unchosen_edge_colour_is_the_erasers_own() {
+        use super::*;
+        use prunr_core::inpaint_blend::EdgeColour;
+        let old: BrushSettings = serde_json::from_str(r#"{"inpaint_feather": 22.0}"#).unwrap();
+        assert_eq!((old.edge_colour(true), old.edge_colour(false)), (EdgeColour::Off, EdgeColour::AlongEdge));
+        let chosen = BrushSettings { inpaint_edge_colour: Some(EdgeColour::WholeArea), ..old };
+        let reloaded: BrushSettings = serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!((reloaded.edge_colour(true), reloaded.edge_colour(false)), (EdgeColour::WholeArea, EdgeColour::WholeArea));
     }
 
     /// Saved brush settings load the same whatever they leave out: an
@@ -575,7 +597,7 @@ mod tests {
             inpaint_feather: 7.0,
             inpaint_grow: -3.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Half,
-            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::WholeArea,
+            inpaint_edge_colour: Some(prunr_core::inpaint_blend::EdgeColour::WholeArea),
             sd_soft_edge: false,
             sd_sampler: Some(SdScheduler::Lcm),
             sd_prompt: "mine".into(),
@@ -840,7 +862,7 @@ mod tests {
             inpaint_feather: 24.0,
             inpaint_grow: -8.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Quarter,
-            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::Off,
+            inpaint_edge_colour: Some(prunr_core::inpaint_blend::EdgeColour::Off),
             sd_soft_edge: false,
             sd_sampler: Some(SdScheduler::Lcm),
             sd_prompt: "custom prompt".into(),

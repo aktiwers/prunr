@@ -107,10 +107,19 @@ const EDGE_COLOURS: [chip::Choice<EdgeColour>; 3] = [
     chip::Choice { value: EdgeColour::Off, name: "Off", description: "The fill's own colors", enabled: true },
 ];
 
-fn edge_colour_row(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let changed = chip::choice_row(ui, "Edge color", &EDGE_COLOURS, &mut brush.inpaint_edge_colour);
+fn edge_colour_row(ui: &mut egui::Ui, brush: &mut BrushSettings, generated: bool) -> bool {
+    let mut colour = brush.edge_colour(generated);
+    let changed = chip::choice_row(ui, "Edge color", &EDGE_COLOURS, &mut colour);
+    if changed {
+        brush.inpaint_edge_colour = Some(colour);
+    }
     hint(ui, "How the fill's colors meet the photo around it.");
     changed
+}
+
+/// Whether the edge colour differs from the eraser's own.
+fn edge_colour_tuned(brush: &BrushSettings, generated: bool) -> bool {
+    brush.edge_colour(generated) != crate::gui::brush_state::default_edge_colour(generated)
 }
 
 /// The edge of a generated fill (SD and RORem): Soft edge, then Edge colour.
@@ -118,23 +127,23 @@ fn generated_edge_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let mut committed = chip::toggle_row(ui, "Soft edge", &mut brush.sd_soft_edge).changed;
     hint(ui, "Draws the Feather band last, against the photo around it, so the fill blends in.");
     ui.add_space(theme::SPACE_XS);
-    committed |= edge_colour_row(ui, brush);
+    committed |= edge_colour_row(ui, brush, true);
     committed
 }
 
 /// How many of the generated edge's settings differ from the shipped ones.
 fn generated_edge_tuned(brush: &BrushSettings) -> usize {
-    usize::from(!brush.sd_soft_edge) + usize::from(brush.inpaint_edge_colour != EdgeColour::Off)
+    usize::from(!brush.sd_soft_edge) + usize::from(edge_colour_tuned(brush, true))
 }
 
 fn reset_generated_edge(brush: &mut BrushSettings) {
     brush.sd_soft_edge = true;
-    brush.inpaint_edge_colour = EdgeColour::Off;
+    brush.inpaint_edge_colour = None;
 }
 
 /// LaMa, Big-LaMa and MI-GAN's Advanced group: how the fill meets the photo.
 pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let tuned = usize::from(brush.inpaint_edge_colour != EdgeColour::AlongEdge);
+    let tuned = usize::from(edge_colour_tuned(brush, false));
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "fill_advanced",
@@ -149,10 +158,10 @@ pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings)
     let mut committed = false;
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
-            brush.inpaint_edge_colour = EdgeColour::AlongEdge;
+            brush.inpaint_edge_colour = None;
             committed = true;
         }
-        committed |= edge_colour_row(ui, brush);
+        committed |= edge_colour_row(ui, brush, false);
     });
     committed
 }

@@ -2183,7 +2183,7 @@ mod sd_request_tests {
         use prunr_models::ModelId::*;
         for (model, want) in [(SdV15InpaintFp16, EdgeColour::Off), (RoremFp16, EdgeColour::Off), (LaMaFp32, EdgeColour::AlongEdge), (BigLaMa, EdgeColour::AlongEdge), (Migan, EdgeColour::AlongEdge)] {
             let floor = super::super::brush_state::BrushSettings::floor_for(model);
-            assert_eq!(floor.inpaint_edge_colour, want, "{model:?}");
+            assert_eq!(floor.edge_colour(model.is_sd_family()), want, "{model:?}");
             assert!(floor.sd_soft_edge, "{model:?}");
         }
     }

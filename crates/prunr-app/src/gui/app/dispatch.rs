@@ -225,7 +225,7 @@ impl PrunrApp {
             feather_px: bs.inpaint_feather,
             grow_px: bs.inpaint_grow,
             fill_scale: bs.inpaint_fill_scale,
-            edge_colour: bs.inpaint_edge_colour,
+            edge_colour: bs.edge_colour(picked_model.is_sd_family()),
             soft_edge: bs.sd_soft_edge,
             sd_sampler: bs.sd_sampler,
             model,
