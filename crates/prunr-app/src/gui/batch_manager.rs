@@ -1029,94 +1029,48 @@ mod tests {
         assert!(batch.items[2].bg_image.is_none());
     }
 
-    // ── new + selected_item ─────────────────────────────────────────────
+    // ── selected_item / is_selected / selected_idx_clamped ──────────────
 
+    /// The selection getters agree on an empty batch, an index in range
+    /// and a stale one left past the end by a removal: the accessor must
+    /// not panic, and the clamped index falls back to the last item.
     #[test]
-    fn selected_item_returns_none_when_batch_empty() {
-        let bm = fixture();
-        assert!(bm.selected_item().is_none());
-    }
+    fn selection_getters_on_empty_in_range_and_stale_index() {
+        let empty = fixture();
+        assert!(empty.selected_item().is_none());
+        assert!(!empty.is_selected(0));
+        assert_eq!(empty.selected_idx_clamped(), None);
 
-    #[test]
-    fn selected_item_returns_indexed_item() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.items.push(item_with_cache(2, 0));
-        bm.selected_index = 1;
-        assert_eq!(bm.selected_item().unwrap().id, 2);
-    }
-
-    #[test]
-    fn selected_item_returns_none_when_index_out_of_bounds() {
-        // Defensive: callers should clamp, but the accessor must not panic.
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.selected_index = 99;
-        assert!(bm.selected_item().is_none());
-    }
-
-    // ── is_selected ─────────────────────────────────────────────────────
-
-    #[test]
-    fn is_selected_matches_selected_item_id() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         bm.items.push(item_with_cache(42, 0));
         bm.selected_index = 1;
-        assert!(bm.is_selected(42));
-        assert!(!bm.is_selected(1));
-    }
+        assert_eq!(bm.selected_item().map(|i| i.id), Some(42));
+        assert!(bm.is_selected(42) && !bm.is_selected(1));
+        assert_eq!(bm.selected_idx_clamped(), Some(1));
 
-    #[test]
-    fn is_selected_false_when_batch_empty() {
-        let bm = fixture();
-        assert!(!bm.is_selected(0));
-        assert!(!bm.is_selected(99));
-    }
-
-    // ── selected_idx_clamped ────────────────────────────────────────────
-
-    #[test]
-    fn selected_idx_clamped_is_none_when_empty() {
-        let bm = fixture();
-        assert_eq!(bm.selected_idx_clamped(), None);
-    }
-
-    #[test]
-    fn selected_idx_clamped_returns_index_when_in_bounds() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.items.push(item_with_cache(2, 0));
-        bm.selected_index = 1;
+        bm.selected_index = 99;
+        assert!(bm.selected_item().is_none());
+        assert!(!bm.is_selected(42));
         assert_eq!(bm.selected_idx_clamped(), Some(1));
     }
-
-    #[test]
-    fn selected_idx_clamped_clamps_when_out_of_bounds() {
-        // Guards against stale selected_index after items shrink (remove
-        // operation) before selected_index has been updated.
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.selected_index = 99;
-        assert_eq!(bm.selected_idx_clamped(), Some(0));
-    }
-
     // ── status_counts ───────────────────────────────────────────────────
 
-    #[test]
-    fn status_counts_totals_by_status_excluding_pending() {
+    /// A batch of items put in each status, in order.
+    fn batch_of(statuses: Vec<BatchStatus>) -> BatchManager {
         let mut bm = fixture();
-        let mut push = |id, status| {
+        for (id, status) in (1..).zip(statuses) {
             let mut item = item_with_cache(id, 0);
             crate::gui::tests::fixtures::put_in(&mut item, status);
             bm.items.push(item);
-        };
-        push(1, BatchStatus::Done);
-        push(2, BatchStatus::Done);
-        push(3, BatchStatus::Processing);
-        push(4, BatchStatus::Error("oops".into()));
-        push(5, BatchStatus::Pending);
+        }
+        bm
+    }
 
+    #[test]
+    fn status_counts_totals_by_status_excluding_pending() {
+        use BatchStatus::*;
+        let bm = batch_of(vec![Done, Done, Processing, Error("oops".into()), Pending]);
         let c = bm.status_counts();
         assert_eq!(c.done, 2);
         assert_eq!(c.processing, 1);
@@ -1125,25 +1079,19 @@ mod tests {
     }
 
     #[test]
-    fn status_counts_empty_batch_zero() {
+    fn an_empty_batch_counts_nothing_and_divides_by_nothing() {
         let bm = fixture();
         let c = bm.status_counts();
         assert_eq!(c, StatusCounts::default());
         assert_eq!(c.batch_total(), 0);
+        let report = bm.progress();
+        assert_eq!(report.stage, "Finishing up");
+        assert_eq!(report.pct, 0.0);
     }
 
     #[test]
     fn progress_stage_says_processing_while_in_flight() {
-        let mut bm = fixture();
-        let mut push = |id, status| {
-            let mut item = item_with_cache(id, 0);
-            crate::gui::tests::fixtures::put_in(&mut item, status);
-            bm.items.push(item);
-        };
-        push(1, BatchStatus::Done);
-        push(2, BatchStatus::Processing);
-        push(3, BatchStatus::Pending);
-
+        let bm = batch_of(vec![BatchStatus::Done, BatchStatus::Processing, BatchStatus::Pending]);
         let report = bm.progress();
         assert_eq!(report.stage, "Processing 1/2");
         // pct = done(1) / batch_total(2) = 0.5; pending excluded from total.
@@ -1152,44 +1100,17 @@ mod tests {
 
     #[test]
     fn progress_stage_says_finishing_when_no_in_flight() {
-        let mut bm = fixture();
-        let mut item = item_with_cache(1, 0);
-        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
-        bm.items.push(item);
-
-        let report = bm.progress();
+        let report = batch_of(vec![BatchStatus::Done]).progress();
         assert_eq!(report.stage, "Finishing up");
         assert!((report.pct - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn progress_empty_batch_no_division_by_zero() {
-        let bm = fixture();
-        let report = bm.progress();
-        assert_eq!(report.stage, "Finishing up");
-        assert_eq!(report.pct, 0.0);
-    }
-
-    #[test]
     fn first_error_message_returns_first_errored_item() {
-        let mut bm = fixture();
-        let mut push = |id, status| {
-            let mut item = item_with_cache(id, 0);
-            crate::gui::tests::fixtures::put_in(&mut item, status);
-            bm.items.push(item);
-        };
-        push(1, BatchStatus::Done);
-        push(2, BatchStatus::Error("first problem".into()));
-        push(3, BatchStatus::Error("second problem".into()));
-
+        use BatchStatus::*;
+        let bm = batch_of(vec![Done, Error("first problem".into()), Error("second problem".into())]);
         assert_eq!(bm.first_error_message(), Some("first problem"));
-    }
-
-    #[test]
-    fn first_error_message_none_when_no_errors() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        assert_eq!(bm.first_error_message(), None);
+        assert_eq!(batch_of(vec![Done]).first_error_message(), None);
     }
 
     // ── enforce_tensor_budget / evict_all_tensors ───────────────────────
@@ -1210,37 +1131,21 @@ mod tests {
     #[test]
     fn evict_all_tensors_clears_all_except_selected() {
         let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 100));
+        let mut item = item_with_cache(1, 100);
+        item.edge_planes.store_placeholder();
+        bm.items.push(item);
         bm.items.push(item_with_cache(2, 100));
         bm.items.push(item_with_cache(3, 100));
         bm.selected_index = 1; // item id=2
-        // Sanity: all three start with caches.
         assert!(bm.items.iter().all(|i| i.cached_tensor.is_some()));
 
         bm.evict_all_tensors();
 
         assert!(bm.items[0].cached_tensor.is_none(), "non-selected evicted");
+        assert!(bm.items[0].edge_planes.is_empty() && bm.items[0].cached_edge_tensors.is_none(), "its edge cache too");
         assert!(bm.items[1].cached_tensor.is_some(), "selected preserved");
         assert!(bm.items[2].cached_tensor.is_none(), "non-selected evicted");
     }
-
-    #[test]
-    fn evict_all_tensors_clears_edge_cache_too() {
-        let mut bm = fixture();
-        let mut item = item_with_cache(1, 100);
-        item.edge_planes.store_placeholder();
-        bm.items.push(item);
-        bm.items.push(item_with_cache(2, 100));
-        bm.selected_index = 1; // selected = id=2
-
-        bm.evict_all_tensors();
-
-        // item id=1 (non-selected) gets BOTH caches cleared.
-        assert!(bm.items[0].cached_tensor.is_none());
-        assert!(bm.items[0].edge_planes.is_empty());
-        assert!(bm.items[0].cached_edge_tensors.is_none());
-    }
-
     // ── request_decode_bytes / request_thumbnail (thread-spawning) ──────
 
     /// 1x1 PNG byte sequence — minimum valid PNG.
@@ -1364,23 +1269,11 @@ mod tests {
 
     // ── fit_dimensions (private helper) ─────────────────────────────────
 
+    /// Scales down preserving aspect, never upscales, never reaches zero.
     #[test]
-    fn fit_dimensions_scales_down_oversized() {
-        // 4000x2000 → fits inside 1000x1000 with aspect preserved.
-        let (w, h) = fit_dimensions(4000, 2000, 1000, 1000);
-        assert_eq!((w, h), (1000, 500));
-    }
-
-    #[test]
-    fn fit_dimensions_does_not_upscale() {
-        // Small image should NOT be upscaled to fill the box.
-        let (w, h) = fit_dimensions(10, 10, 1000, 1000);
-        assert_eq!((w, h), (10, 10));
-    }
-
-    #[test]
-    fn fit_dimensions_minimum_size_is_one() {
-        // Pathological case: extreme aspect ratio shouldn't produce zero dims.
+    fn fit_dimensions_shrinks_only_and_keeps_a_pixel() {
+        assert_eq!(fit_dimensions(4000, 2000, 1000, 1000), (1000, 500));
+        assert_eq!(fit_dimensions(10, 10, 1000, 1000), (10, 10));
         let (w, h) = fit_dimensions(1000, 1, 50, 50);
         assert!(w >= 1 && h >= 1);
     }
@@ -1393,81 +1286,29 @@ mod tests {
         i
     }
 
+    /// "Process All [1]" reads as a glitch: one item ticked of one stays
+    /// Selected; All needs at least two.
     #[test]
-    fn process_button_label_empty_batch_is_viewed() {
-        let bm = fixture();
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessViewed);
-    }
-
-    #[test]
-    fn process_button_label_no_checkboxes_is_viewed() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.items.push(item_with_cache(2, 0));
-        bm.items.push(item_with_cache(3, 0));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessViewed);
-    }
-
-    #[test]
-    fn process_button_label_one_checkbox_of_three_is_selected_1() {
-        let mut bm = fixture();
-        bm.items.push(checked(1));
-        bm.items.push(item_with_cache(2, 0));
-        bm.items.push(item_with_cache(3, 0));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
-    }
-
-    #[test]
-    fn process_button_label_two_checkboxes_of_three_is_selected_2() {
-        let mut bm = fixture();
-        bm.items.push(checked(1));
-        bm.items.push(checked(2));
-        bm.items.push(item_with_cache(3, 0));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(2));
-    }
-
-    #[test]
-    fn process_button_label_all_checked_multi_is_all() {
-        let mut bm = fixture();
-        bm.items.push(checked(1));
-        bm.items.push(checked(2));
-        bm.items.push(checked(3));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessAll(3));
-    }
-
-    #[test]
-    fn process_button_label_single_item_checked_is_selected_not_all() {
-        // "Process All [1]" reads as a glitch — the t>=2 guard keeps it Selected.
-        let mut bm = fixture();
-        bm.items.push(checked(1));
-        assert_eq!(bm.process_button_label(), ProcessButtonLabel::ProcessSelected(1));
+    fn process_button_label_follows_the_ticks() {
+        use ProcessButtonLabel::*;
+        let rows: [(&[bool], ProcessButtonLabel); 6] = [
+            (&[], ProcessViewed),
+            (&[false, false, false], ProcessViewed),
+            (&[true, false, false], ProcessSelected(1)),
+            (&[true, true, false], ProcessSelected(2)),
+            (&[true, true, true], ProcessAll(3)),
+            (&[true], ProcessSelected(1)),
+        ];
+        for (ticks, want) in rows {
+            let mut bm = fixture();
+            for (id, &t) in (1..).zip(ticks) {
+                bm.items.push(if t { checked(id) } else { item_with_cache(id, 0) });
+            }
+            assert_eq!(bm.process_button_label(), want, "{ticks:?}");
+        }
     }
 
     // ── items_to_process ─────────────────────────────────────────────────
-
-    #[test]
-    fn items_to_process_empty_batch_is_empty() {
-        let bm = fixture();
-        assert!(bm.items_to_process().is_empty());
-    }
-
-    #[test]
-    fn items_to_process_no_checkboxes_returns_viewed() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(10, 0));
-        bm.items.push(item_with_cache(20, 0));
-        bm.items.push(item_with_cache(30, 0));
-        bm.selected_index = 1;
-        assert_eq!(bm.items_to_process(), vec![20]);
-    }
-
-    #[test]
-    fn items_to_process_no_checkboxes_clamps_stale_index() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(42, 0));
-        bm.selected_index = 99; // stale; clamped to 0
-        assert_eq!(bm.items_to_process(), vec![42]);
-    }
 
     /// The three target-set readers agree on ticked items and on the item
     /// on screen; a stale index clamps for Process only, the other two
@@ -1504,20 +1345,6 @@ mod tests {
     }
 
     #[test]
-    fn items_to_process_some_checkboxes_returns_only_checked() {
-        let mut bm = fixture();
-        bm.items.push(checked(1));
-        bm.items.push(item_with_cache(2, 0));
-        bm.items.push(checked(3));
-        bm.selected_index = 1; // viewed item is NOT checked — still excluded
-        let got = bm.items_to_process();
-        assert_eq!(got.len(), 2);
-        assert!(got.contains(&1));
-        assert!(got.contains(&3));
-        assert!(!got.contains(&2));
-    }
-
-    #[test]
     fn items_to_process_all_checked_returns_all() {
         let mut bm = fixture();
         bm.items.push(checked(1));
@@ -1526,7 +1353,6 @@ mod tests {
         let got = bm.items_to_process();
         assert_eq!(got.len(), 3);
     }
-
     /// Filter-only Process must be off the UI thread — decodes + applies
     /// the subject effect on a background thread; UI learns via `filter_only_rx`.
     #[test]
@@ -1562,66 +1388,36 @@ mod tests {
     // ── select_item ─────────────────────────────────────────────────────
 
     #[test]
-    fn select_item_returns_true_when_index_changes() {
+    fn select_item_reports_whether_the_index_changed() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
         bm.items.push(item_with_cache(2, 0));
-        bm.selected_index = 0;
+        assert!(!bm.select_item(0));
         assert!(bm.select_item(1));
         assert_eq!(bm.selected_index, 1);
     }
 
-    #[test]
-    fn select_item_returns_false_when_already_selected() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        bm.selected_index = 0;
-        assert!(!bm.select_item(0));
-        assert_eq!(bm.selected_index, 0);
-    }
-
     // ── reorder ─────────────────────────────────────────────────────────
 
+    /// The selected item follows its new position; a no-op move or an
+    /// out-of-bounds source leaves the order alone.
     #[test]
-    fn reorder_moves_item_forward_and_adjusts_selected() {
-        // [A B C D] selected=1(B), move from=0(A) to=3 → [B C A D] selected=0(B)
-        let mut bm = fixture();
-        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
-        bm.selected_index = 1;
-        bm.reorder(0, 3);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [20, 30, 10, 40]);
-        assert_eq!(bm.selected_index, 0, "selected item B must follow its new position");
+    fn reorder_moves_the_item_and_the_selection_follows() {
+        let rows: [(usize, usize, usize, [u64; 4], usize); 4] = [
+            (1, 0, 3, [20, 30, 10, 40], 0),
+            (2, 3, 1, [10, 40, 20, 30], 3),
+            (1, 1, 1, [10, 20, 30, 40], 1),
+            (1, 5, 0, [10, 20, 30, 40], 1),
+        ];
+        for (selected, from, to, order, now_selected) in rows {
+            let mut bm = fixture();
+            for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+            bm.selected_index = selected;
+            bm.reorder(from, to);
+            assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), order, "{from} -> {to}");
+            assert_eq!(bm.selected_index, now_selected, "{from} -> {to}");
+        }
     }
-
-    #[test]
-    fn reorder_moves_item_backward_and_adjusts_selected() {
-        // [A B C D] selected=2(C), move from=3(D) to=1 → [A D B C] selected=3(C)
-        let mut bm = fixture();
-        for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
-        bm.selected_index = 2;
-        bm.reorder(3, 1);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 40, 20, 30]);
-        assert_eq!(bm.selected_index, 3, "selected item C must follow its new position");
-    }
-
-    #[test]
-    fn reorder_noop_when_from_equals_to() {
-        let mut bm = fixture();
-        for id in [10, 20, 30] { bm.items.push(item_with_cache(id, 0)); }
-        bm.selected_index = 1;
-        bm.reorder(1, 1);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20, 30]);
-        assert_eq!(bm.selected_index, 1);
-    }
-
-    #[test]
-    fn reorder_noop_when_from_out_of_bounds() {
-        let mut bm = fixture();
-        for id in [10, 20] { bm.items.push(item_with_cache(id, 0)); }
-        bm.reorder(5, 0);
-        assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), [10, 20]);
-    }
-
     // ── selection lifecycle ─────────────────────────────────────────────
 
     fn style(fill: f32) -> crate::gui::background_io::SelectionStyle {
