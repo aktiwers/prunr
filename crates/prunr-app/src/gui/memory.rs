@@ -1,18 +1,13 @@
-//! Memory-aware admission controller for batch image processing.
-//!
-//! Instead of loading all images into memory at once, the controller
-//! maintains a RAM budget and greedily admits images using best-fit
-//! selection. As each image finishes processing and its buffers are
-//! evicted, the freed budget is used to admit new images.
+//! Memory-aware admission for batch processing: images are admitted
+//! best-fit against a RAM budget, and each release frees room for more.
 
 use std::collections::HashMap;
 
 use prunr_core::ModelKind;
 
-/// Estimated memory cost for a single image.
 pub struct ImageMemCost {
     pub item_id: u64,
-    /// Total estimated bytes this image will consume while in-flight.
+    /// Estimated bytes while in flight.
     pub total: usize,
 }
 
@@ -21,7 +16,6 @@ pub struct ImageMemCost {
 pub struct AdmissionController {
     budget_bytes: usize,
     committed_bytes: usize,
-    /// Maps admitted item_id → its cost, so we can subtract on release.
     admitted: HashMap<u64, usize>,
     /// Pending items sorted descending by cost (largest first for best-fit).
     pending: Vec<ImageMemCost>,
@@ -32,9 +26,8 @@ pub struct AdmissionController {
 pub(crate) const RESIDENT_HISTORY_STEPS: usize = 10;
 
 impl AdmissionController {
-    /// Create a new controller. Queries available system RAM and applies
-    /// safety margin; `first_look`: the first-look model may load beside
-    /// the engines.
+    /// Budget is 85% of available RAM minus engine overhead; `first_look`:
+    /// the first-look model may load beside the engines.
     pub fn new(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> Self {
         let available = crate::hardware::available_ram_bytes_now() as usize;
         let overhead = model_overhead(model, jobs, cpu_only)
@@ -49,18 +42,10 @@ impl AdmissionController {
         }
     }
 
-    /// Estimate memory cost for a single image from dimensions, file size,
-    /// and the number of compressed undo states expected to sit in RAM.
-    ///
-    /// Cost = `2 × rgba_size + file_bytes + history_residue`, where the
-    /// history residue uses a conservative ~2 : 1 zstd ratio on RGBA per
-    /// stored state — zstd-level-1 (the level `history_disk` uses) sees
-    /// roughly 2:1 on natural-image RGBA, so dividing by 2 keeps admission
-    /// honest under sustained pressure rather than under-counting and
-    /// over-admitting. Without this term, long batches with deep history
-    /// systematically OOM. The estimate is intentionally pessimistic —
-    /// slots demoted to disk free their RAM before the next admission
-    /// window, but counting them upfront caps the worst-case RSS.
+    /// Cost = `2 × rgba_size + file_bytes + history_residue`, the residue
+    /// at zstd-1's ~2:1 on RGBA per resident undo state. Deliberately
+    /// pessimistic: without the history term long batches with deep
+    /// history OOM.
     pub fn estimate_cost(
         item_id: u64,
         dimensions: (u32, u32),
@@ -81,23 +66,19 @@ impl AdmissionController {
         Self { budget_bytes, committed_bytes: 0, admitted: HashMap::new(), pending: Vec::new() }
     }
 
-    /// Whether images are still waiting for room in the budget.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 
-    /// Add pending items. Sorts them for best-fit (largest first).
     pub fn enqueue(&mut self, costs: Vec<ImageMemCost>) {
         self.pending.extend(costs);
         self.pending.sort_by(|a, b| b.total.cmp(&a.total));
     }
 
-    /// Try to admit the next best-fitting image.
-    /// Returns `Some(item_id)` if one fits the remaining budget.
+    /// The largest pending image that fits the remaining budget.
     pub fn try_admit_next(&mut self) -> Option<u64> {
         let remaining = self.budget_bytes.saturating_sub(self.committed_bytes);
 
-        // Best-fit: find the largest pending item that fits.
         if let Some(idx) = self.pending.iter().position(|c| c.total <= remaining) {
             let cost = self.pending.remove(idx);
             self.committed_bytes += cost.total;
@@ -118,14 +99,12 @@ impl AdmissionController {
         None // wait for in-flight items to release budget
     }
 
-    /// Release an item's budget after its processing completes.
     pub fn release(&mut self, item_id: u64) {
         if let Some(cost) = self.admitted.remove(&item_id) {
             self.committed_bytes = self.committed_bytes.saturating_sub(cost);
         }
     }
 
-    /// True when all items have been admitted and released.
     /// The images still waiting for room, not admitted.
     pub(crate) fn pending_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending.iter().map(|c| c.item_id)
@@ -136,8 +115,7 @@ impl AdmissionController {
     }
 }
 
-/// Returns true when available RAM drops below 20% of total.
-/// Used to trigger Tier 2 → Tier 3 demotion of history entries.
+/// Available RAM below 20% of total: undo history spills to disk.
 pub fn under_memory_pressure() -> bool {
     let total = crate::hardware::total_ram_bytes();
     let available = crate::hardware::available_ram_bytes_now();
@@ -145,30 +123,25 @@ pub fn under_memory_pressure() -> bool {
     (available as f64 / total as f64) < 0.20
 }
 
-/// Total cost per concurrent inference slot: session weights + ORT workspace +
-/// inference tensors + decoded image buffers. Reads `working_set_mb` from
-/// the model registry — adding a new segmentation model is a registry edit,
-/// no `memory.rs` change required.
+/// Per inference slot: session weights, ORT workspace, tensors and image
+/// buffers, as the registry's `working_set_mb`.
 fn per_engine_cost(model: ModelKind) -> usize {
     working_set_mb(model) as usize * 1024 * 1024
 }
 
-/// The model's registry working set in MB.
 pub(crate) fn working_set_mb(model: ModelKind) -> u32 {
     let id: prunr_models::ModelId = model.into();
     // unreachable fallback: every ModelKind has a descriptor.
     prunr_models::descriptor(id).map_or(800, |d| d.working_set_mb)
 }
 
-/// Fixed overhead for the engine pool the worker will build for `jobs`.
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &prunr_core::OrtEngine::detect_active_provider());
     per_engine_cost(model) * engines
 }
 
-/// Maximum safe parallel jobs for the given model and available RAM.
-/// Conservative: engines should use at most 50% of available RAM,
-/// leaving the rest for image buffers, history, and OS headroom.
+/// Engines take at most 50% of available RAM, leaving the rest for image
+/// buffers, history and OS headroom.
 pub fn safe_max_jobs(model: ModelKind) -> usize {
     let available = crate::hardware::available_ram_bytes_now() as usize;
     let budget = available / 2; // 50% of available RAM for engines

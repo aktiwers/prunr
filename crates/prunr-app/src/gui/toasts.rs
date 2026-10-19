@@ -1,19 +1,11 @@
-//! Newtype around `egui_notify::Toasts` that pre-wraps long captions at
-//! word boundaries.
-//!
-//! `egui-notify` 0.22 hardcodes `TextWrapping::Extend` with infinite
-//! width inside its `show()` — there's no caller-side knob to opt into
-//! actual wrapping, so the toast widens with the longest caption and
-//! drifts off-screen on error messages that interpolate paths or
-//! exception text. Wrapping the caption ourselves before handing it off
-//! sidesteps the upstream limitation without forking the crate.
+//! `egui_notify::Toasts` with captions pre-wrapped at word boundaries:
+//! egui-notify 0.22 hardcodes infinite-width `TextWrapping::Extend`, so a
+//! caption with a path or error text would drift off-screen.
 
 use egui::{Context, Vec2};
 use egui_notify::{Anchor, Toast};
 
-/// Per-line character cap. Tuned for the default egui_notify font at
-/// ~12 px — readable line length without going wider than ~360 px.
-/// Words longer than this get hard-broken inside the wrapper.
+/// Readable line length at the default ~12 px font, under ~360 px wide.
 const TOAST_LINE_CHARS: usize = 60;
 
 #[derive(Default)]
@@ -95,11 +87,8 @@ impl Toasts {
 }
 
 
-/// Greedy word-wrap: break on whitespace into lines of at most
-/// `TOAST_LINE_CHARS` chars (counted in unicode scalar values, which is
-/// close enough to display width for our use cases). Words longer than
-/// the limit hard-break — uncommon in practice (URLs, file paths) but
-/// we'd rather wrap mid-word than overflow the screen.
+/// Greedy word-wrap counted in chars (close enough to display width);
+/// a word over the limit hard-breaks rather than overflow the screen.
 fn wrap(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + input.len() / TOAST_LINE_CHARS);
     for (i, line) in input.split('\n').enumerate() {
@@ -118,7 +107,6 @@ fn wrap_one_line(line: &str, out: &mut String) {
         let wlen = word.chars().count();
         if wlen >= TOAST_LINE_CHARS {
             if !first { out.push('\n'); col = 0; }
-            // Hard-break very long words so the toast still fits.
             for ch in word.chars() {
                 if col >= TOAST_LINE_CHARS {
                     out.push('\n');

@@ -1,6 +1,5 @@
 pub const READY: &str = "Ready";
 
-/// Progress and status text state, displayed in the status bar.
 pub struct StatusState {
     pub stage: String,
     pub pct: f32,

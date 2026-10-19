@@ -35,7 +35,6 @@ impl SelState {
     }
 }
 
-/// One selection edit.
 #[derive(Clone)]
 pub(crate) enum SelectionOp {
     /// A stroke, painted or decoded, merged into the selection: Add grows
@@ -68,7 +67,6 @@ enum Msg {
     Forget(u64),
 }
 
-/// An edit for the worker.
 struct Job {
     item_id: u64,
     op: SelectionOp,
@@ -136,7 +134,6 @@ impl SelectionQueue {
         Self { tx, rx, pending: HashMap::new(), deferred: Vec::new(), repaint }
     }
 
-    /// Wake `ctx` whenever an edit is made.
     pub(crate) fn wake(&self, ctx: &egui::Context) {
         let _ = self.repaint.set(ctx.clone());
     }

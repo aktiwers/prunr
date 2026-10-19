@@ -52,10 +52,8 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
     let clicked = ctx.input(|i| i.pointer.primary_clicked());
     if !clicked { return false; }
 
-    // If any popup is open (color picker, combo box), don't close
     if any_popup_open(ctx) { return false; }
 
-    // Check click position is outside the window rect
     let click_pos = ctx.input(|i| i.pointer.interact_pos());
     if let (Some(pos), Some(resp)) = (click_pos, window_response) {
         !resp.response.rect.contains(pos)
@@ -123,10 +121,9 @@ pub fn motion_clock(ctx: &egui::Context) -> f32 {
 /// enough to watch the image change under it, solid enough to read.
 pub const SCRUB_OPACITY: f32 = 0.7;
 
-/// How often the animations that last as long as a run draw (the
-/// progress capsule, the working canvas, the busy pills): thirty frames
-/// a second keeps a turning ring smooth at half the drawing of sixty,
-/// which a laptop on battery feels over a run of minutes.
+/// Frame pace of animations that last a whole run (capsule, working
+/// canvas, busy pills): 30 fps keeps a ring smooth at half the drawing
+/// of 60, which a laptop on battery feels over minutes.
 pub const WORK_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// How often the slow ambient animations draw (the processing canvas,
@@ -227,23 +224,17 @@ pub fn apply_modal_visuals(ui: &mut egui::Ui) {
     vis.widgets.hovered.bg_fill = WIDGET_HOVER_BG;
 }
 
-/// Suppression window for the backdrop-click that opens a modal —
-/// without it, the same primary_clicked event that triggered the open
-/// also fires backdrop_clicked outside the new window's rect, closing
-/// it on the first frame.
+/// Without it, the click that opens a modal also lands outside its rect
+/// and closes it on the first frame.
 pub const MODAL_BACKDROP_DEBOUNCE_SECS: f64 = 0.2;
 
 /// What a modal keeps clear of the window's edges when it has to shrink.
 const MODAL_SCREEN_MARGIN: f32 = 16.0;
 const MODAL_MIN_SIZE: f32 = 240.0;
 
-/// Render a centred non-resizable modal: backdrop + window + frame +
-/// close-on-backdrop-click. Returns `true` when the user closed the
-/// modal this frame (X button or backdrop click). The `opened_at`
-/// timestamp lives in egui memory keyed by `id`.
-///
-/// `id` must be unique across modals — used as the backdrop layer id,
-/// the egui Window id, and the debounce-memory key.
+/// `true` when the user closed the modal this frame (X or backdrop).
+/// `id` must be unique across modals: it keys the backdrop layer, the
+/// Window and the debounce memory.
 pub fn standard_modal_window(
     ctx: &egui::Context,
     id: &str,
@@ -367,10 +358,8 @@ pub const ACCENT_GREEN: Color32 = Color32::from_rgb(0x5b, 0x8c, 0x3e);
 /// Destructive/error
 pub const DESTRUCTIVE: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 
-/// Primary text
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 
-/// Secondary text
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(0xa8, 0xa8, 0xa8);
 
 /// Checkerboard colors for light mode: (lighter square, darker square).
@@ -386,7 +375,6 @@ pub const CHECKER_DARK_MODE: (Color32, Color32) = (
     Color32::from_rgb(0x1f, 0x1f, 0x1f),
 );
 
-/// Progress bar fill
 pub const PROGRESS_FILL: Color32 = ACCENT;
 
 /// The sweep over an image being processed, on the canvas and its thumbnail:
@@ -396,7 +384,6 @@ pub const PROCESSING_SWEEP: Color32 = Color32::from_rgba_premultiplied(24, 9, 28
 /// Drop zone border on drag hover
 pub const DROP_HOVER_BORDER: Color32 = ACCENT;
 
-/// Drop zone border default
 pub const DROP_BORDER: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 64);
 
 // === Spacing (multiples of 4) ===
@@ -469,7 +456,6 @@ pub const FONT_SIZE_HEADING: f32 = 16.0;
 
 // === Checkerboard ===
 
-/// Checkerboard square size in pixels
 pub const CHECKER_SIZE: f32 = 16.0;
 
 // === Logo ===
@@ -481,7 +467,6 @@ pub const THUMBNAIL_SIZE: f32 = 120.0;
 pub const THUMBNAIL_ROUNDING: f32 = 4.0;
 
 // === Modals ===
-/// Width of a standard modal.
 pub const STANDARD_MODAL_WIDTH: f32 = 600.0;
 /// The glass panel's colour at full cover, for a modal page of text.
 pub const MODAL_FILL: Color32 = Color32::from_rgb(42, 42, 46);

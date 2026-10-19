@@ -1,9 +1,5 @@
-//! Magic Brush coordinator. Owns the tool-active flag, the encoder-pending
-//! flag, and the in-progress stroke point buffer for SAM decoder prompts.
-//!
-//! Does NOT own the selection mask (lives on BatchItem) or the encoder
-//! embedding cache (also BatchItem). This struct is purely transient UI
-//! state — active tool + "preparing..." spinner gate + stroke buffer.
+//! Transient Magic Brush UI state. The selection mask and the encoder
+//! embedding live on BatchItem, not here.
 
 use std::time::{Duration, Instant};
 
@@ -33,7 +29,6 @@ pub(crate) struct PendingSamPick {
     pub(crate) mode: prunr_core::selection::BrushMode,
 }
 
-/// Magic Brush tool coordinator.
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
     active: bool,
@@ -45,20 +40,13 @@ pub(crate) struct MagicBrushState {
     /// A re-threshold is on the pool; the next Confidence value waits for
     /// its result so a drag never queues more than one.
     pub(crate) rethreshold_in_flight: bool,
-    /// True while Processor::dispatch_sam_encoder is in flight for the
-    /// current item. Set on dispatch, cleared by pump_sam_encoder_results
-    /// when the embedding lands.
+    /// An encode is in flight for the current item; cleared when its
+    /// embedding lands.
     encoder_pending: bool,
-    /// Points collected during an in-progress drag stroke, in SOURCE-IMAGE
-    /// pixel coordinates. Populated while the user drags with Magic Brush
-    /// active; dispatched on mouse-up via build_stroke_prompt.
+    /// The in-progress drag stroke in SOURCE-IMAGE pixels.
     pub(crate) active_stroke: Vec<(f32, f32)>,
-    /// The in-progress trail in SCREEN coordinates, cleared at the same
-    /// lifecycle points as `active_stroke`. Distinct buffer because the
-    /// SAM prompt path needs source-pixel points but the visual layer
-    /// needs zoom-aware screen pixels — keeping the transform out of the
-    /// dispatch path means a pan / zoom mid-stroke doesn't corrupt the
-    /// SAM points.
+    /// The same stroke in SCREEN pixels, kept apart so a pan / zoom
+    /// mid-stroke doesn't corrupt the SAM points.
     pub(crate) active_trail: Trail,
     /// The image on screen and since when, and the one before it.
     shown: Option<(u64, Instant)>,
@@ -127,9 +115,8 @@ impl MagicBrushState {
         ENCODE_SETTLE.checked_sub(now.saturating_duration_since(since)).filter(|d| !d.is_zero())
     }
 
-    /// Clear both the source-coords stroke and the screen-coords trail.
-    /// One method keeps the two buffers locked together — a clear of one
-    /// without the other would leave a ghost trail or a stuck dispatch.
+    /// Clearing one buffer without the other leaves a ghost trail or a
+    /// stuck dispatch.
     pub(crate) fn clear_stroke(&mut self) {
         self.active_stroke.clear();
         self.active_trail.clear();
