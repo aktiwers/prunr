@@ -337,7 +337,7 @@ pub fn process_lama(
     }
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
-    fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
+    fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, _, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
             tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
             tile_rgba.clone()
@@ -348,18 +348,19 @@ pub fn process_lama(
 /// Fill `mask` through `fill` at `scale`, region by region: each region
 /// (nearby pieces grouped) `scale` shrinks is filled on its own, scaled down;
 /// the rest in one full-size pass. A small mark far from a large one
-/// stays sharp. `fill` reports through the handle it is given, which
-/// places a scaled-down crop's tiles where the crop sits in the photo.
+/// stays sharp. `fill` gets the scale it fills at (1 at full size), and
+/// reports through the handle it is given, which places a scaled-down
+/// crop's tiles where the crop sits in the photo.
 pub(crate) fn fill_at_scale(
     image: &RgbaImage,
     mask: &GrayImage,
     scale: FillScale,
     fit: Fit,
     progress: &Progress,
-    mut fill: impl FnMut(&RgbaImage, &GrayImage, &Progress) -> Result<RgbaImage, CoreError>,
+    mut fill: impl FnMut(&RgbaImage, &GrayImage, f32, &Progress) -> Result<RgbaImage, CoreError>,
 ) -> Result<Filled, CoreError> {
     if scale == FillScale::Full {
-        return Ok(Filled::full(fill(image, mask, progress)?));
+        return Ok(Filled::full(fill(image, mask, 1.0, progress)?));
     }
     let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
         .map(|r| {
@@ -369,7 +370,7 @@ pub(crate) fn fill_at_scale(
         .filter(|&(_, f)| f < 1.0)
         .collect();
     if shrunk.is_empty() {
-        return Ok(Filled::full(fill(image, mask, progress)?));
+        return Ok(Filled::full(fill(image, mask, 1.0, progress)?));
     }
     let smallest = shrunk.iter().map(|&(_, f)| f).fold(1.0f32, f32::min);
     let mut out = image.clone();
@@ -383,7 +384,7 @@ pub(crate) fn fill_at_scale(
         }
     }
     if !mask_is_empty(&rest) {
-        out = fill(&out, &rest, progress)?;
+        out = fill(&out, &rest, 1.0, progress)?;
     }
     Ok(Filled { rgba: out, scale: smallest })
 }
@@ -403,7 +404,7 @@ fn fill_scaled_down(
     hole: Bbox,
     factor: f32,
     progress: &Progress,
-    fill: &mut impl FnMut(&RgbaImage, &GrayImage, &Progress) -> Result<RgbaImage, CoreError>,
+    fill: &mut impl FnMut(&RgbaImage, &GrayImage, f32, &Progress) -> Result<RgbaImage, CoreError>,
 ) -> Result<(), CoreError> {
     let margin = (OVERLAP as f32 / factor).ceil() as u32;
     let (x0, y0) = (hole.x.saturating_sub(margin), hole.y.saturating_sub(margin));
@@ -418,7 +419,7 @@ fn fill_scaled_down(
     // Any coverage stays a hole, so nothing of the object survives the shrink.
     let mut small_mask = crate::formats::resize_gray_lanczos3(&crop_mask, sw, sh);
     small_mask.pixels_mut().for_each(|p| p.0[0] = if p.0[0] > 0 { 255 } else { 0 });
-    let small_fill = fill(&small_rgba, &small_mask, &progress.within((crop.x, crop.y, crop.w, crop.h), mask.dimensions()))?;
+    let small_fill = fill(&small_rgba, &small_mask, factor, &progress.within((crop.x, crop.y, crop.w, crop.h), mask.dimensions()))?;
     let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
     // Only this hole: another one's pixels in the crop get their own fill.
     let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
@@ -1466,7 +1467,7 @@ mod tests {
         let factor = FillScale::Auto.factor((hole.w, hole.h), LAMA_FIT);
         let mut seen = None;
         let mut out = image.clone();
-        fill_scaled_down(&mut out, &mask, hole, factor, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: &Progress| {
+        fill_scaled_down(&mut out, &mask, hole, factor, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: f32, _: &Progress| {
             // The mark at (1800-1830, 800-830): crop starts 200 px out, scaled by 0.32.
             let neighbour = m.get_pixel(485, 165).0[0];
             seen = Some((rgba.dimensions(), neighbour));
@@ -1495,8 +1496,8 @@ mod tests {
             }
         }
         let mut calls = Vec::new();
-        let Filled { rgba: out, scale } = fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, m, _| {
-            calls.push((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
+        let Filled { rgba: out, scale } = fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, m, at, _| {
+            calls.push((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count(), at));
             let mut filled = rgba.clone();
             for (x, y, p) in m.enumerate_pixels() {
                 if p.0[0] >= 128 {
@@ -1506,11 +1507,12 @@ mod tests {
             Ok(filled)
         }).unwrap();
         assert!(scale > 0.0 && scale < 1.0, "reports the large region's scale: {scale}");
-        let full = fill_at_scale(&image, &mask, FillScale::Full, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, _| Ok(rgba.clone())).unwrap();
+        let full = fill_at_scale(&image, &mask, FillScale::Full, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, _, _| Ok(rgba.clone())).unwrap();
         assert_eq!(full.scale, 1.0, "Full fills at full size");
         assert_eq!(calls.len(), 2, "the large region scaled down, then the rest");
         assert!(calls[0].0.0 < 1200, "the large region's crop is scaled down");
-        assert_eq!(calls[1], ((1200, 400), 20 * 20), "the small mark alone, at full size");
+        assert_eq!(calls[0].2, scale, "the fill is told the scale it fills at");
+        assert_eq!(calls[1], ((1200, 400), 20 * 20, 1.0), "the small mark alone, at full size");
         assert_eq!(out.get_pixel(1110, 200).0, [200, 0, 0, 255]);
         assert_eq!(out.get_pixel(400, 200).0, [200, 0, 0, 255]);
         assert_eq!(out.get_pixel(900, 200).0, [10, 20, 30, 255]);
@@ -1533,7 +1535,7 @@ mod tests {
         }
         let sink = std::sync::Arc::new(RecordingSink::default());
         let progress = Progress::new(sink.clone()).with_tile_previews(600);
-        fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &progress, |rgba, _, p| {
+        fill_at_scale(&image, &mask, FillScale::Auto, Fit { long: 300, short: 300 }, &progress, |rgba, _, _, p| {
             let (w, h) = rgba.dimensions();
             p.tiles(vec![TileRect::of_pixels(0, 0, w, h, w, h)]);
             p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![0; (pw * ph * 4) as usize]);
@@ -1561,7 +1563,7 @@ mod tests {
         let hole = mask_bbox(&mask, 128, 0).unwrap();
         let mut seen = None;
         let mut out = image.clone();
-        fill_scaled_down(&mut out, &mask, hole, 0.25, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: &Progress| {
+        fill_scaled_down(&mut out, &mask, hole, 0.25, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: f32, _: &Progress| {
             seen = Some((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
             Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
         }).unwrap();
