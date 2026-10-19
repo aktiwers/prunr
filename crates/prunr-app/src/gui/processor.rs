@@ -193,22 +193,38 @@ struct RunQueue {
 }
 
 /// An in-process model run, one at a time (upscale, colorize).
+/// Both ends of the channel a background job's answers come back on.
+struct Chan<T> {
+    tx: mpsc::Sender<T>,
+    rx: mpsc::Receiver<T>,
+}
+
+impl<T> Default for Chan<T> {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { tx, rx }
+    }
+}
+
+impl<T> Chan<T> {
+    fn drain(&self) -> Vec<T> {
+        self.rx.try_iter().collect()
+    }
+}
+
 struct RunSlot<R> {
     active: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
-    tx: mpsc::Sender<R>,
-    rx: mpsc::Receiver<R>,
+    done: Chan<R>,
     warm: WarmEngine,
 }
 
 impl<R> RunSlot<R> {
     fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             active: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
-            tx,
-            rx,
+            done: Chan::default(),
             warm: Arc::new(Mutex::new(None)),
         }
     }
@@ -226,16 +242,12 @@ impl<R> RunSlot<R> {
         true
     }
 
-    fn drain(&self) -> Vec<R> {
-        self.rx.try_iter().collect()
-    }
-
     /// A run starts: it is in flight, not cancelled, and reports to
     /// `progress`. The run's thread ends it through the returned handle.
     fn begin(&self, progress: super::dispatch_progress::RunSink) -> RunDone<R> {
         self.active.store(true, Ordering::Release);
         self.cancel.store(false, Ordering::Release);
-        RunDone { active: Arc::clone(&self.active), tx: self.tx.clone(), progress }
+        RunDone { active: Arc::clone(&self.active), tx: self.done.tx.clone(), progress }
     }
 
     fn take_engine(&self) -> Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)> {
@@ -760,8 +772,7 @@ pub(crate) struct Processor {
     seg_run: Option<super::dispatch_progress::RunSink>,
     /// The per-item generation drops a result a fresher stroke overtook;
     /// `inpaint_pending` counts dispatches not yet drained.
-    inpaint_tx: mpsc::Sender<(u64, InpaintOutcome)>,
-    inpaint_rx: mpsc::Receiver<(u64, InpaintOutcome)>,
+    inpaint_done: Chan<(u64, InpaintOutcome)>,
     inpaint_latest_generation: HashMap<u64, u64>,
     inpaint_pending: HashMap<u64, u32>,
     /// Checked between LaMa tiles and between SD UNet steps.
@@ -786,17 +797,14 @@ pub(crate) struct Processor {
     /// construction deadlocks on dlopen).
     upscale_run_options: std::sync::OnceLock<Arc<prunr_core::upscale::UpscaleRunOptions>>,
     /// The pictures runs make for their items (`PictureSink`).
-    picture_tx: mpsc::Sender<RunPicture>,
-    picture_rx: mpsc::Receiver<RunPicture>,
+    pictures: Chan<RunPicture>,
     /// The one progress snapshot every dispatch kind reports into; `None`
     /// when nothing runs.
     dispatch_progress: super::dispatch_progress::DispatchProgressSlot,
     /// Its cancel flag is read before and after the model's one run.
     colorize: RunSlot<ColorizeResult>,
-    sam_encoder_tx: mpsc::Sender<SamEncoderResult>,
-    sam_encoder_rx: mpsc::Receiver<SamEncoderResult>,
-    sam_decoder_tx: mpsc::Sender<SamDecoderResult>,
-    sam_decoder_rx: mpsc::Receiver<SamDecoderResult>,
+    sam_encoded: Chan<SamEncoderResult>,
+    sam_decoded: Chan<SamDecoderResult>,
     sam_sessions: SamSessionSlot,
     /// Whether dispatches run their models. A test app's runs start
     /// and stay in flight until the test lands or fails them with the
@@ -804,8 +812,7 @@ pub(crate) struct Processor {
     /// test process never initialises, and the pool worker it blocks is
     /// lost for every test after it.
     runs_models: bool,
-    faces_tx: mpsc::Sender<FacesResult>,
-    faces_rx: mpsc::Receiver<FacesResult>,
+    faces_found: Chan<FacesResult>,
     /// The latest face search's stop flag, for Cancel and Esc.
     faces_stop: Mutex<Arc<AtomicBool>>,
     /// The latest face search's number: an earlier search's pictures are
@@ -834,12 +841,7 @@ impl Processor {
         worker_tx: mpsc::Sender<WorkerMessage>,
         worker_rx: mpsc::Receiver<WorkerResult>,
     ) -> Self {
-        let (inpaint_tx, inpaint_rx) = mpsc::channel();
         let (inpaint_bridge_tx, inpaint_bridge_rx) = spawn_inpaint_bridge();
-        let (picture_tx, picture_rx) = mpsc::channel();
-        let (sam_encoder_tx, sam_encoder_rx) = mpsc::channel();
-        let (sam_decoder_tx, sam_decoder_rx) = mpsc::channel();
-        let (faces_tx, faces_rx) = mpsc::channel();
         let dispatch_progress = super::dispatch_progress::DispatchProgressSlot::new();
         let depth = DepthQueue::spawn(dispatch_progress.clone());
         Self {
@@ -855,8 +857,7 @@ impl Processor {
             in_flight: Vec::new(),
             next_batch: 0,
             seg_run: None,
-            inpaint_tx,
-            inpaint_rx,
+            inpaint_done: Chan::default(),
             inpaint_latest_generation: HashMap::new(),
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
@@ -866,18 +867,14 @@ impl Processor {
             upscale: RunSlot::new(),
             run_queue: Mutex::new(RunQueue::default()),
             upscale_run_options: std::sync::OnceLock::new(),
-            picture_tx,
-            picture_rx,
+            pictures: Chan::default(),
             dispatch_progress,
             colorize: RunSlot::new(),
-            sam_encoder_tx,
-            sam_encoder_rx,
-            sam_decoder_tx,
-            sam_decoder_rx,
+            sam_encoded: Chan::default(),
+            sam_decoded: Chan::default(),
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
-            faces_tx,
-            faces_rx,
+            faces_found: Chan::default(),
             faces_stop: Mutex::default(),
             faces_latest: Arc::default(),
             depth,
@@ -948,7 +945,7 @@ impl Processor {
     /// A Magic Brush click with Depth on: everything near the clicked
     /// depth, made on the pool and landing like a decoded stroke.
     pub(crate) fn dispatch_depth_select(&self, req: DepthSelectRequest) {
-        let tx = self.sam_decoder_tx.clone();
+        let tx = self.sam_decoded.tx.clone();
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let around = req.depth.at(req.at.0, req.at.1);
@@ -967,7 +964,7 @@ impl Processor {
     /// An encoder run finishing for `item_id`.
     #[cfg(test)]
     pub(crate) fn land_sam_encoder_for_test(&self, item_id: u64, embedding: prunr_core::sam::SamEmbedding) {
-        let _ = self.sam_encoder_tx.send(SamEncoderResult { item_id, result: Ok(embedding) });
+        let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, result: Ok(embedding) });
     }
 
     #[cfg(test)]
@@ -978,12 +975,12 @@ impl Processor {
     #[cfg(test)]
     pub(crate) fn land_inpaint_scaled_for_test(&mut self, item_id: u64, rgba: image::RgbaImage, fill_scale: f32) {
         let generation = *self.inpaint_latest_generation.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
-        let _ = self.inpaint_tx.send((item_id, InpaintOutcome::Done { rgba, fill_scale, generation }));
+        let _ = self.inpaint_done.tx.send((item_id, InpaintOutcome::Done { rgba, fill_scale, generation }));
     }
 
     #[cfg(test)]
     pub(crate) fn fail_inpaint_for_test(&mut self, item_id: u64, error: &str) {
-        let _ = self.inpaint_tx.send((item_id, InpaintOutcome::Failed(error.into())));
+        let _ = self.inpaint_done.tx.send((item_id, InpaintOutcome::Failed(error.into())));
     }
 
     #[cfg(test)]
@@ -1062,7 +1059,7 @@ impl Processor {
             self.dispatch_inpaint_sd(item_id, generation, image, correction, tuning, progress);
             return;
         }
-        let tx = self.inpaint_tx.clone();
+        let tx = self.inpaint_done.tx.clone();
         self.spawn_model(move || {
             let fill = caught(|| {
                 let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
@@ -1193,7 +1190,7 @@ impl Processor {
         // PNG-encode + temp-file write is 150-300 ms per stroke at 4K:
         // off the UI thread.
         let bridge_tx = self.inpaint_bridge_tx.clone();
-        let inpaint_tx = self.inpaint_tx.clone();
+        let inpaint_tx = self.inpaint_done.tx.clone();
         rayon::spawn(move || {
             // Checked before the work and before the bridge dispatch, so a
             // mid-encode Esc never runs the SD bundle on a discarded stroke.
@@ -1243,7 +1240,7 @@ impl Processor {
                 InpaintBridgeResult::Done { item_id, generation, rgba_path, width, height, fill_scale } => {
                     // The result file is read off the UI thread (a
                     // full-size image); the capsule ends once it is there.
-                    let (tx, sink) = (self.inpaint_tx.clone(), self.inpaint_runs.get(&item_id).cloned());
+                    let (tx, sink) = (self.inpaint_done.tx.clone(), self.inpaint_runs.get(&item_id).cloned());
                     rayon::spawn(move || {
                         let outcome = match crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height) {
                             Some(rgba) => InpaintOutcome::Done { rgba, fill_scale, generation },
@@ -1268,7 +1265,7 @@ impl Processor {
                     } else {
                         InpaintOutcome::Failed(error)
                     };
-                    let _ = self.inpaint_tx.send((item_id, outcome));
+                    let _ = self.inpaint_done.tx.send((item_id, outcome));
                     self.end_inpaint_run(item_id);
                 }
             }
@@ -1296,7 +1293,7 @@ impl Processor {
         let mut out = Vec::new();
         let mut cancelled = Vec::new();
         let mut errors = Vec::new();
-        while let Ok((item_id, outcome)) = self.inpaint_rx.try_recv() {
+        while let Ok((item_id, outcome)) = self.inpaint_done.rx.try_recv() {
             // Stale results count too: their job has finished.
             if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
@@ -1659,7 +1656,7 @@ impl Processor {
 
     /// Where a `PictureSink` sends its run's pictures.
     pub(crate) fn picture_sender(&self) -> mpsc::Sender<RunPicture> {
-        self.picture_tx.clone()
+        self.pictures.tx.clone()
     }
 
     /// Drain the pictures runs have made since the last frame, oldest first.
@@ -1668,7 +1665,7 @@ impl Processor {
     /// the canvas is the same and its upload is made once.
     pub(crate) fn pump_pictures(&mut self) -> Vec<RunPicture> {
         let mut pictures: Vec<RunPicture> = Vec::new();
-        for picture in self.picture_rx.try_iter() {
+        for picture in self.pictures.rx.try_iter() {
             if let Some(place) = tile_place(&picture) {
                 pictures.retain(|p| tile_place(p) != Some(place));
             }
@@ -1678,7 +1675,7 @@ impl Processor {
     }
 
     pub(crate) fn pump_upscale_results(&mut self) -> Vec<UpscaleResult> {
-        self.upscale.drain()
+        self.upscale.done.drain()
     }
 
     pub fn is_colorize_in_flight(&self) -> bool {
@@ -1695,12 +1692,12 @@ impl Processor {
         match engine {
             super::item::Engine::Upscale => {
                 let run = super::item::UpscaleCache::new(Arc::clone(&shown), Arc::clone(&shown), None);
-                let _ = self.upscale.tx.send(UpscaleResult { item_id, run: run_id, result: Ok(UpscaleOutput { run, shown }), recipe });
+                let _ = self.upscale.done.tx.send(UpscaleResult { item_id, run: run_id, result: Ok(UpscaleOutput { run, shown }), recipe });
             }
             super::item::Engine::Colorize => {
                 let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
                 let run = super::item::ColorizeCache::new(Arc::new(vec![0.0; 2 * n]), Arc::clone(&shown));
-                let _ = self.colorize.tx.send(ColorizeResult { item_id, run: run_id, result: Ok(ColorizeOutput { run, shown }), recipe });
+                let _ = self.colorize.done.tx.send(ColorizeResult { item_id, run: run_id, result: Ok(ColorizeOutput { run, shown }), recipe });
             }
             other => unreachable!("{other:?} is not an upscale or colorize"),
         }
@@ -1710,8 +1707,8 @@ impl Processor {
     #[cfg(test)]
     pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, run: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
         match engine {
-            super::item::Engine::Upscale => { let _ = self.upscale.tx.send(UpscaleResult { item_id, run, result: Err(err), recipe }); }
-            super::item::Engine::Colorize => { let _ = self.colorize.tx.send(ColorizeResult { item_id, run, result: Err(err), recipe }); }
+            super::item::Engine::Upscale => { let _ = self.upscale.done.tx.send(UpscaleResult { item_id, run, result: Err(err), recipe }); }
+            super::item::Engine::Colorize => { let _ = self.colorize.done.tx.send(ColorizeResult { item_id, run, result: Err(err), recipe }); }
             other => unreachable!("{other:?} is not an upscale or colorize"),
         }
     }
@@ -1819,7 +1816,7 @@ impl Processor {
     }
 
     pub(crate) fn pump_colorize_results(&mut self) -> Vec<ColorizeResult> {
-        self.colorize.drain()
+        self.colorize.done.drain()
     }
 
     /// Runs once per source image; `Err(reason)` at once when under
@@ -1837,7 +1834,7 @@ impl Processor {
                 ENCODER_COST_MB, available_ram_mb,
             ));
         }
-        let tx = self.sam_encoder_tx.clone();
+        let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
             let result = caught(|| ensure_sam_sessions(&sessions).and_then(|s| run_sam_encoder_inline(&s, &source)))
@@ -1852,7 +1849,7 @@ impl Processor {
     /// redrawn, each blended in at `blend`. The photo is unpacked there,
     /// never here.
     pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend) {
-        let tx = self.faces_tx.clone();
+        let tx = self.faces_found.tx.clone();
         let (stop, current) = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
         // face search taking it would hide theirs and its Cancel.
@@ -1896,7 +1893,7 @@ impl Processor {
     }
 
     pub(crate) fn pump_faces_results(&mut self) -> Vec<FacesResult> {
-        self.faces_rx.try_iter().collect()
+        self.faces_found.drain()
     }
 
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
@@ -1927,7 +1924,7 @@ impl Processor {
     /// worker too, so the UI thread only merges it; the logits come back
     /// for re-thresholding.
     pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
-        let tx = self.sam_decoder_tx.clone();
+        let tx = self.sam_decoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
             let (w, h) = req.source_dims;
@@ -1956,7 +1953,7 @@ impl Processor {
     /// pre-stroke selection and hash it there, so the UI thread only swaps
     /// the plane in. The result arrives through the decoder channel.
     pub(crate) fn dispatch_sam_rethreshold(&self, req: SamRethresholdRequest) {
-        let tx = self.sam_decoder_tx.clone();
+        let tx = self.sam_decoded.tx.clone();
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
@@ -1971,11 +1968,11 @@ impl Processor {
     }
 
     pub(crate) fn pump_sam_encoder_results(&mut self) -> Vec<SamEncoderResult> {
-        self.sam_encoder_rx.try_iter().collect()
+        self.sam_encoded.drain()
     }
 
     pub(crate) fn pump_sam_decoder_results(&mut self) -> Vec<SamDecoderResult> {
-        self.sam_decoder_rx.try_iter().collect()
+        self.sam_decoded.drain()
     }
 }
 
@@ -2369,10 +2366,10 @@ mod tests {
         let (_, current) = p.begin_faces_search();
         let sink = PictureSink::of_face_search(3, None, current, p.picture_sender());
         sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert_eq!(p.picture_rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(3, PictureFrom::FaceSearch, ProgressUpdate::Faces(Vec::new()))]);
+        assert_eq!(p.pictures.rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(3, PictureFrom::FaceSearch, ProgressUpdate::Faces(Vec::new()))]);
         let _next = p.begin_faces_search();
         sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert!(p.picture_rx.try_recv().is_err(), "a newer search took over");
+        assert!(p.pictures.rx.try_recv().is_err(), "a newer search took over");
     }
 
     #[test]
@@ -2486,10 +2483,10 @@ mod tests {
     fn drain_filters_stale_generations() {
         let mut p = fixture();
         p.inpaint_latest_generation.insert(7, 2);
-        p.inpaint_tx.send((7, InpaintOutcome::Done {
+        p.inpaint_done.tx.send((7, InpaintOutcome::Done {
             rgba: image::RgbaImage::new(1, 1), fill_scale: 1.0, generation: 1,
         })).unwrap();
-        p.inpaint_tx.send((7, InpaintOutcome::Done {
+        p.inpaint_done.tx.send((7, InpaintOutcome::Done {
             rgba: image::RgbaImage::new(2, 2), fill_scale: 1.0, generation: 2,
         })).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
@@ -2504,7 +2501,7 @@ mod tests {
         let mut p = fixture();
         p.inpaint_latest_generation.insert(7, 5);
         p.inpaint_pending.insert(7, 1);
-        p.inpaint_tx.send((7, InpaintOutcome::Cancelled)).unwrap();
+        p.inpaint_done.tx.send((7, InpaintOutcome::Cancelled)).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
         assert!(drained.is_empty(),
             "cancelled stroke must not commit a result");
@@ -2518,7 +2515,7 @@ mod tests {
     fn drain_routes_dispatch_errors_to_error_list() {
         let mut p = fixture();
         p.inpaint_pending.insert(7, 1);
-        p.inpaint_tx.send((7, InpaintOutcome::Failed(
+        p.inpaint_done.tx.send((7, InpaintOutcome::Failed(
             "SD inpaint refused to load: only 13.4 GB free".to_string(),
         ))).unwrap();
         let (drained, cancelled, errors) = p.drain_inpaint_results();
@@ -2857,7 +2854,7 @@ mod tests {
         p.inpaint_bridge_rx = rx;
         tx.send(crate::gui::inpaint_bridge::InpaintBridgeResult::Error { item_id: 1, error: prunr_core::CoreError::Cancelled.message() }).unwrap();
         p.pump_inpaint_subprocess();
-        assert!(matches!(p.inpaint_rx.try_recv(), Ok((1, InpaintOutcome::Cancelled))));
+        assert!(matches!(p.inpaint_done.rx.try_recv(), Ok((1, InpaintOutcome::Cancelled))));
     }
 
     /// An image a cancelled run left in an older batch awaits only the
