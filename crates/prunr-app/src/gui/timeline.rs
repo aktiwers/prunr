@@ -1,6 +1,5 @@
 //! One undo timeline per image: the states it has been in, and which one
-//! is shown. A list and a cursor, the shape every editor converges on.
-//! Undo and redo move the cursor; any other edit cuts the redo tail and
+//! is shown. Undo and redo move the cursor; any other edit cuts the redo tail and
 //! appends. Each state is complete (result, recipe, selection, settings),
 //! so stepping back shows a stored image instead of re-running a model.
 //! The version, bumped on every move, lets a background job land only on

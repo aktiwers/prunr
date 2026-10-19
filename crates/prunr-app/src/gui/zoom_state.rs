@@ -1,4 +1,3 @@
-/// Zoom and pan state for the canvas viewer.
 pub struct ZoomState {
     pub zoom: f32,
     pub pan_offset: egui::Vec2,

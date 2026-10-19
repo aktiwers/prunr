@@ -79,9 +79,8 @@ pub fn run() -> eframe::Result {
 
     let app_factory = || Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>));
 
-    // Try default renderer (glow/OpenGL). On Windows-on-Mac VMs and older Intel
-    // GPUs OpenGL drivers are unreliable; fall back to wgpu (DX12/Metal/Vulkan)
-    // which tends to work better in virtualized environments.
+    // OpenGL drivers are unreliable on Windows-on-Mac VMs and older Intel
+    // GPUs; wgpu does better there.
     let primary = eframe::run_native("prunr", make_options(), app_factory());
     if let Err(ref e) = primary {
         log_startup_error("glow/OpenGL renderer failed", e);
