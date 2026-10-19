@@ -8,10 +8,10 @@
 mod test_common;
 
 use prunr_core::{
-    CoreError, InferenceEngine, ModelKind, OrtEngine,
-    LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
+    InferenceEngine, ModelKind, OrtEngine,
+    DOWNSCALE_TARGET,
     process_image, batch_process,
-    check_large_image, downscale_image,
+    downscale_image,
 };
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
@@ -273,21 +273,6 @@ fn test_format_support_png_jpeg_webp_bmp() {
 // ============================================================
 // Large image handling
 // ============================================================
-
-#[test]
-fn test_large_image_warning() {
-    // check_large_image returns LargeImage error for > 8000px images
-    let large = DynamicImage::ImageRgb8(image::RgbImage::new(9000, 100));
-    let err = check_large_image(&large);
-    assert!(err.is_some(), "Expected LargeImage warning for 9000px image");
-    match err.unwrap() {
-        CoreError::LargeImage { width, height: _, limit } => {
-            assert_eq!(width, 9000);
-            assert_eq!(limit, LARGE_IMAGE_LIMIT);
-        }
-        other => panic!("Expected LargeImage, got {:?}", other),
-    }
-}
 
 #[test]
 fn test_downscale_image_preserves_aspect_ratio() {

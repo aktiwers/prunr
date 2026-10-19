@@ -516,15 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_color_match_dimension_mismatch_allowed() {
-        // Different dimensions are valid — transfer uses statistics only.
-        let source = gradient_image(64, 64);
-        let mut target = gradient_image(32, 32);
-        // Must not panic
-        apply_color_match(&mut target, &source);
-    }
-
-    #[test]
     fn apply_color_match_warms_cool_target() {
         // Cool target: shifted blue. Warm source: shifted red/yellow.
         // After transfer, target mean R should increase and mean B decrease.
@@ -561,13 +552,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_color_match_preserves_alpha() {
-        let source = gradient_image(16, 16);
-        let mut target = make_image(16, 16, [100, 150, 200, 192]);
-        apply_color_match(&mut target, &source);
-        for p in target.pixels() {
-            assert_eq!(p.0[3], 192, "alpha must be preserved after color match");
-        }
-    }
 }

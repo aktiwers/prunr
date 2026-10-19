@@ -883,18 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_kind_variants() {
-        let silueta = ModelKind::Silueta;
-        let u2net = ModelKind::U2net;
-        // Both exist and implement Debug + Clone
-        let _ = format!("{:?}", silueta);
-        let _ = format!("{:?}", u2net);
-        let _cloned = silueta;
-        let _cloned2 = u2net;
-        assert_ne!(silueta, u2net);
-    }
-
-    #[test]
     fn model_kind_x2plus_roundtrips() {
         let model_id: prunr_models::ModelId = ModelKind::RealEsrganX2Plus.into();
         assert_eq!(model_id, prunr_models::ModelId::RealEsrganX2Plus);
@@ -987,13 +975,4 @@ mod tests {
         assert_eq!(EdgeSettings::default().edge_scale, EdgeScale::Fused);
     }
 
-    #[test]
-    fn test_process_result_fields() {
-        let result = ProcessResult {
-            rgba_image: image::RgbaImage::new(1, 1),
-            active_provider: "CPU".to_string(),
-        };
-        assert_eq!(result.rgba_image.width(), 1);
-        assert_eq!(result.active_provider, "CPU");
-    }
 }

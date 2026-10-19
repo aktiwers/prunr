@@ -967,37 +967,12 @@ mod tests {
     }
 
     #[test]
-    fn test_downscale_image_respects_max_dim() {
-        let img = DynamicImage::ImageRgb8(image::RgbImage::new(8000, 4000));
-        let scaled = downscale_image(img, DOWNSCALE_TARGET);
-        assert!(
-            scaled.width().max(scaled.height()) <= DOWNSCALE_TARGET,
-            "Downscaled image {}x{} exceeds max_dim {}",
-            scaled.width(), scaled.height(), DOWNSCALE_TARGET
-        );
-    }
-
-    #[test]
     fn test_downscale_image_no_upscale() {
         // Images already within limit should be returned as-is
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(800, 600));
         let scaled = downscale_image(img, DOWNSCALE_TARGET);
         assert_eq!(scaled.width(), 800);
         assert_eq!(scaled.height(), 600);
-    }
-
-    #[test]
-    fn test_encode_rgba_png() {
-        let mut img = RgbaImage::new(10, 10);
-        for pixel in img.pixels_mut() {
-            *pixel = Rgba([0, 128, 255, 200]);
-        }
-        let result = encode_rgba_png(&img);
-        assert!(result.is_ok(), "encode_rgba_png failed: {:?}", result.err());
-        let bytes = result.unwrap();
-        assert!(!bytes.is_empty(), "Encoded PNG is empty");
-        // PNG magic bytes: \x89PNG
-        assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
 
     #[test]

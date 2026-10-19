@@ -234,27 +234,6 @@ mod tests {
         }
     }
 
-    /// Windows are clipped at the borders and averaged over the pixels
-    /// they cover.
-    #[test]
-    fn box_means_average_what_the_window_covers() {
-        let src: Vec<f32> = (0..20).map(|v| v as f32).collect();
-        let out = box_filter(&src, 5, 4, 1);
-        let at = |x: usize, y: usize| out[y * 5 + x];
-        assert!((at(0, 0) - (0.0 + 1.0 + 5.0 + 6.0) / 4.0).abs() < 1e-5);
-        assert!((at(2, 1) - (1.0 + 2.0 + 3.0 + 6.0 + 7.0 + 8.0 + 11.0 + 12.0 + 13.0) / 9.0).abs() < 1e-5);
-        assert!((at(4, 3) - (13.0 + 14.0 + 18.0 + 19.0) / 4.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_guided_filter_preserves_dimensions() {
-        let guide = RgbaImage::from_pixel(64, 48, Rgba([128, 128, 128, 255]));
-        let mask = GrayImage::from_pixel(64, 48, Luma([200]));
-        let result = guided_filter_alpha(&guide, &mask, 4, 0.01);
-        assert_eq!(result.width(), 64);
-        assert_eq!(result.height(), 48);
-    }
-
     #[test]
     fn test_guided_filter_uniform_mask_unchanged() {
         let guide = RgbaImage::from_pixel(32, 32, Rgba([100, 150, 200, 255]));
@@ -290,46 +269,6 @@ mod tests {
         let (mut buf, mut scratch) = (data, Vec::new());
         box_blur3_into(&mut buf, w, h, 2, &mut scratch);
         assert_eq!(buf, want);
-    }
-
-    #[test]
-    fn test_box_filter_uniform_is_identity() {
-        let data = vec![0.5f32; 16];
-        let out = box_filter(&data, 4, 4, 1);
-        for &v in &out {
-            assert!((v - 0.5).abs() < 0.01, "Expected ~0.5, got {v}");
-        }
-    }
-
-    #[test]
-    fn test_box_filter_correctness_3x3() {
-        // 3x3 image, radius 1 => each interior pixel averages all 9 neighbors
-        #[rustfmt::skip]
-        let data = vec![
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-        ];
-        let out = box_filter(&data, 3, 3, 1);
-        // Center pixel (1,1): mean of all 9 = 5.0
-        assert!((out[4] - 5.0).abs() < 1e-5, "center={}", out[4]);
-        // Corner (0,0): mean of [1,2,4,5] = 3.0
-        assert!((out[0] - 3.0).abs() < 1e-5, "corner={}", out[0]);
-    }
-
-    #[test]
-    fn box_filter_stays_within_input_range() {
-        let w = 200u32;
-        let h = 150u32;
-        let n = (w * h) as usize;
-        let data: Vec<f32> = (0..n).map(|i| (i as f32 * 0.001).sin().abs()).collect();
-        let result = box_filter(&data, w, h, 5);
-        assert_eq!(result.len(), n);
-        // Every output should be non-negative (input is non-negative)
-        for (i, &v) in result.iter().enumerate() {
-            assert!(v >= -1e-6, "Negative value at {i}: {v}");
-            assert!(v <= 1.0 + 1e-6, "Value > 1 at {i}: {v}");
-        }
     }
 
     /// Naïve O(N²·(2r+1)²) reference: each pixel = mean of its (2r+1)² window

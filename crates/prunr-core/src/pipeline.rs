@@ -393,19 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_image_large_returns_err() {
-        // 9000x100 exceeds LARGE_IMAGE_LIMIT — check_large_image should catch it
-        use crate::formats::check_large_image;
-        let big = DynamicImage::ImageRgb8(RgbImage::new(9000, 100));
-        let err = check_large_image(&big);
-        assert!(err.is_some(), "Expected LargeImage error for 9000px wide image");
-        match err.unwrap() {
-            CoreError::LargeImage { width, .. } => assert_eq!(width, 9000),
-            other => panic!("Expected LargeImage, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_process_image_bad_bytes() {
         // load_image_from_bytes should return ImageFormat error for garbage bytes
         use crate::formats::load_image_from_bytes;

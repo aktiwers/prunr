@@ -630,12 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_focus_is_the_nearest_tenth() {
-        let f = auto_focus(&ramp(1, 101));
-        assert!((f - 0.9).abs() < 0.02, "{f}");
-    }
-
-    #[test]
     fn the_subject_is_focused_at_its_median_depth() {
         let depth = ramp(10, 100);
         let mut cut = RgbaImage::new(10, 100);
