@@ -256,9 +256,12 @@ impl BrushSettings {
     }
 
     /// The settings that belong to a model rather than to the brush: the
-    /// eraser's region knobs and the Stable Diffusion quality, prompt and seed.
+    /// fill's Sharpen and scale, and the Stable Diffusion quality, prompt
+    /// and seed. Expand region and Feather sit on the brush strips and
+    /// mean the same in every eraser, so they stay as the user set them.
     pub fn take_model_tuning_from(&mut self, source: &Self) {
-        self.take_inpaint_tuning_from(source);
+        self.inpaint_sharpen = source.inpaint_sharpen;
+        self.inpaint_fill_scale = source.inpaint_fill_scale;
         self.take_sd_quality_from(source);
         self.sd_prompt = source.sd_prompt.clone();
         self.sd_negative_prompt = source.sd_negative_prompt.clone();

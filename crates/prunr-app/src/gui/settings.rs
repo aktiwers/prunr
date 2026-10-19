@@ -423,9 +423,10 @@ impl Settings {
     }
 
     /// Take the new model's tuning from the active preset after the model
-    /// dropdown flips: the eraser's region knobs and the Stable Diffusion
-    /// settings. What the user set for the brush itself (size, hardness,
-    /// opacity, mode, feather, the selection look, Magic Brush) stays.
+    /// dropdown flips: the fill's Sharpen and scale and the Stable
+    /// Diffusion settings. What the user set for the brush (size, hardness,
+    /// opacity, mode, Expand region, Feather, the selection look, Magic
+    /// Brush) stays.
     pub(crate) fn on_model_change_resolve_brush(&mut self) {
         let resolved = self.resolve_active_preset(None).brush;
         self.brush.take_model_tuning_from(&resolved);
@@ -1184,6 +1185,8 @@ mod tests {
         let mut u2net_brush = BrushSettings::default();
         u2net_brush.radius = 120.0;
         u2net_brush.inpaint_feather = 9.0;
+        u2net_brush.inpaint_grow = 1.0;
+        u2net_brush.inpaint_sharpen = 0.0;
         let mut models = HashMap::new();
         models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
             item_settings: ItemSettings::default(),
@@ -1200,11 +1203,15 @@ mod tests {
         s.default_preset = "Foo".to_string();
         s.brush.radius = 33.0;
         s.brush.hardness = 0.2;
+        s.brush.inpaint_feather = 30.0;
+        s.brush.inpaint_grow = 14.0;
+        s.brush.inpaint_sharpen = 0.6;
 
         s.model = SettingsModel::U2net;
         s.on_model_change_resolve_brush();
         assert_eq!((s.brush.radius, s.brush.hardness), (33.0, 0.2), "what the user set for the brush survives a model switch");
-        assert_eq!(s.brush.inpaint_feather, 9.0, "the new model's tuning comes from the preset");
+        assert_eq!((s.brush.inpaint_grow, s.brush.inpaint_feather), (14.0, 30.0), "so do the region knobs on the brush strips");
+        assert_eq!(s.brush.inpaint_sharpen, 0.0, "the new model's tuning comes from the preset");
     }
 
     /// Without the Fast download, Fast's few steps would run on the full
