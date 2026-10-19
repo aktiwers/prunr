@@ -1316,31 +1316,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_tiles_small_image_single_tile() {
-        let tiles = plan_tiles(400, 300);
-        assert_eq!(tiles.len(), 1);
-        assert_eq!(tiles[0], TilePlacement { x: 0, y: 0, w: 400, h: 300 });
-    }
-
-    #[test]
-    fn plan_tiles_exact_tile_size_single_tile() {
-        let tiles = plan_tiles(TILE, TILE);
-        assert_eq!(tiles.len(), 1);
-        assert_eq!(tiles[0], TilePlacement { x: 0, y: 0, w: TILE, h: TILE });
-    }
-
-    #[test]
-    fn plan_tiles_horizontal_strip_overlaps_correctly() {
-        // 1024 wide → first tile [0..512], second tile must be at
-        // 1024 - 512 = 512 to cover the right edge.
-        let tiles = plan_tiles(1024, TILE);
-        assert!(tiles.len() >= 2, "1024-wide must produce >=2 tiles");
-        let xs: Vec<u32> = tiles.iter().map(|t| t.x).collect();
-        assert!(xs.contains(&0));
-        assert!(xs.iter().any(|&x| x + TILE == 1024), "must cover the right edge");
-    }
-
-    #[test]
     fn plan_tiles_grid_full_size() {
         // 1024×1024 with 64-px overlap: a clean 2×2 split would leave
         // tiles touching with NO overlap (no feather possible). Plan
@@ -1369,28 +1344,6 @@ mod tests {
                 });
                 assert!(covered, "pixel ({x}, {y}) uncovered");
             }
-        }
-    }
-
-    #[test]
-    fn feather_weight_full_inside_overlap() {
-        // Far from the tile edge: weight 1.0.
-        assert!((feather_weight(OVERLAP) - 1.0).abs() < 1e-6);
-        assert!((feather_weight(OVERLAP * 2) - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn feather_weight_zero_at_edge() {
-        assert!(feather_weight(0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn feather_weight_smoothstep_monotone() {
-        let mut prev = 0.0;
-        for d in 0..=OVERLAP {
-            let w = feather_weight(d);
-            assert!(w >= prev - 1e-6, "feather weight must be monotonic non-decreasing");
-            prev = w;
         }
     }
 
@@ -1441,41 +1394,6 @@ mod tests {
         assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), "the machine's lack, not the model's");
     }
 
-    #[test]
-    fn pick_input_names_matches_by_keyword() {
-        let names = vec!["image".to_string(), "mask".to_string()];
-        let (img, msk) = pick_input_names(&names);
-        assert_eq!(img, "image");
-        assert_eq!(msk, "mask");
-    }
-
-    #[test]
-    fn pick_input_names_case_insensitive() {
-        let names = vec!["IMAGE_INPUT".to_string(), "Mask_Input".to_string()];
-        let (img, msk) = pick_input_names(&names);
-        assert_eq!(img, "IMAGE_INPUT");
-        assert_eq!(msk, "Mask_Input");
-    }
-
-    #[test]
-    fn pick_input_names_falls_back_to_positional() {
-        // No keyword match — first input becomes image, second becomes mask.
-        let names = vec!["input_0".to_string(), "input_1".to_string()];
-        let (img, msk) = pick_input_names(&names);
-        assert_eq!(img, "input_0");
-        assert_eq!(msk, "input_1");
-    }
-
-    #[test]
-    fn pick_input_names_handles_swapped_order() {
-        // Mask appears before image in the export — keyword match still
-        // assigns them correctly.
-        let names = vec!["the_mask".to_string(), "the_image".to_string()];
-        let (img, msk) = pick_input_names(&names);
-        assert_eq!(img, "the_image");
-        assert_eq!(msk, "the_mask");
-    }
-
     /// The bbox-cropped grow matches full-image morphology, for masks in
     /// the middle and touching each image edge, growing and shrinking.
     #[test]
@@ -1498,43 +1416,6 @@ mod tests {
             }
         }
         assert_eq!(grow_mask(&GrayImage::new(8, 8), 3), GrayImage::new(8, 8));
-    }
-
-    #[test]
-    fn grow_mask_zero_is_identity() {
-        let mut m = GrayImage::new(8, 8);
-        m.put_pixel(4, 4, Luma([255]));
-        let out = grow_mask(&m, 0);
-        assert_eq!(out.as_raw(), m.as_raw());
-    }
-
-    #[test]
-    fn grow_mask_dilates_one_pixel() {
-        let mut m = GrayImage::new(5, 5);
-        m.put_pixel(2, 2, Luma([255]));
-        let out = grow_mask(&m, 1);
-        // Center stays + 4-connected neighbours light up.
-        assert_eq!(out.get_pixel(2, 2).0[0], 255);
-        assert_eq!(out.get_pixel(1, 2).0[0], 255);
-        assert_eq!(out.get_pixel(3, 2).0[0], 255);
-        assert_eq!(out.get_pixel(2, 1).0[0], 255);
-        assert_eq!(out.get_pixel(2, 3).0[0], 255);
-        // Diagonal NOT dilated under 4-connectivity.
-        assert_eq!(out.get_pixel(1, 1).0[0], 0);
-    }
-
-    #[test]
-    fn grow_mask_erodes_negative() {
-        // 3×3 filled block surrounded by zero. Erosion strips the
-        // boundary down to a single pixel.
-        let mut m = GrayImage::new(5, 5);
-        for y in 1..=3 { for x in 1..=3 { m.put_pixel(x, y, Luma([255])); } }
-        let out = grow_mask(&m, -1);
-        // Only the centre survives — corners and edges of the 3×3 had
-        // a zero neighbour.
-        assert_eq!(out.get_pixel(2, 2).0[0], 255);
-        assert_eq!(out.get_pixel(1, 1).0[0], 0);
-        assert_eq!(out.get_pixel(1, 2).0[0], 0);
     }
 
     #[test]
@@ -1823,57 +1704,6 @@ mod tests {
     }
 
     #[test]
-    fn mask_bbox_empty_returns_none() {
-        let mask = GrayImage::new(64, 64);
-        assert!(mask_bbox(&mask, 1, 0).is_none());
-        assert!(mask_bbox(&mask, 128, 2).is_none());
-    }
-
-    #[test]
-    fn mask_bbox_single_pixel_tight_box_no_margin() {
-        let mut mask = GrayImage::new(64, 64);
-        mask.put_pixel(10, 20, Luma([1]));
-        let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 10, y: 20, w: 1, h: 1 });
-    }
-
-    #[test]
-    fn mask_bbox_single_pixel_with_margin_clamps_to_image() {
-        let mut mask = GrayImage::new(32, 32);
-        // Hit the corner — margin 4 on a corner pixel must clamp.
-        mask.put_pixel(0, 0, Luma([255]));
-        let bbox = mask_bbox(&mask, 128, 4).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 5, h: 5 });
-    }
-
-    #[test]
-    fn mask_bbox_pads_an_interior_box_by_the_margin() {
-        let mut mask = GrayImage::new(64, 64);
-        for y in 20..30 {
-            for x in 25..35 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        assert_eq!(mask_bbox(&mask, 128, 4), Some(Bbox { x: 21, y: 16, w: 18, h: 18 }));
-    }
-
-    #[test]
-    fn mask_bbox_full_image_no_margin() {
-        let mask = GrayImage::from_pixel(32, 32, Luma([255]));
-        let bbox = mask_bbox(&mask, 1, 0).expect("non-empty");
-        assert_eq!(bbox, Bbox { x: 0, y: 0, w: 32, h: 32 });
-    }
-
-    #[test]
-    fn mask_bbox_threshold_separates_low_from_high() {
-        // A pixel with value 100 counts at threshold=1 but NOT at 128.
-        let mut mask = GrayImage::new(32, 32);
-        mask.put_pixel(10, 10, Luma([100]));
-        assert!(mask_bbox(&mask, 1, 0).is_some(), "low value present at threshold 1");
-        assert!(mask_bbox(&mask, 128, 0).is_none(), "low value absent at threshold 128");
-    }
-
-    #[test]
     fn tile_compose_empty_mask_is_byte_identical_to_source() {
         // The bbox optimisation early-returns on empty masks. Output
         // must be byte-identical to source — no allocation, no float
@@ -1887,64 +1717,6 @@ mod tests {
         let mask = GrayImage::new(128, 128); // all-zero
         let out = tile_compose(&img, &mask, &Progress::none(), |t, _| t.clone()).unwrap();
         assert_eq!(out, img);
-    }
-
-    #[test]
-    fn sharpen_inpainted_zero_amount_is_clone() {
-        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
-        let mut mask = GrayImage::new(16, 16);
-        mask.put_pixel(8, 8, Luma([255]));
-        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.0));
-        assert_eq!(out, img);
-    }
-
-    #[test]
-    fn sharpen_inpainted_empty_mask_is_clone() {
-        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
-        let mask = GrayImage::new(16, 16);
-        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.5));
-        assert_eq!(out, img);
-    }
-
-    #[test]
-    fn sharpen_inpainted_dim_mismatch_is_clone() {
-        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
-        let mask = GrayImage::new(8, 8);
-        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.5));
-        assert_eq!(out, img);
-    }
-
-    #[test]
-    fn sharpen_inpainted_unmasked_pixels_byte_identical_to_source() {
-        // Bbox-restricted sharpen must leave every mask <= 127 pixel
-        // byte-identical to source — Gemini's "silent seam" risk lives
-        // here. We use a high-frequency checkerboard so any leakage of
-        // the blur outside the mask would be obvious.
-        let mut img = RgbaImage::new(64, 64);
-        for y in 0..64 {
-            for x in 0..64 {
-                let v = if (x + y) % 2 == 0 { 0 } else { 255 };
-                img.put_pixel(x, y, Rgba([v, v, v, 255]));
-            }
-        }
-        let mut mask = GrayImage::new(64, 64);
-        for y in 24..40 {
-            for x in 24..40 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        let out = applied(&img, |o| sharpen_inpainted(o, &mask, 0.7));
-        for y in 0..64 {
-            for x in 0..64 {
-                if mask.get_pixel(x, y).0[0] > 127 {
-                    continue;
-                }
-                assert_eq!(
-                    out.get_pixel(x, y), img.get_pixel(x, y),
-                    "unmasked pixel ({x}, {y}) must be byte-identical to source",
-                );
-            }
-        }
     }
 
     /// Reference: re-implement the original full-image algorithm
@@ -2029,48 +1801,103 @@ mod tests {
         img
     }
 
-    /// Bit-exactness — corner-touching mask (exercises asymmetric
-    /// boundary clamp where margin runs into the image edge).
+    #[test]
+    fn plan_tiles_keeps_a_photo_up_to_one_tile_whole() {
+        for (w, h) in [(400, 300), (TILE, TILE)] {
+            assert_eq!(plan_tiles(w, h), [TilePlacement { x: 0, y: 0, w, h }], "{w}×{h}");
+        }
+    }
+
+    /// The feather is 0 at a tile's edge, 1 from the overlap's width in,
+    /// and never falls on the way.
+    #[test]
+    fn feather_weight_ramps_from_the_edge_to_the_overlap() {
+        assert!(feather_weight(0).abs() < 1e-6);
+        assert!((feather_weight(OVERLAP) - 1.0).abs() < 1e-6);
+        assert!((feather_weight(OVERLAP * 2) - 1.0).abs() < 1e-6);
+        for d in 1..=OVERLAP {
+            assert!(feather_weight(d) >= feather_weight(d - 1) - 1e-6, "falls at {d}");
+        }
+    }
+
+    /// Image and mask inputs are told apart by name in any case and
+    /// order; with no name to go by, the first is the image.
+    #[test]
+    fn pick_input_names_matches_by_keyword_or_position() {
+        for (names, image, mask) in [
+            (["image", "mask"], "image", "mask"),
+            (["IMAGE_INPUT", "Mask_Input"], "IMAGE_INPUT", "Mask_Input"),
+            (["the_mask", "the_image"], "the_image", "the_mask"),
+            (["input_0", "input_1"], "input_0", "input_1"),
+        ] {
+            let names = names.map(String::from).to_vec();
+            let (img, msk) = pick_input_names(&names);
+            assert_eq!((img.as_str(), msk.as_str()), (image, mask), "{names:?}");
+        }
+    }
+
+    /// Grow 0 is the mask itself; +1 adds the 4-connected neighbours (not
+    /// the diagonals); −1 strips a pixel off every edge.
+    #[test]
+    fn grow_mask_dilates_and_erodes_by_4_connectivity() {
+        let mut dot = GrayImage::new(5, 5);
+        dot.put_pixel(2, 2, Luma([255]));
+        assert_eq!(grow_mask(&dot, 0).as_raw(), dot.as_raw());
+        let grown = grow_mask(&dot, 1);
+        for (x, y) in [(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)] {
+            assert_eq!(grown.get_pixel(x, y).0[0], 255, "({x}, {y})");
+        }
+        assert_eq!(grown.get_pixel(1, 1).0[0], 0, "a diagonal");
+        let mut block = GrayImage::new(5, 5);
+        for y in 1..=3 { for x in 1..=3 { block.put_pixel(x, y, Luma([255])); } }
+        let shrunk = grow_mask(&block, -1);
+        assert_eq!(shrunk.get_pixel(2, 2).0[0], 255, "the centre survives");
+        assert_eq!((shrunk.get_pixel(1, 1).0[0], shrunk.get_pixel(1, 2).0[0]), (0, 0), "every pixel with a clear neighbour goes");
+    }
+
+    /// The box of the pixels at or above the threshold, grown by the
+    /// margin and clipped to the image; none when nothing reaches it.
+    #[test]
+    fn mask_bbox_bounds_the_mask_with_its_margin() {
+        let mask = |w, h, on: &[(u32, u32, u8)]| {
+            let mut m = GrayImage::new(w, h);
+            for &(x, y, v) in on { m.put_pixel(x, y, Luma([v])); }
+            m
+        };
+        let bbox = |x, y, w, h| Some(Bbox { x, y, w, h });
+        assert_eq!(mask_bbox(&GrayImage::new(64, 64), 1, 0), None);
+        assert_eq!(mask_bbox(&GrayImage::new(64, 64), 128, 2), None);
+        assert_eq!(mask_bbox(&mask(64, 64, &[(10, 20, 1)]), 1, 0), bbox(10, 20, 1, 1), "a tight box");
+        assert_eq!(mask_bbox(&mask(32, 32, &[(0, 0, 255)]), 128, 4), bbox(0, 0, 5, 5), "the margin clips at the corner");
+        let square: Vec<_> = (20..30).flat_map(|y| (25..35).map(move |x| (x, y, 255))).collect();
+        assert_eq!(mask_bbox(&mask(64, 64, &square), 128, 4), bbox(21, 16, 18, 18), "padded on every side");
+        assert_eq!(mask_bbox(&GrayImage::from_pixel(32, 32, Luma([255])), 1, 0), bbox(0, 0, 32, 32));
+        let low = mask(32, 32, &[(10, 10, 100)]);
+        assert!(mask_bbox(&low, 1, 0).is_some() && mask_bbox(&low, 128, 0).is_none(), "100 counts at 1, not at 128");
+    }
+
+    /// No amount, no mask, or a mask of another size: the image as it was.
+    #[test]
+    fn sharpen_inpainted_with_nothing_to_do_leaves_the_image() {
+        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 255]));
+        let mut dot = GrayImage::new(16, 16);
+        dot.put_pixel(8, 8, Luma([255]));
+        for (mask, amount) in [(dot, 0.0), (GrayImage::new(16, 16), 0.5), (GrayImage::new(8, 8), 0.5)] {
+            assert_eq!(applied(&img, |o| sharpen_inpainted(o, &mask, amount)), img, "{:?} at {amount}", mask.dimensions());
+        }
+    }
+
+    /// Bit-exact against the full-image sharpen, for a mask in a corner
+    /// (the margin clamps at two edges), in the middle (no clamp), and
+    /// across the right and bottom edges.
     #[test]
     fn sharpen_inpainted_matches_reference_full_image_computation() {
-        let img = gradient_image(48, 48);
-        let mut mask = GrayImage::new(48, 48);
-        for y in 0..16 {
-            for x in 0..16 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
+        for (side, x0, y0, x1, y1, amount) in [(48, 0, 0, 16, 16, 0.5), (64, 24, 24, 40, 40, 0.7), (48, 36, 36, 48, 48, 0.5)] {
+            let img = gradient_image(side, side);
+            let mut mask = GrayImage::new(side, side);
+            for y in y0..y1 { for x in x0..x1 { mask.put_pixel(x, y, Luma([255])); } }
+            assert_bbox_sharpen_matches_reference(&img, &mask, amount);
         }
-        assert_bbox_sharpen_matches_reference(&img, &mask, 0.5);
-    }
-
-    /// Bit-exactness — interior mask with margin on every side
-    /// (exercises the pure-bbox path with no edge clamping).
-    #[test]
-    fn sharpen_inpainted_matches_reference_interior_mask() {
-        let img = gradient_image(64, 64);
-        let mut mask = GrayImage::new(64, 64);
-        // 16×16 mask centred at (32, 32), 16 px from any image edge —
-        // bbox + margin (2) is still well inside, no boundary clamp.
-        for y in 24..40 {
-            for x in 24..40 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        assert_bbox_sharpen_matches_reference(&img, &mask, 0.7);
-    }
-
-    /// Bit-exactness — mask spanning the right + bottom edges
-    /// simultaneously (exercises clamps on two adjacent edges).
-    #[test]
-    fn sharpen_inpainted_matches_reference_two_edge_mask() {
-        let img = gradient_image(48, 48);
-        let mut mask = GrayImage::new(48, 48);
-        for y in 36..48 {
-            for x in 36..48 {
-                mask.put_pixel(x, y, Luma([255]));
-            }
-        }
-        assert_bbox_sharpen_matches_reference(&img, &mask, 0.5);
     }
 
     #[test]
