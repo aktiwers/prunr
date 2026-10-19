@@ -3685,62 +3685,24 @@ mod tests {
         }
     }
 
+    /// A landed result is Done with its recipe and keeps the source (live
+    /// preview re-cuts from `source_rgba` on any item, shown or not). A
+    /// Tier 2 rerun reports no provider, so the backend label shown in
+    /// the UI is not overwritten.
     #[test]
     fn apply_tier_result_success_sets_done_and_returns_provider() {
-        let mut item = fixture_item(1);
-        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
-
-        let provider = item.apply_tier_result(
-            Ok(fixture_process_result("CUDA")),
-            None,
-            None,
-            fixture_recipe(),
-        );
-        item.finish_job();
-
-        assert_eq!(provider.as_deref(), Some("CUDA"));
-        assert_eq!(item.status(), BatchStatus::Done);
-        assert!(item.result_rgba.is_some());
-        assert!(item.applied_recipe.is_some());
+        for (provider, want) in [("CUDA", Some("CUDA")), ("", None)] {
+            let mut item = fixture_item(1);
+            crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
+            item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+            let got = item.apply_tier_result(Ok(fixture_process_result(provider)), None, None, fixture_recipe());
+            item.finish_job();
+            assert_eq!(got.as_deref(), want, "{provider:?}");
+            assert_eq!(item.status(), BatchStatus::Done);
+            assert!(item.result_rgba.is_some() && item.applied_recipe.is_some());
+            assert!(item.source_rgba.is_some(), "source_rgba must stay for live preview");
+        }
     }
-
-    #[test]
-    fn apply_tier_result_tier2_rerun_returns_none_for_empty_provider() {
-        // Tier 2 reruns omit active_provider so the caller knows not to
-        // overwrite the backend label shown in the UI.
-        let mut item = fixture_item(1);
-        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
-
-        let provider = item.apply_tier_result(
-            Ok(fixture_process_result("")),
-            None,
-            None,
-            fixture_recipe(),
-        );
-
-        item.finish_job();
-        assert!(provider.is_none());
-        assert_eq!(item.status(), BatchStatus::Done);
-    }
-
-    #[test]
-    fn apply_tier_result_success_keeps_source() {
-        // Live preview re-cuts from `source_rgba` on any item, including
-        // one that was not shown when its result landed.
-        let mut item = fixture_item(1);
-        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Processing);
-        item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
-
-        let _ = item.apply_tier_result(
-            Ok(fixture_process_result("CUDA")),
-            None,
-            None,
-            fixture_recipe(),
-        );
-
-        assert!(item.source_rgba.is_some(), "source_rgba must stay for live preview");
-    }
-
     #[test]
     fn apply_tier_result_error_clears_recipe_and_tensors_for_fresh_retry() {
         let mut item = fixture_item(1);
