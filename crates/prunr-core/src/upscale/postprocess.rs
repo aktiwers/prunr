@@ -494,29 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_color_match_uniform_source_no_nan() {
-        // Uniform grey source → stddev = 0 in all Lab channels.
-        // Without the variance guard (stddev.max(1e-6)), output is NaN.
-        let source = make_image(16, 16, [128, 128, 128, 255]);
-        let mut target = gradient_image(32, 32);
-        apply_color_match(&mut target, &source);
-        for p in target.pixels() {
-            let [r, g, b, _] = p.0;
-            // All values must be finite (no NaN/Inf propagated through u8).
-            // Since they're u8, they're always finite — but we check they're
-            // not all the same impossible sentinel.
-            let _ = (r, g, b); // ensure the pixels are accessible
-        }
-        // The real check: the function must not panic or produce all-black output
-        // due to NaN contamination. We verify the target has valid pixel values.
-        let raw = target.as_raw();
-        assert!(
-            raw.iter().any(|&v| v != 0),
-            "uniform source variance guard test: output should not be all-black (NaN→0)"
-        );
-    }
-
-    #[test]
     fn apply_color_match_identity_source_unchanged() {
         // When source and target are identical, stat_source == stat_target
         // → scale = 1, offset = 0 → output is bit-identical to input.
@@ -551,6 +528,8 @@ mod tests {
     fn apply_color_match_warms_cool_target() {
         // Cool target: shifted blue. Warm source: shifted red/yellow.
         // After transfer, target mean R should increase and mean B decrease.
+        // The target is flat, so its spread is 0: this also holds the
+        // variance guard (unguarded, 0 · ∞ turns every pixel to NaN).
         let mut source = RgbaImage::new(32, 32);
         let mut target_orig = RgbaImage::new(32, 32);
         for p in source.pixels_mut() {
