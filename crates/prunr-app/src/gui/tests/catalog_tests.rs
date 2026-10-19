@@ -242,11 +242,12 @@ fn every_surface_is_visited() {
         Surface::Colorize => 6,
         Surface::SdChips => 7,
         Surface::RoremChips => 8,
-        Surface::Brushes => 9,
-        Surface::SelectionStrokes => 10,
-        Surface::FillRegionKnobs => 11,
-        Surface::Faces => 12,
-        Surface::Depth => 13,
+        Surface::FillChips => 9,
+        Surface::Brushes => 10,
+        Surface::SelectionStrokes => 11,
+        Surface::FillRegionKnobs => 12,
+        Surface::Faces => 13,
+        Surface::Depth => 14,
     };
     for (i, surface) in Surface::ALL.into_iter().enumerate() {
         assert_eq!(slot(surface), i, "{surface:?} out of place in Surface::ALL");

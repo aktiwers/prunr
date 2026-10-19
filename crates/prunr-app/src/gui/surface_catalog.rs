@@ -174,8 +174,9 @@ pub const VISITS: &[Visit] = &[
     on(Surface::Colorize, visit("strength", Kind::Flyout, &[Click("Strength")], &["Strength"])),
     on(Surface::SdChips, visit("quality", Kind::Popover, &[Click("Quality")], &["Fast"])),
     on(Surface::SdChips, visit("prompt", Kind::Popover, &[Click("Prompt")], &["Negative prompt"])),
-    on(Surface::SdChips, visit("stable diffusion advanced", Kind::Flyout, &[Click("Advanced")], &["Guidance"])),
-    on(Surface::RoremChips, visit("rorem advanced", Kind::Flyout, &[Click("Advanced")], &["Steps", "Pin seed"])),
+    on(Surface::SdChips, visit("stable diffusion advanced", Kind::Flyout, &[Click("Advanced")], &["Guidance", "As Quality", "Soft edge"])),
+    on(Surface::RoremChips, visit("rorem advanced", Kind::Flyout, &[Click("Advanced")], &["Steps", "Pin seed", "Soft edge"])),
+    on(Surface::FillChips, visit("eraser advanced", Kind::Flyout, &[Click("Advanced")], &["Along the edge"])),
     on(Surface::Brushes, with(
         Variants::Fixed(&[panel(&[Click("More Paint Brush settings")], &["Feather"])]),
         visit("paint brush", Kind::Strip, &[Click("Paint Brush")], &["Size", "More Paint Brush settings"]),

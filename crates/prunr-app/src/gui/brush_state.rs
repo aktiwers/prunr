@@ -49,6 +49,17 @@ pub struct BrushSettings {
     pub inpaint_grow: f32,
     /// Eraser: how large a hole is filled (see `FillScale`).
     pub inpaint_fill_scale: prunr_core::inpaint::FillScale,
+    /// Eraser: how the fill's colours meet the photo around it.
+    #[serde(default)]
+    pub inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour,
+    /// SD and RORem: the Feather band is generated last, against the
+    /// photo around it, and pasted back fading into it.
+    #[serde(default = "default_soft_edge")]
+    pub sd_soft_edge: bool,
+    /// SD-only: the sampler, when chosen apart from the quality; `None`
+    /// runs the quality's own.
+    #[serde(default)]
+    pub sd_sampler: Option<SdScheduler>,
     /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.
     #[serde(deserialize_with = "own_prompt")]
     pub sd_prompt: String,
@@ -145,6 +156,7 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
 }
 
 fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
+fn default_soft_edge() -> bool { true }
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
@@ -202,9 +214,14 @@ impl BrushSettings {
 
     /// The settings `model` starts from when no preset has an entry for it.
     pub fn floor_for(model: prunr_models::ModelId) -> Self {
-        // SD draws its own detail; sharpening on top crunches it.
-        let inpaint_sharpen = if model.is_sd_family() { 0.0 } else { Self::default().inpaint_sharpen };
-        Self { inpaint_sharpen, ..Self::default() }
+        // SD draws its own detail; sharpening on top crunches it. Its soft
+        // edge already meets the photo, and a colour shift over it brings
+        // back a lighter or darker rim.
+        if model.is_sd_family() {
+            Self { inpaint_sharpen: 0.0, inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::Off, ..Self::default() }
+        } else {
+            Self::default()
+        }
     }
 
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
@@ -243,6 +260,9 @@ impl BrushSettings {
     pub fn take_model_tuning_from(&mut self, source: &Self) {
         self.inpaint_sharpen = source.inpaint_sharpen;
         self.inpaint_fill_scale = source.inpaint_fill_scale;
+        self.inpaint_edge_colour = source.inpaint_edge_colour;
+        self.sd_soft_edge = source.sd_soft_edge;
+        self.sd_sampler = source.sd_sampler;
         self.take_sd_quality_from(source);
         self.sd_prompt = source.sd_prompt.clone();
         self.sd_negative_prompt = source.sd_negative_prompt.clone();
@@ -308,6 +328,9 @@ impl Default for BrushSettings {
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
             inpaint_fill_scale: Default::default(),
+            inpaint_edge_colour: Default::default(),
+            sd_soft_edge: default_soft_edge(),
+            sd_sampler: None,
             sd_prompt: String::new(),
             sd_negative_prompt: default_sd_negative_prompt(),
             sd_guidance_scale: default_cfg(),
@@ -513,6 +536,9 @@ mod tests {
             inpaint_feather: 4.0,
             inpaint_grow: 2.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Auto,
+            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::AlongEdge,
+            sd_soft_edge: true,
+            sd_sampler: None,
             sd_prompt: String::new(),
             sd_negative_prompt: DEFAULT_SD_NEGATIVE_PROMPT.to_string(),
             sd_guidance_scale: 1.5,
@@ -549,6 +575,9 @@ mod tests {
             inpaint_feather: 7.0,
             inpaint_grow: -3.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Half,
+            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::WholeArea,
+            sd_soft_edge: false,
+            sd_sampler: Some(SdScheduler::Lcm),
             sd_prompt: "mine".into(),
             sd_negative_prompt: "neg".into(),
             sd_guidance_scale: 6.0,
@@ -566,7 +595,7 @@ mod tests {
         let full = serde_json::to_value(&probe).unwrap();
         let nothing = serde_json::to_value(loaded_from_nothing()).unwrap();
         let fields = full.as_object().unwrap();
-        assert_eq!(fields.len(), 23, "a new field joins this test");
+        assert_eq!(fields.len(), 26, "a new field joins this test");
         for key in fields.keys() {
             assert_ne!(full[key], nothing[key], "{key}: the probe must differ from the default");
             let mut partial = full.clone();
@@ -811,6 +840,9 @@ mod tests {
             inpaint_feather: 24.0,
             inpaint_grow: -8.0,
             inpaint_fill_scale: prunr_core::inpaint::FillScale::Quarter,
+            inpaint_edge_colour: prunr_core::inpaint_blend::EdgeColour::Off,
+            sd_soft_edge: false,
+            sd_sampler: Some(SdScheduler::Lcm),
             sd_prompt: "custom prompt".into(),
             sd_negative_prompt: "custom negative".into(),
             sd_guidance_scale: 5.5,

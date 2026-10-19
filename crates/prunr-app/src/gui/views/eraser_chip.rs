@@ -1,5 +1,6 @@
-//! SD-eraser chips: Quality, Prompt, and an Advanced group holding the
-//! steps, guidance, seed and the fast decoder.
+//! Eraser chips: the SD eraser's Quality, Prompt and Advanced (steps,
+//! guidance, sampler, seed, the fast decoder and the edge), RORem's
+//! Advanced, and the other erasers' Advanced (the edge).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -7,6 +8,7 @@ use egui_material_icons::icons::*;
 use crate::gui::brush_state::{
     BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE,
 };
+use prunr_core::inpaint_blend::EdgeColour;
 use prunr_core::inpaint_sd::ROREM_STEPS;
 use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
@@ -35,14 +37,16 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
     let tuned = usize::from(brush.sd_steps != shipped.steps)
         + usize::from(differs(brush.sd_guidance_scale, shipped.guidance_scale))
         + usize::from(brush.sd_seed.is_some())
-        + usize::from(brush.sd_use_taesd.is_some());
+        + usize::from(brush.sd_use_taesd.is_some())
+        + usize::from(brush.sd_sampler.is_some())
+        + generated_edge_tuned(brush);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "eraser_advanced",
         icon: ICON_TUNE.codepoint,
         label: "Advanced",
         summary: &summary,
-        tooltip: "How the eraser generates the fill: steps, guidance, seed.",
+        tooltip: "How the eraser generates the fill: steps, guidance, sampler, seed and how it meets the photo.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
         live: false,
@@ -54,6 +58,8 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             brush.sd_guidance_scale = shipped.guidance_scale;
             brush.sd_seed = None;
             brush.sd_use_taesd = None;
+            brush.sd_sampler = None;
+            reset_generated_edge(brush);
             committed = true;
         }
 
@@ -78,6 +84,75 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             committed = true;
         }
         hint(ui, "About three times faster decoding at a slight quality cost.");
+        ui.add_space(theme::SPACE_XS);
+
+        committed |= chip::choice_row(ui, "Sampler", &SAMPLERS, &mut brush.sd_sampler);
+        hint(ui, "How each step is taken. DPM++ 2M Karras suits Quality's full model, LCM the Fast one.");
+        ui.add_space(theme::SPACE_XS);
+
+        committed |= generated_edge_rows(ui, brush);
+    });
+    committed
+}
+
+const SAMPLERS: [chip::Choice<Option<SdScheduler>>; 3] = [
+    chip::Choice { value: None, name: "As Quality", description: "The sampler the chosen quality runs", enabled: true },
+    chip::Choice { value: Some(SdScheduler::DpmPlusPlus2MKarras), name: "DPM++ 2M Karras", description: "Detailed, for 20 steps or more", enabled: true },
+    chip::Choice { value: Some(SdScheduler::Lcm), name: "LCM", description: "A few steps; made for the Fast model", enabled: true },
+];
+
+const EDGE_COLOURS: [chip::Choice<EdgeColour>; 3] = [
+    chip::Choice { value: EdgeColour::AlongEdge, name: "Along the edge", description: "Matches the colors around each part of the edge", enabled: true },
+    chip::Choice { value: EdgeColour::WholeArea, name: "Whole area", description: "One color shift for the whole area", enabled: true },
+    chip::Choice { value: EdgeColour::Off, name: "Off", description: "The fill's own colors", enabled: true },
+];
+
+fn edge_colour_row(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let changed = chip::choice_row(ui, "Edge color", &EDGE_COLOURS, &mut brush.inpaint_edge_colour);
+    hint(ui, "How the fill's colors meet the photo around it.");
+    changed
+}
+
+/// The edge of a generated fill (SD and RORem): Soft edge, then Edge colour.
+fn generated_edge_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let mut committed = chip::toggle_row(ui, "Soft edge", &mut brush.sd_soft_edge).changed;
+    hint(ui, "Draws the Feather band last, against the photo around it, so the fill blends in.");
+    ui.add_space(theme::SPACE_XS);
+    committed |= edge_colour_row(ui, brush);
+    committed
+}
+
+/// How many of the generated edge's settings differ from the shipped ones.
+fn generated_edge_tuned(brush: &BrushSettings) -> usize {
+    usize::from(!brush.sd_soft_edge) + usize::from(brush.inpaint_edge_colour != EdgeColour::Off)
+}
+
+fn reset_generated_edge(brush: &mut BrushSettings) {
+    brush.sd_soft_edge = true;
+    brush.inpaint_edge_colour = EdgeColour::Off;
+}
+
+/// LaMa, Big-LaMa and MI-GAN's Advanced group: how the fill meets the photo.
+pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+    let tuned = usize::from(brush.inpaint_edge_colour != EdgeColour::AlongEdge);
+    let summary = chip::tuned_summary(tuned);
+    let group = GroupChip {
+        id_salt: "fill_advanced",
+        icon: ICON_TUNE.codepoint,
+        label: "Advanced",
+        summary: &summary,
+        tooltip: "How the fill meets the photo around it.",
+        tuned: tuned > 0,
+        width: theme::POPOVER_WIDTH,
+        live: false,
+    };
+    let mut committed = false;
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            brush.inpaint_edge_colour = EdgeColour::AlongEdge;
+            committed = true;
+        }
+        committed |= edge_colour_row(ui, brush);
     });
     committed
 }
@@ -97,17 +172,17 @@ fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64
     changed
 }
 
-/// RORem's Advanced group: steps and seed. Its prompt is baked in, so
-/// there is nothing else to tell it.
+/// RORem's Advanced group: steps, seed and the edge. Its prompt is baked
+/// in, so there is nothing else to tell it.
 pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
-    let tuned = usize::from(brush.rorem_steps != ROREM_STEPS) + usize::from(brush.sd_seed.is_some());
+    let tuned = usize::from(brush.rorem_steps != ROREM_STEPS) + usize::from(brush.sd_seed.is_some()) + generated_edge_tuned(brush);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "rorem_advanced",
         icon: ICON_TUNE.codepoint,
         label: "Advanced",
         summary: &summary,
-        tooltip: "How the eraser generates the fill: steps and seed.",
+        tooltip: "How the eraser generates the fill: steps, seed and how it meets the photo.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
         live: false,
@@ -117,12 +192,15 @@ pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_s
         if reset {
             brush.rorem_steps = ROREM_STEPS;
             brush.sd_seed = None;
+            reset_generated_edge(brush);
             committed = true;
         }
         committed |= chip::slider_row(ui, "Steps", &mut brush.rorem_steps, ROREM_STEPS_RANGE).commit;
         hint(ui, "Fewer steps are faster but rougher; past 4, the number the model was trained for, the fill barely changes.");
         ui.add_space(theme::SPACE_XS);
         committed |= seed_row(ui, brush, shown_seed);
+        ui.add_space(theme::SPACE_XS);
+        committed |= generated_edge_rows(ui, brush);
     });
     committed
 }

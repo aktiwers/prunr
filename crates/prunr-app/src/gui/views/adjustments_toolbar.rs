@@ -194,6 +194,9 @@ pub(crate) fn render(
         if shows(model, Surface::RoremChips) && super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed) {
             change.brush_settings_committed = true;
         }
+        if shows(model, Surface::FillChips) && super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush) {
+            change.brush_settings_committed = true;
+        }
         if shows(model, Surface::Mask) {
             chip::gated(ui, gate(Surface::Mask), |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);

@@ -176,6 +176,8 @@ pub struct InpaintJob {
     /// 0 ⇒ skip sharpen.
     #[serde(default)]
     pub sharpen: f32,
+    #[serde(default)]
+    pub edge_colour: prunr_core::inpaint_blend::EdgeColour,
 }
 
 /// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
@@ -583,6 +585,7 @@ mod tests {
                 sd_req: None,
                 feather_px: 0.0,
                 sharpen: 0.0,
+                edge_colour: prunr_core::inpaint_blend::EdgeColour::AlongEdge,
             }),
             SubprocessCommand::CancelItem { item_id: 1 },
             SubprocessCommand::Configure { mask: MaskSettings::default(), line_mode: LineMode::Off, edge: EdgeSettings::default(), first_look: None, on_screen: None },
@@ -760,9 +763,11 @@ mod tests {
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::DpmPp2MKarras,
                 tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512, cpu_only: true, mem: prunr_core::inpaint_sd::SdMemPlan { memory_pattern: Some(false), device_initializers: true, intra_threads: 4 } },
                 fill_scale: prunr_core::inpaint::FillScale::Quarter,
+                soft_edge_px: 22.0,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
+            edge_colour: prunr_core::inpaint_blend::EdgeColour::Off,
         }));
     }
 
