@@ -153,8 +153,12 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
-                let done = self.tiles.iter().zip(self.tile_states.iter()).filter(|(_, s)| **s == TileState::Done).map(|(c, _)| *c);
-                self.finished = self.finished.iter().copied().chain(done).collect();
+                // A run that re-lays one layout pass after pass adds no
+                // second copy of a cell; the map draws every kept cell per frame.
+                let fresh = self.tiles.iter().zip(self.tile_states.iter())
+                    .filter(|&(c, s)| *s == TileState::Done && !self.finished.contains(c))
+                    .map(|(c, _)| *c);
+                self.finished = self.finished.iter().copied().chain(fresh).collect();
                 self.tiles = rects.as_slice().into();
                 self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
@@ -527,6 +531,23 @@ mod tests {
         p.apply(&ProgressUpdate::Tile { index: 0, done: true });
         p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
         assert_eq!(*p.finished, [half(0.0), half(0.5)]);
+    }
+
+    /// A layout laid again for each pass of a run keeps one copy of each
+    /// finished cell, however many passes.
+    #[test]
+    fn a_relaid_layout_keeps_one_copy_of_each_cell() {
+        use prunr_core::{ProgressUpdate, TileRect};
+        let mut p = upscale((0, 0));
+        let layout = vec![TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, TileRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 }];
+        for _ in 0..30 {
+            p.apply(&ProgressUpdate::Tiles(layout.clone()));
+            for index in 0..2 {
+                p.apply(&ProgressUpdate::Tile { index, done: true });
+            }
+        }
+        p.apply(&ProgressUpdate::Tiles(layout.clone()));
+        assert_eq!(*p.finished, *layout);
     }
 
     #[test]
