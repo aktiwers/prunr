@@ -628,11 +628,11 @@ mod tests {
         assert_eq!(r.mask, defaults);
     }
 
+    /// A preset saved before the line scale and the upscale knobs loads
+    /// with Fused lines, the native X4 scale and full AI blend (zero
+    /// would turn the AI output off); the retired `upscale_scale` is ignored.
     #[test]
-    fn serde_loads_old_preset_missing_edge_scale_as_fused() {
-        // Backwards-compat: older preset files lack edge_scale.
-        // `#[serde(default)]` on ItemSettings must fall back to
-        // `EdgeScale::Fused`.
+    fn an_old_preset_loads_with_the_newer_knobs_at_their_defaults() {
         let old_json = r#"{
             "gamma": 1.2,
             "contrast": 0.0,
@@ -645,11 +645,15 @@ mod tests {
             "line_strength": 0.5,
             "solid_line_color": null,
             "edge_thickness": 0,
-            "bg": null
+            "bg": null,
+            "upscale_scale": 2
         }"#;
         let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.edge_scale, EdgeScale::Fused);
-        assert_eq!(loaded.line_mode, LineMode::EdgesOnly); // sanity: others still parse
+        assert_eq!(loaded.line_mode, LineMode::EdgesOnly, "the saved knobs still parse");
+        assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
+        assert_eq!((loaded.pre_denoise, loaded.sharpen, loaded.ai_blend), (0.0, prunr_core::DEFAULT_SHARPEN, 1.0));
+        assert!(!loaded.color_match);
     }
 
     /// Presets saved with the retired Balanced scale still load.
@@ -705,74 +709,6 @@ mod tests {
         assert_eq!(s, recovered);
     }
 
-    #[test]
-    fn serde_loads_old_preset_missing_upscale_fields() {
-        // Old preset JSON that carried `upscale_model` or `upscale_scale` from
-        // the pre-refactor schema — serde should ignore unknown keys and load
-        // cleanly. Missing `output_scale` defaults to X4 (native).
-        let old_json = r#"{
-            "gamma": 1.0,
-            "contrast": 0.0,
-            "edge_shift": 0.0,
-            "refine_edges": false,
-            "guided_radius": 8,
-            "guided_epsilon": 0.0001,
-            "feather": 0.0,
-            "line_mode": "Off",
-            "line_strength": 0.5,
-            "solid_line_color": null,
-            "edge_thickness": 0,
-            "bg": null
-        }"#;
-        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
-    }
-
-    #[test]
-    fn current_recipe_derives_upscale_model_from_active_model_kind() {
-        let s = ItemSettings { output_scale: prunr_core::OutputScale::X2, ..ItemSettings::default() };
-        // Active upscale model → recipe slot populated.
-        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
-        assert_eq!(r.upscale.model, Some(prunr_models::ModelId::RealEsrganX4Plus));
-        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
-        // Active seg model → upscale slot empty.
-        let r = s.current_recipe(prunr_core::ModelKind::Silueta);
-        assert_eq!(r.upscale.model, None);
-    }
-
-
-    #[test]
-    fn current_recipe_passes_output_scale_through() {
-        let s = ItemSettings {
-            output_scale: prunr_core::OutputScale::X2,
-            ..ItemSettings::default()
-        };
-        let r = s.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
-        assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
-    }
-
-    #[test]
-    fn serde_loads_old_preset_with_upscale_scale_int() {
-        // An old preset's `"upscale_scale": 2` is unknown to ItemSettings;
-        // serde silently drops it and defaults `output_scale` to X4.
-        let old_json = r#"{
-            "gamma": 1.0,
-            "contrast": 0.0,
-            "edge_shift": 0.0,
-            "refine_edges": false,
-            "guided_radius": 8,
-            "guided_epsilon": 0.0001,
-            "feather": 0.0,
-            "line_mode": "Off",
-            "line_strength": 0.5,
-            "solid_line_color": null,
-            "edge_thickness": 0,
-            "bg": null,
-            "upscale_scale": 2
-        }"#;
-        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(loaded.output_scale, prunr_core::OutputScale::X4);
-    }
 
 
     #[test]
@@ -806,47 +742,6 @@ mod tests {
         assert_eq!(r.upscale.ai_blend_bits, 0.6_f32.to_bits());
         assert!(r.upscale.color_match);
         assert_eq!(r.upscale.output_scale, prunr_core::OutputScale::X2);
-    }
-
-    #[test]
-    fn serde_roundtrip_all_upscale_fields() {
-        let s = ItemSettings {
-            pre_denoise: 0.4,
-            sharpen: 0.3,
-            ai_blend: 0.6,
-            color_match: true,
-            output_scale: prunr_core::OutputScale::X2,
-            ..ItemSettings::default()
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        let recovered: ItemSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(s, recovered);
-    }
-
-    #[test]
-    fn serde_loads_old_preset_missing_upscale_tuning_fields() {
-        // An old preset missing the upscale-tuning fields must load with
-        // sensible defaults: pre_denoise=0, sharpen at DEFAULT_SHARPEN,
-        // ai_blend=1 (the critical one — zero here would disable AI output).
-        let old_json = r#"{
-            "gamma": 1.0,
-            "contrast": 0.0,
-            "edge_shift": 0.0,
-            "refine_edges": false,
-            "guided_radius": 8,
-            "guided_epsilon": 0.0001,
-            "feather": 0.0,
-            "line_mode": "Off",
-            "line_strength": 0.5,
-            "solid_line_color": null,
-            "edge_thickness": 0,
-            "bg": null
-        }"#;
-        let loaded: ItemSettings = serde_json::from_str(old_json).unwrap();
-        assert_eq!(loaded.pre_denoise, 0.0);
-        assert_eq!(loaded.sharpen, prunr_core::DEFAULT_SHARPEN);
-        assert_eq!(loaded.ai_blend, 1.0);
-        assert!(!loaded.color_match);
     }
 
     /// The recipe names the upscale model for every upscaler (the NMKD
