@@ -113,6 +113,15 @@ impl DecodeSlots {
         *s -= 1;
         DecodeSlotGuard { sem: self.clone() }
     }
+
+    /// Run `work` on a thread of its own once a slot is free.
+    pub fn spawn(self: &Arc<Self>, work: impl FnOnce() + Send + 'static) {
+        let slots = Arc::clone(self);
+        std::thread::spawn(move || {
+            let _slot = slots.acquire();
+            work();
+        });
+    }
 }
 
 pub struct DecodeSlotGuard {
