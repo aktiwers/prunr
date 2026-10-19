@@ -5,12 +5,8 @@
 //! to-default button. Non-default values get an accent outline so the user
 //! can see at a glance which knobs have been tuned.
 //!
-//! View Component discipline: chips take `&mut` to their underlying value
-//! only (e.g. `&mut f32`) — never `&mut PrunrApp`. This keeps them reusable
-//! and testable, and prevents PrunrApp from growing into a God Object.
-//!
-//! All chip functions return `bool` indicating whether the value changed,
-//! so callers can invalidate textures or kick off live preview.
+//! Chips take `&mut` to their underlying value only, never `&mut PrunrApp`,
+//! so they stay reusable and testable.
 
 use egui::{Color32, RichText, Response, Ui};
 use egui::ecolor::Hsva;
@@ -24,7 +20,6 @@ use crate::gui::knob_catalog::StaticKnob;
 use crate::gui::theme;
 use crate::gui::views::effects::paint_mesh;
 
-/// Horizontal padding inside a chip.
 const CHIP_PADDING_X: f32 = 8.0;
 
 /// Return value of every chip function. Callers aggregate these into a
@@ -65,8 +60,7 @@ pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui
     .inner
 }
 
-/// Shared chip-button renderer. Returns the response for popup wiring.
-/// `accent` = true draws an accent border (non-default value indicator).
+/// `accent` draws an accent border (the non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
     let text = if compact(ui) { icon.to_owned() } else { format!("{icon}  {value}") };
     chip_face(ui, text, accent)
@@ -188,8 +182,7 @@ pub(super) fn falloff_square_shapes(
         .chain(rings.into_iter().map(move |(dist, stroke)| egui::Shape::rect_stroke(square(dist), 0.0, stroke, egui::StrokeKind::Outside)))
 }
 
-/// Square icon-only button with an active/inactive visual state. Used by
-/// the toolbar's Reset / Brush toggles.
+/// Square icon-only button with an active/inactive visual state.
 ///
 /// `icon` is `&str` rather than `char` even though every caller passes a
 /// single Unicode code point — `egui::RichText::new` doesn't accept
@@ -502,12 +495,10 @@ fn value_box_width(ui: &Ui, key: impl std::hash::Hash, texts: impl FnOnce() -> V
 /// The key under which `panel_rows` marks a panel whose sliders lay out
 /// as panel rows.
 const PANEL_ROWS: &str = "chip_panel_rows";
-/// The name column of a panel row.
 const PANEL_NAME_WIDTH: f32 = 116.0;
 /// A panel row's height: the segmented control's, so every row's name
 /// centres on its control.
 const PANEL_ROW_HEIGHT: f32 = 30.0;
-/// Room for a panel row's value box.
 const PANEL_VALUE_WIDTH: f32 = 74.0;
 
 /// Run `body` with its sliders laid out as panel rows: the
@@ -566,7 +557,6 @@ fn add_slider(ui: &mut Ui, slider: egui::Slider<'_>, value_w: f32) -> Response {
     .inner
 }
 
-/// The handle's colour: near-white over the rail.
 const HANDLE: Color32 = Color32::from_rgb(0xf4, 0xf4, 0xf4);
 
 /// Where a slider's handle sits, 0–1, by egui's own mapping (log10
@@ -611,7 +601,6 @@ fn row_wash(resp: &Response, selected: bool) -> Color32 {
     }
 }
 
-/// The picked row's check mark size.
 const ROW_CHECK_SIZE: f32 = 16.0;
 
 /// The picked row's check, `inset` from its right edge.
@@ -765,7 +754,6 @@ fn segmented<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
 }
 
 /// Horizontal tab strip: the active tab is filled, the rest are flat.
-/// Used by Settings, the CLI reference and the Model Store filters.
 pub(super) fn tab_strip(ui: &mut Ui, labels: &[&str], selected: &mut usize) {
     segmented(ui, |ui| {
         ui.horizontal(|ui| {
@@ -857,7 +845,6 @@ impl GroupChip<'_> {
     }
 }
 
-/// The popup a group chip opens.
 fn group_chip_id(id_salt: &str) -> egui::Id {
     egui::Id::new(("group_chip", id_salt))
 }
@@ -877,7 +864,6 @@ pub(super) fn group_chip<R>(
         // Exactly its width: the header's right-aligned Reset would
         // otherwise stretch a flyout to the popup's default width.
         ui.set_width(g.width);
-        // Each slider spans the panel, its value box at the end.
         ui.spacing_mut().slider_width = g.width - PANEL_VALUE_WIDTH;
         let reset = popover_header(ui, g.label, Some(("Reset every setting in this group", !g.tuned)));
         out = Some(body(ui, reset));
@@ -1064,7 +1050,6 @@ pub(super) fn swatch_tile(ui: &mut Ui, name: &str, selected: bool, size: egui::V
     resp
 }
 
-/// A quick strip's slider width.
 const STRIP_SLIDER_WIDTH: f32 = 72.0;
 /// A strip's sliders and gaps when it would not fit the window otherwise.
 const STRIP_SLIDER_WIDTH_COMPACT: f32 = 52.0;

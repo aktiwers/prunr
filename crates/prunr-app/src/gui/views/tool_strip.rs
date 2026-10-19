@@ -39,7 +39,6 @@ impl Tool {
 pub(crate) struct StripFacts {
     pub model: SettingsModel,
     pub encoder_pending: bool,
-    /// The shown fill can be generated again ("Try another").
     /// Why "Try another" can't run now (`None`: it can).
     pub reroll_refusal: Option<&'static str>,
 }

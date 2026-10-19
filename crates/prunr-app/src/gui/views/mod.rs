@@ -47,13 +47,9 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) {
     ui.add_space(theme::SPACE_SM);
 }
 
-/// Description text below a control. Mono font signals "supplemental".
-/// Wraps to the available width so a long hint doesn't push its parent
-/// container wider than the screen — egui's default Label is single-line
-/// which forces parents to grow to the longest hint, which is what we
-/// don't want inside narrow popovers (brush_chip) and fixed-width modals.
-/// Ragged right: in a justified layout (every popup's) egui would justify
-/// the lines and spread the words apart.
+/// Description text below a control, in mono. Wraps to the available
+/// width so a long hint does not widen a narrow popover or modal, and is
+/// ragged right because egui would justify it in a justified layout.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
     if text.is_empty() { return; }
     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| ui.add(
@@ -95,9 +91,7 @@ pub(super) fn variant_index<T>(all: &[T], value: &T) -> usize {
     all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
 }
 
-/// Format a byte count for human display. Used by the Model Store
-/// (download progress, disk-usage footer) and stays here so future
-/// callers don't reinvent it.
+/// Format a byte count for human display.
 pub fn format_byte_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;

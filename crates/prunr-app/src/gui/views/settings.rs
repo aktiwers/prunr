@@ -747,8 +747,6 @@ fn render_tab_shortcuts(ui: &mut egui::Ui, app: &mut PrunrApp) {
     }
 }
 
-// ── Model Credits tab ────────────────────────────────────────────────────────
-
 /// Sort installed model descriptors for the Model Credits tab.
 /// Primary: `attribution_required == true` first (CC-BY at top for
 /// legal-compliance scannability). Secondary: alphabetical by `display_name`.

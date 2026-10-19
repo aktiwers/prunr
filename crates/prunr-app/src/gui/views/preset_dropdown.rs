@@ -1,16 +1,7 @@
 //! The "Preset" dropdown: quick-apply named settings snapshots and save
 //! the current item's settings as a new preset.
 //!
-//! View Component discipline: takes `&mut AppSettings` (for the preset map
-//! and the naming dialog state) + `&mut ItemSettings` (the current image's
-//! settings — source of a Save, target of an Apply).
-//!
-//! Returns the applied preset's name (Apply), so the caller can record it
-//! on the item.
-//!
-//! The "Save preset" naming dialog's text lives in `PresetUi.save_dialog`.
-//! It opens on "Save current as..." and closes when the user confirms or
-//! cancels.
+//! Takes `&mut AppSettings` and `&mut ItemSettings`, never `&mut PrunrApp`.
 
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
@@ -20,15 +11,9 @@ use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 use crate::gui::views::chip::{button, ButtonKind};
 
-/// Label for the dropdown button — shows the `applied_preset` name and
-/// whether current settings still match it.
-///   - Match → `Portrait ✓` (check icon, clean)
-///   - Diverged → `Portrait ✎` (edit icon, modified)
-///
-/// Tracks the preset the user LAST APPLIED (via dropdown click or Reset All),
-/// not whichever preset happens to match current settings. This way
-/// "Portrait ✎" keeps saying Portrait while you tweak — you know your base
-/// and that you've diverged from it.
+/// Label for the dropdown button: the preset the user last applied, with a
+/// check while current settings still match it and an edit mark once they
+/// diverge, so "Portrait ✎" keeps naming the base while you tweak.
 fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &str) -> String {
     // If applied_preset was deleted out from under us, fall back gracefully.
     let exists = applied_preset == PRUNR_PRESET
@@ -54,8 +39,7 @@ pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
 }
 
 /// All preset names in display order: Prunr first, then user presets
-/// alphabetically. Used by the dropdown list and anywhere we need the
-/// complete set of valid `default_preset` values.
+/// alphabetically.
 pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     let mut names = Vec::with_capacity(settings.presets.len() + 1);
     names.push(PRUNR_PRESET.to_string());
@@ -63,7 +47,6 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     names
 }
 
-/// The dialog's egui id for `standard_modal_window`.
 const SAVE_DIALOG_ID: &str = "preset_save_dialog";
 const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 380.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
@@ -117,9 +100,8 @@ pub(crate) fn render(
             ui.set_min_width(theme::POPOVER_WIDTH);
             crate::gui::views::chip::popover_header(ui, "Presets", None);
 
-            // List in display order: Prunr first, then user presets. Prunr is
-            // a synthetic entry — applies ItemSettings::default() and cannot be
-            // deleted or overwritten.
+            // Prunr is synthetic: it applies ItemSettings::default() and
+            // cannot be deleted or overwritten.
             for name in all_preset_names(settings) {
                 let is_prunr = name == PRUNR_PRESET;
                 let is_default = settings.default_preset == name;
@@ -139,7 +121,6 @@ pub(crate) fn render(
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            // Delete — hidden for Prunr (non-deletable).
                             if !is_prunr {
                                 let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
                                 let armed = RichText::new("Delete?").size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
@@ -203,7 +184,6 @@ pub(crate) fn render(
         },
     );
 
-    // ── Naming dialog ──
     if let Some(name_buf) = presets.save_dialog.as_mut() {
         let mut commit = false;
         let mut cancel = false;

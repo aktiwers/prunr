@@ -399,7 +399,6 @@ impl Pressed {
     }
 }
 
-/// Collect the shortcuts pressed this frame.
 pub fn pressed(ctx: &egui::Context) -> Pressed {
     if ctx.input(|i| i.events.is_empty()) {
         return Pressed::default();

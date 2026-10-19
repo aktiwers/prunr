@@ -9,8 +9,7 @@ use super::chip::{icon_action_button, tooltip};
 use super::shortcuts::Action;
 use crate::gui::theme::{DESTRUCTIVE, TEXT_PRIMARY};
 
-/// What the action bar wants the app to do. Returned to the caller
-/// (PrunrApp) which holds the BatchManager + SystemBridge + history.
+/// What the action bar wants the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectionAction {
     /// On a cut-out: bring the selected area back.

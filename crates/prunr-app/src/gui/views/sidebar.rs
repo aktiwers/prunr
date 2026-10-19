@@ -28,8 +28,7 @@ struct SidebarActions {
     hovered: Option<(u64, bool)>,
 }
 
-/// Values that are constant for the whole item loop — computed once and
-/// passed by reference to avoid re-reading per-row.
+/// Values constant for the whole item loop, computed once.
 struct RowContext<'a> {
     dragging_ids: Option<&'a HashSet<u64>>,
     sidebar_escape_rect: Rect,
@@ -204,7 +203,6 @@ fn render_item_row(
 
     let close_clicked = paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, row_hovered, actions);
 
-    // DnD: set drag payload (intra-sidebar reorder) and check for drops.
     item_response.dnd_set_drag_payload(i);
     if let Some(src_idx) = item_response.dnd_release_payload::<usize>() {
         actions.swap_from = Some(*src_idx);
@@ -219,11 +217,9 @@ fn render_item_row(
         app.zoom_state.reset();
         let egui_ctx = ui.ctx().clone();
         app.sync_selected_batch_textures(&egui_ctx);
-        // Force a repaint now AND shortly after — when the selected item's
-        // result_texture was previously evicted, `sync_selected_batch_textures`
-        // kicks off an async tex_prep whose completion-time repaint can race
-        // with egui's idle state. Without these, the canvas waits for the
-        // next mouse event before showing the new image.
+        // Repaint now and shortly after: an evicted result's async tex_prep
+        // can land while egui idles, leaving the old image up until the
+        // next mouse event.
         egui_ctx.request_repaint();
         egui_ctx.request_repaint_after(std::time::Duration::from_millis(66));
     }
@@ -264,17 +260,13 @@ fn render_thumbnail_layer(
         theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
-    // Bg-image texture is built off-thread (kicked from the file-pick
-    // and preset-apply paths). The thumbnail paint reads the handle
-    // directly; if still pending the bg-color path renders below.
+    // A bg-image texture still building off-thread falls back to the bg colour.
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
     needs_repaint || fade < 1.0
 }
 
 /// True when the item needs a thumbnail but hasn't asked for one yet.
-/// Viewport-visibility gating happens upstream: `render_item_row`
-/// early-returns on the virtualization check before this is called, so
-/// off-screen rows never trigger a request.
+/// Off-screen rows never get here: the row returns early before painting.
 fn should_request_thumbnail(item: &BatchItem) -> bool {
     item.thumb.wanted()
 }
@@ -352,8 +344,7 @@ fn paint_thumbnail(
 
 /// Returns `true` when the checkbox absorbed a click this frame — the row's
 /// click-to-select handler must then skip, so toggling the check does NOT
-/// also switch the main canvas to this item. Mirrors the `close_clicked`
-/// contract used for the delete/save hover buttons.
+/// also switch the main canvas to this item.
 fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect) -> bool {
     let cb_center = Pos2::new(
         item_rect.min.x + 4.0 + TICK_SIZE * 0.5,
@@ -397,7 +388,6 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
 }
 
 fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
-    // Shimmer sweep.
     let sweep =
         ((anim_time * 0.7).fract()) * (item_rect.width() + 40.0) - 20.0 + item_rect.min.x;
     let shimmer = Rect::from_min_max(
@@ -412,7 +402,6 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
             theme::PROCESSING_SWEEP,
         );
     }
-    // Pulsing accent border.
     let pulse = (anim_time * 2.5).sin() * 0.5 + 0.5;
     let border_alpha = (40.0 + pulse * 80.0) as u8;
     ui.painter().rect_stroke(
@@ -489,7 +478,6 @@ fn paint_hover_buttons(
     let mut close_clicked = false;
     let btn_size = 20.0;
 
-    // Delete — top-right.
     let del_center = Pos2::new(
         item_rect.max.x - 4.0 - btn_size * 0.5,
         item_rect.min.y + 4.0 + btn_size * 0.5,
