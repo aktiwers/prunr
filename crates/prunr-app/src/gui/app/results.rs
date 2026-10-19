@@ -214,7 +214,8 @@ impl PrunrApp {
             self.end_stale_run(item_id, tex_kind);
             return false;
         }
-        item.show_run_result(Arc::clone(&shown), recipe);
+        item.applied_recipe = Some(recipe);
+        item.show_result(Arc::clone(&shown));
         keep(item);
         let source = item.source.clone();
         let target = item.request_result_texture(false);

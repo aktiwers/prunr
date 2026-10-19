@@ -137,12 +137,6 @@ impl DepthExport {
     }
 }
 
-/// `<stem>-depth.png` for an image named `filename`.
-pub(crate) fn depth_map_name(filename: &str) -> String {
-    let stem = std::path::Path::new(filename).file_stem().map_or_else(|| filename.into(), |s| s.to_string_lossy());
-    prunr_core::depth::map_file_name(&stem)
-}
-
 /// The photo an effect background is made from: the image the shown
 /// result's run started from (a photo with an object erased first), or
 /// the original. An edited one is unpacked where it is used, off the UI
@@ -477,13 +471,6 @@ impl Engine {
 pub(crate) enum Cutter {
     Model(prunr_core::ModelKind),
     NoModel,
-}
-
-impl Cutter {
-    /// The active model's: No model when it has no segmentation model.
-    pub(crate) fn of(model: Option<prunr_core::ModelKind>) -> Self {
-        model.map_or(Cutter::NoModel, Cutter::Model)
-    }
 }
 
 /// A lens-blur focus and what it was measured from.
@@ -1640,15 +1627,6 @@ impl BatchItem {
         self.failure = None;
     }
 
-    /// Show a finished upscale or colorize with the recipe it ran: over
-    /// its tile preview when there is one.
-    pub(crate) fn show_run_result(&mut self, shown: Arc<image::RgbaImage>, recipe: prunr_core::ProcessingRecipe) {
-        self.applied_recipe = Some(recipe);
-        self.failure = None;
-        self.hold_tile_preview_for_reveal();
-        self.take_result(shown);
-    }
-
     /// A texture of the result now held is to be made: any asked for
     /// earlier no longer lands. `live` swaps it in without a reveal.
     pub(crate) fn request_result_texture(&mut self, live: bool) -> super::background_io::TexTarget {
@@ -2296,12 +2274,6 @@ impl BatchItem {
         self.timeline.current().origin.as_ref().filter(|o| o.engine == engine && engine != Engine::Erase)
     }
 
-    /// Whether a run of `engine` redoes the shown step rather than
-    /// building on it.
-    pub(crate) fn redoes_shown_step(&self, engine: Engine) -> bool {
-        self.redo_origin(engine).is_some()
-    }
-
     /// Where a run of `engine` starts (`None`: the original): the shown
     /// step's own start when the run redoes it, the shown result otherwise.
     /// Nothing is loaded.
@@ -2421,12 +2393,6 @@ impl BatchItem {
         self.run_start(engine).map_or(self.dimensions, |s| s.dims())
     }
 
-    /// Whether a run of `engine` starts from an earlier result rather than
-    /// the original; cheap, for recipes and labels.
-    pub(crate) fn starts_from_result(&self, engine: Engine) -> bool {
-        self.run_start(engine).is_some()
-    }
-
     /// The pixels the awaited run starts from (`None`: the original),
     /// loaded when the run is sent.
     #[cfg(test)]
@@ -2467,8 +2433,8 @@ impl BatchItem {
         // A run that starts from an earlier result works on pixels the
         // cached tensor never saw, unless it redoes the shown cut-out
         // from that cut-out's own starting image.
-        if self.starts_from_result(Engine::Segment) {
-            if !self.redoes_shown_step(Engine::Segment) {
+        if self.run_start(Engine::Segment).is_some() {
+            if self.redo_origin(Engine::Segment).is_none() {
                 self.set_cached_tensor(None);
             }
             return RunTier::Full;
@@ -2826,7 +2792,8 @@ impl BatchItem {
 
     /// The depth map to save beside this item's result.
     pub(crate) fn depth_export(&self) -> DepthExport {
-        DepthExport { name: depth_map_name(&self.filename), dims: self.dimensions, depth: self.depth_source() }
+        let stem = std::path::Path::new(&self.filename).file_stem().map_or_else(|| self.filename.as_str().into(), |s| s.to_string_lossy());
+        DepthExport { name: prunr_core::depth::map_file_name(&stem), dims: self.dimensions, depth: self.depth_source() }
     }
 
     pub(crate) fn depth_source(&self) -> DepthSource {
@@ -3797,7 +3764,7 @@ mod tests {
 
         let _ = item.undo_step();
         assert_eq!(item.run_input(Engine::Segment).map(|b| b.get_pixel(0, 0).0[0]), Some(6), "undo brings back the step's own start");
-        assert!(item.starts_from_result(Engine::Segment));
+        assert!(item.run_start(Engine::Segment).is_some());
         assert_eq!(item.run_input_dims(Engine::Upscale), (2, 2));
     }
 

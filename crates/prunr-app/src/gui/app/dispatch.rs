@@ -297,7 +297,7 @@ impl PrunrApp {
             self.batch.share_settings(shown, &candidate_ids);
         }
 
-        let cutter = Cutter::of(self.settings.model.to_model_kind());
+        let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
         let tiers = self.batch.classify(&candidate_ids, model, step, cutter);
         self.notify_skip(tiers.up_to_date_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
