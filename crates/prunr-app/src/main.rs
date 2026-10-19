@@ -20,12 +20,9 @@ fn attach_parent_console() {
 fn main() {
     let cli = Cli::parse();
 
-    // `--debug` propagates to subprocess workers via two env vars, set BEFORE
-    // `init_tracing` reads them. Workers inherit the parent env at spawn.
-    //   RUST_LOG=prunr=debug  → filter level
-    //   PRUNR_DEBUG_LOG=<path> → also tee tracing to a file (bulletproof on
-    //                            Windows where AttachConsole + GUI-subsystem
-    //                            subprocess stderr is unreliable).
+    // `--debug` reaches subprocess workers through env vars they inherit,
+    // set BEFORE `init_tracing` reads them. PRUNR_DEBUG_LOG tees to a file:
+    // on Windows a GUI-subsystem worker's stderr is unreliable.
     // The bench's report carries every provider failure; the warnings
     // the ladder logs for them would bury its progress lines.
     let level = if cli.debug { Some("prunr=debug") } else { cli.command.is_some().then_some("prunr=error") };
@@ -77,15 +74,10 @@ fn main() {
         std::process::exit(cli::run_bench(args));
     }
 
-    // `--open <path>` forces GUI mode regardless of input args. Plumbed
-    // via env var so gui::run() and PrunrApp::new don't need a parameter
-    // shuffle just for this opt-in flag.
+    // `--open <path>` forces GUI mode regardless of input args.
     if let Some(path) = cli.open.as_ref() {
         if let Some(s) = path.to_str() {
-            // Safety: the binary is single-threaded at this point — the
-            // worker subprocess is a separate process, ORT init does not
-            // spawn user-visible threads, and `gui::run` is reached
-            // immediately after this block.
+            // SAFETY: single-threaded at this point in main.
             unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
         }
     } else if !cli.inputs.is_empty() {

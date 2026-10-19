@@ -55,12 +55,8 @@ pub fn save_image_replacing(path: &Path, img: &image::RgbaImage) -> Result<(), S
     .map_err(|e| e.to_string())
 }
 
-/// Remove every regular file directly inside `dir`. Non-recursive — uses
-/// `DirEntry::file_type()` (does NOT follow symlinks) so only true regular
-/// files at depth 0 are removed; subdirectories, symlinks, and device nodes
-/// are all skipped.
-///
-/// Silent on errors — best-effort housekeeping.
+/// Remove every regular file directly inside `dir`, best effort.
+/// Symlinks are NOT followed; subdirectories and device nodes are skipped.
 pub(crate) fn sweep_dir_files(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -70,9 +66,7 @@ pub(crate) fn sweep_dir_files(dir: &Path) {
     }
 }
 
-/// `sweep_dir_files` on a background thread. Used by graceful-exit cleanup
-/// paths where blocking the shutdown sequence on file-system I/O would
-/// stall the parent process.
+/// `sweep_dir_files` on a background thread, so shutdown never waits on I/O.
 pub(crate) fn sweep_dir_files_async(dir: std::path::PathBuf) {
     std::thread::spawn(move || sweep_dir_files(&dir));
 }
