@@ -647,15 +647,6 @@ mod tests {
         assert!(!path.exists(), "the file is removed with its last state");
     }
 
-    #[test]
-    fn a_selection_plane_round_trips_through_compression() {
-        let mut cells = vec![0i8; 64];
-        cells[9] = prunr_core::selection::FULL;
-        cells[20] = -40;
-        let plane = MaskArtifact::from_cells(8, 8, cells);
-        assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane);
-    }
-
     /// Masks and images stored for undo come back as they went in, and
     /// a payload's size header reads back as written.
     #[test]

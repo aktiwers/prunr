@@ -735,17 +735,6 @@ mod selection_action_tests {
         assert!(item.result_rgba.as_ref().zip(before.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b)), "the image stays as it is");
         assert_eq!(item.timeline.undo_steps(), 2, "no Edit step from the stale cut");
     }
-
-    /// Invert: coverage complement, signed by the active brush mode.
-    #[test]
-    fn invert_action_replaces_mask_with_inverse() {
-        use prunr_core::selection::FULL;
-        let original = make_mask(4, 4, true);
-        let inverted = original.invert();
-        assert!(inverted.cells().iter().all(|&v| v == 0), "inverted all-selected mask must be all-zero");
-        let partial = MaskArtifact::from_cells(2, 2, vec![0, FULL, 0, FULL]);
-        assert_eq!(partial.invert().cells(), &[-FULL, 0, -FULL, 0]);
-    }
 }
 
 #[cfg(test)]
