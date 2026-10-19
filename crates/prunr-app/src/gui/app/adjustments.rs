@@ -8,7 +8,6 @@ use crate::gui::brush_state::Tool;
 use super::PrunrApp;
 
 impl PrunrApp {
-    /// Whether the adjustments toolbar should render this frame.
     /// Shift+H and an empty batch always hide it. `auto_hide_adjustments`
     /// hides it unless the cursor is in a peek zone near the top of the
     /// window or a popup (combo / color picker) is open.
@@ -20,9 +19,8 @@ impl PrunrApp {
             return true;
         }
         let screen_rect = ctx.content_rect();
-        // Peek zone covers the main toolbar + ~half the adjustments toolbar
-        // height. Generous enough to catch the user heading up toward the
-        // chips, tight enough not to trigger on ordinary canvas work.
+        // Main toolbar + ~half the adjustments toolbar: catches the cursor
+        // heading for the chips, not ordinary canvas work.
         let peek_zone = egui::Rect::from_min_size(
             screen_rect.min,
             egui::vec2(screen_rect.width(), theme::TOOLBAR_HEIGHT + 32.0),
@@ -65,11 +63,8 @@ impl PrunrApp {
             .show_inside(ui, |ui| {
                 let can_compare = self.can_compare_intent();
                 let selection_gates = crate::gui::views::selection_action_bar::SelectionGates::of(|a| self.selection_action_refusal(a));
-                // Split borrow: app.settings and app.batch are disjoint
-                // fields of PrunrApp, and within the batch item its
-                // `settings` and `applied_preset` are disjoint fields too.
-                // Lets the toolbar mutate the preset string in place
-                // without a clone + writeback round-trip.
+                // Split borrow: disjoint fields, so the toolbar edits the
+                // preset string in place without a clone + writeback.
                 let settings_ref = &mut self.settings;
                 let brush_state_ref = &mut self.brush_state;
                 let item = &mut self.batch.items[idx];
@@ -131,10 +126,8 @@ impl PrunrApp {
 
         if toolbar_change.preset_applied {
             self.batch.items[idx].commit(StepKind::Preset);
-            // Preset apply copied an ItemSettings into the item — including
-            // any captured bg_image_hash. Reload the matching bytes from
-            // the persisted path map (or clear if missing) so the recipe
-            // diff invariant holds and the canvas paints the right image.
+            // The preset may carry a bg_image_hash: reload its bytes from the
+            // persisted path map (or clear) so the recipe diff holds.
             self.reconcile_bg_image_after_preset(idx);
         }
         if toolbar_change.model_changed {
@@ -228,18 +221,15 @@ impl PrunrApp {
         }
 
         if toolbar_change.render_repaint {
-            // bg paints as a GPU rect behind the transparent result texture —
-            // no CPU composite, no texture rebuild. Also fires on preset
-            // applies so a no-op preset still repaints for the commit toast.
+            // bg paints as a GPU rect behind the result texture; also repaints
+            // a no-op preset apply for the commit toast.
             ctx.request_repaint();
         }
     }
 
-    /// Resolve the auto-fire dispatch. Starts from the aggregated catalog
-    /// dispatch (populated only by `auto_trigger_on_commit` knobs), then
-    /// refines context-sensitive knobs with item state (cached tensors).
-    /// Preset applies reduce to the actual recipe diff — a no-op preset
-    /// pick returns `None`, so a trivial re-apply doesn't spawn a subprocess.
+    /// Starts from the catalog dispatch (only `auto_trigger_on_commit`
+    /// knobs), refined by item state (cached tensors). A preset apply
+    /// reduces to the recipe diff, so a no-op pick returns `None`.
     fn resolve_auto_dispatch(
         &self,
         idx: usize,
@@ -280,10 +270,8 @@ impl PrunrApp {
                         RequiredTier::Skip
                         | RequiredTier::CompositeOnly
                         | RequiredTier::UpscaleRerun => knob_catalog::DispatchKind::None,
-                        // UpscaleTier2: route to live preview via the upscale
-                        // dispatch path. DispatchKind doesn't have an UpscaleTier2
-                        // variant — the caller handles it specially after this
-                        // function returns when the model is in upscale mode.
+                        // No DispatchKind for these: the caller routes them
+                        // to the upscale live preview.
                         RequiredTier::UpscaleTier2 | RequiredTier::ColorizeTier2 => knob_catalog::DispatchKind::None,
                         RequiredTier::EdgeRerun => knob_catalog::DispatchKind::LivePreviewEdge,
                         RequiredTier::MaskRerun => knob_catalog::DispatchKind::LivePreviewMask,
@@ -308,7 +296,6 @@ impl PrunrApp {
 
 /// The second toolbar row's panel, with or without an image loaded.
 fn adjustments_panel(frame: egui::Frame) -> egui::Panel {
-    // A chip with SPACE_SM above and below.
     let margin = egui::Margin::symmetric(theme::SPACE_SM as i8, theme::SPACE_SM as i8);
     egui::Panel::top("adjustments_toolbar")
         .exact_size(theme::CHIP_HEIGHT + theme::SPACE_SM * 2.0)

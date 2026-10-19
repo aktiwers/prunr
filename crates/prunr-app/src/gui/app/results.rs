@@ -17,13 +17,12 @@ pub(super) enum RunLost {
     Unanswered,
 }
 
-/// Cap on `WorkerResult` messages drained per frame from `processor.worker_rx`.
-/// Keeps the UI responsive during heavy batch processing — remaining messages
-/// are picked up on the next frame (request_repaint_after ensures continuity).
+/// Per-frame cap on `processor.worker_rx` messages, so a heavy batch keeps
+/// the UI responsive; the rest drain next frame.
 const WORKER_POLL_PER_FRAME: usize = 8;
 
-/// Cap on file-load receipts drained per frame from `batch.bg_io.file_load_rx`.
-/// Same rationale as `WORKER_POLL_PER_FRAME`.
+/// Per-frame cap on `batch.bg_io.file_load_rx` receipts, so a big import
+/// keeps the UI responsive.
 const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
 
 /// The status line when a face search is stopped (Cancel or Esc).
@@ -144,8 +143,7 @@ impl PrunrApp {
     }
 
     /// Drain completed upscale results and apply them to the matching item.
-    /// A result for a state the item has left is dropped. `.try_recv()`
-    /// keeps this non-blocking.
+    /// A result for a state the item has left is dropped.
     pub(super) fn pump_upscale_results(&mut self, ctx: &egui::Context) {
         let results = self.processor.pump_upscale_results();
         if results.is_empty() {
@@ -727,10 +725,7 @@ impl PrunrApp {
             self.processor.note_failed_rerun();
         }
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        // Single completion event — useful for `RUST_LOG=prunr=debug` bug
-        // reports (when did inference actually finish?) and as a stable
-        // signal for any external observer (e.g. a smoke driver) that a
-        // dispatch round-trip closed for this item.
+        // A stable completion signal for debug logs and external observers.
         tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
         // A model the accelerator does not run used the CPU by design; the
@@ -860,10 +855,8 @@ impl PrunrApp {
         self.status.text = msg;
     }
 
-    /// Drain completed thumbnails from the background decoder into GPU
-    /// textures. Throttles uploads so a 50-image import doesn't burst all
-    /// `ctx.load_texture` calls into one frame and overwhelm the egui
-    /// command buffer. Requests a repaint while the queue is still saturated.
+    /// Uploads are throttled so a 50-image import doesn't burst every
+    /// `ctx.load_texture` into one frame; repaints while the queue is full.
     fn pump_thumbnail_results(&mut self, ctx: &egui::Context) -> bool {
         const THUMB_UPLOADS_PER_FRAME: usize = 3;
         let mut uploaded = 0;
@@ -900,10 +893,8 @@ impl PrunrApp {
         }
         landed |= decode_arrived;
         if decode_arrived {
-            // Freshly-decoded RGBA for the viewed item: clear zoom state
-            // entirely (not just re-arm the flag). A bare flag keeps
-            // previous_zoom / pan_offset around, which lets `canvas.rs`'s
-            // toggle-back branch fire against the old image's state.
+            // Reset zoom entirely, not just the flag: a stale previous_zoom /
+            // pan_offset fires the canvas's toggle-back against the old image.
             self.zoom_state.reset();
             self.show_original = false;
         }
@@ -918,7 +909,6 @@ impl PrunrApp {
             self.batch.bg_io.uploads.push(prep.name, image, landing);
         }
 
-        // Drain filter-only Process results (model=None path).
         let mut filter_only_arrived = false;
         let mut filtered = Vec::new();
         while let Ok((item_id, run, result, chain_start)) = self.batch.bg_io.filter_only_rx.try_recv() {
@@ -968,7 +958,6 @@ impl PrunrApp {
         for (note, took) in self.system.take_copy_outcomes() {
             self.on_copy_done(note, took);
         }
-        // Drain save completion notifications
         while let Ok(outcome) = self.batch.bg_io.save_done_rx.try_recv() {
             match outcome {
                 Ok(msg) => self.toasts.success(msg),
@@ -987,9 +976,7 @@ impl PrunrApp {
         landed |= self.pump_thumbnail_results(ctx);
         self.batch.compress_history_off_thread();
 
-        // Drain off-thread selection textures. `ctx.load_texture` is
-        // allowed here — this drain runs from `logic()`, not a render
-        // closure. A result for a mask that has since changed is dropped;
+        // A result for a mask that has since changed is dropped;
         // `ensure_selection_texture` already requested the current one.
         let mut to_upload = Vec::new();
         while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
@@ -1085,7 +1072,6 @@ impl PrunrApp {
         }
         if loaded_count > 0 {
             ctx.request_repaint();
-            // Select the new image if only one was loaded and no more are pending
             if loaded_count == 1 && channel_drained {
                 self.batch.selected_index = self.batch.items.len() - 1;
                 self.zoom_state.reset();
