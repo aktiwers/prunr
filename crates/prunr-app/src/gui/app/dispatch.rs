@@ -136,7 +136,7 @@ impl PrunrApp {
         };
         let recipe = item.settings.current_recipe(model_kind);
         let start = item.next_upscale_start(model_kind);
-        let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims);
+        let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims());
         let factor = output_scale.factor();
         let out = (w.saturating_mul(factor), h.saturating_mul(factor));
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);

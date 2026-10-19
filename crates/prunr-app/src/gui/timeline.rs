@@ -357,17 +357,13 @@ impl Origin {
 }
 
 /// An image a run starts from: a stored timeline image, loaded only when
-/// the run reads it, and its size.
-#[derive(Clone)]
-pub(crate) struct RunStart {
-    pub(crate) image: StoredImage,
-    pub(crate) dims: (u32, u32),
-}
+/// the run reads it; its size is known without loading it.
+pub(crate) type RunStart = StoredImage;
 
 impl DocState {
     /// Every stored part of the step can be read back.
     pub(crate) fn readable(&self) -> bool {
-        let start = self.origin.as_ref().and_then(|o| o.start.as_ref()).map(|s| &s.image);
+        let start = self.origin.as_ref().and_then(|o| o.start.as_ref());
         self.result.iter().chain(start).all(|s| s.is_readable())
             && self.selection.iter().chain(self.edits.as_ref()).all(|s| s.is_readable())
     }
@@ -498,7 +494,7 @@ impl Timeline {
     pub(crate) fn stored_images(&self) -> impl Iterator<Item = &StoredImage> {
         let is_a_result = |b: &StoredImage| self.states.iter().any(|s| s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, b)));
         self.states.iter().filter_map(|s| s.result.as_ref())
-            .chain(self.states.iter().filter_map(|s| Some(&s.origin.as_ref()?.start.as_ref()?.image)).filter(move |b| !is_a_result(b)))
+            .chain(self.states.iter().filter_map(|s| s.origin.as_ref()?.start.as_ref()).filter(move |b| !is_a_result(b)))
     }
 
     /// Every stored selection and cut-out edits plane.

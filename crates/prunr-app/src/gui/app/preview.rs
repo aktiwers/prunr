@@ -152,7 +152,7 @@ impl PrunrApp {
     ) -> Result<crate::gui::live_preview::DispatchInputs, crate::gui::capability::Verdict> {
         use crate::gui::capability::{check, ItemFacts, Need, Reason, Verdict};
         use crate::gui::knob_catalog::ModelRole;
-        use crate::gui::live_preview::{DispatchInputs, OriginalFrom, PreviewKind};
+        use crate::gui::live_preview::{DispatchInputs, PreviewKind};
         let facts = ItemFacts::of(item);
         let need = |need| match check(&facts, need, role) {
             Verdict::Ready => Ok(()),
@@ -205,12 +205,12 @@ impl PrunrApp {
         // it is not packed away between ticks.
         let start = item.run_start(Engine::Segment);
         let (original, original_from) = match start.as_ref() {
-            Some(s) => match s.image.loaded() {
+            Some(s) => match s.loaded() {
                 Some(rgba) => {
                     item.start_photo = Some(Arc::clone(&rgba));
                     (rgba, None)
                 }
-                None => (Arc::new(image::RgbaImage::new(0, 0)), Some(OriginalFrom { image: Arc::clone(&s.image), dims: s.dims })),
+                None => (Arc::new(image::RgbaImage::new(0, 0)), Some(Arc::clone(s))),
             },
             None => {
                 item.start_photo = None;
