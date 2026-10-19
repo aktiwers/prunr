@@ -192,16 +192,18 @@ pub fn color_match_inpainted(
 /// Leaves `inpainted` as it is when the mask is empty, dimensions
 /// disagree, or no fill pixel has photo within `ring_px`.
 ///
-/// Peak working set, n = mask bbox plus `ring_px` (f32): the inside mask,
-/// both box counts, both box sums, the offset and its weight, and the
-/// pyramid above them (a third of n each) = **about 9.4 × n × 4 B**;
-/// channels run in turn.
+/// Peak working set, n = mask bbox plus `max(ring_px, reach_px)` (f32):
+/// while the offsets are measured, the inside mask, its box share, the
+/// edge weight, the fade, the offset and two reused scratch planes (7 n);
+/// while one channel spreads, the inside mask, weight, fade and offset
+/// plus push-pull's own levels and output (about 4 n) = **about 8 × n ×
+/// 4 B**; channels run in turn.
 ///
 /// | bbox      | peak f32 working set |
 /// |-----------|----------------------|
-/// |  500²     | ~9 MB                |
-/// | 1000²     | ~38 MB               |
-/// | 2000²     | ~150 MB              |
+/// |  500²     | ~8 MB                |
+/// | 1000²     | ~32 MB               |
+/// | 2000²     | ~130 MB              |
 pub fn match_colour_along_edge(
     inpainted: &mut RgbaImage,
     source: &RgbaImage,
@@ -218,60 +220,63 @@ pub fn match_colour_along_edge(
     let Some(bbox) = mask_bbox(mask, 128, ring_px.max(reach_px) + 1) else {
         return;
     };
-    let (bw, bh) = (bbox.w as usize, bbox.h as usize);
+    let (bw, n) = (bbox.w as usize, bbox.area());
     let (bx, by) = (bbox.x as usize, bbox.y as usize);
     let img_w = inpainted.width() as usize;
     let msk = mask.as_raw();
-    let inside: Vec<f32> = (0..bw * bh)
-        .map(|i| if msk[(by + i / bw) * img_w + bx + i % bw] >= 128 { 1.0 } else { 0.0 })
-        .collect();
+    let mut inside = vec![0.0f32; n];
+    inside.par_chunks_mut(bw).enumerate().for_each(|(j, row)| {
+        let at = (by + j) * img_w + bx;
+        for (slot, &m) in row.iter_mut().zip(&msk[at..at + bw]) {
+            *slot = if m >= 128 { 1.0 } else { 0.0 };
+        }
+    });
     let in_share = box_filter(&inside, bbox.w, bbox.h, ring_px);
-    // A pixel counts as on the edge when photo and fill each fill a fair
-    // part of its box, so both means rest on enough samples.
-    let on_edge: Vec<bool> = inside.iter().zip(&in_share)
-        .map(|(&i, &share)| i > 0.5 && (0.2..=0.8).contains(&share))
+    // An edge pixel has photo and fill each fill a fair part of its box,
+    // so both means rest on enough samples.
+    let weight: Vec<f32> = inside.iter().zip(&in_share)
+        .map(|(&i, s)| if i > 0.5 && (0.2..=0.8).contains(s) { 1.0 } else { 0.0 })
         .collect();
-    if !on_edge.iter().any(|&e| e) {
+    if !weight.iter().any(|&w| w > 0.0) {
         return;
     }
-    let out_share: Vec<f32> = in_share.iter().map(|s| 1.0 - s).collect();
     // 1 at the edge, where the fill box is half inside, to 0 once the
     // `reach_px` box lies wholly in the fill.
     let fade: Vec<f32> = box_filter(&inside, bbox.w, bbox.h, reach_px.max(1)).iter()
         .map(|&share| ((1.0 - share) * 2.0).clamp(0.0, 1.0))
         .collect();
-    let mut plane = vec![0.0f32; bw * bh]; // reused per channel as the masked sum's input
-    let mut offset = vec![0.0f32; bw * bh];
-    let weight: Vec<f32> = on_edge.iter().map(|&e| if e { 1.0 } else { 0.0 }).collect();
+    let (mut plane, mut sum) = (vec![0.0f32; n], vec![0.0f32; n]); // reused per channel
+    let mut offset = vec![0.0f32; n];
     for c in 0..3 {
-        let read = |img: &RgbaImage, keep_inside: bool, out: &mut [f32]| {
-            let raw = img.as_raw();
-            for (i, slot) in out.iter_mut().enumerate() {
-                let p = ((by + i / bw) * img_w + bx + i % bw) * 4 + c;
-                let side = if keep_inside { inside[i] } else { 1.0 - inside[i] };
-                *slot = raw[p] as f32 * side;
-            }
-        };
-        read(source, false, &mut plane);
-        let photo_sum = box_filter(&plane, bbox.w, bbox.h, ring_px);
-        read(inpainted, true, &mut plane);
-        let fill_sum = box_filter(&plane, bbox.w, bbox.h, ring_px);
-        for i in 0..bw * bh {
-            offset[i] = if on_edge[i] {
-                photo_sum[i] / out_share[i] - fill_sum[i] / in_share[i]
-            } else {
-                0.0
-            };
+        // The photo's mean just outside, less the fill's just inside.
+        load_channel(source, bbox, c, &mut plane);
+        plane.iter_mut().zip(&inside).for_each(|(v, &i)| *v *= 1.0 - i);
+        box_filter_into(&plane, bbox.w, bbox.h, ring_px, &mut sum);
+        for (i, o) in offset.iter_mut().enumerate() {
+            *o = if weight[i] > 0.0 { sum[i] / (1.0 - in_share[i]) } else { 0.0 };
         }
-        drop((photo_sum, fill_sum));
-        let field = push_pull(&offset, &weight, bw, bh);
+        load_channel(inpainted, bbox, c, &mut plane);
+        plane.iter_mut().zip(&inside).for_each(|(v, &i)| *v *= i);
+        box_filter_into(&plane, bbox.w, bbox.h, ring_px, &mut sum);
+        for (i, o) in offset.iter_mut().enumerate() {
+            if weight[i] > 0.0 {
+                *o -= sum[i] / in_share[i];
+            }
+        }
+        let field = push_pull(&offset, &weight, bw, bbox.h as usize);
         let raw = inpainted.as_mut();
-        for i in 0..bw * bh {
-            if inside[i] > 0.5 {
-                let p = ((by + i / bw) * img_w + bx + i % bw) * 4 + c;
-                raw[p] = crate::math::round_u8(raw[p] as f32 + field[i] * fade[i]);
-            }
-        }
+        raw[by * img_w * 4..(by + bbox.h as usize) * img_w * 4]
+            .par_chunks_mut(img_w * 4)
+            .enumerate()
+            .for_each(|(j, row)| {
+                for x in 0..bw {
+                    let i = j * bw + x;
+                    if inside[i] > 0.5 {
+                        let p = (bx + x) * 4 + c;
+                        row[p] = crate::math::round_u8(row[p] as f32 + field[i] * fade[i]);
+                    }
+                }
+            });
     }
 }
 
