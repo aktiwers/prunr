@@ -158,23 +158,7 @@ fn tensor_to_mask_core(
         }
     };
 
-    let (lo, hi) = if pred_slice.len() >= ROW_PAR_THRESHOLD {
-        pred_slice
-            .par_iter()
-            .fold(
-                || (f32::INFINITY, f32::NEG_INFINITY),
-                |(lo, hi), &v| (lo.min(v), hi.max(v)),
-            )
-            .reduce(
-                || (f32::INFINITY, f32::NEG_INFINITY),
-                |(l1, h1), (l2, h2)| (l1.min(l2), h1.max(h2)),
-            )
-    } else {
-        pred_slice.iter().fold(
-            (f32::INFINITY, f32::NEG_INFINITY),
-            |(lo, hi), &v| (lo.min(v), hi.max(v)),
-        )
-    };
+    let (lo, hi, _) = crate::math::slice_stats(pred_slice);
 
     let norm = SegNormaliser::new(lo, hi, model);
     let uniform_val = norm.uniform;
