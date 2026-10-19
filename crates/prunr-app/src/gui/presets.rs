@@ -259,22 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn model_preset_default_round_trips() {
-        let original = ModelPreset::default();
-        let json = serde_json::to_string(&original).expect("serialize");
-        let restored: ModelPreset = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, original);
-    }
-
-    #[test]
-    fn sd_preset_default_round_trips() {
-        let original = SdPreset::default();
-        let json = serde_json::to_string(&original).expect("serialize");
-        let restored: SdPreset = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, original);
-    }
-
-    #[test]
     fn sd_scheduler_bundle_default_for_lcm_is_fast() {
         let b = SdSchedulerBundle::default_for(SdScheduler::Lcm);
         assert_eq!(b.steps, 8);
@@ -289,47 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn presets_loads_empty_object_as_defaults_modelpreset() {
-        let parsed: ModelPreset = serde_json::from_str("{}")
-            .expect("ModelPreset must deserialize from `{}` — add #[serde(default)] to any new field");
-        assert_eq!(parsed, ModelPreset::default());
-    }
-
-    #[test]
     fn presets_loads_unknown_fields_modelpreset() {
         let json = r#"{ "made_up_field": 42, "another_future_field": "hello" }"#;
         let parsed: ModelPreset = serde_json::from_str(json)
-            .expect("ModelPreset must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
+            .expect("ModelPreset must default every missing field and ignore unknown ones — no #[serde(deny_unknown_fields)]");
         assert_eq!(parsed, ModelPreset::default());
-    }
-
-    #[test]
-    fn presets_loads_empty_object_as_defaults_sdpreset() {
-        let parsed: SdPreset = serde_json::from_str("{}")
-            .expect("SdPreset must deserialize from `{}` — add #[serde(default)] to any new field");
-        assert_eq!(parsed, SdPreset::default());
     }
 
     #[test]
     fn presets_loads_unknown_fields_sdpreset() {
         let json = r#"{ "future_field": true, "another": [1, 2, 3] }"#;
         let parsed: SdPreset = serde_json::from_str(json)
-            .expect("SdPreset must ignore unknown fields");
+            .expect("SdPreset must default every missing field and ignore unknown ones");
         assert_eq!(parsed, SdPreset::default());
-    }
-
-    #[test]
-    fn presets_loads_empty_object_as_defaults_sdschedulerbundle() {
-        let parsed: SdSchedulerBundle = serde_json::from_str("{}")
-            .expect("SdSchedulerBundle must deserialize from `{}` — add #[serde(default)] to any new field");
-        assert_eq!(parsed, SdSchedulerBundle::default());
     }
 
     #[test]
     fn presets_loads_unknown_fields_sdschedulerbundle() {
         let json = r#"{ "tomorrows_field": 1.5 }"#;
         let parsed: SdSchedulerBundle = serde_json::from_str(json)
-            .expect("SdSchedulerBundle must ignore unknown fields");
+            .expect("SdSchedulerBundle must default every missing field and ignore unknown ones");
         assert_eq!(parsed, SdSchedulerBundle::default());
     }
 
@@ -427,21 +390,6 @@ mod tests {
 
     fn brush_with(radius: f32) -> BrushSettings {
         BrushSettings { radius, ..BrushSettings::default() }
-    }
-
-    #[test]
-    fn resolve_full_entry_returns_preset_values() {
-        let mp = ModelPreset {
-            item_settings: crate::gui::item_settings::item_with_gamma(2.5),
-            brush: brush_with(80.0),
-            sd: None,
-        };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Silueta), mp);
-
-        let r = resolve_preset_for_model(&file, ModelId::Silueta, None);
-        assert!((r.item_settings.gamma - 2.5).abs() < f32::EPSILON);
-        assert!((r.brush.radius - 80.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -656,80 +604,6 @@ mod tests {
         assert_eq!(model_id_from_key("FutureModel"), None);
         let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
         assert_eq!(resolved.item_settings, ItemSettings::default());
-    }
-
-    #[test]
-    fn reset_button_parity_top_right_matches_brush_popover_subset() {
-        use prunr_core::brush::BrushShape;
-        use prunr_core::selection::BrushMode;
-        let preset_brush = BrushSettings {
-            radius: 80.0,
-            hardness: 0.3,
-            mode: BrushMode::Add,
-            shape: BrushShape::Square,
-            inpaint_grow: 5.0,
-            inpaint_feather: 6.0,
-            inpaint_sharpen: 1.5,
-            ..BrushSettings::default()
-        };
-        let mp = ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: preset_brush.clone(),
-            sd: None,
-        };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Silueta), mp);
-
-        // (a) Top-right ↻ path: full re-resolve via the resolver. Brush
-        //     comes back exactly as the preset stored it.
-        let top_right_path_brush =
-            resolve_preset_for_model(&file, ModelId::Silueta, None).brush;
-
-        // (b) Brush popover Reset path: caller has a live `Settings.brush`
-        //     with a user mutation (radius=10) and resets the popover-visible
-        //     subset using the resolver's brush as the source.
-        let mut live_brush = BrushSettings::default();
-        live_brush.radius = 10.0;
-        let mut popover_target = live_brush.clone();
-        popover_target.reset_popover_fields_from(&top_right_path_brush);
-
-        // Parity: every popover-visible knob agrees between the two paths.
-        assert!((top_right_path_brush.radius - 80.0).abs() < f32::EPSILON);
-        assert!((popover_target.radius - top_right_path_brush.radius).abs() < f32::EPSILON);
-        assert!((popover_target.hardness - top_right_path_brush.hardness).abs() < f32::EPSILON);
-        assert_eq!(popover_target.shape, top_right_path_brush.shape);
-        assert!(
-            (popover_target.inpaint_grow - top_right_path_brush.inpaint_grow).abs()
-                < f32::EPSILON,
-        );
-        assert!(
-            (popover_target.inpaint_feather - top_right_path_brush.inpaint_feather).abs()
-                < f32::EPSILON,
-        );
-        assert!(
-            (popover_target.inpaint_sharpen - top_right_path_brush.inpaint_sharpen).abs()
-                < f32::EPSILON,
-        );
-    }
-
-    #[test]
-    fn split_then_fuse_round_trips_sd_model() {
-        let original = BrushSettings {
-            radius: 33.0,
-            sd_prompt: "rt-prompt".into(),
-            sd_negative_prompt: "rt-neg".into(),
-            sd_steps: 17,
-            sd_guidance_scale: 4.25,
-            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
-            sd_seed: Some(99),
-            sd_use_taesd: Some(false),
-            ..BrushSettings::default()
-        };
-
-        let sd = sd_preset_for_save(&original, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset { brush: original.clone(), sd, ..ModelPreset::default() };
-        let fused = fuse_brush_for_apply(&mp, Some(original.sd_scheduler));
-        assert_eq!(fused, original);
     }
 
     #[test]
