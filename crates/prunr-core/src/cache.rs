@@ -556,9 +556,7 @@ mod tests {
     /// and never touch other models' caches.
     ///
     /// Uses `LaMaFp32` (not used by other tests in this module) to avoid
-    /// races under `cargo test`'s default parallel runner — see also
-    /// `cache_populated_distinguishes_empty_from_nonempty` which owns
-    /// `Migan`.
+    /// races under `cargo test`'s default parallel runner.
     #[test]
     fn gc_stale_for_model_removes_siblings_only() {
         let _dir = DIR_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
