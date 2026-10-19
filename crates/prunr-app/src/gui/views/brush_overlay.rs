@@ -60,7 +60,9 @@ pub(crate) fn handle_input(
             i.pointer.primary_released(),
         )
     });
-    let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
+    // On the image, and not on a control drawn over it (the strip).
+    let layer = ui.layer_id();
+    let pointer_on_img = hover.filter(|p| img_rect.contains(*p) && ui.ctx().layer_id_at(*p).is_none_or(|l| l == layer));
 
     // In-progress stroke trail (drawn first so the cursor renders on top).
     draw_trail(ui, brush_state, look);
