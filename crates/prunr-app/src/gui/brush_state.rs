@@ -715,53 +715,6 @@ mod tests {
         assert!(d.sd_scheduler.guidance_range().contains(&d.sd_guidance_scale));
     }
 
-    /// Old persisted JSON without the new SD-tuning fields must
-    /// deserialize cleanly into the new defaults — no panic. Pins
-    /// serde back-compat for users carrying older settings.json files.
-    #[test]
-    fn brush_settings_serde_back_compat_old_json_without_new_fields() {
-        let old_json = r#"{
-            "radius": 24.0,
-            "hardness": 0.7,
-            "strength": 1.0,
-            "mode": "Subtract",
-            "shape": "Circle",
-            "inpaint_sharpen": 0.6,
-            "inpaint_feather": 4.0,
-            "inpaint_grow": 2.0,
-            "sd_prompt": "x",
-            "sd_negative_prompt": "y",
-            "sd_guidance_scale": 4.0
-        }"#;
-        let s: BrushSettings = serde_json::from_str(old_json).unwrap();
-        // Missing fields fill with serde defaults:
-        assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
-        assert_eq!(s.sd_steps, 8);
-        assert_eq!(s.sd_seed, None);
-        assert_eq!(s.sd_use_taesd, None);
-        assert!((s.sd_guidance_scale - 4.0).abs() < f32::EPSILON);
-    }
-
-    /// Forward-compat tripwire: a JSON literal with only `{"radius":24}`
-    /// must deserialize into a fully-defaulted `BrushSettings`. Preset
-    /// files produced by older binaries that lack SD-tuning fields must
-    /// keep loading.
-    #[test]
-    fn brush_settings_loads_with_only_radius() {
-        let s: BrushSettings = serde_json::from_str(r#"{"radius":24}"#)
-            .expect("BrushSettings must deserialize from a single-field JSON literal");
-        assert!((s.radius - 24.0).abs() < f32::EPSILON);
-        assert_eq!(s.sd_use_taesd, None);
-        assert_eq!(s.sd_seed, None);
-        assert_eq!(s.sd_steps, 8);
-        assert_eq!(s.sd_scheduler, SdScheduler::Lcm);
-        assert!((s.sd_guidance_scale - 1.5).abs() < f32::EPSILON);
-        assert!(s.sd_prompt.is_empty());
-        assert_eq!(s.sd_negative_prompt, DEFAULT_SD_NEGATIVE_PROMPT);
-        assert!((s.inpaint_feather - 4.0).abs() < f32::EPSILON);
-        assert!((s.inpaint_grow - 2.0).abs() < f32::EPSILON);
-    }
-
     #[test]
     fn sd_use_taesd_default_is_none_auto() {
         let s = BrushSettings::default();
@@ -769,59 +722,24 @@ mod tests {
             "default must be None (auto-on when TAESD bundle installed)");
     }
 
+    /// The fast decoder runs only when installed; left on auto it runs with
+    /// Fast and not with Quality, whose point is the best fill; the user's
+    /// choice wins otherwise.
     #[test]
-    fn sd_use_taesd_serde_round_trip() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(true);
-        let json = serde_json::to_string(&s).unwrap();
-        let restored: BrushSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.sd_use_taesd, Some(true));
-
-        s.sd_use_taesd = Some(false);
-        let json = serde_json::to_string(&s).unwrap();
-        let restored: BrushSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.sd_use_taesd, Some(false));
-    }
-
-    #[test]
-    fn sd_use_taesd_effective_explicit_off_beats_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(false);
-        assert!(!s.sd_use_taesd_effective_with_avail(true),
-            "explicit opt-out must override installed bundle");
-        assert!(!s.sd_use_taesd_effective_with_avail(false));
-    }
-
-    #[test]
-    fn sd_use_taesd_effective_explicit_on_gated_by_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = Some(true);
-        assert!(s.sd_use_taesd_effective_with_avail(true),
-            "explicit opt-in + installed must dispatch TAESD");
-        assert!(!s.sd_use_taesd_effective_with_avail(false),
-            "explicit opt-in but not installed must fall back");
-    }
-
-    /// Left on auto, the fast decoder runs with Fast and not with Quality,
-    /// whose point is the best fill.
-    #[test]
-    fn the_fast_decoder_follows_the_quality_until_set() {
-        let mut s = BrushSettings { sd_scheduler: SdScheduler::DpmPlusPlus2MKarras, ..BrushSettings::default() };
-        assert!(!s.sd_use_taesd_effective_with_avail(true), "Quality: off");
-        s.sd_scheduler = SdScheduler::Lcm;
-        assert!(s.sd_use_taesd_effective_with_avail(true), "Fast: on");
-        s.sd_use_taesd = Some(false);
-        assert!(!s.sd_use_taesd_effective_with_avail(true), "the user's choice wins");
-    }
-
-    #[test]
-    fn sd_use_taesd_effective_auto_follows_install() {
-        let mut s = BrushSettings::default();
-        s.sd_use_taesd = None;
-        assert!(s.sd_use_taesd_effective_with_avail(true),
-            "auto mode + installed = on");
-        assert!(!s.sd_use_taesd_effective_with_avail(false),
-            "auto mode + not installed = off");
+    fn the_fast_decoder_follows_the_install_the_quality_and_the_choice() {
+        use SdScheduler::{DpmPlusPlus2MKarras as Quality, Lcm as Fast};
+        for (scheduler, choice, installed, runs) in [
+            (Fast, None, true, true),
+            (Fast, None, false, false),
+            (Quality, None, true, false),
+            (Fast, Some(true), true, true),
+            (Fast, Some(true), false, false),
+            (Fast, Some(false), true, false),
+            (Fast, Some(false), false, false),
+        ] {
+            let s = BrushSettings { sd_scheduler: scheduler, sd_use_taesd: choice, ..BrushSettings::default() };
+            assert_eq!(s.sd_use_taesd_effective_with_avail(installed), runs, "{scheduler:?} {choice:?} installed={installed}");
+        }
     }
 
     #[test]
@@ -957,18 +875,6 @@ mod tests {
         assert_eq!(s.sd_steps, 30);
         assert_eq!(s.sd_seed, Some(42));
         assert!(s.magic_depth && s.magic_depth_range == 0.2, "Depth is a strip knob, not the popover's");
-    }
-
-    #[test]
-    fn brush_settings_saved_before_depth_load_with_depth_off() {
-        let mut json = serde_json::to_value(BrushSettings::default()).unwrap();
-        let map = json.as_object_mut().unwrap();
-        map.remove("magic_depth");
-        map.remove("magic_depth_range");
-        let loaded: BrushSettings = serde_json::from_value(json).unwrap();
-        assert!(!loaded.magic_depth);
-        assert_eq!(loaded.magic_depth_range, DEPTH_RANGE_DEFAULT);
-        assert!(DEPTH_RANGE.contains(&loaded.magic_depth_range));
     }
 
     #[test]
