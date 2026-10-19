@@ -1,9 +1,7 @@
 //! Hardware profile detection — CPU vendor/brand + dGPU/iGPU vendors.
-//! Cached via OnceLock; first call does the work, subsequent ones are
-//! zero-cost. PCI vendor IDs are read from `/sys/class/drm/.../device/vendor`
-//! on Linux and from DXGI's adapter list on Windows, because neither
-//! needs a graphics context — `wgpu`/`ash` would fail in headless
-//! containers.
+//! PCI vendor IDs come from sysfs on Linux and DXGI on Windows: neither
+//! needs a graphics context, which `wgpu`/`ash` would fail to get in
+//! headless containers.
 
 #[cfg_attr(not(windows), allow(dead_code))] // only Windows lists adapters through DXGI; the tests run the rules everywhere
 mod adapters;
@@ -122,8 +120,7 @@ pub fn profile() -> &'static HardwareProfile {
     CACHE.get_or_init(detect_now)
 }
 
-/// Total system RAM (bytes). Cached — total memory doesn't change at
-/// runtime so we read it once.
+/// Total system RAM (bytes), read once.
 pub fn total_ram_bytes() -> u64 {
     static CACHE: OnceLock<u64> = OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -169,10 +166,8 @@ pub fn available_ram_mb_throttled() -> u32 {
     (available_ram_bytes_throttled() / (1024 * 1024)) as u32
 }
 
-/// Cached available-RAM read with a 1-second TTL. Cheap to call from
-/// per-frame UI code (~10 ns on cache hit). The 1 s freshness is fine
-/// for a settings panel — RAM displays are read at human speed, not
-/// frame speed. First call on cold start does the full ~1 ms read.
+/// Cached available-RAM read with a 1-second TTL; cheap enough for
+/// per-frame UI code (~10 ns on a cache hit).
 pub fn available_ram_bytes_throttled() -> u64 {
     use std::sync::Mutex;
     use std::time::Instant;
@@ -295,12 +290,9 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVen
         let vendor_path = entry.path().join("device").join("vendor");
         let Ok(vendor_raw) = std::fs::read_to_string(&vendor_path) else { continue };
         let gpu_vendor = parse_pci_vendor(&vendor_raw);
-        // Heuristic: GPU vendor matching CPU vendor is the iGPU; distinct
-        // vendor is dGPU. Known limitation — AMD CPU + AMD dGPU (Ryzen +
-        // Radeon RX) misclassifies the dGPU as iGPU and `recommends_rocm`
-        // returns false. Reading `/sys/class/drm/.../device/class` (PCI
-        // class byte 0x030000 = VGA) would disambiguate; deferred until
-        // we have a real-hardware tester for that combo.
+        // Heuristic: GPU vendor matching CPU vendor is the iGPU. Known
+        // limitation: AMD CPU + AMD dGPU (Ryzen + Radeon RX) reads the
+        // dGPU as an iGPU.
         let is_integrated = matches_cpu(gpu_vendor, cpu_vendor);
         if is_integrated {
             igpu.get_or_insert(gpu_vendor);

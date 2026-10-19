@@ -1,8 +1,5 @@
-//! GUI-side runtime install glue. The cross-cutting helpers (host RID,
-//! wheel selection, SHA256 verify, repackaging, install-dir naming) live
-//! in the `prunr-runtime-install` crate and are shared with `xtask`.
-//! This module wires those into a `RuntimeId` enum + `mpsc::Sender`-based
-//! progress events for the GUI.
+//! GUI-side runtime install glue over `prunr-runtime-install`: the
+//! `RuntimeId` enum and channel-based progress events.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -337,10 +334,8 @@ pub fn start_install(target: InstallTarget) -> InstallHandle {
 }
 
 /// Remove an installed runtime. Refuses when this is the only ORT source
-/// (uninstalling would brick startup) and validates the subdir name so
-/// a future refactor of `install_subdir()` (or a future variant whose
-/// short-name becomes user-supplied) can't escape `<data>/runtimes/` via
-/// embedded path separators.
+/// (uninstalling would brick startup) and when the subdir name could
+/// escape `<data>/runtimes/`.
 pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     let dir = runtime.checked_install_dir()?;
     if !dir.exists() {
@@ -377,8 +372,7 @@ fn run_install(
         });
     };
     let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel };
-    // SHA verification is folded into `download_wheel`'s retry loop —
-    // bytes are already verified when this returns Ok.
+    // Already SHA-verified inside the retry loop.
     let bytes = ri::download_wheel(&wheel, &mut hooks)?;
 
     let _ = tx.send(InstallEvent::Extracting);
