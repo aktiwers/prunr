@@ -20,9 +20,7 @@ use super::memory::{AdmissionController, ImageMemCost, RESIDENT_HISTORY_STEPS};
 use super::state::AppState;
 use super::worker::{CachedTensorWork, WorkItem};
 
-/// Per-status counts across the batch. Produced by `status_counts` for
-/// callers that need to render progress strings, decide "all done" vs
-/// "still processing", etc. without triple-scanning `items` inline.
+/// Per-status counts across the batch.
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StatusCounts {
     pub done: usize,
@@ -36,16 +34,14 @@ impl StatusCounts {
     }
 }
 
-/// Derived progress summary for the status bar. Owns its `stage` string so
-/// callers don't divide done/total or format text inline.
+/// Derived progress summary for the status bar.
 #[derive(Default, Clone, Debug)]
 pub(crate) struct StatusReport {
     pub stage: String,
     pub pct: f32,
 }
 
-/// Which shape the Process button should take for the current selection state.
-/// Drives both the button label and the icon the toolbar renders.
+/// Which shape the Process button takes for the current selection.
 // `Process*` prefix matches the user-visible button labels and the
 // dispatcher arms in `process_items` — renaming would split that pairing.
 #[allow(clippy::enum_variant_names)]
@@ -63,8 +59,7 @@ pub(crate) enum ProcessButtonLabel {
 /// (`cached_edge_tensors`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
 
-/// Maximum thumbnail edge length in pixels. Used by `request_thumbnail`
-/// for both source-decode and result-rgba paths.
+/// Maximum thumbnail edge length in pixels.
 const THUMB_MAX_PX: u32 = 160;
 
 pub(crate) struct BatchManager {
@@ -159,26 +154,20 @@ impl BatchManager {
         self.items.get(self.selected_index)
     }
 
-    /// Look up an item by id. Returns `None` if no batch item has that id —
-    /// common when a worker event arrives after the item was removed.
+    /// `None` is common: a worker event can arrive after its item was removed.
     pub(crate) fn find_by_id(&self, id: u64) -> Option<&BatchItem> {
         self.items.iter().find(|b| b.id == id)
     }
 
-    /// The position of the item with `id`, for callers that index.
     pub(crate) fn index_of(&self, id: u64) -> Option<usize> {
         self.items.iter().position(|b| b.id == id)
     }
 
-    /// Mutable counterpart of `find_by_id`. Used by worker-event handlers
-    /// that write results / status into the matching item.
     pub(crate) fn find_by_id_mut(&mut self, id: u64) -> Option<&mut BatchItem> {
         self.items.iter_mut().find(|b| b.id == id)
     }
 
     /// Derives app-level state from the selected item's status.
-    /// Empty when no item is selected; Done/Processing pass through;
-    /// all other statuses collapse to Loaded.
     pub(crate) fn app_state(&self) -> AppState {
         match self.selected_item() {
             None => AppState::Empty,
@@ -190,9 +179,6 @@ impl BatchManager {
         }
     }
 
-    /// True when the currently-selected item has the given id. Callers use
-    /// this to decide whether a worker message / background-io event affects
-    /// what the user is looking at right now (textures, progress, status).
     pub(crate) fn is_selected(&self, id: u64) -> bool {
         self.selected_item().is_some_and(|b| b.id == id)
     }
@@ -208,22 +194,18 @@ impl BatchManager {
         self.items.iter().filter(|i| i.ticked && i.awaits_cut()).map(|i| i.id)
     }
 
-    /// IDs of the ticked items.
     pub(crate) fn ticked_ids(&self) -> Vec<u64> {
         self.items.iter().filter(|i| i.ticked).map(|i| i.id).collect()
     }
 
 
-    /// Tick or untick every item's checkbox.
     pub(crate) fn set_all_ticked(&mut self, ticked: bool) {
         for item in &mut self.items {
             item.ticked = ticked;
         }
     }
 
-    /// Selected-item index clamped to the current batch size. `None` when
-    /// the batch is empty — callers early-return on that shape instead of
-    /// dealing with saturating arithmetic.
+    /// Selected index clamped to the batch size; `None` when the batch is empty.
     pub(crate) fn selected_idx_clamped(&self) -> Option<usize> {
         if self.items.is_empty() {
             None
@@ -232,11 +214,8 @@ impl BatchManager {
         }
     }
 
-    /// Clamp `selected_index` to the current batch size. Returns `true` when
-    /// the index moved (i.e. the batch shrank below the old selection). Callers
-    /// use the return value to trigger a pending batch sync.
-    /// No-op on an empty batch — resets to 0 instead, which is the canonical
-    /// "nothing selected" sentinel.
+    /// Clamp `selected_index` to the batch size (0 on an empty batch);
+    /// `true` when it moved.
     pub(crate) fn clamp_selected_index(&mut self) -> bool {
         if self.items.is_empty() {
             let moved = self.selected_index != 0;
@@ -250,9 +229,7 @@ impl BatchManager {
         }
     }
 
-    /// Switch the selected item to `idx`. Returns `true` when the index actually
-    /// changed; `false` when it was already selected. Callers use the return value
-    /// to decide whether to reset the canvas (zoom/pan/texture sync).
+    /// `true` when the selection changed, so the caller resets the canvas.
     pub(crate) fn select_item(&mut self, idx: usize) -> bool {
         debug_assert!(idx < self.items.len(), "select_item: idx {idx} out of bounds (len={})", self.items.len());
         if self.selected_index == idx {
@@ -262,9 +239,8 @@ impl BatchManager {
         true
     }
 
-    /// Move the item at `from` to position `to`, adjusting `selected_index`
-    /// so the same logical item remains selected after the move.
-    /// `to == items.len()` is valid and appends the item to the end.
+    /// Move the item at `from` to `to` (`items.len()` appends), keeping the
+    /// same item selected.
     pub(crate) fn reorder(&mut self, from: usize, to: usize) {
         if from == to || from >= self.items.len() {
             return;
@@ -315,7 +291,6 @@ impl BatchManager {
         self.targets(self.viewed_unclamped()).any(|(_, item)| f(item))
     }
 
-    /// Indices of the items in the action target set.
     pub(crate) fn targeted_indices(&self) -> Vec<usize> {
         self.targets(self.viewed_unclamped()).map(|(i, _)| i).collect()
     }
@@ -355,26 +330,20 @@ impl BatchManager {
         }
     }
 
-    /// Number of items with the checkbox set. Single source of truth so
-    /// statusbar / sidebar don't re-roll `iter().filter(...).count()`.
     pub(crate) fn ticked_count(&self) -> usize {
         self.items.iter().filter(|i| i.ticked).count()
     }
 
-    /// True when at least one item has the checkbox set.
     pub(crate) fn any_ticked(&self) -> bool {
         self.items.iter().any(|i| i.ticked)
     }
 
-    /// True when every item has the checkbox set (and the batch is
-    /// non-empty — an empty batch is not "all ticked").
+    /// An empty batch is not all ticked.
     pub(crate) fn all_ticked(&self) -> bool {
         !self.items.is_empty() && self.items.iter().all(|i| i.ticked)
     }
 
-    /// Single pass over `items` producing the three counts that callers
-    /// (`poll_worker_results`, statusbar) otherwise compute with three
-    /// separate filter-count passes.
+    /// The per-status counts, in one pass.
     pub(crate) fn status_counts(&self) -> StatusCounts {
         let mut c = StatusCounts::default();
         for item in &self.items {
@@ -388,8 +357,6 @@ impl BatchManager {
         c
     }
 
-    /// Status-bar progress derived from `status_counts`. Single source of
-    /// truth so callers don't divide done/total or format text inline.
     pub(crate) fn progress(&self) -> StatusReport {
         let counts = self.status_counts();
         let total = counts.batch_total();
@@ -404,18 +371,13 @@ impl BatchManager {
         }
     }
 
-    /// First error message across errored items, or `None` if none errored.
-    /// Used for batch-failure toasts so the user sees the *reason* instead of
-    /// just the count.
+    /// First error message across errored items, for a batch-failure toast.
     pub(crate) fn first_error_message(&self) -> Option<&str> {
         self.items.iter().find_map(BatchItem::error)
     }
 
-    /// Pre-decode source bytes to RgbaImage on a background thread; the
-    /// result lands on `bg_io.decode_rx` for the main thread to attach.
-    /// Decode failures travel as `Err(msg)` so the UI clears
-    /// `decode_pending` and surfaces the error instead of leaving the
-    /// item stuck in a "still loading" state forever.
+    /// Decode source bytes on a background thread into `bg_io.decode_rx`. A
+    /// failure travels as `Err` so the item stops waiting for a decode.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         self.spawn_decode(item_id, move || Ok(bytes));
     }
@@ -492,9 +454,8 @@ impl BatchManager {
         });
     }
 
-    /// Filter-only Process: load + decode + `apply_subject_effect` on a background
-    /// thread, deliver the result via `bg_io.filter_only_rx`. Keeps the UI
-    /// thread free on large batches that the inline path used to freeze.
+    /// Filter-only Process off the UI thread; the result lands on
+    /// `bg_io.filter_only_rx`.
     pub(crate) fn request_filter_only(
         &self,
         item_id: u64,
@@ -534,14 +495,9 @@ impl BatchManager {
         });
     }
 
-    /// Request thumbnail generation on a background thread for a batch item.
-    /// If `result_rgba` is `Some`, thumbnails from the result; otherwise decodes
-    /// source bytes.
-    ///
-    /// Result images stay transparent in storage; the thumb texture needs its
-    /// own composite so the sidebar matches what's drawn on the canvas. Solid
-    /// line color is already baked into `result_rgba` by the pipeline, so we
-    /// don't need a separate parameter for it.
+    /// Build a thumbnail on a background thread, from `result_rgba` when it
+    /// is `Some`, else from the source. Results are stored transparent, so
+    /// the thumb gets its own background composite to match the canvas.
     pub(crate) fn request_thumbnail(
         &self,
         item_id: u64,
@@ -565,11 +521,8 @@ impl BatchManager {
             let source = source.clone();
             std::thread::spawn(move || {
                 let _slot = slots.acquire();
-                // Build the thumb in an inner scope so the source bytes,
-                // DynamicImage, and full-resolution RGBA all drop before
-                // we send. On a 50-image batch this is the dominant
-                // transient peak during sidebar ingestion (was N ×
-                // ~50 MB co-resident).
+                // Source bytes, DynamicImage and full RGBA drop before the send: on a
+                // 50-image batch they were N × ~50 MB co-resident.
                 let thumb = (|| -> Option<image::RgbaImage> {
                     let bytes = source.load_bytes().ok()?;
                     let img = prunr_core::load_image_from_bytes(&bytes).ok()?;
@@ -583,10 +536,8 @@ impl BatchManager {
         }
     }
 
-    /// Evict tensor caches from oldest-loaded items until under budget.
-    /// Iterates front-to-back (oldest first) to preserve recently-processed items.
-    /// Drops BOTH caches on eviction — partial eviction would leave a partially-stale
-    /// item (segmentation cached but edges gone, or vice versa) which is useless.
+    /// Evict tensor caches, oldest-loaded first, until under budget. Both
+    /// caches go together: one without the other is useless.
     pub(crate) fn enforce_tensor_budget(&mut self) {
         // Budget only what eviction can free — selection planes and
         // embeddings would otherwise force tensor evictions they never
@@ -733,7 +684,6 @@ impl ClassifiedTiers {
         self.full.len() + self.mask.len() + self.add_edge.len()
     }
 
-    /// Every image the run sends.
     pub(crate) fn all_process_ids(&self) -> HashSet<u64> {
         self.full.iter()
             .chain(self.mask.iter())
@@ -743,7 +693,6 @@ impl ClassifiedTiers {
 }
 
 impl BatchManager {
-    /// The items whose id is in `ids`, in batch order.
     pub(crate) fn in_set<'a>(&'a mut self, ids: &'a HashSet<u64>) -> impl Iterator<Item = &'a mut BatchItem> + 'a {
         self.items.iter_mut().filter(move |i| ids.contains(&i.id))
     }

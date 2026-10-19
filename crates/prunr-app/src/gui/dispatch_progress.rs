@@ -263,11 +263,9 @@ impl DispatchProgress {
     }
 }
 
-/// Shared slot the dispatcher writes and the widgets read. `None` when
-/// no dispatch is in flight. `Arc<Mutex<…>>` over atomics because the
-/// payload includes a heap `Cow` for `step_label`; writes are
-/// step-frequency (≤ a few Hz), reads are render-frequency (60 Hz),
-/// and the lock is held for microseconds — contention is invisible.
+/// Shared slot the dispatcher writes and the widgets read; `None` when no
+/// dispatch is in flight. A Mutex rather than atomics because the payload
+/// holds a heap `Cow`; the lock is held for microseconds.
 #[derive(Debug, Clone, Default)]
 pub struct DispatchProgressSlot {
     inner: Arc<Mutex<Option<DispatchProgress>>>,
@@ -335,8 +333,7 @@ impl DispatchProgressSlot {
         RunSink { slot: self.clone(), run }
     }
 
-    /// Replace the active progress snapshot. Pass `None` to clear when
-    /// the dispatch finishes (success, cancel, or error).
+    /// `None` clears it when the dispatch finishes.
     pub fn set(&self, progress: Option<DispatchProgress>) {
         *self.lock() = progress;
     }
@@ -345,8 +342,7 @@ impl DispatchProgressSlot {
         f(&mut self.lock());
     }
 
-    /// Snapshot the current progress for a widget. `None` when no
-    /// dispatch is in flight.
+    /// `None` when no dispatch is in flight.
     pub fn read(&self) -> Option<DispatchProgress> {
         self.lock().clone()
     }

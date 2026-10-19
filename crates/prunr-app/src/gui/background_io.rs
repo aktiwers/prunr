@@ -1,8 +1,5 @@
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 
-/// An image's No-model result, and the start a chained pass built. A load
-/// or decode failure is an `Err` on the same channel (mapped to
-/// `BatchStatus::Error` in `drain_background_channels`).
 /// A filter-only pass: the item, its run, the result, and the chained
 /// start built for it.
 pub type FilterOnlyResult = (u64, u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
@@ -94,14 +91,11 @@ pub(crate) enum SelectionImage {
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
 }
 
-/// Counting semaphore bounding how many background jobs (decode, thumbnail,
-/// filter-only pass, background picture, texture prep, history compression)
-/// run at once. Without it, a 50-image Process All fans out 50
-/// threads each holding `compressed bytes + DynamicImage + RgbaImage`
-/// (~50–80 MB at 4 K) → multi-GB transient before any thread releases.
-/// Threads still spawn immediately; they park on `acquire` until a slot
-/// opens. Cap is `available_parallelism()` so cold-cache disk paths
-/// still saturate cores.
+/// Counting semaphore bounding how many background jobs run at once.
+/// Without it a 50-image Process All spawns 50 threads each holding
+/// ~50–80 MB at 4 K, a multi-GB transient. Threads still spawn at once and
+/// park on `acquire`; the cap is `available_parallelism()` so cold-cache
+/// disk paths still saturate cores.
 pub struct DecodeSlots {
     state: Mutex<usize>,
     cv: Condvar,
@@ -133,9 +127,7 @@ impl Drop for DecodeSlotGuard {
     }
 }
 
-/// Owned handles to the texture-prep channel + decode slots, bundled so
-/// `PrunrApp::spawn_tex_prep` takes one parameter instead of two. The
-/// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
+/// The texture-prep channel and decode slots; cheap to clone.
 #[derive(Clone)]
 pub struct TexPrepHandles {
     pub(crate) tx: mpsc::Sender<TexPrepMsg>,
@@ -154,7 +146,6 @@ pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
     pub(crate) file_load_tx: mpsc::Sender<FileLoad>,
     pub(crate) file_load_rx: mpsc::Receiver<FileLoad>,
-    /// Thumbnail generation results
     pub thumb_tx: mpsc::Sender<ThumbMsg>,
     pub thumb_rx: mpsc::Receiver<ThumbMsg>,
     /// Pre-decoded source images for instant canvas switching
@@ -168,8 +159,6 @@ pub struct BackgroundIO {
     /// installed set is read again when it lands.
     pub(crate) removed_tx: mpsc::Sender<Result<String, String>>,
     pub(crate) removed_rx: mpsc::Receiver<Result<String, String>>,
-    /// A copy whose background was baked off the UI thread, for the
-    /// clipboard, with the note to show once copied.
     /// A copy's image made off the UI thread (`None`: it could not be
     /// read), with the note to show once copied.
     pub copy_ready_tx: mpsc::Sender<(Option<Arc<image::RgbaImage>>, Option<String>)>,
@@ -183,25 +172,18 @@ pub struct BackgroundIO {
     /// Prepared textures uploading a few tiles per frame, with what each
     /// lands on.
     pub(crate) uploads: crate::gui::image_texture::Uploads<TexLanding>,
-    /// Filter-only (model=None) Process results — keeps the UI thread free
-    /// while load + decode + `apply_subject_effect` runs per item.
+    /// Filter-only (model=None) Process results.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
-    /// Off-thread RGBA decode + ColorImage build for a per-item bg
-    /// image. Drain calls `ctx.load_texture` with the bg-specific
-    /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
-    /// The `to_rgba8()` copy (~32 MB on a 4K bg) stays off the UI thread.
+    /// A per-item bg image decoded and built off-thread; its `to_rgba8()`
+    /// copy (~32 MB on a 4K bg) stays off the UI thread.
     pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
     pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
-    /// Bounds simultaneous background jobs to `available_parallelism()`.
-    /// Threads spawn immediately but park here until a slot opens,
-    /// capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
     /// Selection texture built off-thread whenever the selected item's
-    /// texture is missing. Drained via ctx.load_texture (allowed —
-    /// drain_background_channels runs in logic(), not a render closure).
+    /// texture is missing.
     pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
     pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
 }
@@ -224,7 +206,6 @@ pub enum TexTarget {
 }
 
 impl BackgroundIO {
-    /// Clone the (tx, slots) pair as one handle bundle for spawn paths.
     pub fn tex_prep_handles(&self) -> TexPrepHandles {
         TexPrepHandles {
             tx: self.tex_prep_tx.clone(),
@@ -436,14 +417,14 @@ impl SelectionStyle {
     }
 }
 
-/// ACCENT-tinted image (Erase's red when `style.erase`): each cell at the fill alpha scaled by its
-/// coverage, so a feathered edge or a faint stroke shows as such, and
 /// An overlay cut into tiles on the thread that built it.
 fn prepared(image: egui::ColorImage) -> crate::gui::image_texture::PreparedImage {
     crate::gui::image_texture::PreparedImage::from_color_image(image)
 }
 
-/// the outline band stamped over it.
+/// ACCENT-tinted image (Erase's red when `style.erase`): each cell at the
+/// fill alpha scaled by its coverage, so a feathered edge or a faint
+/// stroke shows as such, and the outline band stamped over it.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,

@@ -262,7 +262,6 @@ impl Automation {
         self.locate(name, false)
     }
 
-    /// The reply and when to send it.
     fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(Release, Response), String> {
         if let Request::WaitIdle { timeout_ms } = request {
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);

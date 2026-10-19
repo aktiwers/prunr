@@ -26,29 +26,22 @@ pub struct BrushSettings {
     pub radius: f32,
     /// Edge falloff: 0.0 = full smoothstep falloff, 1.0 = hard disc.
     pub hardness: f32,
-    /// Stroke magnitude. 1.0 = "neutral / equivalent to a gamma push";
-    /// lower values give a gentler local effect (`m → m * (1 - s)` for
-    /// subtract). Decoupled from hardness so users can fine-tune
-    /// intensity without changing edge softness.
+    /// Stroke magnitude: 1.0 is a full gamma push, lower is gentler
+    /// (`m → m * (1 - s)` for subtract).
     pub strength: f32,
     /// Add to or take from the selection; on a cut-out a stroke adds and
     /// Alt/Ctrl takes away, and `cutout_action` says what the selection does.
     pub mode: BrushMode,
     pub cutout_action: CutoutAction,
     pub shape: BrushShape,
-    /// Eraser-only: post-process unsharp-mask amount applied inside the
-    /// inpainted region. 0.0 = LaMa output as-is (slightly soft, the
-    /// model's bias). Higher values sharpen against the model's blur.
-    /// Practical sweet spot: 0.3-0.7. Pinned to BrushSettings (global)
-    /// rather than ItemSettings since it's a render preference, not
-    /// per-image content.
+    /// Eraser-only: unsharp-mask amount inside the filled region; 0.0 is the
+    /// model's output as-is (slightly soft). Sweet spot 0.3-0.7.
     // Load-bearing: a file without the field loads as f32's 0.0, not
     // `Default`'s 0.6.
     #[serde(default)]
     pub inpaint_sharpen: f32,
-    /// Eraser-only: pixels of soft blend at the painted-region boundary.
-    /// Hides the LaMa↔source seam by gradually mixing the model's output
-    /// toward source within `feather_px` of the mask edge.
+    /// Eraser-only: pixels of soft blend at the painted-region boundary,
+    /// hiding the seam between fill and source.
     pub inpaint_feather: f32,
     /// Eraser-only: dilate (>0) or erode (<0) the painted mask before
     /// inference. Small dilation gives LaMa more context for cleaner
@@ -59,10 +52,8 @@ pub struct BrushSettings {
     /// SD-only: the user's own prompt; empty runs `DEFAULT_SD_PROMPT`.
     #[serde(deserialize_with = "own_prompt")]
     pub sd_prompt: String,
-    /// SD-only: negative prompt — content to push *away* from.
-    /// Defaults to the standard SD-1.5 anti-failure-mode list (text,
-    /// watermark, blur, etc.) which suppresses the most common
-    /// artifacts on weakly-conditioned regions.
+    /// SD-only: negative prompt; defaults to the SD-1.5 anti-artifact list
+    /// (text, watermark, blur, ...).
     pub sd_negative_prompt: String,
     /// SD-only: classifier-free guidance scale. 1.0 = no CFG (cond pass
     /// only). 7.5 is the typical SD-1.5 prompt strength. >1 doubles UNet
@@ -74,21 +65,16 @@ pub struct BrushSettings {
     pub sd_steps: u32,
     /// RORem only: its denoise steps, within `ROREM_STEPS_RANGE`.
     pub rorem_steps: u32,
-    /// SD-only: pinned RNG seed for reproducibility. `None` = fresh
-    /// random per stroke (the historical behavior).
+    /// SD-only: pinned RNG seed; `None` = fresh random per stroke.
     pub sd_seed: Option<u64>,
-    /// SD-only: TAESD fast VAE preference. `None` = auto (on when
-    /// the TAESD bundle is installed). `Some(false)` = explicit
-    /// opt-out. `Some(true)` = explicit opt-in (still gated by
-    /// install at dispatch time). Orthogonal to scheduler — works
-    /// with both standard SD and LCM checkpoints.
+    /// SD-only: TAESD fast VAE. `None` = auto (on when installed); `Some` is
+    /// an explicit choice, still gated by install.
     pub sd_use_taesd: Option<bool>,
     /// Shared selection knob: edge feather in pixels, 0 = sharp. Applied to
     /// what the overlay shows and to what Delete / Copy / Cut act on.
     pub edge_feather: f32,
     /// Magic Brush only: the probability a pixel must reach to be
-    /// selected (0.5 is the model's decision boundary). Lives in shared
-    /// BrushSettings like the other per-tool knobs.
+    /// selected (0.5 is the model's decision boundary).
     pub magic_confidence_threshold: f32,
     /// Magic Brush only: drop specks and fill pinholes in what the model
     /// returns.
@@ -101,8 +87,7 @@ pub struct BrushSettings {
     pub magic_depth_range: f32,
 }
 
-/// The SD eraser's quality: which sampler runs the fill. Wired into
-/// `SdInpaintRequest` at dispatch time.
+/// The SD eraser's quality: which sampler runs the fill.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SdScheduler {
     /// Fast: the LCM-distilled model, a few steps.
@@ -170,13 +155,9 @@ pub const DEPTH_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.3;
 const DEPTH_RANGE_DEFAULT: f32 = 0.08;
 fn default_cfg() -> f32 { crate::gui::presets::SdSchedulerBundle::default().guidance_scale }
 
-/// Defaults for SD eraser prompts. Style-agnostic — works whether the
-/// source is a photo, drawing, anime, pixel art, render, etc. (avoiding
-/// `"photorealistic"` which would bias non-photo sources). Conservative
-/// on the positive (let surroundings dominate; reinforce eraser intent
-/// via "seamless continuation"); aggressive on the negative (block
-/// SD-1.5 failure modes, especially text-shape glyphs which fire on
-/// weak conditioning).
+/// Defaults for SD eraser prompts. Style-agnostic (no "photorealistic",
+/// which biases non-photo sources); the negative blocks SD-1.5 failure
+/// modes, above all text-like glyphs on weak conditioning.
 pub const DEFAULT_SD_PROMPT: &str =
     "seamless continuation of the surroundings, matching style, high quality";
 pub const DEFAULT_SD_NEGATIVE_PROMPT: &str =
@@ -303,12 +284,9 @@ impl BrushSettings {
         self.sd_guidance_scale = self.sd_guidance_scale.clamp(*guidance.start(), *guidance.end());
     }
 
-    /// Reset the brush popover's slider knobs (radius / hardness /
-    /// inpaint_grow / inpaint_feather / inpaint_sharpen) and shape to
-    /// the values carried by `source`. Leaves `strength` and `mode`
-    /// alone — those carry user intent across reset (the Add/Subtract
-    /// toggle and seg-mode strength) — and SD-tuning fields are owned
-    /// by the SD chip popover.
+    /// Reset the brush popover's sliders and shape to `source`. `strength`
+    /// and `mode` carry user intent across a reset and stay; SD tuning
+    /// belongs to the SD popover.
     pub fn reset_popover_fields_from(&mut self, source: &Self) {
         self.radius = source.radius;
         self.hardness = source.hardness;
@@ -354,10 +332,8 @@ impl Default for BrushSettings {
 pub(crate) struct Trail(Vec<(f32, f32, f32)>);
 
 impl Trail {
-    /// Skips the stamp when it lies within half a radius of the previous
-    /// one: pointer events at 60+ Hz over a slow drag stack near-identical
-    /// stamps that paint the same pixels, and dropping them cuts the
-    /// per-frame paint count without changing what the user sees.
+    /// Skips a stamp within half a radius of the previous one: a slow drag
+    /// at 60+ Hz stacks near-identical stamps that paint the same pixels.
     pub fn push_spaced(&mut self, sx: f32, sy: f32, screen_radius: f32) {
         if let Some(&(px, py, _)) = self.0.last() {
             let (dx, dy) = (sx - px, sy - py);
@@ -425,15 +401,13 @@ impl BrushState {
         self.enabled = true;
     }
 
-    /// Force the brush off. Used when the active model changes to a
-    /// mode that has no brush surface (upscale) so a stray enabled
-    /// state from a previous mode doesn't leak through.
+    /// Force the brush off, so an enabled state from a previous mode does
+    /// not leak into one without a brush (upscale).
     pub fn disable(&mut self) {
         self.enabled = false;
         self.active = None;
     }
 
-    /// True while the user is mid-drag.
     pub fn has_active_stroke(&self) -> bool {
         self.active.is_some()
     }
@@ -453,17 +427,14 @@ impl BrushState {
         self.active.as_ref().map(|a| a.shape)
     }
 
-    /// Record a screen-space stamp for the in-progress stroke trail.
-    /// Caller is the canvas-side overlay; `BrushState` doesn't compute
-    /// screen coords itself.
+    /// Record a screen-space stamp for the stroke trail.
     pub fn record_trail_stamp(&mut self, sx: f32, sy: f32, screen_radius: f32) {
         if let Some(active) = self.active.as_mut() {
             active.trail.push_spaced(sx, sy, screen_radius);
         }
     }
 
-    /// Iterator over `(sx, sy, screen_radius)` stamps in the active
-    /// stroke's trail. Empty when no stroke is active.
+    /// Empty when no stroke is active.
     pub fn trail_stamps(&self) -> impl Iterator<Item = (f32, f32, f32)> + '_ {
         self.active
             .as_ref()
