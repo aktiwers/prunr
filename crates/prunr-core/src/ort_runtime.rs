@@ -121,7 +121,7 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded one line above
     // No spin-waiting between ops: idle ORT threads spinning steal the cores
     // from rayon's tile blending and from a second session running at once.
-    // Measured (tests/spin_probe.rs, 4-core i7): LaMa 5.2 s -> 3.5 s alone,
+    // Measured (4-core i7): LaMa 5.2 s -> 3.5 s alone,
     // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
     // an OpenVINO session is unchanged.
     Session::builder()
@@ -391,10 +391,6 @@ fn write_preferred(root: &Path, subdir: &str) -> Result<(), String> {
     std::fs::write(&path, subdir).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// The runtime to load from the store under `store_root` and the
-/// `built_in` one beside the executable: the preferred one when it is
-/// there, else the built-in one first when `built_in_first`, else the
-/// store's first install by name.
 /// Every runtime there is to load, in the order to try them: the
 /// preferred one, then the built-in one first when `built_in_first`, else
 /// the store's installs by name, then the rest.
@@ -429,8 +425,7 @@ fn store_entries() -> Vec<(String, PathBuf)> {
 }
 
 /// Every runtime-store entry as `(dir name, path the dylib would have)`,
-/// sorted by name so logs reproduce; meaningful EP selection happens at
-/// the per-session ladder, not at this layer.
+/// sorted by name so logs reproduce.
 fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
     let Ok(read) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -446,8 +441,7 @@ fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
     entries
 }
 
-/// Structured snapshot of runtime resolution state for `prunr doctor`.
-/// Each field reflects what the resolver would see on a fresh init.
+/// Runtime resolution state as a fresh init would see it.
 #[derive(Debug)]
 pub struct Diagnostics {
     pub env_path: Option<PathBuf>,
@@ -480,11 +474,9 @@ pub fn diagnose() -> Diagnostics {
     }
 }
 
-/// True iff at least one ORT source other than `excluding` exists. Used
-/// by Settings → Hardware → Uninstall to refuse a removal that would
-/// leave the app unable to load any runtime — this is the dev-build
-/// case where there's no bundled fallback next to the executable, and
-/// the user's runtime-store entry is their only ORT.
+/// True iff at least one ORT source other than `excluding` exists, so a
+/// removal never leaves the app with no runtime to load (a dev build has
+/// no bundled one).
 pub fn has_fallback_excluding(excluding: &Path) -> bool {
     env_override().is_some_and(|p| p.is_file() && p != excluding)
         || store_entries().iter().any(|(_, p)| p.is_file() && p != excluding && !p.starts_with(excluding))

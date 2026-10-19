@@ -1,15 +1,9 @@
 //! Persistent EP × model compatibility cache.
 //!
-//! The `is_available()` filter answers "did the loaded ORT compile
-//! this EP in?" but it doesn't know the EP can't actually run
-//! a specific model — e.g. OpenVINO rejects Silueta's ONNX graph
-//! because of cycles, but `OpenVINO::is_available()`
-//! still returns true.
-//!
-//! Without a cache, every cold-start re-tries the doomed (EP, model)
-//! pair and pays the failed-load tax (~5s for OpenVINO+Silueta on
-//! this machine). One-shot: record failures persistently, skip them
-//! on subsequent runs.
+//! `is_available()` only says the EP is compiled in, not that it can run
+//! a given model (OpenVINO rejects Silueta's graph for cycles), so failed
+//! pairs are recorded and skipped instead of paying the failed load
+//! (~5 s for OpenVINO+Silueta) on every cold start.
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
 //! Scoped to what a failure says something about: the app version, the
@@ -179,16 +173,14 @@ impl Store {
 }
 
 /// True when these weights of the model are on the EP's persistent skip
-/// list. Cheap: in-memory hashmap lookup behind a Mutex.
+/// list.
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
     let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     store.failures.contains_key(&key(ep, model, weights))
 }
 
-/// Idempotent — re-recording the same combo is a no-op (no extra disk
-/// writes). A transient failure is logged and not recorded.
-/// Best-effort persistence; a failed write is logged but not fatal —
-/// next session will re-discover the failure.
+/// Idempotent. A transient failure is logged and not recorded. A failed
+/// write is logged, not fatal: the next session re-discovers the failure.
 pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, error: &str) {
     if is_transient(error) {
         tracing::info!(%ep, ?model, ?weights, %error, "EP failure looks transient; not recorded");
@@ -202,9 +194,7 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
     save(&mut store);
 }
 
-/// Wipe the cache — used by `prunr --clear-ep-cache` and Settings ›
-/// Hardware. Returns the number of entries removed for the caller's
-/// confirmation message.
+/// Wipe the cache. Returns the number of entries removed.
 pub fn clear() -> usize {
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = store.failures.len();
