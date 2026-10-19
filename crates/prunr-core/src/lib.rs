@@ -37,7 +37,7 @@ pub mod subject;
 /// model ready; a user who moved on gets the RAM back.
 pub const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(300);
 
-pub use engine::{InferenceEngine, OrtEngine};
+pub use engine::OrtEngine;
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, ColorizeRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
 pub use types::{
     CoreError, ModelKind, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,

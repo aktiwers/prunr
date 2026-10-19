@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use prunr_core::upscale::{upscale_rgba_with_engine, UpscaleRunOptions};
-use prunr_core::{CoreError, InferenceEngine, OrtEngine};
+use prunr_core::{CoreError, OrtEngine};
 use prunr_models::ModelId;
 use test_common::{skip_if_model_missing, skip_if_no_ort};
 

@@ -12,12 +12,6 @@ use ort::{
     value::Tensor,
 };
 
-/// Send + Sync because worker threads own the engine.
-pub trait InferenceEngine: Send + Sync {
-    /// The active execution provider's name ("CUDA", "CoreML", "CPU").
-    fn active_provider(&self) -> &str;
-}
-
 /// GPU execution providers, platform-gated so ladder matches stay
 /// exhaustive without dead arms. `Display` keeps the historic names:
 /// they are the persistent `ep_compat.json` cache keys.
@@ -941,8 +935,9 @@ impl OrtEngine {
     }
 }
 
-impl InferenceEngine for OrtEngine {
-    fn active_provider(&self) -> &str {
+impl OrtEngine {
+    /// The active execution provider's name ("CUDA", "CoreML", "CPU").
+    pub fn active_provider(&self) -> &str {
         &self.pick.provider
     }
 }

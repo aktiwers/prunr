@@ -8,7 +8,7 @@
 mod test_common;
 
 use prunr_core::{
-    InferenceEngine, ModelKind, OrtEngine,
+    ModelKind, OrtEngine,
     DOWNSCALE_TARGET,
     process_image, batch_process,
     downscale_image,
