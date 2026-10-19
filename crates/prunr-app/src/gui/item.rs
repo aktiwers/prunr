@@ -55,9 +55,10 @@ pub(crate) fn same_arc<T>(a: Option<&Arc<T>>, b: Option<&Arc<T>>) -> bool {
     }
 }
 
-/// A fresh id for a kept run, for the step it lands on to claim.
+/// A fresh run id, for a job's result and a kept run's step to claim;
+/// never 0, which a work item without a job carries.
 fn next_run() -> u64 {
-    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -2006,9 +2007,7 @@ impl BatchItem {
     ) {
         // Only a cut queues for a worker slot; other runs start at once.
         let running = engine != Engine::Segment;
-        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.job = Some(Job { run, version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
+        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
         self.failure = None;
         self.tile_preview = None;
         self.subject = None;
