@@ -47,6 +47,29 @@ impl ZoomState {
         self.zoom = zoom;
     }
 
+    /// Run a pending Fit to window (`fit` is the fitting zoom) or Actual
+    /// size. Pressed again at its zoom it goes back to the zoom before; a
+    /// fresh image (no zoom before) always fits.
+    pub fn apply_pending(&mut self, fit: f32) {
+        if std::mem::take(&mut self.pending_fit_zoom) {
+            let may_return = self.previous_zoom != 1.0;
+            self.toggle_to(fit, may_return);
+        }
+        if std::mem::take(&mut self.pending_actual_size) {
+            self.toggle_to(1.0, true);
+        }
+    }
+
+    fn toggle_to(&mut self, target: f32, may_return: bool) {
+        if may_return && (self.zoom - target).abs() < 0.001 {
+            self.zoom = self.previous_zoom;
+        } else {
+            self.previous_zoom = self.zoom;
+            self.zoom = target;
+            self.pan_offset = egui::Vec2::ZERO;
+        }
+    }
+
     /// Reset to default state, requesting fit-to-window on next frame.
     pub fn reset(&mut self) {
         self.pan_offset = egui::Vec2::ZERO;
@@ -80,6 +103,38 @@ mod tests {
         let before = z.zoom;
         z.follow_frame(2, source);
         assert_eq!(z.zoom, before, "another image is not rescaled here");
+    }
+
+    /// Fit to window and Actual size each go back to the zoom before when
+    /// pressed again at their zoom; a fresh image fits and stays fitted.
+    #[test]
+    fn fit_and_actual_size_toggle_back_to_the_zoom_before() {
+        let fit = 0.25;
+        let mut z = ZoomState::default();
+        z.reset();
+        z.pan_offset = egui::vec2(5.0, 5.0);
+        z.apply_pending(fit);
+        assert_eq!((z.zoom, z.previous_zoom, z.pan_offset), (fit, 1.0, egui::Vec2::ZERO), "a fresh image fits");
+        z.pending_fit_zoom = true;
+        z.apply_pending(fit);
+        assert_eq!(z.zoom, fit, "with no zoom before, Fit stays fitted");
+
+        z.zoom = 2.0;
+        z.pan_offset = egui::vec2(30.0, -10.0);
+        z.pending_fit_zoom = true;
+        z.apply_pending(fit);
+        assert_eq!((z.zoom, z.previous_zoom, z.pan_offset), (fit, 2.0, egui::Vec2::ZERO));
+        z.pending_fit_zoom = true;
+        z.apply_pending(fit);
+        assert_eq!(z.zoom, 2.0, "Fit again goes back");
+
+        z.pending_actual_size = true;
+        z.apply_pending(fit);
+        assert_eq!((z.zoom, z.previous_zoom), (1.0, 2.0));
+        z.pending_actual_size = true;
+        z.apply_pending(fit);
+        assert_eq!(z.zoom, 2.0, "Actual size again goes back");
+        assert!(!z.pending_fit_zoom && !z.pending_actual_size, "both requests are spent");
     }
 
     /// Scroll-zoom keeps the image point under the cursor where it is, at
