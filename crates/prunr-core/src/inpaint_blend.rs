@@ -23,10 +23,6 @@
 //!
 //! Plus the cloned `RgbaImage` output (4 × img_w × img_h u8 — full image,
 //! not bbox-scaled) and the byte-sized `crop_mask`.
-//!
-//! All optimisations are quality-preserving: bbox crop emits bit-exact
-//! pixels for unchanged regions, sequential channels run identical math
-//! to a parallel-channel variant, and buffer reuse only changes layout.
 
 use image::{GrayImage, RgbaImage};
 use rayon::prelude::*;
@@ -35,19 +31,17 @@ use crate::guided_filter::{box_filter, box_filter_into};
 use crate::inpaint::{mask_bbox, Bbox};
 use crate::math::SendMutPtr;
 
-/// Default ring width for [`color_match_inpainted`] (pixels). Tuned for
-/// 1024-class inpaint output; on much-larger sources, the visible band
-/// stays the same absolute width — a feature, not a bug, since the
-/// underlying inpaint patch size doesn't grow with image resolution.
+/// Default ring width for [`color_match_inpainted`] (pixels). Fixed in
+/// absolute pixels on purpose: the inpaint patch size doesn't grow with
+/// image resolution.
 pub const COLOR_MATCH_RING_PX: u32 = 12;
 
-/// Default radius for [`seam_guided_blend`]. Six pixels picks up enough
-/// surrounding texture to drive the locally-affine fit without over-
-/// smoothing across a real edge.
+/// Default radius for [`seam_guided_blend`]: enough texture for the
+/// locally-affine fit without smoothing across a real edge.
 pub const SEAM_BLEND_RADIUS: u32 = 6;
 
-/// Default regularisation for [`seam_guided_blend`]. 1e-3 is a good
-/// trade-off between edge sharpness (lower) and seam smoothness (higher).
+/// Default regularisation for [`seam_guided_blend`]: lower is sharper
+/// edges, higher is a smoother seam.
 pub const SEAM_BLEND_EPSILON: f32 = 1e-3;
 
 /// The eraser's default Expand region and Edge blend, in pixels.
@@ -89,11 +83,8 @@ pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge
 /// of the boundary (insufficient sample → noisy correction; common at
 /// image edges where the source ring is clipped).
 ///
-/// **Working set scales with the mask bbox, not the image.** A 200×200
-/// stroke on an 8 MP source allocates ~400 KB of f32 scratch instead of
-/// ~64 MB. Bit-exact vs. the full-image variant — pixels outside the
-/// bbox have mask = 0 by construction (the bbox encloses every mask >=
-/// 128 pixel), and the offset-apply pass only writes where mask >= 128.
+/// Working set scales with the mask bbox, not the image: a 200×200
+/// stroke on an 8 MP source allocates ~400 KB of f32 scratch, not ~64 MB.
 pub fn color_match_inpainted(
     inpainted: &mut RgbaImage,
     source: &RgbaImage,
@@ -115,8 +106,7 @@ pub fn color_match_inpainted(
     let byu = bbox.y as usize;
     let img_wu = inpainted.width() as usize;
 
-    // Boundary detection via box-filtered binary mask, evaluated on the
-    // cropped mask only — pixels with mean strictly between 0 and 1 are
+    // Pixels whose box-filtered mask mean is strictly between 0 and 1 lie
     // within `ring_px` of the seam.
     let msk_raw = mask.as_raw();
     let mut mask_bin = vec![0.0f32; bbox.area()];
@@ -132,7 +122,6 @@ pub fn color_match_inpainted(
         });
     let mean = box_filter(&mask_bin, bbox.w, bbox.h, ring_px);
 
-    // Sum source RGB on the outer ring and inpaint RGB on the inner ring.
     let src_raw = source.as_raw();
     let inp_raw = inpainted.as_raw();
     let mut src_sum = [0u64; 3];
@@ -170,8 +159,7 @@ pub fn color_match_inpainted(
         src_sum[c] as f32 / src_count as f32 - inp_sum[c] as f32 / inp_count as f32
     });
 
-    // Apply offset only on bbox rows; mask >= 128 pixels live entirely
-    // inside the bbox by construction.
+    // Every mask >= 128 pixel lies inside the bbox by construction.
     let out_raw = inpainted.as_mut();
     out_raw[byu * img_wu * 4..(byu + bhu) * img_wu * 4]
         .par_chunks_mut(img_wu * 4)
@@ -199,9 +187,8 @@ pub fn color_match_inpainted(
 /// (the caller's compose step has already painted source there).
 ///
 /// Leaves `inpainted` as it is when the mask is empty or dimensions
-/// disagree. Internally crops to the mask bounding box plus a margin
-/// of `radius + ceil(band_px) + 2` so a small brush stroke pays for a
-/// small bbox, not the whole image.
+/// disagree. Works on the mask bbox plus a `radius + ceil(band_px) + 2`
+/// margin.
 pub fn seam_guided_blend(
     inpainted: &mut RgbaImage,
     source: &RgbaImage,
@@ -224,19 +211,14 @@ pub fn seam_guided_blend(
 
     let n = bbox.area();
 
-    // Distance-from-edge inside the mask, evaluated on the cropped mask
-    // so chamfer cost scales with bbox not image. (Reused across channels
-    // — distance is independent of colour.)
+    // Distance is independent of colour, so one pass serves all channels.
     let crop_mask =
         image::imageops::crop_imm(mask, bbox.x, bbox.y, bbox.w, bbox.h).to_image();
     let dist = crate::inpaint::chamfer_distance_inside(&crop_mask);
     let crop_mask_raw = crop_mask.as_raw();
 
-    // Allocate working buffers ONCE; reuse across channels.
-    // - guide / input: bbox source / inpaint, one channel at a time
-    // - gi_a / gg_b: re-purposed (guide×input → coeff `a`, guide² → coeff `b`)
-    // - mean_*: box-filter outputs, written via `box_filter_into` so the
-    //   four allocations happen once total, not 4×3 = 12 times.
+    // Allocated once and reused across channels; gi_a / gg_b hold
+    // guide×input and guide² first, then are reused as coefficients a / b.
     let mut guide = vec![0.0f32; n];
     let mut input = vec![0.0f32; n];
     let mut gi_a = vec![0.0f32; n];
@@ -254,7 +236,6 @@ pub fn seam_guided_blend(
         load_channel(source, bbox, c, &mut guide);
         load_channel(inpainted, bbox, c, &mut input);
 
-        // gi = guide * input, gg = guide * guide
         gi_a.par_iter_mut()
             .zip(gg_b.par_iter_mut())
             .zip(guide.par_iter().zip(input.par_iter()))
@@ -263,10 +244,6 @@ pub fn seam_guided_blend(
                 *gg = g * g;
             });
 
-        // Box filters 1-4. Two inner pairs joined for CPU overlap. Each
-        // writes into a pre-allocated buffer, no per-call allocation.
-        // Buffers are aliased only as exclusive `&mut` slices passed into
-        // independent rayon::join branches → no overlap, sound.
         let (mg, mi, mgi, mgg) =
             (&mut mean_g, &mut mean_i, &mut mean_gi, &mut mean_gg);
         rayon::join(
@@ -284,11 +261,8 @@ pub fn seam_guided_blend(
             },
         );
 
-        // a = cov / (var + eps), b = mean_i - a * mean_g.
-        // Reuse gi_a/gg_b in-place. `var.max(0.0)` guards against
-        // sub-epsilon negative variance from f32 rounding on flat regions
-        // (would otherwise feed `/(var+eps)` a value below `eps` and
-        // produce noise on completely uniform input).
+        // `var.max(0.0)`: f32 rounding on flat regions can go sub-zero,
+        // which would amplify noise through `/(var+eps)`.
         gi_a.par_iter_mut()
             .zip(gg_b.par_iter_mut())
             .zip(
@@ -309,10 +283,7 @@ pub fn seam_guided_blend(
             || box_filter_into(&gg_b, bbox.w, bbox.h, radius, &mut mean_b),
         );
 
-        // Composite back in place: q = mean_a * source_pixel + mean_b,
-        // blended toward raw inpaint deeper in the mask. Channel `c` was
-        // read above and the others are untouched, so writing it here
-        // changes nothing a later channel reads.
+        // Writing channel `c` in place is safe: no later channel reads it.
         composite_channel(
             inpainted, source, bbox, c, crop_mask_raw,
             &dist, &mean_a, &mean_b, inv_band,
@@ -334,9 +305,8 @@ fn load_channel(img: &RgbaImage, bbox: Bbox, channel: usize, out: &mut [f32]) {
     });
 }
 
-// Per-channel inner kernel — args are the math context the row-parallel
-// loop closes over. Splitting into a struct adds a borrow-lifetime story
-// for what is fundamentally a leaf math helper.
+// Leaf math kernel: the args are the context the row-parallel loop
+// closes over, and it has a single caller.
 #[allow(clippy::too_many_arguments)]
 fn composite_channel(
     out: &mut RgbaImage,
@@ -368,7 +338,6 @@ fn composite_channel(
             if mask_raw[i] < 128 {
                 continue; // outside mask: leave caller's compose alone
             }
-            // Guided-filter prediction at this pixel.
             let g = src[(row_in_full + x) * 4 + channel] as f32;
             let q = mean_a[i] * g + mean_b[i];
             // Blend weight: 0 at the seam (use guided), 1 deep in mask

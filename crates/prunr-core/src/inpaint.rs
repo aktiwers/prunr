@@ -1,7 +1,5 @@
-//! LaMa-based inpainting. Public entry: `process_inpaint(image, mask)`.
-//! Tiles 512-px with 64-px feathered overlap so large images stay
-//! inside LaMa's fixed input size and seams stay invisible against
-//! flat backgrounds.
+//! LaMa-based inpainting. Tiles 512 px with a 64 px feathered overlap so
+//! large images fit LaMa's fixed input size without visible seams.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -22,16 +20,13 @@ pub const TILE: u32 = 512;
 /// which the feather blend tapers across.
 pub const OVERLAP: u32 = 64;
 
-/// 5-tap separable Gaussian for `sharpen_inpainted`'s unsharp-mask blur
-/// (sigma ≈ 1.0). Constant + derived margin lock the kernel↔bbox
-/// invariant: `mask_bbox` must expand by `kernel.len() / 2` so the
-/// clamped reads at bbox edges land on the same source pixels the
-/// full-image variant would have hit.
+/// 5-tap separable Gaussian (sigma ≈ 1.0). The bbox must expand by
+/// `kernel.len() / 2` so clamped reads at its edges hit the same source
+/// pixels a full-image pass would.
 const SHARPEN_KERNEL: [f32; 5] = [1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0];
 const SHARPEN_MARGIN: u32 = (SHARPEN_KERNEL.len() / 2) as u32;
 
-/// Region of interest in pixel coordinates. Distinct from `TilePlacement`
-/// (which is a planned-tile-of-work); a `Bbox` is just a rectangle.
+/// Region of interest in pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Bbox {
     pub x: u32,
@@ -57,7 +52,7 @@ impl Bbox {
 /// Eagerly initialise the inpaint session for `id` in the background so
 /// the first stroke doesn't pay its build: ~5-10 s for LaMa, 10-30 s for
 /// the four sessions of a Stable Diffusion bundle (built at the default
-/// tuning). Idempotent — repeated calls for the same id are no-ops.
+/// tuning). Idempotent.
 pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreError> {
     if id.is_sd_family() {
         crate::inpaint_sd::load_bundle(id, &crate::inpaint_sd::SdTuning::default()).map(drop)
@@ -66,9 +61,8 @@ pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreErro
     }
 }
 
-/// Dilate (px > 0) or erode (px < 0) a binary mask. `|px|` iterations
-/// of single-pixel 4-connected morphology — fine for the small values
-/// the GUI exposes. px == 0 returns a clone unchanged.
+/// Dilate (px > 0) or erode (px < 0) a binary mask by `|px|` iterations
+/// of 4-connected morphology — fine for the small values the GUI exposes.
 ///
 /// Works on the mask's bbox (plus `px` when dilating): nothing farther
 /// than `px` from the mask can change, so the result is bit-identical
@@ -102,8 +96,8 @@ fn morphology_step_into(mask: &GrayImage, out: &mut GrayImage, dilate: bool) {
     let buf = out.as_mut();
     for y in 0..h_us {
         for x in 0..w_us {
-            // 4-connected: center + N, S, E, W. Edge pixels treat OOB
-            // as zero (so erosion shrinks at the image boundary).
+            // Out of bounds counts as zero, so erosion shrinks at the
+            // image boundary.
             let center = raw[y * w_us + x] > 127;
             let n = y > 0 && raw[(y - 1) * w_us + x] > 127;
             let s = y + 1 < h_us && raw[(y + 1) * w_us + x] > 127;
@@ -130,21 +124,15 @@ pub(crate) fn chamfer_distance_inside(mask: &GrayImage) -> Vec<f32> {
     crate::math::distance_to_nearest(&outside, mask.width() as usize, mask.height() as usize)
 }
 
-/// Apply an unsharp-mask sharpen pass over the inpainted region. LaMa
-/// output tends to be soft on high-frequency texture; this counters
-/// the blur without disturbing source pixels outside the mask.
+/// Unsharp-mask the inpainted region (`mask > 127`) to counter LaMa's
+/// softness on high-frequency texture.
 ///
-/// `amount` in [0.0, 2.0]. 0.0 leaves `image` unchanged. 0.3-0.7 is
-/// the practical range; higher introduces visible halos.
+/// `amount` in [0.0, 2.0]; 0.0 leaves `image` unchanged. 0.3-0.7 is the
+/// practical range; higher introduces visible halos.
 ///
-/// Algorithm: `out = src + amount * (src - blur(src))`, applied only
-/// to pixels where `mask > 127`. Blur is a separable 5-tap Gaussian
-/// (sigma ≈ 1.0).
-///
-/// RAM: working buffers are sized to the **mask bounding box** plus
-/// the kernel half-width (2 px) so blur reads from cropped pixels
-/// stay bit-identical to a full-image variant. A 200 × 200 stroke on
-/// a 4096 × 3072 image holds ~480 KB of f32 instead of ~150 MB.
+/// RAM: buffers are sized to the mask bbox plus the 2 px kernel
+/// half-width. A 200 × 200 stroke on a 4096 × 3072 image holds ~480 KB
+/// of f32 instead of ~150 MB.
 pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
     if amount <= 0.0 {
         return;
@@ -159,7 +147,6 @@ pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
         );
         return;
     }
-    // No mask>127 pixels → nothing to sharpen; skip the temp f32 buffer.
     let Some(bbox) = mask_bbox(mask, 128, SHARPEN_MARGIN) else {
         return;
     };
@@ -170,8 +157,7 @@ pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
     let bbox_x = bbox.x as usize;
     let bbox_y = bbox.y as usize;
 
-    // Horizontal pass into a bbox-sized temp f32 buffer (RGB only —
-    // alpha never changes). Rows are independent → parallelise.
+    // Horizontal pass, RGB only — alpha never changes.
     let mut tmp: Vec<f32> = vec![0.0; bbox_w * bbox_h * 3];
     use rayon::prelude::*;
     tmp.par_chunks_mut(bbox_w * 3).enumerate().for_each(|(by, row)| {
@@ -191,9 +177,7 @@ pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
     });
 
     // Sharpened in place: the blur reads only `tmp`, and each pixel's
-    // own value is read just before it is written. Pixels outside the
-    // bbox are mask <= 127 by definition and stay. Rows are
-    // write-disjoint → parallelise via SendMutPtr.
+    // own value is read just before it is written.
     let msk_raw = mask.as_raw();
     let dp = crate::math::SendMutPtr(image.as_mut_ptr());
     (0..bbox_h).into_par_iter().for_each(|by| {
@@ -208,10 +192,6 @@ pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
             for c in 0..3 {
                 let mut blur = 0.0;
                 for (k, &kv) in SHARPEN_KERNEL.iter().enumerate() {
-                    // Clamp at bbox bounds — they extend the mask
-                    // region by `SHARPEN_MARGIN`, so the clamped index
-                    // points at the same source pixel a full-image
-                    // variant's clamp would have hit.
                     let by_kernel = (by as isize + k as isize - SHARPEN_MARGIN as isize)
                         .clamp(0, bbox_h as isize - 1) as usize;
                     blur += kv * tmp[(by_kernel * bbox_w + bx) * 3 + c];
@@ -232,20 +212,16 @@ pub fn sharpen_inpainted(image: &mut RgbaImage, mask: &GrayImage, amount: f32) {
     });
 }
 
-/// Top-level inpaint entry. `id` selects the inpaint backend
-/// (LaMaFp32, BigLaMa, MI-GAN, SD …). Returns the input unchanged when
-/// the mask is all-zero (no work). SD-family ids dispatch to the
-/// `inpaint_sd` module which has its own multi-model pipeline.
+/// Fill `mask` with the backend `id`. Returns the input unchanged when
+/// the mask is all-zero.
 pub fn process_inpaint(image: &RgbaImage, mask: &GrayImage, id: prunr_models::ModelId) -> Result<RgbaImage, CoreError> {
     process_inpaint_with(image, mask, id, None, false, &Progress::none()).map(|f| f.rgba)
 }
 
-/// Same as `process_inpaint` but takes optional SD-specific tuning
-/// (prompt / negative prompt / guidance_scale / steps) and the run's
-/// progress handle. `cpu_only` keeps every session off the GPU providers
-/// (for SD it overrides the request's tuning). Cancel is checked between LaMa tiles and between
-/// SD UNet steps — ORT has no per-op cancel hook so worst-case latency
-/// on cancel is one tile (LaMa) or one UNet step (SD).
+/// `process_inpaint` with optional SD tuning and the run's progress
+/// handle. `cpu_only` keeps every session off the GPU providers (for SD
+/// it overrides the request's tuning). ORT has no per-op cancel hook, so
+/// cancel takes up to one LaMa tile or one SD UNet step.
 pub fn process_inpaint_with(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -261,8 +237,8 @@ pub fn process_inpaint_with(
             mask.dimensions()
         )));
     }
-    // Short-circuit before the 200 MB session load — empty masks are
-    // common during live preview when the user hasn't started painting.
+    // Before the 200 MB session load: empty masks are common in live
+    // preview before the user paints.
     if mask_is_empty(mask) {
         return Ok(Filled::full(image.clone()));
     }
@@ -355,8 +331,7 @@ impl std::str::FromStr for FillScale {
     }
 }
 
-/// LaMa, Big-LaMa or MI-GAN fill of `mask` (255 = fill) at `scale`
-/// (see `fill_at_scale`).
+/// LaMa, Big-LaMa or MI-GAN fill of `mask` (255 = fill) at `scale`.
 pub fn process_lama(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -464,9 +439,8 @@ fn fill_scaled_down(
     Ok(())
 }
 
-/// One LaMa session per process — see `LamaSession::get`. Tiles run
-/// sequentially under one Mutex; do NOT parallelise across tiles
-/// (ORT session inference is already multi-threaded internally).
+/// Do NOT parallelise across tiles: ORT inference is already
+/// multi-threaded internally.
 struct LamaSession {
     session: Mutex<Session>,
     image_input_name: String,
@@ -482,9 +456,8 @@ pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPic
 
 
 
-/// Per-id deferred session. The outer `Arc<OnceLock>` closes the build
-/// race between two concurrent
-/// `get()` callers (e.g. a prewarm racing the first stroke).
+/// The `Arc<OnceLock>` closes the build race between concurrent `get()`
+/// callers (e.g. a prewarm racing the first stroke).
 type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
 /// Keyed by model and "CPU only", so a session built under one choice is
 /// never handed out under the other.
@@ -496,12 +469,9 @@ fn lama_cache() -> &'static Mutex<LamaCache> {
 }
 
 /// Drop every cached eraser session, LaMa-class and Stable Diffusion,
-/// kept ones too. In-flight callers keep their own `Arc` of the session,
-/// so the clear is safe; once the dispatch finishes, the last Arc goes
-/// and the ORT session frees. Called by the GUI when the user switches
-/// models — keeping the previous backend cached for 5 min after they've
-/// committed to a different tool wastes ~700 MB–2 GB (LaMa) or ~16 GB
-/// (SD) on a model they're no longer using.
+/// kept ones too; in-flight callers keep their own `Arc`. Used on a model
+/// switch, where idling the old backend would hold ~700 MB–2 GB (LaMa) or
+/// ~16 GB (SD).
 ///
 /// The caches are empty when this returns; the sessions free where the
 /// result is dropped, so a caller that must not wait hundreds of
@@ -533,18 +503,14 @@ fn ensure_lama_sweeper_running() {
 }
 
 impl LamaSession {
-    /// Per-id cache. Each LamaSession is built once on first use, kept
-    /// in an `Arc`, and released after `crate::IDLE_RELEASE` of no
-    /// `get()` calls: in-flight callers hold their own Arc (no
-    /// use-after-free), the cache drops its ref on idle, the OS reclaims
-    /// the underlying ORT session.
+    /// Built once on first use and released after `crate::IDLE_RELEASE`
+    /// without a `get()`; in-flight callers hold their own `Arc`.
     fn get(id: prunr_models::ModelId, cpu_only: bool) -> Result<Arc<LamaSession>, CoreError> {
         ensure_lama_sweeper_running();
         let cache = lama_cache();
         let now = Instant::now();
 
-        // Cache lock held only for the HashMap lookup and at most one
-        // Arc<OnceLock> allocation — never for the seconds-long build.
+        // Never hold the cache lock across the seconds-long build.
         let (slot, idle): (LamaSlot, _) = {
             let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let idle = crate::inpaint_sd::sweep_and_log(&mut guard, now, "LaMa: released idle session(s)");
@@ -555,9 +521,7 @@ impl LamaSession {
         };
         drop(idle);
 
-        // Build outside the cache lock. Concurrent callers block on
-        // the OnceLock and receive the same Result — no duplicate
-        // session gets built.
+        // Concurrent callers block on the OnceLock and share one build.
         slot.get_or_init(|| Self::new_inner(id, cpu_only).map(Arc::new))
             .clone()
             .map_err(CoreError::Inference)
@@ -567,9 +531,7 @@ impl LamaSession {
         let bytes = prunr_models::resolve_bytes(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let bytes = bytes.as_ref();
-        // Match physical cores so LaMa convolutions saturate the CPU.
-        // Unlike the seg models (single-image dispatch with intra=1),
-        // LaMa runs on the GUI hot path — the user is waiting per stroke.
+        // All cores, unlike the seg models: the user waits on every stroke.
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -598,10 +560,8 @@ impl LamaSession {
     fn run_tile(&self, image: &RgbaImage, mask: &GrayImage) -> Result<RgbaImage, CoreError> {
         let (img_in, mask_in) = encode_tile(image, mask);
 
-        // Borrow the output view straight into `decode_tile` — no
-        // `.to_owned()` between extract and decode. The session lock
-        // is held across the closure so the ORT-allocated buffer the
-        // view points into stays alive. Saves one 3 MB clone per tile.
+        // The lock stays held until decode so the ORT buffer the output
+        // view borrows stays alive — saves a 3 MB clone per tile.
         let mut session = self.session.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let img_t = Tensor::from_array(img_in)
@@ -631,19 +591,13 @@ impl Drop for LamaSession {
     }
 }
 
-/// Build the LaMa ORT session, trying GPU EPs first and falling back
-/// to CPU. Returns the session and where it runs, with each GPU
-/// provider that failed on the way. CPU is the universal fallback; if
-/// even CPU fails we propagate the error string.
+/// Build the LaMa session, GPU EPs first, then CPU. Returns where it
+/// runs, with each GPU provider that failed on the way.
 ///
-/// Each GPU candidate is **smoke-tested** with a tiny inference before
-/// being accepted — some EPs (notably CUDA on certain ORT versions)
-/// can `commit_from_memory` successfully but fail at runtime on
-/// specific ops, e.g. `"Reshape node ... GetElementType is not
-/// implemented"` on this LaMa export. A silent runtime failure
-/// would leave every tile unchanged; the smoke test catches it
-/// at init so the CPU fallback engages and the user sees actual
-/// inpainting.
+/// Each GPU candidate is smoke-tested with one inference: some EPs (CUDA
+/// on certain ORT versions) commit fine but fail at runtime on specific
+/// ops ("Reshape node ... GetElementType is not implemented"), which
+/// would silently leave every tile unchanged.
 fn build_lama_session(
     id: prunr_models::ModelId,
     bytes: &[u8],
@@ -690,7 +644,6 @@ fn lama_ladder(
         Err(walk) => walk.failed,
     };
 
-    // CPU fallback: no EP registration, ORT uses its default CPU provider.
     crate::cache::gc_stale_for_model(id, crate::engine::CPU_NAME);
     let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, crate::engine::CPU_NAME, Weights::Fp32);
     let started = Instant::now();
@@ -702,9 +655,8 @@ fn lama_ladder(
     Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
 }
 
-/// Run one inference with zero-padded inputs to validate that the
-/// session can actually execute this graph. Catches EP/op
-/// incompatibilities that don't surface until the first run.
+/// One inference on zero inputs: catches EP/op incompatibilities that
+/// don't surface until the first run.
 fn smoke_test_session(session: &mut Session) -> Result<(), String> {
     let s = TILE as usize;
     let img = ndarray::Array4::<f32>::zeros((1, 3, s, s));
@@ -744,8 +696,8 @@ fn lama_input_names(session: &Session) -> Result<(String, String), Vec<String>> 
     Ok(pick_input_names(&inputs))
 }
 
-/// LaMa-ONNX exports use `image` + `mask` as input names (Carve/LaMa-ONNX
-/// convention). Match case-insensitively; fall back to positional order.
+/// Inputs named like `image` / `mask` (Carve/LaMa-ONNX convention),
+/// case-insensitively; else positional order.
 fn pick_input_names(names: &[String]) -> (String, String) {
     let mut img = None;
     let mut mask = None;
@@ -795,10 +747,8 @@ fn encode_tile(image: &RgbaImage, mask: &GrayImage) -> (Array4<f32>, Array4<f32>
     (img, msk)
 }
 
-/// Decode LaMa output back to RGBA at the tile's actual size.
-///
-/// Outside the mask, copy from the source tile so the un-inpainted
-/// region matches exactly — LaMa often perturbs unmasked pixels by
+/// Decode LaMa output back to RGBA at the tile's actual size. Outside
+/// the mask the source is copied: LaMa perturbs unmasked pixels by
 /// fractions of a unit, which would defeat the feather blend.
 fn decode_tile(
     output: ndarray::ArrayView4<'_, f32>,
@@ -855,13 +805,11 @@ fn rect_is_empty(mask: &GrayImage, tile: &TilePlacement) -> bool {
     })
 }
 
-/// True when every pixel of `mask` is zero. O(n) scan; cheap relative
-/// to inference, and short-circuits the entire pipeline.
 fn mask_is_empty(mask: &GrayImage) -> bool {
     mask.as_raw().iter().all(|&v| v == 0)
 }
 
-/// One planned inpaint tile: its rect in image pixels.
+/// One planned inpaint tile, in image pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TilePlacement {
     pub x: u32,
@@ -870,11 +818,9 @@ pub(crate) struct TilePlacement {
     pub h: u32,
 }
 
-/// Lay tiles across `(width, height)` with `OVERLAP` overlap. Tiles
-/// near the right/bottom edges shift backwards to keep `TILE × TILE`
-/// extent — never extending past the image bounds. For images <= TILE
-/// in either axis, a single tile covers the whole image at its actual
-/// size (LaMa accepts smaller inputs after pad-to-512 in the wrapper).
+/// Lay tiles across `(width, height)` with `OVERLAP` overlap. Tiles at
+/// the right/bottom edges shift back to keep `TILE × TILE` inside the
+/// image. An image within TILE on both axes is one tile at its own size.
 pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
     if width <= TILE && height <= TILE {
         return vec![TilePlacement { x: 0, y: 0, w: width, h: height }];
@@ -919,8 +865,8 @@ pub(crate) fn plan_tiles(width: u32, height: u32) -> Vec<TilePlacement> {
 /// One tile centred on the painted `bbox` when it fits with `OVERLAP` of
 /// photo on every side (or the photo is no larger than a tile there):
 /// one model run, and the most photo around the hole. On the grid a
-/// small stroke over a seam ran up to four tiles, each seeing it at its
-/// edge.
+/// small stroke over a seam would run up to four tiles, each seeing it
+/// at its edge.
 fn tile_around(bbox: Bbox, width: u32, height: u32) -> Option<TilePlacement> {
     let axis = |start: u32, len: u32, full: u32| {
         let size = TILE.min(full);
@@ -930,9 +876,8 @@ fn tile_around(bbox: Bbox, width: u32, height: u32) -> Option<TilePlacement> {
     Some(TilePlacement { x, y, w, h })
 }
 
-/// Smoothstep weight for blending tile contributions in the overlap
-/// region. Returns 1.0 at the tile interior, 0.0 at the very edge,
-/// with a smooth `t² (3 - 2t)` taper across `OVERLAP` pixels.
+/// Tile blend weight: 0.0 at the edge, smoothstep up to 1.0 at
+/// `OVERLAP` pixels in.
 pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
     if distance_from_edge >= OVERLAP {
         1.0
@@ -942,16 +887,11 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
     }
 }
 
-/// Compose the inpaint output by walking each tile, running the
-/// inference closure, and feather-blending into the output buffer.
-/// Skips tiles whose mask is all-zero (no work). The closure runs
-/// once per non-empty tile.
+/// Run `inpaint_tile` on every tile that touches the mask and
+/// feather-blend the results into a copy of `image`.
 ///
-/// RAM: accumulators are sized to the **mask bounding box**, not the
-/// image. A 200 × 200 stroke on a 4096 × 3072 image holds ~640 KB of
-/// f32 accumulators instead of ~250 MB. Pixels outside the bbox are
-/// guaranteed mask==0 and so would be skipped by the composite loop
-/// anyway — the bbox crop is bit-exact with the full-image variant.
+/// RAM: accumulators are sized to the mask bbox. A 200 × 200 stroke on a
+/// 4096 × 3072 image holds ~640 KB of f32 instead of ~250 MB.
 ///
 /// Asked for previews, each finished tile goes out as its fill over the
 /// photo (`tile_fill_preview`), made in the tile's photo crop, which the loop
@@ -966,9 +906,7 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 /// | 1024 × 768, 1536    | the part, ≤ 1 MB (1:1) | 3 MB          |
 /// | 4096 × 3072, 1536   | 150 KB + the part      | 7 MB          |
 /// | 8192 × 6144, 1536   | 40 KB + the part       | 7 MB          |
-// `pub` to be reachable from `benches/tile_compose.rs`; `#[doc(hidden)]`
-// because it's still an internal kernel — callers should use
-// `process_inpaint`.
+// `pub` only for the benches; callers use `process_inpaint`.
 #[doc(hidden)]
 pub fn tile_compose<F>(
     image: &RgbaImage,
@@ -982,19 +920,14 @@ where
     let (w, h) = image.dimensions();
     let mut out = image.clone();
 
-    // No mask → no work, and no accumulators allocated.
     let Some(bbox) = mask_bbox(mask, 1, 0) else {
         return Ok(out);
     };
 
     let bbox_w = bbox.w as usize;
     let bbox_n = (bbox.w as usize) * (bbox.h as usize);
-    // Per-pixel weight accumulator for the feather blend. Tiles overlap
-    // in the OVERLAP band; each contributes a smoothstep-weighted
-    // sample, normalized at the end. Bbox-sized — see fn docs.
     let mut weight_acc: Vec<f32> = vec![0.0; bbox_n];
-    // Weighted RGB in f32, quantised back to u8 at the end. No alpha:
-    // the resolve keeps the photo's.
+    // No alpha: the resolve keeps the photo's.
     let mut color_acc: Vec<[f32; 3]> = vec![[0.0; 3]; bbox_n];
 
     // Only tiles that touch the mask run; they are the tile map's layout.
@@ -1023,12 +956,8 @@ where
         progress.tile(i as u32, true);
     }
 
-    // Resolve accumulated tiles into the bbox region of `out`. Pixels
-    // outside the bbox stay byte-identical to source (already cloned
-    // into `out`); pixels inside-bbox-but-mask=0 also stay byte-
-    // identical (skipped here). Float-blend even on a uniform region
-    // would introduce 1-unit u8 quantisation drift (255*w/w ≠ 255 in
-    // float math), so the skip on mask==0 is load-bearing.
+    // The mask==0 skip is load-bearing: the float blend drifts a u8 by
+    // one even on a uniform region (255*w/w ≠ 255 in f32).
     let mask_raw = mask.as_raw();
     let img_w = w as usize;
     let out_raw = out.as_mut();
@@ -1046,11 +975,6 @@ where
             if wsum > 0.0 {
                 let inv = 1.0 / wsum;
                 let c = color_acc[bbox_idx];
-                // Direct raw-buffer write — saves the bounds-check +
-                // Rgba<u8> reconstruction per pixel that
-                // `get_pixel_mut` would do. Alpha (offset +3) is left
-                // untouched: source clone already filled it, and LaMa
-                // is RGB-only.
                 let pix = global_idx * 4;
                 out_raw[pix]     = crate::math::round_u8(c[0] * inv);
                 out_raw[pix + 1] = crate::math::round_u8(c[1] * inv);
@@ -1076,17 +1000,13 @@ fn tile_fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage
 
 /// Bounding box of pixels where `mask >= min_value`, expanded by
 /// `margin` pixels on each side and clamped to image bounds. `None`
-/// for an empty result. Parallel row-reduction so a 4 K mask scans
-/// in ~1 ms on multi-core.
+/// for an empty result.
 ///
-/// Margin asymmetry at image edges is intentional: when the bbox
-/// touches an image edge, that side's margin is clipped to 0. Callers
-/// that subsequently `clamp(0, bbox_edge - 1)` their kernel reads
-/// produce bit-identical output to a full-image variant — both clamp
-/// at the same image edge, just framed differently.
+/// A side touching the image edge gets no margin, so kernel reads
+/// clamped to the bbox match a full-image pass clamped to the image.
 ///
-/// `min_value = 1` finds any nonzero pixel (the inference trigger, as in
-/// `mask_is_empty`); `128` is the binary-mask threshold.
+/// `min_value = 1` finds any nonzero pixel; `128` is the binary-mask
+/// threshold.
 pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<Bbox> {
     use rayon::prelude::*;
     let raw = mask.as_raw();
@@ -1133,9 +1053,6 @@ fn accumulate_tile(
     bbox: Bbox,
     (img_w, img_h): (u32, u32),
 ) {
-    // Hoist tile↔bbox intersection out of the per-pixel loop. For a
-    // small stroke far from this tile's edge, this skips ~62 K
-    // per-iteration `if outside bbox: continue` branches.
     let bbox_x_end = bbox.x + bbox.w;
     let bbox_y_end = bbox.y + bbox.h;
     let tile_x_end = placement.x + placement.w;
@@ -1169,8 +1086,6 @@ fn accumulate_tile(
             let edge_x = dist_left.min(dist_right);
             let w = feather_weight(edge_x.min(edge_y));
             let dst_idx = by * bbox_w + bx;
-            // Direct raw indexing — saves the bounds-check + Rgba<u8>
-            // reconstruction `tile.get_pixel(tx, ty).0` would do.
             let p_off = (tile_row + tx as usize) * 4;
             let acc = &mut color_acc[dst_idx];
             acc[0] += tile_raw[p_off]     as f32 * w;
