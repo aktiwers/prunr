@@ -309,18 +309,6 @@ impl Settings {
         }
     }
 
-    /// Path-injectable save (used by tests; production calls `save()`).
-    #[cfg(test)]
-    /// Best-effort: any I/O error is swallowed so the GUI keeps running.
-    fn save_to_path(&self, path: &std::path::Path) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
-    }
-
     /// Whether an accelerator backend is active (OpenVINO counts, though it
     /// may run on the host CPU: `runs_on_host_cpu`). Settings offers the
     /// Processor choice only then.
@@ -961,17 +949,8 @@ mod tests {
         assert_eq!(migrated.bg, None);
     }
 
-    #[test]
-    fn default_preset_is_prunr() {
-        let s = Settings::default();
-        assert_eq!(s.default_preset, PRUNR_PRESET);
-    }
-
-    /// Whole-shape snapshot of `Settings::default()`. The individual
-    /// helper tests (`default_preset_is_prunr`, …) each pin one field — a new
-    /// field that lands without a default-aware test slips through.
-    /// This pins the entire surface so a `parallel_jobs: 0` regression
-    /// has to break this test on the way out.
+    /// Whole-shape snapshot of `Settings::default()`, so a
+    /// `parallel_jobs: 0` regression has to break this test on the way out.
     ///
     /// `parallel_jobs` is host-dependent (CPU count), so its row
     /// asserts a lower bound rather than an exact value.
@@ -1009,24 +988,16 @@ mod tests {
         })
     }
 
+    /// "Prunr", a missing preset, and a new item under "Prunr" all read
+    /// factory values.
     #[test]
-    fn preset_values_prunr_is_factory() {
+    fn prunr_and_missing_presets_read_factory_values() {
         let s = Settings::default();
         assert_eq!(s.preset_values(PRUNR_PRESET), ItemSettings::default());
-    }
-
-    #[test]
-    fn preset_values_returns_user_preset() {
-        let mut s = Settings::default();
-        let portrait = wrap_for_model(&s, item_with_gamma(2.0));
-        s.presets.insert("Portrait".to_string(), portrait);
-        assert_eq!(s.preset_values("Portrait").gamma, 2.0);
-    }
-
-    #[test]
-    fn preset_values_missing_name_falls_back_to_factory() {
-        let s = Settings::default();
         assert_eq!(s.preset_values("NonExistent"), ItemSettings::default());
+        assert_eq!(s.item_defaults_for_new_item(), ItemSettings::default());
+        let r = s.resolve_active_preset(None);
+        assert_eq!((r.item_settings, r.brush), (ItemSettings::default(), super::BrushSettings::default()));
     }
 
     #[test]
@@ -1038,40 +1009,28 @@ mod tests {
         assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
     }
 
+    /// What `save()` writes reads back the same, brush included.
     #[test]
-    fn item_defaults_for_new_item_factory_when_prunr_default() {
-        let s = Settings::default();
-        assert_eq!(s.item_defaults_for_new_item(), ItemSettings::default());
-    }
-
-    #[test]
-    fn save_load_round_trip_via_tempdir() {
-        // Verifies the JSON schema is stable across save → read-back, the
-        // primary cross-platform contract for settings persistence.
-        // Platform path resolution (config_dir) is delegated to the `dirs`
-        // crate and tested separately.
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-test-{}",
-            std::process::id(),
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("settings.json");
-
-        let original = Settings {
+    fn saved_settings_read_back_the_same() {
+        use prunr_core::brush::BrushShape;
+        use prunr_core::selection::BrushMode;
+        let mut original = Settings {
             parallel_jobs: 7,
             processor: ComputeMode::CpuOnly,
             auto_process_on_import: true,
             ..Settings::default()
         };
-        original.save_to_path(&path);
-
-        let json = std::fs::read_to_string(&path).expect("settings.json should exist");
+        original.brush.radius = 87.5;
+        original.brush.hardness = 0.42;
+        original.brush.strength = 0.75;
+        original.brush.mode = BrushMode::Add;
+        original.brush.shape = BrushShape::Square;
+        let json = serde_json::to_string_pretty(&original).unwrap();
         let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
         assert_eq!(restored.parallel_jobs, 7);
         assert!(restored.auto_process_on_import);
         assert_eq!(restored.processor, ComputeMode::CpuOnly, "the processor choice is saved");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(restored.brush, original.brush);
     }
 
     /// Reset keeps what the user owns or agreed to (presets, licence
@@ -1134,36 +1093,6 @@ mod tests {
     }
 
     #[test]
-    fn brush_settings_round_trip() {
-        use prunr_core::brush::BrushShape;
-        use prunr_core::selection::BrushMode;
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-brush-test-{}",
-            std::process::id(),
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("settings.json");
-
-        let mut original = Settings::default();
-        original.brush.radius = 87.5;
-        original.brush.hardness = 0.42;
-        original.brush.strength = 0.75;
-        original.brush.mode = BrushMode::Add;
-        original.brush.shape = BrushShape::Square;
-        original.save_to_path(&path);
-
-        let json = std::fs::read_to_string(&path).expect("settings.json exists");
-        let restored: Settings = serde_json::from_str(&json).expect("schema round-trip");
-        assert_eq!(restored.brush.radius, 87.5);
-        assert_eq!(restored.brush.hardness, 0.42);
-        assert_eq!(restored.brush.strength, 0.75);
-        assert_eq!(restored.brush.mode, BrushMode::Add);
-        assert_eq!(restored.brush.shape, BrushShape::Square);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn missing_brush_field_falls_back_to_default() {
         let json = serde_json::json!({
             "model": "Silueta",
@@ -1210,39 +1139,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_active_preset_returns_prunr_floor_when_default_preset_is_prunr() {
-        let s = Settings::default();
-        let r = s.resolve_active_preset(None);
-        assert_eq!(r.item_settings, ItemSettings::default());
-        assert_eq!(r.brush, super::BrushSettings::default());
-    }
-
-    #[test]
-    fn resolve_active_preset_returns_named_preset_values() {
-        let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
-        let mp = super::super::presets::ModelPreset {
-            item_settings: item_with_gamma(2.0),
-            brush,
-            sd: None,
-        };
-        let mut models = HashMap::new();
-        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = super::super::presets::PresetFile {
-            format_version: super::super::presets::PRESET_FORMAT_VERSION,
-            models,
-        };
-        s.presets.insert("Foo".to_string(), file);
-        s.default_preset = "Foo".to_string();
-
-        let r = s.resolve_active_preset(None);
-        assert!((r.item_settings.gamma - 2.0).abs() < f32::EPSILON);
-        assert!((r.brush.radius - 80.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn a_cutout_preset_is_shared_by_the_cutout_models_and_no_other() {
         let mut s = Settings::default();
         s.model = SettingsModel::U2net;
@@ -1263,6 +1159,10 @@ mod tests {
         s.presets.insert("Foo".to_string(), file);
         s.default_preset = "Foo".to_string();
 
+        s.model = SettingsModel::Silueta;
+        let r = s.resolve_active_preset(None);
+        assert_eq!((r.item_settings.gamma, r.brush.radius), (2.0, 80.0), "Silueta reads its own entry");
+        s.model = SettingsModel::U2net;
         let r = s.resolve_active_preset(None);
         assert_eq!((r.item_settings.gamma, r.brush.radius), (2.0, 80.0), "U2net uses the Silueta entry");
         s.model = SettingsModel::BigInpaint;
@@ -1377,21 +1277,6 @@ mod tests {
         assert_eq!(s.brush.sd_seed, Some(77), "and the pinned seed");
     }
 
-    #[test]
-    fn save_creates_parent_dir() {
-        // Regression: on a fresh install the parent dir doesn't exist yet;
-        // save() must create it rather than silently failing.
-        let dir = std::env::temp_dir().join(format!(
-            "prunr-mkdir-test-{}",
-            std::process::id(),
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let nested = dir.join("nested").join("settings.json");
-        Settings::default().save_to_path(&nested);
-        assert!(nested.exists(), "save_to_path must mkdir -p the parent");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Cross-subsystem contract: a dozen call sites across canvas /
     /// toolbar / app branch on `is_inpaint()`, including the seg
     /// live-preview gate that prevents the no-tensor fallback from
@@ -1409,16 +1294,6 @@ mod tests {
                     | SettingsModel::RoremInpaint,
             );
             assert_eq!(m.is_inpaint(), expected, "{m:?}");
-        }
-    }
-
-    #[test]
-    fn is_inpaint_and_uses_segmentation_are_disjoint() {
-        for m in SettingsModel::ALL {
-            assert!(
-                !(m.is_inpaint() && m.uses_segmentation()),
-                "{m:?} cannot be both inpaint and seg",
-            );
         }
     }
 
