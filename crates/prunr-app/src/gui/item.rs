@@ -909,14 +909,10 @@ pub(crate) struct BatchItem {
     pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
-    /// The last upscale run's model output and input, so Refine's
-    /// after-the-model knobs re-finish it without a model run. Mirrors
-    /// `cached_tensor`'s contract: NOT cleared by `reset_result_caches()`;
-    /// only cleared explicitly on Tier-1 invalidation (model swap).
-    ///
-    /// RAM impact: at 4K source × 4× upscale = 15360×8640 RGBA ≈ 500 MB,
-    /// plus as much again while AI blend or Color match keep the enlarged
-    /// reference. Not under the tensor budget (`evictable_tensor_bytes`).
+    /// The last upscale run's model output and input, so Refine re-finishes
+    /// it without a model run. Survives `reset_result_caches()`; cleared on a
+    /// model swap. RAM: 4K × 4 ≈ 500 MB, double while AI blend or Color match
+    /// keep the enlarged reference; outside the tensor budget.
     pub(crate) upscale: Option<UpscaleCache>,
     /// The last colorize run, so Strength re-renders it without a model
     /// run. Not cleared by `reset_result_caches()`; cleared on a model
@@ -937,17 +933,12 @@ pub(crate) struct BatchItem {
     /// dilated, each with its key), and of the Bold scale for dual-scale
     /// styles.
     pub(crate) edge_planes: super::live_preview::EdgePlaneCache,
-    /// SubjectOutline live-preview cache: the "masked subject" base
-    /// (`postprocess_from_flat` output) that edge composition draws onto.
-    /// Keyed by `(MaskRecipe, ModelKind)` — when mask settings change, the
-    /// base is rebuilt; when only edge settings change, the base is reused
-    /// and we skip ~50-100 ms of Lanczos + guided filter per Edge tick.
+    /// SubjectOutline live-preview base (`postprocess_from_flat` output) that
+    /// edges draw onto, keyed by mask recipe and model: an Edge-only tick
+    /// reuses it and skips ~50-100 ms of Lanczos + guided filter.
     pub(crate) cached_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
-    /// Which preset was last APPLIED to this image (via the dropdown's row
-    /// click or via Reset All). The preset button compares current `settings`
-    /// against this preset's values to show a modified/clean icon. Stays set
-    /// across unrelated tweaks — so "Portrait ✎" keeps saying Portrait even
-    /// after the user modifies something.
+    /// The preset last applied (dropdown or Reset All); the preset button
+    /// compares `settings` against it, and it stays across later tweaks.
     pub(crate) applied_preset: String,
     /// Never mutate outside `set_bg_image_hashed` / `clear_bg_image` /
     /// `adopt_settings`: the writers that keep `settings.bg_image_hash` in step,
@@ -965,11 +956,9 @@ pub(crate) struct BatchItem {
     /// new result can never pass for the old one by address.
     lens_focus: Option<LensFocus>,
 
-    /// Shared selection mask. Both Paint Brush and Magic Brush write
-    /// here. Signed i8 plane at source image resolution.
-    ///
-    /// Survives Process; an erase that lands clears it, as do Clear and a
-    /// source change.
+    /// Shared selection mask (Paint and Magic Brush), a signed i8 plane at
+    /// source resolution. Survives Process; an erase that lands clears it, as
+    /// do Clear and a source change.
     pub(crate) selection_mask: Option<Arc<prunr_core::selection::MaskArtifact>>,
 
     /// Content hash of `selection_mask`, set in lockstep with the mask by
@@ -1061,10 +1050,8 @@ pub(crate) struct SelectionTexture {
 }
 
 impl BatchItem {
-    /// Clear every edge cache tier together — compressed multi-scale set,
-    /// the hot decompressed tensor, and the derived pre-dilation mask. The
-    /// mask is always built from the tensor, so any tensor change invalidates
-    /// all of them.
+    /// Clear every edge cache tier together: the mask is built from the
+    /// tensor, so any tensor change invalidates all of them.
     pub(crate) fn invalidate_edge_cache(&mut self) {
         self.cached_edge_tensors = None;
         self.volatile_edge_tensor = None;
@@ -1202,13 +1189,9 @@ impl BatchItem {
         }
     }
 
-    /// Clear the cached upscale run.
-    /// Called on model switch and on item error. Tier-1 knob changes do NOT
-    /// call this — the next dispatch's pump_upscale_results overwrites the
-    /// buffer in-place, so explicit invalidation would just drop work the
-    /// next dispatch is about to redo. Model switch is special because the
-    /// next dispatch may never happen (user may drag a Tier-2 knob first),
-    /// and the stale buffer is from the wrong model.
+    /// Clear the kept upscale run, on a model switch and on item error. A knob
+    /// that re-runs the model need not: its landing overwrites it, but after a
+    /// switch it is the wrong model's and may never be replaced.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
         super::reclaim::later(self.upscale.take());
     }
@@ -1280,8 +1263,6 @@ impl BatchItem {
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
-    /// Called by `BatchManager::clear_selection` (Esc / Clear) and
-    /// `invalidate_source_derived`.
     pub(crate) fn invalidate_selection(&mut self) {
         self.selection_mask = None;
         self.selection_hash = None;
@@ -1335,7 +1316,6 @@ impl BatchItem {
         self.job.as_ref().is_some_and(|j| j.engine == Engine::Segment)
     }
 
-    /// Whether `need` is met for this image under a model of `role`.
     pub(crate) fn verdict(&self, need: super::capability::Need, role: super::knob_catalog::ModelRole) -> super::capability::Verdict {
         super::capability::check(&super::capability::ItemFacts::of(self), need, role)
     }
@@ -2168,7 +2148,6 @@ impl BatchItem {
         self.job.as_ref().is_some_and(|j| j.version == self.timeline.version())
     }
 
-    /// The awaited run's id.
     pub(crate) fn job_run(&self) -> Option<u64> {
         self.job.as_ref().map(|j| j.run)
     }
@@ -2366,7 +2345,6 @@ impl BatchItem {
         self.found_faces.as_ref().filter(|f| f.model == model && f.photo.same(photo))
     }
 
-    /// Whether a search of `photo` with `model` is under way.
     pub(crate) fn pending_for(&self, photo: &FacePhoto, model: prunr_models::ModelId) -> bool {
         self.faces_pending.as_ref().is_some_and(|p| p.model == model && p.photo.same(photo))
     }
@@ -2471,8 +2449,7 @@ impl BatchItem {
         super::worker::WorkItem { id: self.id, run: self.job_run().unwrap_or_default(), source: self.source.clone(), image: self.job_run_image() }
     }
 
-    /// Drop whatever caches a `CacheImpact` says are stale. Single entry
-    /// point used by both the toolbar dispatcher and batch classification.
+    /// Drop whatever caches a `CacheImpact` says are stale.
     pub(crate) fn apply_cache_impact(
         &mut self,
         impact: crate::gui::knob_catalog::CacheImpact,
@@ -2538,22 +2515,13 @@ impl BatchItem {
         }
     }
 
-    /// Reset all caches tied to the current result. Call after the result
-    /// has changed (history walk, fresh process, etc.) so the next paint
-    /// rebuilds textures and the next reprocess re-runs from scratch.
-    /// Note: `source_texture` is NOT cleared — callers decide whether the
-    /// source view also needs rebuilding (undo: yes; redo: no).
+    /// Reset all caches tied to the current result, after it changed, so
+    /// textures rebuild and the next reprocess runs from scratch.
+    /// `source_texture` stays: the caller decides.
     pub(crate) fn reset_result_caches(&mut self) {
-        // Do NOT clear `cached_tensor` here. The seg tensor is a function of
-        // the source image + model, so it stays valid across undo/redo and
-        // across Tier 2 / AddEdge reruns that don't return a fresh tensor.
-        // Callers that actually invalidate the tensor (model swap, crash
-        // retry) set `cached_tensor = None` explicitly.
-        //
-        // Same rule for the kept upscale run: Tier-2 knobs (sharpen /
-        // ai_blend / color_match) re-finish FROM it, so clearing it here
-        // would force a full re-upscale on every Tier-2 tweak. Tier-1
-        // invalidation paths call `invalidate_upscale_cache()` explicitly.
+        // `cached_tensor` and the kept upscale run stay: the tensor depends only
+        // on source + model, and Refine knobs re-finish from the upscale run.
+        // Paths that invalidate them clear them explicitly.
         self.result_texture = None;
         // A result texture still being made is of the result this drops.
         self.result_tex_request += 1;
@@ -2563,13 +2531,9 @@ impl BatchItem {
         self.decode_pending = false;
     }
 
-    /// Apply a finished tier result to this item (success or error branch).
-    /// Returns the `active_provider` string when the caller should update the
-    /// app-level backend label; `None` for Tier 2 reruns (empty provider) or
-    /// error results.
-    ///
-    /// Keeps the BatchItem mutation isolated here; the backend update on
-    /// `Settings` is applied in the caller via the returned `Option<String>`.
+    /// Apply a finished tier result (success or error). Returns the
+    /// `active_provider` for the app's backend label; `None` for reruns that
+    /// ran no model, and for errors.
     pub(crate) fn apply_tier_result(
         &mut self,
         result: Result<prunr_core::ProcessResult, String>,
@@ -2583,11 +2547,8 @@ impl BatchItem {
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.failure = None;
                 self.applied_recipe = Some(recipe_snapshot);
-                // Preserve existing cache when the worker returned without a
-                // fresh tensor (Tier 2 RePostProcess / AddEdgeInference for
-                // the seg side). Clobbering it here silently killed live
-                // preview after any tier-2 result — the next gamma tweak had
-                // nothing to postprocess from.
+                // Keep the cache when the worker returned no fresh tensor (a
+                // rerun): clobbering it killed live preview after any rerun.
                 if let Some(new) = seg {
                     self.set_cached_tensor(Some(new));
                 }
@@ -2749,9 +2710,7 @@ impl BatchItem {
         }
     }
 
-    /// Test-only constructor: returns a BatchItem with all fields at their
-    /// zero/None default. Use in tests that need a real BatchItem without
-    /// building a full batch pipeline. Not compiled into release binaries.
+    /// Test-only: a BatchItem with every field at its zero/None default.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn new_for_test() -> Self {
         Self::new(
@@ -2878,7 +2837,6 @@ impl BatchItem {
         DepthExport { name: depth_map_name(&self.filename), dims: self.dimensions, depth: self.depth_source() }
     }
 
-    /// See `DepthSource`.
     pub(crate) fn depth_source(&self) -> DepthSource {
         DepthSource { depth: self.depth.clone(), source: self.source.clone() }
     }
@@ -2895,7 +2853,6 @@ impl BatchItem {
         }
     }
 
-    /// See `BackdropPhoto`.
     pub(crate) fn backdrop_photo(&self) -> Option<BackdropPhoto> {
         let edited = self.timeline.latest_run().and_then(|o| o.start.as_ref());
         match edited {

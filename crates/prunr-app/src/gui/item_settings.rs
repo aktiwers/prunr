@@ -1,30 +1,18 @@
-//! Per-image processing settings.
-//!
-//! Each `BatchItem` owns an `ItemSettings`. The toolbar binds to the current
-//! image's settings; tweaking a knob updates only that image. `Settings`
-//! holds app-wide config (parallel jobs, hotkeys, presets).
-//!
-//! `ItemSettings` is `Copy` and contains no heap allocations — diffing and
-//! snapshotting are branchless and free. Building a `ProcessingRecipe` from
-//! an `ItemSettings` is a trivial field copy.
+//! Per-image processing settings: each `BatchItem` owns one, and the
+//! toolbar binds to the shown image's; `Settings` holds app-wide config.
+//! `ItemSettings` is `Copy` with no heap, so diffing and snapshotting are
+//! free.
 
 use prunr_core::{LineMode, MaskSettings, EdgeSettings, EdgeScale, BgImageFit};
 use serde::{Deserialize, Serialize};
 
-/// Per-image processing settings. Edited via the adjustments toolbar.
+/// Per-image processing settings.
 ///
-/// Invariants:
-/// - All fields are `Copy`. Diff is a branchless struct compare.
-/// - `bg` uses RGBA for UI parity with egui color pickers; only RGB is sent
-///   into the pipeline (alpha is always treated as 255 during compositing).
+/// `bg` is RGBA for egui's colour picker; only RGB reaches the pipeline.
 ///
-/// Serialization contract — IMPORTANT when adding fields:
-/// Preset files on disk carry one `ItemSettings` as JSON. Users share them,
-/// so files written by old builds MUST keep loading when we add fields.
-/// The `#[serde(default)]` attribute on this struct makes missing fields
-/// fall back to `Default::default()`, so adding a new field is safe *as
-/// long as `Default` covers it*. Do NOT add `#[serde(deny_unknown_fields)]`
-/// — the tripwire tests in `presets_fs::tests` enforce this contract.
+/// Preset files carry one `ItemSettings` as JSON and users share them, so
+/// old files MUST keep loading: `#[serde(default)]` fills missing fields
+/// from `Default`. Never add `deny_unknown_fields`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ItemSettings {
@@ -36,8 +24,8 @@ pub struct ItemSettings {
     pub edge_shift: f32,
     /// Guided-filter refinement of mask edges.
     pub refine_edges: bool,
-    /// Guided filter window radius (pixels). Only used when refine_edges.
-    /// Range 4-32 in the UI; stored as u8 to fit the ItemSettings byte budget.
+    /// Guided filter window radius in pixels (4-32 in the UI; u8 for the
+    /// byte budget). Only used when refine_edges.
     pub guided_radius: u8,
     /// Guided filter regularization. Only used when refine_edges.
     pub guided_epsilon: f32,
@@ -56,8 +44,7 @@ pub struct ItemSettings {
     /// Which TEED output scale to read from the cached tensor set.
     pub edge_scale: EdgeScale,
 
-    /// Fill transparent areas with a solid color. `None` = transparent.
-    /// Stored as RGBA for UI parity; pipeline only uses RGB.
+    /// Fill transparent areas with a solid color; `None` = transparent.
     pub bg: Option<[u8; 4]>,
 
     /// How the subject mask and edge mask combine in SubjectOutline mode.
@@ -76,20 +63,16 @@ pub struct ItemSettings {
     /// drops the edge tensor cache and reruns the detector at once (on the
     /// cached cut-out when there is one).
     pub input_transform: prunr_core::InputTransform,
-    /// Drives the CompositeOnly recipe diff when the user picks a different
-    /// background image. `None` when no image bg is set.
-    ///
-    /// `NonZeroU64` niche saves 8 bytes vs `Option<u64>`. Hash=0 is treated
-    /// as None (content_hash never yields 0 in practice).
+    /// Content hash of the background image, driving the CompositeOnly recipe
+    /// diff; `None` without one. `NonZeroU64` saves 8 bytes (a content hash
+    /// of 0 does not occur in practice).
     pub bg_image_hash: Option<std::num::NonZeroU64>,
     /// How the background image is positioned/scaled inside the result frame.
     /// Default `Cover` matches CSS `background-size: cover`.
     pub bg_image_fit: BgImageFit,
 
-    /// User-facing output scale. Older presets that carried `upscale_scale: u32`
-    /// silently drop the field via `#[serde(default)]` — they reload at
-    /// `OutputScale::X4` (the no-op default matching the prior native upscale
-    /// model behaviour).
+    /// User-facing output scale. Old presets' `upscale_scale` field is
+    /// dropped; they load at `X4`.
     pub output_scale: prunr_core::OutputScale,
     /// Pre-inference classical denoise blend strength, range [0.0, 1.0].
     /// 0.0 = no denoise (output bit-identical to the un-touched source).
@@ -97,9 +80,8 @@ pub struct ItemSettings {
     /// Unsharp-mask strength applied after inference, range [-1.0, 1.0].
     /// Negative = blur, 0.0 = no-op, positive = sharpen.
     pub sharpen: f32,
-    /// Lerp weight: 1.0 = full AI upscale (default), 0.0 = pure bicubic.
-    /// Default is 1.0 so a preset that omits this field reads as full AI —
-    /// the no-op state where the upscale model's output passes through.
+    /// Lerp weight: 1.0 = full AI upscale, 0.0 = pure bicubic. Defaults to
+    /// 1.0 so a preset without it passes the model's output through.
     pub ai_blend: f32,
     /// Reinhard Lab mean+stddev color match against source RGB.
     pub color_match: bool,
@@ -344,11 +326,9 @@ impl ItemSettings {
         prunr_core::upscale::Refine { sharpen: self.sharpen, sharpen_sigma: self.output_scale.sharpen_sigma(), ai_blend: self.ai_blend, color_match: self.color_match }
     }
 
-    /// Build a `ProcessingRecipe` snapshot for tier routing.
-    /// Pins mask fields to defaults in modes that skip segmentation so unrelated
-    /// knob changes don't trigger reprocessing when the mask isn't used.
-    ///
-    /// `model` is app-global, not per-item — the caller provides it.
+    /// A `ProcessingRecipe` snapshot for tier routing. Mask fields are pinned
+    /// to defaults where segmentation is skipped, so unused knobs don't
+    /// trigger reprocessing. `model` is app-global.
     pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
         let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
         let uses_edge_detection = self.line_mode != LineMode::Off;

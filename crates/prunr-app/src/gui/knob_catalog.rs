@@ -6,21 +6,16 @@
 //! `resolve_tier` operates on recipe diffs; this catalog operates on knobs.
 //! Both must agree on single-knob mutations — cross-check tests enforce it.
 //!
-//! **Type discipline.** `StaticKnob` covers knobs whose spec is fully
-//! determined by the knob identity. `LineModeChange` carries transition
-//! context (from/to). `spec()` takes only `StaticKnob`, so context-
-//! sensitive dispatch must go through `line_mode_spec` or
-//! `input_transform_spec` with item state — "silent worst-case fallback"
-//! perf bugs can't exist.
+//! `spec()` takes only `StaticKnob`; context-sensitive knobs go through
+//! `line_mode_spec` / `input_transform_spec` with item state, so a silent
+//! worst-case fallback can't be expressed.
 
 use prunr_core::{LineMode, ProcessingRecipe, RequiredTier};
 
 use crate::gui::settings::SettingsModel;
 
-/// Knobs whose `KnobSpec` is a pure function of the knob identity.
-/// Context-sensitive knobs (line_mode transition, input_transform) live
-/// in their own types so callers can't accidentally ask the catalog for
-/// a static spec and get a conservative over-approximation.
+/// Knobs whose `KnobSpec` is a pure function of the knob identity;
+/// context-sensitive ones have their own types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StaticKnob {
     // Mask tier — cached seg tensor reused.
@@ -312,9 +307,7 @@ pub struct KnobSpec {
     pub auto_trigger_on_commit: bool,
 }
 
-/// Static per-knob spec. Only defined for `StaticKnob` — context-sensitive
-/// knobs have their own resolvers, so silent worst-case fallbacks are
-/// unrepresentable.
+/// Static per-knob spec.
 pub fn spec(knob: StaticKnob) -> KnobSpec {
     use CacheImpact::*;
     use DispatchKind::*;
@@ -355,15 +348,11 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
     }
 }
 
-/// Precise spec for a line-mode transition.
-///
-/// `cached_edge` gates the `Off → SubjectOutline` fast path: with the
-/// TEED tensor in memory we recompose via live-preview; otherwise we
-/// rerun TEED on the cached seg (AddEdgeInference subprocess).
-///
-/// Transitions to/from `Off` preserve the TEED tensor — `Off` doesn't
-/// use it. `SubjectOutline ↔ EdgesOnly` invalidates edge cache because
-/// TEED sees different input (masked-subject vs raw scene).
+/// Spec for a line-mode transition. `cached_edge` gates the
+/// `Off → SubjectOutline` fast path: with the TEED tensor in memory it
+/// recomposes live, else TEED reruns on the cached seg. Transitions to or
+/// from `Off` keep the tensor; `SubjectOutline ↔ EdgesOnly` drops it,
+/// since TEED sees the masked subject vs the raw scene.
 pub fn line_mode_spec(change: LineModeChange, cached_edge: bool) -> KnobSpec {
     use CacheImpact::*;
     use DispatchKind::*;
@@ -412,10 +401,9 @@ pub fn input_transform_spec(cached_seg: bool) -> KnobSpec {
     }
 }
 
-/// Aggregate `CacheImpact` implied by a recipe diff — union of per-knob
-/// impacts for every field that actually changed. Used by `BatchItem::run_tier`
-/// to invalidate only the caches whose INPUT changed (seg stays valid on an
-/// input_transform change, edge stays valid on a model swap).
+/// Union of per-knob `CacheImpact`s for every field the recipe diff
+/// changed, so only caches whose input changed are dropped (seg survives
+/// an input_transform change, edge a model swap).
 pub fn cache_impact_for_recipe_diff(old: &ProcessingRecipe, new: &ProcessingRecipe) -> CacheImpact {
     let mut impact = CacheImpact::Nothing;
     if old.inference.model != new.inference.model {
