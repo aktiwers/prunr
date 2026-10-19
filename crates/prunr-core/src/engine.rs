@@ -12,19 +12,15 @@ use ort::{
     value::Tensor,
 };
 
-/// Trait for inference backends. Implemented by OrtEngine.
-/// Send + Sync required because worker threads own the engine instance.
+/// Send + Sync because worker threads own the engine.
 pub trait InferenceEngine: Send + Sync {
-    /// Returns the name of the active execution provider (e.g., "CUDA", "CoreML", "CPU").
+    /// The active execution provider's name ("CUDA", "CoreML", "CPU").
     fn active_provider(&self) -> &str;
 }
 
-/// GPU execution-provider variants. Variants are platform-gated so the
-/// EP-ladder match sites stay exhaustive without dead arms — CoreML
-/// only exists on macOS, DirectML on Windows, CUDA + OpenVINO on
-/// non-macOS targets. `Display` mirrors the historic string names so
-/// log output and the persistent `ep_compat.json` cache keys stay
-/// stable.
+/// GPU execution providers, platform-gated so ladder matches stay
+/// exhaustive without dead arms. `Display` keeps the historic names:
+/// they are the persistent `ep_compat.json` cache keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum EpKind {
     #[cfg(not(target_os = "macos"))]
@@ -49,10 +45,7 @@ pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 pub(crate) const CPU_NAME: &str = "CPU";
 
 impl EpKind {
-    /// Stable display string used by logs, the active-provider label,
-    /// and the `ep_compat.json` cache keys. Returned as `&'static str`
-    /// so callers (e.g. `is_ep_compatible`) don't trigger an allocation
-    /// just to read the EP name.
+    /// Stable name: also the `ep_compat.json` cache key.
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             #[cfg(not(target_os = "macos"))]
@@ -75,15 +68,12 @@ impl std::fmt::Display for EpKind {
     }
 }
 
-/// Filter the GPU EP ladder by `is_available()` — on `load-dynamic`
-/// builds the loaded `libonnxruntime` may not have all EPs compiled in
-/// (e.g. the OpenVINO PyPI wheel has CPU + OpenVINO only). Cached for
-/// the process lifetime; first call probes ort's EP table.
+/// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
+/// runtime may lack EPs (the OpenVINO wheel has CPU + OpenVINO only).
+/// Probed once per process.
 ///
-/// Order on Linux: OpenVINO before CUDA so Intel users (the most common
-/// non-NVIDIA Linux desktop population) hit OpenVINO first when their
-/// Runtime Store install wins. NVIDIA users still get CUDA because
-/// OpenVINO Runtime won't be installed and `is_available()` returns false.
+/// OpenVINO goes before CUDA so Intel users get it; an NVIDIA machine
+/// has no OpenVINO runtime, so it still reaches CUDA.
 pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Vec<EpKind>> = OnceLock::new();
@@ -350,19 +340,15 @@ impl EpKind {
             }
             #[cfg(windows)]
             EpKind::DirectMl => directml_provider(),
-            // NOT using `with_cache_dir`: retested against SD UNet on
-            // ort=2.0.0-rc.12 + openvino-1.24.1, Intel HD 530. Cold and
-            // warm session-commit elapsed are identical within noise
-            // (cold 23735 ms / warm 23224 ms on UNet), and every blob's
-            // mtime advances on the warm run — OpenVINO computes a
-            // different cache key each launch and rewrites ~3.3 GB on
-            // every cold build. Re-evaluate when ort bumps.
+            // NOT using `with_cache_dir`: on ort 2.0.0-rc.12 + OpenVINO
+            // 1.24.1 cold and warm SD UNet commits match (23.7 / 23.2 s)
+            // because OpenVINO keys the cache differently each launch and
+            // rewrites ~3.3 GB every build.
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => match site {
-                // Cap the EP-internal TBB pool to our outer rayon budget.
-                // Uncapped, OpenVINO sizes its pool to all logical cores
-                // and oversubscribes against the rayon workers —
-                // `sched_yield` was ~2% of CLI batch wall time.
+                // Uncapped, OpenVINO's TBB pool takes every logical core
+                // and oversubscribes against rayon (`sched_yield` ~2% of
+                // CLI batch wall time).
                 EpSite::Engine { threads } | EpSite::Fill { threads } => {
                     let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
                     match site.ov_device(intel_gpu_chosen()) {
@@ -610,12 +596,10 @@ impl SessionPick {
     }
 }
 
-/// ORT-backed inference engine. Holds one Session per model selection.
-/// Create once per model; reuse across all images — never instantiate per-image.
+/// ORT-backed inference engine. Create once per model and reuse across
+/// images; never per image.
 ///
-/// The session is behind a Mutex because ort's `Session::run()` takes `&mut self`
-/// internally (ORT updates state during inference). The Mutex enables shared `&OrtEngine`
-/// references while still satisfying ort's mutability requirement.
+/// The session is behind a Mutex because `Session::run()` takes `&mut self`.
 pub struct OrtEngine {
     session: Mutex<Session>,
     pick: SessionPick,
@@ -623,14 +607,9 @@ pub struct OrtEngine {
 }
 
 impl OrtEngine {
-    /// Create a new OrtEngine for the given model.
-    ///
-    /// - `model`: Which ONNX model to load (Silueta = ~4MB fast, U2net = ~170MB quality)
-    /// - `intra_threads`: ORT intra-op thread count. For batch use: num_cpus / rayon_workers.
-    ///   Pass 1 for single-image use; the thread count is set at session creation time.
-    ///
-    /// Tries each available GPU provider in turn, then the CPU. Call
-    /// active_provider() after creation to see which one won.
+    /// Tries each available GPU provider in turn, then the CPU.
+    /// `intra_threads`: ORT intra-op threads; for batch use
+    /// num_cpus / rayon_workers.
     pub fn new(model: ModelKind, intra_threads: usize) -> Result<Self, CoreError> {
         Self::with_threads(model, intra_threads, false)
     }
@@ -751,12 +730,9 @@ impl OrtEngine {
             });
         }
 
-        // GPU path: try platform GPU EPs one by one so we know which succeeded
-        // (registering them as a list hides which EP was actually selected and
-        // lets a crashing EP abort session creation before the CPU fallback is
-        // reached — exactly the DirectML AbiCustomRegistry failure seen in the
-        // wild). Fall through on error; the caller retries on the CPU if all
-        // GPU EPs fail.
+        // One EP per try, not a list: a list hides which EP won and lets a
+        // crashing EP (DirectML's AbiCustomRegistry) abort before the CPU
+        // fallback is reached.
         let (session, ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
@@ -794,20 +770,12 @@ impl OrtEngine {
             .map_err(|e| CoreError::Inference(format!("ORT set intra threads failed: {e}")))
     }
 
-    /// Detect the runtime provider (cached — runs once per process).
-    ///
-    /// This is a best-effort *startup guess* for the UI label before any
-    /// subprocess is spawned: the first GPU provider the loaded runtime
-    /// offers, else the CPU. The real EP is stamped onto each `OrtEngine`
-    /// at session creation and propagated through the subprocess `Ready`
-    /// event, so the UI corrects itself if this guess was wrong.
+    /// A startup guess at the provider, before any session exists: the
+    /// first GPU provider the loaded runtime offers, else the CPU. Each
+    /// session reports the real one.
     pub fn detect_active_provider() -> String {
         static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         CACHED.get_or_init(|| {
-            // First entry from `available_gpu_eps` is the most likely
-            // winner — same probe drives the actual EP ladder. CPU is
-            // the universal fallback when the loaded libonnxruntime
-            // has no GPU EPs compiled in.
             available_gpu_eps()
                 .first()
                 .map(|ep| ep.as_str().to_string())
@@ -835,13 +803,9 @@ pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     }
 }
 
-/// Whether DirectML is the active GPU provider on this platform.
-///
-/// Used to gate parallel session-build paths: DirectML's
-/// `commit_from_memory` has historic AbiCustomRegistry races on
-/// concurrent calls, so callers fall back to sequential build when
-/// DirectML is active. Always `false` outside Windows since the
-/// `EpKind::DirectMl` variant is `cfg(windows)`-gated.
+/// Whether DirectML is the active GPU provider. Parallel session builds
+/// go sequential under it: its `commit_from_memory` races in
+/// AbiCustomRegistry on concurrent calls.
 pub(crate) fn directml_active() -> bool {
     #[cfg(windows)]
     {
@@ -855,8 +819,7 @@ pub(crate) fn directml_active() -> bool {
 }
 
 impl OrtEngine {
-    /// Lock the underlying ORT Session for inference. Not part of the
-    /// public trait API. ORT requires &mut Session for run(); Mutex provides interior mutability.
+    /// Lock the ORT session for inference.
     pub(crate) fn with_session<T, F>(&self, f: F) -> Result<T, CoreError>
     where
         F: FnOnce(&mut Session) -> Result<T, CoreError>,
@@ -898,21 +861,11 @@ impl OrtEngine {
         Ok(out)
     }
 
-    /// Run inference via `IoBinding` and pass the output **as a borrow**
-    /// to `f`. The borrow is alive only for the duration of `f`'s call.
-    ///
-    /// Compared to the `with_session` + `try_extract_array().to_owned()`
-    /// path, this skips one full output-tensor clone (4 MB at BiRefNet
-    /// 1024² → ~11.9% of `_memcpy_avx_unaligned_erms` in the perf trace).
-    /// `bind_output_to_device(CPU)` lets ORT allocate the output in CPU
-    /// memory directly; the post-run `try_extract_array` returns a view
-    /// into that buffer without copying.
-    ///
-    /// Use this when the caller can consume the view in-place
-    /// (e.g. postprocess running inside the closure). For paths that
-    /// need an owned `Vec<f32>` regardless (Tier-2 cache write,
-    /// IPC tensor packing), the `with_session` path is fine — the
-    /// owning copy is unavoidable there.
+    /// Run inference via `IoBinding` and pass the output to `f` as a
+    /// borrow, alive only for `f`'s call. Skips the output clone of the
+    /// `with_session` path (4 MB at BiRefNet 1024², ~11.9% of memcpy in
+    /// the perf trace); use it when the caller can consume the view in
+    /// place.
     pub(crate) fn infer_into<R, F>(
         &self,
         input_array: ndarray::Array4<f32>,
@@ -963,10 +916,8 @@ impl InferenceEngine for OrtEngine {
     }
 }
 
-/// Delete a cached optimized graph a session failed on (stale, or a
-/// malformed artifact), so the next build rebuilds it from source.
-/// `NotFound` is silent — concurrent processes legitimately race on the
-/// same path.
+/// Delete a cached optimized graph a session failed on, so the next
+/// build rebuilds it. `NotFound` is silent: processes race on the path.
 fn clear_suspect_cache(path: &std::path::Path) {
     match std::fs::remove_file(path) {
         Ok(()) => tracing::warn!(cache = %path.display(),
@@ -983,11 +934,9 @@ pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep: EpKind, 
     hit.then(|| crate::cache::optimized_model_path(model, ep.as_str(), weights)).flatten()
 }
 
-/// Per-(model, EP, weights) ORT-graph-optimization cache. On hit returns the
-/// optimized bytes so commit skips optimization; on miss sets
-/// `with_optimized_model_path` so ORT writes the optimized graph for
-/// the next launch. Cache failures are best-effort — any I/O or ORT
-/// error logs and falls back to the uncached path.
+/// Per-(model, EP, weights) optimized-graph cache: a hit returns the
+/// optimized bytes; a miss has ORT write them for the next launch.
+/// Best-effort: any failure logs and falls back to the uncached path.
 pub(crate) fn apply_ort_graph_cache<'a>(
     builder: ort::session::builder::SessionBuilder,
     model_bytes: &'a [u8],
