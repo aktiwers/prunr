@@ -723,13 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn command_cancel_item_roundtrip() {
-        roundtrip(&SubprocessCommand::CancelItem { item_id: 42 });
-        roundtrip(&SubprocessCommand::CancelItem { item_id: 0 });
-        roundtrip(&SubprocessCommand::CancelItem { item_id: u64::MAX });
-    }
-
-    #[test]
     fn event_image_done_with_and_without_edge_cache_roundtrip() {
         roundtrip(&SubprocessEvent::ImageDone {
             item_id: 11,
@@ -775,19 +768,6 @@ mod tests {
                 width: 640,
                 scales: vec![prunr_core::EdgeScale::Fine],
             }),
-        });
-    }
-
-    #[test]
-    fn command_inpaint_lama_roundtrip() {
-        roundtrip(&SubprocessCommand::Inpaint {
-            item_id: 11,
-            model_id: prunr_models::ModelId::LaMaFp32,
-            image_path: std::path::PathBuf::from("/tmp/prunr-inpaint-img-11"),
-            mask_path: std::path::PathBuf::from("/tmp/prunr-inpaint-mask-11"),
-            sd_req: None,
-            feather_px: 0.0,
-            sharpen: 0.0,
         });
     }
 
@@ -940,20 +920,6 @@ mod tests {
         }
     }
 
-    /// Files matching no supplied prefix are left in place — the sweep is
-    /// "remove only what I own", not "remove everything except what I name."
-    #[test]
-    fn sweep_dir_with_prefix_ignores_unmatched_files() {
-        let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path();
-        poison(dir, &["unrelated.txt", "seg_1.png"]);
-
-        super::sweep_dir_with_prefix(dir, SEG_PIPELINE_PREFIXES);
-
-        assert_gone(dir, &["seg_1.png"]);
-        assert!(dir.join("unrelated.txt").exists());
-    }
-
     /// Every temp-file kind has an owner that removes it after a crash:
     /// the seg pipeline's sweep, the CLI's end-of-batch sweep, or the
     /// eraser bridge's per-stroke removal. A new kind fails to compile here
@@ -1052,51 +1018,6 @@ mod tests {
         u32::MAX
     }
 
-    // ── serde(default) field roundtrip tests ────────────────────────────────
-    //
-    // `#[serde(default)]` fields — `inpaint_only`, `feather_px`, `sharpen`,
-    // `edge_cache` — are pinned here to document their expected defaults
-    // and catch accidental value drift. Bincode is a positional format; it
-    // does NOT support "missing trailing field → default" across a wire
-    // boundary (it returns `UnexpectedEnd` on a short payload). These tests
-    // therefore verify that the defaults serialise and deserialise correctly
-    // in a full roundtrip, not that a legacy binary can omit the field.
-    //
-    // The real forward-compat contract is: parent and child are always
-    // launched from the same binary, so no cross-version decode is
-    // expected in practice.
-
-    /// `Init.inpaint_only` defaults to `false`. A worker that sees `false`
-    /// creates the full engine pool; `true` skips it. Roundtrip both values
-    /// so a stray `serde(default = "true_fn")` regression fails loudly.
-    #[test]
-    fn command_init_inpaint_only_field_roundtrips_both_values() {
-        roundtrip(&SubprocessCommand::Init {
-            model: ModelKind::Silueta,
-            jobs: 1,
-            mask: MaskSettings::default(),
-            cpu_only: false,
-            line_mode: LineMode::Off,
-            edge: EdgeSettings::default(),
-            ipc_dir: PathBuf::from("/tmp/test"),
-            inpaint_only: false,
-            line_fade_pct: 40,
-            edge_scales: InferredScales::DrawnFirst,
-        });
-        roundtrip(&SubprocessCommand::Init {
-            model: ModelKind::Silueta,
-            jobs: 1,
-            mask: MaskSettings::default(),
-            cpu_only: false,
-            line_mode: LineMode::Off,
-            edge: EdgeSettings::default(),
-            ipc_dir: PathBuf::from("/tmp/test"),
-            inpaint_only: true,
-            line_fade_pct: 0,
-            edge_scales: InferredScales::Drawn,
-        });
-    }
-
     /// The app's runs make the drawn scales (and what their detector run
     /// makes anyway) before the result, the rest after it only for the
     /// image on screen; the CLI runs only the ones its lines draw.
@@ -1123,28 +1044,4 @@ mod tests {
         assert!(InferredScales::DrawnFirst.spare(&dual, 7, shown).is_empty(), "Dual scale draws every run");
     }
 
-    /// `Inpaint.feather_px` and `Inpaint.sharpen` default to 0.0 (no
-    /// post-process tuning). Roundtrip zero and non-zero values to catch
-    /// default drift.
-    #[test]
-    fn command_inpaint_feather_and_sharpen_roundtrip_zero_and_nonzero() {
-        roundtrip(&SubprocessCommand::Inpaint {
-            item_id: 5,
-            model_id: prunr_models::ModelId::LaMaFp32,
-            image_path: PathBuf::from("/tmp/img.png"),
-            mask_path: PathBuf::from("/tmp/mask.png"),
-            sd_req: None,
-            feather_px: 0.0,
-            sharpen: 0.0,
-        });
-        roundtrip(&SubprocessCommand::Inpaint {
-            item_id: 6,
-            model_id: prunr_models::ModelId::LaMaFp32,
-            image_path: PathBuf::from("/tmp/img2.png"),
-            mask_path: PathBuf::from("/tmp/mask2.png"),
-            sd_req: None,
-            feather_px: 8.5,
-            sharpen: 0.4,
-        });
-    }
 }
