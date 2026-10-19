@@ -218,13 +218,13 @@ fn every_panel_toggle_is_on_screen_at_the_minimum_width() {
 
 #[test]
 fn every_modal_is_visited_or_says_why_not() {
-    for (name, _) in PrunrApp::MODALS {
+    for (name, ..) in PrunrApp::MODALS {
         let visited = VISITS.iter().any(|v| v.kind == Kind::Modal(name));
         let excused = UNVISITED_MODALS.iter().any(|(n, _)| *n == name);
         assert!(visited != excused, "{name}: visited {visited}, excused {excused}; exactly one");
     }
     for (name, _) in UNVISITED_MODALS {
-        assert!(PrunrApp::MODALS.iter().any(|(n, _)| n == name), "{name} is no modal");
+        assert!(PrunrApp::MODALS.iter().any(|(n, ..)| n == name), "{name} is no modal");
     }
 }
 

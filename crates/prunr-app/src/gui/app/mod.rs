@@ -678,22 +678,28 @@ impl PrunrApp {
         !self.open_modals().is_empty()
     }
 
-    /// Every modal the app can show, by name, and whether it is up.
-    pub(crate) const MODALS: [(&'static str, IsUp); 9] = [
-        ("settings", |a| a.show_settings),
-        ("cli_help", |a| a.show_cli_help),
-        ("pipeline_flow", |a| a.show_pipeline_flow),
-        ("model_store", |a| a.model_store.is_some()),
-        ("license", |a| a.pending_license_request.is_some()),
-        ("save_preset", |a| a.save_preset.is_some()),
-        ("runtime_prompt", |a| a.runtime_prompt.is_some()),
-        ("reset_confirm", |a| a.pending_reset_confirm),
-        ("file_dialog", |a| a.system.dialog_open()),
+    /// Every modal the app can show, by name, whether it is up, and how
+    /// Escape closes it (`None`: Escape leaves it up). Topmost first:
+    /// Escape closes the first one up that it can.
+    pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 9] = [
+        ("save_preset", |a| a.save_preset.is_some(), Some(|a| a.save_preset = None)),
+        ("license", |a| a.pending_license_request.is_some(), Some(|a| a.pending_license_request = None)),
+        ("model_store", |a| a.model_store.is_some(), Some(|a| a.model_store = None)),
+        ("runtime_prompt", |a| a.runtime_prompt.is_some(), Some(|a| {
+            if let Some(rt) = a.runtime_prompt.take() {
+                a.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
+            }
+        })),
+        ("settings", |a| a.show_settings, Some(PrunrApp::close_settings)),
+        ("cli_help", |a| a.show_cli_help, Some(|a| a.show_cli_help = false)),
+        ("pipeline_flow", |a| a.show_pipeline_flow, Some(|a| a.show_pipeline_flow = false)),
+        ("reset_confirm", |a| a.pending_reset_confirm, None),
+        ("file_dialog", |a| a.system.dialog_open(), None),
     ];
 
     /// The modals up this frame, by name.
     pub(crate) fn open_modals(&self) -> Vec<&'static str> {
-        Self::MODALS.iter().filter(|(_, open)| open(self)).map(|(name, _)| *name).collect()
+        Self::MODALS.iter().filter(|(_, open, _)| open(self)).map(|(name, ..)| *name).collect()
     }
 
     /// Step the targeted images (the checked ones, else the shown one) one
@@ -1028,25 +1034,10 @@ impl PrunrApp {
         }
     }
 
-    /// Closes the modal on top, in stacking order; false when none is open.
+    /// Closes the topmost modal Escape closes; false when none is up.
     fn close_top_modal(&mut self) -> bool {
-        if self.save_preset.is_some() {
-            self.save_preset = None;
-        } else if self.pending_license_request.is_some() {
-            self.pending_license_request = None;
-        } else if self.model_store.is_some() {
-            self.model_store = None;
-        } else if let Some(rt) = self.runtime_prompt.take() {
-            self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
-        } else if self.show_settings {
-            self.close_settings();
-        } else if self.show_cli_help {
-            self.show_cli_help = false;
-        } else if self.show_pipeline_flow {
-            self.show_pipeline_flow = false;
-        } else {
-            return false;
-        }
+        let Some(close) = Self::MODALS.iter().find_map(|&(_, up, close)| close.filter(|_| up(self))) else { return false };
+        close(self);
         true
     }
 
@@ -1496,6 +1487,30 @@ mod hotkey_capture_tests {
 
 /// Whether one modal is up.
 type IsUp = fn(&PrunrApp) -> bool;
+/// Close one modal, as Escape does.
+type Close = fn(&mut PrunrApp);
+
+#[cfg(test)]
+mod modal_escape_tests {
+    /// Escape closes the topmost modal it can, one per press, and leaves
+    /// a modal it cannot close (the reset confirm) for its own buttons.
+    #[test]
+    fn escape_closes_the_top_modal_first() {
+        let mut app = super::PrunrApp::new_for_test();
+        app.show_pipeline_flow = true;
+        app.show_cli_help = true;
+        app.show_settings = true;
+        assert!(app.close_top_modal());
+        assert!(!app.show_settings && app.show_cli_help && app.show_pipeline_flow, "Settings first");
+        assert!(app.close_top_modal());
+        assert!(!app.show_cli_help && app.show_pipeline_flow, "then the CLI help");
+        assert!(app.close_top_modal());
+        assert!(!app.show_pipeline_flow, "then the pipeline view");
+        app.pending_reset_confirm = true;
+        assert!(!app.close_top_modal(), "the reset confirm is not Escape's to close");
+        assert!(app.pending_reset_confirm);
+    }
+}
 
 #[cfg(test)]
 mod field_list_tests {
