@@ -35,7 +35,10 @@ fn role_name<S: serde::Serializer>(role: &Role, s: S) -> Result<S::Ok, S::Error>
 }
 
 impl ControlNode {
-    pub fn from_node(node: &Node<'_>) -> Self {
+    /// `node` and its children, their rectangles in points: AccessKit's
+    /// are in pixels, `pixels_per_point` to the point.
+    pub fn from_node(node: &Node<'_>, pixels_per_point: f32) -> Self {
+        let points = |v: f64| v as f32 / pixels_per_point;
         Self {
             // The consumer packs its tree index below the AccessKit id.
             id: (u128::from(node.id()) >> 64) as u64,
@@ -45,8 +48,8 @@ impl ControlNode {
             number: node.numeric_value(),
             toggled: node.toggled().map(|t| t == accesskit::Toggled::True),
             disabled: node.is_disabled(),
-            rect: node.bounding_box().map(|r| [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32]),
-            children: name_slider_value_boxes(node.children().map(|c| Self::from_node(&c)).collect()),
+            rect: node.bounding_box().map(|r| [points(r.x0), points(r.y0), points(r.x1), points(r.y1)]),
+            children: name_slider_value_boxes(node.children().map(|c| Self::from_node(&c, pixels_per_point)).collect()),
         }
     }
 
@@ -107,7 +110,13 @@ fn name_slider_value_boxes(mut children: Vec<ControlNode>) -> Vec<ControlNode> {
 /// output: the same source the test harness reads. An egui plugin, so it
 /// sees the output before eframe hands it to the platform.
 #[derive(Clone, Default)]
-pub struct Mirror(Arc<Mutex<Option<Tree>>>);
+pub struct Mirror(Arc<Mutex<Option<Mirrored>>>);
+
+struct Mirrored {
+    tree: Tree,
+    /// The scale of the frame the tree came from.
+    pixels_per_point: f32,
+}
 
 struct Silent;
 
@@ -119,20 +128,23 @@ impl accesskit_consumer::TreeChangeHandler for Silent {
 }
 
 impl Mirror {
-    fn lock(&self) -> MutexGuard<'_, Option<Tree>> {
+    fn lock(&self) -> MutexGuard<'_, Option<Mirrored>> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn apply(&self, update: accesskit::TreeUpdate) {
-        let mut tree = self.lock();
-        match tree.as_mut() {
-            Some(tree) => tree.update_and_process_changes(update, &mut Silent),
-            None => *tree = Some(Tree::new(update, true)),
+    pub fn apply(&self, update: accesskit::TreeUpdate, pixels_per_point: f32) {
+        let mut mirrored = self.lock();
+        match mirrored.as_mut() {
+            Some(m) => {
+                m.tree.update_and_process_changes(update, &mut Silent);
+                m.pixels_per_point = pixels_per_point;
+            }
+            None => *mirrored = Some(Mirrored { tree: Tree::new(update, true), pixels_per_point }),
         }
     }
 
     pub fn snapshot(&self) -> Option<ControlNode> {
-        self.lock().as_ref().map(|t| ControlNode::from_node(&t.state().root()))
+        self.lock().as_ref().map(|m| ControlNode::from_node(&m.tree.state().root(), m.pixels_per_point))
     }
 }
 
@@ -145,7 +157,7 @@ impl egui::plugin::Plugin for Mirror {
         // Cloned, not taken: a screen reader attached to the window
         // still gets the update.
         if let Some(update) = output.platform_output.accesskit_update.clone() {
-            self.apply(update);
+            self.apply(update, output.pixels_per_point);
         }
     }
 }
@@ -166,6 +178,28 @@ pub(crate) fn test_node(role: Role, name: Option<&str>) -> ControlNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Controls are found and clicked in points, the unit of every pointer
+    /// event; on a 2x screen (Retina) the tree's pixel rectangles put each
+    /// click at twice its place, off the window.
+    #[test]
+    fn a_control_is_placed_in_points_on_a_2x_screen() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(2.0);
+        ctx.enable_accesskit();
+        let mirror = Mirror::default();
+        ctx.add_plugin(mirror.clone());
+        let mut placed = egui::Rect::NOTHING;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                placed = ui.button("Close without saving").rect;
+            });
+        }
+        let root = mirror.snapshot().expect("a frame ran");
+        let button = root.iter().find(|n| n.name.as_deref() == Some("Close without saving")).expect("the button");
+        let center = button.center().expect("a rectangle");
+        assert!((center - placed.center()).length() < 0.5, "{center:?} is not {:?}", placed.center());
+    }
 
     #[test]
     fn readable_name_strips_icon_glyphs_and_padding() {
