@@ -2019,7 +2019,7 @@ impl BatchItem {
     /// A save of `mark` was written.
     pub(crate) fn mark_saved(&mut self, mark: SaveMark) {
         if mark.id == self.id {
-            self.saved = Some(mark.revision);
+            self.saved = self.saved.max(Some(mark.revision));
         }
     }
 
@@ -2027,7 +2027,7 @@ impl BatchItem {
     /// past the photo as opened that no save wrote as shown, or a run
     /// under way.
     pub(crate) fn has_unsaved_work(&self) -> bool {
-        self.job.is_some() || (self.timeline.undo_steps() > 0 && self.saved != Some(self.timeline.revision()))
+        self.job.is_some() || (!self.timeline.shows_opened() && self.saved != Some(self.timeline.revision()))
     }
 
     /// Step forward one state; returns what the redone step did.
@@ -3003,6 +3003,31 @@ mod tests {
         assert!(!item.has_unsaved_work(), "back to the photo as opened");
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(item.has_unsaved_work(), "a run under way");
+    }
+
+    /// Two saves of one image can finish out of order; the older one
+    /// landing last does not make the newer one's state unsaved.
+    #[test]
+    fn an_older_save_landing_last_keeps_the_newer_one() {
+        let mut item = fixture_item(1);
+        item.commit(StepKind::Adjust);
+        let older = item.save_mark();
+        item.commit(StepKind::Stroke);
+        item.mark_saved(item.save_mark());
+        item.mark_saved(older);
+        assert!(!item.has_unsaved_work());
+    }
+
+    /// Past the undo depth the photo as opened is gone, so the oldest
+    /// step kept is work like any other.
+    #[test]
+    fn the_oldest_step_kept_is_unsaved_once_the_opened_photo_is_dropped() {
+        let mut item = fixture_item(1);
+        for _ in 0..crate::gui::timeline::TIMELINE_DEPTH + 2 {
+            item.commit(StepKind::Stroke);
+        }
+        while item.undo_step().is_ok() {}
+        assert!(item.has_unsaved_work());
     }
 
     /// Parking a saved image's result when it leaves the screen keeps it

@@ -395,11 +395,13 @@ pub(crate) struct Timeline {
     cursor: usize,
     version: u64,
     revision: u64,
+    /// The photo as opened fell off the end.
+    opened_dropped: bool,
 }
 
 impl Timeline {
     pub(crate) fn new(original: DocState) -> Self {
-        Self { states: VecDeque::from([original]), cursor: 0, version: 0, revision: 0 }
+        Self { states: VecDeque::from([original]), cursor: 0, version: 0, revision: 0, opened_dropped: false }
     }
 
     pub(crate) fn current(&self) -> &DocState {
@@ -467,6 +469,7 @@ impl Timeline {
         self.states.push_back(state);
         while self.states.len() > TIMELINE_DEPTH {
             super::reclaim::later(self.states.pop_front());
+            self.opened_dropped = true;
         }
         self.cursor = self.states.len() - 1;
         self.version += 1;
@@ -503,6 +506,11 @@ impl Timeline {
     /// Steps an undo can walk back.
     pub(crate) fn undo_steps(&self) -> usize {
         self.cursor
+    }
+
+    /// Whether the photo as it was opened is the state shown.
+    pub(crate) fn shows_opened(&self) -> bool {
+        self.cursor == 0 && !self.opened_dropped
     }
 
     /// Every stored image: each step's result, and each step's start
