@@ -342,7 +342,7 @@ pub fn process_lama(
     fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, _, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
         session.run_tile(tile_rgba, tile_mask).inspect_err(|e| {
             tracing::error!(%e, ?id, "LaMa tile inference failed; its session is dropped");
-            LamaSession::forget(id, cpu_only);
+            LamaSession::forget(id, cpu_only, &session);
         })
     }))
 }
@@ -461,12 +461,25 @@ pub fn load_lama(id: prunr_models::ModelId, cpu_only: bool) -> Result<SessionPic
 
 
 
+/// A session built once and shared, or why its build failed.
+type SessionSlot<S> = Arc<OnceLock<Result<Arc<S>, String>>>;
 /// The `Arc<OnceLock>` closes the build race between concurrent `get()`
 /// callers (e.g. a prewarm racing the first stroke).
-type LamaSlot = Arc<OnceLock<Result<Arc<LamaSession>, String>>>;
+type LamaSlot = SessionSlot<LamaSession>;
 /// Keyed by model and "CPU only", so a session built under one choice is
 /// never handed out under the other.
 type LamaCache = HashMap<(prunr_models::ModelId, bool), crate::inpaint_sd::CacheEntry<LamaSlot>>;
+
+/// Take `key`'s entry out of `cache` while it still holds `session`: once
+/// a newer stroke has replaced it, it is not this stroke's to drop.
+fn take_if_current<K: std::hash::Hash + Eq, S>(
+    cache: &mut HashMap<K, crate::inpaint_sd::CacheEntry<SessionSlot<S>>>,
+    key: &K,
+    session: &Arc<S>,
+) -> Option<crate::inpaint_sd::CacheEntry<SessionSlot<S>>> {
+    let current = cache.get(key).is_some_and(|e| matches!(e.value.get(), Some(Ok(cached)) if Arc::ptr_eq(cached, session)));
+    current.then(|| cache.remove(key)).flatten()
+}
 
 fn lama_cache() -> &'static Mutex<LamaCache> {
     static CACHE: OnceLock<Mutex<LamaCache>> = OnceLock::new();
@@ -1126,6 +1139,19 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); Ok(t.clone()) });
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
+    }
+
+    /// A stroke whose session failed drops that session only: a newer
+    /// stroke may already have built the next one.
+    #[test]
+    fn a_failed_session_is_forgotten_only_while_it_is_the_cached_one() {
+        let entry = |session: &Arc<u8>| crate::inpaint_sd::CacheEntry::new(Arc::new(OnceLock::from(Ok::<_, String>(Arc::clone(session)))), Instant::now());
+        let (failed, rebuilt) = (Arc::new(1u8), Arc::new(2u8));
+        let mut cache = HashMap::from([("lama", entry(&rebuilt))]);
+        assert!(take_if_current(&mut cache, &"lama", &failed).is_none());
+        assert!(cache.contains_key("lama"), "the rebuilt session stays");
+        assert!(take_if_current(&mut cache, &"lama", &rebuilt).is_some());
+        assert!(cache.is_empty());
     }
 
     /// A tile the model fails on fails the erase: before, the tile came
