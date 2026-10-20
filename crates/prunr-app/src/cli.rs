@@ -1220,7 +1220,12 @@ fn run_batch_subprocess(
                         }
                         continue;
                     }
-                    SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
+                    SubprocessEvent::ImageDone { item_id, result_path, width, height, tensor_cache, edge_cache, .. } => {
+                        // Tensors are for a parent that re-runs from them;
+                        // the CLI never does, so their files go (in RAM on Linux).
+                        for path in tensor_cache.map(|t| t.path).into_iter().chain(edge_cache.map(|e| e.path)) {
+                            let _ = std::fs::remove_file(path);
+                        }
                         let orig_idx = item_id as usize;
                         let result = prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
                             .map(|mut rgba_image| {
