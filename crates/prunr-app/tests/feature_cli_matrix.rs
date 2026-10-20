@@ -166,3 +166,54 @@ fn cli_help_text_succeeds() {
     assert!(stdout.contains("--model"), "--help must list --model");
     assert!(stdout.contains("--lines"), "--help must list --lines");
 }
+
+/// Run the CLI on several inputs, killed if it outlives `limit`: the exit
+/// code (`None`: it hung) and stderr.
+fn run_cli_batch(inputs: &[&std::path::Path], out_dir: &std::path::Path, extra: &[&str], limit: std::time::Duration) -> (Option<i32>, String) {
+    let mut child = Command::new(CLI_BIN)
+        .args(inputs)
+        .arg("-o").arg(out_dir).arg("-f")
+        .args(extra)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn prunr binary");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr_pipe, &mut text);
+        text
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait on prunr") {
+            break status.code();
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    (code, reader.join().unwrap_or_default())
+}
+
+/// A batch goes on past an image that fails: the next one is processed
+/// and the run ends with a partial-failure exit.
+#[test]
+fn cli_batch_goes_on_after_an_image_fails() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let bytes = std::fs::read(&good).expect("read fixture");
+    // Its header reads, so it reaches the worker; its pixels do not decode.
+    let broken = dir.path().join("broken.png");
+    std::fs::write(&broken, &bytes[..bytes.len() / 2]).expect("write broken.png");
+    let (code, stderr) = run_cli_batch(&[&broken, &good], dir.path(), &["-m", "silueta", "-j", "1"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_batch_error] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(2), "a partial failure, not a hang; stderr:\n{stderr}");
+    assert_output_decodes(&dir.path().join("input.prunr.png"), "the image after the failure");
+}

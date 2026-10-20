@@ -1153,7 +1153,8 @@ fn run_batch_subprocess(
     inputs: &[std::path::PathBuf],
     quiet: bool,
 ) -> Vec<Result<prunr_core::ProcessResult, CoreError>> {
-    use prunr_app::subprocess::manager::SubprocessManager;
+    use prunr_app::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
+    use prunr_app::subprocess::manager::{Crash, SubprocessManager};
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
     let mut results: Vec<Option<Result<prunr_core::ProcessResult, CoreError>>> =
@@ -1186,34 +1187,29 @@ fn run_batch_subprocess(
         };
 
         let mut in_flight: Vec<usize> = Vec::new();
-
-        let burst = max_jobs.min(pending.len());
-        for _ in 0..burst {
-            if let Some(idx) = pending.pop_front() {
-                let item_id = valid_indices[idx] as u64;
-                if sub.send_image_path(item_id, valid_paths[idx].clone()).is_err() {
-                    pending.push_front(idx);
-                    break;
+        let mut last_event_at = Instant::now();
+        let crash = loop {
+            while room_to_send(in_flight.len(), max_jobs, sub.should_pause_admission()) > 0 {
+                let Some(idx) = pending.pop_front() else { break };
+                match sub.send_image_path(valid_indices[idx] as u64, valid_paths[idx].clone()) {
+                    Ok(()) => in_flight.push(idx),
+                    // A live worker that cannot take it would refuse it again;
+                    // one a dead worker refused is the crash path's to rerun.
+                    Err(e) if sub.is_alive() => results[idx] = Some(Err(CoreError::Model(e))),
+                    Err(_) => {
+                        pending.push_front(idx);
+                        break;
+                    }
                 }
-                in_flight.push(idx);
-            }
-        }
-
-        let mut crashed = false;
-        loop {
-            if !sub.is_alive() && !in_flight.is_empty() {
-                crashed = true;
-                break;
             }
 
-            // Wakes on arrival, so admission follows ImageDone without a poll delay.
+            // Wakes on arrival, so admission follows a finished image without a poll delay.
             let events = sub.poll_events_blocking(std::time::Duration::from_millis(50));
-            if events.is_empty() && in_flight.is_empty() && pending.is_empty() {
-                break;
+            if !events.is_empty() {
+                last_event_at = Instant::now();
             }
-
             for event in events {
-                match event {
+                let (item_id, result) = match event {
                     SubprocessEvent::Report { item_id, update: prunr_core::ProgressUpdate::Step(step) } => {
                         let orig_idx = item_id as usize;
                         if !quiet {
@@ -1221,13 +1217,10 @@ fn run_batch_subprocess(
                                 pb.set_message(format!("{} \u{2014} {}", inputs[orig_idx].display(), step.label()));
                             }
                         }
+                        continue;
                     }
                     SubprocessEvent::ImageDone { item_id, result_path, width, height, .. } => {
                         let orig_idx = item_id as usize;
-                        let ridx = orig_to_batch.get(&orig_idx).copied();
-                        // in_flight holds batch indices, each sent once a pass.
-                        in_flight.retain(|&i| Some(i) != ridx);
-
                         let result = prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
                             .map(|mut rgba_image| {
                                 backdrop.apply(&mut rgba_image, &inputs[orig_idx]);
@@ -1237,68 +1230,55 @@ fn run_batch_subprocess(
                                 }
                             })
                             .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()));
-
-                        if let Some(ridx) = ridx {
-                            results[ridx] = Some(result);
-                        }
-
-                        if !sub.should_pause_admission() {
-                            if let Some(next) = pending.pop_front() {
-                                let next_id = valid_indices[next] as u64;
-                                if sub.send_image_path(next_id, valid_paths[next].clone()).is_ok() {
-                                    in_flight.push(next);
-                                }
-                            }
-                        }
+                        (item_id, result)
                     }
-                    SubprocessEvent::ImageError { item_id, error } => {
-                        let orig_idx = item_id as usize;
-                        let ridx = orig_to_batch.get(&orig_idx).copied();
-                        // in_flight holds batch indices, each sent once a pass.
-                        in_flight.retain(|&i| Some(i) != ridx);
-                        if let Some(ridx) = ridx {
-                            results[ridx] = Some(Err(CoreError::Model(error)));
-                        }
-                    }
-                    SubprocessEvent::Finished => {
-                        if in_flight.is_empty() && pending.is_empty() {
-                            break;
-                        }
-                    }
-                    _ => {}
+                    SubprocessEvent::ImageError { item_id, error } => (item_id, Err(CoreError::Model(error))),
+                    _ => continue,
+                };
+                if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
+                    // in_flight holds batch indices, each sent once a pass.
+                    in_flight.retain(|&i| i != ridx);
+                    results[ridx] = Some(result);
                 }
             }
 
-            if in_flight.is_empty() && pending.is_empty() { break; }
-            // No sleep here: `poll_events_blocking` already waited.
-        }
-
-        if crashed {
-            for idx in in_flight.into_iter().rev() {
-                pending.push_front(idx);
+            if in_flight.is_empty() && pending.is_empty() {
+                break None;
             }
-            let old_jobs = max_jobs;
-            max_jobs = (max_jobs / 2).max(1);
-            if old_jobs == 1 {
-                for &idx in &pending {
-                    results[idx] = Some(Err(CoreError::Model(
-                        "Insufficient memory \u{2014} try a smaller model".into()
-                    )));
+            if let Some(crash) = sub.died() {
+                break Some(crash);
+            }
+            if is_stalled(last_event_at.elapsed(), in_flight.len(), HANG_TIMEOUT) {
+                sub.kill();
+                break Some(Crash::Unresponsive);
+            }
+        };
+
+        let Some(crash) = crash else {
+            // Matches the GUI's 5s grace budget for model-cache teardown;
+            // Drop's 1s covers any slippage.
+            let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(5));
+            break;
+        };
+        sub.kill();
+        prunr_app::subprocess::protocol::cleanup_seg_pipeline_temps();
+        match on_crash(max_jobs) {
+            OnCrash::FailInFlight => {
+                let advice = if crash == Crash::OutOfMemory { " \u{2014} try a smaller model" } else { "" };
+                for idx in in_flight {
+                    results[idx] = Some(Err(CoreError::Model(format!("worker {crash}{advice}"))));
                 }
-                break;
             }
-            if !quiet {
-                eprintln!("Memory pressure \u{2014} retrying with {} parallel jobs", max_jobs);
+            OnCrash::RetryWith(jobs) => {
+                for idx in in_flight.into_iter().rev() {
+                    pending.push_front(idx);
+                }
+                max_jobs = jobs;
+                if !quiet {
+                    eprintln!("Worker {crash} \u{2014} retrying with {max_jobs} parallel jobs");
+                }
             }
-            sub.kill();
-            prunr_app::subprocess::protocol::cleanup_seg_pipeline_temps();
-            continue;
         }
-
-        // Normal completion of this subprocess run — matches the GUI's 5s
-        // grace budget for model-cache teardown; Drop's 1s covers any slippage.
-        let _ = sub.shutdown_with_timeout(std::time::Duration::from_secs(5));
-        break;
     }
 
     // Crash recovery leaves `cli_ds_*` temps for retries to re-feed; sweep
