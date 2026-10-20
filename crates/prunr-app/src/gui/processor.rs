@@ -1341,6 +1341,12 @@ impl Processor {
     pub(crate) fn drain_inpaint_results(&mut self) -> ErasesEnded {
         let mut ended = ErasesEnded::default();
         while let Ok((item_id, generation, outcome)) = self.inpaint_done.rx.try_recv() {
+            let newest = self.inpaint_latest.get(&item_id).filter(|&&(g, _)| g == generation).map(|&(_, run)| run);
+            // The stroke's capsule ends with its outcome, whichever thread
+            // sent it.
+            if newest.is_some() {
+                self.end_inpaint_run(item_id);
+            }
             // Stale results count too: their job has finished.
             if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
@@ -1351,7 +1357,7 @@ impl Processor {
                 self.inpaint_cancels.remove(&item_id);
                 self.inpaint_runs.remove(&item_id);
             }
-            let Some(&(_, run)) = self.inpaint_latest.get(&item_id).filter(|&&(newest, _)| newest == generation) else {
+            let Some(run) = newest else {
                 tracing::info!(item_id, generation, "outcome of a superseded stroke dropped");
                 continue;
             };
@@ -2970,6 +2976,33 @@ mod tests {
         // A different item must not be affected.
         assert!(!p.is_inpaint_in_flight(99),
             "in-flight state must be item-scoped, not global");
+    }
+
+    /// A stroke's progress capsule ends with its outcome, whoever sent it
+    /// (the SD prep thread's early exits included); a superseded stroke's
+    /// outcome leaves the newer one's capsule up.
+    #[test]
+    fn a_strokes_capsule_ends_with_its_outcome() {
+        use super::super::dispatch_progress::{DispatchProgress, ProgressKind};
+        let outcomes: [fn() -> InpaintOutcome; 3] = [
+            || InpaintOutcome::Done { rgba: image::RgbaImage::new(1, 1), fill_scale: 1.0 },
+            || InpaintOutcome::Cancelled,
+            || InpaintOutcome::Failed("the image could not be read".into()),
+        ];
+        for outcome in outcomes {
+            let mut p = fixture();
+            let superseded = p.next_inpaint(7, 40);
+            let newest = p.next_inpaint(7, 41);
+            p.inpaint_pending.insert(7, 2);
+            let run = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing"));
+            p.inpaint_runs.insert(7, PictureSink::of_run(7, run, p.picture_sender()));
+            p.inpaint_done.tx.send((7, superseded, outcome())).unwrap();
+            let _ = p.drain_inpaint_results();
+            assert!(p.dispatch_progress().is_some(), "a superseded stroke's outcome leaves it up");
+            p.inpaint_done.tx.send((7, newest, outcome())).unwrap();
+            let _ = p.drain_inpaint_results();
+            assert!(p.dispatch_progress().is_none(), "the newest stroke's outcome ends it");
+        }
     }
 
     #[test]
