@@ -272,6 +272,7 @@ impl PrunrApp {
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
         app.batch.selection_queue.wake(&cc.egui_ctx);
+        app.download_manager.wake(&cc.egui_ctx);
         app
     }
 
