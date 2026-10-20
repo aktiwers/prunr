@@ -299,12 +299,6 @@ impl BatchManager {
     /// Remove the item at `idx`; its undo files go with its timeline.
     /// Returns `false` when `idx` is out of bounds. Caller is responsible
     /// for clamping `selected_index` and any downstream sync.
-    pub(crate) fn remove(&mut self, idx: usize) -> bool {
-        if idx >= self.items.len() { return false; }
-        super::reclaim::later(self.items.remove(idx));
-        true
-    }
-
     /// Abandon every cut, under way or waiting for a slot, after a
     /// Cancel-All: each image shows its own state again. Late arrivals
     /// from the worker are dropped by the job check in `on_batch_item_done`.
@@ -314,6 +308,20 @@ impl BatchManager {
                 item.abandon_job();
             }
         }
+    }
+
+    /// Mark the images `marks` name as saved in those states.
+    pub(crate) fn mark_saved(&mut self, marks: &[crate::gui::item::SaveMark]) {
+        for &mark in marks {
+            if let Some(item) = self.find_by_id_mut(mark.id) {
+                item.mark_saved(mark);
+            }
+        }
+    }
+
+    /// Images whose work closing or removing them would lose.
+    pub(crate) fn unsaved_count(&self) -> usize {
+        self.items.iter().filter(|item| item.has_unsaved_work()).count()
     }
 
     pub(crate) fn ticked_count(&self) -> usize {

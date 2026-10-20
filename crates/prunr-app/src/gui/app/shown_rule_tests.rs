@@ -246,7 +246,7 @@ fn save_writes_what_the_canvas_shows() {
     let saved = |app: &mut PrunrApp, name: &str| {
         let path = dir.join(name);
         app.on_save_image_picked(1, prunr_core::ExportFormat::Png, path.clone());
-        let outcome = app.batch.bg_io.save_done_rx.recv_timeout(Duration::from_secs(20)).expect("the save reports");
+        let outcome = app.batch.bg_io.save_done_rx.recv_timeout(Duration::from_secs(20)).expect("the save reports").outcome;
         assert!(outcome.is_ok(), "{name}: {outcome:?}");
         image::open(&path).expect("a readable file").to_rgba8()
     };

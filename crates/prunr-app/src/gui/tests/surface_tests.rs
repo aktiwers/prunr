@@ -5,7 +5,7 @@ use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
 use super::harness::{
-    assert_all_controls_named, click, harness, harness_builder, loaded, names, new_app, settle, settle_until_shown, tree,
+    assert_all_controls_named, click, harness, harness_builder, loaded, loaded_with, names, new_app, settle, settle_until_shown, tree,
 };
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
@@ -323,6 +323,65 @@ fn applying_a_preset_closes_the_popover() {
     assert!(egui::Popup::is_any_open(&h.ctx));
     click(&mut h, "Prunr");
     assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes a set-and-go popover");
+}
+
+/// Ask the window to close, as the title bar's close button or Cmd+Q
+/// does; whether the app held it back.
+fn request_close(h: &mut Harness<'static, PrunrApp>) -> bool {
+    h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().events.push(egui::ViewportEvent::Close);
+    h.step();
+    let held = h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::CancelClose);
+    settle(h);
+    held
+}
+
+/// Closing with work no save wrote asks first: Cancel (or Escape) keeps
+/// the window, "Close without saving" closes it. Nothing unsaved, and the
+/// window closes at once.
+#[test]
+fn closing_with_unsaved_work_asks_first() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = loaded();
+    assert!(!request_close(&mut h), "nothing unsaved: the window closes");
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    assert!(request_close(&mut h), "unsaved work holds the close");
+    assert!(h.state().open_modals().contains(&"discard_prompt"));
+    assert_all_controls_named(&h, "discard prompt");
+    for name in ["Cancel", "Close without saving"] {
+        assert!(names(&h).iter().any(|n| n == name), "{name} missing");
+    }
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().open_modals().is_empty(), "Escape keeps the window");
+    assert!(request_close(&mut h), "and asks again");
+    h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Close without saving")).click();
+    h.step();
+    assert!(h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Close), "the window closes");
+    assert!(!request_close(&mut h), "the close goes through");
+}
+
+/// Removing an image with unsaved work asks first; one without is
+/// removed at once.
+#[test]
+fn removing_unsaved_work_asks_first() {
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    h.state_mut().remove_batch_item(1);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "nothing unsaved: removed at once");
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "held until answered");
+    click(&mut h, "Cancel");
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "Cancel keeps it");
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    click(&mut h, "Remove");
+    settle(&mut h);
+    assert!(h.state().batch.items.is_empty(), "Remove takes it out");
 }
 
 /// The first-launch runtime prompt is a modal for each runtime it can

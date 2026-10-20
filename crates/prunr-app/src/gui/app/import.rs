@@ -53,17 +53,30 @@ impl PrunrApp {
     }
 
     pub fn remove_selected(&mut self) {
-        let count = self.batch.ticked_count();
+        self.request_remove(self.batch.ticked_ids(), true);
+    }
+
+    /// Take `ids` out of the queue; when any holds work no save wrote, ask
+    /// first. `announce`: a toast says how many went.
+    fn request_remove(&mut self, ids: Vec<u64>, announce: bool) {
+        if ids.iter().any(|&id| self.batch.find_by_id(id).is_some_and(|item| item.has_unsaved_work())) {
+            self.pending_discard = Some(crate::gui::views::discard_prompt::Discard::Remove { ids, announce });
+        } else {
+            self.remove_images(&ids, announce);
+        }
+    }
+
+    pub(super) fn remove_images(&mut self, ids: &[u64], announce: bool) {
         // A run on a removed image would go on for an image that is gone.
-        let removed: Vec<u64> = self.batch.items.iter().filter(|i| i.ticked).map(|i| i.id).collect();
-        for id in removed {
+        for &id in ids {
             self.cancel_runs_on(id);
         }
-        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.batch.items).into_iter().partition(|item| item.ticked);
+        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.batch.items).into_iter().partition(|item| ids.contains(&item.id));
         self.batch.items = kept;
+        let count = removed.len();
         crate::gui::reclaim::later(removed);
         self.sync_after_batch_change();
-        if count > 0 {
+        if announce && count > 0 {
             self.toasts.info(format!("Removed {}", crate::gui::views::fmt::count(count, "image", "images")));
         }
     }
@@ -107,10 +120,7 @@ impl PrunrApp {
 
     pub fn remove_batch_item(&mut self, idx: usize) {
         if let Some(id) = self.batch.items.get(idx).map(|i| i.id) {
-            self.cancel_runs_on(id);
-        }
-        if self.batch.remove(idx) {
-            self.sync_after_batch_change();
+            self.request_remove(vec![id], false);
         }
     }
 

@@ -113,6 +113,10 @@ pub struct PrunrApp {
     /// Inline "Reset to defaults" confirmation. Set when the user clicks
     /// the reset button; the next render shows a confirm/cancel pair.
     pub(crate) pending_reset_confirm: bool,
+    /// Asked before closing the app or removing images loses work.
+    pub(crate) pending_discard: Option<super::views::discard_prompt::Discard>,
+    /// The user chose to close without saving: the next close goes through.
+    close_anyway: bool,
     /// The Shortcuts tab is waiting for a key press for this action's slot.
     pub(crate) hotkey_capture: Option<(super::views::shortcuts::Action, usize)>,
     /// The live key bindings: the shipped table plus `settings.hotkeys`.
@@ -424,6 +428,8 @@ impl PrunrApp {
             show_settings: false,
             settings_tab: super::views::settings::SettingsTab::Performance,
             pending_reset_confirm: false,
+            pending_discard: None,
+            close_anyway: false,
             hotkey_capture: None,
             bindings: Arc::new(super::views::shortcuts::Bindings::from_overrides(&settings.hotkeys)),
             model_store: None,
@@ -680,7 +686,8 @@ impl PrunrApp {
     /// Every modal the app can show, by name, whether it is up, and how
     /// Escape closes it (`None`: Escape leaves it up). Topmost first:
     /// Escape closes the first one up that it can.
-    pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 9] = [
+    pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 10] = [
+        ("discard_prompt", |a| a.pending_discard.is_some(), Some(|a| a.pending_discard = None)),
         ("save_preset", |a| a.save_preset.is_some(), Some(|a| a.save_preset = None)),
         ("license", |a| a.pending_license_request.is_some(), Some(|a| a.pending_license_request = None)),
         ("model_store", |a| a.model_store.is_some(), Some(|a| a.model_store = None)),
@@ -1154,6 +1161,7 @@ impl eframe::App for PrunrApp {
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.take_probed_backend();
+        self.hold_close_over_unsaved_work(ctx);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         if !self.handle_hotkey_capture(ctx) {
@@ -1285,6 +1293,36 @@ impl PrunrApp {
         }
     }
 
+    /// A close asked for (the window's close button, Cmd+Q) while work is
+    /// unsaved waits for the user's answer.
+    fn hold_close_over_unsaved_work(&mut self, ctx: &egui::Context) {
+        let asked = ctx.input(|i| i.viewport().close_requested());
+        if !asked || self.close_anyway || self.batch.unsaved_count() == 0 {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.pending_discard = Some(super::views::discard_prompt::Discard::Close);
+    }
+
+    fn render_discard_prompt(&mut self, ctx: &egui::Context) {
+        use super::views::discard_prompt::{self, Discard, DiscardChoice};
+        let Some(discard) = &self.pending_discard else { return };
+        let unsaved = match discard {
+            Discard::Close => self.batch.unsaved_count(),
+            Discard::Remove { ids, .. } => ids.iter().filter(|&&id| self.batch.find_by_id(id).is_some_and(|i| i.has_unsaved_work())).count(),
+        };
+        let Some(choice) = discard_prompt::render(ctx, discard, unsaved) else { return };
+        let discard = self.pending_discard.take();
+        match (choice, discard) {
+            (DiscardChoice::Go, Some(Discard::Close)) => {
+                self.close_anyway = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            (DiscardChoice::Go, Some(Discard::Remove { ids, announce })) => self.remove_images(&ids, announce),
+            _ => {}
+        }
+    }
+
     /// Build the LaMa / Big-LaMa / MI-GAN session in the background, so
     /// the first stroke skips the 5-10 s build. Not SD: it runs in its
     /// own subprocess, and a session here would hold ~9 GB no run reads.
@@ -1336,6 +1374,7 @@ impl PrunrApp {
                 }
             }
         }
+        self.render_discard_prompt(ctx);
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
     }
@@ -1573,6 +1612,8 @@ mod field_list_tests {
             settings: _,
             settings_tab: _,
             pending_reset_confirm: _,
+            pending_discard: _,
+            close_anyway: _,
             hotkey_capture: _,
             bindings: _,
             model_store: _,

@@ -6,7 +6,8 @@ use std::sync::{mpsc, Arc};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
-use crate::gui::item::{BatchItem, ExportDepth};
+use crate::gui::background_io::SaveDone;
+use crate::gui::item::{BatchItem, ExportDepth, SaveMark};
 use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
@@ -67,6 +68,7 @@ impl PrunrApp {
         let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
         let jobs: Vec<LayerSave> = found.iter().zip(names)
             .map(|(item, name)| LayerSave {
+                mark: item.save_mark(),
                 depth: self.settings.export_depth_map.then(|| item.depth_export().named(&name)),
                 layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action).named(name),
                 composite: (item.export_image(), item.export_bg()),
@@ -116,7 +118,7 @@ impl PrunrApp {
             return;
         };
         let depth = self.settings.export_depth_map.then(|| item.depth_export());
-        let one = SaveOne { image: item.export_image(), bg: item.export_bg(), depth };
+        let one = SaveOne { mark: item.save_mark(), image: item.export_image(), bg: item.export_bg(), depth };
         let (path, format) = match prunr_core::ExportFormat::from_path(&path) {
             Some(f) => (path, f),
             None => (path.with_extension(preferred.extension()), preferred),
@@ -141,6 +143,7 @@ impl PrunrApp {
         let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
         let items: Vec<BatchSave> = found.iter().zip(names)
             .map(|(item, filename)| BatchSave {
+                mark: item.save_mark(),
                 depth: with_depth.then(|| item.depth_export().named(&filename)),
                 filename,
                 result: item.export_image(),
@@ -155,6 +158,13 @@ impl PrunrApp {
         self.toasts.info(format!("Saving {}\u{2026}", crate::gui::views::fmt::count(count, "image", "images")));
         let tx = self.batch.bg_io.save_done_tx.clone();
         spawn_save_batch(folder, items, self.settings.export_format, tx);
+    }
+
+    /// A save finished: the images it wrote are saved as they were, and
+    /// its toast shows.
+    pub(crate) fn land_save(&mut self, done: SaveDone) {
+        self.batch.mark_saved(&done.wrote);
+        self.toasts.outcome(done.outcome);
     }
 
     /// Windows/macOS: PNG temp files through the `drag` crate. Linux: a
@@ -322,6 +332,7 @@ impl PrunrApp {
 /// One image to save: its result, what goes behind it, and its depth map
 /// when Save options asks for it.
 struct SaveOne {
+    mark: SaveMark,
     image: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
     depth: Option<crate::gui::item::DepthExport>,
@@ -333,7 +344,7 @@ fn spawn_save_single(
     path: PathBuf,
     one: SaveOne,
     format: prunr_core::ExportFormat,
-    tx: mpsc::Sender<Result<String, String>>,
+    tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
         let depth = ExportDepth::default();
@@ -342,13 +353,14 @@ fn spawn_save_single(
             Some(Err(e)) => Err(format!("Could not save: {e}")),
             None => Err("Could not save: the image could not be read".to_string()),
         };
+        let wrote = outcome.is_ok().then_some(one.mark).into_iter().collect();
         let folder = path.parent().unwrap_or(Path::new("."));
         if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             let msg = outcome.unwrap_or_else(|failed| failed);
             outcome = Err(format!("{msg}; could not save the depth map: {e}"));
         }
-        let _ = tx.send(outcome);
+        let _ = tx.send(SaveDone { outcome, wrote });
     });
 }
 
@@ -404,6 +416,7 @@ fn save_depth_beside(depth: Option<&crate::gui::item::DepthExport>, folder: &Pat
 /// One image of a layers save: its layers, and the composite to save
 /// instead when it has none.
 struct LayerSave {
+    mark: SaveMark,
     layers: crate::gui::drag_export::LayerJob,
     composite: (crate::gui::item::ExportImage, crate::gui::item::ExportBg),
     depth: Option<crate::gui::item::DepthExport>,
@@ -411,11 +424,13 @@ struct LayerSave {
 
 /// Render and write each image's layers into `folder` on a background
 /// thread (the composite where an image has none); report the counts.
-fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<Result<String, String>>) {
+fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::ExportFormat, tx: mpsc::Sender<SaveDone>) {
     std::thread::spawn(move || {
         let mut tally = SaveTally::default();
+        let mut wrote = Vec::new();
         let depth = ExportDepth::default();
         for job in jobs {
+            let failed_before = tally.failed;
             let mut files = job.layers.render_bytes(&depth);
             if files.is_empty() {
                 let (image, bg) = &job.composite;
@@ -430,14 +445,18 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
             for (name, bytes) in files {
                 tally.count(crate::fs_util::write_bytes_replacing(&folder.join(&name), &bytes).map_err(|e| format!("{name}: {e}")));
             }
+            if tally.failed == failed_before {
+                wrote.push(job.mark);
+            }
             save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut tally);
         }
-        let _ = tx.send(tally.summary("file", "files"));
+        let _ = tx.send(SaveDone { outcome: tally.summary("file", "files"), wrote });
     });
 }
 
 /// One image of a batch save.
 struct BatchSave {
+    mark: SaveMark,
     filename: String,
     result: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
@@ -450,20 +469,24 @@ fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<BatchSave>,
     format: prunr_core::ExportFormat,
-    tx: mpsc::Sender<Result<String, String>>,
+    tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
         let mut tally = SaveTally::default();
+        let mut wrote = Vec::new();
         let measure = ExportDepth::default();
-        for BatchSave { filename, result, bg, depth } in items {
+        for BatchSave { mark, filename, result, bg, depth } in items {
             save_depth_beside(depth.as_ref(), &folder, &measure, &mut tally);
             let out_path = folder.join(crate::gui::drag_export::export_name(&filename, format));
             let written = result.load()
                 .ok_or_else(|| format!("{filename} could not be read"))
                 .and_then(|rgba| write_composite(&out_path, &rgba, &bg, format, &measure).map_err(|e| format!("{filename}: {e}")));
+            if written.is_ok() {
+                wrote.push(mark);
+            }
             tally.count(written);
         }
-        let _ = tx.send(tally.summary("image", "images"));
+        let _ = tx.send(SaveDone { outcome: tally.summary("image", "images"), wrote });
     });
 }
 
