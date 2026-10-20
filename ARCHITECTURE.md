@@ -114,7 +114,7 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 | Thread | Purpose |
 |--------|---------|
 | UI (egui) | Render, input, drain result channels with `try_recv` |
-| `prunr-bridge` | Owns the seg worker: spawn, IPC, RSS pacing, crash retry, hang detection (60 s silent = crash) |
+| `prunr-bridge` | Owns the seg worker: spawn, IPC, RSS pacing, crash retry, hang detection (60 s silent = crash; a run repeats its last step every 10 s for up to 10 min, so one long model run on a slow CPU is not taken for a hang) |
 | `prunr-inpaint-bridge` | Owns the SD worker; spawns it on a helper thread so Cancel works during Init |
 | `subprocess-reader` | One per child; blocking reads of child stdout |
 | `prunr-control` | Only with `PRUNR_CONTROL_PORT`: local JSON socket; requests are answered on the UI thread |
@@ -136,7 +136,7 @@ The ORT CPU arena is off to lower the baseline; the subprocess absorbs any OOM. 
 
 ### Crash retry
 
-On a crash or hang the bridge re-queues unfinished images, halves the job count and spawns a new child (toast: "Memory pressure — retrying…"). In-flight Tier 2 items error instead, since their tensor temp file is gone; the next Process reruns them in full. A crash at one job fails the rest with the cause from the exit signal (SIGKILL = out of memory, SIGSEGV = segfault) and "try a smaller model".
+On a crash or hang the bridge re-queues unfinished images, halves the job count and spawns a new child (toast: "Memory pressure — retrying…"). In-flight Tier 2 items error instead, since their tensor temp file is gone; the next Process reruns them in full. A crash at one job fails only the image it ran, with the cause from the exit signal (SIGKILL = out of memory, SIGSEGV = segfault), and the batch goes on with a new worker. The CLI runs on the same rules (`subprocess::batch_rules`).
 
 ## Tiered Recipe Pipeline
 

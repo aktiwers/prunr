@@ -214,21 +214,86 @@ pub struct ChainInput {
 
 /// Sends a pipeline's progress reports as `SubprocessEvent::Report` for
 /// `item_id`, on the same channel as its result, so a report never
-/// arrives after the result.
+/// arrives after the result. It keeps the last step for the run's pulse.
 struct IpcProgress {
     item_id: u64,
     tx: std::sync::mpsc::Sender<SubprocessEvent>,
+    step: std::sync::Mutex<Option<prunr_core::Step>>,
+}
+
+impl IpcProgress {
+    fn send(&self, update: prunr_core::ProgressUpdate) -> bool {
+        self.tx.send(SubprocessEvent::Report { item_id: self.item_id, update }).is_ok()
+    }
 }
 
 impl prunr_core::ProgressSink for IpcProgress {
     fn report(&self, update: prunr_core::ProgressUpdate) {
-        let _ = self.tx.send(SubprocessEvent::Report { item_id: self.item_id, update });
+        if let prunr_core::ProgressUpdate::Step(step) = update {
+            *self.step.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(step);
+        }
+        self.send(update);
     }
 }
 
-/// A progress handle whose reports go to the parent as events.
-pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) -> prunr_core::Progress {
-    prunr_core::Progress::new(std::sync::Arc::new(IpcProgress { item_id, tx }))
+/// How often a worker says it is still at work, well inside the parent's
+/// hang watchdog.
+pub const PULSE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A run this long since its last step of its own is taken for hung all
+/// the same, so a deadlock inside one is still caught.
+const PULSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A progress handle whose reports go to the parent as events, and the
+/// run's pulse: while it is held the run's last step goes out again every
+/// `PULSE_EVERY`, so one long model run (a minute on a slow CPU) is not
+/// taken for a hung worker.
+pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) -> (prunr_core::Progress, Pulse) {
+    pulsing_progress(item_id, tx, PULSE_EVERY, PULSE_LIMIT)
+}
+
+fn pulsing_progress(
+    item_id: u64,
+    tx: std::sync::mpsc::Sender<SubprocessEvent>,
+    every: std::time::Duration,
+    limit: std::time::Duration,
+) -> (prunr_core::Progress, Pulse) {
+    let sink = std::sync::Arc::new(IpcProgress { item_id, tx, step: std::sync::Mutex::new(None) });
+    let beating = std::sync::Arc::clone(&sink);
+    let started = std::time::Instant::now();
+    let pulse = Pulse::start(every, move || {
+        let step = *beating.step.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        started.elapsed() < limit && step.is_none_or(|s| beating.send(prunr_core::ProgressUpdate::Step(s)))
+    });
+    (prunr_core::Progress::new(sink), pulse)
+}
+
+/// Calls `beat` now and every `every` after, on a thread of its own,
+/// until dropped or until `beat` returns false.
+pub struct Pulse {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    beating: std::thread::Thread,
+}
+
+impl Pulse {
+    pub fn start(every: std::time::Duration, beat: impl Fn() -> bool + Send + 'static) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let beating = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) && beat() {
+                std::thread::park_timeout(every);
+            }
+        });
+        Self { stop, beating: beating.thread().clone() }
+    }
+}
+
+impl Drop for Pulse {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.beating.unpark();
+    }
 }
 
 /// A raw f32 segmentation tensor a worker left in a file, `height` × `width`.
@@ -884,10 +949,48 @@ mod tests {
         }
     }
 
+    /// While a run's pulse is held its last step goes out again and
+    /// again, so one long model run is not taken for a hung worker: none
+    /// before a first step, and the channel closes once both are gone.
+    #[test]
+    fn a_run_pulses_its_last_step() {
+        use std::time::Duration;
+        let wait = Duration::from_secs(10);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (progress, pulse) = super::pulsing_progress(4, tx, Duration::from_millis(20), Duration::from_secs(600));
+        progress.step(prunr_core::Step::FindingSubject);
+        let said = || SubprocessEvent::Report { item_id: 4, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject) };
+        for _ in 0..3 {
+            assert_eq!(rx.recv_timeout(wait), Ok(said()));
+        }
+        drop((pulse, progress));
+        let end = loop {
+            if let Err(e) = rx.recv_timeout(wait) {
+                break e;
+            }
+        };
+        assert_eq!(end, std::sync::mpsc::RecvTimeoutError::Disconnected);
+    }
+
+    /// A pulse ends at its limit even while held: a run silent that long
+    /// is taken for hung after all, so a deadlock is still caught.
+    #[test]
+    fn a_pulse_ends_at_its_limit() {
+        use std::time::Duration;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (progress, _pulse) = super::pulsing_progress(4, tx, Duration::from_millis(10), Duration::from_millis(100));
+        progress.step(prunr_core::Step::FindingSubject);
+        drop(progress);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while rx.recv_timeout(Duration::from_secs(10)).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "the pulse went on past its limit");
+        }
+    }
+
     #[test]
     fn ipc_progress_sends_reports_for_its_item() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let p = ipc_progress(4, tx);
+        let (p, _pulse) = ipc_progress(4, tx);
         p.step(prunr_core::Step::FindingSubject);
         assert_eq!(rx.try_recv().unwrap(), SubprocessEvent::Report {
             item_id: 4, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject),
