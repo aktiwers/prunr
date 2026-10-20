@@ -1073,12 +1073,15 @@ impl BatchItem {
         self.volatile_seg_tensor = None;
     }
 
-    /// Drop the decompressed tensors kept for slider drags; the
-    /// compressed caches stay, so the next drag rebuilds them once.
+    /// Drop what slider drags keep unpacked while the image is shown: the
+    /// decompressed tensors and the live-preview caches (edge planes,
+    /// outline base, the run start read back). The compressed caches stay,
+    /// so the next drag rebuilds them once.
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
         self.last_decode = None;
+        super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take()));
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
         }

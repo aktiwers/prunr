@@ -1416,6 +1416,25 @@ mod faces_tests {
         assert!(app.batch.items[0].found_faces.is_some());
     }
 
+    /// An image not on screen lets go of the live-preview caches built
+    /// for it on screen: its edge planes, its outline base and the run
+    /// start read back for previews (~140 MB per 12 MP image visited).
+    #[test]
+    fn images_not_on_screen_drop_their_preview_caches() {
+        let mut app = super::PrunrApp::new_for_test();
+        push_test_item(&mut app, 1);
+        push_test_item(&mut app, 2);
+        let item = &mut app.batch.items[0];
+        item.edge_planes.store_placeholder();
+        let image = || Arc::new(image::RgbaImage::new(2, 2));
+        item.cached_masked_base = Some((image(), prunr_core::MaskRecipe::from(&item.settings.mask_settings()), prunr_core::ModelKind::Silueta));
+        item.start_photo = Some(image());
+        app.batch.select_item(1);
+        app.evict_background_item_caches(1);
+        let item = &app.batch.items[0];
+        assert!(item.edge_planes.is_empty() && item.cached_masked_base.is_none() && item.start_photo.is_none());
+    }
+
     /// An image not on screen lets go of its unpacked undo / redo steps
     /// (up to two images each across a whole batch).
     #[test]
