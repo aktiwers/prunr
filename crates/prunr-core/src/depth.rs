@@ -177,9 +177,12 @@ impl Measurer {
     }
 }
 
+/// What a photo's stem takes to name its depth map, saved beside its result.
+pub const MAP_FILE_SUFFIX: &str = "-depth.png";
+
 /// The file name a photo's depth map is saved under, beside its result.
 pub fn map_file_name(stem: &str) -> String {
-    format!("{stem}-depth.png")
+    format!("{stem}{MAP_FILE_SUFFIX}")
 }
 
 /// Estimate the depth of `src`.

@@ -217,3 +217,22 @@ fn cli_batch_goes_on_after_an_image_fails() {
     assert_eq!(code, Some(2), "a partial failure, not a hang; stderr:\n{stderr}");
     assert_output_decodes(&dir.path().join("input.prunr.png"), "the image after the failure");
 }
+
+/// A file name that is not UTF-8 (Linux allows any bytes) reaches the
+/// worker and is processed like any other.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_processes_a_file_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.png"));
+    std::fs::copy(&good, &odd).expect("copy to a non-UTF-8 name");
+    let (code, stderr) = run_cli_batch(&[&odd], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_non_utf8] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_output_decodes(&dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.prunr.png")), "non-UTF-8 name");
+}
