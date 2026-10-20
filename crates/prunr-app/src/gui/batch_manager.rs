@@ -310,6 +310,16 @@ impl BatchManager {
         }
     }
 
+    /// Results that landed on images not on screen: once their step holds
+    /// them, the full-size copy and any texture go (the timeline keeps the
+    /// image and compresses it); they come back when the image is shown.
+    /// A batch of 4x upscales otherwise held ~0.8 GB per 12 MP image.
+    pub(crate) fn park_off_screen_results(&mut self) {
+        for item in &mut self.items {
+            item.park_off_screen();
+        }
+    }
+
     /// Mark the images `marks` name as saved in those states.
     pub(crate) fn mark_saved(&mut self, marks: &[crate::gui::item::SaveMark]) {
         for &mark in marks {
