@@ -1112,9 +1112,9 @@ impl TileTimer {
 }
 
 /// One guided step: the batched UNet call (cond and uncond together)
-/// when the export allows it, else two calls. The first batched
-/// failure (a static batch-1 export) switches the session to two calls
-/// for good.
+/// when the export allows it, else two calls. A batch the export refuses
+/// (a static batch-1 export) switches the session to two calls for good;
+/// one the card had no memory for takes two calls for this step only.
 fn cfg_noise_pred(
     bundle: &SdSession,
     latent_in: Array4<f16>,
@@ -1131,16 +1131,23 @@ fn cfg_noise_pred(
                 let pred_uncond = pair.slice(ndarray::s![1..2, .., .., ..]);
                 return Ok(cfg_blend(pred_uncond, pred_cond, scale));
             }
-            Err(e) => {
+            Err(e) if batch_refused_for_good(&e.to_string()) => {
                 tracing::warn!(%e, "SD: batched CFG UNet rejected (static batch=1 export); \
                                    running cond and uncond separately for this session");
                 bundle.cfg_fallback_to_sequential.store(true, Ordering::Relaxed);
             }
+            Err(e) => tracing::warn!(%e, "SD: no memory for the batched CFG UNet; this step runs cond and uncond separately"),
         }
     }
     let pred_cond = unet_step(bundle, latent_in.clone(), UnetStep { last: false, ..step }, Cond::Text(cond))?;
     let pred_uncond = unet_step(bundle, latent_in, step, Cond::Text(uncond))?;
     Ok(cfg_blend(pred_uncond.view(), pred_cond.view(), scale))
+}
+
+/// Whether a failed batched UNet call means the export takes one image
+/// at a time, rather than a device that ran out of memory this once.
+fn batch_refused_for_good(error: &str) -> bool {
+    !crate::ep_compat::is_transient(error)
 }
 
 // ── Session bundle ──────────────────────────────────────────────────────
@@ -1225,9 +1232,9 @@ pub(crate) struct SdSession {
     latent: prunr_models::SdLatent,
     /// The VAE takes f32: SDXL's overflows in f16.
     vae_f32: bool,
-    /// Set once a batched UNet call fails (a static batch-1 export, the
-    /// LCM bundle); guided steps then run cond and uncond one after the
-    /// other for this session's lifetime.
+    /// Set once the export refuses a batched UNet call (a static batch-1
+    /// export, the LCM bundle); guided steps then run cond and uncond one
+    /// after the other for this session's lifetime.
     cfg_fallback_to_sequential: std::sync::atomic::AtomicBool,
     /// CLIP embeddings by prompt, in f16. The encoder is deterministic, so
     /// a repeated prompt (every tile, every stroke) skips it. Bounded by
@@ -3124,6 +3131,19 @@ mod tests {
                 assert!(changed > 0, "{kind:?}: the estimate shows inside the mask");
             }
         }
+    }
+
+    /// A batched call the card had no memory for runs as two halves for
+    /// that step only; one the export refuses (a static batch of one)
+    /// switches the session to halves for good.
+    #[test]
+    fn only_a_refused_batch_switches_to_halves_for_good() {
+        let out_of_memory = "SD unet (batched): run: Non-zero status code returned while running Softmax node. \
+            Status Message: bfc_arena.cc:358 Failed to allocate memory for requested buffer of size 1207959552";
+        let static_batch = "SD unet (batched): run: Got invalid dimensions for input: sample for the following indices \
+            index: 0 Got: 2 Expected: 1";
+        assert!(!batch_refused_for_good(out_of_memory));
+        assert!(batch_refused_for_good(static_batch));
     }
 
     /// The UNet hands back its pool's spare memory once per crop, after

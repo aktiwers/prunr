@@ -46,7 +46,7 @@ fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
 /// Error text of a failure the device had rather than the model: memory
 /// ran out, or the GPU was removed, hung or reset (DXGI 887A0005-7, as
 /// DirectML reports them). The next session may well succeed.
-fn is_transient(error: &str) -> bool {
+pub(crate) fn is_transient(error: &str) -> bool {
     const MARKS: &[&str] = &[
         "out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate",
         "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
