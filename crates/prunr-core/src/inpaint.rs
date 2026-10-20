@@ -439,6 +439,16 @@ struct LamaSession {
     image_input_name: String,
     mask_input_name: String,
     pick: SessionPick,
+    /// `output_scale` of its model.
+    output_scale: f32,
+}
+
+/// What an eraser's output spans, as the factor to 0-255, read from the
+/// graphs: LaMa fp32 ends in ×255 and Clip(0, 255); Big-LaMa in a sigmoid,
+/// MI-GAN in Clip(0, 1). A guess from a tile's values read a near-black
+/// LaMa tile as 0-1.
+fn output_scale(id: prunr_models::ModelId) -> f32 {
+    if id == prunr_models::ModelId::LaMaFp32 { 1.0 } else { 255.0 }
 }
 
 /// Load `id`'s LaMa-family session (or find it loaded) and say where it
@@ -558,6 +568,7 @@ impl LamaSession {
             image_input_name: img_name,
             mask_input_name: mask_name,
             pick,
+            output_scale: output_scale(id),
         })
     }
 
@@ -582,7 +593,7 @@ impl LamaSession {
             .map_err(|e| CoreError::Inference(format!("LaMa: output extract: {e}")))?
             .into_dimensionality::<ndarray::Ix4>()
             .map_err(|e| CoreError::Inference(format!("LaMa: output reshape: {e}")))?;
-        Ok(decode_tile(view, image, mask))
+        Ok(decode_tile(view, image, mask, self.output_scale))
     }
 }
 
@@ -751,13 +762,15 @@ fn encode_tile(image: &RgbaImage, mask: &GrayImage) -> (Array4<f32>, Array4<f32>
     (img, msk)
 }
 
-/// Decode LaMa output back to RGBA at the tile's actual size. Outside
-/// the mask the source is copied: LaMa perturbs unmasked pixels by
-/// fractions of a unit, which would defeat the feather blend.
+/// Decode LaMa output back to RGBA at the tile's actual size, `scale`
+/// taking it to 0-255 (`output_scale`). Outside the mask the source is
+/// copied: LaMa perturbs unmasked pixels by fractions of a unit, which
+/// would defeat the feather blend.
 fn decode_tile(
     output: ndarray::ArrayView4<'_, f32>,
     source: &RgbaImage,
     mask: &GrayImage,
+    scale: f32,
 ) -> RgbaImage {
     let (w, h) = source.dimensions();
     let s = TILE as usize;
@@ -767,11 +780,6 @@ fn decode_tile(
         tracing::warn!(buf_len = buf.len(), "LaMa output smaller than expected; returning source");
         return source.clone();
     }
-    // Heuristic: max > 1.5 ⇒ output is in [0, 255], else [0, 1].
-    // Sample all three planes — a dim red channel could mis-detect.
-    let max = buf[..plane * 3].iter().copied().fold(0.0_f32, f32::max);
-    let scale = if max > 1.5 { 1.0 } else { 255.0 };
-
     let mut out = RgbaImage::new(w, h);
     let src_raw = source.as_raw();
     let msk_raw = mask.as_raw();
@@ -1077,6 +1085,7 @@ fn accumulate_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prunr_models::ModelId;
 
     /// A `w`×`h` mask at 255 over `x0..x1`, `y0..y1`, 0 elsewhere.
     fn rect_mask(w: u32, h: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> GrayImage {
@@ -1339,7 +1348,7 @@ mod tests {
         // Fill output with junk to prove we don't read it.
         let mut output = Array4::<f32>::zeros((1, 3, s, s));
         for v in output.iter_mut() { *v = 0.5; }
-        let out = decode_tile(output.view(), &src, &mask);
+        let out = decode_tile(output.view(), &src, &mask, 255.0);
         assert_eq!(out.as_raw(), src.as_raw(), "unmasked pixels must equal source");
     }
 
@@ -1355,7 +1364,7 @@ mod tests {
         output[[0, 0, 4, 4]] = 1.0;
         output[[0, 1, 4, 4]] = 0.0;
         output[[0, 2, 4, 4]] = 128.0 / 255.0;
-        let out = decode_tile(output.view(), &src, &mask);
+        let out = decode_tile(output.view(), &src, &mask, 255.0);
         let p = out.get_pixel(4, 4);
         assert_eq!(p[0], 255);
         assert_eq!(p[1], 0);
@@ -1378,7 +1387,7 @@ mod tests {
                 output[[0, c, v / 16, v % 16]] = (v as f32 - 0.2).max(0.0) / 255.0;
             }
         }
-        let out = decode_tile(output.view(), &src, &mask);
+        let out = decode_tile(output.view(), &src, &mask, 255.0);
         let got: Vec<u8> = (0..256u32).map(|v| out.get_pixel(v % 16, v / 16)[0]).collect();
         assert_eq!(got, (0..=255).collect::<Vec<u8>>());
     }
@@ -1429,18 +1438,24 @@ mod tests {
         }
     }
 
+    /// Each eraser's output is read in the range its graph ends in: LaMa
+    /// fp32 in 0-255, so a tile filled near black stays near black (a
+    /// guess from its values read it as 0-1 and drew a bright blob);
+    /// Big-LaMa and MI-GAN in 0-1.
     #[test]
-    fn decode_tile_detects_0_255_range() {
-        // Output already in [0, 255] range — no rescaling.
+    fn a_tile_is_read_in_its_models_own_range() {
         let src = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
-        let mut mask = GrayImage::from_pixel(8, 8, Luma([255]));
-        mask.put_pixel(0, 0, Luma([255]));
+        let mask = GrayImage::from_pixel(8, 8, Luma([255]));
         let s = TILE as usize;
-        let mut output = Array4::<f32>::zeros((1, 3, s, s));
-        // Big values across the whole tile so the heuristic picks 1.0 scale.
-        for v in output.iter_mut() { *v = 200.0; }
-        let out = decode_tile(output.view(), &src, &mask);
-        assert_eq!(out.get_pixel(4, 4).0[0], 200, "200.0 in [0,255] range stays 200");
+        let filled = |v: f32| Array4::<f32>::from_elem((1, 3, s, s), v);
+        let lama = decode_tile(filled(0.8).view(), &src, &mask, output_scale(ModelId::LaMaFp32));
+        assert_eq!(lama.get_pixel(4, 4).0[0], 1, "near black stays near black");
+        let lama = decode_tile(filled(200.0).view(), &src, &mask, output_scale(ModelId::LaMaFp32));
+        assert_eq!(lama.get_pixel(4, 4).0[0], 200);
+        for id in [ModelId::BigLaMa, ModelId::Migan] {
+            let out = decode_tile(filled(0.5).view(), &src, &mask, output_scale(id));
+            assert_eq!(out.get_pixel(4, 4).0[0], 128, "{id:?}");
+        }
     }
 
     #[test]
