@@ -305,9 +305,6 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let embedding = item.magic_brush_embedding.clone();
 
     let hover_pos_for_cursor = ui.ctx().input(|i| i.pointer.hover_pos());
-    if hover_pos_for_cursor.is_some_and(|p| canvas_rect.contains(p)) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
 
     let look = super::brush_overlay::CursorLook { erase: app.settings.brush_erases(), ..super::brush_overlay::MAGIC_CURSOR };
     let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
