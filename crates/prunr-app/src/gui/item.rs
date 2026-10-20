@@ -625,6 +625,15 @@ impl Pixels {
         self.read().ok()
     }
 
+    /// Width and height without unpacking; `None` for a photo not decoded.
+    pub(crate) fn decoded_dims(&self) -> Option<(u32, u32)> {
+        match self {
+            Self::Resident(rgba) => Some(rgba.dimensions()),
+            Self::Parked(stored) => Some(stored.dims()),
+            Self::Source(_) => None,
+        }
+    }
+
     /// The pixels, or why they could not be read.
     pub(crate) fn read(&self) -> Result<Arc<image::RgbaImage>, String> {
         match self {
@@ -3028,6 +3037,17 @@ mod tests {
         }
         while item.undo_step().is_ok() {}
         assert!(item.has_unsaved_work());
+    }
+
+    /// A parked result still tells its size, without unpacking it.
+    #[test]
+    fn a_parked_result_tells_its_size() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(6, 4)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(StepKind::Process);
+        assert!(item.park_result());
+        assert_eq!(item.result_pixels().and_then(|p| p.decoded_dims()), Some((6, 4)));
     }
 
     /// Parking a saved image's result when it leaves the screen keeps it

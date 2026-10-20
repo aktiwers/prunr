@@ -78,7 +78,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
                 selected: it.ticked,
                 dimensions: it.dimensions,
                 has_result: it.has_result(),
-                result_dims: it.result_rgba.as_ref().map(|r| r.dimensions()),
+                result_dims: it.result_pixels().and_then(|p| p.decoded_dims()),
                 has_selection: it.selection_mask.is_some(),
                 undo_steps: it.timeline.undo_steps(),
                 settings: it.settings,
