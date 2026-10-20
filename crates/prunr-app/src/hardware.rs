@@ -134,11 +134,7 @@ pub fn profile() -> &'static HardwareProfile {
 /// Total system RAM (bytes), read once.
 pub fn total_ram_bytes() -> u64 {
     static CACHE: OnceLock<u64> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        sys.total_memory()
-    })
+    *CACHE.get_or_init(|| prunr_core::sysmem::total_ram_bytes().unwrap_or(0))
 }
 
 /// Free bytes on the disk holding `path` (or its nearest existing
@@ -160,15 +156,10 @@ pub fn free_space_at(path: &std::path::Path) -> Option<u64> {
 /// Currently-available RAM (bytes). Re-reads on every call — fresh value
 /// for UIs that show live headroom. ~1 ms on Linux. Don't call inside a
 /// per-frame loop; prefer `available_ram_bytes_throttled` for any caller
-/// that fires more than once per second.
+/// that fires more than once per second. 0 when the system reports no
+/// memory at all, so the gates refuse rather than guess.
 pub fn available_ram_bytes_now() -> u64 {
-    use std::sync::{Mutex, PoisonError};
-    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
-    let sys = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
-    // Poison recovery: the System is only a reused buffer, refreshed below.
-    let mut sys = sys.lock().unwrap_or_else(PoisonError::into_inner);
-    sys.refresh_memory();
-    sys.available_memory()
+    prunr_core::sysmem::available_ram_bytes().unwrap_or(0)
 }
 
 /// `available_ram_bytes_throttled` in MiB, the unit the admission gates
