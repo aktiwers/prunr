@@ -104,40 +104,6 @@ impl Drop for SemaphoreGuard {
     }
 }
 
-/// How often a model being built reports, well inside the parent's hang
-/// watchdog.
-const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Reports "Loading model" for `item_id` every `every` until dropped.
-struct Heartbeat {
-    stop: Arc<AtomicBool>,
-    beating: std::thread::Thread,
-}
-
-impl Heartbeat {
-    fn start(events: std::sync::mpsc::Sender<SubprocessEvent>, item_id: u64, every: std::time::Duration) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let beating = std::thread::spawn(move || {
-            while !stopped.load(Ordering::Acquire) {
-                let report = SubprocessEvent::Report { item_id, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) };
-                if events.send(report).is_err() {
-                    return;
-                }
-                std::thread::park_timeout(every);
-            }
-        });
-        Self { stop, beating: beating.thread().clone() }
-    }
-}
-
-impl Drop for Heartbeat {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.beating.unpark();
-    }
-}
-
 /// Write a result for the parent to read. One that fails (a full temp
 /// disk) leaves no half file behind; the caller reports the error, or the
 /// parent would wait for an answer that never comes.
@@ -412,7 +378,11 @@ pub fn run_worker() -> ! {
                     // as it goes, or the parent's hang watchdog kills it.
                     let builds = (line_mode != LineMode::Off && edge_engine.is_none())
                         || (line_mode != LineMode::EdgesOnly && engines.is_empty());
-                    let _loading = builds.then(|| Heartbeat::start(evt_tx.clone(), item_id, HEARTBEAT_EVERY));
+                    let _loading = builds.then(|| {
+                        let events = evt_tx.clone();
+                        let loading = prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel);
+                        Pulse::start(PULSE_EVERY, move || events.send(SubprocessEvent::Report { item_id, update: loading.clone() }).is_ok())
+                    });
                     if line_mode != LineMode::Off {
                         ensure_edge_engine(&mut edge_engine)?;
                     }
@@ -482,7 +452,8 @@ pub fn run_worker() -> ! {
                     // Released on drop, panics included.
                     let weight = pixel_weight(&img_bytes);
                     let sem_guard = sem.acquire(weight);
-                    let progress = ipc_progress(item_id, evt_tx.clone()).with_cancel(cancel.flag());
+                    let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
+                    let progress = progress.with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
                     // Whether this image is the one on screen is settled
                     // as its run starts, here.
@@ -718,7 +689,7 @@ pub fn run_worker() -> ! {
                     // Conservative weight — postprocess upscales tensor to original resolution
                     // which allocates significant memory for Lanczos3 + guided filter
                     let _sem_guard = sem.acquire(10);
-                    let progress = ipc_progress(item_id, evt_tx.clone());
+                    let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
 
                     let tensor_result = (|| -> Result<image::RgbaImage, String> {
                         let raw_bytes = std::fs::read(&tensor_path)
@@ -799,7 +770,7 @@ pub fn run_worker() -> ! {
                         return;
                     }
                     let sem_guard = sem.acquire(10);
-                    let progress = ipc_progress(item_id, evt_tx.clone());
+                    let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
@@ -891,7 +862,8 @@ pub fn run_worker() -> ! {
                 let inpaint_cancel = cancels.register(item_id);
                 // Reports go out on this stroke's own thread, ahead of its
                 // InpaintDone on the same channel.
-                let progress = ipc_progress(item_id, evt_tx.clone())
+                let (progress, pulse) = ipc_progress(item_id, evt_tx.clone());
+                let progress = progress
                     .with_cancel(inpaint_cancel.flag())
                     .with_tile_previews(TILE_PREVIEW_EDGE);
                 let in_flight_for_thread = in_flight.clone();
@@ -922,6 +894,7 @@ pub fn run_worker() -> ! {
                         }
                     }
                     let _cleanup = Cleanup { in_flight: in_flight_for_thread, cancel: Some(inpaint_cancel) };
+                    let _pulse = pulse;
                     let result = (|| -> Result<(image::RgbaImage, f32), String> {
                         let image: image::RgbaImage = read_image(&image_path)
                             .ok_or_else(|| "read source: missing or short".to_string())?;
@@ -1042,7 +1015,8 @@ mod tests {
         // for longer than any fixed sleep.
         let wait = Duration::from_secs(10);
         let (tx, rx) = std::sync::mpsc::channel();
-        let beat = Heartbeat::start(tx, 7, Duration::from_millis(20));
+        let loading = prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel);
+        let beat = Pulse::start(Duration::from_millis(20), move || tx.send(SubprocessEvent::Report { item_id: 7, update: loading.clone() }).is_ok());
         for _ in 0..3 {
             let report = rx.recv_timeout(wait).expect("a report while building");
             assert!(matches!(report, SubprocessEvent::Report { item_id: 7, .. }));
