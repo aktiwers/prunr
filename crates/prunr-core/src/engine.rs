@@ -169,6 +169,12 @@ pub enum StartFailure {
 }
 
 impl GpuStartFailure {
+    /// A CUDA start that failed on `err`, for tests outside the crate.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn cuda_for_test(err: &str) -> Self {
+        Self::of(GpuStack::Cuda, err)
+    }
+
     /// `err` names the first library the loader could not find, or the
     /// vendor's error code.
     pub(crate) fn of(stack: GpuStack, err: &str) -> Self {
