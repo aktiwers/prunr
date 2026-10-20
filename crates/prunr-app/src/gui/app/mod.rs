@@ -130,6 +130,8 @@ pub struct PrunrApp {
     pub(crate) pending_license_request: Option<prunr_models::ModelId>,
     /// Shown on the first frame: egui is not ready while the app is built.
     pub(crate) pending_first_toasts: Vec<String>,
+    /// The accelerator runtime that could not start was named in a toast.
+    told_gpu_failure: bool,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
     /// Snapshot of `RuntimeId::is_installed()` to avoid syscalling per-frame
@@ -435,6 +437,7 @@ impl PrunrApp {
             model_store: None,
             pending_license_request: None,
             pending_first_toasts: Vec::new(),
+            told_gpu_failure: false,
             runtime_install: None,
             hardware_install_cache: Default::default(),
             runtime_prompt: None,
@@ -960,6 +963,14 @@ impl PrunrApp {
         }
     }
 
+    /// An accelerator runtime that could not start (the models quietly
+    /// run on the CPU) is said once, when the probe has answered.
+    pub(crate) fn tell_gpu_start_failure(&mut self, failure: Option<&prunr_core::engine::GpuStartFailure>) {
+        let Some(failure) = failure.filter(|_| !self.told_gpu_failure) else { return };
+        self.told_gpu_failure = true;
+        self.toasts.warning(format!("{} See Settings › Hardware.", failure.text()));
+    }
+
     fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
         use crate::gui::views::shortcuts::{self, Chord};
         // A capture lives on its tab: Settings closed by any way, or
@@ -1165,6 +1176,7 @@ impl eframe::App for PrunrApp {
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.take_probed_backend();
+        self.tell_gpu_start_failure(prunr_core::engine::gpu_start_failure());
         self.hold_close_over_unsaved_work(ctx);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
@@ -1589,6 +1601,24 @@ mod field_list_tests {
         assert_eq!(raw.events, vec![egui::Event::Text("x".into())]);
     }
 
+    /// An accelerator runtime that cannot start says so in the window
+    /// once (the models quietly ran on the CPU), pointing to Settings ›
+    /// Hardware; nothing to say, no toast.
+    #[test]
+    fn a_gpu_that_cannot_start_says_so_once() {
+        let mut app = super::PrunrApp::new_for_test();
+        let before = app.toasts.len_for_test();
+        app.tell_gpu_start_failure(None);
+        assert_eq!(app.toasts.len_for_test(), before, "nothing to say");
+        let failure = prunr_core::engine::GpuStartFailure::cuda_for_test("libcublasLt.so.12: cannot open shared object file: No such file or directory");
+        app.tell_gpu_start_failure(Some(&failure));
+        let (kind, text) = app.toasts.last_for_test().expect("a toast");
+        assert_eq!(kind, "warning");
+        assert!(text.contains("libcublasLt.so.12") && text.contains("Settings › Hardware"), "{text}");
+        app.tell_gpu_start_failure(Some(&failure));
+        assert_eq!(app.toasts.len_for_test(), before + 1, "once");
+    }
+
     #[test]
     fn every_field_is_a_decision() {
         let app = super::PrunrApp::new_for_test();
@@ -1624,6 +1654,7 @@ mod field_list_tests {
             model_store: _,
             pending_license_request: _,
             pending_first_toasts: _,
+            told_gpu_failure: _,
             runtime_install: _,
             hardware_install_cache: _,
             runtime_prompt: _,
