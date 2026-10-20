@@ -814,6 +814,8 @@ pub(crate) struct Processor {
     colorize: RunSlot<ColorizeResult>,
     sam_encoded: Chan<SamEncoderResult>,
     sam_decoded: Chan<SamDecoderResult>,
+    /// Magic Brush picks selecting, per image: each answers exactly once.
+    picks_selecting: HashMap<u64, u32>,
     sam_sessions: SamSessionSlot,
     /// Whether dispatches run their models. A test app's runs start
     /// and stay in flight until the test lands or fails them with the
@@ -879,6 +881,7 @@ impl Processor {
             colorize: RunSlot::new(),
             sam_encoded: Chan::default(),
             sam_decoded: Chan::default(),
+            picks_selecting: HashMap::new(),
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
             faces_found: Chan::default(),
@@ -951,17 +954,25 @@ impl Processor {
 
     /// A Magic Brush click with Depth on: everything near the clicked
     /// depth, made on the pool and landing like a decoded stroke.
-    pub(crate) fn dispatch_depth_select(&self, req: DepthSelectRequest) {
+    pub(crate) fn dispatch_depth_select(&mut self, req: DepthSelectRequest) {
+        self.note_pick(req.item_id);
         let tx = self.sam_decoded.tx.clone();
         rayon::spawn(move || {
             let (w, h) = req.source_dims;
             let around = req.depth.at(req.at.0, req.at.1);
-            let mask = prunr_core::depth::select_by_depth(&req.depth, w, h, around, req.range, req.mode);
-            let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, mode: req.mode, reading: req.reading,
-                result: Ok(DecodedSelection::ByDepth(mask)),
-            });
+            let result = caught(|| prunr_core::depth::select_by_depth(&req.depth, w, h, around, req.range, req.mode))
+                .map(DecodedSelection::ByDepth);
+            let _ = tx.send(SamDecoderResult { item_id: req.item_id, mode: req.mode, reading: req.reading, result });
         });
+    }
+
+    fn note_pick(&mut self, item_id: u64) {
+        *self.picks_selecting.entry(item_id).or_default() += 1;
+    }
+
+    /// A Magic Brush pick on `item_id` is still selecting.
+    pub(crate) fn selecting(&self, item_id: u64) -> bool {
+        self.picks_selecting.contains_key(&item_id)
     }
 
     pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
@@ -1924,7 +1935,8 @@ impl Processor {
     /// No admission gate: the decoder is ~20 MB. The mask is built on the
     /// worker too, so the UI thread only merges it; the logits come back
     /// for re-thresholding.
-    pub(crate) fn dispatch_sam_decoder(&self, req: SamDecodeRequest) {
+    pub(crate) fn dispatch_sam_decoder(&mut self, req: SamDecodeRequest) {
+        self.note_pick(req.item_id);
         let tx = self.sam_decoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
@@ -1973,7 +1985,16 @@ impl Processor {
     }
 
     pub(crate) fn pump_sam_decoder_results(&mut self) -> Vec<SamDecoderResult> {
-        self.sam_decoded.drain()
+        let results = self.sam_decoded.drain();
+        for r in results.iter().filter(|r| !matches!(r.result, Ok(DecodedSelection::Retuned { .. }))) {
+            if let Some(n) = self.picks_selecting.get_mut(&r.item_id) {
+                *n -= 1;
+                if *n == 0 {
+                    self.picks_selecting.remove(&r.item_id);
+                }
+            }
+        }
+        results
     }
 }
 

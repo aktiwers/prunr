@@ -181,10 +181,10 @@ impl SelectionQueue {
         self.deferred.push((action, ids));
     }
 
-    /// The held actions whose images are done, in the order held; one
-    /// waiting holds the ones after it too.
-    pub(crate) fn take_deferred(&mut self) -> Vec<(super::views::shortcuts::Action, Vec<u64>)> {
-        let ready = self.deferred.iter().take_while(|(_, ids)| !ids.iter().any(|id| self.is_pending(*id))).count();
+    /// The held actions whose images are done, here and by `elsewhere`, in
+    /// the order held; one waiting holds the ones after it too.
+    pub(crate) fn take_deferred(&mut self, elsewhere: impl Fn(u64) -> bool) -> Vec<(super::views::shortcuts::Action, Vec<u64>)> {
+        let ready = self.deferred.iter().take_while(|(_, ids)| !ids.iter().any(|&id| self.is_pending(id) || elsewhere(id))).count();
         self.deferred.drain(..ready).collect()
     }
 }
@@ -290,7 +290,8 @@ mod tests {
         assert!(folded.selection.is_none() && folded.edits.is_some_and(|e| Arc::ptr_eq(&e, &edits)), "a blank selection folds in nothing");
     }
 
-    /// Undo asked for while a stroke is pending waits for the queue.
+    /// Undo asked for while a stroke is pending waits for the queue, and
+    /// for an edit still being made elsewhere (a Magic Brush pick).
     #[test]
     fn an_action_waits_for_the_queue() {
         use super::super::views::shortcuts::Action;
@@ -298,8 +299,9 @@ mod tests {
         queue.push(1, SelectionOp::Invert, AfterLanding::Nothing, SelState { selection: Some(plane(&[0])), edits: None });
         queue.defer(Action::Undo, vec![1]);
         queue.defer(Action::Redo, vec![2]);
-        assert!(queue.take_deferred().is_empty(), "held while its image is pending, and the one after it too");
+        assert!(queue.take_deferred(|_| false).is_empty(), "held while its image is pending, and the one after it too");
         wait(&mut queue, 1);
-        assert_eq!(queue.take_deferred(), vec![(Action::Undo, vec![1]), (Action::Redo, vec![2])]);
+        assert!(queue.take_deferred(|id| id == 1).is_empty(), "or while its image is still being edited elsewhere");
+        assert_eq!(queue.take_deferred(|_| false), vec![(Action::Undo, vec![1]), (Action::Redo, vec![2])]);
     }
 }
