@@ -47,6 +47,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
 use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
+use crate::sysmem::{available_ram_bytes, process_rss_mb};
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length.
@@ -2324,34 +2325,6 @@ fn step_array(
 }
 
 // ── Safety guards ───────────────────────────────────────────────────────
-
-/// One `sysinfo::System` for both probes; they refresh disjoint fields.
-fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
-    use std::sync::PoisonError;
-    static SYS: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
-    let mtx = SYS.get_or_init(|| Mutex::new(sysinfo::System::new()));
-    let mut sys = mtx.lock().unwrap_or_else(PoisonError::into_inner);
-    f(&mut sys)
-}
-
-/// `None` when sysinfo can't read the system; callers then skip the
-/// guard, since an unknown reading doesn't mean memory is low.
-pub(crate) fn available_ram_bytes() -> Option<u64> {
-    let avail = with_system(|sys| {
-        sys.refresh_memory();
-        sys.available_memory()
-    });
-    if avail == 0 { None } else { Some(avail) }
-}
-
-/// Current process RSS in MB; `None` when sysinfo can't read the process.
-pub(crate) fn process_rss_mb() -> Option<u64> {
-    let pid = sysinfo::get_current_pid().ok()?;
-    with_system(|sys| {
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-        sys.process(pid).map(|p| p.memory() / (1024 * 1024))
-    })
-}
 
 /// The run-time RAM gate for a stroke. Refuses when the model's base
 /// need is not free; when only the tall crop's extra is missing, the
