@@ -137,22 +137,6 @@ pub fn total_ram_bytes() -> u64 {
     *CACHE.get_or_init(|| prunr_core::sysmem::total_ram_bytes().unwrap_or(0))
 }
 
-/// Free bytes on the disk holding `path` (or its nearest existing
-/// parent): the mount with the longest prefix of it. `None` when no
-/// mount matches.
-pub fn free_space_at(path: &std::path::Path) -> Option<u64> {
-    let existing = path.ancestors().find(|p| p.exists())?;
-    // std's canonicalize gives `\\?\C:\…` on Windows, which no mount
-    // point (`C:\`) prefixes; dunce keeps the plain form.
-    let path = dunce::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
-    sysinfo::Disks::new_with_refreshed_list()
-        .list()
-        .iter()
-        .filter(|d| path.starts_with(d.mount_point()))
-        .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map(sysinfo::Disk::available_space)
-}
-
 /// Currently-available RAM (bytes). Re-reads on every call — fresh value
 /// for UIs that show live headroom. ~1 ms on Linux. Don't call inside a
 /// per-frame loop; prefer `available_ram_bytes_throttled` for any caller

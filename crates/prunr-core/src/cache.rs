@@ -175,17 +175,23 @@ impl Drop for GraphDraft {
     }
 }
 
-/// A cache miss: `builder` writes its optimized graph to a draft of
-/// `path`, published once the session builds. When ORT refuses the
-/// path the build goes on uncached.
+/// A cache miss: `builder` writes its optimized graph (about
+/// `graph_bytes`) to a draft of `path`, published once the session
+/// builds. Where the draft cannot be written, or ORT refuses the path,
+/// the build goes on uncached.
 pub(crate) fn attach_draft(
     builder: ort::session::builder::SessionBuilder,
     path: &Path,
+    graph_bytes: u64,
     model_id: ModelId,
     ep_name: &str,
     part: Option<&str>,
 ) -> (ort::session::builder::SessionBuilder, Option<GraphDraft>) {
     let draft = GraphDraft::for_path(path);
+    if !writable(draft.draft(), graph_bytes) {
+        tracing::warn!(?model_id, ep = %ep_name, part, path = %path.display(), "optimized graph cannot be written here; built uncached");
+        return (builder, None);
+    }
     match builder.with_optimized_model_path(draft.draft()) {
         Ok(builder) => {
             tracing::debug!(?model_id, ep = %ep_name, part, path = %path.display(), "cache miss (writing optimized graph)");
@@ -196,6 +202,14 @@ pub(crate) fn attach_draft(
             (e.recover(), None)
         }
     }
+}
+
+/// The draft can be made and the graph fits, twice over: ORT fails a whole
+/// session it cannot write the graph for (a read-only or missing folder, a
+/// full disk), and the cache must never cost the model.
+fn writable(draft: &Path, graph_bytes: u64) -> bool {
+    std::fs::File::create(draft).is_ok()
+        && crate::sysmem::free_disk_bytes(draft).is_none_or(|free| free / 2 >= graph_bytes)
 }
 
 fn remove_abandoned_drafts(dir: &Path, name: &str) {
@@ -370,6 +384,23 @@ fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A draft is attached only where ORT can write the graph: ORT fails
+    /// the whole session otherwise, and the cache must not cost the model.
+    #[cfg(unix)]
+    #[test]
+    fn a_draft_is_attached_only_where_the_graph_can_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(writable(&dir.path().join("graph.draft"), 1024), "a folder with room");
+        assert!(!writable(&dir.path().join("missing/graph.draft"), 1024), "a folder that is not there");
+        assert!(!writable(&dir.path().join("graph.draft"), u64::MAX / 4), "a graph the disk cannot hold");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(!writable(&locked.join("graph.draft"), 1024), "a read-only folder");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     /// The directory-writing tests share one temp root (never the user's
     /// cache), so they still must not interleave with each other.

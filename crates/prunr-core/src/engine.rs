@@ -1064,7 +1064,7 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
         return (builder, Cow::Borrowed(model_bytes), None);
     }
-    let (builder, draft) = crate::cache::attach_draft(builder, &path, model_id, ep_name, None);
+    let (builder, draft) = crate::cache::attach_draft(builder, &path, model_bytes.len() as u64, model_id, ep_name, None);
     (builder, Cow::Borrowed(model_bytes), draft)
 }
 

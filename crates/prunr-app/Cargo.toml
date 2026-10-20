@@ -46,7 +46,6 @@ dirs = { workspace = true }
 zstd = { workspace = true }
 bytemuck = { workspace = true }
 sysinfo = { workspace = true }
-dunce = { workspace = true }
 bincode = { workspace = true }
 memory-stats = { workspace = true }
 ndarray = { workspace = true }

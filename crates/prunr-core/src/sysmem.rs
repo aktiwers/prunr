@@ -1,5 +1,5 @@
 //! What the system has free and what this process holds, for the memory
-//! guards.
+//! and disk guards.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -43,6 +43,22 @@ pub fn process_rss_mb() -> Option<u64> {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         sys.process(pid).map(|p| p.memory() / (1024 * 1024))
     })
+}
+
+/// Free bytes on the disk holding `path` (or its nearest existing
+/// parent): the mount with the longest prefix of it. `None` when no
+/// mount matches.
+pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    // std's canonicalize gives `\\?\C:\…` on Windows, which no mount
+    // point (`C:\`) prefixes; dunce keeps the plain form.
+    let path = dunce::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    sysinfo::Disks::new_with_refreshed_list()
+        .list()
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(sysinfo::Disk::available_space)
 }
 
 #[cfg(test)]
