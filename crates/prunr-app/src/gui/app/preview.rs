@@ -430,7 +430,6 @@ impl PrunrApp {
                     item.quick.clear();
                     item.result_tex_pending = false;
                     item.drop_hot_tensors();
-                    item.start_photo = None;
                     item.park_result();
                 }
                 (item.id, item.source.clone(), r.is_final, new_rgba)
