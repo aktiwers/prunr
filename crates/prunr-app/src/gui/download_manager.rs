@@ -354,6 +354,7 @@ fn download_attempt(
     // Tear down any leftover partial from a previous aborted attempt so
     // the writer starts fresh.
     let _ = std::fs::remove_file(&partial);
+    sweep_stale_partials(dest);
 
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
         .map_err(|e| DlError::fatal(format!("Could not start the download: {e}")))?;
@@ -446,10 +447,37 @@ fn space_refusal(needed: u64, free: u64) -> Option<String> {
     })
 }
 
+/// This process's own partial of `dest`: two instances fetching one
+/// model would otherwise write into one file, and the one finishing first
+/// would keep whatever the other made of it.
 fn partial_path(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
-    s.push(".partial");
+    s.push(format!(".partial.{}", std::process::id()));
     PathBuf::from(s)
+}
+
+/// A partial untouched this long is no live download's: a download writes
+/// every few milliseconds.
+const STALE_PARTIAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove the partials of `dest` an earlier run left (quit mid-download
+/// keeps gigabytes), sparing one another instance is writing now.
+fn sweep_stale_partials(dest: &Path) {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
+    let mut prefix = name.to_owned();
+    prefix.push(".partial");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let ours = file.as_encoded_bytes().starts_with(prefix.as_encoded_bytes());
+        let stale = entry.metadata().ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_PARTIAL);
+        if ours && stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -542,10 +570,36 @@ mod tests {
         assert!(dm.active().is_none());
     }
 
+    /// Each process downloads into a partial of its own: two instances
+    /// fetching one model wrote into one file, and the one finishing first
+    /// kept whatever the other had made of it.
     #[test]
-    fn partial_path_appends_partial_suffix() {
+    fn each_process_downloads_into_its_own_partial() {
         let p = partial_path(Path::new("/tmp/big_lama.onnx"));
-        assert_eq!(p, PathBuf::from("/tmp/big_lama.onnx.partial"));
+        assert_eq!(p, PathBuf::from(format!("/tmp/big_lama.onnx.partial.{}", std::process::id())));
+    }
+
+    /// A partial an earlier run left (quit mid-download: gigabytes kept)
+    /// goes when the model is fetched again; one another instance is
+    /// writing now, and other models' files, stay.
+    #[test]
+    fn a_partial_left_by_an_earlier_run_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big_lama.onnx");
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        let file = |name: &str, old: bool| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"half").unwrap();
+            if old {
+                std::fs::File::options().write(true).open(&path).unwrap().set_modified(old_time).unwrap();
+            }
+            path
+        };
+        let left = [file("big_lama.onnx.partial", true), file("big_lama.onnx.partial.4242", true)];
+        let kept = [file("big_lama.onnx.partial.4343", false), file("migan.onnx.partial.4242", true)];
+        sweep_stale_partials(&dest);
+        assert!(left.iter().all(|p| !p.exists()), "an earlier run's partials go");
+        assert!(kept.iter().all(|p| p.exists()), "a live download and other models' files stay");
     }
 
     // ── Queue behaviour ───────────────────────────────────────────────────
