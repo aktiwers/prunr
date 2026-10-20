@@ -124,13 +124,11 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
     assert!(app.processor.live_preview.is_pending_for(7), "the re-cut is queued");
 }
 
-/// Moving the Confidence knob re-thresholds the last Magic Brush stroke
-/// from its kept logits: the selection changes, the stroke keeps its single
-/// undo entry, and the retune follows the selection it committed.
-#[test]
-fn confidence_change_retunes_the_last_stroke_in_place() {
+/// An image (id 9) whose last stroke is a Magic Brush decode kept for a
+/// retune: logits ramp left to right, so a higher confidence keeps fewer
+/// columns. Returns the stroke's selection hash.
+fn app_with_a_retunable_stroke() -> (PrunrApp, u64) {
     use crate::gui::item::LastDecode;
-    use crate::gui::processor::DecodedSelection;
     use prunr_core::selection::BrushMode;
     use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::Silueta);
@@ -156,20 +154,25 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
         output, mode: BrushMode::Add,
         committed_hash: first_hash, reading: committed_reading,
     });
+    (app, first_hash)
+}
 
+/// Moving the Confidence knob re-thresholds the last Magic Brush stroke
+/// from its kept logits: the selection changes, the stroke keeps its single
+/// undo entry, and the retune follows the selection it committed.
+#[test]
+fn confidence_change_retunes_the_last_stroke_in_place() {
+    let (mut app, first_hash) = app_with_a_retunable_stroke();
     app.settings.brush.magic_confidence_threshold = 0.9;
     app.maybe_rethreshold_last_stroke();
     assert!(app.magic_brush_state.rethreshold_in_flight);
+    let ctx = egui::Context::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let result = loop {
-        if let Some(r) = app.processor.pump_sam_decoder_results().pop() { break r; }
+    while app.magic_brush_state.rethreshold_in_flight {
         assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
+        app.pump_sam_results(&ctx);
         std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    let Ok(DecodedSelection::Retuned { merged, hash, for_hash }) = result.result else {
-        panic!("re-threshold decodes without a session");
-    };
-    app.apply_rethreshold(9, merged, hash, result.reading, for_hash);
+    }
 
     let item = &app.batch.items[0];
     let new_hash = item.selection_hash.unwrap();
@@ -189,6 +192,34 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     app.settings.brush.magic_remove_specks = !app.settings.brush.magic_remove_specks;
     app.maybe_rethreshold_last_stroke();
     assert!(app.magic_brush_state.rethreshold_in_flight, "flipping Remove specks retunes the last stroke");
+}
+
+/// A retune that lands while a run holds the image is dropped and the
+/// knob stays alive: none starts while the image is busy, and the next
+/// change retunes once it is free.
+#[test]
+fn a_retune_on_a_busy_image_leaves_the_knob_alive() {
+    use crate::gui::item::Engine;
+    let (mut app, first_hash) = app_with_a_retunable_stroke();
+    let ctx = egui::Context::default();
+    app.settings.brush.magic_confidence_threshold = 0.9;
+    app.maybe_rethreshold_last_stroke();
+    assert!(app.magic_brush_state.rethreshold_in_flight);
+    app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.magic_brush_state.rethreshold_in_flight {
+        assert!(std::time::Instant::now() < deadline, "the knob went dead: its retune never ended");
+        app.pump_sam_results(&ctx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(app.batch.items[0].selection_hash, Some(first_hash), "dropped: a run holds the image");
+
+    app.settings.brush.magic_confidence_threshold = 0.8;
+    app.maybe_rethreshold_last_stroke();
+    assert!(!app.magic_brush_state.rethreshold_in_flight, "none starts while the run holds it");
+    app.batch.items[0].abandon_job();
+    app.maybe_rethreshold_last_stroke();
+    assert!(app.magic_brush_state.rethreshold_in_flight, "the image free, the knob retunes");
 }
 
 /// A stroke committed under each active model: segmentation re-cuts at

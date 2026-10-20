@@ -520,7 +520,7 @@ impl PrunrApp {
 
     /// Keep the selected image's embedding current, then drain SAM encoder
     /// and decoder results from the background rayon threads.
-    pub(super) fn pump_sam_results(&mut self, ctx: &egui::Context) {
+    pub(crate) fn pump_sam_results(&mut self, ctx: &egui::Context) {
         use crate::gui::processor::DecodedSelection;
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
@@ -544,6 +544,18 @@ impl PrunrApp {
             }
         }
 
+        for retune in self.processor.pump_sam_retune_results() {
+            self.magic_brush_state.rethreshold_in_flight = false;
+            match retune.result {
+                // A selection change landing after a run started on the
+                // image would make that run's result stale.
+                Ok(_) if self.batch.find_by_id(retune.item_id).is_some_and(|i| !i.is_idle()) => {
+                    tracing::info!(item_id = retune.item_id, "Magic Brush retune dropped: a run started on the image");
+                }
+                Ok(crate::gui::processor::Retuned { merged, hash, for_hash }) => self.apply_rethreshold(retune.item_id, merged, hash, retune.reading, for_hash),
+                Err(err) => tracing::warn!(item_id = retune.item_id, %err, "Magic Brush retune failed"),
+            }
+        }
         self.maybe_rethreshold_last_stroke();
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
@@ -562,10 +574,6 @@ impl PrunrApp {
                 Ok(DecodedSelection::ByDepth(mask)) => {
                     self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::ByDepth);
                 }
-                Ok(DecodedSelection::Retuned { merged, hash, for_hash }) => {
-                    self.magic_brush_state.rethreshold_in_flight = false;
-                    self.apply_rethreshold(result.item_id, merged, hash, result.reading, for_hash);
-                }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
                     self.toasts.error(format!("Magic Brush could not run: {err}"));
@@ -583,6 +591,10 @@ impl PrunrApp {
         let want = self.settings.brush.magic_reading();
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
+        // A retune is a selection change; it waits for a run on the image.
+        if !item.is_idle() {
+            return;
+        }
         let Some((output, mode, reading, for_hash)) = item.retunable_decode().map(|ld| (Arc::clone(&ld.output), ld.mode, ld.reading, ld.committed_hash)) else { return };
         if reading == want {
             return;
