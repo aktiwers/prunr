@@ -45,7 +45,9 @@ pub enum InpaintBridgeMsg {
 pub enum InpaintBridgeResult {
     Report { item_id: u64, update: prunr_core::ProgressUpdate },
     Done { item_id: u64, generation: u64, rgba_path: std::path::PathBuf, width: u32, height: u32, fill_scale: f32 },
-    Error { item_id: u64, error: String },
+    /// The stroke `generation` on `item_id`, and any before it, ended
+    /// without a result.
+    Error { item_id: u64, generation: u64, error: String },
 }
 
 /// The thread runs until the parent drops the sender.
@@ -162,7 +164,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     SubprocessEvent::InpaintError { item_id, generation, error } => {
                         last_used = Instant::now();
                         strokes.remove(&(item_id, generation));
-                        let _ = res_tx.send(InpaintBridgeResult::Error { item_id, error });
+                        let _ = res_tx.send(InpaintBridgeResult::Error { item_id, generation, error });
                     }
                     // An inpaint-only subprocess shouldn't emit seg events; ignore one
                     // rather than misroute it.
@@ -348,7 +350,7 @@ fn send_or_fail(
 ) {
     let stroke = (job.item_id, job.generation);
     if let Err(error) = mgr.send_inpaint(job) {
-        let _ = res_tx.send(InpaintBridgeResult::Error { item_id: stroke.0, error });
+        let _ = res_tx.send(InpaintBridgeResult::Error { item_id: stroke.0, generation: stroke.1, error });
         strokes.remove(&stroke);
         remove_stroke_files(crate::subprocess::protocol::ipc_temp_dir(), stroke);
     }
@@ -396,10 +398,11 @@ fn end_strokes(
     error: &str,
 ) {
     let mut last_item = None;
-    for stroke in std::mem::take(strokes) {
+    // Newest first, so the one error per image names its latest stroke.
+    for stroke in std::mem::take(strokes).into_iter().rev() {
         remove_stroke_files(ipc_dir, stroke);
         if last_item.replace(stroke.0) != Some(stroke.0) {
-            let _ = res_tx.send(InpaintBridgeResult::Error { item_id: stroke.0, error: error.into() });
+            let _ = res_tx.send(InpaintBridgeResult::Error { item_id: stroke.0, generation: stroke.1, error: error.into() });
         }
     }
 }
@@ -440,11 +443,11 @@ mod tests {
         assert!(strokes.is_empty());
         assert!(ended.iter().all(|p| !p.exists()), "every ended stroke's files are gone");
         assert!(kept.iter().all(|p| p.exists()), "a finished stroke's and others' files stay");
-        let ended_items: Vec<u64> = rx.try_iter().map(|r| match r {
-            InpaintBridgeResult::Error { item_id, .. } => item_id,
+        let ended_items: Vec<(u64, u64)> = rx.try_iter().map(|r| match r {
+            InpaintBridgeResult::Error { item_id, generation, .. } => (item_id, generation),
             _ => panic!("only errors"),
         }).collect();
-        assert_eq!(ended_items, [1, 2], "one error per image");
+        assert_eq!(ended_items, [(2, 1), (1, 4)], "one error per image, naming its latest stroke");
     }
 
     /// "Keep the Stable Diffusion eraser loaded" holds it until quit; only
@@ -480,7 +483,7 @@ mod tests {
         assert!(matches!(state, SubState::Idle), "the next stroke starts a new worker");
         assert!(inflight.is_empty());
         match rx.try_recv() {
-            Ok(InpaintBridgeResult::Error { item_id: 7, error }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
+            Ok(InpaintBridgeResult::Error { item_id: 7, error, .. }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
             _ => panic!("the stroke did not end"),
         }
     }
@@ -511,7 +514,7 @@ mod tests {
         }
         assert!(matches!(state, SubState::Idle), "the next stroke starts a new worker");
         match rx.try_recv() {
-            Ok(InpaintBridgeResult::Error { item_id: 7, error }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
+            Ok(InpaintBridgeResult::Error { item_id: 7, error, .. }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
             _ => panic!("the stroke did not end"),
         }
     }

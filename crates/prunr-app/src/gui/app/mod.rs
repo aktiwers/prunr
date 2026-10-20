@@ -832,8 +832,9 @@ impl PrunrApp {
         }
         tracing::info!(item_id, seed, "try another; dispatching");
         let tuning = self.erase_tuning(Some(seed));
-        self.processor.dispatch_inpaint(item_id, source, region, tuning);
         self.batch.items[idx].start_reroll(reroll, seed);
+        let Some(run) = self.batch.items[idx].job_run() else { return };
+        self.processor.dispatch_inpaint(item_id, run, source, region, tuning);
     }
 
     /// Make `bindings` the live ones and persist what differs from the
