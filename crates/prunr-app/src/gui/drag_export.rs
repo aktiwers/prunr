@@ -748,14 +748,10 @@ mod tests {
     #[test]
     fn each_instance_drags_out_of_its_own_folder() {
         let temp = std::env::temp_dir();
-        // Elsewhere a folder counts as dead by its age (a day), not at once.
-        #[cfg(target_os = "linux")]
-        {
-            let dead = temp.join(format!("{DRAG_SUBDIR}-4294967294"));
-            std::fs::create_dir_all(dead.join("1")).unwrap();
-            cleanup_stale();
-            assert!(!dead.exists(), "an instance no longer running loses its folder");
-        }
+        let dead = temp.join(format!("{DRAG_SUBDIR}-{}", crate::fs_util::a_free_pid()));
+        std::fs::create_dir_all(dead.join("1")).unwrap();
+        cleanup_stale();
+        assert!(!dead.exists(), "an instance no longer running loses its folder");
         assert!(drag_subdir().ends_with(&std::process::id().to_string()));
         assert!(is_self_drop(&drag_dir().join("1").join("a.prunr.png")));
         assert!(!is_self_drop(&temp.join(format!("{DRAG_SUBDIR}-12345")).join("1").join("a.prunr.png")), "another instance's import");

@@ -75,9 +75,8 @@ pub(crate) fn sweep_dir_files_async(dir: std::path::PathBuf) {
 /// process is no longer running, sparing `self_pid`. A crash or OOM kill
 /// skips graceful cleanup, so without this such dirs pile up forever.
 ///
-/// Liveness is `/proc/{pid}` on Linux. Other platforms fall back to
-/// "untouched for more than 24 h", conservative enough not to clobber a
-/// concurrent prunr instance.
+/// Liveness is the process itself: a session left open for days touches
+/// its folder rarely, so the folder's age would take a live one's files.
 pub(crate) fn sweep_dead_pid_dirs(parent: &Path, prefix: &str, self_pid: u32) {
     let Ok(entries) = std::fs::read_dir(parent) else { return };
     for entry in entries.flatten() {
@@ -86,22 +85,49 @@ pub(crate) fn sweep_dead_pid_dirs(parent: &Path, prefix: &str, self_pid: u32) {
         let Some(name) = name_os.to_str() else { continue };
         let Some(pid_str) = name.strip_prefix(prefix) else { continue };
         let Ok(other_pid) = pid_str.parse::<u32>() else { continue };
-        if other_pid == self_pid || !is_pid_dead(other_pid, &entry) { continue; }
+        if other_pid == self_pid || pid_runs(other_pid) { continue; }
         let _ = std::fs::remove_dir_all(entry.path());
     }
 }
 
-#[cfg(target_os = "linux")]
-fn is_pid_dead(pid: u32, _entry: &std::fs::DirEntry) -> bool {
-    !Path::new(&format!("/proc/{pid}")).exists()
+/// Whether a process has `pid`. When unsure (a pid too large for the OS,
+/// a check that errs) it answers yes: a folder kept costs disk, one taken
+/// from a live session costs its work.
+#[cfg(unix)]
+pub(crate) fn pid_runs(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return true };
+    // SAFETY: signal 0 sends nothing; it only checks the pid.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM: a process of another user.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn is_pid_dead(_pid: u32, entry: &std::fs::DirEntry) -> bool {
-    let Ok(meta) = entry.metadata() else { return false };
-    let Ok(modified) = meta.modified() else { return false };
-    let Ok(age) = modified.elapsed() else { return false };
-    age > std::time::Duration::from_secs(86_400)
+/// A pid no process has, for tests: the highest ones go unused on every
+/// desktop.
+#[cfg(test)]
+pub(crate) fn a_free_pid() -> u32 {
+    (4_000_000..4_100_000).rev().find(|&pid| !pid_runs(pid)).expect("a free pid")
+}
+
+#[cfg(windows)]
+pub(crate) fn pid_runs(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain Win32 calls; the handle is opened and closed here.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // ERROR_INVALID_PARAMETER: no process has the pid; any other
+            // error (access denied) is one that runs.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        read == 0 || code == STILL_ACTIVE as u32
+    }
 }
 
 #[cfg(test)]

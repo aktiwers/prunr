@@ -4412,6 +4412,7 @@ dependencies = [
  "hex",
  "image",
  "indicatif",
+ "libc",
  "memory-stats",
  "ndarray",
  "num_cpus",

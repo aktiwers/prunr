@@ -69,8 +69,12 @@ drag = "2.1"
 # Windows: attach to parent console when run from cmd/PowerShell so CLI output
 # reaches the user. Paired with `#![windows_subsystem = "windows"]` in main.rs
 # to suppress the empty console window on GUI launch.
+# Whether another instance's process still runs (its folders are kept).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
 # GPU detection: DXGI lists the display adapters without creating a
 # device. The same version and features the GPU stack already builds.
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
