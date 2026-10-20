@@ -296,9 +296,6 @@ impl BatchManager {
         self.selected_item().map(|_| self.selected_index)
     }
 
-    /// Remove the item at `idx`; its undo files go with its timeline.
-    /// Returns `false` when `idx` is out of bounds. Caller is responsible
-    /// for clamping `selected_index` and any downstream sync.
     /// Abandon every cut, under way or waiting for a slot, after a
     /// Cancel-All: each image shows its own state again. Late arrivals
     /// from the worker are dropped by the job check in `on_batch_item_done`.

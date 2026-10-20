@@ -4,8 +4,9 @@
 //! cache, CoreML mlmodelc cache, ORT graph optimization for CPU /
 //! CUDA) gets a directory under `<cache root>/<ep>/<key>/` (see
 //! [`cache_root`]), where `<key>` is
-//! `<model_stable_name>-<model_version>-ort<runtime>-v<format>`.
-//! Bumping any component invalidates the cache automatically.
+//! `<model_stable_name>-<model_version>-<files>-ort<runtime>-v<format>`,
+//! then `-<cpu vector ISA>` on the CPU (see [`cache_key`]). Bumping any
+//! component invalidates the cache automatically.
 //!
 //! EP names are `OrtEngine::active_provider()` strings (`"OpenVINO"`,
 //! `"CPU"`, …) rather than `EpKind`, because the CPU provider has no `EpKind`.

@@ -549,10 +549,10 @@ impl LamaSession {
         built.map_err(CoreError::Inference)
     }
 
-    /// Drop the cached session for `(id, cpu_only)`, so the next stroke
+    /// Drop `session`, cached for `(id, cpu_only)`, so the next stroke
     /// builds a fresh one; a run under way keeps its own.
-    fn forget(id: prunr_models::ModelId, cpu_only: bool) {
-        let gone = lama_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(id, cpu_only));
+    fn forget(id: prunr_models::ModelId, cpu_only: bool, session: &Arc<LamaSession>) {
+        let gone = take_if_current(&mut lama_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner), &(id, cpu_only), session);
         drop(gone);
     }
 
@@ -1344,8 +1344,6 @@ mod tests {
         assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), "the machine's lack, not the model's");
     }
 
-    /// The bbox-cropped grow matches full-image morphology, for masks in
-    /// the middle and touching each image edge, growing and shrinking.
     /// Growing or shrinking past the image's size does what its size
     /// does, at once (a huge Expand from a settings file looped 2^31 times).
     #[test]
@@ -1358,6 +1356,8 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
+    /// The bbox-cropped grow matches full-image morphology, for masks in
+    /// the middle and touching each image edge, growing and shrinking.
     #[test]
     fn grow_mask_matches_full_image_morphology() {
         let full = |m: &GrayImage, px: i32| {

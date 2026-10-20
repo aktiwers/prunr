@@ -112,7 +112,6 @@ fn source_stem(source_filename: &str) -> &str {
         .unwrap_or("image")
 }
 
-/// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
 /// `filenames` with each stem once, ignoring case as Windows and macOS
 /// do: a repeat becomes `stem-2`, `stem-3`…, its extension kept, so the
 /// files one save writes from them never share a name.
@@ -133,6 +132,7 @@ pub(crate) fn distinct_filenames<'a>(filenames: impl IntoIterator<Item = &'a str
     }).collect()
 }
 
+/// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
 pub(crate) fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
     format!("{}{}", source_stem(source_filename), format.result_suffix())
 }
