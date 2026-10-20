@@ -46,6 +46,13 @@ fn main() {
 
     init_tracing();
 
+    // Before anything is loaded: a worker of another version stops, and
+    // the app asks to be restarted.
+    if cli.worker && cli.worker_of.as_deref() != Some(prunr_app::subprocess::protocol::WORKER_VERSION) {
+        tracing::error!(parent = ?cli.worker_of, own = prunr_app::subprocess::protocol::WORKER_VERSION, "worker started by another version of the app");
+        std::process::exit(prunr_app::subprocess::protocol::WORKER_OF_ANOTHER_VERSION);
+    }
+
     if cli.doctor {
         cli::run_doctor();
         std::process::exit(0);

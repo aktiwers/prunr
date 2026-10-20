@@ -137,11 +137,11 @@ impl SubprocessManager {
         let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct, scales: edge_scales } = lines;
         // Spawn must NOT touch the temp dir: the CLI and the inpaint bridge write
         // inputs before spawning. `ipc_temp_dir()`'s init-time sweep owns cleanup.
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe: {e}"))?;
+        let exe = worker_exe()?;
 
         let mut child = Command::new(&exe)
             .arg("--worker")
+            .args(["--worker-of", WORKER_VERSION])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // child errors visible in parent console
@@ -175,10 +175,7 @@ impl SubprocessManager {
                 let _ = child.kill();
                 return Err(format!("Worker init failed: {error}"));
             }
-            Ok(ReaderEvent::Disconnected) => {
-                let _ = child.kill();
-                return Err("Worker exited during initialization".to_string());
-            }
+            Ok(ReaderEvent::Disconnected) => return Err(init_ended(child)),
             Ok(ReaderEvent::Event(other)) => {
                 let _ = child.kill();
                 return Err(format!("Unexpected event during init: {other:?}"));
@@ -531,6 +528,41 @@ impl Drop for SubprocessManager {
     }
 }
 
+/// The binary to run a worker from: this process's own. On Linux an update
+/// can replace the file while the app runs (the path then reads
+/// "… (deleted)"); /proc/self/exe still reaches the binary running.
+fn worker_exe() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let own = std::path::PathBuf::from("/proc/self/exe");
+        if own.exists() {
+            return Ok(own);
+        }
+    }
+    std::env::current_exe().map_err(|e| format!("Failed to get current exe: {e}"))
+}
+
+/// Why a worker that closed its output during Init stopped, once it has.
+fn init_ended(mut child: Child) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => break None,
+        }
+    };
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if status.and_then(|s| s.code()) == Some(WORKER_OF_ANOTHER_VERSION) {
+        "Prunr was updated while it was open. Restart it to keep processing.".to_string()
+    } else {
+        "Worker exited during initialization".to_string()
+    }
+}
+
 /// Take `child`'s pipes: its stdin to write commands to, and its stdout
 /// read on a thread into events, ending with `Disconnected`.
 fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mpsc::Receiver<ReaderEvent>), String> {
@@ -599,6 +631,26 @@ fn apply_event_state(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A worker that stopped as soon as it began says why: one of another
+    /// version (the app was updated while open) asks for a restart.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_that_stops_at_init_says_why() {
+        let exit = |code: i32| Command::new("sh").args(["-c", &format!("exit {code}")]).spawn().unwrap();
+        assert!(init_ended(exit(WORKER_OF_ANOTHER_VERSION)).starts_with("Prunr was updated while it was open"));
+        assert_eq!(init_ended(exit(3)), "Worker exited during initialization");
+    }
+
+    /// The worker runs from this process's own binary, which on Linux an
+    /// update may have replaced on disk.
+    #[test]
+    fn the_worker_runs_from_this_processs_own_binary() {
+        let exe = worker_exe().unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(exe, PathBuf::from("/proc/self/exe"));
+        assert!(exe.exists());
+    }
 
     fn fresh_state() -> (HashSet<u64>, bool) {
         let in_flight: HashSet<u64> = (0..10).collect();
