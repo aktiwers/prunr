@@ -102,6 +102,23 @@ impl PrunrApp {
     /// other edits; it lands through `land_selection_edits`. Every author
     /// (Paint Brush, Magic Brush, Invert, a fold into the cut-out) goes
     /// through here.
+    /// A selection edit on `item_id` is still being made: queued to land,
+    /// or a Magic Brush pick selecting. Undo, Process and the selection
+    /// actions wait for it.
+    pub(crate) fn selection_edit_pending(&self, item_id: u64) -> bool {
+        self.batch.selection_queue.is_pending(item_id) || self.processor.selecting(item_id)
+    }
+
+    /// Take back the Magic Brush picks on `ids` still waiting for their
+    /// image's embedding or depth map; whether there were any.
+    pub(crate) fn take_back_waiting_picks(&mut self, ids: &[u64]) -> bool {
+        let state = &mut self.magic_brush_state;
+        let held = state.pending_sam_picks.len();
+        state.pending_sam_picks.retain(|p| !ids.contains(&p.item_id));
+        let depth = state.pending_depth_click.take_if(|c| ids.contains(&c.item_id)).is_some();
+        depth || state.pending_sam_picks.len() != held
+    }
+
     pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding) {
         let Some(current) = self.batch.find_by_id(item_id).map(BatchItem::selection_state) else { return };
         self.batch.selection_queue.push(item_id, op, after, current);
@@ -148,7 +165,8 @@ impl PrunrApp {
             }
             ctx.request_repaint();
         }
-        for (action, ids) in self.batch.selection_queue.take_deferred() {
+        let processor = &self.processor;
+        for (action, ids) in self.batch.selection_queue.take_deferred(|id| processor.selecting(id)) {
             self.step_items(ctx, action, &ids);
         }
         // A queued run that waited for its image's selection goes now.
@@ -235,7 +253,7 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let item = self.batch.selected_item()?;
         // Every action reads the selection the edits under way will change.
-        if self.batch.selection_queue.is_pending(item.id) {
+        if self.selection_edit_pending(item.id) {
             return Some(Reason::FinishingSelection.text());
         }
         if item.selection_mask.is_none() {

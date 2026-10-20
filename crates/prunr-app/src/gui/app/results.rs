@@ -2454,6 +2454,47 @@ mod depth_tests {
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
     }
 
+    /// Undo pressed while a Magic Brush pick is still selecting waits for
+    /// it and undoes that pick, not the step before, so Redo brings the
+    /// pick back. A pick still waiting for its map is taken back at once
+    /// instead, so Undo never waits on a map that may be minutes away.
+    #[test]
+    fn undo_during_a_magic_pick_undoes_that_pick() {
+        use prunr_core::selection::{BrushMode, MaskArtifact, FULL};
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        push_test_item(&mut app, 1);
+        app.batch.items[0].dimensions = (8, 8);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+        let mut cells = vec![0i8; 64];
+        cells[0] = FULL;
+        app.batch.commit_selection(1, MaskArtifact::from_cells(8, 8, cells), crate::gui::timeline::StepKind::Stroke);
+        let steps = app.batch.items[0].timeline.undo_steps();
+
+        app.batch.items[0].depth = Some(map());
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.handle_undo(&ctx);
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "held while the pick selects");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.batch.items[0].timeline.can_redo() {
+            assert!(std::time::Instant::now() < deadline, "the held undo never ran");
+            app.pump_sam_results(&ctx);
+            app.land_selection_edits(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let item = &app.batch.items[0];
+        assert_eq!(item.timeline.undo_steps(), steps, "the pick, landed and undone");
+        assert_eq!(item.selection_mask.as_ref().map(|m| m.cells()[0]), Some(FULL), "the stroke before it stays");
+
+        app.batch.items[0].depth = None;
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.handle_undo(&ctx);
+        assert!(app.magic_brush_state.pending_depth_click.is_none(), "the waiting pick is taken back");
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "and nothing else");
+    }
+
     /// Magic Brush clicks made while the image is still being encoded wait
     /// for the embedding and all run when it lands, rather than being
     /// dropped; another image coming on screen, or the brush turned off,

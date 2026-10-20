@@ -652,7 +652,7 @@ impl PrunrApp {
             return Some(why);
         }
         // A run reads the selection the edits under way will change.
-        if self.batch.selection_queue.is_pending(item.id) {
+        if self.selection_edit_pending(item.id) {
             return Some(crate::gui::capability::Reason::FinishingSelection);
         }
         if let Verdict::Never(why) = item.verdict(Need::ShownImage, role) {
@@ -711,10 +711,15 @@ impl PrunrApp {
 
     /// Undo / redo the targeted images; while any of them has a selection
     /// edit being made, held until it has landed (an undo right after a
-    /// stroke undoes that stroke), for those same images.
+    /// stroke undoes that stroke), for those same images. An undo takes
+    /// back a pick still waiting for its image's embedding or depth map.
     fn step_or_hold(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action) {
         let ids: Vec<u64> = self.batch.targeted_indices().into_iter().map(|i| self.batch.items[i].id).collect();
-        if ids.iter().any(|&id| self.batch.selection_queue.is_pending(id)) {
+        if action == crate::gui::views::shortcuts::Action::Undo && self.take_back_waiting_picks(&ids) {
+            self.toasts.info(step_toast(&[StepKind::Stroke], "undone"));
+            return;
+        }
+        if ids.iter().any(|&id| self.selection_edit_pending(id)) {
             self.batch.selection_queue.defer(action, ids);
             return;
         }
