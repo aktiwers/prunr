@@ -1174,12 +1174,10 @@ mod tests {
     fn sweep_dead_pid_dirs_removes_dead_pids_keeps_self_and_unrelated() {
         // Stage three siblings under a fresh parent dir: own pid (keep),
         // a guaranteed-dead pid (remove), and a non-prunr name (keep).
-        // On non-Linux the dead-pid removal is gated out — only the
-        // self/foreign preservation arms run there.
         let parent = tempfile::tempdir().unwrap();
         let self_pid = std::process::id();
         let self_dir = parent.path().join(format!("prunr-ipc-{self_pid}"));
-        let dead_pid = pick_definitely_dead_pid();
+        let dead_pid = crate::fs_util::a_free_pid();
         let dead_dir = parent.path().join(format!("prunr-ipc-{dead_pid}"));
         let foreign = parent.path().join("not-a-prunr-dir");
         for d in [&self_dir, &dead_dir, &foreign] {
@@ -1188,35 +1186,36 @@ mod tests {
         crate::fs_util::sweep_dead_pid_dirs(self_dir.parent().unwrap(), "prunr-ipc-", self_pid);
         assert!(self_dir.exists(), "own pid dir must survive");
         assert!(foreign.exists(), "non-prunr names must be ignored");
-        // On non-Linux the 24h fallback won't kill a fresh dir; only assert
-        // the dead-pid removal where it's deterministic.
-        #[cfg(target_os = "linux")]
         assert!(!dead_dir.exists(), "dead-pid dir should be removed");
     }
 
-    #[cfg(target_os = "linux")]
-    fn pick_definitely_dead_pid() -> u32 {
-        // Iterate down from a high pid. The first `/proc/{pid}` miss
-        // wins. Theoretical race: kernel could re-allocate the picked
-        // pid before `sweep_dead_pid_dirs` runs, leaving the dir
-        // intact. In practice the window is microseconds and Linux
-        // doesn't reuse pids that fast under normal load. Worst case
-        // is a flaky test, not a correctness bug.
-        for pid in (1_000_000..2_000_000).rev() {
-            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
-                return pid;
-            }
-        }
-        unreachable!("could not find a dead pid in [1M, 2M)")
+    /// A session open for days keeps its folder: liveness is the process,
+    /// not the folder's age (another instance once took a live session's
+    /// files after 24 h untouched).
+    #[test]
+    fn a_live_sessions_folder_is_kept_however_old() {
+        let parent = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let waits = std::process::Command::new("sleep").arg("30").spawn();
+        #[cfg(windows)]
+        let waits = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+        let mut other = waits.unwrap();
+        let live_dir = parent.path().join(format!("prunr-ipc-{}", other.id()));
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let mut open = std::fs::File::options();
+        open.read(true);
+        // A folder opens on Windows only with FILE_FLAG_BACKUP_SEMANTICS.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::custom_flags(open.write(true), 0x0200_0000);
+        let days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        open.open(&live_dir).unwrap().set_modified(days_ago).unwrap();
+        crate::fs_util::sweep_dead_pid_dirs(parent.path(), "prunr-ipc-", std::process::id());
+        let kept = live_dir.exists();
+        let _ = other.kill();
+        let _ = other.wait();
+        assert!(kept, "a live session's folder survives the sweep");
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn pick_definitely_dead_pid() -> u32 {
-        // Liveness check on non-Linux falls back to mtime > 24h, which a
-        // freshly-created dir won't satisfy. Test still exercises the
-        // happy path of self/foreign preservation; pid value is unused.
-        u32::MAX
-    }
 
     /// The app's runs make the drawn scales (and what their detector run
     /// makes anyway) before the result, the rest after it only for the
