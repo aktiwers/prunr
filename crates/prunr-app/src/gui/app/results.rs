@@ -574,7 +574,7 @@ impl PrunrApp {
                     }
                 }
                 WorkerResult::BatchComplete { batch } => self.on_batch_complete(batch),
-                WorkerResult::Cancelled => self.on_cancelled(),
+                WorkerResult::Cancelled { batch } => self.on_cancelled(batch),
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
@@ -824,10 +824,17 @@ impl PrunrApp {
         self.run_deferred();
     }
 
-    fn on_cancelled(&mut self) {
-        self.processor.drain_recipes();
-        self.status.text = "Cancelled".to_string();
-        self.processor.clear_admission();
+    /// The worker stopped batch `batch` for a Cancel. Only that batch
+    /// ends: its word can come after the next Process started another.
+    fn on_cancelled(&mut self, batch: u64) {
+        let mut never_answered = self.processor.finish_batch(batch);
+        never_answered.extend(self.processor.end_admission_with(batch));
+        for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
+            item.abandon_job();
+        }
+        if !self.batch.any_awaiting_cut() {
+            self.status.text = "Cancelled".to_string();
+        }
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {
@@ -2208,6 +2215,28 @@ mod timeline_contract_tests {
             assert!(app.batch.items[0].job.is_none(), "{engine:?}: the run is over");
             assert_eq!(shown(&app), Some(7), "{engine:?}: the result landed");
         }
+    }
+
+    /// The worker's word that a batch was cancelled can come after the
+    /// next Process: it ends only the batch it names, and the batch
+    /// started since still lands its answer.
+    #[test]
+    fn a_late_cancel_ends_only_the_batch_it_names() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
+        crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
+        let cancelled = app.processor.track_dispatch(recipe.clone(), [1]);
+        app.handle_cancel_all_and_reset();
+        crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
+        let next = app.processor.track_dispatch(recipe, [1]);
+        app.on_cancelled(cancelled);
+        let answer = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, next, 1, Ok(answer), None, None);
+        let item = &app.batch.items[0];
+        assert_eq!(item.status(), BatchStatus::Done);
+        assert!(item.job.is_none(), "nothing is awaited any more");
+        assert_eq!(shown(&app), Some(9), "the new batch's answer landed");
     }
 
     /// A batch that ends with an image still marked as processing (its

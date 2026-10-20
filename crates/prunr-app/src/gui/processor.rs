@@ -1469,13 +1469,6 @@ impl Processor {
         batch.pending.into_iter().collect()
     }
 
-    /// Drop every batch regardless of pending, so a late delivery after a
-    /// cancel can't reattribute.
-    pub(crate) fn drain_recipes(&mut self) {
-        self.in_flight.clear();
-        self.end_seg_run();
-    }
-
     fn after_batch_change(&mut self) {
         if self.in_flight.is_empty() {
             self.end_seg_run();
@@ -2463,7 +2456,7 @@ mod tests {
         p.track_streamed(4);
         assert_eq!(p.dispatch_progress().unwrap().outer, Some((1, 4)), "a streamed image grows the total");
 
-        p.drain_recipes();
+        let _ = p.finish_batch(b);
         assert!(p.dispatch_progress().is_none());
         let _upscale = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling"));
         p.end_seg_run();
@@ -2879,12 +2872,11 @@ mod tests {
     }
 
     #[test]
-    fn drain_recipes_clears_pending() {
+    fn a_finished_batch_takes_no_late_answer() {
         let mut p = fixture();
         let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
-        p.drain_recipes();
-        assert!(p.take_recipe(b, 1).is_none(),
-            "drain must drop the slot so late deliveries do not land");
+        assert_eq!(p.finish_batch(b).len(), 3);
+        assert!(p.take_recipe(b, 1).is_none(), "a late answer lands on nothing");
     }
 
     /// A stroke stopped part-way by its cancel reports core's own text;
