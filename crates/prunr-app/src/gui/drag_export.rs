@@ -466,6 +466,8 @@ impl DragFiles {
 pub(crate) struct DragKey {
     settings: ItemSettings,
     result: Option<std::sync::Weak<image::RgbaImage>>,
+    /// The shown step's result: off screen it is the only copy.
+    step: Option<std::sync::Weak<super::timeline::Stored<image::RgbaImage>>>,
     bg_image: Option<std::sync::Weak<super::item::BgImage>>,
     backdrop: Option<u64>,
     layers: Option<LayerKey>,
@@ -488,6 +490,7 @@ impl DragKey {
         Self {
             settings: item.settings,
             result: item.result_rgba.as_ref().map(Arc::downgrade),
+            step: item.timeline.current().result.as_ref().map(Arc::downgrade),
             bg_image: item.bg_image.as_ref().map(Arc::downgrade),
             backdrop: item.backdrop_key(),
             layers: split.then(|| LayerKey {
@@ -511,6 +514,7 @@ impl DragKey {
         }
         self.settings == other.settings
             && same(&self.result, &other.result)
+            && same(&self.step, &other.step)
             && same(&self.bg_image, &other.bg_image)
             && self.backdrop == other.backdrop
             && match (&self.layers, &other.layers) {
@@ -773,6 +777,24 @@ mod tests {
         item.settings.bg = None;
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         assert!(!key.matches(&DragKey::of(&item, spec(false))), "a new result");
+    }
+
+    /// An image off screen holds its result only on its step, so a new
+    /// result landing there must stale the files written ahead too.
+    #[test]
+    fn a_new_result_parked_off_screen_stales_the_drag_key() {
+        use crate::gui::brush_state::CutoutAction;
+        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let mut item = processed_item(2, "parked.jpg");
+        item.park_off_screen();
+        assert!(matches!(item.result_pixels(), Some(crate::gui::item::Pixels::Parked(_))));
+        let key = DragKey::of(&item, spec);
+        assert!(key.matches(&DragKey::of(&item, spec)), "nothing changed");
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))));
+        item.amend();
+        item.park_off_screen();
+        assert!(matches!(item.result_pixels(), Some(crate::gui::item::Pixels::Parked(_))));
+        assert!(!key.matches(&DragKey::of(&item, spec)), "a new result, parked");
     }
 
     /// A drag takes the files written ahead on a worker; once the item
