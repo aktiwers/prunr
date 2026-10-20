@@ -5,7 +5,7 @@
 //! Does NOT own the worker bridge thread (only its channel ends) or
 //! `BatchManager`, which methods borrow per call.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -85,7 +85,8 @@ struct InFlightBatch {
     /// The id the worker's completion names it by.
     id: u64,
     recipe: ProcessingRecipe,
-    pending: HashSet<u64>,
+    /// Each image still to answer, with the run its answer is for.
+    pending: HashMap<u64, u64>,
     /// Frozen at dispatch, so progress counts only this dispatch, not
     /// items processed before it.
     total: usize,
@@ -418,7 +419,8 @@ pub(crate) struct DepthResult {
 /// What `release_and_admit` did with the images that fit.
 #[derive(Default, Debug)]
 pub(crate) struct Admitted {
-    pub(crate) sent: Vec<u64>,
+    /// Each with the run it is.
+    pub(crate) sent: Vec<(u64, u64)>,
     /// Built but not sent: the worker had gone.
     pub(crate) lost: Vec<u64>,
 }
@@ -1385,15 +1387,15 @@ impl Processor {
     pub(crate) fn track_dispatch(
         &mut self,
         recipe: ProcessingRecipe,
-        ids: impl IntoIterator<Item = u64>,
+        runs: impl IntoIterator<Item = (u64, u64)>,
     ) -> u64 {
-        let pending: HashSet<u64> = ids.into_iter().collect();
+        let pending: HashMap<u64, u64> = runs.into_iter().collect();
         let total = pending.len();
         // A batch admission still feeds stays open for the images to come.
         let fed = self.admission_batch();
         self.in_flight.retain_mut(|b| {
             let before = b.pending.len();
-            b.pending.retain(|id| !pending.contains(id));
+            b.pending.retain(|id, _| !pending.contains_key(id));
             b.total -= before - b.pending.len();
             !b.pending.is_empty() || Some(b.id) == fed
         });
@@ -1423,14 +1425,14 @@ impl Processor {
     /// Add a streamed item to the batch admission feeds (without one, the
     /// newest batch). Release builds no-op on a missing batch so a late
     /// delivery can't take down a real one.
-    pub(crate) fn track_streamed(&mut self, id: u64) {
+    pub(crate) fn track_streamed(&mut self, id: u64, run: u64) {
         let fed = match self.admission_batch() {
             Some(batch) => self.in_flight.iter_mut().find(|b| b.id == batch),
             None => self.in_flight.last_mut(),
         };
         match fed {
             Some(b) => {
-                if b.pending.insert(id) {
+                if b.pending.insert(id, run).is_none() {
                     b.total += 1;
                     self.report_seg_count();
                 }
@@ -1488,22 +1490,22 @@ impl Processor {
         std::mem::take(&mut self.deferred_runs)
     }
 
-    /// Take the recipe for an item batch `batch` answered. `None` when
-    /// that batch no longer awaits it (cancelled, or a newer batch runs
-    /// the image): the answer is stale. A batch whose last item lands is
-    /// done.
-    pub(crate) fn take_recipe(&mut self, batch: u64, id: u64) -> Option<ProcessingRecipe> {
-        let at = self.in_flight.iter().position(|b| b.id == batch && b.pending.contains(&id))?;
+    /// Take the recipe for an item batch `batch` answered, and the run
+    /// the answer is for. `None` when that batch no longer awaits it
+    /// (cancelled, or a newer batch runs the image): the answer is stale.
+    /// A batch whose last item lands is done.
+    pub(crate) fn take_recipe(&mut self, batch: u64, id: u64) -> Option<(ProcessingRecipe, u64)> {
+        let at = self.in_flight.iter().position(|b| b.id == batch && b.pending.contains_key(&id))?;
         let fed = self.admission_batch() == Some(batch);
         let batch = &mut self.in_flight[at];
-        batch.pending.remove(&id);
+        let run = batch.pending.remove(&id)?;
         let recipe = batch.recipe.clone();
         // A batch admission still feeds stays open for the images to come.
         if batch.pending.is_empty() && !fed {
             self.in_flight.remove(at);
         }
         self.after_batch_change();
-        Some(recipe)
+        Some((recipe, run))
     }
 
     /// The worker finished batch `id`: drop it and return the images it
@@ -1512,7 +1514,7 @@ impl Processor {
         let Some(at) = self.in_flight.iter().position(|b| b.id == id) else { return Vec::new() };
         let batch = self.in_flight.remove(at);
         self.after_batch_change();
-        batch.pending.into_iter().collect()
+        batch.pending.into_keys().collect()
     }
 
     fn after_batch_change(&mut self) {
@@ -1571,8 +1573,9 @@ impl Processor {
                 ctrl.release(next);
                 continue;
             };
+            let run = item.run;
             if tx.send(item).is_ok() {
-                admitted.sent.push(next);
+                admitted.sent.push((next, run));
             } else {
                 ctrl.release(next);
                 admitted.lost.push(next);
@@ -1580,8 +1583,8 @@ impl Processor {
             }
         }
         let complete = ctrl.is_complete();
-        for &id in &admitted.sent {
-            self.track_streamed(id);
+        for &(id, run) in &admitted.sent {
+            self.track_streamed(id, run);
         }
         if complete {
             let fed = self.admission_batch();
@@ -2424,7 +2427,7 @@ mod tests {
         assert!(warmed(&rx).is_empty());
 
         p.schedule_seg_warm(cfg(ModelKind::Silueta), t0);
-        p.track_dispatch(crate::gui::item_settings::ItemSettings::default().current_recipe(ModelKind::Silueta), [1]);
+        p.track_dispatch(crate::gui::item_settings::ItemSettings::default().current_recipe(ModelKind::Silueta), [1].map(|id| (id, 0)));
         assert_eq!(p.pump_seg_warm(t0 + Duration::from_secs(2)), None);
         assert!(warmed(&rx).is_empty(), "a run under way drops it");
 
@@ -2508,12 +2511,12 @@ mod tests {
     fn a_batch_counts_its_images_and_keeps_the_reported_step() {
         use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].map(|id| (id, 0)));
         p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::FindingSubject));
         assert!(p.take_recipe(b, 1).is_some());
         let shown = p.dispatch_progress().unwrap();
         assert_eq!((shown.outer, shown.step_label.as_ref()), (Some((1, 3)), "Finding the subject"));
-        p.track_streamed(4);
+        p.track_streamed(4, 0);
         assert_eq!(p.dispatch_progress().unwrap().outer, Some((1, 4)), "a streamed image grows the total");
 
         let _ = p.finish_batch(b);
@@ -2640,7 +2643,7 @@ mod tests {
         let (admitted, rx) = p.open_admission(ctrl, work);
         let admitted: Vec<u64> = admitted.into_iter().map(|w| w.id).collect();
         assert_eq!(admitted, vec![3], "only the smallest is forced in");
-        p.track_dispatch(fixture_recipe(), admitted);
+        p.track_dispatch(fixture_recipe(), admitted.iter().map(|&id| (id, 0)));
 
         p.release_and_admit(3, work);
         assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "the next smallest is sent");
@@ -2661,7 +2664,7 @@ mod tests {
         let (items, _rx) = p.open_admission(ctrl, |id| (id != 1).then(|| test_work(id)));
         let sent: Vec<u64> = items.iter().map(|w| w.id).collect();
         assert_eq!(sent, vec![2], "1 fits first but can't be sent; its share lets 2 in");
-        p.track_dispatch(fixture_recipe(), sent);
+        p.track_dispatch(fixture_recipe(), sent.iter().map(|&id| (id, 0)));
         let work = |id: u64| Some(test_work(id));
         p.release_and_admit(2, work);
         assert_eq!(_rx.try_recv().map(|w| w.id), Ok(3), "3 goes out behind 2");
@@ -2676,10 +2679,10 @@ mod tests {
         let mut p = fixture();
         let ctrl = controller(1, &[(1, 2), (2, 1)]);
         let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
-        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| (w.id, w.run)));
         p.admission_feeds(fed);
-        let newer = p.track_dispatch(fixture_recipe(), [9]);
-        assert!(p.release_and_admit(2, |id| Some(test_work(id))).sent == vec![1]);
+        let newer = p.track_dispatch(fixture_recipe(), [9].map(|id| (id, 0)));
+        assert!(p.release_and_admit(2, |id| Some(test_work(id))).sent == vec![(1, 0)]);
         assert!(p.take_recipe(newer, 1).is_none(), "not the newer batch's");
         assert!(p.take_recipe(fed, 1).is_some(), "the fed batch takes its answer");
     }
@@ -2692,7 +2695,7 @@ mod tests {
         let mut p = fixture();
         let ctrl = controller(1, &[(1, 3), (2, 2), (3, 1)]);
         let (first, rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
-        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| (w.id, w.run)));
         p.admission_feeds(fed);
         drop(rx);
         let admitted = p.release_and_admit(first[0].id, |id| Some(test_work(id)));
@@ -2709,7 +2712,7 @@ mod tests {
         let mut p = fixture();
         let ctrl = controller(1, &[(1, 2), (2, 1)]);
         let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
-        p.track_dispatch(fixture_recipe(), first.iter().map(|w| w.id));
+        p.track_dispatch(fixture_recipe(), first.iter().map(|w| (w.id, w.run)));
         p.defer_run(vec![7], None);
         assert!(p.take_deferred_runs().is_empty(), "held while admission feeds");
         p.clear_admission();
@@ -2793,7 +2796,7 @@ mod tests {
     #[test]
     fn a_background_removal_run_shows_progress_from_the_start() {
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
+        p.track_dispatch(fixture_recipe(), [10, 20].map(|id| (id, 0)));
         p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel));
         let shown = p.dispatch_progress().expect("the capsule shows before any image is done");
         assert_eq!((shown.outer, shown.step_label.as_ref()), (Some((0, 2)), "Loading the model"));
@@ -2802,7 +2805,7 @@ mod tests {
     #[test]
     fn track_dispatch_then_take_returns_recipe_per_item() {
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [10, 20, 30].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [10, 20, 30].map(|id| (id, 0)));
         assert!(p.take_recipe(b, 10).is_some());
         assert!(p.take_recipe(b, 20).is_some());
         // Slot still alive while items remain.
@@ -2820,16 +2823,16 @@ mod tests {
         let mut p = fixture();
         let mut second = fixture_recipe();
         second.mask = prunr_core::MaskRecipe::from(&prunr_core::MaskSettings { gamma: 2.0, ..Default::default() });
-        let one = p.track_dispatch(fixture_recipe(), [1]);
-        let two = p.track_dispatch(second.clone(), [2]);
-        assert!(p.take_recipe(one, 1).is_some_and(|r| r != second), "the first batch's image keeps its own recipe");
+        let one = p.track_dispatch(fixture_recipe(), [1].map(|id| (id, 0)));
+        let two = p.track_dispatch(second.clone(), [2].map(|id| (id, 0)));
+        assert!(p.take_recipe(one, 1).is_some_and(|(r, _)| r != second), "the first batch's image keeps its own recipe");
         assert_eq!(p.current_dispatch_progress(), Some((0, 1)), "the first batch is done; the queued one shows on");
-        assert_eq!(p.take_recipe(two, 2), Some(second));
+        assert_eq!(p.take_recipe(two, 2), Some((second, 0)));
         assert_eq!(p.current_dispatch_progress(), None);
 
-        let first = p.track_dispatch(fixture_recipe(), [3, 4]);
-        p.track_streamed(5);
-        let queued = p.track_dispatch(fixture_recipe(), [6]);
+        let first = p.track_dispatch(fixture_recipe(), [3, 4].map(|id| (id, 0)));
+        p.track_streamed(5, 0);
+        let queued = p.track_dispatch(fixture_recipe(), [6].map(|id| (id, 0)));
         p.take_recipe(first, 3);
         let mut unanswered = p.finish_batch(first);
         unanswered.sort();
@@ -2842,7 +2845,7 @@ mod tests {
     #[test]
     fn take_recipe_unknown_id_is_none() {
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1].map(|id| (id, 0)));
         assert!(p.take_recipe(b, 999).is_none(), "unknown id must not return a recipe");
         assert!(p.take_recipe(b + 1, 1).is_none(), "another batch's answer must not take it");
         // Tracked id still works.
@@ -2864,7 +2867,7 @@ mod tests {
         // a previously-Done item from a prior dispatch can't inflate
         // total.
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [10, 20].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [10, 20].map(|id| (id, 0)));
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
             "fresh dispatch starts at 0/total");
         assert!(p.take_recipe(b, 10).is_some());
@@ -2882,8 +2885,8 @@ mod tests {
         // Re-registering an already-tracked id (defensive against a
         // worker echo) must not inflate total — only first-insert bumps.
         let mut p = fixture();
-        p.track_dispatch(fixture_recipe(), [1, 2].iter().copied());
-        p.track_streamed(1);
+        p.track_dispatch(fixture_recipe(), [1, 2].map(|id| (id, 0)));
+        p.track_streamed(1, 0);
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)),
             "duplicate streamed id must not bump total");
     }
@@ -2894,8 +2897,8 @@ mod tests {
         // current batch's recipe so a late ImageDone for a streamed id
         // still attributes correctly.
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [1].iter().copied());
-        p.track_streamed(2);
+        let b = p.track_dispatch(fixture_recipe(), [1].map(|id| (id, 0)));
+        p.track_streamed(2, 0);
         assert!(p.take_recipe(b, 1).is_some());
         assert!(p.take_recipe(b, 2).is_some(), "streamed item must have a recipe");
     }
@@ -2904,13 +2907,13 @@ mod tests {
     #[should_panic(expected = "track_streamed called without active batch")]
     fn track_streamed_without_dispatch_panics_in_debug() {
         let mut p = fixture();
-        p.track_streamed(99);
+        p.track_streamed(99, 0);
     }
 
     #[test]
     fn a_finished_batch_takes_no_late_answer() {
         let mut p = fixture();
-        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].iter().copied());
+        let b = p.track_dispatch(fixture_recipe(), [1, 2, 3].map(|id| (id, 0)));
         assert_eq!(p.finish_batch(b).len(), 3);
         assert!(p.take_recipe(b, 1).is_none(), "a late answer lands on nothing");
     }
@@ -2933,15 +2936,15 @@ mod tests {
     #[test]
     fn a_newer_batch_takes_an_image_from_the_batch_that_ran_it() {
         let mut p = fixture();
-        let old = p.track_dispatch(fixture_recipe(), [1, 2]);
-        let new = p.track_dispatch(fixture_recipe(), [1]);
+        let old = p.track_dispatch(fixture_recipe(), [1, 2].map(|id| (id, 0)));
+        let new = p.track_dispatch(fixture_recipe(), [1].map(|id| (id, 0)));
         assert!(p.take_recipe(old, 1).is_none(), "the old run's answer is stale");
         assert_eq!(p.current_dispatch_progress(), Some((0, 2)), "image 1 is counted once");
         assert_eq!(p.finish_batch(old), vec![2]);
         assert!(p.take_recipe(new, 1).is_some(), "the new run's answer lands");
 
-        let only = p.track_dispatch(fixture_recipe(), [3]);
-        let again = p.track_dispatch(fixture_recipe(), [3]);
+        let only = p.track_dispatch(fixture_recipe(), [3].map(|id| (id, 0)));
+        let again = p.track_dispatch(fixture_recipe(), [3].map(|id| (id, 0)));
         assert!(p.finish_batch(only).is_empty(), "a batch left with nothing awaits nothing");
         assert_eq!(p.finish_batch(again), vec![3]);
     }
