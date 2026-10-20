@@ -1178,22 +1178,6 @@ impl BatchItem {
         super::reclaim::later(self.colorize.take());
     }
 
-    /// Clear the cached SAM encoder embedding. Called on source image
-    /// change and on model switch to a non-Selection category.
-    pub(crate) fn invalidate_magic_brush_embedding(&mut self) {
-        self.magic_brush_embedding = None;
-        self.magic_preencode_refused = false;
-        self.last_decode = None;
-    }
-
-    /// The photo changed: its depth map, any run measuring the old one and
-    /// the photo looked from it are out of date.
-    pub(crate) fn invalidate_depth(&mut self) {
-        self.depth = None;
-        self.depth_photo = None;
-        self.depth_run = DepthRun { epoch: self.depth_run.epoch.wrapping_add(1), pending: false, failed: false };
-    }
-
     /// A depth map is wanted and none is kept, under way or failed.
     pub(crate) fn needs_depth_run(&self) -> bool {
         self.depth.is_none() && !self.depth_run.pending && !self.depth_run.failed
@@ -1226,17 +1210,6 @@ impl BatchItem {
             self.last_decode = None;
         }
         self.last_decode.as_mut()
-    }
-
-    /// What was made from the source pixels goes with them: the
-    /// selection, the Magic Brush embedding and the depth map. Returns
-    /// whether a selection or embedding was there.
-    pub(crate) fn invalidate_source_derived(&mut self) -> bool {
-        let any = self.selection_mask.is_some() || self.magic_brush_embedding.is_some();
-        self.invalidate_selection();
-        self.invalidate_magic_brush_embedding();
-        self.invalidate_depth();
-        any
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
@@ -1726,13 +1699,9 @@ impl BatchItem {
         match result {
             Ok(rgba) => {
                 self.decode_failed = false;
-                // The first decode is the same photo, now in pixels: what
+                // The image's own file, which never changes under it: what
                 // was made from it (depth, selection, embedding) stays.
-                // Only a photo replaced by another invalidates it.
-                let replaced = self.source_rgba.replace(Arc::clone(&rgba)).is_some_and(|old| !Arc::ptr_eq(&old, &rgba));
-                if replaced {
-                    self.invalidate_source_derived();
-                }
+                self.source_rgba = Some(rgba);
                 true
             }
             Err(msg) => {
@@ -2511,7 +2480,6 @@ impl BatchItem {
         self.thumb.clear();
         self.source_tex_pending = false;
         self.result_tex_pending = false;
-        self.decode_pending = false;
     }
 
     /// Apply a finished tier result (success or error). Returns the
@@ -3262,7 +3230,7 @@ mod tests {
         assert!(!item.thumb.is_pending());
         assert!(!item.source_tex_pending);
         assert!(!item.result_tex_pending);
-        assert!(!item.decode_pending);
+        assert!(item.decode_pending, "the photo's decode is no result cache: it is still under way");
         assert!(item.selection_mask.is_some() && item.selection_hash.is_some(), "the selection stays");
     }
 
@@ -3590,17 +3558,20 @@ mod tests {
         assert_eq!(item.redo_step(), Err(StepRefused::Nothing), "still on the newest step");
     }
 
+    /// A decode is of the image's own file, which never changes under it
+    /// (a changed file is refused): what was made from the photo (depth,
+    /// selection, Magic Brush embedding) stays through every decode.
     #[test]
-    fn the_first_decode_keeps_what_was_made_from_the_photo() {
+    fn a_decode_keeps_what_was_made_from_the_photo() {
         let mut item = fixture_item(1);
         item.dimensions = (1, 1);
         item.source_rgba = None;
         item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
         item.selection_mask = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![1])));
         assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(1, 1)))));
-        assert!(item.depth.is_some() && item.selection_mask.is_some(), "the same photo, decoded");
+        assert!(item.depth.is_some() && item.selection_mask.is_some(), "the first decode");
         assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(1, 1)))));
-        assert!(item.depth.is_none() && item.selection_mask.is_none(), "another photo");
+        assert!(item.depth.is_some() && item.selection_mask.is_some(), "a second decode of the same photo");
     }
 
     /// A run's work is handles: its file is read where the run is sent,
