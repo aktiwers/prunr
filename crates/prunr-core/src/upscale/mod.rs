@@ -112,8 +112,7 @@ pub fn upscale_rgba_with_engine(
     let knobs = upscale_knobs(descriptor)?;
     if let Some(net) = engine.parts() {
         let running = blocks::Running { net, terminate: terminate.map(Arc::as_ref) };
-        // An unknown reading is not low memory: hold the most.
-        let room = crate::sysmem::available_ram_bytes().map_or(u64::MAX, |free| free.saturating_sub(working_set_bytes(model_id)));
+        let room = parted_room(crate::sysmem::available_ram_bytes(), working_set_bytes(model_id), net.resident_bytes());
         let pre = blocks::pre_norm_within(net.layout(), input.width(), input.height(), knobs.native_scale, room);
         tracing::info!(?model_id, ?pre, room, "upscale in parts");
         let rgb = blocks::upscale_by_parts(&running, input, knobs.native_scale, pre, progress)?;
@@ -236,19 +235,26 @@ pub fn needed_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u
     peak_bytes(model, in_w, in_h, scale) + working_set_bytes(model)
 }
 
+/// What a parted run may still take of `free`: the parts' sessions are
+/// in memory already (`resident`), so only the rest of the working set is
+/// still to come. Nothing readable: none, as the app's gates refuse then.
+fn parted_room(free: Option<u64>, working_set: u64, resident: u64) -> u64 {
+    free.map_or(0, |free| free.saturating_sub(working_set.saturating_sub(resident)))
+}
+
 fn working_set_bytes(model: prunr_models::ModelId) -> u64 {
     prunr_models::descriptor(model).map_or(0, |d| u64::from(d.working_set_mb)) * 1024 * 1024
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
 /// holds at its peak, besides the input and the model: the tiler's
-/// buffers, or a part-by-part run's held its leanest way, at the model's
-/// own scale, or the resample to `scale` when that is larger.
+/// buffers, or the least a part-by-part run can hold, at the model's own
+/// scale, or the resample to `scale` when that is larger.
 fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
     let descriptor = prunr_models::descriptor(model);
     let native = descriptor.and_then(|d| d.upscale.as_ref()).map_or(scale, |k| k.native_scale);
     let run = match descriptor.and_then(|d| d.part_layout()) {
-        Some(layout) => blocks::peak_bytes(layout, in_w, in_h, native, blocks::PreNorm::LEANEST),
+        Some(layout) => blocks::least_peak_bytes(layout, in_w, in_h, native),
         None => {
             // A model without a tile size refuses to run; count the whole height.
             let tile = descriptor.and_then(|d| d.recommended_tile).unwrap_or(in_h);
@@ -312,15 +318,24 @@ mod tests {
         assert_eq!(mb(peak_bytes(ModelId::RealEsrganX2Plus, 4096, 4096, 2)), 128 + 256 + 64);
     }
 
+    /// A parted run's room leaves out what its sessions already hold.
+    #[test]
+    fn a_parted_run_counts_only_the_working_set_still_to_come() {
+        assert_eq!(parted_room(Some(10), 4, 1), 7);
+        assert_eq!(parted_room(Some(10), 4, 6), 10, "sessions past the working set leave all of it");
+        assert_eq!(parted_room(Some(2), 4, 0), 0);
+        assert_eq!(parted_room(None, 4, 1), 0, "nothing readable: no room");
+    }
+
     /// What an upscale needs free is its peak and the model's working set:
-    /// for a model run in parts, held its leanest way, whatever the Scale.
+    /// for a model run in parts the least it can hold, whatever the Scale.
     #[test]
     fn an_upscale_needs_its_peak_and_the_models_working_set() {
         use prunr_models::ModelId;
         let working_set = working_set_bytes;
         let nomos2 = ModelId::FourXNomos2RealPlksr;
-        // The features and the image (268 B a pixel), and two bands of
-        // 250 kept rows of 64 f32 channels.
+        // The features and the image (268 B a pixel), and half-precision
+        // blocks' outputs or two bands of 250 of the 1000 rows: 128 B.
         assert_eq!(needed_bytes(nomos2, 1000, 1000, 4), 1_000_000 * 268 + 2 * 250 * 1000 * 256 + working_set(nomos2));
         assert_eq!(needed_bytes(nomos2, 1000, 1000, 2), needed_bytes(nomos2, 1000, 1000, 4), "the run at 4x outweighs the resample");
         let x4 = ModelId::RealEsrganX4Plus;

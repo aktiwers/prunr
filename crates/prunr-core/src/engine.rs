@@ -805,6 +805,7 @@ impl OrtEngine {
     /// optimized-graph cache, which keys one graph per model.
     fn build_parts(model: ModelKind, net: crate::upscale::blocks::NetShape, intra_threads: usize, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
         let id: prunr_models::ModelId = model.into();
+        let rss_before = crate::sysmem::process_rss_mb();
         let (onnx, norms) = crate::upscale::blocks::read_parts(id, net.layout.features)?;
         let commit_all = |ep: Option<EpKind>| -> Result<Vec<(&'static str, Session)>, Miss> {
             onnx.iter().map(|(key, bytes)| {
@@ -835,7 +836,8 @@ impl OrtEngine {
             }
         };
         tracing::info!(?model, parts = sessions.len(), provider = %pick.provider, elapsed_ms = started.elapsed().as_millis() as u64, "part sessions committed");
-        let net = crate::upscale::blocks::BlockNet::new(sessions, norms, net)?;
+        let resident_mb = rss_before.zip(crate::sysmem::process_rss_mb()).map_or(0, |(before, after)| after.saturating_sub(before));
+        let net = crate::upscale::blocks::BlockNet::new(sessions, norms, net, resident_mb * 1024 * 1024)?;
         Ok(Self { sessions: Sessions::Parts(Box::new(net)), pick, model_kind: model })
     }
 
