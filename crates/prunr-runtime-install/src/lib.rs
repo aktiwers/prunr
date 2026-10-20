@@ -264,6 +264,24 @@ impl Retryable for DlError {
     fn cancelled() -> Self { DlError::fatal("cancelled") }
 }
 
+/// `error` with the causes under it, "a: b: c". A failed request's own
+/// text names only the request ("error sending request for url ..."); why
+/// it failed (a refused connection, an untrusted certificate, a proxy
+/// that would not answer) is a cause beneath it.
+pub fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(e) = cause {
+        let more = e.to_string();
+        if !text.contains(&more) {
+            text.push_str(": ");
+            text.push_str(&more);
+        }
+        cause = e.source();
+    }
+    text
+}
+
 /// The HTTP client every download site shares. The blocking client
 /// applies `timeout` per operation: once for the request headers, then
 /// again for each `Read` call on a streamed body, so a slow link still
@@ -297,9 +315,9 @@ fn download_wheel_attempt(
     hooks: &mut DownloadHooks<'_>,
 ) -> Result<bytes::Bytes, DlError> {
     let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
-        .map_err(|e| DlError::fatal(format!("HTTP client: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("HTTP client: {}", with_causes(&e))))?;
     let response = client.get(&info.url).send()
-        .map_err(|e| DlError::transient(format!("connect: {e}")))?;
+        .map_err(|e| DlError::transient(format!("connect: {}", with_causes(&e))))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -318,7 +336,7 @@ fn download_wheel_attempt(
         let n = match response.read(&mut chunk) {
             Ok(n) => n,
             // Partial-stream errors (broken pipe, timeout) are transient.
-            Err(e) => return Err(DlError::transient(format!("read: {e}"))),
+            Err(e) => return Err(DlError::transient(format!("read: {}", with_causes(&e)))),
         };
         if n == 0 { break; }
         buf.extend_from_slice(&chunk[..n]);
@@ -416,6 +434,24 @@ pub const DYLIB_NAME: &str = if cfg!(windows) {
 
 #[cfg(test)]
 mod tests {
+    /// An error reads with its causes, each once: a wrapper that repeats
+    /// its cause's text does not repeat it again.
+    #[test]
+    fn an_error_reads_with_its_causes_each_once() {
+        #[derive(Debug)]
+        struct Failed(&'static str, Option<std::io::Error>);
+        impl std::fmt::Display for Failed {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+        }
+        impl std::error::Error for Failed {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { self.1.as_ref().map(|e| e as _) }
+        }
+        let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        assert_eq!(super::with_causes(&Failed("error sending request", Some(refused))), "error sending request: connection refused");
+        let repeated = std::io::Error::other("tls: certificate not trusted");
+        assert_eq!(super::with_causes(&Failed("tls: certificate not trusted", Some(repeated))), "tls: certificate not trusted");
+    }
+
     /// A wheel's buffer is reserved whole from its PyPI size, so it never
     /// regrows; a missing or absurd size reserves nothing past the cap.
     #[test]
