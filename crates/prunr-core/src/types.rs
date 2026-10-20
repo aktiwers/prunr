@@ -219,12 +219,21 @@ impl Decoration {
         if self.shadow == ShadowKind::Drop { self.shadow_distance.round().max(0.0) as u32 } else { 0 }
     }
 
-    /// How far past the subject the decoration can reach, in pixels.
+    /// The radius of the shadow's three box passes.
+    pub fn shadow_radius_px(&self) -> u32 {
+        (self.shadow_blur / 2.0).round() as u32
+    }
+
+    /// How far past the subject the decoration's work reaches, in pixels:
+    /// the shadow's blur with the margin that keeps its crop bit-exact.
     pub fn reach_px(&self) -> u32 {
-        let outline = if self.has_outline() { self.outline_width.ceil() } else { 0.0 };
-        // Three box passes of radius blur/2 reach 1.5 × blur.
-        let shadow = if self.has_shadow() { 1.5 * self.shadow_blur + self.shadow_fall_px() as f32 } else { 0.0 };
-        (outline + shadow).ceil().max(0.0) as u32 + 2
+        let outline = if self.has_outline() { self.outline_width.ceil() as u32 } else { 0 };
+        let shadow = if self.has_shadow() {
+            (crate::postprocess::BLUR_CROP_MARGIN.saturating_mul(self.shadow_radius_px())).saturating_add(self.shadow_fall_px())
+        } else {
+            0
+        };
+        outline.saturating_add(shadow).saturating_add(2)
     }
 }
 

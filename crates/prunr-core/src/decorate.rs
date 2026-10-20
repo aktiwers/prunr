@@ -35,6 +35,10 @@ pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
         h: ((y1 + reach + 1).min(h) - y0.saturating_sub(reach)) as usize,
         stride: w as usize,
     };
+    decorate_region(rgba, d, &region);
+}
+
+fn decorate_region(rgba: &mut RgbaImage, d: &Decoration, region: &Region) {
     if d.has_outline() {
         let cover = outline_cover(&region.alpha(rgba), region.w, region.h, d.outline_width);
         region.composite_under(rgba, d.outline_color, |i| cover[i]);
@@ -138,7 +142,7 @@ fn shadow_cover(alpha: &[u8], w: usize, h: usize, d: &Decoration) -> Vec<f32> {
             *o = a as f32 / 255.0;
         }
     });
-    let radius = (d.shadow_blur / 2.0).round() as u32;
+    let radius = d.shadow_radius_px();
     if radius > 0 {
         crate::guided_filter::box_blur3_into(&mut cast, w as u32, h as u32, radius, &mut Vec::new());
     }
@@ -301,6 +305,29 @@ mod tests {
         }
     }
 
+
+    /// Decorating only the subject's reach changes no pixel against
+    /// decorating the whole image: the shadow's crop leaves its blur room.
+    #[test]
+    fn the_decorated_region_equals_the_whole_image() {
+        let subject = RgbaImage::from_fn(160, 150, |x, y| {
+            let (dx, dy) = (x as f32 - 70.0, y as f32 - 60.0);
+            image::Rgba([90, 60, 40, if dx * dx + dy * dy < 225.0 { 255 } else if dx * dx + dy * dy < 256.0 { 120 } else { 0 }])
+        });
+        for d in [
+            Decoration { shadow: ShadowKind::Drop, shadow_opacity: 0.6, shadow_blur: 6.0, shadow_distance: 5.0, ..Decoration::default() },
+            Decoration { shadow: ShadowKind::Drop, shadow_opacity: 0.8, shadow_blur: 3.0, shadow_distance: 0.0, ..Decoration::default() },
+            Decoration { outline_width: 3.0, shadow: ShadowKind::Drop, shadow_opacity: 0.5, shadow_blur: 9.0, shadow_distance: 4.0, ..Decoration::default() },
+        ] {
+            let mut cropped = subject.clone();
+            apply_decoration(&mut cropped, &d);
+            let mut whole = subject.clone();
+            let (w, h) = whole.dimensions();
+            decorate_region(&mut whole, &d, &Region { x: 0, y: 0, w: w as usize, h: h as usize, stride: w as usize });
+            let off: Vec<u8> = cropped.as_raw().iter().zip(whole.as_raw()).map(|(a, b)| a.abs_diff(*b)).filter(|&v| v > 0).collect();
+            assert!(off.is_empty(), "{} channels off, by up to {}: {d:?}", off.len(), off.iter().max().unwrap_or(&0));
+        }
+    }
 
     /// The distance transform matches brute force on a scattered mask,
     /// edges and corners included.
