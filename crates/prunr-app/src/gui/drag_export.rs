@@ -7,11 +7,14 @@
 //!   can't supply one. Callers should show a fallback toast on Linux.
 //!
 //! Temp file lifecycle:
-//! - Single subdirectory under `std::env::temp_dir()/prunr-drag/`.
+//! - One subdirectory per instance, `std::env::temp_dir()/prunr-drag-{pid}/`:
+//!   two instances' images share ids, and one's exit cleanup would take
+//!   the other's files mid-drag.
 //! - Filenames derived from source (e.g. `sunset.prunr.png`, `sunset-lines.png`).
 //! - Not deleted at drag end — receiving apps may read async. Files written
 //!   ahead of a drag (on hover) stay too, so hovering again writes nothing.
-//! - Stale cleanup (>10 min old) runs at app start.
+//! - At app start, instances no longer running lose their folders, and the
+//!   one shared folder of earlier versions its entries older than 10 min.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,17 +33,14 @@ pub(crate) const DRAG_OUT_SUPPORTED: bool = cfg!(any(target_os = "windows", targ
 
 const DRAG_SUBDIR: &str = "prunr-drag";
 
-/// The drag folder's name. A test process writes to its own: every test
-/// app sweeps stale entries at start, and an image folder an earlier run
-/// left behind is old enough to go while a parallel test writes into it.
+/// This instance's drag folder name. A test process's is apart from any
+/// app's, so a sweep of either never takes the other's.
 fn drag_subdir() -> &'static str {
-    #[cfg(test)]
-    {
-        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        NAME.get_or_init(|| format!("{DRAG_SUBDIR}-test-{}", std::process::id()))
-    }
-    #[cfg(not(test))]
-    DRAG_SUBDIR
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let kind = if cfg!(test) { "test-" } else { "" };
+        format!("{DRAG_SUBDIR}-{kind}{}", std::process::id())
+    })
 }
 /// Files older than this are considered stale and get removed at startup.
 const STALE_AGE: Duration = Duration::from_secs(10 * 60);
@@ -61,8 +61,8 @@ fn item_dir(item_id: u64) -> PathBuf {
     dir
 }
 
-/// Whether `path` came from our own drag-out, so our own files can't be
-/// re-ingested on drop.
+/// Whether `path` came from this instance's own drag-out, so its files
+/// can't be re-ingested on drop; another instance's import like any file.
 pub(crate) fn is_self_drop(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == drag_subdir())
 }
@@ -82,11 +82,15 @@ fn remove_entry(path: &Path) {
     let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
 }
 
-/// Remove stale temp files left behind by previous sessions or crashes.
-/// Silent on errors — this is best-effort housekeeping.
+/// Remove the drag files earlier runs left: the folders of instances no
+/// longer running, and the stale entries of the folder earlier versions
+/// shared. Silent on errors — this is best-effort housekeeping.
 pub(crate) fn cleanup_stale() {
-    let dir = drag_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let temp = std::env::temp_dir();
+    for kind in ["", "test-"] {
+        crate::fs_util::sweep_dead_pid_dirs(&temp, &format!("{DRAG_SUBDIR}-{kind}"), std::process::id());
+    }
+    let Ok(entries) = std::fs::read_dir(temp.join(DRAG_SUBDIR)) else { return };
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
@@ -736,6 +740,25 @@ mod tests {
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([7, 8, 9, 255]))));
         crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item
+    }
+
+    /// Each instance drags out of a folder of its own; a folder of an
+    /// instance no longer running goes at start, and only this instance's
+    /// own files count as dropped back onto it.
+    #[test]
+    fn each_instance_drags_out_of_its_own_folder() {
+        let temp = std::env::temp_dir();
+        // Elsewhere a folder counts as dead by its age (a day), not at once.
+        #[cfg(target_os = "linux")]
+        {
+            let dead = temp.join(format!("{DRAG_SUBDIR}-4294967294"));
+            std::fs::create_dir_all(dead.join("1")).unwrap();
+            cleanup_stale();
+            assert!(!dead.exists(), "an instance no longer running loses its folder");
+        }
+        assert!(drag_subdir().ends_with(&std::process::id().to_string()));
+        assert!(is_self_drop(&drag_dir().join("1").join("a.prunr.png")));
+        assert!(!is_self_drop(&temp.join(format!("{DRAG_SUBDIR}-12345")).join("1").join("a.prunr.png")), "another instance's import");
     }
 
     /// Files written ahead stand for the item only while it shows what
