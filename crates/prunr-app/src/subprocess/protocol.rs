@@ -41,6 +41,14 @@ pub fn is_cancel_error(error: &str) -> bool {
 /// knows the abort was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
 
+/// The version a worker must be to talk with this app: a worker of
+/// another (an update replaced the binary while the app ran) would not
+/// read its messages.
+pub const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The exit code of a worker started by another version of the app.
+pub const WORKER_OF_ANOTHER_VERSION: i32 = 75;
+
 /// The longer side of the preview a run shows while it works: about a
 /// canvas at most, so a preview costs a few MB whatever the photo's
 /// size. Runs in the app and in the worker ask for the same.

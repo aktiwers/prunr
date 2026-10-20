@@ -153,6 +153,10 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub worker: bool,
 
+    /// Internal: the version of the app that started this worker.
+    #[arg(long, hide = true)]
+    pub worker_of: Option<String>,
+
     /// Print a diagnostic dump (hardware profile, ORT runtime status,
     /// installed models, paths) and exit. Paste the output into bug
     /// reports when hardware acceleration misbehaves.

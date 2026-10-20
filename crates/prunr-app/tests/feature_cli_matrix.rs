@@ -265,3 +265,14 @@ fn cli_batch_leaves_no_ipc_files() {
         assert!(left.is_empty(), "{extra:?}: left in {}: {left:?}", ipc.display());
     }
 }
+
+/// A worker started by another version of the app (an update replaced
+/// the binary while the app ran) stops at once with its own exit code,
+/// before it reads a message it might not understand.
+#[test]
+fn a_worker_of_another_version_stops_at_once() {
+    for args in [&["--worker", "--worker-of", "0.0.0-another"][..], &["--worker"]] {
+        let out = Command::new(CLI_BIN).args(args).stdin(std::process::Stdio::null()).output().expect("spawn prunr binary");
+        assert_eq!(out.status.code(), Some(75), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
