@@ -176,8 +176,9 @@ pub enum Delivery {
     Press,
     /// Once per physical press — toggles must not flicker while held.
     FreshPress,
-    /// egui turns the chord into its own event (`Event::Copy`), which the
-    /// app intercepts in `raw_input_hook`; the row exists for display.
+    /// egui turns the chord into its own event (`Event::Copy`, `Event::Cut`),
+    /// which the app intercepts in `raw_input_hook`; the row exists for
+    /// display.
     Event,
 }
 
@@ -220,7 +221,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { action: Action::Process, chords: &[chord(Command, Key::R)], label: "Process the image", delivery: Press },
     Shortcut { action: Action::Save, chords: &[chord(Command, Key::S)], label: "Save the result", delivery: Press },
     Shortcut { action: Action::Copy, chords: &[chord(Command, Key::C)], label: "Copy the result or selection", delivery: ByEvent },
-    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", delivery: Press },
+    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", delivery: ByEvent },
     Shortcut { action: Action::Delete, chords: &[chord(NoMods, Key::Delete)], label: "Delete the selection", delivery: Press },
     Shortcut { action: Action::Invert, chords: &[chord(NoMods, Key::Enter)], label: "Invert the selection", delivery: Press },
     Shortcut { action: Action::Cancel, chords: &[chord(NoMods, Key::Escape)], label: "Cancel, clear or close", delivery: Press },
@@ -286,7 +287,7 @@ impl Bindings {
     pub fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> Self {
         let mut b = Self::shipped();
         for (name, list) in overrides {
-            let Some(action) = Action::from_name(name) else { continue };
+            let Some(action) = Action::from_name(name).filter(|&a| rebindable(a)) else { continue };
             let parsed: Vec<Chord> = list.iter().filter_map(|s| Chord::parse(s)).collect();
             if list.is_empty() || !parsed.is_empty() {
                 b.set(action, parsed);
@@ -426,6 +427,12 @@ fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
 
 /// Bare keys type into a focused text field, so they are suppressed while
 /// one has focus. Modifier chords, function keys and Escape always fire.
+/// A text field has the keyboard: its own Copy, Cut and Paste are for
+/// its text. A focused button or slider does not count.
+pub fn text_field_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.focused()).is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some())
+}
+
 fn blocked_by_text_focus(c: Chord) -> bool {
     let bare = matches!(c.mods, Mods::None | Mods::Shift);
     bare && !matches!(c.key, Key::Escape | Key::F1 | Key::F2 | Key::F3 | Key::F12)
@@ -480,8 +487,8 @@ pub fn keys(ctx: &egui::Context, action: Action) -> Arc<str> {
     Arc::clone(current(ctx).display(action))
 }
 
-/// Whether the user can rebind `action`: Copy arrives as egui's own
-/// event and Escape is the universal cancel.
+/// Whether the user can rebind `action`: Copy and Cut arrive as egui's
+/// own events and Escape is the universal cancel.
 pub fn rebindable(action: Action) -> bool {
     row(action).delivery != ByEvent && action != Action::Cancel
 }
@@ -627,7 +634,9 @@ mod tests {
         assert_eq!(b.chords(Action::Redo).len(), 2);
         b.reset(Action::Undo);
         assert!(b.is_default(Action::Undo));
-        assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cancel));
+        assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cut) && !rebindable(Action::Cancel));
+        let saved = BTreeMap::from([("Cut".to_string(), vec!["Mod+Shift+X".to_string()])]);
+        assert_eq!(Bindings::from_overrides(&saved).chords(Action::Cut), Bindings::shipped().chords(Action::Cut), "a saved chord for an action that cannot be rebound is ignored");
     }
 
     #[test]
@@ -712,10 +721,32 @@ mod tests {
     }
 
     #[test]
-    fn copy_is_delivered_by_the_copy_event_not_the_table() {
-        assert_eq!(row(Action::Copy).delivery, Delivery::Event);
-        let p = pressed_for(press(Key::C, Modifiers::COMMAND));
-        assert!(!p.is(Action::Copy));
+    fn copy_and_cut_are_delivered_by_their_events_not_the_table() {
+        for (action, key) in [(Action::Copy, Key::C), (Action::Cut, Key::X)] {
+            assert_eq!(row(action).delivery, Delivery::Event);
+            assert!(!pressed_for(press(key, Modifiers::COMMAND)).is(action));
+        }
+    }
+
+    /// Only a focused text field counts as typing; a focused button does
+    /// not.
+    #[test]
+    fn a_focused_text_field_is_typing_and_a_button_is_not() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let frame = |ctx: &egui::Context, text: &mut String, field: bool| {
+            let _ = ctx.run_ui(RawInput::default(), |ui| {
+                let r = if field { ui.text_edit_singleline(text) } else { ui.button("Paint Brush") };
+                r.request_focus();
+            });
+        };
+        frame(&ctx, &mut text, true);
+        frame(&ctx, &mut text, true);
+        assert!(text_field_focused(&ctx));
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut text, false);
+        frame(&ctx, &mut text, false);
+        assert!(ctx.memory(|m| m.focused().is_some()) && !text_field_focused(&ctx));
     }
 
     #[test]
