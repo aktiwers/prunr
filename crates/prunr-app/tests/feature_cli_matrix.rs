@@ -218,6 +218,23 @@ fn cli_batch_goes_on_after_an_image_fails() {
     assert_output_decodes(&dir.path().join("input.prunr.png"), "the image after the failure");
 }
 
+/// An input that is not an image says so on stderr when no spinner shows
+/// it (output piped, as from a script), and the batch goes on.
+#[test]
+fn an_input_that_is_not_an_image_says_so() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let notes = dir.path().join("notes.png");
+    std::fs::write(&notes, b"not an image").expect("write notes.png");
+    let (code, stderr) = run_cli_batch(&[&notes, &good], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_not_an_image] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(2), "stderr:\n{stderr}");
+    assert!(stderr.lines().any(|l| l.contains("notes.png") && l.contains("not a valid image")), "stderr:\n{stderr}");
+}
+
 /// A file name that is not UTF-8 (Linux allows any bytes) reaches the
 /// worker and is processed like any other.
 #[cfg(target_os = "linux")]
