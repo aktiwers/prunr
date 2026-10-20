@@ -394,11 +394,12 @@ pub(crate) struct Timeline {
     states: VecDeque<DocState>,
     cursor: usize,
     version: u64,
+    revision: u64,
 }
 
 impl Timeline {
     pub(crate) fn new(original: DocState) -> Self {
-        Self { states: VecDeque::from([original]), cursor: 0, version: 0 }
+        Self { states: VecDeque::from([original]), cursor: 0, version: 0, revision: 0 }
     }
 
     pub(crate) fn current(&self) -> &DocState {
@@ -428,6 +429,7 @@ impl Timeline {
 
     /// Fill in the shown state as a job it started lands: no new step.
     pub(crate) fn current_mut(&mut self) -> &mut DocState {
+        self.revision += 1;
         &mut self.states[self.cursor]
     }
 
@@ -437,9 +439,17 @@ impl Timeline {
         self.version
     }
 
+    /// Changes whenever the shown state may have: every move, and every
+    /// change in place (a merged knob change, a fill-in), which `version`
+    /// lets pass so jobs stay valid. What a save is checked against.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// A new step after the shown one; any redo tail goes. A knob change
     /// right after another knob change joins it instead.
     pub(crate) fn push(&mut self, state: DocState) {
+        self.revision += 1;
         let at_end = self.cursor + 1 == self.states.len();
         let top = &self.states[self.cursor];
         if state.kind == StepKind::Adjust
@@ -467,6 +477,7 @@ impl Timeline {
         let undone = self.can_undo().then(|| self.states[self.cursor].kind)?;
         self.cursor -= 1;
         self.version += 1;
+        self.revision += 1;
         Some(undone)
     }
 
@@ -477,6 +488,7 @@ impl Timeline {
         }
         self.cursor += 1;
         self.version += 1;
+        self.revision += 1;
         Some(self.states[self.cursor].kind)
     }
 
@@ -567,6 +579,31 @@ mod tests {
         let v2 = t.version();
         t.redo();
         assert!(v0 < v1 && v1 < v2 && v2 < t.version());
+    }
+
+    /// The revision moves on anything that changes what the image shows:
+    /// a step, a knob change merged into the last one, a fill-in, an undo
+    /// or a redo. A save is current while the revision it wrote is.
+    #[test]
+    fn every_change_moves_the_revision() {
+        let mut t = Timeline::new(state(StepKind::Original, 1.0));
+        let mut last = t.revision();
+        let mut moved = |t: &Timeline, what: &str| {
+            assert!(t.revision() > last, "{what}");
+            last = t.revision();
+        };
+        t.push(state(StepKind::Adjust, 2.0));
+        moved(&t, "a step");
+        t.push(state(StepKind::Adjust, 3.0));
+        moved(&t, "a knob change merged into the last one");
+        t.current_mut().recipe = None;
+        moved(&t, "a fill-in");
+        t.undo();
+        moved(&t, "an undo");
+        t.redo();
+        moved(&t, "a redo");
+        let _ = (t.current(), t.version(), t.undo_steps());
+        assert_eq!(t.revision(), last, "reading changes nothing");
     }
 
     #[test]

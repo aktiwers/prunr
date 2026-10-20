@@ -965,8 +965,8 @@ impl PrunrApp {
         for (note, took) in self.system.take_copy_outcomes() {
             self.on_copy_done(note, took);
         }
-        while let Ok(outcome) = self.batch.bg_io.save_done_rx.try_recv() {
-            self.toasts.outcome(outcome);
+        while let Ok(done) = self.batch.bg_io.save_done_rx.try_recv() {
+            self.land_save(done);
         }
         while let Ok(outcome) = self.batch.bg_io.removed_rx.try_recv() {
             self.toasts.outcome(outcome);

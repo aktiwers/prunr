@@ -18,6 +18,7 @@ pub mod brush_overlay;
 pub mod pipeline_flow;
 pub mod model_store;
 pub mod runtime_prompt;
+pub(crate) mod discard_prompt;
 pub(crate) mod upscale_chip;
 pub(crate) mod upscale_toolbar;
 pub(crate) mod refinement_row;

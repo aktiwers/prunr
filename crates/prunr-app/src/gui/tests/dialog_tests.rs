@@ -113,7 +113,7 @@ fn save_as_answer_writes_that_image_to_the_picked_file() {
     let out = dir.path().join("out.png");
     answer(&mut app, Some(vec![out.clone()]));
 
-    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
+    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved".to_string()));
     assert_eq!(image::open(&out).expect("saved png").dimensions(), (3, 2));
 }
@@ -131,7 +131,7 @@ fn sidebar_save_answer_writes_that_rows_image() {
     let out = dir.path().join("row.png");
     answer(&mut app, Some(vec![out.clone()]));
 
-    app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done").expect("saved");
+    app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome.expect("saved");
     assert_eq!(image::open(&out).expect("saved png").dimensions(), (7, 7));
 }
 
@@ -147,9 +147,33 @@ fn save_layers_answer_writes_into_the_picked_folder() {
     let dir = tempfile::tempdir().unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
-    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
+    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved 1 file".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
+}
+
+/// A save marks the images it wrote as saved; one it could not write
+/// keeps its work unsaved.
+#[test]
+fn a_save_marks_what_it_wrote() {
+    let mut app = PrunrApp::new_for_test();
+    for id in [1, 2] {
+        let item = done_item(&mut app, id);
+        item.commit(crate::gui::timeline::StepKind::Process);
+        item.ticked = true;
+    }
+    assert_eq!(app.batch.unsaved_count(), 2);
+    app.handle_save_selected();
+    let dir = tempfile::tempdir().unwrap();
+    // A folder where image 2's file would go: its write fails.
+    std::fs::create_dir(dir.path().join("test2.prunr.png")).unwrap();
+    answer(&mut app, Some(vec![dir.path().to_path_buf()]));
+    let done = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
+    assert!(done.outcome.is_err(), "one file failed");
+    app.land_save(done);
+    assert!(!app.batch.items[0].has_unsaved_work(), "written");
+    assert!(app.batch.items[1].has_unsaved_work(), "not written");
+    assert_eq!(app.batch.unsaved_count(), 1);
 }
 
 #[test]
@@ -164,7 +188,7 @@ fn save_selected_answer_writes_each_into_the_picked_folder() {
     let dir = tempfile::tempdir().unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
-    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
+    let msg = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved 2 images".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
     assert!(dir.path().join("test2.prunr.png").is_file());

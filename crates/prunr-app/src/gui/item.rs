@@ -810,6 +810,13 @@ impl WarmKey {
     }
 }
 
+/// An image as a save wrote it: which one, at which timeline revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SaveMark {
+    pub(crate) id: u64,
+    revision: u64,
+}
+
 pub(crate) struct BatchItem {
     pub(crate) id: u64,
     pub(crate) filename: String,
@@ -877,6 +884,8 @@ pub(crate) struct BatchItem {
     pub(crate) timeline: Timeline,
     /// The run (Process, erase, upscale) whose result this item awaits.
     pub(crate) job: Option<Job>,
+    /// The timeline revision the last save wrote.
+    saved: Option<u64>,
     /// Why the last run or decode failed; cleared by the next run.
     failure: Option<String>,
     pub(crate) ticked: bool,
@@ -1947,6 +1956,25 @@ impl BatchItem {
         self.step(Timeline::previous, Timeline::undo)
     }
 
+    /// What a save of the shown state writes: this image as it is now.
+    pub(crate) fn save_mark(&self) -> SaveMark {
+        SaveMark { id: self.id, revision: self.timeline.revision() }
+    }
+
+    /// A save of `mark` was written.
+    pub(crate) fn mark_saved(&mut self, mark: SaveMark) {
+        if mark.id == self.id {
+            self.saved = Some(mark.revision);
+        }
+    }
+
+    /// Work that closing the app or removing the image would lose: a state
+    /// past the photo as opened that no save wrote as shown, or a run
+    /// under way.
+    pub(crate) fn has_unsaved_work(&self) -> bool {
+        self.job.is_some() || (self.timeline.undo_steps() > 0 && self.saved != Some(self.timeline.revision()))
+    }
+
     /// Step forward one state; returns what the redone step did.
     pub(crate) fn redo_step(&mut self) -> Result<StepKind, StepRefused> {
         self.step(Timeline::next, Timeline::redo)
@@ -2710,6 +2738,7 @@ impl BatchItem {
             decode_pending: false,
             timeline: Timeline::new(DocState::original(settings, applied_preset.clone())),
             job: None,
+            saved: None,
             failure: None,
             decode_failed: false,
             ticked: false,
@@ -2874,6 +2903,29 @@ mod tests {
 
     fn fixture_item(id: u64) -> BatchItem {
         BatchItem { id, ..BatchItem::new_for_test() }
+    }
+
+    /// Work is unsaved from the first step until a save of the state
+    /// shown; a later change, or a run under way, makes it unsaved again.
+    /// The photo as it was opened is on disk already.
+    #[test]
+    fn work_is_unsaved_until_the_state_shown_is_saved() {
+        let mut item = fixture_item(1);
+        assert!(!item.has_unsaved_work(), "the photo as opened");
+        item.commit(StepKind::Adjust);
+        assert!(item.has_unsaved_work(), "a step");
+        let saved = item.save_mark();
+        item.commit(StepKind::Stroke);
+        item.mark_saved(saved);
+        assert!(item.has_unsaved_work(), "a save of an earlier state");
+        item.mark_saved(item.save_mark());
+        assert!(!item.has_unsaved_work(), "saved as shown");
+        item.undo_step().unwrap();
+        assert!(item.has_unsaved_work(), "an undo shows a state not saved");
+        item.undo_step().unwrap();
+        assert!(!item.has_unsaved_work(), "back to the photo as opened");
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        assert!(item.has_unsaved_work(), "a run under way");
     }
 
     #[test]

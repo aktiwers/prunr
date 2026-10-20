@@ -82,6 +82,14 @@ pub(crate) struct SelectionTextureResult {
     pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
 }
 
+/// A finished save: its toast text (`Ok` when everything was written,
+/// `Err` when anything failed), and the images whose files were all
+/// written, as they were when it began.
+pub(crate) struct SaveDone {
+    pub(crate) outcome: Result<String, String>,
+    pub(crate) wrote: Vec<crate::gui::item::SaveMark>,
+}
+
 pub(crate) enum SelectionImage {
     /// The whole overlay, and the feathered plane it was built from when
     /// the style feathers (so actions can reuse it).
@@ -160,10 +168,9 @@ pub struct BackgroundIO {
     /// Pre-decoded source images for instant canvas switching
     pub decode_tx: mpsc::Sender<DecodeResult>,
     pub decode_rx: mpsc::Receiver<DecodeResult>,
-    /// A finished save's toast text: `Ok` when everything was written,
-    /// `Err` when anything failed.
-    pub save_done_tx: mpsc::Sender<Result<String, String>>,
-    pub save_done_rx: mpsc::Receiver<Result<String, String>>,
+    /// A finished save.
+    pub(crate) save_done_tx: mpsc::Sender<SaveDone>,
+    pub(crate) save_done_rx: mpsc::Receiver<SaveDone>,
     /// A model or runtime removed off the UI thread: its toast text. The
     /// installed set is read again when it lands.
     pub(crate) removed_tx: mpsc::Sender<Result<String, String>>,

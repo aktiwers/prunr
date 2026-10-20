@@ -196,6 +196,7 @@ pub const UNVISITED_MODALS: &[(&str, &str)] = &[
     ("license", "opens on downloading a model under a non-commercial license; the store offers no download while every model is installed"),
     ("runtime_prompt", "opens once at first launch, from the hardware probe"),
     ("file_dialog", "a native window, not drawn by the app"),
+    ("discard_prompt", "opens on a window close or a removal while work is unsaved; the walk closes no window and its image holds no unsaved work"),
 ];
 
 fn effects() -> Vec<Variant> {
