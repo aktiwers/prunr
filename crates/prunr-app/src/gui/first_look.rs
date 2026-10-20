@@ -38,11 +38,16 @@ struct Search {
 
 impl CutTimes {
     /// A report of `item_id`'s run, arrived `at`. A first look reports a
-    /// search of its own first; the run's own comes last and is kept.
+    /// search of its own first; the run's own comes last and is kept. A
+    /// step repeated while its search is open is the worker saying the
+    /// run is alive.
     pub(crate) fn note(&mut self, item_id: u64, update: &ProgressUpdate, at: Instant) {
         match update {
             ProgressUpdate::Step(Step::FindingSubject) => {
-                self.searching.insert(item_id, Search { since: at, took: None });
+                let open = self.searching.get(&item_id).is_some_and(|s| s.took.is_none());
+                if !open {
+                    self.searching.insert(item_id, Search { since: at, took: None });
+                }
             }
             ProgressUpdate::Subject(_) => {
                 if let Some(search) = self.searching.get_mut(&item_id) {
@@ -198,5 +203,23 @@ mod tests {
         assert_eq!(times.expected(BiRefNetLite, "DirectML"), Some(Duration::from_millis(300)));
         assert_eq!(times.expected(BiRefNetLite, "CPU"), Some(Duration::from_secs(6)), "a failed run, or one cut off before its subject, keeps the last time");
         assert!(times.searching.is_empty(), "nothing held for ended runs");
+    }
+
+    /// The worker repeats a long run's step every few seconds to show it
+    /// is alive; a repeat is the same search, not a new one.
+    #[test]
+    fn a_repeated_step_does_not_restart_the_search() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let subject = || ProgressUpdate::Subject(prunr_core::SubjectHint { width: 1, height: 1, coverage: vec![255] });
+        let mut times = CutTimes::default();
+        times.note(1, &ProgressUpdate::Step(Step::FindingSubject), at(0));
+        times.note(1, &subject(), at(500));
+        times.note(1, &ProgressUpdate::Step(Step::FindingSubject), at(1000));
+        times.note(1, &ProgressUpdate::Step(Step::FindingSubject), at(11_000));
+        times.note(1, &ProgressUpdate::Step(Step::FindingSubject), at(21_000));
+        times.note(1, &subject(), at(21_500));
+        times.ended(1, Some((BiRefNetLite, "CPU")));
+        assert_eq!(times.expected(BiRefNetLite, "CPU"), Some(Duration::from_millis(20_500)));
     }
 }
