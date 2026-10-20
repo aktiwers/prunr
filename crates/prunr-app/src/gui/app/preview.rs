@@ -96,8 +96,14 @@ impl PrunrApp {
     pub(super) fn pump_live_preview(&mut self, ctx: &egui::Context) {
         self.recipe_drift_tripwire();
 
-        // The closure borrows `batch.items` mutably so `build_preview_inputs`
-        // can hold the run's start on the item for the drag session.
+        let results = self.processor.live_preview.drain_results();
+        if !results.is_empty() {
+            self.apply_completed_previews(ctx, results);
+        }
+        // Ticked after the landing: a landed frame frees its image for the
+        // next, which builds on the caches it left. The closure borrows
+        // `batch.items` mutably so `build_preview_inputs` can hold the
+        // run's start on the item for the drag session.
         let role = self.settings.model.role();
         let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
@@ -123,10 +129,6 @@ impl PrunrApp {
             self.ensure_source_decoded(idx);
         }
 
-        let results = self.processor.live_preview.drain_results();
-        if !results.is_empty() {
-            self.apply_completed_previews(ctx, results);
-        }
         let live = &self.processor.live_preview;
         for item in &mut self.batch.items {
             item.quick.settle(live.works_on(item.id));
