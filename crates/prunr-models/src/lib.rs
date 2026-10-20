@@ -1334,6 +1334,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     },
 ];
 
+/// The version the models built into the binary ship with: they change
+/// only with it.
+pub const BUILT_IN_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn descriptor(id: ModelId) -> Option<&'static ModelDescriptor> {
     REGISTRY.iter().find(|d| d.id == id)
 }
