@@ -329,6 +329,17 @@ impl BatchManager {
         }
     }
 
+    /// Why `format` cannot hold the images Save writes (the ticked ones,
+    /// else the one shown), if it cannot: the largest of them is past its
+    /// side limit.
+    pub(crate) fn save_refusal(&self, format: prunr_core::ExportFormat) -> Option<String> {
+        let any_ticked = self.any_ticked();
+        let shown = self.selected_item().filter(|_| !any_ticked);
+        let targets = self.items.iter().filter(|i| any_ticked && i.ticked).chain(shown);
+        let (w, h) = targets.map(BatchItem::shown_dims).max_by_key(|&(w, h)| w.max(h))?;
+        format.refusal(w, h)
+    }
+
     /// Images whose work closing or removing them would lose.
     pub(crate) fn unsaved_count(&self) -> usize {
         self.items.iter().filter(|item| item.has_unsaved_work()).count()
@@ -770,6 +781,26 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
 mod tests {
     use super::*;
     use crate::gui::item_settings::ItemSettings;
+
+    /// A format refuses Save when an image Save writes is past its largest
+    /// side: the ticked images, else the one shown.
+    #[test]
+    fn a_format_refuses_save_for_an_image_past_its_largest_side() {
+        use prunr_core::ExportFormat::{Png, Webp};
+        let mut mgr = BatchManager::new();
+        mgr.items.push(item_with_cache(1, 0));
+        mgr.items.push(item_with_cache(2, 0));
+        mgr.items[0].dimensions = (16_385, 900);
+        mgr.items[1].dimensions = (4_000, 3_000);
+        mgr.select_item(0);
+        let why = mgr.save_refusal(Webp).expect("the shown image is too wide for WebP");
+        assert!(why.contains("16385"), "{why}");
+        assert_eq!(mgr.save_refusal(Png), None);
+        mgr.items[1].ticked = true;
+        assert_eq!(mgr.save_refusal(Webp), None, "only the ticked image is saved");
+        mgr.items[0].ticked = true;
+        assert!(mgr.save_refusal(Webp).is_some());
+    }
     use crate::gui::worker::{CompressedTensor, RawSegTensor};
     use prunr_core::ModelKind;
     use std::time::Duration;
