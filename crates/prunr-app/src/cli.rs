@@ -460,8 +460,9 @@ impl CliDepth {
 
 /// Where an input's depth map goes, beside its result.
 fn depth_map_path(args: &Cli, input: &std::path::Path) -> PathBuf {
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    args.result_path(input).with_file_name(prunr_core::depth::map_file_name(&stem))
+    let mut name = input.file_stem().unwrap_or_default().to_os_string();
+    name.push(prunr_core::depth::MAP_FILE_SUFFIX);
+    args.result_path(input).with_file_name(name)
 }
 
 /// Write each input's depth map (`--depth-map`). Returns how many failed.
@@ -873,8 +874,8 @@ fn output_path_with_suffix(
     is_batch: bool,
     suffix: &str,
 ) -> std::path::PathBuf {
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let name = format!("{stem}{suffix}");
+    let mut name = input.file_stem().unwrap_or_default().to_os_string();
+    name.push(suffix);
     match output {
         Some(out) if is_batch || out.is_dir() => out.join(name),
         // A name without an extension is a file, saved as PNG: the
@@ -1623,6 +1624,20 @@ mod tests {
         let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "--depth-map", "--depth-only"]);
         assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/p/cat-depth.png"));
         assert!(super::Cli::try_parse_from(["prunr", "/p/cat.jpg", "--depth-only"]).is_err(), "--depth-only needs --depth-map");
+    }
+
+    /// A stem that is not UTF-8 names its result and depth map as it is:
+    /// a mended name would let two inputs write one file.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_kept() {
+        use clap::Parser;
+        use std::os::unix::ffi::OsStrExt;
+        let os = |bytes: &[u8]| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+        let input = os(b"/p/caf\xe9.jpg");
+        let args = super::Cli::parse_from([std::ffi::OsStr::new("prunr"), input.as_os_str(), std::ffi::OsStr::new("--depth-map")]);
+        assert_eq!(args.result_path(&input), os(b"/p/caf\xe9.prunr.png"));
+        assert_eq!(super::depth_map_path(&args, &input), os(b"/p/caf\xe9-depth.png"));
     }
 
     /// `--depth-map` writes the map a backdrop measured instead of

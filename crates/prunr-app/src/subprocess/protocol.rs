@@ -8,6 +8,21 @@ use prunr_core::inpaint_sd::SdInpaintRequest;
 use prunr_models::ModelId;
 use serde::{Serialize, Deserialize};
 
+/// Paths cross in the OS's own form: a file name need not be UTF-8,
+/// which serde's `Path` refuses.
+mod wire_path {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::path::{Path, PathBuf};
+
+    pub fn serialize<S: Serializer>(path: &Path, s: S) -> Result<S::Ok, S::Error> {
+        path.as_os_str().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+        std::ffi::OsString::deserialize(d).map(PathBuf::from)
+    }
+}
+
 /// `ImageError.error` value emitted when a per-item `CancelItem` trips at
 /// dispatch. The parent matches on this exact string to revert the item to
 /// `Pending` rather than flag it as `Error`; any drift silently breaks the
@@ -80,6 +95,7 @@ pub enum SubprocessCommand {
         line_mode: LineMode,
         edge: EdgeSettings,
         /// IPC temp directory (set by parent so child uses the same PID-namespaced dir)
+        #[serde(with = "wire_path")]
         ipc_dir: std::path::PathBuf,
         #[serde(default)]
         inpaint_only: bool,
@@ -95,6 +111,7 @@ pub enum SubprocessCommand {
     /// the raw image bytes (avoids piping large payloads through stdin).
     ProcessImage {
         item_id: u64,
+        #[serde(with = "wire_path")]
         image_path: std::path::PathBuf,
         /// For a run that starts from an earlier result: path to temp file with its RGBA + dimensions.
         chain_input: Option<ChainInput>,
@@ -104,10 +121,12 @@ pub enum SubprocessCommand {
     RePostProcess {
         item_id: u64,
         /// Path to temp file with raw f32 tensor data.
+        #[serde(with = "wire_path")]
         tensor_path: std::path::PathBuf,
         tensor_height: u32,
         tensor_width: u32,
         model: ModelKind,
+        #[serde(with = "wire_path")]
         original_image_path: std::path::PathBuf,
         mask: MaskSettings,
     },
@@ -116,10 +135,12 @@ pub enum SubprocessCommand {
     /// enabling the outline doesn't re-run seg inference.
     AddEdgeInference {
         item_id: u64,
+        #[serde(with = "wire_path")]
         image_path: std::path::PathBuf,
         /// Path to temp file with the cached raw f32 seg tensor. It
         /// is NOT deleted by the worker: it comes back as `tensor_cache` on
         /// `ImageDone` for the parent to read-and-delete, saving a copy.
+        #[serde(with = "wire_path")]
         seg_tensor_path: std::path::PathBuf,
         seg_tensor_height: u32,
         seg_tensor_width: u32,
@@ -164,8 +185,10 @@ pub struct InpaintJob {
     pub generation: u64,
     pub model_id: ModelId,
     /// The photo as `ipc::write_image` writes it.
+    #[serde(with = "wire_path")]
     pub image_path: std::path::PathBuf,
     /// Single-channel mask, the same way: 255 = inpaint here, 0 = keep.
+    #[serde(with = "wire_path")]
     pub mask_path: std::path::PathBuf,
     /// SD-specific knobs. `None` for LaMa / Big-LaMa / MI-GAN.
     pub sd_req: Option<SdInpaintRequest>,
@@ -183,6 +206,7 @@ pub struct InpaintJob {
 /// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct ChainInput {
+    #[serde(with = "wire_path")]
     pub path: std::path::PathBuf,
     pub width: u32,
     pub height: u32,
@@ -210,6 +234,7 @@ pub fn ipc_progress(item_id: u64, tx: std::sync::mpsc::Sender<SubprocessEvent>) 
 /// A raw f32 segmentation tensor a worker left in a file, `height` × `width`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TensorCacheFile {
+    #[serde(with = "wire_path")]
     pub path: std::path::PathBuf,
     pub height: u32,
     pub width: u32,
@@ -221,6 +246,7 @@ pub struct TensorCacheFile {
 /// `width`. A run may write only some scales.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EdgeCacheFile {
+    #[serde(with = "wire_path")]
     pub path: std::path::PathBuf,
     pub height: u32,
     pub width: u32,
@@ -255,6 +281,7 @@ pub enum SubprocessEvent {
     /// Result RGBA is written to `result_path` temp file (not piped).
     ImageDone {
         item_id: u64,
+        #[serde(with = "wire_path")]
         result_path: std::path::PathBuf,
         width: u32,
         height: u32,
@@ -288,6 +315,7 @@ pub enum SubprocessEvent {
     InpaintDone {
         item_id: u64,
         generation: u64,
+        #[serde(with = "wire_path")]
         rgba_path: std::path::PathBuf,
         width: u32,
         height: u32,
@@ -542,8 +570,24 @@ mod tests {
     }
     const EVENTS: usize = 10;
 
+    /// A path that is not Unicode where the OS allows one, so a path
+    /// field that crosses the way serde's `Path` does fails its sample.
+    fn path() -> PathBuf {
+        #[cfg(unix)]
+        {
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"/tmp/prunr-sampl\xe9").into()
+        }
+        #[cfg(windows)]
+        {
+            <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0x43, 0xD800]).into()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            PathBuf::from("/tmp/prunr-sample")
+        }
+    }
+
     fn command_samples() -> Vec<SubprocessCommand> {
-        let path = || PathBuf::from("/tmp/prunr-sample");
         vec![
             SubprocessCommand::Init {
                 model: ModelKind::Silueta,
@@ -557,7 +601,7 @@ mod tests {
                 line_fade_pct: 0,
                 edge_scales: InferredScales::Drawn,
             },
-            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: None },
+            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: Some(ChainInput { path: path(), width: 2, height: 2 }) },
             SubprocessCommand::RePostProcess {
                 item_id: 1,
                 tensor_path: path(),
@@ -594,7 +638,6 @@ mod tests {
     }
 
     fn event_samples() -> Vec<SubprocessEvent> {
-        let path = || PathBuf::from("/tmp/prunr-sample");
         vec![
             SubprocessEvent::Ready { active_provider: "CPU".into() },
             SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::Denoising) },
@@ -604,11 +647,15 @@ mod tests {
                 width: 2,
                 height: 2,
                 active_provider: "CPU".into(),
-                tensor_cache: None,
-                edge_cache: None,
-                spare_scales: None,
+                tensor_cache: Some(TensorCacheFile { path: path(), height: 2, width: 2 }),
+                edge_cache: Some(EdgeCacheFile { path: path(), height: 2, width: 2, scales: vec![prunr_core::EdgeScale::Bold] }),
+                spare_scales: Some(1),
             },
-            SubprocessEvent::SpareEdgeScales { item_id: 1, token: 1, outcome: SpareOutcome::Skipped },
+            SubprocessEvent::SpareEdgeScales {
+                item_id: 1,
+                token: 1,
+                outcome: SpareOutcome::Made(EdgeCacheFile { path: path(), height: 2, width: 2, scales: vec![prunr_core::EdgeScale::Fine] }),
+            },
             SubprocessEvent::ImageError { item_id: 1, error: "failed".into() },
             SubprocessEvent::InpaintDone { item_id: 1, generation: 1, rgba_path: path(), width: 2, height: 2, fill_scale: 1.0 },
             SubprocessEvent::InpaintError { item_id: 1, generation: 1, error: "failed".into() },
