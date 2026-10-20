@@ -635,7 +635,7 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
         return;
     }
     // Both blurs stay inside the wider one's reach; blend only there.
-    let Some(reach) = crate::inpaint::mask_bbox(mask, 1, 3 * (lo + 1)) else { return };
+    let Some(reach) = crate::inpaint::mask_bbox(mask, 1, BLUR_CROP_MARGIN * (lo + 1)) else { return };
     let (x0, y0, w) = (reach.x as usize, reach.y as usize, mask.width() as usize);
     let mut wider = image::imageops::crop_imm(mask, reach.x, reach.y, reach.w, reach.h).to_image();
     let mut narrow = wider.clone();
@@ -650,13 +650,16 @@ fn feather_mask(mask: &mut GrayImage, sigma: f32) {
     }
 }
 
-/// 3-box blur at `radius`, cropped to the mask's bbox plus the 3·radius
-/// reach: bit-exact, with a bbox-sized peak instead of ~96 MB at 4K.
+/// Radii of margin a 3-box blur's crop needs to be bit-exact: the passes
+/// reach 3 radii, and a crop edge, where the windows are clipped and
+/// divide by fewer pixels, must lie one radius past that, over zeros.
+pub(crate) const BLUR_CROP_MARGIN: u32 = 4;
+
+/// 3-box blur at `radius`, cropped to the mask's bbox plus its margin:
+/// bit-exact, with a bbox-sized peak instead of ~96 MB at 4K.
 fn box_blur(mask: &mut GrayImage, radius: u32) {
     if radius == 0 { return; }
-    // 3-box kernel total reach is 3·radius from each source pixel.
-    let margin = 3 * radius;
-    let Some(bbox) = crate::inpaint::mask_bbox(mask, 1, margin) else {
+    let Some(bbox) = crate::inpaint::mask_bbox(mask, 1, BLUR_CROP_MARGIN * radius) else {
         return;
     };
     let raw_w = mask.width() as usize;
@@ -704,6 +707,52 @@ mod tests {
 
     /// Feather is continuous: half a pixel softens an edge, and 1.5 px
     /// lands between 1 and 2.
+    /// A disc in a canvas far wider than the blur's reach.
+    fn disc_in_canvas() -> GrayImage {
+        GrayImage::from_fn(96, 80, |x, y| {
+            let (dx, dy) = (x as f32 - 40.0, y as f32 - 36.0);
+            image::Luma([if dx * dx + dy * dy < 81.0 { 255 } else if dx * dx + dy * dy < 100.0 { 128 } else { 0 }])
+        })
+    }
+
+    /// The 3-box blur over the whole plane, rounded as `box_blur` writes it.
+    fn whole_plane_blur(mask: &GrayImage, radius: u32) -> Vec<u8> {
+        let mut buf: Vec<f32> = mask.as_raw().iter().map(|&v| v as f32).collect();
+        crate::guided_filter::box_blur3_into(&mut buf, mask.width(), mask.height(), radius, &mut Vec::new());
+        buf.iter().map(|&v| v.clamp(0.0, 255.0).round() as u8).collect()
+    }
+
+    fn assert_same(got: &[u8], want: &[u8], label: String) {
+        let off: Vec<u8> = got.iter().zip(want).map(|(a, b)| a.abs_diff(*b)).filter(|&d| d > 0).collect();
+        assert!(off.is_empty(), "{label}: {} pixels off, by up to {}", off.len(), off.iter().max().unwrap_or(&0));
+    }
+
+    /// Cropping the blur to the mask's reach changes no pixel: the crop
+    /// edge, where the box windows are clipped, lies where the whole-image
+    /// blur reads only zeros.
+    #[test]
+    fn the_cropped_blur_equals_the_whole_image_blur() {
+        for radius in 1..=6 {
+            let mut cropped = disc_in_canvas();
+            box_blur(&mut cropped, radius);
+            assert_same(cropped.as_raw(), &whole_plane_blur(&disc_in_canvas(), radius), format!("radius {radius}"));
+        }
+    }
+
+    #[test]
+    fn a_fractional_feather_equals_the_whole_image_blend() {
+        for sigma in [0.4f32, 1.5, 2.25, 4.7] {
+            let lo = sigma.floor() as u32;
+            let t = sigma - lo as f32;
+            let narrow = if lo == 0 { disc_in_canvas().into_raw() } else { whole_plane_blur(&disc_in_canvas(), lo) };
+            let wider = whole_plane_blur(&disc_in_canvas(), lo + 1);
+            let want: Vec<u8> = narrow.iter().zip(&wider).map(|(&a, &b)| (a as f32 * (1.0 - t) + b as f32 * t).round() as u8).collect();
+            let mut got = disc_in_canvas();
+            feather_mask(&mut got, sigma);
+            assert_same(got.as_raw(), &want, format!("sigma {sigma}"));
+        }
+    }
+
     #[test]
     fn feather_is_continuous_below_and_between_whole_pixels() {
         let edge = || GrayImage::from_fn(16, 1, |x, _| image::Luma([if x < 8 { 255 } else { 0 }]));
