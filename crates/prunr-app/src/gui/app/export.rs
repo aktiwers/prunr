@@ -63,12 +63,13 @@ impl PrunrApp {
     pub(super) fn on_save_layers_picked(&mut self, targets: &[u64], folder: PathBuf) {
         let style = self.selection_style();
         let format = self.settings.export_format;
-        let jobs: Vec<LayerSave> = targets.iter()
-            .filter_map(|id| self.batch.find_by_id(*id))
-            .map(|item| LayerSave {
-                layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action),
+        let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
+        let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
+        let jobs: Vec<LayerSave> = found.iter().zip(names)
+            .map(|(item, name)| LayerSave {
+                depth: self.settings.export_depth_map.then(|| item.depth_export().named(&name)),
+                layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action).named(name),
                 composite: (item.export_image(), item.export_bg()),
-                depth: self.settings.export_depth_map.then(|| item.depth_export()),
             })
             .collect();
         let without_layers: Vec<&str> = targets.iter()
@@ -136,13 +137,14 @@ impl PrunrApp {
     /// Encode + write run on a background thread.
     pub(super) fn on_save_selected_picked(&mut self, targets: &[u64], folder: PathBuf) {
         let with_depth = self.settings.export_depth_map;
-        let items: Vec<BatchSave> = targets.iter()
-            .filter_map(|id| self.batch.find_by_id(*id))
-            .map(|item| BatchSave {
-                filename: item.filename.clone(),
+        let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
+        let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
+        let items: Vec<BatchSave> = found.iter().zip(names)
+            .map(|(item, filename)| BatchSave {
+                depth: with_depth.then(|| item.depth_export().named(&filename)),
+                filename,
                 result: item.export_image(),
                 bg: item.export_bg(),
-                depth: with_depth.then(|| item.depth_export()),
             })
             .collect();
         if items.is_empty() {
@@ -540,6 +542,24 @@ mod toast_kind_tests {
         app.system.copy_image(rgba, CopyNote::SelectionCut);
         land(&mut app);
         assert_eq!(app.toasts.last_for_test(), Some(("success", "Selection cut to clipboard")));
+    }
+
+    /// A save of several images writes each to its own file, also when
+    /// they share a name (two cameras' IMG_0001, one file opened twice),
+    /// ignoring case as Windows and macOS do.
+    #[test]
+    fn a_save_of_several_never_writes_two_images_to_one_file() {
+        let mut app = PrunrApp::new_for_test();
+        for (id, name) in [(1, "IMG_0001.jpg"), (2, "IMG_0001.png"), (3, "img_0001.jpg")] {
+            done_item(&mut app, id);
+            app.batch.items.last_mut().expect("just pushed").filename = name.into();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        app.on_save_selected_picked(&[1, 2, 3], dir.path().to_path_buf());
+        assert_eq!(save_toast(&mut app).0, "success");
+        let mut written: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        written.sort();
+        assert_eq!(written, ["IMG_0001-2.prunr.png", "IMG_0001.prunr.png", "img_0001-3.prunr.png"]);
     }
 
     #[test]

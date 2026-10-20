@@ -128,7 +128,18 @@ pub(crate) struct DepthExport {
     depth: DepthSource,
 }
 
+/// The depth map's file name for an image named `filename`.
+fn depth_file_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename).file_stem().map_or_else(|| filename.into(), |s| s.to_string_lossy());
+    prunr_core::depth::map_file_name(&stem)
+}
+
 impl DepthExport {
+    /// The map written under `filename`'s stem.
+    pub(crate) fn named(self, filename: &str) -> Self {
+        Self { name: depth_file_name(filename), ..self }
+    }
+
     /// Write the map into `folder`.
     pub(crate) fn write(&self, folder: &std::path::Path, export: &ExportDepth) -> Result<(), String> {
         let depth = self.depth.get(export, None)?;
@@ -2787,8 +2798,7 @@ impl BatchItem {
 
     /// The depth map to save beside this item's result.
     pub(crate) fn depth_export(&self) -> DepthExport {
-        let stem = std::path::Path::new(&self.filename).file_stem().map_or_else(|| self.filename.as_str().into(), |s| s.to_string_lossy());
-        DepthExport { name: prunr_core::depth::map_file_name(&stem), dims: self.dimensions, depth: self.depth_source() }
+        DepthExport { name: depth_file_name(&self.filename), dims: self.dimensions, depth: self.depth_source() }
     }
 
     pub(crate) fn depth_source(&self) -> DepthSource {
