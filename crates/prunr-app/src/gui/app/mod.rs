@@ -176,6 +176,8 @@ impl PrunrApp {
         let worker_ctx = cc.egui_ctx.clone();
 
         theme::install_fonts(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        super::macos_quit::install();
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -1178,6 +1180,8 @@ impl eframe::App for PrunrApp {
         self.take_probed_backend();
         self.tell_gpu_start_failure(prunr_core::engine::gpu_start_failure());
         self.hold_close_over_unsaved_work(ctx);
+        #[cfg(target_os = "macos")]
+        super::macos_quit::set_unsaved(!self.close_anyway && self.batch.unsaved_count() > 0);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         if !self.handle_hotkey_capture(ctx) {

@@ -37,6 +37,8 @@ pub(crate) mod disk_queue;
 pub(crate) mod reclaim;
 pub(crate) mod image_texture;
 pub(crate) mod selection_queue;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_quit;
 
 #[cfg(test)]
 mod tests;
