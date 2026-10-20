@@ -1361,11 +1361,13 @@ impl Processor {
     ) -> u64 {
         let pending: HashSet<u64> = ids.into_iter().collect();
         let total = pending.len();
+        // A batch admission still feeds stays open for the images to come.
+        let fed = self.admission_batch();
         self.in_flight.retain_mut(|b| {
             let before = b.pending.len();
             b.pending.retain(|id| !pending.contains(id));
             b.total -= before - b.pending.len();
-            !b.pending.is_empty()
+            !b.pending.is_empty() || Some(b.id) == fed
         });
         let id = self.next_batch;
         self.next_batch += 1;
@@ -1427,6 +1429,11 @@ impl Processor {
 
     fn admission_batch(&self) -> Option<u64> {
         self.admission.as_ref().and_then(|a| a.batch)
+    }
+
+    /// Admission feeds `batch`: its images hold shares of the RAM budget.
+    pub(crate) fn admission_fed(&self, batch: u64) -> bool {
+        self.admission_batch() == Some(batch)
     }
 
     /// `batch` ended: when admission fed it, admission ends too, and the

@@ -647,6 +647,11 @@ impl PrunrApp {
     ) {
         let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
             tracing::info!(item_id, batch, "a run's answer dropped: its batch no longer awaits the image");
+            // The worker is done with the image all the same; the share
+            // admission held for it goes back, or the batch never ends.
+            if self.processor.admission_fed(batch) {
+                self.admission_release_and_admit(item_id);
+            }
             return;
         };
         let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
@@ -2215,6 +2220,30 @@ mod timeline_contract_tests {
             assert!(app.batch.items[0].job.is_none(), "{engine:?}: the run is over");
             assert_eq!(shown(&app), Some(7), "{engine:?}: the result landed");
         }
+    }
+
+    /// An answer dropped because its image was sent again still frees the
+    /// share of the RAM budget it held: the worker is done with the image,
+    /// and the next one waiting on admission goes.
+    #[test]
+    fn a_dropped_answer_still_frees_its_admission_share() {
+        use crate::gui::memory::{AdmissionController, ImageMemCost};
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        push_test_item(&mut app, 2);
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue(vec![ImageMemCost { item_id: 1, total: 1 }, ImageMemCost { item_id: 2, total: 1 }]);
+        let work = |id| crate::gui::worker::WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None };
+        let (first, rx) = app.processor.open_admission(ctrl, |id| Some(work(id)));
+        assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1], "one fits");
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
+        let fed = app.processor.track_dispatch(recipe.clone(), [1]);
+        app.processor.admission_feeds(fed);
+        let _again = app.processor.track_dispatch(recipe, [1]);
+        let answer = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, fed, 1, Ok(answer), None, None);
+        assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "its share let the next image in");
+        assert!(app.processor.take_recipe(fed, 2).is_some(), "into the batch admission feeds, which takes its answer");
     }
 
     /// The worker's word that a batch was cancelled can come after the
