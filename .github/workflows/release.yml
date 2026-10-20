@@ -48,6 +48,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxdo-dev icnsutils rpm
 
+      # Ubuntu's own Python refuses pip installs (PEP 668's
+      # EXTERNALLY-MANAGED marker); this one takes the ziglang wheel.
+      - name: Install Python (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       # The runner's glibc would set the binary's floor (2.35 on Ubuntu
       # 24.04: no Debian 11, Ubuntu 20.04 or RHEL 8/9). zig links against
       # glibc 2.28, the floor of the ONNX Runtime wheel shipped beside it.
