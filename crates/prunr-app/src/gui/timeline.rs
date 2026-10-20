@@ -346,13 +346,17 @@ pub(crate) struct Origin {
     /// Who cut this step out (`None`: another engine, or not known), so a
     /// Process by a different one builds on it.
     pub(crate) cutter: Option<super::item::Cutter>,
+    /// The image a live render on this step started from, when the step
+    /// is another run's (an erase, an upscale): the run stays the step's
+    /// own, and the next render redoes from here, not on its own output.
+    pub(crate) rendered_from: Option<RunStart>,
 }
 
 impl Origin {
     /// A run of `engine` from `start` (`None`: the original), with no seed,
     /// kept run or region.
     pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
-        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None, cutter: None }
+        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None, cutter: None, rendered_from: None }
     }
 }
 
@@ -363,8 +367,8 @@ pub(crate) type RunStart = StoredImage;
 impl DocState {
     /// Every stored part of the step can be read back.
     pub(crate) fn readable(&self) -> bool {
-        let start = self.origin.as_ref().and_then(|o| o.start.as_ref());
-        self.result.iter().chain(start).all(|s| s.is_readable())
+        let starts = self.origin.iter().flat_map(|o| o.start.iter().chain(&o.rendered_from));
+        self.result.iter().chain(starts).all(|s| s.is_readable())
             && self.selection.iter().chain(self.edits.as_ref()).all(|s| s.is_readable())
     }
 
@@ -494,7 +498,7 @@ impl Timeline {
     pub(crate) fn stored_images(&self) -> impl Iterator<Item = &StoredImage> {
         let is_a_result = |b: &StoredImage| self.states.iter().any(|s| s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, b)));
         self.states.iter().filter_map(|s| s.result.as_ref())
-            .chain(self.states.iter().filter_map(|s| s.origin.as_ref()?.start.as_ref()).filter(move |b| !is_a_result(b)))
+            .chain(self.states.iter().filter_map(|s| s.origin.as_ref()).flat_map(|o| o.start.iter().chain(&o.rendered_from)).filter(move |b| !is_a_result(b)))
     }
 
     /// Every stored selection and cut-out edits plane.
