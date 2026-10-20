@@ -149,15 +149,13 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to spawn worker: {e}"))?;
         let (mut stdin_writer, event_rx) = attach(&mut child)?;
 
-        // Flushed at once: the child's blocking `read_message` waits on it.
-        write_message(&mut stdin_writer, &SubprocessCommand::Init {
+        let child = send_init(child, &mut stdin_writer, &SubprocessCommand::Init {
             model, jobs, mask, cpu_only, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
             line_fade_pct,
             edge_scales,
-        }).map_err(|e| format!("Failed to send Init: {e}"))?;
-        stdin_writer.flush().map_err(|e| format!("Failed to flush Init: {e}"))?;
+        })?;
 
         // Seg/edge workers build engine pools at Init (a CoreML first-run compile
         // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
@@ -172,16 +170,16 @@ impl SubprocessManager {
                 active_provider
             }
             Ok(ReaderEvent::Event(SubprocessEvent::InitError { error })) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!("Worker init failed: {error}"));
             }
-            Ok(ReaderEvent::Disconnected) => return Err(init_ended(child)),
+            Ok(ReaderEvent::Disconnected) => return Err(init_ended(child, "Worker exited during initialization")),
             Ok(ReaderEvent::Event(other)) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!("Unexpected event during init: {other:?}"));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!(
                     "Worker init timed out ({:?}). \
                      If this happened on first SD eraser use, the \
@@ -191,7 +189,7 @@ impl SubprocessManager {
                 ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
+                stop(child);
                 return Err("Worker reader thread died during init".to_string());
             }
         };
@@ -542,8 +540,9 @@ fn worker_exe() -> Result<std::path::PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("Failed to get current exe: {e}"))
 }
 
-/// Why a worker that closed its output during Init stopped, once it has.
-fn init_ended(mut child: Child) -> String {
+/// Why a worker that closed its output during Init stopped, once it has:
+/// `otherwise` unless it was one of another version.
+fn init_ended(mut child: Child, otherwise: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(2);
     let status = loop {
         match child.try_wait() {
@@ -553,14 +552,29 @@ fn init_ended(mut child: Child) -> String {
         }
     };
     if status.is_none() {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop(child);
     }
     if status.and_then(|s| s.code()) == Some(WORKER_OF_ANOTHER_VERSION) {
         "Prunr was updated while it was open. Restart it to keep processing.".to_string()
     } else {
-        "Worker exited during initialization".to_string()
+        otherwise.to_string()
     }
+}
+
+/// Send `init` to a worker just spawned, flushed at once: its blocking
+/// `read_message` waits on it. One that already stopped (of another
+/// version) closed the pipe, so its exit says why, not the write.
+fn send_init(child: Child, stdin: &mut BufWriter<std::process::ChildStdin>, init: &SubprocessCommand) -> Result<Child, String> {
+    match write_message(stdin, init).and_then(|()| stdin.flush()) {
+        Ok(()) => Ok(child),
+        Err(e) => Err(init_ended(child, &format!("Failed to send Init: {e}"))),
+    }
+}
+
+/// Kill a worker and reap it, so no zombie stays until the app exits.
+fn stop(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Take `child`'s pipes: its stdin to write commands to, and its stdout
@@ -638,8 +652,23 @@ mod tests {
     #[test]
     fn a_worker_that_stops_at_init_says_why() {
         let exit = |code: i32| Command::new("sh").args(["-c", &format!("exit {code}")]).spawn().unwrap();
-        assert!(init_ended(exit(WORKER_OF_ANOTHER_VERSION)).starts_with("Prunr was updated while it was open"));
-        assert_eq!(init_ended(exit(3)), "Worker exited during initialization");
+        assert!(init_ended(exit(WORKER_OF_ANOTHER_VERSION), "").starts_with("Prunr was updated while it was open"));
+        assert_eq!(init_ended(exit(3), "Worker exited during initialization"), "Worker exited during initialization");
+    }
+
+    /// One that stopped before its Init was even written closed the pipe:
+    /// the write fails, and the reason is still its exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_gone_before_its_init_says_why() {
+        let mut child = Command::new("sh").args(["-c", &format!("exit {WORKER_OF_ANOTHER_VERSION}")])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let (mut stdin, _events) = attach(&mut child).unwrap();
+        while child.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let why = send_init(child, &mut stdin, &SubprocessCommand::Shutdown).expect_err("the pipe is closed");
+        assert!(why.starts_with("Prunr was updated while it was open"), "{why}");
     }
 
     /// The worker runs from this process's own binary, which on Linux an
