@@ -214,11 +214,12 @@ pub struct ChainInput {
 
 /// Sends a pipeline's progress reports as `SubprocessEvent::Report` for
 /// `item_id`, on the same channel as its result, so a report never
-/// arrives after the result. It keeps the last step for the run's pulse.
+/// arrives after the result. It keeps the last step, and when it came,
+/// for the run's pulse.
 struct IpcProgress {
     item_id: u64,
     tx: std::sync::mpsc::Sender<SubprocessEvent>,
-    step: std::sync::Mutex<Option<prunr_core::Step>>,
+    step: std::sync::Mutex<Option<(prunr_core::Step, std::time::Instant)>>,
 }
 
 impl IpcProgress {
@@ -230,7 +231,7 @@ impl IpcProgress {
 impl prunr_core::ProgressSink for IpcProgress {
     fn report(&self, update: prunr_core::ProgressUpdate) {
         if let prunr_core::ProgressUpdate::Step(step) = update {
-            *self.step.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(step);
+            *self.step.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((step, std::time::Instant::now()));
         }
         self.send(update);
     }
@@ -260,10 +261,9 @@ fn pulsing_progress(
 ) -> (prunr_core::Progress, Pulse) {
     let sink = std::sync::Arc::new(IpcProgress { item_id, tx, step: std::sync::Mutex::new(None) });
     let beating = std::sync::Arc::clone(&sink);
-    let started = std::time::Instant::now();
     let pulse = Pulse::start(every, move || {
         let step = *beating.step.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        started.elapsed() < limit && step.is_none_or(|s| beating.send(prunr_core::ProgressUpdate::Step(s)))
+        step.is_none_or(|(s, at)| at.elapsed() < limit && beating.send(prunr_core::ProgressUpdate::Step(s)))
     });
     (prunr_core::Progress::new(sink), pulse)
 }
@@ -970,6 +970,26 @@ mod tests {
             }
         };
         assert_eq!(end, std::sync::mpsc::RecvTimeoutError::Disconnected);
+    }
+
+    /// The limit counts from the run's last step of its own: a run that
+    /// keeps reporting keeps its pulse.
+    #[test]
+    fn a_new_step_renews_the_pulse() {
+        use std::time::Duration;
+        let wait = Duration::from_secs(10);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let limit = Duration::from_millis(500);
+        let (progress, _pulse) = super::pulsing_progress(4, tx, Duration::from_millis(10), limit);
+        progress.step(prunr_core::Step::FindingSubject);
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit * 2 {
+            progress.step(prunr_core::Step::RefiningEdges);
+            assert!(rx.recv_timeout(wait).is_ok());
+        }
+        let repeat = SubprocessEvent::Report { item_id: 4, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::RefiningEdges) };
+        while rx.try_recv().is_ok() {}
+        assert_eq!(rx.recv_timeout(wait), Ok(repeat), "still pulsing past the limit from the start");
     }
 
     /// A pulse ends at its limit even while held: a run silent that long
