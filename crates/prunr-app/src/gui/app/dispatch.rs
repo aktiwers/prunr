@@ -15,7 +15,7 @@ fn too_large_to_upscale(out: (u32, u32), needed: u64, free: u64) -> Option<Strin
     (needed > free).then(|| {
         use crate::gui::views::format_byte_size;
         format!(
-            "Too large to upscale: {}\u{00d7}{} needs about {} of free memory, {} is free. Undo to a smaller image or pick a lower Scale.",
+            "Too large to upscale: {}\u{00d7}{} needs about {} of free memory, {} is free. Close other apps or undo to a smaller image.",
             out.0, out.1, format_byte_size(needed), format_byte_size(free),
         )
     })
@@ -140,7 +140,7 @@ impl PrunrApp {
         let factor = output_scale.factor();
         let out = (w.saturating_mul(factor), h.saturating_mul(factor));
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
-        let needed = prunr_core::upscale::peak_bytes(run_model, w, h, factor) + u64::from(crate::gui::memory::working_set_mb(model_kind)) * 1024 * 1024;
+        let needed = prunr_core::upscale::needed_bytes(run_model, w, h, factor);
         let free = crate::hardware::available_ram_bytes_throttled();
         if let Some(why) = too_large_to_upscale(out, needed, free) {
             tracing::warn!(item_id, out_w = out.0, out_h = out.1, needed, free, "upscale refused: too large for free memory");

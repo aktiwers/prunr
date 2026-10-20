@@ -227,10 +227,17 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
+/// needs free: its buffers at their peak and the model's working set.
+pub fn needed_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
+    let working_set = prunr_models::descriptor(model).map_or(0, |d| u64::from(d.working_set_mb));
+    peak_bytes(model, in_w, in_h, scale) + working_set * 1024 * 1024
+}
+
+/// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
 /// holds at its peak, besides the input and the model: the tiler's or
 /// the part-by-part run's buffers at the model's own scale, or the
 /// resample to `scale` when that is larger.
-pub fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
+fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
     let descriptor = prunr_models::descriptor(model);
     let native = descriptor.and_then(|d| d.upscale.as_ref()).map_or(scale, |k| k.native_scale);
     let run = match descriptor.and_then(|d| d.part_layout()) {
@@ -296,6 +303,20 @@ mod tests {
         assert_eq!(mb(four), 512 + 1024 + 256, "a 512 band, the output and its alpha");
         assert_eq!(peak_bytes(ModelId::RealEsrganX4Plus, 4096, 4096, 2), four, "the tiler at 4x outweighs the resample");
         assert_eq!(mb(peak_bytes(ModelId::RealEsrganX2Plus, 4096, 4096, 2)), 128 + 256 + 64);
+    }
+
+    /// What an upscale needs free is its peak and the model's working set:
+    /// for a model run in parts its larger stage, whatever the Scale.
+    #[test]
+    fn an_upscale_needs_its_peak_and_the_models_working_set() {
+        use prunr_models::ModelId;
+        let mib = 1024 * 1024;
+        let working_set = |id| u64::from(prunr_models::descriptor(id).map_or(0, |d| d.working_set_mb)) * mib;
+        let nomos2 = ModelId::FourXNomos2RealPlksr;
+        assert_eq!(needed_bytes(nomos2, 1000, 1000, 4), 1_000_000 * 524 + working_set(nomos2));
+        assert_eq!(needed_bytes(nomos2, 1000, 1000, 2), needed_bytes(nomos2, 1000, 1000, 4), "the run at 4x outweighs the resample");
+        let x4 = ModelId::RealEsrganX4Plus;
+        assert_eq!(needed_bytes(x4, 4096, 4096, 4), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
     }
 
     #[test]
