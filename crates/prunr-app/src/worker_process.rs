@@ -104,6 +104,15 @@ impl Drop for SemaphoreGuard {
     }
 }
 
+/// `work`'s answer, or the eraser's own words when it panicked: a stroke
+/// thread dying without an answer would leave the stroke busy for good.
+fn stroke_answer<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
+        tracing::error!("eraser stroke panicked");
+        Err("The eraser stopped unexpectedly. Erase again.".into())
+    })
+}
+
 /// Write a result for the parent to read. One that fails (a full temp
 /// disk) leaves no half file behind; the caller reports the error, or the
 /// parent would wait for an answer that never comes.
@@ -895,7 +904,7 @@ pub fn run_worker() -> ! {
                     }
                     let _cleanup = Cleanup { in_flight: in_flight_for_thread, cancel: Some(inpaint_cancel) };
                     let _pulse = pulse;
-                    let result = (|| -> Result<(image::RgbaImage, f32), String> {
+                    let result = stroke_answer(|| -> Result<(image::RgbaImage, f32), String> {
                         let image: image::RgbaImage = read_image(&image_path)
                             .ok_or_else(|| "read source: missing or short".to_string())?;
                         let mask: image::GrayImage = read_image(&mask_path)
@@ -908,7 +917,7 @@ pub fn run_worker() -> ! {
                         Ok((prunr_core::inpaint_blend::finalize_inpaint(
                             filled.rgba, &image, &mask, feather_px, sharpen, edge_colour,
                         ), filled.scale))
-                    })();
+                    });
                     drop(_cleanup);
                     match result {
                         Ok((rgba, fill_scale)) => {
@@ -1004,6 +1013,15 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A stroke whose work panics still answers, in the eraser's own
+    /// words: its thread dying without one left the stroke busy for good.
+    #[test]
+    fn a_stroke_that_panics_still_answers() {
+        let answer = stroke_answer(|| -> Result<(), String> { panic!("a bad tile") });
+        assert!(answer.is_err_and(|e| e.starts_with("The eraser stopped")));
+        assert_eq!(stroke_answer(|| Ok::<_, String>(7)), Ok(7));
+    }
 
     /// While a model builds, the worker reports it again and again, so a
     /// long compile is not taken for a hang; it stops with the build.
