@@ -980,13 +980,11 @@ pub(crate) struct BatchItem {
     pub(crate) quick_photo: Option<super::live_preview::QuickPhoto>,
 }
 
-/// The depth map's run for one photo: `epoch` counts the photos the item
-/// has had, so a map measured from a replaced one is dropped on landing.
+/// The depth map's run for the photo.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DepthRun {
-    pub(crate) epoch: u64,
     pub(crate) pending: bool,
-    /// The run failed; not retried until the photo changes.
+    /// The run failed; not retried.
     pub(crate) failed: bool,
 }
 
@@ -1183,12 +1181,8 @@ impl BatchItem {
         self.depth.is_none() && !self.depth_run.pending && !self.depth_run.failed
     }
 
-    /// Keep a depth map measured at `epoch`, unless the photo changed
-    /// since. True when it was kept.
-    pub(crate) fn land_depth(&mut self, epoch: u64, result: Result<Arc<prunr_core::depth::DepthMap>, String>) -> bool {
-        if epoch != self.depth_run.epoch {
-            return false;
-        }
+    /// Keep a depth map measured from the photo. True when it was kept.
+    pub(crate) fn land_depth(&mut self, result: Result<Arc<prunr_core::depth::DepthMap>, String>) -> bool {
         self.depth_run.pending = false;
         match result {
             Ok(map) => {

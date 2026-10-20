@@ -455,7 +455,6 @@ impl PrunrApp {
         }
         let job = crate::gui::processor::DepthJob {
             item_id: item.id,
-            epoch: item.depth_run.epoch,
             input: item.photo_pixels(),
             cpu_only,
             faces: item.faces_found_in_original(),
@@ -470,13 +469,11 @@ impl PrunrApp {
         for landed in self.processor.pump_depth_results() {
             let Some(idx) = self.batch.index_of(landed.item_id) else { continue };
             let error = landed.result.as_ref().err().cloned();
-            let item = &mut self.batch.items[idx];
-            let current = landed.epoch == item.depth_run.epoch;
-            if item.land_depth(landed.epoch, landed.result) {
+            if self.batch.items[idx].land_depth(landed.result) {
                 tracing::info!(item_id = landed.item_id, "depth map landed");
                 self.on_depth_landed(idx);
                 ctx.request_repaint();
-            } else if let Some(err) = error.filter(|_| current) {
+            } else if let Some(err) = error {
                 self.toasts.error(format!("Could not measure the depth: {err}"));
             }
         }
@@ -2490,8 +2487,7 @@ mod depth_tests {
                 other => crate::gui::tests::fixtures::put_in(item, other),
             }
             set(&mut item.settings);
-            let epoch = item.depth_run.epoch;
-            assert!(item.land_depth(epoch, Ok(map())));
+            assert!(item.land_depth(Ok(map())));
             app.after_depth_landed(0);
             assert_eq!(app.processor.live_preview.is_pending_for(1), reruns, "{name}");
         }
@@ -2531,8 +2527,7 @@ mod depth_tests {
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
         assert!(app.magic_brush_state.pending_depth_click.is_some(), "parked until the map is there");
         assert!(app.processor.pump_sam_decoder_results().is_empty());
-        let epoch = app.batch.items[0].depth_run.epoch;
-        assert!(app.batch.items[0].land_depth(epoch, Ok(map())));
+        assert!(app.batch.items[0].land_depth(Ok(map())));
         app.on_depth_landed(0);
         assert!(app.magic_brush_state.pending_depth_click.is_none());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
