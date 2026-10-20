@@ -1208,6 +1208,7 @@ impl eframe::App for PrunrApp {
         // Land finished work, then the live previews it may have queued,
         // before `ui` renders, so this frame shows the newest results.
         self.pump_results(ctx);
+        self.batch.park_off_screen_results();
         self.pump_live_preview(ctx);
     }
 

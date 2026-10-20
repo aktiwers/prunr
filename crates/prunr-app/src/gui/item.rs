@@ -2596,6 +2596,18 @@ impl BatchItem {
         true
     }
 
+    /// A result that landed while the image is off screen goes back to its
+    /// step, with its texture, once no run is under way.
+    pub(crate) fn park_off_screen(&mut self) {
+        if self.on_screen || self.job.is_some() || self.result_rgba.is_none() {
+            return;
+        }
+        if self.park_result() {
+            self.release_result_texture();
+            self.reveal = None;
+        }
+    }
+
     /// Bring a parked result back from the timeline. Every result reader
     /// and writer calls this first; a result that landed meanwhile wins.
     #[cfg(test)]
@@ -2926,6 +2938,19 @@ mod tests {
         assert!(!item.has_unsaved_work(), "back to the photo as opened");
         item.start_job(Some(StepKind::Process), Engine::Segment);
         assert!(item.has_unsaved_work(), "a run under way");
+    }
+
+    /// Parking a saved image's result when it leaves the screen keeps it
+    /// saved: what it shows did not change.
+    #[test]
+    fn a_saved_image_stays_saved_when_parked() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        item.commit(StepKind::Process);
+        item.mark_saved(item.save_mark());
+        assert!(item.park_result());
+        assert!(!item.has_unsaved_work());
     }
 
     #[test]

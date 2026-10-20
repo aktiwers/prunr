@@ -126,10 +126,16 @@ impl PrunrApp {
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let source = item.source.clone();
-        let target = item.request_result_texture(false);
-        Self::spawn_tex_prep(
-            crate::gui::item::Pixels::Resident(Arc::clone(shown)), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
-        );
+        if item.on_screen {
+            let target = item.request_result_texture(false);
+            Self::spawn_tex_prep(
+                crate::gui::item::Pixels::Resident(Arc::clone(shown)), item_id, Self::tex_name(tag, item_id, Some(switch)), target, handles, ctx.clone(),
+            );
+        } else {
+            // Off screen the thumbnail is enough; the texture is made
+            // when the image is shown.
+            item.release_result_texture();
+        }
         self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(shown))));
     }
 
@@ -1714,6 +1720,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::None);
         let old = ctx.load_texture("old", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default());
         let item = &mut app.batch.items[0];
+        item.set_on_screen(true);
         item.result_texture = Some(old.clone().into());
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
@@ -1726,6 +1733,70 @@ mod timeline_contract_tests {
         assert!(item.result_tex_pending);
         assert_eq!(item.status(), BatchStatus::Done);
         assert!(item.job.is_none(), "the step is recorded");
+    }
+
+    /// A result that lands on an image not on screen is kept by its step
+    /// and parked, with no texture: a batch of upscales held a full copy
+    /// and a texture of each. The image on screen keeps both. One row per
+    /// way a result lands.
+    #[test]
+    fn results_landing_off_screen_are_parked() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        type Land = fn(&mut PrunrApp, &egui::Context, u64);
+        let rows: [(&str, SettingsModel, Land); 4] = [
+            ("cut", SettingsModel::Silueta, |app, ctx, id| {
+                let item = app.batch.find_by_id_mut(id).unwrap();
+                item.start_job(Some(StepKind::Process), Engine::Segment);
+                item.mark_running();
+                app.answer_for_test(ctx, id, Ok(prunr_core::ProcessResult { rgba_image: (*px(7)).clone(), active_provider: String::new() }));
+            }),
+            ("upscale", SettingsModel::RealEsrganUpscale, |app, ctx, id| {
+                let item = app.batch.find_by_id_mut(id).unwrap();
+                item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+                let (run, recipe) = (item.job_run().unwrap(), item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+                app.processor.land_run_for_test(Engine::Upscale, id, run, px(7), recipe);
+                app.pump_upscale_results(ctx);
+            }),
+            ("colorize", SettingsModel::ColorizeDdcolor, |app, ctx, id| {
+                let item = app.batch.find_by_id_mut(id).unwrap();
+                item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+                let (run, recipe) = (item.job_run().unwrap(), item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+                app.processor.land_run_for_test(Engine::Colorize, id, run, px(7), recipe);
+                app.pump_colorize_results(ctx);
+            }),
+            ("erase", SettingsModel::Inpaint, |app, ctx, id| {
+                app.commit_selection_and_dispatch(id, mask(), StepKind::Stroke);
+                let item = app.batch.find_by_id_mut(id).unwrap();
+                item.start_job(Some(StepKind::Erase), Engine::Erase);
+                let run = item.job_run().unwrap();
+                app.processor.land_inpaint_for_test(id, run, (*px(7)).clone());
+                app.pump_inpaint_results(ctx);
+            }),
+        ];
+        for (path, model, land) in rows {
+            for on_screen in [false, true] {
+                let mut app = app_with_processed_item(model);
+                let item = push_test_item(&mut app, 2);
+                item.dimensions = (4, 4);
+                item.source_rgba = Some(px(0));
+                item.result_rgba = Some(px(1));
+                crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+                item.commit(StepKind::Process);
+                app.batch.select_item(if on_screen { 1 } else { 0 });
+                for (i, item) in app.batch.items.iter_mut().enumerate() {
+                    item.set_on_screen(app.batch.selected_index == i);
+                }
+                land(&mut app, &ctx, 2);
+                app.batch.park_off_screen_results();
+                let item = app.batch.find_by_id(2).unwrap();
+                assert!(item.timeline.current().result.as_ref().is_some_and(|r| r.load().is_some_and(|i| i.get_pixel(0, 0)[0] == 7)), "{path}: landed");
+                assert_eq!(item.result_rgba.is_none(), !on_screen, "{path}, on screen {on_screen}: parked only off screen");
+                if !on_screen {
+                    assert!(!item.result_tex_pending && item.result_texture.is_none(), "{path}: no texture off screen");
+                }
+            }
+        }
     }
 
     /// An erase lands as one step that shows the filled image without its

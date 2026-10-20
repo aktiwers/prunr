@@ -705,6 +705,7 @@ mod selection_action_tests {
         crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Pending);
         item.source_rgba = Some(source);
         item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        item.set_on_screen(true);
         app.batch.items.push(item);
 
         app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
