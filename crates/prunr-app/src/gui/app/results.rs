@@ -55,7 +55,12 @@ impl PrunrApp {
     }
 
     pub(super) fn pump_inpaint_results(&mut self, ctx: &egui::Context) {
-        let (results, cancelled, errors) = self.processor.drain_inpaint_results();
+        let ended = self.processor.drain_inpaint_results();
+        // An erase's word is for the run that asked: an image an undo or a
+        // newer run has moved on from takes none of it.
+        let awaited = |id: u64, run: u64| self.batch.find_by_id(id).is_some_and(|i| i.awaits_run(run));
+        let cancelled: Vec<u64> = ended.cancelled.iter().filter(|&&(id, run)| awaited(id, run)).map(|&(id, _)| id).collect();
+        let errors: Vec<(u64, String)> = ended.failed.into_iter().filter(|&(id, run, _)| awaited(id, run)).map(|(id, _, msg)| (id, msg)).collect();
         // A cancelled or failed erase records nothing; the painted region
         // stays for another try.
         for &item_id in cancelled.iter().chain(errors.iter().map(|(id, _)| id)) {
@@ -75,8 +80,12 @@ impl PrunrApp {
             // gate names the free and needed memory).
             self.toasts.error(msg.clone());
         }
-        for crate::gui::processor::LandedFill { item_id, rgba, fill_scale } in results {
+        for crate::gui::processor::LandedFill { item_id, run, rgba, fill_scale } in ended.fills {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            if !item.awaits_run(run) {
+                tracing::info!(item_id, run, "fill of a run no longer awaited dropped");
+                continue;
+            }
             if !item.job_is_current() {
                 self.end_run_without_result(item_id, "erase", RunLost::ImageChanged);
                 continue;
@@ -1593,8 +1602,9 @@ mod timeline_contract_tests {
         assert_eq!(preview_size(&app, 0), Some([3, 2]), "a run another replaced shows nothing more");
         assert_eq!(preview_size(&app, 1), Some([4, 2]));
 
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
-        app.processor.fail_inpaint_for_test(2, "failed");
+        let (first, second) = (app.batch.items[0].job_run().expect("an erase"), app.batch.items[1].job_run().expect("an erase"));
+        app.processor.land_inpaint_for_test(1, first, (*px(7)).clone());
+        app.processor.end_inpaint_for_test(2, second, crate::gui::processor::InpaintOutcome::Failed("failed".into()));
         app.pump_inpaint_results(&ctx);
         assert_eq!(app.batch.items[0].held_texture().map(|t| t.id()), preview, "the fill reveals over its tiles");
         assert!(app.batch.items[0].tile_preview.is_none());
@@ -1723,7 +1733,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.land_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
 
         let item = &app.batch.items[0];
@@ -1736,6 +1746,34 @@ mod timeline_contract_tests {
         assert!(app.batch.items[0].selection_mask.is_some(), "undo brings the marks back with the image");
     }
 
+    /// An erase's late word lands only on the run that asked: after an
+    /// undo stopped the erase and an upscale started, its fill, cancel or
+    /// failure leaves the upscale's job alone.
+    #[test]
+    fn a_late_erase_answer_leaves_a_newer_run_alone() {
+        let ctx = egui::Context::default();
+        use crate::gui::processor::InpaintOutcome;
+        let late: [fn() -> InpaintOutcome; 3] = [
+            || InpaintOutcome::Done { rgba: (*px(7)).clone(), fill_scale: 1.0 },
+            || InpaintOutcome::Cancelled,
+            || InpaintOutcome::Failed("the eraser failed".into()),
+        ];
+        for (i, answer) in late.into_iter().enumerate() {
+            let mut app = app_with_processed_item(SettingsModel::Inpaint);
+            app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+            app.batch.items[0].start_erase(None);
+            let erase = app.batch.items[0].job_run().expect("an erase");
+            app.handle_undo(&ctx);
+            app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
+            let upscale = app.batch.items[0].job_run();
+            app.processor.end_inpaint_for_test(1, erase, answer());
+            app.pump_inpaint_results(&ctx);
+            let item = &app.batch.items[0];
+            assert_eq!(item.job_run(), upscale, "answer {i}: the upscale is still awaited");
+            assert_eq!(shown(&app), Some(1), "answer {i}: nothing landed");
+        }
+    }
+
     /// An erase records how large it filled its region on its step, so
     /// the footer can show what Auto picked; undo and redo keep it with
     /// the step.
@@ -1745,7 +1783,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
-        app.processor.land_inpaint_scaled_for_test(1, (*px(7)).clone(), 0.5);
+        app.processor.end_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), crate::gui::processor::InpaintOutcome::Done { rgba: (*px(7)).clone(), fill_scale: 0.5 });
         app.pump_inpaint_results(&ctx);
         let fill_scale = |app: &PrunrApp| app.batch.items[0].timeline.current().origin.as_ref().and_then(|o| o.fill_scale);
         assert_eq!(fill_scale(&app), Some(0.5));
@@ -1765,7 +1803,7 @@ mod timeline_contract_tests {
         assert!(!crate::gui::automation::state::dump(&app).busy);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
         assert!(crate::gui::automation::state::dump(&app).busy, "an erase in flight");
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.land_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "landed: only the texture upload is left");
     }
@@ -1859,7 +1897,7 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
-        app.processor.fail_inpaint_for_test(1, "refused to load: only 6 GB RAM free");
+        app.processor.end_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), crate::gui::processor::InpaintOutcome::Failed("refused to load: only 6 GB RAM free".into()));
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "the run is over");
         assert!(app.batch.items[0].selection_mask.is_some(), "the painted region stays for another try");
@@ -1901,8 +1939,9 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
+        let erase = app.batch.items[0].job_run().expect("an erase");
         app.handle_undo(&ctx);
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.land_inpaint_for_test(1, erase, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert_eq!(shown(&app), Some(1));
         assert!(app.batch.items[0].timeline.can_redo(), "the undone stroke is still there to redo");
@@ -2161,7 +2200,7 @@ mod timeline_contract_tests {
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
         edit_by_hand(&mut app);
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.land_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "erase: the run is over");
         assert_eq!(shown(&app), Some(2), "erase: the late result did not land");
@@ -2197,7 +2236,7 @@ mod timeline_contract_tests {
         app.batch.items[0].start_erase(None);
         app.batch.items[0].settings.gamma = 1.8;
         app.batch.items[0].commit(StepKind::Adjust);
-        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.processor.land_inpaint_for_test(1, app.batch.items[0].job_run().expect("an erase"), (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "erase: the run is over");
         assert_eq!(shown(&app), Some(7), "erase: the fill landed");

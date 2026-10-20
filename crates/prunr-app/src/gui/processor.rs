@@ -93,9 +93,8 @@ struct InFlightBatch {
 
 /// How an inpaint stroke ended; it travels with the item id.
 pub(crate) enum InpaintOutcome {
-    /// `fill_scale` is how large the fill ran (1 is full size);
-    /// `generation` is the dispatch's own, so a fresher stroke wins.
-    Done { rgba: image::RgbaImage, fill_scale: f32, generation: u64 },
+    /// `fill_scale` is how large the fill ran (1 is full size).
+    Done { rgba: image::RgbaImage, fill_scale: f32 },
     /// Shows "Erase cancelled", so Esc / Cancel reads as taken, not lost.
     Cancelled,
     /// Any other error (e.g. the SD RAM guard refused to load), shown so
@@ -103,9 +102,20 @@ pub(crate) enum InpaintOutcome {
     Failed(String),
 }
 
-/// A finished fill that is still its item's newest stroke.
+/// How erases ended: each with its image and the run it answers.
+#[derive(Default)]
+pub(crate) struct ErasesEnded {
+    pub fills: Vec<LandedFill>,
+    pub cancelled: Vec<(u64, u64)>,
+    /// With a user-visible message.
+    pub failed: Vec<(u64, u64, String)>,
+}
+
+/// A finished fill that is still its item's newest stroke, and the run
+/// it answers.
 pub(crate) struct LandedFill {
     pub item_id: u64,
+    pub run: u64,
     pub rgba: image::RgbaImage,
     pub fill_scale: f32,
 }
@@ -792,8 +802,10 @@ pub(crate) struct Processor {
     seg_run: Option<super::dispatch_progress::RunSink>,
     /// The per-item generation drops a result a fresher stroke overtook;
     /// `inpaint_pending` counts dispatches not yet drained.
-    inpaint_done: Chan<(u64, InpaintOutcome)>,
-    inpaint_latest_generation: HashMap<u64, u64>,
+    /// Each erase's outcome, with its image and generation.
+    inpaint_done: Chan<(u64, u64, InpaintOutcome)>,
+    /// Each image's newest erase: its generation, and the run it answers.
+    inpaint_latest: HashMap<u64, (u64, u64)>,
     inpaint_pending: HashMap<u64, u32>,
     /// Checked between LaMa tiles and between SD UNet steps.
     inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -879,7 +891,7 @@ impl Processor {
             next_batch: 0,
             seg_run: None,
             inpaint_done: Chan::default(),
-            inpaint_latest_generation: HashMap::new(),
+            inpaint_latest: HashMap::new(),
             inpaint_pending: HashMap::new(),
             inpaint_cancels: HashMap::new(),
             inpaint_runs: HashMap::new(),
@@ -998,20 +1010,24 @@ impl Processor {
         let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, result: Ok(embedding) });
     }
 
+    /// An erase of `item_id` for `run` dispatched and ending with `outcome`.
     #[cfg(test)]
-    pub(crate) fn land_inpaint_for_test(&mut self, item_id: u64, rgba: image::RgbaImage) {
-        self.land_inpaint_scaled_for_test(item_id, rgba, 1.0);
+    pub(crate) fn end_inpaint_for_test(&mut self, item_id: u64, run: u64, outcome: InpaintOutcome) {
+        let generation = self.next_inpaint(item_id, run);
+        let _ = self.inpaint_done.tx.send((item_id, generation, outcome));
     }
 
     #[cfg(test)]
-    pub(crate) fn land_inpaint_scaled_for_test(&mut self, item_id: u64, rgba: image::RgbaImage, fill_scale: f32) {
-        let generation = *self.inpaint_latest_generation.entry(item_id).and_modify(|g| *g += 1).or_insert(1);
-        let _ = self.inpaint_done.tx.send((item_id, InpaintOutcome::Done { rgba, fill_scale, generation }));
+    pub(crate) fn land_inpaint_for_test(&mut self, item_id: u64, run: u64, rgba: image::RgbaImage) {
+        self.end_inpaint_for_test(item_id, run, InpaintOutcome::Done { rgba, fill_scale: 1.0 });
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_inpaint_for_test(&mut self, item_id: u64, error: &str) {
-        let _ = self.inpaint_done.tx.send((item_id, InpaintOutcome::Failed(error.into())));
+    /// The next erase of `item_id`, answering `run`: its generation, so a
+    /// fresher stroke wins.
+    fn next_inpaint(&mut self, item_id: u64, run: u64) -> u64 {
+        let generation = self.inpaint_latest.get(&item_id).map_or(1, |&(g, _)| g + 1);
+        self.inpaint_latest.insert(item_id, (generation, run));
+        generation
     }
 
     #[cfg(test)]
@@ -1068,13 +1084,12 @@ impl Processor {
     pub(crate) fn dispatch_inpaint(
         &mut self,
         item_id: u64,
+        run: u64,
         image: super::item::Pixels,
         correction: super::item::Region,
         tuning: InpaintTuning,
     ) {
-        let latest = self.inpaint_latest_generation.entry(item_id).or_insert(0);
-        *latest += 1;
-        let generation = *latest;
+        let generation = self.next_inpaint(item_id, run);
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
         // Fresh flag and sink: a stale cancel of the earlier stroke must
         // not fire on this one.
@@ -1106,7 +1121,7 @@ impl Processor {
             });
             run.end();
             let outcome = match fill.unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why))) {
-                Ok((rgba, fill_scale)) => InpaintOutcome::Done { rgba, fill_scale, generation },
+                Ok((rgba, fill_scale)) => InpaintOutcome::Done { rgba, fill_scale },
                 Err(prunr_core::CoreError::Cancelled) => {
                     tracing::info!(item_id, "inpaint cancelled by user");
                     InpaintOutcome::Cancelled
@@ -1117,7 +1132,7 @@ impl Processor {
                     InpaintOutcome::Failed(msg)
                 }
             };
-            let _ = tx.send((item_id, outcome));
+            let _ = tx.send((item_id, generation, outcome));
         });
     }
 
@@ -1227,11 +1242,11 @@ impl Processor {
             // mid-encode Esc never runs the SD bundle on a discarded stroke.
             let cancelled = || progress.is_cancelled();
             let send_cancelled = || {
-                let _ = inpaint_tx.send((item_id, InpaintOutcome::Cancelled));
+                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Cancelled));
             };
             if cancelled() { send_cancelled(); return; }
             let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
-                let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed("the image could not be read".into())));
+                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed("the image could not be read".into())));
                 return;
             };
             // Before the dispatch, so it lands under the worker's previews.
@@ -1246,7 +1261,7 @@ impl Processor {
                 crate::subprocess::ipc::write_image(&mask_path, &mask).map_err(|e| format!("write mask: {e}"))
             })();
             if let Err(e) = res {
-                let _ = inpaint_tx.send((item_id, InpaintOutcome::Failed(e)));
+                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed(e)));
                 return;
             }
             if cancelled() {
@@ -1275,16 +1290,16 @@ impl Processor {
                     let (tx, sink) = (self.inpaint_done.tx.clone(), self.inpaint_runs.get(&item_id).cloned());
                     rayon::spawn(move || {
                         let outcome = match crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height) {
-                            Some(rgba) => InpaintOutcome::Done { rgba, fill_scale, generation },
+                            Some(rgba) => InpaintOutcome::Done { rgba, fill_scale },
                             None => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
                         };
-                        let _ = tx.send((item_id, outcome));
+                        let _ = tx.send((item_id, generation, outcome));
                         if let Some(sink) = sink {
                             sink.end();
                         }
                     });
                 }
-                InpaintBridgeResult::Error { item_id, error } => {
+                InpaintBridgeResult::Error { item_id, generation, error } => {
                     // IPC sentinels become user text here, at the seam.
                     use crate::subprocess::protocol::{is_cancel_error, MEMORY_PRESSURE_ABORT_MSG};
                     let outcome = if is_cancel_error(&error) {
@@ -1297,7 +1312,7 @@ impl Processor {
                     } else {
                         InpaintOutcome::Failed(error)
                     };
-                    let _ = self.inpaint_done.tx.send((item_id, outcome));
+                    let _ = self.inpaint_done.tx.send((item_id, generation, outcome));
                     self.end_inpaint_run(item_id);
                 }
             }
@@ -1319,13 +1334,11 @@ impl Processor {
         }
     }
 
-    /// `(fills, cancelled_ids, errors)`: fills only of each item's newest
-    /// stroke (stale ones dropped); errors are user-visible messages.
-    pub(crate) fn drain_inpaint_results(&mut self) -> (Vec<LandedFill>, Vec<u64>, Vec<(u64, String)>) {
-        let mut out = Vec::new();
-        let mut cancelled = Vec::new();
-        let mut errors = Vec::new();
-        while let Ok((item_id, outcome)) = self.inpaint_done.rx.try_recv() {
+    /// How each image's newest stroke ended since the last call; a
+    /// superseded stroke's outcome is dropped.
+    pub(crate) fn drain_inpaint_results(&mut self) -> ErasesEnded {
+        let mut ended = ErasesEnded::default();
+        while let Ok((item_id, generation, outcome)) = self.inpaint_done.rx.try_recv() {
             // Stale results count too: their job has finished.
             if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
@@ -1336,18 +1349,20 @@ impl Processor {
                 self.inpaint_cancels.remove(&item_id);
                 self.inpaint_runs.remove(&item_id);
             }
+            let Some(&(_, run)) = self.inpaint_latest.get(&item_id).filter(|&&(newest, _)| newest == generation) else {
+                tracing::info!(item_id, generation, "outcome of a superseded stroke dropped");
+                continue;
+            };
             match outcome {
-                InpaintOutcome::Cancelled => cancelled.push(item_id),
-                InpaintOutcome::Failed(msg) => errors.push((item_id, msg)),
-                InpaintOutcome::Done { rgba, fill_scale, generation } => {
-                    if self.inpaint_latest_generation.get(&item_id) == Some(&generation) {
-                        tracing::info!(item_id, fill_scale, "erase landed");
-                        out.push(LandedFill { item_id, rgba, fill_scale });
-                    }
+                InpaintOutcome::Cancelled => ended.cancelled.push((item_id, run)),
+                InpaintOutcome::Failed(msg) => ended.failed.push((item_id, run, msg)),
+                InpaintOutcome::Done { rgba, fill_scale } => {
+                    tracing::info!(item_id, fill_scale, "erase landed");
+                    ended.fills.push(LandedFill { item_id, run, rgba, fill_scale });
                 }
             }
         }
-        (out, cancelled, errors)
+        ended
     }
 
     pub(crate) fn is_inpaint_in_flight(&self, item_id: u64) -> bool {
@@ -2561,54 +2576,30 @@ mod tests {
         assert_eq!(p.queued_run_position(), None, "one image counts nothing");
     }
 
+    /// Each image's newest stroke's outcome comes out with the run it
+    /// answers, as its own kind; a superseded stroke's, of any kind, is
+    /// dropped.
     #[test]
-    fn drain_filters_stale_generations() {
-        let mut p = fixture();
-        p.inpaint_latest_generation.insert(7, 2);
-        p.inpaint_done.tx.send((7, InpaintOutcome::Done {
-            rgba: image::RgbaImage::new(1, 1), fill_scale: 1.0, generation: 1,
-        })).unwrap();
-        p.inpaint_done.tx.send((7, InpaintOutcome::Done {
-            rgba: image::RgbaImage::new(2, 2), fill_scale: 1.0, generation: 2,
-        })).unwrap();
-        let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert_eq!(drained.len(), 1, "stale generation=1 must be dropped");
-        assert_eq!(drained[0].rgba.dimensions(), (2, 2), "the generation=2 fill lands");
-        assert!(cancelled.is_empty(), "no cancellation events expected");
-        assert!(errors.is_empty(), "no dispatch errors expected");
-    }
-
-    #[test]
-    fn drain_routes_cancelled_results_to_cancellation_list() {
-        let mut p = fixture();
-        p.inpaint_latest_generation.insert(7, 5);
-        p.inpaint_pending.insert(7, 1);
-        p.inpaint_done.tx.send((7, InpaintOutcome::Cancelled)).unwrap();
-        let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert!(drained.is_empty(),
-            "cancelled stroke must not commit a result");
-        assert_eq!(cancelled, vec![7],
-            "cancellation event must surface for the toast");
-        assert!(errors.is_empty(),
-            "cancel must not be reported as a dispatch error");
-    }
-
-    #[test]
-    fn drain_routes_dispatch_errors_to_error_list() {
-        let mut p = fixture();
-        p.inpaint_pending.insert(7, 1);
-        p.inpaint_done.tx.send((7, InpaintOutcome::Failed(
-            "SD inpaint refused to load: only 13.4 GB free".to_string(),
-        ))).unwrap();
-        let (drained, cancelled, errors) = p.drain_inpaint_results();
-        assert!(drained.is_empty(),
-            "errored stroke must not commit a result");
-        assert!(cancelled.is_empty(),
-            "errored stroke is not a cancel");
-        assert_eq!(errors.len(), 1,
-            "dispatch error must surface for the user toast");
-        assert_eq!(errors[0].0, 7);
-        assert!(errors[0].1.contains("13.4 GB"));
+    fn the_newest_strokes_outcome_comes_out_with_its_run() {
+        type Outcome = fn() -> InpaintOutcome;
+        let outcomes: [(&str, Outcome); 3] = [
+            ("fill", || InpaintOutcome::Done { rgba: image::RgbaImage::new(2, 2), fill_scale: 1.0 }),
+            ("cancel", || InpaintOutcome::Cancelled),
+            ("failure", || InpaintOutcome::Failed("SD inpaint refused to load: only 13.4 GB free".into())),
+        ];
+        for (kind, outcome) in outcomes {
+            let mut p = fixture();
+            let superseded = p.next_inpaint(7, 40);
+            let newest = p.next_inpaint(7, 41);
+            p.inpaint_done.tx.send((7, superseded, outcome())).unwrap();
+            p.inpaint_done.tx.send((7, newest, outcome())).unwrap();
+            let ended = p.drain_inpaint_results();
+            let got: Vec<(&str, u64, u64)> = ended.fills.iter().map(|f| ("fill", f.item_id, f.run))
+                .chain(ended.cancelled.iter().map(|&(id, run)| ("cancel", id, run)))
+                .chain(ended.failed.iter().map(|(id, run, _)| ("failure", *id, *run)))
+                .collect();
+            assert_eq!(got, vec![(kind, 7, 41)], "{kind}: only the newest stroke's, with its run");
+        }
     }
 
     /// An admission controller with `budget` and the images' costs queued.
@@ -2931,9 +2922,9 @@ mod tests {
         let mut p = fixture();
         let (tx, rx) = mpsc::channel();
         p.inpaint_bridge_rx = rx;
-        tx.send(crate::gui::inpaint_bridge::InpaintBridgeResult::Error { item_id: 1, error: prunr_core::CoreError::Cancelled.message() }).unwrap();
+        tx.send(crate::gui::inpaint_bridge::InpaintBridgeResult::Error { item_id: 1, generation: 1, error: prunr_core::CoreError::Cancelled.message() }).unwrap();
         p.pump_inpaint_subprocess();
-        assert!(matches!(p.inpaint_done.rx.try_recv(), Ok((1, InpaintOutcome::Cancelled))));
+        assert!(matches!(p.inpaint_done.rx.try_recv(), Ok((1, 1, InpaintOutcome::Cancelled))));
     }
 
     /// An image a cancelled run left in an older batch awaits only the
