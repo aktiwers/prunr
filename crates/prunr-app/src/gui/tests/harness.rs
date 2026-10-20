@@ -49,7 +49,7 @@ pub(super) fn loaded_with(setup: impl FnOnce(&mut PrunrApp)) -> Harness<'static,
 }
 
 pub(super) fn tree<S>(harness: &Harness<'_, S>) -> ControlNode {
-    ControlNode::from_node(&harness.kittest_state().root())
+    ControlNode::from_node(&harness.kittest_state().root(), harness.ctx.pixels_per_point())
 }
 
 /// Runs a few frames so clicks, animations and repaint requests settle.
