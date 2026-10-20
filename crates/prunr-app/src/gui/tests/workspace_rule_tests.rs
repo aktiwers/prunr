@@ -293,6 +293,25 @@ fn user_text_has_no_engineering_words() {
     report(found, "engineering words in user text");
 }
 
+/// Every character user text writes has a glyph in the app's fonts: a
+/// missing one draws as an empty box ("Settings □ Hardware").
+#[test]
+fn user_text_writes_only_glyphs_the_fonts_have() {
+    let ctx = egui::Context::default();
+    egui_material_icons::initialize(&ctx);
+    let _ = ctx.run_ui(Default::default(), |_| {});
+    let font = egui::FontId::proportional(14.0);
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+        for (n, literal) in user_literals(text) {
+            if let Some(c) = literal.chars().find(|&c| !c.is_ascii() && !ctx.fonts_mut(|f| f.has_glyph(&font, c))) {
+                found.push(format!("{rel}:{n}: \"{literal}\" writes {c:?}, which the fonts lack"));
+            }
+        }
+    }
+    report(found, "glyphs the fonts lack in user text");
+}
+
 /// A key named in user text comes from the binding table
 /// (`shortcuts::keys`): Settings › Shortcuts rebinds them, and a key
 /// written by hand stays wrong after.
