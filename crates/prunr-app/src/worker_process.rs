@@ -461,7 +461,7 @@ pub fn run_worker() -> ! {
                     // Released on drop, panics included.
                     let weight = pixel_weight(&img_bytes);
                     let sem_guard = sem.acquire(weight);
-                    let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
+                    let (progress, pulse) = ipc_progress(item_id, evt_tx.clone());
                     let progress = progress.with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
                     // Whether this image is the one on screen is settled
@@ -662,6 +662,8 @@ pub fn run_worker() -> ! {
                             });
                         }
                     }
+                    // Answered: a beat now would report a finished image's step.
+                    drop(pulse);
 
                     send_rss(&evt_tx);
 
@@ -779,7 +781,7 @@ pub fn run_worker() -> ! {
                         return;
                     }
                     let sem_guard = sem.acquire(10);
-                    let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
+                    let (progress, pulse) = ipc_progress(item_id, evt_tx.clone());
                     let mut spare = SpareScales::new(edge_scales.spare(&edge, item_id, on_screen.get()));
 
                     // seg_tensor_path is both our input and the output we hand
@@ -850,6 +852,7 @@ pub fn run_worker() -> ! {
                         }
                     }
 
+                    drop(pulse);
                     cleanup_ipc_temps(&ipc, &[&image_path]);
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
