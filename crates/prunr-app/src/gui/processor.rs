@@ -408,11 +408,9 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) reading: prunr_core::MaskReading,
 }
 
-/// A depth map landing for `item_id`, measured from the photo the item
-/// had at `epoch`.
+/// A depth map landing for `item_id`.
 pub(crate) struct DepthResult {
     pub(crate) item_id: u64,
-    pub(crate) epoch: u64,
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
@@ -428,7 +426,6 @@ pub(crate) struct Admitted {
 /// One photo to measure, queued for the depth thread.
 pub(crate) struct DepthJob {
     pub(crate) item_id: u64,
-    pub(crate) epoch: u64,
     pub(crate) input: super::item::Pixels,
     pub(crate) cpu_only: bool,
     /// The faces a Faces search already found in this photo; `None`: the
@@ -453,12 +450,12 @@ impl DepthQueue {
         std::thread::spawn(move || {
             let mut faces = prunr_core::face::LazyFaceFinder::default();
             for job in job_rx {
-                let (item_id, epoch) = (job.item_id, job.epoch);
+                let item_id = job.item_id;
                 let result = caught(|| measure_depth(&engine_slot, &progress, job, &mut faces)).unwrap_or_else(Err);
                 if let Err(err) = &result {
                     tracing::warn!(item_id, %err, "depth run failed");
                 }
-                let _ = done_tx.send(DepthResult { item_id, epoch, result });
+                let _ = done_tx.send(DepthResult { item_id, result });
             }
         });
         Self { jobs, done, warm }
@@ -970,7 +967,7 @@ impl Processor {
     }
 
     /// Queue a photo for a depth map; it lands through
-    /// `pump_depth_results`, tagged with the job's epoch.
+    /// `pump_depth_results`.
     pub(crate) fn dispatch_depth(&self, job: DepthJob) {
         let _ = self.depth.jobs.send(job);
     }
