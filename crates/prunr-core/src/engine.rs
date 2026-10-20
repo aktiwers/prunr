@@ -176,7 +176,8 @@ impl GpuStartFailure {
     }
 
     /// `err` names the first library the loader could not find, or the
-    /// vendor's error code.
+    /// vendor's error code. macOS starts no CUDA or ROCm provider.
+    #[cfg(any(not(target_os = "macos"), test, feature = "test-utils"))]
     pub(crate) fn of(stack: GpuStack, err: &str) -> Self {
         let missing = err
             .split(": cannot open shared object file")
