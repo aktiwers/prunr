@@ -1541,7 +1541,7 @@ impl SdSession {
             };
 
         let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
-        let unet_on_cuda = picks.iter().any(|(k, pick)| *k == "unet" && pick.provider == EpKind::Cuda.as_str());
+        let unet_on_cuda = picks.iter().any(|(k, pick)| *k == "unet" && pick.provider == crate::engine::CUDA_NAME);
         let mut take = |want: &str| -> Result<Session, String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;

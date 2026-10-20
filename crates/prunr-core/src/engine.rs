@@ -34,6 +34,9 @@ pub(crate) enum EpKind {
 /// reads a provider string needs no per-platform branch.
 pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 
+/// CUDA's provider name, defined on every platform like OpenVINO's.
+pub(crate) const CUDA_NAME: &str = "CUDA";
+
 /// The CPU provider's name: its label, its cache-dir key and the
 /// fallback when no GPU provider is available.
 pub const CPU_NAME: &str = "CPU";
@@ -45,7 +48,7 @@ impl EpKind {
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino => OPENVINO_NAME,
             #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => "CUDA",
+            EpKind::Cuda => CUDA_NAME,
             #[cfg(target_os = "linux")]
             EpKind::MiGraphX => "MIGraphX",
             #[cfg(target_os = "macos")]
