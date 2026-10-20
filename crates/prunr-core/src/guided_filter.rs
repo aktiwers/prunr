@@ -206,6 +206,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{Luma, Rgba};
 
     /// An epsilon of zero (a hand-edited preset) on a flat region divides
     /// zero by zero; it filters as the app's small one does, not into NaN
@@ -220,7 +221,6 @@ mod tests {
             assert!(out.pixels().zip(small.pixels()).all(|(a, b)| a[0].abs_diff(b[0]) <= 1), "eps {eps}");
         }
     }
-    use image::{Luma, Rgba};
 
     /// A guided filter takes variance as mean(g²) − mean(g)². On a big
     /// region of large values (0-255 squared) that difference must stay

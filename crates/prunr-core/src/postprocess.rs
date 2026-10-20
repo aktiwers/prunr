@@ -708,8 +708,6 @@ mod tests {
         assert!(mean(2.0) < mean(1.0) && mean(1.0) < mean(0.5), "{} {} {}", mean(2.0), mean(1.0), mean(0.5));
     }
 
-    /// Feather is continuous: half a pixel softens an edge, and 1.5 px
-    /// lands between 1 and 2.
     /// A disc in a canvas far wider than the blur's reach.
     fn disc_in_canvas() -> GrayImage {
         GrayImage::from_fn(96, 80, |x, y| {
@@ -730,9 +728,6 @@ mod tests {
         assert!(off.is_empty(), "{label}: {} pixels off, by up to {}", off.len(), off.iter().max().unwrap_or(&0));
     }
 
-    /// Cropping the blur to the mask's reach changes no pixel: the crop
-    /// edge, where the box windows are clipped, lies where the whole-image
-    /// blur reads only zeros.
     /// A feather that is not a number leaves the mask; one past the
     /// image's size blurs as one of its size, without overflow.
     #[test]
@@ -761,6 +756,9 @@ mod tests {
         assert_eq!(mask(f32::NAN), mask(1.0));
     }
 
+    /// Cropping the blur to the mask's reach changes no pixel: the crop
+    /// edge, where the box windows are clipped, lies where the whole-image
+    /// blur reads only zeros.
     #[test]
     fn the_cropped_blur_equals_the_whole_image_blur() {
         for radius in 1..=6 {
@@ -784,6 +782,8 @@ mod tests {
         }
     }
 
+    /// Feather is continuous: half a pixel softens an edge, and 1.5 px
+    /// lands between 1 and 2.
     #[test]
     fn feather_is_continuous_below_and_between_whole_pixels() {
         let edge = || GrayImage::from_fn(16, 1, |x, _| image::Luma([if x < 8 { 255 } else { 0 }]));
