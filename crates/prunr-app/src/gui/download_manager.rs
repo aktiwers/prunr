@@ -8,7 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 
 use prunr_runtime_install::DlError;
 use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource, OnDemandVariant};
@@ -39,9 +39,28 @@ pub(crate) struct DownloadManager {
     states: HashMap<ModelId, DownloadState>,
     queue: VecDeque<ModelId>,
     cancel_flags: HashMap<ModelId, Arc<AtomicBool>>,
-    progress_tx: mpsc::Sender<DownloadEvent>,
+    progress_tx: Waking,
     progress_rx: mpsc::Receiver<DownloadEvent>,
     active: Option<ModelId>,
+}
+
+/// The download threads' end of the channel: each event wakes the window
+/// too. The checksum pass sends nothing for seconds, the window then goes
+/// idle, and the event that ends a download would sit unread.
+#[derive(Clone)]
+struct Waking {
+    tx: mpsc::Sender<DownloadEvent>,
+    repaint: Arc<OnceLock<egui::Context>>,
+}
+
+impl Waking {
+    fn send(&self, event: DownloadEvent) -> Result<(), mpsc::SendError<DownloadEvent>> {
+        let sent = self.tx.send(event);
+        if let Some(ctx) = self.repaint.get() {
+            ctx.request_repaint();
+        }
+        sent
+    }
 }
 
 impl DownloadManager {
@@ -51,10 +70,15 @@ impl DownloadManager {
             states: HashMap::new(),
             queue: VecDeque::new(),
             cancel_flags: HashMap::new(),
-            progress_tx: tx,
+            progress_tx: Waking { tx, repaint: Arc::default() },
             progress_rx: rx,
             active: None,
         }
+    }
+
+    /// The window the download threads wake with each event.
+    pub(crate) fn wake(&self, ctx: &egui::Context) {
+        let _ = self.progress_tx.repaint.set(ctx.clone());
     }
 
     /// Returns `Idle` for ids that have never been touched.
@@ -523,6 +547,29 @@ mod tests {
 
     fn fixture() -> DownloadManager {
         DownloadManager::new()
+    }
+
+    /// A download runs on its own thread while the window may sit idle
+    /// (the checksum pass sends nothing for seconds): each event it sends
+    /// wakes the window, or a finished download sat unread and the queued
+    /// ones never started until the pointer moved.
+    #[test]
+    fn every_download_event_wakes_the_window() {
+        let ctx = egui::Context::default();
+        for _ in 0..5 {
+            let _ = ctx.run_ui(Default::default(), |_| {});
+        }
+        assert!(!ctx.has_requested_repaint(), "an idle window");
+        let mut dm = DownloadManager::new();
+        dm.wake(&ctx);
+        dm.active = Some(ModelId::LaMaFp32);
+        dm.states.insert(ModelId::BigLaMa, DownloadState::Queued);
+        dm.queue.push_back(ModelId::BigLaMa);
+        let tx = dm.progress_tx.clone();
+        std::thread::spawn(move || { let _ = tx.send(DownloadEvent::Cancelled { id: ModelId::LaMaFp32 }); }).join().unwrap();
+        assert!(ctx.has_requested_repaint(), "the window is woken");
+        dm.pump();
+        assert_ne!(dm.state(ModelId::BigLaMa), DownloadState::Queued, "and the next one starts");
     }
 
     #[test]
