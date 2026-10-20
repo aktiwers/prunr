@@ -33,7 +33,15 @@ fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let mut depth_turned_on = false;
     popup_for(ui, id, &resp, |ui| {
         popover_header(ui, "Save options", None);
-        changed |= super::chip::choice_row(ui, "Format", &FORMAT_CHOICES, &mut app.settings.export_format);
+        let refusals = FORMAT_CHOICES.map(|c| app.batch.save_refusal(c.value));
+        let mut choices = FORMAT_CHOICES;
+        for (choice, why) in choices.iter_mut().zip(&refusals) {
+            choice.enabled = why.is_none();
+        }
+        changed |= super::chip::choice_row(ui, "Format", &choices, &mut app.settings.export_format);
+        for why in refusals.iter().flatten() {
+            super::hint(ui, why);
+        }
         if app.offers_layers() {
             ui.add_space(theme::SPACE_SM);
             changed |= ui.checkbox(&mut app.settings.export_split_layers, "Separate layers").changed();

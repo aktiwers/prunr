@@ -485,6 +485,28 @@ impl ExportFormat {
         }
     }
 
+    /// The largest side, in pixels, the format stores: WebP's header has
+    /// 14 bits for it, JPEG's 16.
+    pub const fn max_side(self) -> u32 {
+        match self {
+            Self::Png => i32::MAX as u32,
+            Self::Jpeg => 65_535,
+            Self::Webp => 16_384,
+        }
+    }
+
+    pub const fn fits(self, width: u32, height: u32) -> bool {
+        width <= self.max_side() && height <= self.max_side()
+    }
+
+    /// Why a `width × height` image cannot be saved in this format, if it
+    /// cannot.
+    pub fn refusal(self, width: u32, height: u32) -> Option<String> {
+        (!self.fits(width, height)).then(|| {
+            format!("{} stores images up to {} px a side; this one is {width}×{height}. Save it as PNG.", self.label(), self.max_side())
+        })
+    }
+
     /// The format a file name asks for by its extension.
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -497,6 +519,9 @@ impl ExportFormat {
     /// Temp, drag-out and clipboard PNGs stay fast (`encode_rgba_png`).
     pub fn encode_into<W: std::io::Write>(self, img: &RgbaImage, w: W) -> Result<(), CoreError> {
         let (width, height) = img.dimensions();
+        if let Some(why) = self.refusal(width, height) {
+            return Err(CoreError::ImageFormat(why));
+        }
         match self {
             Self::Png => return write_kept_png(w, img.as_raw(), width, height, image::ExtendedColorType::Rgba8),
             Self::Jpeg => {
@@ -781,6 +806,17 @@ mod tests {
         let path = dir.path().join("logo.svg");
         std::fs::write(&path, SAMPLE_SVG).unwrap();
         assert_eq!(image_dimensions_from_path(&path), Some((32, 16)));
+    }
+
+    /// WebP stores at most 16384 px a side: a larger image is refused
+    /// before encoding, saying what fits, not with the encoder's error.
+    #[test]
+    fn a_format_refuses_an_image_past_its_largest_side_with_the_reason() {
+        assert!(ExportFormat::Webp.encode(&RgbaImage::new(16384, 1)).is_ok());
+        let refused = ExportFormat::Webp.encode(&RgbaImage::new(16385, 1)).unwrap_err().to_string();
+        assert!(refused.contains("16384") && refused.contains("PNG"), "{refused}");
+        assert!(ExportFormat::Png.fits(16385, 16385) && !ExportFormat::Webp.fits(1, 16385));
+        assert!(ExportFormat::Jpeg.fits(65_535, 1) && !ExportFormat::Jpeg.fits(65_536, 1));
     }
 
     #[test]
