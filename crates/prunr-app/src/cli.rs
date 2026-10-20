@@ -28,7 +28,7 @@ pub struct Cli {
     pub model: CliModel,
 
     /// Number of parallel jobs for batch processing.
-    #[arg(short = 'j', long, default_value_t = 1)]
+    #[arg(short = 'j', long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     pub jobs: usize,
 
     /// How to handle images exceeding 8000px in either dimension.
@@ -1519,6 +1519,13 @@ mod tests {
         assert!(photo.command.is_none());
         assert_eq!(photo.inputs.len(), 2);
         assert!(super::Cli::try_parse_from(["prunr", "bench", "--runs", "500"]).is_err());
+    }
+
+    /// No job slots means nothing is ever sent, and the batch waits forever.
+    #[test]
+    fn zero_jobs_is_refused() {
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "-j", "0"]).is_err());
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "-j", "3"]).jobs, 3);
     }
 
     /// `-o` with one input is the output file; with several it is the
