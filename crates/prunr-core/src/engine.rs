@@ -80,14 +80,12 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
         }
         #[cfg(target_os = "macos")]
         {
-            if ort::ep::CoreML::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
+            if ort::ep::CoreML::is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if ort::ep::OpenVINO::default()
-                .is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            if ort::ep::CUDA::default().is_available().unwrap_or(false) {
+            if ort::ep::OpenVINO::is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
+            if ort::ep::CUDA::is_available().unwrap_or(false) {
                 match provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()) {
                     Ok(()) => eps.push(EpKind::Cuda),
                     Err(e) => {
@@ -97,7 +95,7 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
                 }
             }
             #[cfg(target_os = "linux")]
-            if ort::ep::MIGraphX::default().is_available().unwrap_or(false) {
+            if ort::ep::MIGraphX::is_available().unwrap_or(false) {
                 match provider_starts(ort::ep::MIGraphX::default().with_device_id(0).build().error_on_failure()) {
                     Ok(()) => eps.push(EpKind::MiGraphX),
                     Err(e) => {
@@ -107,8 +105,7 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
                 }
             }
             #[cfg(windows)]
-            if ort::ep::DirectML::default()
-                .is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
+            if ort::ep::DirectML::is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
         }
         let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
         tracing::info!(eps = ?eps_str, "Available GPU execution providers");
@@ -467,7 +464,7 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 }
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
-fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
+pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
     if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
@@ -1295,7 +1292,7 @@ mod tests {
     fn missing_provider_fails_registration_instead_of_running_on_cpu() {
         use ort::ep::ExecutionProvider;
         if crate::ort_runtime::ensure_initialized().is_err()
-            || ort::ep::CUDA::default().is_available().unwrap_or(true)
+            || ort::ep::CUDA::is_available().unwrap_or(true)
         {
             return;
         }
