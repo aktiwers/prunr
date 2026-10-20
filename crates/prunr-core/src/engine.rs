@@ -338,7 +338,16 @@ impl EpKind {
                         .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
                         .with_tf32(true)
                         .build(),
-                    EpSite::Fill { .. } | EpSite::SdPart { .. } => p.build(),
+                    // The pool and search of the engines, for the same
+                    // reasons, without TF32's lower precision: SD 1.5 on a
+                    // 12 GB RTX 3060 took 7.1 GB for 512 px tiles instead
+                    // of 9.4, at the same 4.0 s, and its pixels differ from
+                    // the defaults' no more than two default runs do.
+                    EpSite::SdPart { .. } => p
+                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
+                        .build(),
+                    EpSite::Fill { .. } => p.build(),
                 }
             }
             // One device, as for CUDA: the first card ROCm lists.
