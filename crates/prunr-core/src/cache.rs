@@ -389,6 +389,9 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
         // `<stable>-` prefix is unambiguous given the registry convention
         // that `stable_name` uses `_` internally, never `-`.
         if !name_str.starts_with(&our_prefix) { continue; }
+        if current_name.to_str().is_some_and(|current| another_cpus_entry(current, name_str, ep_name.eq_ignore_ascii_case(crate::engine::CPU_NAME))) {
+            continue;
+        }
         match std::fs::remove_dir_all(&path) {
             Ok(()) => tracing::info!(
                 ?id, ep = %ep_name, dir = %path.display(),
@@ -401,6 +404,16 @@ pub fn gc_stale_for_model(id: ModelId, ep_name: &str) {
             ),
         }
     }
+}
+
+/// `other` is the entry another CPU keeps under the same key as `current`:
+/// on the CPU the key ends in the vector width (`cache_key`), and the rest
+/// matches.
+fn another_cpus_entry(current: &str, other: &str, cpu: bool) -> bool {
+    fn base(key: &str) -> Option<&str> {
+        key.rsplit_once('-').map(|(base, _)| base)
+    }
+    cpu && base(current).is_some() && base(current) == base(other)
 }
 
 fn remove_shared_graph(entry: &Path) {
@@ -569,6 +582,17 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"graph");
         drop(other);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
+    }
+
+    /// A CPU entry that differs from this machine's only by its vector
+    /// width is another machine's live cache (a synced profile, a shared
+    /// home): the clean-up keeps it, and still removes an older runtime's.
+    #[test]
+    fn the_cleanup_keeps_another_cpus_entry() {
+        let ours = "silueta-1.0.0-app0.4.8-ortbuild-ce7b65b0-v1-avx512";
+        assert!(another_cpus_entry(ours, "silueta-1.0.0-app0.4.8-ortbuild-ce7b65b0-v1-x86_64", true));
+        assert!(!another_cpus_entry(ours, "silueta-1.0.0-app0.4.8-ortbuild-aaaaaaaa-v1-x86_64", true), "another runtime's");
+        assert!(!another_cpus_entry("silueta-1.0.0-app0.4.8-ortbuild-ce7b65b0-v1", "silueta-1.0.0-app0.4.7-ortbuild-ce7b65b0-v1", false), "a GPU entry has no CPU part");
     }
 
     /// Graphs written side by side (the parts of one model build at once)
