@@ -51,16 +51,16 @@ pub struct Cli {
     pub debug: bool,
 
     /// Mask gamma (removal strength). >1 = more aggressive, <1 = gentler.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.0, value_parser = finite)]
     pub gamma: f32,
 
     /// Edge contrast (0.0–1.0): 0 keeps the soft edge, 1 cuts it hard.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, value_parser = finite)]
     pub contrast: f32,
 
     /// Shift the cut-out's edge in pixels: positive grows the subject,
     /// negative shrinks it.
-    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = finite)]
     pub edge_shift: f32,
 
     /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
@@ -72,7 +72,7 @@ pub struct Cli {
     pub edge_width: u32,
 
     /// Soften the cut-out's edge by this many pixels (fractions allowed).
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, value_parser = finite)]
     pub feather: f32,
 
     /// Extract lines/edges instead of removing background (uses TEED model).
@@ -85,7 +85,7 @@ pub struct Cli {
 
     /// How much of the detected edges become lines (0.0–1.0): lower draws
     /// bold outlines only, higher adds fine detail.
-    #[arg(long = "line-detail", visible_alias = "line-strength", default_value_t = 0.5)]
+    #[arg(long = "line-detail", visible_alias = "line-strength", default_value_t = 0.5, value_parser = finite)]
     pub line_strength: f32,
 
     /// Line width in pixels (0–20).
@@ -200,15 +200,15 @@ pub struct Cli {
     pub scale: u8,
 
     /// Denoise before the upscale model, 0 (off) to 1.
-    #[arg(long, requires = "upscale", default_value_t = 0.0)]
+    #[arg(long, requires = "upscale", default_value_t = 0.0, value_parser = finite)]
     pub denoise: f32,
 
     /// Sharpen after the upscale, -1 (soften) to 1; 0 is off.
-    #[arg(long, requires = "upscale", default_value_t = prunr_core::DEFAULT_SHARPEN, allow_negative_numbers = true)]
+    #[arg(long, requires = "upscale", default_value_t = prunr_core::DEFAULT_SHARPEN, allow_negative_numbers = true, value_parser = finite)]
     pub sharpen: f32,
 
     /// AI blend: 1 keeps the model's output, 0 the plain enlargement.
-    #[arg(long, requires = "upscale", default_value_t = 1.0)]
+    #[arg(long, requires = "upscale", default_value_t = 1.0, value_parser = finite)]
     pub ai_blend: f32,
 
     /// Match the upscale's colours to the original.
@@ -231,7 +231,7 @@ pub struct Cli {
     pub colorize: bool,
 
     /// Color strength: 0 is grey, 1 the predicted color, up to 1.5.
-    #[arg(long, requires = "colorize", default_value_t = 1.0)]
+    #[arg(long, requires = "colorize", default_value_t = 1.0, value_parser = finite)]
     pub color_strength: f32,
 
     /// Lines fade with distance, 0-100 (needs the depth model, from the
@@ -406,6 +406,12 @@ impl CliBackdrop<'_> {
 }
 
 /// `blur`, `blur:N` (1-64 px), `lens`, `lens:N` (0-100 %) or `bw`.
+/// A float flag's value: any number but nan and the infinities, which
+/// mean nothing as a knob.
+fn finite(s: &str) -> Result<f32, String> {
+    s.parse::<f32>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("'{s}' is not a finite number"))
+}
+
 fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     use prunr_core::BgEffect;
     match s.split_once(':') {
