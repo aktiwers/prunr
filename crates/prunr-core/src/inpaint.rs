@@ -642,7 +642,7 @@ fn lama_ladder(
         let mut built = builder
             .with_execution_providers([ep.provider(id, EpSite::Fill { threads })])
             .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
-        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep, Weights::Fp32) };
+        let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep.as_str(), Weights::Fp32) };
         let started = Instant::now();
         let mut session = built
             .commit_from_memory(&bytes_owner)
@@ -660,13 +660,17 @@ fn lama_ladder(
     };
 
     crate::cache::gc_stale_for_model(id, crate::engine::CPU_NAME);
-    let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder()?, bytes, id, crate::engine::CPU_NAME, Weights::Fp32);
-    let started = Instant::now();
-    let session = builder
-        .commit_from_memory(&cpu_bytes)
-        .map_err(|e| format!("LaMa: CPU session commit failed: {e}"))?;
-    if let Some(draft) = draft { draft.publish(); }
-    tracing::info!(?id, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+    let session = crate::engine::commit_past_bad_cache(|| {
+        let (mut builder, cpu_bytes, draft) = apply_ort_graph_cache(builder().map_err(|e| (e, None))?, bytes, id, crate::engine::CPU_NAME, Weights::Fp32);
+        let suspect = cached_graph(matches!(cpu_bytes, Cow::Owned(_)), id, crate::engine::CPU_NAME, Weights::Fp32);
+        let started = Instant::now();
+        let session = builder
+            .commit_from_memory(&cpu_bytes)
+            .map_err(|e| (format!("LaMa: CPU session commit failed: {e}"), suspect))?;
+        if let Some(draft) = draft { draft.publish(); }
+        tracing::info!(?id, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
+        Ok(session)
+    })?;
     Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
 }
 

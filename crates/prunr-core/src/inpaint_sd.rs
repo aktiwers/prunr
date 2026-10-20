@@ -1649,15 +1649,22 @@ fn build_part_with_ep_ladder(
         ));
     }
     crate::cache::gc_stale_for_model(id, crate::engine::CPU_NAME);
-    let builder = sd_base_builder(session_key.mem, lean)
-        .map_err(|e| format!("SD {key}: builder init: {e}"))?;
-    let (mut builder, load_path, draft) = sd_apply_path_cache(builder, path.as_path(), id, crate::engine::CPU_NAME, key);
-    let started = Instant::now();
-    let session = builder
-        .commit_from_file(&load_path)
-        .map_err(|e| format!("SD {key}: load from {}: {e}", load_path.display()))?;
-    if let Some(draft) = draft { draft.publish(); }
-    tracing::info!(?id, part = %key, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
+    let session = crate::engine::commit_past_bad_cache(|| {
+        let builder = sd_base_builder(session_key.mem, lean)
+            .map_err(|e| (format!("SD {key}: builder init: {e}"), None))?;
+        let (mut builder, load_path, draft) = sd_apply_path_cache(builder, path.as_path(), id, crate::engine::CPU_NAME, key);
+        let suspect = match &load_path {
+            Cow::Owned(cached) => Some(cached.clone()),
+            Cow::Borrowed(_) => None,
+        };
+        let started = Instant::now();
+        let session = builder
+            .commit_from_file(&load_path)
+            .map_err(|e| (format!("SD {key}: load from {}: {e}", load_path.display()), suspect))?;
+        if let Some(draft) = draft { draft.publish(); }
+        tracing::info!(?id, part = %key, ep = crate::engine::CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "SD: session committed");
+        Ok(session)
+    })?;
     Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
 }
 

@@ -751,16 +751,20 @@ impl OrtEngine {
         let model_id: prunr_models::ModelId = model.into();
         if eps.is_empty() {
             crate::cache::gc_stale_for_model(model_id, CPU_NAME);
-            let builder = Self::builder_with_base(intra_threads, level)?;
-            let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights);
-            let started = Instant::now();
-            let session = builder
-                .with_execution_providers([cpu_provider()])
-                .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
-                .commit_from_memory(&bytes)
-                .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
-            if let Some(draft) = draft { draft.publish(); }
-            tracing::info!(?model, ep = CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
+            let session = commit_past_bad_cache(|| {
+                let builder = Self::builder_with_base(intra_threads, level).map_err(|e| (e, None))?;
+                let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights);
+                let suspect = cached_graph(matches!(bytes, Cow::Owned(_)), model_id, CPU_NAME, weights);
+                let started = Instant::now();
+                let session = builder
+                    .with_execution_providers([cpu_provider()])
+                    .map_err(|e| (CoreError::Inference(format!("ORT set CPU EP failed: {e}")), None))?
+                    .commit_from_memory(&bytes)
+                    .map_err(|e| (CoreError::Inference(format!("ORT session creation failed (CPU): {e}")), suspect))?;
+                if let Some(draft) = draft { draft.publish(); }
+                tracing::info!(?model, ep = CPU_NAME, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
+                Ok(session)
+            })?;
             return Ok(Self {
                 sessions: Sessions::One(Mutex::new(session)),
                 pick: SessionPick { weights, ..SessionPick::on(CPU_NAME) },
@@ -786,7 +790,7 @@ impl OrtEngine {
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
-                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep, weights),
+                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep.as_str(), weights),
             })?;
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
@@ -1040,8 +1044,24 @@ fn clear_suspect_cache(path: &std::path::Path) {
 
 /// The cached optimized graph a session loaded, when `hit` (an
 /// `apply_ort_graph_cache` hit comes back as owned bytes).
-pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep: EpKind, weights: Weights) -> Option<PathBuf> {
-    hit.then(|| crate::cache::optimized_model_path(model, ep.as_str(), weights)).flatten()
+pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep_name: &str, weights: Weights) -> Option<PathBuf> {
+    hit.then(|| crate::cache::optimized_model_path(model, ep_name, weights)).flatten()
+}
+
+/// Commit a CPU session, where `commit` answers a failure with the cached
+/// graph it loaded, if any. A cached graph the CPU fails on (damaged, or
+/// written on another machine) is deleted and the session committed again,
+/// from the model: the CPU is the last provider, so a bad cache must not
+/// stop a model loading.
+pub(crate) fn commit_past_bad_cache<T, E: std::fmt::Display>(mut commit: impl FnMut() -> Result<T, (E, Option<PathBuf>)>) -> Result<T, E> {
+    match commit() {
+        Err((error, Some(cached))) => {
+            tracing::warn!(%error, cache = %cached.display(), "CPU session failed on its cached graph; building it again");
+            clear_suspect_cache(&cached);
+            commit().map_err(|(error, _)| error)
+        }
+        done => done.map_err(|(error, _)| error),
+    }
 }
 
 /// Per-(model, EP, weights) optimized-graph cache: a hit returns the
@@ -1078,6 +1098,25 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached CPU graph the session cannot load (damaged, or written on
+    /// another machine) is deleted and the session built from the model:
+    /// the CPU is the last provider, so a bad cache must not stop a model.
+    #[test]
+    fn a_cpu_session_builds_past_a_broken_cached_graph() {
+        let id = prunr_models::ModelId::Silueta;
+        assert!(crate::cache::cache_dir_for(id, CPU_NAME).is_some());
+        let broken: Vec<PathBuf> = [Weights::Fp32, Weights::Fp16, Weights::Int8]
+            .into_iter()
+            .filter_map(|w| crate::cache::optimized_model_path(id, CPU_NAME, w))
+            .collect();
+        for path in &broken {
+            std::fs::write(path, b"not a graph").unwrap();
+        }
+        let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("the model loads past its broken cache");
+        let used = crate::cache::optimized_model_path(id, CPU_NAME, engine.pick.weights).unwrap();
+        assert_ne!(std::fs::read(&used).ok().as_deref(), Some(&b"not a graph"[..]), "the broken graph is gone");
+    }
 
     /// Erasers and models run in parts never land on MIGraphX, which
     /// recompiles per crop size; engines still use it.
