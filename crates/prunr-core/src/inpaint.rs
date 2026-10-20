@@ -72,7 +72,9 @@ pub fn grow_mask(mask: &GrayImage, px: i32) -> GrayImage {
         return mask.clone();
     }
     let (w, h) = mask.dimensions();
-    let iters = px.unsigned_abs();
+    // After w + h steps every pixel is as far as any can be: further ones
+    // change nothing.
+    let iters = px.unsigned_abs().min(w + h);
     let dilate = px > 0;
     let mut out = GrayImage::new(w, h);
     let Some(b) = mask_bbox(mask, 128, if dilate { iters } else { 0 }) else {
@@ -1318,6 +1320,18 @@ mod tests {
 
     /// The bbox-cropped grow matches full-image morphology, for masks in
     /// the middle and touching each image edge, growing and shrinking.
+    /// Growing or shrinking past the image's size does what its size
+    /// does, at once (a huge Expand from a settings file looped 2^31 times).
+    #[test]
+    fn a_grow_past_the_image_ends_at_once() {
+        let mut m = GrayImage::new(12, 9);
+        m.put_pixel(5, 4, Luma([255]));
+        let started = std::time::Instant::now();
+        assert_eq!(grow_mask(&m, i32::MAX), grow_mask(&m, 21));
+        assert_eq!(grow_mask(&m, i32::MIN), grow_mask(&m, -21));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     #[test]
     fn grow_mask_matches_full_image_morphology() {
         let full = |m: &GrayImage, px: i32| {
