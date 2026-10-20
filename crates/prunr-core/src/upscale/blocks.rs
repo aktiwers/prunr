@@ -16,9 +16,10 @@
 //! |--------------------------------------|--------------------|--------------------------------|
 //! | held, f32                            | 524 B              | none                           |
 //! | held, f16                            | 396 B              | within 1/255 of f32 on a photo |
-//! | not held: run for its statistics, then again to apply them | 268 B and two bands of rows | each block runs twice, ~1.9× the time |
+//! | not held: run for its statistics, then again to apply them | 268 B and two bands of rows | each block runs twice, ~1.8× the time |
 //!
-//! A run whose blocks hold nothing peaks in its tail instead: 316 B at 4×.
+//! Two bands are most of a short image, so holding nothing pays only on a
+//! tall one, where the tail's 316 B at 4× then sets the peak.
 //! Held f32 on the CPU provider (i7-6700): 0.99 GB peak at 0.6 MP,
 //! 1.32 GB at 1.4 MP.
 
@@ -51,12 +52,39 @@ pub(crate) enum PreNorm {
 
 impl PreNorm {
     const ALL: [PreNorm; 3] = [PreNorm::Whole, PreNorm::Half, PreNorm::Twice];
-    pub(crate) const LEANEST: PreNorm = PreNorm::Twice;
+
+    fn runs_per_block(self) -> usize {
+        if self == PreNorm::Twice { 2 } else { 1 }
+    }
+
+    fn step(self) -> Step {
+        if self == PreNorm::Whole { Step::Upscaling } else { Step::UpscalingInLessMemory }
+    }
 }
 
-/// The first `PreNorm` whose planes fit in `room` bytes, else the leanest.
+/// The ways a run over an image `h` tall may hold its blocks' outputs, in
+/// `PreNorm` order. Holding nothing writes a crop row back two rows behind
+/// the one being read, so it needs every row to keep more rows than a
+/// block reads around a pixel.
+fn ways(layout: PartLayout, h: u32) -> impl Iterator<Item = PreNorm> {
+    let rows = spans(h as usize, CROP, 0);
+    let fits_twice = rows.iter().all(|row| row.kept_len() > layout.block);
+    PreNorm::ALL.into_iter().filter(move |&pre| pre != PreNorm::Twice || fits_twice)
+}
+
+/// The first way whose planes fit in `room` bytes, else the one that
+/// holds the least.
 pub(crate) fn pre_norm_within(layout: PartLayout, w: u32, h: u32, scale: u32, room: u64) -> PreNorm {
-    PreNorm::ALL.into_iter().find(|&pre| peak_bytes(layout, w, h, scale, pre) <= room).unwrap_or(PreNorm::LEANEST)
+    let peak = |pre| peak_bytes(layout, w, h, scale, pre);
+    ways(layout, h).find(|&pre| peak(pre) <= room)
+        .or_else(|| ways(layout, h).min_by_key(|&pre| peak(pre)))
+        .unwrap_or(PreNorm::Whole)
+}
+
+/// The least any way holds for a `w × h` image by `scale`: what the
+/// memory guard counts, so it refuses only what fits no way.
+pub(crate) fn least_peak_bytes(layout: PartLayout, w: u32, h: u32, scale: u32) -> u64 {
+    ways(layout, h).map(|pre| peak_bytes(layout, w, h, scale, pre)).min().unwrap_or(0)
 }
 
 /// What a part-by-part upscale of `w × h` by `scale` holds in its planes
@@ -68,16 +96,15 @@ pub(crate) fn peak_bytes(layout: PartLayout, w: u32, h: u32, scale: u32, pre: Pr
     let held = match pre {
         PreNorm::Whole => w * h * features,
         PreNorm::Half => w * h * features / 2,
-        PreNorm::Twice => 2 * band_rows(h as usize) as u64 * w * features,
+        PreNorm::Twice => {
+            let rows = spans(h as usize, CROP, 0);
+            let band = rows.iter().map(|row| row.kept_len()).max().unwrap_or(0) as u64;
+            rows.len().min(2) as u64 * band * w * features
+        }
     };
     let blocks = w * h * (12 + features) + held;
     let tail = w * h * (12 + features + u64::from(scale).pow(2) * 3);
     blocks.max(tail)
-}
-
-/// The rows a crop row keeps of an image `h` tall.
-fn band_rows(h: usize) -> usize {
-    spans(h, CROP, 0).first().map_or(0, |span| span.kept_len())
 }
 
 /// What the runner knows of a parted network besides its files.
@@ -132,6 +159,9 @@ impl Span {
 /// (at an image edge it reaches further in instead) so the model compiles
 /// one shape. Equal parts keep the work run twice to the borders.
 fn spans(len: usize, crop: usize, border: usize) -> Vec<Span> {
+    if len == 0 {
+        return Vec::new();
+    }
     let n = len.div_ceil(crop.max(1));
     let kept = len.div_ceil(n);
     let side = (kept + 2 * border).min(len);
@@ -248,14 +278,14 @@ fn affine(sums: &[(f64, f64)], count: usize, groups: usize, eps: f32, (gamma, be
 }
 
 /// `features += γ ⊙ (pre − μ) / √(σ² + ε) + β`, per channel, with μ and
-/// σ² over the whole image for each of `groups` runs of channels: what
-/// GroupNorm and the block's skip compute on a one-piece run. One plane
-/// per weight in the norm; `to` reads a held value.
-fn add_normalized<T: Copy + Send + Sync>(features: &mut [f32], pre: &[T], groups: usize, eps: f32, norm: (&[f32], &[f32]), to: impl Fn(T) -> f32 + Sync) {
-    let plane = pre.len() / norm.0.len();
+/// σ² over the whole image for each group of channels: what block `k`'s
+/// GroupNorm and its skip compute on a one-piece run. `to` reads a held
+/// value.
+fn add_normalized<T: Copy + Send + Sync>(features: &mut [f32], pre: &[T], norms: &Norms, k: usize, to: impl Fn(T) -> f32 + Sync) {
+    let plane = pre.len() / norms.gamma[k].len();
     let sums: Vec<(f64, f64)> = pre.par_chunks(plane).map(|p| sums_of(p.iter().map(|&v| to(v)))).collect();
-    let affine = affine(&sums, plane, groups, eps, norm);
-    features.par_chunks_mut(plane).zip(pre.par_chunks(plane)).zip(affine.par_iter()).for_each(|((f, p), &(scale, shift))| {
+    let scales = affine(&sums, plane, norms.groups, norms.eps, norms.norm(k));
+    features.par_chunks_mut(plane).zip(pre.par_chunks(plane)).zip(scales.par_iter()).for_each(|((f, p), &(scale, shift))| {
         f.iter_mut().zip(p).for_each(|(f, &p)| *f += to(p) * scale + shift);
     });
 }
@@ -276,9 +306,10 @@ fn add_kept_sums(sums: &mut [(f64, f64)], result: &[f32], crop: Crop) {
 }
 
 /// A twice-run block's new features for the crop rows it has finished,
-/// held until the next row has read the old ones around them. A row reads
-/// `border` rows into a neighbour, never past the next row, so two are
-/// held at most.
+/// held until the next row has read the old ones around them. A crop's
+/// kept part depends on rows at most `border` from it, fewer than a row
+/// keeps (`ways`), so writing a row back two rows behind the one being
+/// read is safe, and two are held at most.
 #[derive(Default)]
 struct Bands {
     before: Option<Band>,
@@ -349,9 +380,8 @@ pub(crate) fn upscale_by_parts(net: &impl Stages, input: &RgbaImage, scale: u32,
     }
     let (layout, norms) = (net.layout(), net.norms());
     let channels = layout.features;
-    let runs_per_block = if pre == PreNorm::Twice { 2 } else { 1 };
-    let stages = (norms.blocks() * runs_per_block + 2) as u32;
-    progress.step(if pre == PreNorm::Twice { Step::UpscalingInLessMemory } else { Step::Upscaling });
+    let stages = (norms.blocks() * pre.runs_per_block() + 2) as u32;
+    progress.step(pre.step());
 
     let mut features = vec![0.0f32; channels * plane];
     run_stage(progress, (w, h), (0, stages), layout.head, |crop| {
@@ -377,17 +407,25 @@ pub(crate) fn upscale_by_parts(net: &impl Stages, input: &RgbaImage, scale: u32,
                     keep(&mut held, &block_out(k, &features, crop)?, w, h, crop, |v| v);
                     Ok(())
                 })?;
-                add_normalized(&mut features, &held, norms.groups, norms.eps, norms.norm(k), |v| v);
+                add_normalized(&mut features, &held, norms, k, |v| v);
             }
         }
         PreNorm::Half => {
+            // Nomos2's blocks give at most ~10 on photos and made-up
+            // extremes, against f16's 65504; a value past it would turn
+            // every later block to infinity, so it stops the run instead.
+            let half_max = f16::MAX.to_f32();
             let mut held = vec![f16::ZERO; channels * plane];
             for k in 0..norms.blocks() {
                 run_stage(progress, (w, h), next(), layout.block, |crop| {
-                    keep(&mut held, &block_out(k, &features, crop)?, w, h, crop, f16::from_f32);
+                    let out = block_out(k, &features, crop)?;
+                    if out.iter().any(|v| v.abs() > half_max) {
+                        return Err(CoreError::Inference("a block gave values too large to hold in half precision".into()));
+                    }
+                    keep(&mut held, &out, w, h, crop, f16::from_f32);
                     Ok(())
                 })?;
-                add_normalized(&mut features, &held, norms.groups, norms.eps, norms.norm(k), f16::to_f32);
+                add_normalized(&mut features, &held, norms, k, f16::to_f32);
             }
         }
         PreNorm::Twice => {
@@ -397,11 +435,11 @@ pub(crate) fn upscale_by_parts(net: &impl Stages, input: &RgbaImage, scale: u32,
                     add_kept_sums(&mut sums, &block_out(k, &features, crop)?, crop);
                     Ok(())
                 })?;
-                let affine = affine(&sums, plane, norms.groups, norms.eps, norms.norm(k));
+                let scales = affine(&sums, plane, norms.groups, norms.eps, norms.norm(k));
                 let mut bands = Bands::default();
                 run_stage(progress, (w, h), next(), layout.block, |crop| {
                     let out = block_out(k, &features, crop)?;
-                    bands.put(&mut features, &out, (w, h), crop, &affine);
+                    bands.put(&mut features, &out, (w, h), crop, &scales);
                     Ok(())
                 })?;
                 bands.finish(&mut features, (w, h));
@@ -544,10 +582,12 @@ pub(crate) struct BlockNet {
     tail_features: String,
     norms: Norms,
     shape: NetShape,
+    /// What building the parts' sessions added to the process.
+    resident: u64,
 }
 
 impl BlockNet {
-    pub(crate) fn new(parts: Vec<(&'static str, Session)>, norms: Norms, shape: NetShape) -> Result<Self, CoreError> {
+    pub(crate) fn new(parts: Vec<(&'static str, Session)>, norms: Norms, shape: NetShape, resident: u64) -> Result<Self, CoreError> {
         let (mut head, mut tail, mut blocks) = (None, None, Vec::new());
         for (key, session) in parts {
             let part = Part::of(key, session)?;
@@ -569,7 +609,7 @@ impl BlockNet {
         };
         let fits = head.inputs == [image] && blocks.iter().all(|b| b.inputs.len() == 1) && norms.blocks() == blocks.len();
         match tail_features {
-            Some(tail_features) if fits => Ok(Self { head, blocks, tail, tail_features, norms, shape }),
+            Some(tail_features) if fits => Ok(Self { head, blocks, tail, tail_features, norms, shape, resident }),
             _ => Err(CoreError::Model(format!(
                 "parts do not fit: a head taking {:?}, a tail taking {:?}, {} blocks for {} norms, the image as {image:?}",
                 head.inputs, tail.inputs, blocks.len(), norms.blocks(),
@@ -587,6 +627,10 @@ pub(crate) struct Running<'a> {
 impl BlockNet {
     pub(crate) fn layout(&self) -> PartLayout {
         self.shape.layout
+    }
+
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.resident
     }
 }
 
@@ -639,8 +683,9 @@ mod tests {
     fn the_norm_uses_each_groups_whole_image_statistics() {
         let pre: Vec<f32> = vec![1.0, 2.0, 3.0, 5.0, 5.0, 5.0, 0.0, 4.0, 8.0, 1.0, 1.0, 1.0];
         let mut features = vec![10.0f32; 12];
-        let (gamma, beta) = (vec![1.0, 2.0, 1.0, 1.0], vec![0.0, 0.0, 0.5, 0.0]);
-        add_normalized(&mut features, &pre, 2, 0.0, (&gamma, &beta), |v| v);
+        let (gamma, beta): (Vec<f32>, Vec<f32>) = (vec![1.0, 2.0, 1.0, 1.0], vec![0.0, 0.0, 0.5, 0.0]);
+        let norms = Norms { groups: 2, eps: 0.0, gamma: vec![gamma], beta: vec![beta] };
+        add_normalized(&mut features, &pre, &norms, 0, |v| v);
         // Group 0: 1,2,3,5,5,5 → mean 3.5, var 2.5833…
         let (m, sd) = (3.5f32, (2.583_333_3f32).sqrt());
         assert!((features[0] - (10.0 + (1.0 - m) / sd)).abs() < 1e-5);
@@ -659,6 +704,8 @@ mod tests {
         norms: Norms,
         /// Channels the head gives; 4 fits the network.
         head_out: usize,
+        /// What each block's output is scaled by.
+        block_gain: f32,
     }
 
     impl Toy {
@@ -667,7 +714,7 @@ mod tests {
         fn new(gamma: Vec<f32>, beta: Vec<f32>) -> Self {
             let row = |v: &[f32], k: usize| v.iter().map(|x| x * (1.0 + 0.1 * k as f32)).collect();
             let norms = Norms { groups: 2, eps: 1e-5, gamma: (0..3).map(|k| row(&gamma, k)).collect(), beta: (0..3).map(|k| row(&beta, k)).collect() };
-            Self { norms, head_out: 4 }
+            Self { norms, head_out: 4, block_gain: 1.0 }
         }
     }
 
@@ -704,7 +751,7 @@ mod tests {
         }
         fn block(&self, k: usize, f: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError> {
             let p = w * h;
-            Ok((0..4).flat_map(|c| blur(&f[c * p..(c + 1) * p], w, h, 3).into_iter().map(move |v| v * (1.0 + k as f32 + c as f32))).collect())
+            Ok((0..4).flat_map(|c| blur(&f[c * p..(c + 1) * p], w, h, 3).into_iter().map(move |v| v * (1.0 + k as f32 + c as f32) * self.block_gain)).collect())
         }
         fn tail(&self, f: Vec<f32>, image: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError> {
             // 2× nearest of a blurred mix, plus the image.
@@ -736,7 +783,7 @@ mod tests {
         let mut f = net.head(image.clone(), w, h).unwrap();
         for k in 0..net.norms.blocks() {
             let pre = net.block(k, f.clone(), w, h).unwrap();
-            add_normalized(&mut f, &pre, net.norms.groups, net.norms.eps, net.norms.norm(k), |v| v);
+            add_normalized(&mut f, &pre, &net.norms, k, |v| v);
         }
         let rgb = net.tail(f, image, w, h).unwrap();
         RgbImage::from_fn(2 * w as u32, 2 * h as u32, |x, y| image::Rgb(std::array::from_fn(|c| crate::math::round_u8(rgb[c * 4 * p + y as usize * 2 * w + x as usize] * 255.0))))
@@ -745,11 +792,12 @@ mod tests {
     /// Part by part in crops matches one pass over the whole image however
     /// the blocks' outputs are held: no seam where crops meet, whatever the
     /// image's size against a crop. 300 × 600 has three rows of crops, so
-    /// a twice-run block hands a band on across two rows.
+    /// a twice-run block hands a band on across two rows; 300 × 635 keeps
+    /// one row shorter than the others; 120 × 1100 has five rows.
     #[test]
     fn part_by_part_matches_one_pass() {
         let net = Toy::new(vec![0.5, 1.5, 1.0, 0.8], vec![0.1, -0.2, 0.0, 0.3]);
-        for (w, h) in [(300u32, 270u32), (300, 600), (600, 90), (100, 100)] {
+        for (w, h) in [(300u32, 270u32), (300, 600), (300, 635), (120, 1100), (600, 90), (100, 100)] {
             let input = toy_input(w, h);
             let whole = one_pass(&net, &input);
             for pre in PreNorm::ALL {
@@ -771,6 +819,41 @@ mod tests {
         assert_eq!(pre_norm_within(layout, 2000, 4000, 4, peak(PreNorm::Whole) - 1), PreNorm::Half);
         assert_eq!(pre_norm_within(layout, 2000, 4000, 4, peak(PreNorm::Half) - 1), PreNorm::Twice);
         assert_eq!(pre_norm_within(layout, 2000, 4000, 4, 0), PreNorm::Twice);
+        // Two crop rows hold the whole image as bands: half precision is
+        // the least there, and what a run too short of room falls back to.
+        assert_eq!(pre_norm_within(layout, 8000, 500, 4, 0), PreNorm::Half);
+    }
+
+    /// What the guard counts is the least any way holds, so it never
+    /// refuses an image some way would run, short or tall.
+    #[test]
+    fn the_guard_counts_the_least_any_way_holds() {
+        let layout = PartLayout { features: 64, head: 2, block: 12, tail: 16 };
+        for h in [1, 200, 400, 700, 1000, 3000, 9000] {
+            let least = least_peak_bytes(layout, 2000, h, 4);
+            assert!(ways(layout, h).all(|pre| least <= peak_bytes(layout, 2000, h, 4, pre)), "{h} rows");
+            assert_eq!(peak_bytes(layout, 2000, h, 4, pre_norm_within(layout, 2000, h, 4, least)), least, "{h} rows: the least fits its own count");
+        }
+        assert_eq!(least_peak_bytes(layout, 2000, 0, 4), 0, "no rows, nothing held");
+    }
+
+    /// Holding nothing writes rows back two crop rows behind, so it is no
+    /// way at all where a row keeps no more rows than a block reads.
+    #[test]
+    fn holding_nothing_needs_rows_taller_than_a_blocks_reach() {
+        let layout = PartLayout { features: 64, head: 2, block: 12, tail: 16 };
+        assert!(ways(layout, 600).any(|pre| pre == PreNorm::Twice));
+        assert!(!ways(layout, 10).any(|pre| pre == PreNorm::Twice), "a 10-row image keeps 10 rows, under the reach of 12");
+    }
+
+    /// A value past half precision stops a half-precision run with an
+    /// error instead of a picture of infinities.
+    #[test]
+    fn a_value_past_half_precision_stops_the_run() {
+        let net = Toy { block_gain: 1e6, ..Toy::new(vec![1.0; 4], vec![0.0; 4]) };
+        let input = toy_input(100, 100);
+        assert!(upscale_by_parts(&net, &input, 2, PreNorm::Whole, &Progress::none()).is_ok());
+        assert!(matches!(upscale_by_parts(&net, &input, 2, PreNorm::Half, &Progress::none()), Err(CoreError::Inference(_))));
     }
 
     /// The run reports a step, each stage and each crop, within their
