@@ -357,10 +357,10 @@ fn download_attempt(
     sweep_stale_partials(dest);
 
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
-        .map_err(|e| DlError::fatal(format!("Could not start the download: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("Could not start the download: {}", prunr_runtime_install::with_causes(&e))))?;
 
     let response = client.get(url).send()
-        .map_err(|e| DlError::transient(format!("Network error: {e}")))?;
+        .map_err(|e| DlError::transient(format!("Network error: {}", prunr_runtime_install::with_causes(&e))))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -403,7 +403,7 @@ fn fetch_into(
             return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
         }
         let n = std::io::Read::read(&mut response, &mut buf)
-            .map_err(|e| DlError::transient(format!("Read error: {e}")))?;
+            .map_err(|e| DlError::transient(format!("Read error: {}", prunr_runtime_install::with_causes(&e))))?;
         if n == 0 {
             break;
         }
@@ -483,6 +483,17 @@ fn sweep_stale_partials(dest: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download that cannot connect says why (the connection refused,
+    /// a certificate not trusted), not only that the request failed.
+    #[test]
+    fn a_failed_download_names_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let failed = download_attempt("http://127.0.0.1:1/model.onnx", &dir.path().join("model.onnx"), "00", &cancel, &|_, _| {}, &|| {});
+        let why = failed.expect_err("nothing listens on port 1").message.to_lowercase();
+        assert!(why.contains("refused"), "{why}");
+    }
 
     /// A download that would fill the disk does not start, and says how
     /// much it needs; one with room does.

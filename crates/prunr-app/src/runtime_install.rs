@@ -332,11 +332,11 @@ fn run_install(
 
 fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
     let url = format!("https://pypi.org/pypi/{}/{}/json", rt.pypi_package(), rt.ort_version());
-    let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {e}"))?;
+    let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {}", ri::with_causes(&e)))?;
     let resp = client.get(&url).send()
-        .map_err(|e| format!("PyPI query failed: {e}"))?;
+        .map_err(|e| format!("PyPI query failed: {}", ri::with_causes(&e)))?;
     let metadata: serde_json::Value = resp.json()
-        .map_err(|e| format!("PyPI JSON parse: {e}"))?;
+        .map_err(|e| format!("PyPI JSON parse: {}", ri::with_causes(&e)))?;
     let urls = metadata["urls"].as_array()
         .ok_or_else(|| "PyPI metadata missing `urls`".to_string())?;
     ri::pick_wheel_for_host(urls)
