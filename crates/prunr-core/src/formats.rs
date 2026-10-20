@@ -195,9 +195,8 @@ fn has_svg_extension(path: &Path) -> bool {
 fn looks_like_svg(bytes: &[u8]) -> bool {
     let probe = &bytes[..bytes.len().min(512)];
     let probe = probe.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(probe);
-    let head = std::str::from_utf8(probe).unwrap_or("");
-    let trimmed = head.trim_start();
-    trimmed.starts_with("<?xml") || trimmed.starts_with("<svg")
+    let head = probe.trim_ascii_start();
+    head.starts_with(b"<?xml") || head.starts_with(b"<svg")
 }
 
 /// Rasterize an SVG byte buffer to a `DynamicImage::ImageRgba8`. Uses the
@@ -794,6 +793,17 @@ mod tests {
         assert!(!looks_like_svg(b"\xff\xd8\xff\xe0JFIF"), "JPEG header");
         assert!(!looks_like_svg(b"GIF89a"), "GIF header");
         assert!(!looks_like_svg(b""), "empty buffer");
+    }
+
+    /// The first 512 bytes are sniffed: a character cut at that edge, or
+    /// a Latin-1 comment, is no reason to refuse the file.
+    #[test]
+    fn an_svg_is_known_by_its_first_bytes_whatever_follows() {
+        let mut cut = b"<?xml version=\"1.0\"?>\n<!-- ".to_vec();
+        cut.resize(511, b'x');
+        cut.extend_from_slice("é -->\n<svg/>".as_bytes());
+        assert!(looks_like_svg(&cut), "a character cut at byte 512");
+        assert!(looks_like_svg(b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><!-- \xa9 2024 --><svg/>"), "Latin-1");
     }
 
     #[test]
