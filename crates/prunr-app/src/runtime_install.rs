@@ -304,7 +304,7 @@ fn run_install(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
-    let wheel = query_pypi(rt)?;
+    let wheel = query_pypi(rt, &cancel)?;
 
     let _ = tx.send(InstallEvent::Downloading {
         bytes_so_far: 0,
@@ -330,16 +330,31 @@ fn run_install(
     Ok(())
 }
 
-fn query_pypi(rt: RuntimeId) -> Result<ri::WheelInfo, String> {
+fn query_pypi(rt: RuntimeId, cancel: &Arc<AtomicBool>) -> Result<ri::WheelInfo, String> {
     let url = format!("https://pypi.org/pypi/{}/{}/json", rt.pypi_package(), rt.ort_version());
-    let client = ri::http_client(USER_AGENT).map_err(|e| format!("HTTP client: {}", ri::with_causes(&e)))?;
-    let resp = client.get(&url).send()
-        .map_err(|e| format!("PyPI query failed: {}", ri::with_causes(&e)))?;
-    let metadata: serde_json::Value = resp.json()
-        .map_err(|e| format!("PyPI JSON parse: {}", ri::with_causes(&e)))?;
-    let urls = metadata["urls"].as_array()
-        .ok_or_else(|| "PyPI metadata missing `urls`".to_string())?;
-    ri::pick_wheel_for_host(urls)
+    ri::pick_wheel_for_host(&pypi_files(&url, cancel)?)
+}
+
+/// The files PyPI lists at `url`, asked again after a dropped connection
+/// or a server error (5xx), as downloads are.
+fn pypi_files(url: &str, cancel: &Arc<AtomicBool>) -> Result<Vec<serde_json::Value>, String> {
+    ri::retry_with_backoff(cancel, ri::DOWNLOAD_ATTEMPTS, ri::DOWNLOAD_BACKOFF_BASE_MS, |_attempt| {
+        let client = ri::http_client(USER_AGENT)
+            .map_err(|e| ri::DlError::fatal(format!("HTTP client: {}", ri::with_causes(&e))))?;
+        let resp = client.get(url).send()
+            .map_err(|e| ri::DlError::transient(format!("PyPI query failed: {}", ri::with_causes(&e))))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ri::DlError::for_status(status, format!("PyPI answered {status}")));
+        }
+        let mut metadata: serde_json::Value = resp.json()
+            .map_err(|e| ri::DlError::transient(format!("PyPI JSON parse: {}", ri::with_causes(&e))))?;
+        match metadata["urls"].take() {
+            serde_json::Value::Array(urls) => Ok(urls),
+            _ => Err(ri::DlError::fatal("PyPI metadata missing `urls`")),
+        }
+    })
+    .map_err(|e| e.message)
 }
 
 /// Extract into a hidden folder beside the install and move it into place
@@ -365,6 +380,46 @@ fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answer each connection to the returned URL with the next of
+    /// `responses`; the handle tells how many were asked for.
+    fn serve(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/pypi/onnxruntime/json", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let mut served = 0;
+            // Replies first: zip asks its first side first, and the
+            // listener would wait for a connection past the last reply.
+            for (reply, stream) in responses.into_iter().zip(listener.incoming()) {
+                let mut stream = stream.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let _ = std::io::Write::write_all(&mut stream, reply.as_bytes());
+                served += 1;
+            }
+            served
+        });
+        (url, served)
+    }
+
+    const UNAVAILABLE: &str = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+    const LISTED: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"urls\":[]}";
+
+    /// PyPI's passing trouble (a 5xx) is asked again, as downloads are;
+    /// a refusal (a 4xx) says what PyPI answered, at once.
+    #[test]
+    fn the_pypi_query_retries_a_server_error_and_names_a_refusal() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (url, served) = serve(vec![UNAVAILABLE, LISTED]);
+        assert_eq!(pypi_files(&url, &cancel), Ok(Vec::new()));
+        assert_eq!(served.join().unwrap(), 2);
+
+        let (url, served) = serve(vec![NOT_FOUND]);
+        let refused = pypi_files(&url, &cancel).expect_err("a 404");
+        assert!(refused.contains("404"), "{refused}");
+        assert_eq!(served.join().unwrap(), 1, "a refusal is not asked again");
+    }
 
     /// The installer checks the extracted library under its name and the
     /// loader looks for it under core's; neither crate can see the other.
