@@ -211,10 +211,11 @@ impl DragExportState {
         self.prewritten.insert(id, Prewrite { key, files: PrewriteFiles::Writing(handle) });
     }
 
-    /// `id`'s drag files if they were written ahead for `key`, waiting for
-    /// a write still running. `None` when the drag must write them now
-    /// (none, stale or failed); a stale write still running is finished
-    /// first so it cannot overwrite the fresh files afterwards.
+    /// `id`'s drag files if they were written ahead for `key` and are
+    /// still there, waiting for a write still running. `None` when the
+    /// drag must write them now (none, stale, failed or gone); a stale
+    /// write still running is finished first so it cannot overwrite the
+    /// fresh files afterwards.
     pub(crate) fn take_written(&mut self, id: u64, key: &DragKey) -> Option<Vec<PathBuf>> {
         let prewrite = self.prewritten.remove(&id)?;
         let paths = match prewrite.files {
@@ -224,7 +225,7 @@ impl DragExportState {
         if !prewrite.key.matches(key) {
             return None;
         }
-        let paths = paths?;
+        let paths = paths.filter(|paths| paths.iter().all(|p| p.exists()))?;
         self.prewritten.insert(id, Prewrite { key: prewrite.key, files: PrewriteFiles::Written(paths.clone()) });
         Some(paths)
     }
@@ -304,6 +305,27 @@ impl DragExportState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files written ahead that are gone by the drag (another instance's
+    /// sweep, a temp cleaner) are written again, not handed to the drop.
+    #[test]
+    fn files_written_ahead_but_gone_are_written_again() {
+        use crate::gui::drag_export::{DragKey, DragSpec};
+        use crate::gui::item::{BatchItem, BatchStatus, ImageSource};
+        let mut item = BatchItem::new(1, "gone.jpg".into(), ImageSource::Bytes(Arc::new(Vec::new())), (4, 4), Default::default(), String::new());
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: crate::gui::brush_state::CutoutAction::Restore };
+        let key = || DragKey::of(&item, spec);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gone.prunr.png");
+        std::fs::write(&file, b"png").unwrap();
+        let mut s = DragExportState::new();
+        s.prewritten.insert(1, Prewrite { key: key(), files: PrewriteFiles::Written(vec![file.clone()]) });
+        assert_eq!(s.take_written(1, &key()), Some(vec![file.clone()]));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(s.take_written(1, &key()), None, "gone: the drag writes them again");
+    }
 
     #[test]
     fn reset_does_not_touch_pending_or_linux_notified() {
