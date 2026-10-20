@@ -125,7 +125,11 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
 
         if toolbar_change.preset_applied {
-            self.batch.items[idx].commit(StepKind::Preset);
+            let item = &mut self.batch.items[idx];
+            let shown = item.timeline.current();
+            if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
+                item.commit(StepKind::Preset);
+            }
             // The preset may carry a bg_image_hash: reload its bytes from the
             // persisted path map (or clear) so the recipe diff holds.
             self.reconcile_bg_image_after_preset(idx);

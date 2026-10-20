@@ -1419,8 +1419,27 @@ impl BatchItem {
     /// Record the working copy as a new step.
     pub(crate) fn commit(&mut self, kind: StepKind) {
         let state = self.snapshot(kind);
+        let keeps_run = self.keeps_long_run(&state);
         self.timeline.push(state);
+        if keeps_run {
+            if let Some(job) = &mut self.job {
+                job.version = self.timeline.version();
+            }
+        }
         self.warm_neighbour_steps();
+    }
+
+    /// Whether `next` leaves an erase, upscale or colorize under way
+    /// landable: it keeps the pixels the run started from (a knob for the
+    /// next run, a preset), so the run's result still lands, on top of
+    /// it. A cut keeps the strict rule: its knob changes re-cut.
+    fn keeps_long_run(&self, next: &DocState) -> bool {
+        let same_pixels = match (&self.timeline.current().result, &next.result) {
+            (None, None) => true,
+            (Some(shown), Some(kept)) => Arc::ptr_eq(shown, kept),
+            _ => false,
+        };
+        same_pixels && self.job_is_current() && self.job.as_ref().is_some_and(|j| j.engine != Engine::Segment && j.step.is_some())
     }
 
     /// The image leaves or comes on screen: off screen it lets go of its
@@ -3735,6 +3754,38 @@ mod tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         let _ = item.undo_step();
         assert!(!item.job_is_current(), "an undo since the start makes the result stale");
+    }
+
+    /// An erase, upscale or colorize still lands after a step that keeps
+    /// the pixels it started from: a knob, a preset. New pixels or an
+    /// undo leave it stale, and a cut keeps the strict rule.
+    #[test]
+    fn a_step_that_keeps_the_pixels_keeps_a_long_run() {
+        for (engine, step) in [(Engine::Erase, StepKind::Erase), (Engine::Upscale, StepKind::Upscale), (Engine::Colorize, StepKind::Colorize)] {
+            let mut item = fixture_item(1);
+            item.result_rgba = Some(px(1));
+            item.commit(StepKind::Process);
+            item.start_job(Some(step), engine);
+            item.settings.gamma = 1.4;
+            item.commit(StepKind::Adjust);
+            assert!(item.job_is_current(), "{engine:?}: a knob change");
+            item.commit(StepKind::Preset);
+            assert!(item.job_is_current(), "{engine:?}: a preset");
+            item.result_rgba = Some(px(2));
+            item.commit(StepKind::Edit);
+            assert!(!item.job_is_current(), "{engine:?}: new pixels");
+        }
+
+        let mut item = fixture_item(1);
+        item.start_job(Some(StepKind::Erase), Engine::Erase);
+        item.commit(StepKind::Adjust);
+        let _ = item.undo_step();
+        assert!(!item.job_is_current(), "an undo");
+
+        let mut item = fixture_item(1);
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        item.commit(StepKind::Adjust);
+        assert!(!item.job_is_current(), "a cut");
     }
 
     /// Lands a run of `engine` that produced `v`, recording `step`.

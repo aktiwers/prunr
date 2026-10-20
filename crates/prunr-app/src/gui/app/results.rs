@@ -1115,8 +1115,8 @@ mod faces_tests {
     }
 
     /// A run's tiles and a face search's redrawn faces each land on their
-    /// own preview, whatever the other is doing: a run made stale by a
-    /// Faces change paints nothing over the image, and a search under way
+    /// own preview, whatever the other is doing: a run made stale by new
+    /// pixels paints nothing over the image, and a search under way
     /// while a run is awaited paints nothing into the run's preview.
     #[test]
     fn a_runs_tiles_and_a_searchs_faces_land_on_their_own_previews() {
@@ -1139,7 +1139,8 @@ mod faces_tests {
         assert!(app.batch.items[0].face_preview_texture().is_some());
 
         app.batch.items[0].face_preview = None;
-        app.batch.items[0].commit(StepKind::Adjust);
+        app.batch.items[0].result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(8, 8)));
+        app.batch.items[0].commit(StepKind::Edit);
         assert!(!app.batch.items[0].job_is_current());
         run.report(face_tile());
         app.pump_run_pictures(&ctx);
@@ -2133,6 +2134,12 @@ mod timeline_contract_tests {
         assert!(!crate::gui::automation::state::dump(&app).busy);
     }
 
+    /// Leaves the shown state with new pixels, as a hand edit does.
+    fn edit_by_hand(app: &mut PrunrApp) {
+        app.batch.items[0].result_rgba = Some(px(2));
+        app.batch.items[0].commit(StepKind::Edit);
+    }
+
     /// The same for an erase, an upscale and a colorize: a result for a
     /// state the image has left ends the run instead of hanging it.
     #[test]
@@ -2141,12 +2148,11 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_job(Some(StepKind::Erase), Engine::Erase);
-        app.batch.items[0].settings.gamma = 1.8;
-        app.batch.items[0].commit(StepKind::Adjust);
+        edit_by_hand(&mut app);
         app.processor.land_inpaint_for_test(1, (*px(7)).clone());
         app.pump_inpaint_results(&ctx);
         assert!(app.batch.items[0].job.is_none(), "erase: the run is over");
-        assert_eq!(shown(&app), Some(1), "erase: the late result did not land");
+        assert_eq!(shown(&app), Some(2), "erase: the late result did not land");
 
         let runs = [
             (SettingsModel::RealEsrganUpscale, Engine::Upscale, StepKind::Upscale),
@@ -2155,9 +2161,7 @@ mod timeline_contract_tests {
         for (model, engine, step) in runs {
             let mut app = app_with_processed_item(model);
             app.batch.items[0].start_job(Some(step), engine);
-            crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
-            app.batch.items[0].settings.gamma = 1.8;
-            app.batch.items[0].commit(StepKind::Adjust);
+            edit_by_hand(&mut app);
             let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
             let run = app.batch.items[0].job_run().expect("a run");
             app.processor.land_run_for_test(engine, 1, run, px(7), recipe);
@@ -2166,7 +2170,43 @@ mod timeline_contract_tests {
             let item = &app.batch.items[0];
             assert_eq!(item.status(), BatchStatus::Done, "{engine:?}: shows its current state again");
             assert!(item.job.is_none(), "{engine:?}: the run is over");
-            assert_eq!(shown(&app), Some(1), "{engine:?}: the late result did not land");
+            assert_eq!(shown(&app), Some(2), "{engine:?}: the late result did not land");
+        }
+    }
+
+    /// An erase, upscale or colorize outlives a step that keeps the
+    /// image's pixels (a knob for the next run, a preset, Reset): minutes
+    /// of work land, on top of that step.
+    #[test]
+    fn a_long_run_lands_after_a_change_that_keeps_the_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_erase(None);
+        app.batch.items[0].settings.gamma = 1.8;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.processor.land_inpaint_for_test(1, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert!(app.batch.items[0].job.is_none(), "erase: the run is over");
+        assert_eq!(shown(&app), Some(7), "erase: the fill landed");
+        assert_eq!(app.batch.items[0].settings.gamma, 1.8, "erase: on top of the change");
+
+        let runs = [
+            (SettingsModel::RealEsrganUpscale, Engine::Upscale, StepKind::Upscale),
+            (SettingsModel::ColorizeDdcolor, Engine::Colorize, StepKind::Colorize),
+        ];
+        for (model, engine, step) in runs {
+            let mut app = app_with_processed_item(model);
+            app.batch.items[0].start_job(Some(step), engine);
+            app.batch.items[0].settings.gamma = 1.8;
+            app.batch.items[0].commit(StepKind::Preset);
+            let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+            let run = app.batch.items[0].job_run().expect("a run");
+            app.processor.land_run_for_test(engine, 1, run, px(7), recipe);
+            app.pump_upscale_results(&ctx);
+            app.pump_colorize_results(&ctx);
+            assert!(app.batch.items[0].job.is_none(), "{engine:?}: the run is over");
+            assert_eq!(shown(&app), Some(7), "{engine:?}: the result landed");
         }
     }
 
@@ -2258,6 +2298,23 @@ mod timeline_contract_tests {
         assert_eq!(app.batch.items[0].settings.gamma, before.gamma);
         app.handle_redo(&ctx);
         assert_eq!(app.batch.items[0].settings.gamma, 1.8);
+    }
+
+    /// A preset is a step when it changes something; picking the one
+    /// already applied records nothing.
+    #[test]
+    fn a_preset_that_changes_nothing_is_no_step() {
+        use crate::gui::views::adjustments_toolbar::ToolbarChange;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.gamma = 1.8;
+        app.batch.items[0].applied_preset = "Bright".into();
+        app.apply_toolbar_change(&ctx, ToolbarChange { preset_applied: true, ..Default::default() }, before);
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), 2);
+        let again = app.batch.items[0].settings;
+        app.apply_toolbar_change(&ctx, ToolbarChange { preset_applied: true, ..Default::default() }, again);
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), 2, "the same preset again");
     }
 
     /// Clearing the selection is a step: undo brings it back.
