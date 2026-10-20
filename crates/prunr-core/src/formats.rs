@@ -162,8 +162,9 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
 ///
 /// Peak: twice the decoded image while a quarter turn copies it.
 fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Result<DynamicImage, CoreError> {
+    let (reader, late) = late_png_orientation(reader);
     let mut decoder = reader.into_decoder()?;
-    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let orientation = orientation_of(&mut decoder, late);
     let mut limits = image::Limits::default();
     limits.reserve(decoder.total_bytes())?;
     decoder.set_limits(limits)?;
@@ -175,13 +176,65 @@ fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -
 /// A raster's size as `decode_upright` turns it, from its header.
 fn upright_dimensions<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Option<(u32, u32)> {
     use image::metadata::Orientation;
+    let (reader, late) = late_png_orientation(reader);
     let mut decoder = reader.into_decoder().ok()?;
     let (w, h) = decoder.dimensions();
     let quarter_turn = matches!(
-        decoder.orientation(),
-        Ok(Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH)
+        orientation_of(&mut decoder, late),
+        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
     );
     Some(if quarter_turn { (h, w) } else { (w, h) })
+}
+
+/// The turn the header names, else one read after the pixels (`late`).
+fn orientation_of(decoder: &mut impl image::ImageDecoder, late: Option<image::metadata::Orientation>) -> image::metadata::Orientation {
+    use image::metadata::Orientation;
+    match decoder.orientation() {
+        Ok(Orientation::NoTransforms) | Err(_) => late.unwrap_or(Orientation::NoTransforms),
+        Ok(turn) => turn,
+    }
+}
+
+/// A PNG's EXIF turn read wherever its eXIf chunk sits: the PNG rules let
+/// it follow the image data (ExifTool before 12.29 wrote it there), and a
+/// decoder asked before the pixels has not read it yet. The chunk headers
+/// are walked, their data skipped, and the reader put back where it was.
+fn late_png_orientation<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> (ImageReader<R>, Option<image::metadata::Orientation>) {
+    if reader.format() != Some(image::ImageFormat::Png) {
+        return (reader, None);
+    }
+    let mut inner = reader.into_inner();
+    let found = inner.stream_position().ok().and_then(|start| {
+        let found = png_exif_orientation(&mut inner);
+        inner.seek(std::io::SeekFrom::Start(start)).ok().and(found)
+    });
+    (ImageReader::with_format(inner, image::ImageFormat::Png), found)
+}
+
+fn png_exif_orientation<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<image::metadata::Orientation> {
+    // Far past any real EXIF block: a damaged length allocates no more.
+    const MAX_EXIF: u32 = 1 << 20;
+    let mut signature = [0u8; 8];
+    r.read_exact(&mut signature).ok()?;
+    if signature != *b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    loop {
+        let mut head = [0u8; 8];
+        r.read_exact(&mut head).ok()?;
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+        match &head[4..] {
+            b"eXIf" if len <= MAX_EXIF => {
+                let mut exif = vec![0u8; len as usize];
+                r.read_exact(&mut exif).ok()?;
+                return image::metadata::Orientation::from_exif_chunk(&exif);
+            }
+            b"IEND" => return None,
+            _ => {
+                r.seek(std::io::SeekFrom::Current(i64::from(len) + 4)).ok()?;
+            }
+        }
+    }
 }
 
 fn has_svg_extension(path: &Path) -> bool {
@@ -637,6 +690,45 @@ mod tests {
             assert_eq!(image_dimensions_from_bytes(bytes), Some((8, 16)), "{name}'s size from bytes");
             assert_eq!(image_dimensions_from_path(&path), Some((8, 16)), "{name}'s size from a file");
         }
+    }
+
+    /// A PNG may put its EXIF after the image data (the PNG rules allow
+    /// it; ExifTool before 12.29 wrote it there), where a decoder asked
+    /// before the pixels has not read it yet: it still loads upright.
+    #[test]
+    fn a_png_with_its_exif_after_the_pixels_loads_upright() {
+        use image::{GenericImageView, ImageEncoder, Rgb, RgbImage};
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &b in bytes {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut stored = RgbImage::new(16, 8);
+        stored.put_pixel(0, 0, Rgb([255, 0, 0]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(stored.as_raw(), 16, 8, image::ExtendedColorType::Rgb8).unwrap();
+        let exif = turn_right_exif();
+        let mut chunk = (exif.len() as u32).to_be_bytes().to_vec();
+        let typed: Vec<u8> = b"eXIf".iter().chain(&exif).copied().collect();
+        chunk.extend_from_slice(&typed);
+        chunk.extend_from_slice(&crc32(&typed).to_be_bytes());
+        let iend = png.len() - 12;
+        png.splice(iend..iend, chunk);
+
+        let upright = load_image_from_bytes(&png).unwrap().to_rgb8();
+        assert_eq!(upright.dimensions(), (8, 16));
+        assert_eq!(*upright.get_pixel(7, 0), Rgb([255, 0, 0]));
+        assert_eq!(image_dimensions_from_bytes(&png), Some((8, 16)), "its size from the header");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late-exif.png");
+        std::fs::write(&path, &png).unwrap();
+        assert_eq!(load_image_from_path(&path).unwrap().dimensions(), (8, 16), "from a file");
+        assert_eq!(image_dimensions_from_path(&path), Some((8, 16)));
     }
 
     /// A background already the frame's size is used as it is: the same
