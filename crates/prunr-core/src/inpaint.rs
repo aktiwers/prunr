@@ -582,7 +582,7 @@ impl LamaSession {
 impl Drop for LamaSession {
     fn drop(&mut self) {
         tracing::info!(
-            rss_mb = crate::inpaint_sd::process_rss_mb(),
+            rss_mb = crate::sysmem::process_rss_mb(),
             "LaMa session dropped (idle release or process exit)",
         );
     }
