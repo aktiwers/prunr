@@ -83,6 +83,44 @@ impl BrushMode {
     }
 }
 
+/// One image pixel's two neighbouring cells along an axis and the weight
+/// of the second, sampled at pixel centres with the edge cell repeated:
+/// how a linear-filtered texture of the plane is drawn.
+#[derive(Clone, Copy)]
+struct Tap {
+    near: u32,
+    far: u32,
+    far_weight: f32,
+}
+
+impl Tap {
+    /// Whether a cell of `lo..=hi` gets a weight above zero.
+    fn reaches(self, lo: u32, hi: u32) -> bool {
+        let inside = |c: u32| (lo..=hi).contains(&c);
+        inside(self.near) || (self.far_weight > 0.0 && inside(self.far))
+    }
+}
+
+/// The taps of `out` pixels over `cells` cells.
+fn taps(out: u32, cells: u32) -> Vec<Tap> {
+    let (scale, last) = (f64::from(cells) / f64::from(out), f64::from(cells.saturating_sub(1)));
+    (0..out)
+        .map(|o| {
+            let at = ((f64::from(o) + 0.5) * scale - 0.5).clamp(0.0, last);
+            let near = at.floor();
+            Tap { near: near as u32, far: (near + 1.0).min(last) as u32, far_weight: (at - near) as f32 }
+        })
+        .collect()
+}
+
+/// A plane sampled at an image's pixels: the taps per column and row, and
+/// the pixels any selected cell reaches.
+struct Sampled {
+    xs: Vec<Tap>,
+    ys: Vec<Tap>,
+    reach: CellRect,
+}
+
 /// Cells per parallel hash chunk; part of the hash format.
 const HASH_CHUNK: usize = 1 << 20;
 
@@ -334,19 +372,77 @@ impl MaskArtifact {
     }
 
     /// Scales alpha by `1 - coverage` — a fully selected pixel becomes
-    /// transparent, soft edges fade. RGB is preserved.
+    /// transparent, soft edges fade. RGB is preserved. An image of another
+    /// size (an upscale shown) is cut where the selection is, the plane
+    /// sampled at its pixels as the overlay draws it.
     pub fn alpha_cut(&self, rgba: &mut image::RgbaImage) {
-        self.scale_alpha(rgba, |c| 1.0 - c);
+        if rgba.dimensions() == (self.width, self.height) {
+            self.scale_alpha(rgba, |c| 1.0 - c);
+        } else if let Some(sampled) = self.sampled_at(rgba.width(), rgba.height()) {
+            self.scale_alpha_sampled(&sampled, rgba, (0, 0), |c| 1.0 - c);
+        }
     }
 
-    /// The selected part of `source` (a plane of its size): cropped to
-    /// the selection's bounds, alpha scaled by coverage. What clipboard
-    /// Copy and Cut carry; `None` when nothing is selected.
+    /// The selected part of `source`: cropped to the pixels the selection
+    /// reaches, alpha scaled by coverage, sampled like `alpha_cut` when
+    /// `source` is of another size. What clipboard Copy and Cut carry;
+    /// `None` when nothing is selected.
     pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> Option<image::RgbaImage> {
+        if source.dimensions() != (self.width, self.height) {
+            let sampled = self.sampled_at(source.width(), source.height())?;
+            let r = sampled.reach;
+            let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
+            self.scale_alpha_sampled(&sampled, &mut out, (r.x0, r.y0), |c| c);
+            return Some(out);
+        }
         let r = self.bounds()?;
         let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
         self.crop(r).scale_alpha(&mut out, |c| c);
         Some(out)
+    }
+
+    /// The plane sampled at a `w × h` image's pixels; `None` when the
+    /// sampling reaches no selected cell.
+    fn sampled_at(&self, w: u32, h: u32) -> Option<Sampled> {
+        let r = self.bounds()?;
+        let (xs, ys) = (taps(w, self.width), taps(h, self.height));
+        let span = |taps: &[Tap], lo: u32, hi: u32| {
+            let first = taps.iter().position(|t| t.reaches(lo, hi))?;
+            // `first` reaches, so a last one exists
+            let last = taps.iter().rposition(|t| t.reaches(lo, hi)).unwrap_or(first);
+            Some((first as u32, last as u32))
+        };
+        let ((x0, x1), (y0, y1)) = (span(&xs, r.x0, r.x1)?, span(&ys, r.y0, r.y1)?);
+        Some(Sampled { xs, ys, reach: CellRect { x0, y0, x1, y1 } })
+    }
+
+    /// `scale_alpha` on `window`, the part of a sampled image whose top-left
+    /// pixel is `origin`. In place; beyond the image only the taps
+    /// (12 B per column and row).
+    fn scale_alpha_sampled(&self, sampled: &Sampled, window: &mut image::RgbaImage, origin: (u32, u32), factor: impl Fn(f32) -> f32 + Sync) {
+        let (w, reach) = (self.width as usize, sampled.reach);
+        let coverage = |x: u32, y: u32| Self::coverage(self.data[y as usize * w + x as usize]);
+        let row_width = window.width() as usize * 4;
+        window.par_chunks_mut(row_width.max(1)).enumerate().for_each(|(y, row)| {
+            let fy = origin.1 + y as u32;
+            if !(reach.y0..=reach.y1).contains(&fy) {
+                return;
+            }
+            let ty = sampled.ys[fy as usize];
+            for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                let fx = origin.0 + x as u32;
+                if !(reach.x0..=reach.x1).contains(&fx) {
+                    continue;
+                }
+                let tx = sampled.xs[fx as usize];
+                let along = |cy: u32| coverage(tx.near, cy) + (coverage(tx.far, cy) - coverage(tx.near, cy)) * tx.far_weight;
+                let top = along(ty.near);
+                let f = factor(top + (along(ty.far) - top) * ty.far_weight);
+                if f < 1.0 {
+                    pixel[3] = if f <= 0.0 { 0 } else { crate::math::round_u8(f32::from(pixel[3]) * f) };
+                }
+            }
+        });
     }
 
     /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
@@ -647,6 +743,45 @@ mod tests {
         assert!(out.get_pixel(2, 1).0[3] > 100 && out.get_pixel(2, 1).0[3] < 155);
         assert_eq!(out.get_pixel(1, 0).0[3], 0, "an unselected pixel inside the bounds is clear");
         assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
+    }
+
+    /// On an image of another size (an upscale shown) the cut lands where
+    /// the selection is, sampled as the overlay draws it: between cells
+    /// the coverage blends linearly.
+    #[test]
+    fn a_cut_on_a_larger_image_lands_where_the_selection_is() {
+        let m = mask(4, 4, (0..16).map(|i| if i % 4 < 2 { FULL } else { 0 }).collect());
+        let mut rgba = image::RgbaImage::from_pixel(8, 8, image::Rgba([9u8, 8, 7, 255]));
+        m.alpha_cut(&mut rgba);
+        for y in 0..8 {
+            let row: Vec<u8> = (0..8).map(|x| rgba.get_pixel(x, y).0[3]).collect();
+            assert_eq!(row, [0, 0, 0, 64, 191, 255, 255, 255], "row {y}");
+        }
+        assert_eq!(rgba.get_pixel(0, 0).0[..3], [9, 8, 7], "colour kept");
+    }
+
+    #[test]
+    fn a_copy_from_a_larger_image_carries_the_selected_part() {
+        let mut cells = vec![0; 16];
+        for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+            cells[y * 4 + x] = FULL;
+        }
+        let source = image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let out = mask(4, 4, cells).copy_to_rgba(&source).expect("a selection");
+        assert_eq!(out.dimensions(), (6, 6), "columns and rows 1-6: every pixel the selection reaches");
+        assert_eq!(out.get_pixel(2, 2).0, [3, 3, 0, 255], "inside: the pixel of the larger image, whole");
+        assert_eq!(out.get_pixel(0, 0).0, [1, 1, 0, 16], "the corner: a sixteenth covered");
+    }
+
+    #[test]
+    fn a_cut_on_a_smaller_image_lands_where_the_selection_is() {
+        let m = mask(8, 8, (0..64).map(|i| if i % 8 < 4 { FULL } else { 0 }).collect());
+        let mut rgba = image::RgbaImage::from_pixel(4, 4, image::Rgba([0u8, 0, 0, 255]));
+        m.alpha_cut(&mut rgba);
+        for y in 0..4 {
+            let row: Vec<u8> = (0..4).map(|x| rgba.get_pixel(x, y).0[3]).collect();
+            assert_eq!(row, [0, 0, 255, 255], "row {y}");
+        }
     }
 
     /// Painting into a plane an undo snapshot still shares must not

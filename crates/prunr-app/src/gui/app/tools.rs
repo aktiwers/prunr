@@ -718,6 +718,34 @@ mod selection_action_tests {
         assert_eq!(item.timeline.undo_steps(), 1, "one Edit step, back to the unprocessed source");
     }
 
+    /// With an upscale shown (larger than the photo the selection is
+    /// painted on), Cut copies and cuts the part of the upscale under the
+    /// selection.
+    #[test]
+    fn cut_on_an_upscale_takes_the_part_under_the_selection() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba([x as u8, y as u8, 0, 255]))));
+        let left_half = (0..16).map(|i| if i % 4 < 2 { prunr_core::selection::FULL } else { 0 }).collect();
+        item.selection_mask = Some(Arc::new(MaskArtifact::from_cells(4, 4, left_half)));
+        app.batch.items.push(item);
+
+        app.handle_selection_action(0, SelectionAction::Cut, &egui::Context::default());
+        let done = app.batch.bg_io.selection_edit_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        let (copy, _) = done.copy.as_ref().expect("a copy");
+        assert_eq!(copy.dimensions(), (5, 8), "the columns the selection reaches, every row");
+        assert_eq!(copy.get_pixel(1, 7).0, [1, 7, 0, 255], "a selected pixel of the upscale, where it is");
+        app.land_selection_edit(done, &egui::Context::default());
+
+        let result = app.batch.items[0].result_rgba.as_ref().expect("the cut result");
+        assert_eq!(result.dimensions(), (8, 8));
+        for y in 0..8 {
+            let row: Vec<u8> = (0..8).map(|x| result.get_pixel(x, y).0[3]).collect();
+            assert_eq!(row, [0, 0, 0, 64, 191, 255, 255, 255], "row {y}: cut on the left, kept on the right");
+        }
+    }
+
     /// Cut through the real action path: the result is cut like Delete and
     /// copy + cut is one undo step.
     #[test]
