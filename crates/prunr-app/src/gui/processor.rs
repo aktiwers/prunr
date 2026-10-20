@@ -323,9 +323,6 @@ pub(crate) enum DecodedSelection {
     /// current selection, with the logits it came from so a Confidence
     /// change can re-threshold the same stroke without the decoder.
     Fresh { mask: prunr_core::selection::MaskArtifact, output: Arc<prunr_core::sam::SamDecoderOutput> },
-    /// A re-threshold: already merged onto the pre-stroke selection and
-    /// hashed on the pool, ready to replace the stroke's selection.
-    Retuned { merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, for_hash: u64 },
     /// A click with Depth on: the depth band's mask, still to be merged,
     /// with no logits to re-threshold.
     ByDepth(prunr_core::selection::MaskArtifact),
@@ -342,6 +339,20 @@ pub(crate) struct DepthSelectRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) reading: prunr_core::MaskReading,
+}
+
+/// A re-threshold: already merged onto the pre-stroke selection and
+/// hashed on the pool, ready to replace the stroke's selection.
+pub(crate) struct Retuned {
+    pub(crate) merged: Arc<prunr_core::selection::MaskArtifact>,
+    pub(crate) hash: u64,
+    pub(crate) for_hash: u64,
+}
+
+pub(crate) struct SamRetuneResult {
+    pub(crate) item_id: u64,
+    pub(crate) reading: prunr_core::MaskReading,
+    pub(crate) result: Result<Retuned, String>,
 }
 
 /// Re-threshold the logits of the last stroke at a new confidence.
@@ -814,6 +825,7 @@ pub(crate) struct Processor {
     colorize: RunSlot<ColorizeResult>,
     sam_encoded: Chan<SamEncoderResult>,
     sam_decoded: Chan<SamDecoderResult>,
+    sam_retuned: Chan<SamRetuneResult>,
     /// Magic Brush picks selecting, per image: each answers exactly once.
     picks_selecting: HashMap<u64, u32>,
     sam_sessions: SamSessionSlot,
@@ -881,6 +893,7 @@ impl Processor {
             colorize: RunSlot::new(),
             sam_encoded: Chan::default(),
             sam_decoded: Chan::default(),
+            sam_retuned: Chan::default(),
             picks_selecting: HashMap::new(),
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
@@ -1971,20 +1984,24 @@ impl Processor {
 
     /// Re-threshold a kept decoder output on the pool, merge it onto the
     /// pre-stroke selection and hash it there, so the UI thread only swaps
-    /// the plane in. The result arrives through the decoder channel.
+    /// the plane in. Every retune answers, a panic included.
     pub(crate) fn dispatch_sam_rethreshold(&self, req: SamRethresholdRequest) {
-        let tx = self.sam_decoded.tx.clone();
+        let tx = self.sam_retuned.tx.clone();
         rayon::spawn(move || {
-            let (w, h) = req.source_dims;
-            let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
-            let base = req.base.as_ref().and_then(super::item::Region::load);
-            let merged = Arc::new(merge_stroke(base, mask));
-            let hash = merged.content_hash();
-            let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, mode: req.mode, reading: req.reading,
-                result: Ok(DecodedSelection::Retuned { merged, hash, for_hash: req.for_hash }),
+            let result = caught(|| {
+                let (w, h) = req.source_dims;
+                let mask = prunr_core::sam::decode_to_mask_artifact(&req.output, w, h, req.reading, req.mode);
+                let base = req.base.as_ref().and_then(super::item::Region::load);
+                let merged = Arc::new(merge_stroke(base, mask));
+                let hash = merged.content_hash();
+                Retuned { merged, hash, for_hash: req.for_hash }
             });
+            let _ = tx.send(SamRetuneResult { item_id: req.item_id, reading: req.reading, result });
         });
+    }
+
+    pub(crate) fn pump_sam_retune_results(&mut self) -> Vec<SamRetuneResult> {
+        self.sam_retuned.drain()
     }
 
     pub(crate) fn pump_sam_encoder_results(&mut self) -> Vec<SamEncoderResult> {
@@ -1993,7 +2010,7 @@ impl Processor {
 
     pub(crate) fn pump_sam_decoder_results(&mut self) -> Vec<SamDecoderResult> {
         let results = self.sam_decoded.drain();
-        for r in results.iter().filter(|r| !matches!(r.result, Ok(DecodedSelection::Retuned { .. }))) {
+        for r in &results {
             if let Some(n) = self.picks_selecting.get_mut(&r.item_id) {
                 *n -= 1;
                 if *n == 0 {
