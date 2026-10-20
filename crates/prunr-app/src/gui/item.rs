@@ -1868,16 +1868,16 @@ impl BatchItem {
         Some(outcome)
     }
 
+    /// What the canvas draws for the image: its result's texture, else its
+    /// photo's. Both are made off the UI thread, so neither may be up yet.
+    pub(crate) fn canvas_texture(&self) -> Option<&super::image_texture::ImageTexture> {
+        self.result_texture.as_ref().or(self.source_texture.as_ref())
+    }
+
     /// The size of the frame the image is shown in: the result's, once
     /// there is one, else the source's. Every texture shown for this item
     /// (source, preview, held image, result) is drawn into it, so a
     /// hand-over between them never moves the image.
-    /// Whether the canvas can draw the image: its result's or its photo's
-    /// texture is up. Both are made off the UI thread.
-    pub(crate) fn on_canvas(&self) -> bool {
-        self.result_texture.is_some() || self.source_texture.is_some()
-    }
-
     pub(crate) fn frame_size(&self) -> egui::Vec2 {
         let (w, h) = self.shown_dims();
         egui::vec2(w as f32, h as f32)
