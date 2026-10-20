@@ -183,6 +183,9 @@ impl GraphDraft {
 
     /// The session built: its graph becomes the cache.
     pub fn publish(self) {
+        if std::fs::metadata(&self.draft).is_ok_and(|m| m.len() == 0) {
+            return;
+        }
         if let Err(e) = std::fs::rename(&self.draft, &self.path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(cache = %self.path.display(), %e, "optimized graph not cached");
@@ -486,6 +489,20 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"graph");
         drop(other);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
+    }
+
+    /// `writable` creates the draft before ORT runs, so a session that
+    /// built without writing its graph leaves an empty draft: that must
+    /// not become a cache the next launch reads as a hit and fails on.
+    #[test]
+    fn a_draft_the_session_never_wrote_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("optimized.onnx");
+        let draft = GraphDraft::for_path(&path);
+        assert!(writable(draft.draft(), 1));
+        draft.publish();
+        assert!(!path.exists(), "an empty draft is not a cache");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nor is it left behind");
     }
 
     /// Only macOS has a retired cache, and it is never the live one.
