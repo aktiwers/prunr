@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::io::{BufReader, BufWriter, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
 use crate::gui::settings::LineMode;
@@ -27,6 +28,8 @@ pub struct SubprocessManager {
     stdin_writer: BufWriter<std::process::ChildStdin>,
     /// Channel from the reader thread (reads child stdout → events).
     event_rx: mpsc::Receiver<ReaderEvent>,
+    /// When the reader thread was seen to end, its last event delivered.
+    reader_gone_at: Option<Instant>,
     in_flight: HashSet<u64>,
     /// RSS limit: pause admission when child RSS exceeds this.
     rss_limit: u64,
@@ -42,6 +45,10 @@ pub struct SubprocessManager {
 /// Children emit one `RssUpdate` per finished job, so system memory is
 /// re-queried every 16th job (a few ms each).
 const RSS_LIMIT_REFRESH_EVERY: u32 = 16;
+
+/// A child closes its output a moment before it can be waited on, so its
+/// exit is awaited this long before a live one with no reader is killed.
+const READER_GONE_GRACE: Duration = Duration::from_secs(1);
 
 enum ReaderEvent {
     Event(SubprocessEvent),
@@ -74,7 +81,8 @@ impl WorkerLines {
 pub enum Crash {
     /// The system killed it (SIGKILL), which on a desktop means memory.
     OutOfMemory,
-    /// It is alive but sent nothing for too long.
+    /// It is alive but can no longer be heard: it sent nothing for too
+    /// long, or what it sent could not be read.
     Unresponsive,
     /// A crash or exit, described.
     Other(String),
@@ -200,6 +208,7 @@ impl SubprocessManager {
             child,
             stdin_writer,
             event_rx,
+            reader_gone_at: None,
             in_flight: HashSet::new(),
             rss_limit,
             rss_resume,
@@ -422,16 +431,20 @@ impl SubprocessManager {
 
     /// Pull at most one event from the channel, applying state updates
     /// (in-flight removal, RSS pause/resume). `None` timeout = `try_recv`,
-    /// `Some(t)` = `recv_timeout`. Disconnected and recv-error both
-    /// collapse to `None`; caller checks `is_alive`.
+    /// `Some(t)` = `recv_timeout`. A reader that has ended is noted for
+    /// `died`.
     fn next_event_with_state(&mut self, timeout: Option<std::time::Duration>) -> Option<SubprocessEvent> {
         let raw = match timeout {
-            None => self.event_rx.try_recv().ok(),
-            Some(t) => self.event_rx.recv_timeout(t).ok(),
+            None => self.event_rx.try_recv().map_err(|e| e == mpsc::TryRecvError::Disconnected),
+            Some(t) => self.event_rx.recv_timeout(t).map_err(|e| e == mpsc::RecvTimeoutError::Disconnected),
         };
-        let evt = match raw? {
-            ReaderEvent::Event(e) => e,
-            ReaderEvent::Disconnected => return None,
+        let evt = match raw {
+            Ok(ReaderEvent::Event(e)) => e,
+            Ok(ReaderEvent::Disconnected) | Err(true) => {
+                self.reader_gone_at.get_or_insert_with(Instant::now);
+                return None;
+            }
+            Err(false) => return None,
         };
         if matches!(evt, SubprocessEvent::RssUpdate { .. }) {
             self.rss_update_count = self.rss_update_count.wrapping_add(1);
@@ -469,9 +482,19 @@ impl SubprocessManager {
         &self.in_flight
     }
 
-    /// Why the subprocess died, once it has.
+    /// Why the subprocess died, once it has. One still running whose output
+    /// can no longer be read (a frame too large, garbage) is as good as
+    /// dead: it is killed and reported unresponsive.
     pub fn died(&mut self) -> Option<Crash> {
-        (!self.is_alive()).then(|| self.crash())
+        if !self.is_alive() {
+            return Some(self.crash());
+        }
+        let gone = self.reader_gone_at?;
+        (gone.elapsed() >= READER_GONE_GRACE).then(|| {
+            tracing::warn!("worker output unreadable; killed");
+            self.kill();
+            Crash::Unresponsive
+        })
     }
 
     fn crash(&mut self) -> Crash {

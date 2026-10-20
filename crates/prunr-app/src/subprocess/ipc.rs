@@ -1,13 +1,15 @@
 //! Length-prefixed binary framing for subprocess IPC.
 //!
 //! Format: [4 bytes LE length][bincode payload]
-//! Max message size: 1 MB. Commands and events are tiny (≤ a few KB); image
-//! data travels via temp files. If a frame exceeds this limit it is a bug
-//! (e.g. an accidental inline payload), not a legitimate large message.
+//! Images travel via temp files; the one inline image is a run's preview,
+//! at most `TILE_PREVIEW_EDGE`² RGBA, so that sets the largest frame. A
+//! frame past it is a bug (an accidental inline payload) or garbage.
 
 use std::io::{self, Read, Write, BufReader, BufWriter};
 
-const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
+use super::protocol::TILE_PREVIEW_EDGE;
+
+const MAX_MESSAGE_SIZE: u32 = TILE_PREVIEW_EDGE * TILE_PREVIEW_EDGE * 4 + 64 * 1024;
 
 /// Write a single message: [4-byte LE length][bincode payload].
 ///
@@ -130,6 +132,21 @@ pub fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// The largest message the worker sends, a full-size tile preview of
+    /// an erase, crosses intact.
+    #[test]
+    fn a_full_size_tile_preview_crosses() {
+        use crate::subprocess::protocol::SubprocessEvent;
+        let edge = TILE_PREVIEW_EDGE;
+        let bytes = (edge * edge * 4) as usize;
+        let preview = prunr_core::TilePreview { x: 0, y: 0, width: edge, height: edge, full_width: edge, full_height: edge, rgba: vec![7; bytes] };
+        let mut writer = BufWriter::new(Vec::new());
+        write_message(&mut writer, &SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::TilePreview(preview) }).unwrap();
+        let frame = writer.into_inner().unwrap();
+        let read: Option<SubprocessEvent> = read_message(&mut BufReader::new(Cursor::new(frame))).unwrap();
+        assert!(matches!(read, Some(SubprocessEvent::Report { update: prunr_core::ProgressUpdate::TilePreview(p), .. }) if p.rgba.len() == bytes));
+    }
 
     #[test]
     fn a_read_temp_file_is_gone_and_a_missing_one_reads_as_none() {

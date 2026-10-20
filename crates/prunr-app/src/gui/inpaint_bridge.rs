@@ -484,4 +484,35 @@ mod tests {
             _ => panic!("the stroke did not end"),
         }
     }
+
+    /// A worker that lives on with output that can no longer be read (a
+    /// frame too large or garbled) ends its strokes like a dead one: the
+    /// stroke stayed busy for good, the worker's memory held.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_whose_output_breaks_ends_its_strokes() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "printf '\\377\\377\\377\\377'; sleep 30"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a stand-in worker");
+        let mut state = SubState::Ready(SubprocessManager::for_test(child));
+        let mut inflight = Strokes::from([(7, 3)]);
+        let (tx, rx) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(state, SubState::Ready(_)) && Instant::now() < deadline {
+            if let SubState::Ready(s) = &mut state {
+                s.poll_events();
+            }
+            end_if_dead(&mut state, &mut inflight, &tx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(state, SubState::Idle), "the next stroke starts a new worker");
+        match rx.try_recv() {
+            Ok(InpaintBridgeResult::Error { item_id: 7, error }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
+            _ => panic!("the stroke did not end"),
+        }
+    }
 }
