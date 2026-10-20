@@ -175,7 +175,7 @@ impl PrunrApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let worker_ctx = cc.egui_ctx.clone();
 
-        egui_material_icons::initialize(&cc.egui_ctx);
+        theme::install_fonts(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
