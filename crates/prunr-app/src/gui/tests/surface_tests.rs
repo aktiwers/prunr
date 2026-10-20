@@ -360,6 +360,36 @@ fn closing_with_unsaved_work_asks_first() {
     assert!(!request_close(&mut h), "the close goes through");
 }
 
+/// A save that lands while the prompt is up leaves nothing to ask
+/// about: the close or removal the user asked for goes ahead.
+#[test]
+fn a_save_landing_under_the_prompt_goes_ahead() {
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    assert!(request_close(&mut h), "unsaved work holds the close");
+    let mark = h.state().batch.items[0].save_mark();
+    h.state_mut().batch.mark_saved(&[mark]);
+    h.step();
+    assert!(h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Close), "the window closes");
+    settle(&mut h);
+    assert!(h.state().open_modals().is_empty());
+
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 2, "held until answered");
+    let mark = h.state().batch.items[0].save_mark();
+    h.state_mut().batch.mark_saved(&[mark]);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "removed once saved");
+    assert!(h.state().open_modals().is_empty());
+}
+
 /// Removing an image with unsaved work asks first; one without is
 /// removed at once.
 #[test]

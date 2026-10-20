@@ -1328,7 +1328,11 @@ impl PrunrApp {
             Discard::Close => self.batch.unsaved_count(),
             Discard::Remove { ids, .. } => ids.iter().filter(|&&id| self.batch.find_by_id(id).is_some_and(|i| i.has_unsaved_work())).count(),
         };
-        let Some(choice) = discard_prompt::render(ctx, discard, unsaved) else { return };
+        // A save landed under the prompt: nothing is left to ask about.
+        let choice = if unsaved == 0 { DiscardChoice::Go } else {
+            let Some(choice) = discard_prompt::render(ctx, discard, unsaved) else { return };
+            choice
+        };
         let discard = self.pending_discard.take();
         match (choice, discard) {
             (DiscardChoice::Go, Some(Discard::Close)) => {
