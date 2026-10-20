@@ -651,6 +651,9 @@ pub fn run_worker() -> ! {
                                     });
                                 }
                                 Err(error) => {
+                                    for path in tensor_cache.iter().map(|f| &f.path).chain(edge_cache.iter().map(|f| &f.path)) {
+                                        let _ = std::fs::remove_file(path);
+                                    }
                                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                                 }
                             }
