@@ -1,19 +1,17 @@
 //! Upscaling with a network that normalizes over its whole input
 //! (RealPLKSR's GroupNorm, in Nomos2). Tiled the usual way, each tile is
 //! normalized on its own statistics and neighbours come out toned apart:
-//! seams that no overlap hides, since every pixel depends on the whole
-//! tile (Buglakova et al., ICCV 2025). So the model is cut at its norms
-//! (a head, each block up to its norm, a tail) and run part by part: each
-//! part crop by crop, with a border wide enough that a crop's middle is
-//! exact, and each norm on the whole image's statistics, as a one-piece
-//! run has them.
+//! seams that no overlap hides (Buglakova et al., ICCV 2025). So the model
+//! is cut at its norms and run part by part: each part crop by crop, with
+//! a border wide enough that a crop's middle is exact, and each norm on
+//! the whole image's statistics, as a one-piece run has them.
 //!
 //! Peak working set, per input pixel with 64 f32 feature channels: the
 //! blocks hold the image (12 B), the features and one block's output
 //! before its norm (256 B each), 524 B; the tail the image, the features
-//! and the 4× output (460 B); the pack the output and its bytes (240 B).
-//! The parts and one crop through one add ~0.73 GB (`working_set_mb`).
-//! Measured on the CPU provider (i7-6700):
+//! and the output's bytes (316 B at 4×). The parts and one crop through
+//! one add ~0.73 GB (`working_set_mb`). Measured on the CPU provider
+//! (i7-6700):
 //!
 //! | Input  | Planes  | Peak                     |
 //! |--------|---------|--------------------------|
@@ -21,11 +19,11 @@
 //! | 1.4 MP | 0.72 GB | 1.32 GB                  |
 //! | 8 MP   | 4.2 GB  | ~4.3 GB (from the above) |
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use image::{RgbImage, RgbaImage};
 use ort::session::Session;
-use prunr_models::{PartLayout, PART_HEAD, PART_TAIL};
+use prunr_models::{PartLayout, PART_HEAD, PART_NORMS, PART_TAIL};
 use rayon::prelude::*;
 
 use crate::progress::{Progress, Step, TileRect, Unit};
@@ -41,11 +39,10 @@ const CROP: usize = 256;
 /// the model's `working_set_mb`.
 pub(crate) fn peak_bytes(layout: PartLayout, w: u32, h: u32, scale: u32) -> u64 {
     let px = u64::from(w) * u64::from(h);
-    let (image, features, output) = (3 * 4, layout.features as u64 * 4, u64::from(scale).pow(2) * 3 * 4);
+    let (image, features, output) = (3 * 4, layout.features as u64 * 4, u64::from(scale).pow(2) * 3);
     let blocks = image + 2 * features;
     let tail = image + features + output;
-    let pack = output + output / 4;
-    px * blocks.max(tail).max(pack)
+    px * blocks.max(tail)
 }
 
 /// What the runner knows of a parted network besides its files.
@@ -56,15 +53,11 @@ pub(crate) struct NetShape {
     pub image_input: &'static str,
 }
 
-/// What the runner needs of a parted network; `BlockNet` runs the real
+/// What the runner needs of a parted network; `Running` runs the real
 /// parts, tests a stand-in. Planes are channel-major (C × h × w).
 pub(crate) trait Stages {
     fn layout(&self) -> PartLayout;
-    fn blocks(&self) -> usize;
-    fn groups(&self) -> usize;
-    fn eps(&self) -> f32;
-    /// Block `k`'s norm weight and bias, one per channel.
-    fn norm(&self, k: usize) -> (&[f32], &[f32]);
+    fn norms(&self) -> &Norms;
     /// The image (3 planes, 0-1) to the features.
     fn head(&self, image: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError>;
     /// Block `k`'s output before its norm.
@@ -84,8 +77,23 @@ struct Span {
     keep_end: usize,
 }
 
-/// Crops along an axis of `len`: the axis cut into equal kept parts of
-/// at most `crop`, each run with `border` around it, every crop one size
+impl Span {
+    fn len(self) -> usize {
+        self.end - self.start
+    }
+
+    fn kept_len(self) -> usize {
+        self.keep_end - self.keep_start
+    }
+
+    /// Where the kept part starts, from the span's own start.
+    fn kept_from(self) -> usize {
+        self.keep_start - self.start
+    }
+}
+
+/// Spans along an axis of `len`: the axis cut into equal kept parts of
+/// at most `crop`, each run with `border` around it, every span one size
 /// (at an image edge it reaches further in instead) so the model compiles
 /// one shape. Equal parts keep the work run twice to the borders.
 fn spans(len: usize, crop: usize, border: usize) -> Vec<Span> {
@@ -100,46 +108,72 @@ fn spans(len: usize, crop: usize, border: usize) -> Vec<Span> {
     }).collect()
 }
 
+/// One crop of the image: a span of each axis.
+#[derive(Clone, Copy, Debug)]
+struct Crop {
+    x: Span,
+    y: Span,
+}
+
+impl Crop {
+    fn size(self) -> (usize, usize) {
+        (self.x.len(), self.y.len())
+    }
+
+    /// The kept part, as x, y, w, h of the image.
+    fn kept_rect(self) -> (u32, u32, u32, u32) {
+        (self.x.keep_start as u32, self.y.keep_start as u32, self.x.kept_len() as u32, self.y.kept_len() as u32)
+    }
+}
+
 /// Every crop of a `w × h` image for a part reading `border` around a
 /// pixel, row by row. Where they are kept does not depend on `border`, so
 /// every stage lays the same cells.
-fn crops(w: usize, h: usize, border: usize) -> Vec<(Span, Span)> {
+fn crops(w: usize, h: usize, border: usize) -> Vec<Crop> {
     let xs = spans(w, CROP, border);
-    spans(h, CROP, border).into_iter().flat_map(|y| xs.iter().map(move |&x| (x, y))).collect()
+    spans(h, CROP, border).into_iter().flat_map(|y| xs.iter().map(move |&x| Crop { x, y })).collect()
 }
 
-/// The kept part of a crop, as x, y, w, h of the image.
-fn kept_rect((x, y): (Span, Span)) -> (u32, u32, u32, u32) {
-    (x.keep_start as u32, y.keep_start as u32, (x.keep_end - x.keep_start) as u32, (y.keep_end - y.keep_start) as u32)
-}
-
-/// The crop `(x, y)` of each of `planes.len() / (w × h)` planes of a
-/// `w`-wide image.
-fn cut(planes: &[f32], w: usize, h: usize, (x, y): (Span, Span)) -> Vec<f32> {
+/// `crop` of each of `planes.len() / (w × h)` planes of a `w`-wide image.
+fn cut(planes: &[f32], w: usize, h: usize, crop: Crop) -> Vec<f32> {
     let channels = planes.len() / (w * h);
-    let (cw, ch) = (x.end - x.start, y.end - y.start);
+    let (cw, ch) = crop.size();
     let mut out = Vec::with_capacity(channels * cw * ch);
     for c in 0..channels {
-        for row in y.start..y.end {
+        for row in crop.y.start..crop.y.end {
             let at = (c * h + row) * w;
-            out.extend_from_slice(&planes[at + x.start..at + x.end]);
+            out.extend_from_slice(&planes[at + crop.x.start..at + crop.x.end]);
         }
     }
     out
 }
 
-/// Write the kept part of `result` (a crop's output at `scale`×) into
-/// `out` (`channels` planes of the `w × h` image at `scale`×).
-fn keep(out: &mut [f32], result: &[f32], w: usize, h: usize, scale: usize, (x, y): (Span, Span)) {
-    let (ow, oh) = (w * scale, h * scale);
-    let channels = out.len() / (ow * oh);
-    let (cw, ch) = ((x.end - x.start) * scale, (y.end - y.start) * scale);
-    let (kx0, kx1) = ((x.keep_start - x.start) * scale, (x.keep_end - x.start) * scale);
+/// Write the kept part of `result` (`crop`'s output) into `out` (planes
+/// of the `w × h` image).
+fn keep(out: &mut [f32], result: &[f32], w: usize, h: usize, crop: Crop) {
+    let channels = out.len() / (w * h);
+    let (cw, ch) = crop.size();
+    let (x0, x1) = (crop.x.kept_from(), crop.x.kept_from() + crop.x.kept_len());
     for c in 0..channels {
-        for row in (y.keep_start - y.start) * scale..(y.keep_end - y.start) * scale {
+        for row in crop.y.kept_from()..crop.y.kept_from() + crop.y.kept_len() {
             let src = (c * ch + row) * cw;
-            let dst = (c * oh + y.start * scale + row) * ow + x.start * scale;
-            out[dst + kx0..dst + kx1].copy_from_slice(&result[src + kx0..src + kx1]);
+            let dst = (c * h + crop.y.start + row) * w + crop.x.start;
+            out[dst + x0..dst + x1].copy_from_slice(&result[src + x0..src + x1]);
+        }
+    }
+}
+
+/// Write the kept part of the tail's `result` (3 planes, 0-1, at `scale`×
+/// the crop) into `out` as bytes.
+fn keep_rgb(out: &mut RgbImage, result: &[f32], scale: usize, crop: Crop) {
+    let (cw, ch) = crop.size();
+    let (ow, plane) = (cw * scale, cw * ch * scale * scale);
+    let (x0, y0) = (crop.x.kept_from() * scale, crop.y.kept_from() * scale);
+    for py in 0..crop.y.kept_len() * scale {
+        for px in 0..crop.x.kept_len() * scale {
+            let i = (y0 + py) * ow + x0 + px;
+            let rgb = std::array::from_fn(|c| crate::math::round_u8(result[c * plane + i] * 255.0));
+            out.put_pixel(((crop.x.keep_start * scale) + px) as u32, ((crop.y.keep_start * scale) + py) as u32, image::Rgb(rgb));
         }
     }
 }
@@ -154,33 +188,24 @@ fn sized(out: Vec<f32>, len: usize) -> Result<Vec<f32>, CoreError> {
     }
 }
 
-/// Pixel `i` of 3 planes of `plane` values each (0-1), as bytes.
-fn rgb_at(planes: &[f32], plane: usize, i: usize) -> image::Rgb<u8> {
-    image::Rgb(std::array::from_fn(|c| crate::math::round_u8(planes[c * plane + i] * 255.0)))
-}
-
-/// The kept part of a `cw × ch` crop's output at `scale`×, as an image.
-fn kept_rgb(out: &[f32], (cw, ch): (usize, usize), scale: usize, (x, y): (Span, Span)) -> RgbImage {
-    let (ow, plane) = (cw * scale, cw * ch * scale * scale);
-    let (x0, y0) = ((x.keep_start - x.start) * scale, (y.keep_start - y.start) * scale);
-    let (kw, kh) = ((x.keep_end - x.keep_start) * scale, (y.keep_end - y.keep_start) * scale);
-    RgbImage::from_fn(kw as u32, kh as u32, |px, py| rgb_at(out, plane, (y0 + py as usize) * ow + x0 + px as usize))
-}
-
 /// `features += γ ⊙ (pre − μ) / √(σ² + ε) + β`, per channel, with μ and
 /// σ² over the whole image for each of `groups` runs of channels: what
-/// GroupNorm and the block's skip compute on a one-piece run.
-fn add_normalized(features: &mut [f32], pre: &[f32], plane: usize, groups: usize, eps: f32, (gamma, beta): (&[f32], &[f32])) {
-    let per_group = pre.len() / groups;
-    let stats: Vec<(f64, f64)> = pre.par_chunks(per_group).map(|g| {
-        let (sum, sq) = g.iter().fold((0.0f64, 0.0f64), |(s, q), &v| (s + f64::from(v), q + f64::from(v) * f64::from(v)));
-        let n = g.len() as f64;
+/// GroupNorm and the block's skip compute on a one-piece run. One plane
+/// per weight in `gamma`.
+fn add_normalized(features: &mut [f32], pre: &[f32], groups: usize, eps: f32, (gamma, beta): (&[f32], &[f32])) {
+    let plane = pre.len() / gamma.len();
+    let sums: Vec<(f64, f64)> = pre.par_chunks(plane)
+        .map(|p| p.iter().fold((0.0f64, 0.0f64), |(s, q), &v| (s + f64::from(v), q + f64::from(v) * f64::from(v))))
+        .collect();
+    let per_group = gamma.len() / groups;
+    let stats: Vec<(f64, f64)> = sums.chunks(per_group).map(|g| {
+        let (sum, sq) = g.iter().fold((0.0, 0.0), |(s, q), &(cs, cq)| (s + cs, q + cq));
+        let n = (plane * g.len()) as f64;
         let mean = sum / n;
         (mean, (sq / n - mean * mean).max(0.0))
     }).collect();
-    let channels_per_group = per_group / plane;
     features.par_chunks_mut(plane).zip(pre.par_chunks(plane)).enumerate().for_each(|(c, (f, p))| {
-        let (mean, var) = stats[c / channels_per_group];
+        let (mean, var) = stats[c / per_group];
         let scale = gamma[c] / (var + f64::from(eps)).sqrt() as f32;
         let shift = beta[c] - mean as f32 * scale;
         f.iter_mut().zip(p).for_each(|(f, &p)| *f += p * scale + shift);
@@ -189,7 +214,7 @@ fn add_normalized(features: &mut [f32], pre: &[f32], plane: usize, groups: usize
 
 /// Run `net` over `input` part by part (see the module doc); the output
 /// is `scale`× the input, RGB, alpha left to the caller. The tail's crops
-/// are its finished pixels, so they go out as previews.
+/// are finished pixels, so they go out as previews.
 pub(crate) fn upscale_by_parts(net: &impl Stages, input: &RgbaImage, scale: u32, progress: &Progress) -> Result<RgbImage, CoreError> {
     let (w, h) = (input.width() as usize, input.height() as usize);
     let plane = w * h;
@@ -199,72 +224,66 @@ pub(crate) fn upscale_by_parts(net: &impl Stages, input: &RgbaImage, scale: u32,
             image[c * plane + i] = f32::from(p.0[c]) / 255.0;
         }
     }
-    let layout = net.layout();
+    let (layout, norms) = (net.layout(), net.norms());
     let channels = layout.features;
-    let stages = Stage { total: net.blocks() as u32 + 2, w, h };
+    let stages = (norms.blocks() + 2) as u32;
     progress.step(Step::Upscaling);
 
     let mut features = vec![0.0f32; channels * plane];
-    stages.each(progress, 0, layout.head, |crop, (cw, ch)| {
+    run_stage(progress, (w, h), (0, stages), layout.head, |crop| {
+        let (cw, ch) = crop.size();
         let out = sized(net.head(cut(&image, w, h, crop), cw, ch)?, channels * cw * ch)?;
-        keep(&mut features, &out, w, h, 1, crop);
+        keep(&mut features, &out, w, h, crop);
         Ok(())
     })?;
     let mut pre = vec![0.0f32; channels * plane];
-    for k in 0..net.blocks() {
-        stages.each(progress, k as u32 + 1, layout.block, |crop, (cw, ch)| {
+    for k in 0..norms.blocks() {
+        run_stage(progress, (w, h), (k as u32 + 1, stages), layout.block, |crop| {
+            let (cw, ch) = crop.size();
             let out = sized(net.block(k, cut(&features, w, h, crop), cw, ch)?, channels * cw * ch)?;
-            keep(&mut pre, &out, w, h, 1, crop);
+            keep(&mut pre, &out, w, h, crop);
             Ok(())
         })?;
-        add_normalized(&mut features, &pre, plane, net.groups(), net.eps(), net.norm(k));
+        add_normalized(&mut features, &pre, norms.groups, norms.eps, norms.norm(k));
     }
     drop(pre);
     let s = scale as usize;
-    let mut rgb = vec![0.0f32; 3 * plane * s * s];
-    stages.each(progress, stages.total - 1, layout.tail, |crop, (cw, ch)| {
-        let out = sized(net.tail(cut(&features, w, h, crop), cut(&image, w, h, crop), cw, ch)?, 3 * cw * ch * s * s)?;
-        keep(&mut rgb, &out, w, h, s, crop);
-        let rect = kept_rect(crop);
-        progress.tile_preview(rect, (w as u32, h as u32), |pw, ph| super::tiling::preview_with_alpha(input, &kept_rgb(&out, (cw, ch), s, crop), rect, pw, ph));
+    let mut out = RgbImage::new((w * s) as u32, (h * s) as u32);
+    run_stage(progress, (w, h), (stages - 1, stages), layout.tail, |crop| {
+        let (cw, ch) = crop.size();
+        let result = sized(net.tail(cut(&features, w, h, crop), cut(&image, w, h, crop), cw, ch)?, 3 * cw * ch * s * s)?;
+        keep_rgb(&mut out, &result, s, crop);
+        let rect = crop.kept_rect();
+        progress.tile_preview(rect, (w as u32, h as u32), |pw, ph| {
+            let kept = image::imageops::crop_imm(&out, rect.0 * scale, rect.1 * scale, rect.2 * scale, rect.3 * scale).to_image();
+            super::tiling::preview_with_alpha(input, &kept, rect, pw, ph)
+        });
         Ok(())
     })?;
-    progress.outer(stages.total, stages.total, Unit::Step);
-    drop((features, image));
+    progress.outer(stages, stages, Unit::Step);
     progress.step(Step::Finishing);
-    let (ow, oh) = (w * s, h * s);
-    Ok(RgbImage::from_fn(ow as u32, oh as u32, |x, y| rgb_at(&rgb, ow * oh, y as usize * ow + x as usize)))
+    Ok(out)
 }
 
-/// The run's stages (head, blocks, tail) over a `w × h` image.
-struct Stage {
-    total: u32,
-    w: usize,
-    h: usize,
-}
-
-impl Stage {
-    /// Stage `stage`, crop by crop for a part reading `border` around a
-    /// pixel: `run` gets each crop and its size. Cancel stops it between crops.
-    fn each(&self, progress: &Progress, stage: u32, border: usize, mut run: impl FnMut((Span, Span), (usize, usize)) -> Result<(), CoreError>) -> Result<(), CoreError> {
-        let (w, h) = (self.w, self.h);
-        let crops = crops(w, h, border);
-        let n = crops.len() as u32;
-        progress.outer(stage, self.total, Unit::Step);
-        progress.tiles(crops.iter().map(|&crop| {
-            let (x, y, cw, ch) = kept_rect(crop);
-            TileRect::of_pixels(x, y, cw, ch, w as u32, h as u32)
-        }).collect());
-        progress.inner(0, n, Unit::Tile);
-        for (i, crop) in crops.into_iter().enumerate() {
-            progress.check_cancelled()?;
-            progress.tile(i as u32, false);
-            run(crop, (crop.0.end - crop.0.start, crop.1.end - crop.1.start))?;
-            progress.tile(i as u32, true);
-            progress.inner(i as u32 + 1, n, Unit::Tile);
-        }
-        Ok(())
+/// Stage `stage` of `total`, crop by crop of the `w × h` image for a part
+/// reading `border` around a pixel. Cancel stops it between crops.
+fn run_stage(progress: &Progress, (w, h): (usize, usize), (stage, total): (u32, u32), border: usize, mut run: impl FnMut(Crop) -> Result<(), CoreError>) -> Result<(), CoreError> {
+    let crops = crops(w, h, border);
+    let n = crops.len() as u32;
+    progress.outer(stage, total, Unit::Step);
+    progress.tiles(crops.iter().map(|crop| {
+        let (x, y, cw, ch) = crop.kept_rect();
+        TileRect::of_pixels(x, y, cw, ch, w as u32, h as u32)
+    }).collect());
+    progress.inner(0, n, Unit::Tile);
+    for (i, crop) in crops.into_iter().enumerate() {
+        progress.check_cancelled()?;
+        progress.tile(i as u32, false);
+        run(crop)?;
+        progress.tile(i as u32, true);
+        progress.inner(i as u32 + 1, n, Unit::Tile);
     }
+    Ok(())
 }
 
 /// One part's session and the names of what it takes and gives.
@@ -276,12 +295,9 @@ struct Part {
 
 impl Part {
     fn of(key: &str, session: Session) -> Result<Self, CoreError> {
-        let inputs: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
+        let inputs = session.inputs().iter().map(|i| i.name().to_string()).collect();
         let output = session.outputs().first().map(|o| o.name().to_string())
             .ok_or_else(|| CoreError::Model(format!("part {key} gives nothing")))?;
-        if inputs.is_empty() {
-            return Err(CoreError::Model(format!("part {key} takes nothing")));
-        }
         Ok(Self { session: Mutex::new(session), inputs, output })
     }
 
@@ -331,6 +347,31 @@ impl Norms {
         }
         Ok(norms)
     }
+
+    /// One norm per block.
+    fn blocks(&self) -> usize {
+        self.gamma.len()
+    }
+
+    /// Block `k`'s weight and bias, one per channel.
+    fn norm(&self, k: usize) -> (&[f32], &[f32]) {
+        (&self.gamma[k], &self.beta[k])
+    }
+}
+
+/// A parted model's ONNX parts as bytes, by key.
+pub(crate) type PartBytes = Vec<(&'static str, Arc<Vec<u8>>)>;
+
+/// `id`'s parts, and its norms checked against `features` channels.
+pub(crate) fn read_parts(id: prunr_models::ModelId, features: usize) -> Result<(PartBytes, Norms), CoreError> {
+    let parts = match prunr_models::descriptor(id).map(|d| d.source) {
+        Some(prunr_models::ModelSource::MultiPartOnDemand { parts, .. }) if prunr_models::is_available(id) => parts,
+        _ => return Err(CoreError::Inference(prunr_models::not_installed_error(id))),
+    };
+    let bytes = |key: &str| prunr_models::resolve_part_bytes(id, key).map_err(|e| CoreError::Inference(format!("{id:?} {key}: {e:?}")));
+    let norms = Norms::parse(&bytes(PART_NORMS)?, features)?;
+    let onnx = parts.iter().filter(|p| p.key != PART_NORMS).map(|p| Ok((p.key, bytes(p.key)?))).collect::<Result<_, CoreError>>()?;
+    Ok((onnx, norms))
 }
 
 /// The real parts: a head, its blocks in key order, a tail, the norms.
@@ -338,6 +379,8 @@ pub(crate) struct BlockNet {
     head: Part,
     blocks: Vec<Part>,
     tail: Part,
+    /// The tail's other input, beside the image.
+    tail_features: String,
     norms: Norms,
     shape: NetShape,
 }
@@ -358,18 +401,19 @@ impl BlockNet {
         let missing = |what: &str| CoreError::Model(format!("parted model has no {what}"));
         let (head, tail) = (head.ok_or_else(|| missing(PART_HEAD))?, tail.ok_or_else(|| missing(PART_TAIL))?);
         let image = shape.image_input;
-        let fits = head.inputs == [image]
-            && blocks.iter().all(|b| b.inputs.len() == 1)
-            && tail.inputs.len() == 2
-            && tail.inputs.iter().filter(|name| *name == image).count() == 1
-            && norms.gamma.len() == blocks.len();
-        if !fits {
-            return Err(CoreError::Model(format!(
+        let tail_features = match tail.inputs.as_slice() {
+            [a, b] if a == image && b != image => Some(b.clone()),
+            [a, b] if b == image && a != image => Some(a.clone()),
+            _ => None,
+        };
+        let fits = head.inputs == [image] && blocks.iter().all(|b| b.inputs.len() == 1) && norms.blocks() == blocks.len();
+        match tail_features {
+            Some(tail_features) if fits => Ok(Self { head, blocks, tail, tail_features, norms, shape }),
+            _ => Err(CoreError::Model(format!(
                 "parts do not fit: a head taking {:?}, a tail taking {:?}, {} blocks for {} norms, the image as {image:?}",
-                head.inputs, tail.inputs, blocks.len(), norms.gamma.len(),
-            )));
+                head.inputs, tail.inputs, blocks.len(), norms.blocks(),
+            ))),
         }
-        Ok(Self { head, blocks, tail, norms, shape })
     }
 }
 
@@ -381,11 +425,7 @@ pub(crate) struct Running<'a> {
 
 impl Stages for Running<'_> {
     fn layout(&self) -> PartLayout { self.net.shape.layout }
-    fn blocks(&self) -> usize { self.net.blocks.len() }
-    fn groups(&self) -> usize { self.net.norms.groups }
-    fn eps(&self) -> f32 { self.net.norms.eps }
-    // `k` < blocks, as many as the norms' rows (`BlockNet::new`).
-    fn norm(&self, k: usize) -> (&[f32], &[f32]) { (&self.net.norms.gamma[k], &self.net.norms.beta[k]) }
+    fn norms(&self) -> &Norms { &self.net.norms }
 
     fn head(&self, image: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError> {
         self.net.head.run(vec![(self.net.shape.image_input, 3, image)], w, h, self.terminate)
@@ -398,10 +438,8 @@ impl Stages for Running<'_> {
     }
 
     fn tail(&self, features: Vec<f32>, image: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError> {
-        let tail = &self.net.tail;
-        let image_input = self.net.shape.image_input;
-        let other = tail.inputs.iter().find(|name| *name != image_input).map_or("", String::as_str);
-        tail.run(vec![(other, self.layout().features, features), (image_input, 3, image)], w, h, self.terminate)
+        let feeds = vec![(self.net.tail_features.as_str(), self.layout().features, features), (self.net.shape.image_input, 3, image)];
+        self.net.tail.run(feeds, w, h, self.terminate)
     }
 }
 
@@ -432,11 +470,10 @@ mod tests {
     /// GroupNorm and the skip, against a direct computation.
     #[test]
     fn the_norm_uses_each_groups_whole_image_statistics() {
-        let plane = 3;
         let pre: Vec<f32> = vec![1.0, 2.0, 3.0, 5.0, 5.0, 5.0, 0.0, 4.0, 8.0, 1.0, 1.0, 1.0];
         let mut features = vec![10.0f32; 12];
         let (gamma, beta) = (vec![1.0, 2.0, 1.0, 1.0], vec![0.0, 0.0, 0.5, 0.0]);
-        add_normalized(&mut features, &pre, plane, 2, 0.0, (&gamma, &beta));
+        add_normalized(&mut features, &pre, 2, 0.0, (&gamma, &beta));
         // Group 0: 1,2,3,5,5,5 → mean 3.5, var 2.5833…
         let (m, sd) = (3.5f32, (2.583_333_3f32).sqrt());
         assert!((features[0] - (10.0 + (1.0 - m) / sd)).abs() < 1e-5);
@@ -452,15 +489,18 @@ mod tests {
     /// reach and GroupNorm between blocks. Run part by part in crops, it
     /// must give what one pass over the whole image gives.
     struct Toy {
-        gamma: Vec<f32>,
-        beta: Vec<f32>,
+        norms: Norms,
         /// Channels the head gives; 4 fits the network.
         head_out: usize,
     }
 
     impl Toy {
+        /// Three blocks, each norm `gamma` and `beta` scaled a little
+        /// further, so a block read with another's norm would show.
         fn new(gamma: Vec<f32>, beta: Vec<f32>) -> Self {
-            Self { gamma, beta, head_out: 4 }
+            let row = |v: &[f32], k: usize| v.iter().map(|x| x * (1.0 + 0.1 * k as f32)).collect();
+            let norms = Norms { groups: 2, eps: 1e-5, gamma: (0..3).map(|k| row(&gamma, k)).collect(), beta: (0..3).map(|k| row(&beta, k)).collect() };
+            Self { norms, head_out: 4 }
         }
     }
 
@@ -490,10 +530,7 @@ mod tests {
 
     impl Stages for Toy {
         fn layout(&self) -> PartLayout { PartLayout { features: 4, head: 1, block: 3, tail: 2 } }
-        fn blocks(&self) -> usize { 3 }
-        fn groups(&self) -> usize { 2 }
-        fn eps(&self) -> f32 { 1e-5 }
-        fn norm(&self, _: usize) -> (&[f32], &[f32]) { (&self.gamma, &self.beta) }
+        fn norms(&self) -> &Norms { &self.norms }
         fn head(&self, image: Vec<f32>, w: usize, h: usize) -> Result<Vec<f32>, CoreError> {
             let p = w * h;
             Ok((0..self.head_out).flat_map(|c| blur(&image[(c % 3) * p..(c % 3 + 1) * p], w, h, 1)).collect())
@@ -523,16 +560,16 @@ mod tests {
         RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7 % 255) as u8, (y * 3 % 255) as u8, ((x * y) % 251) as u8, 255]))
     }
 
-    /// What the stand-in gives in one pass: the same runner with crops as
-    /// large as the image.
+    /// The stand-in over the whole image in one piece, no crops: the
+    /// reference a part-by-part run must match.
     fn one_pass(net: &Toy, input: &RgbaImage) -> RgbImage {
         let (w, h) = (input.width() as usize, input.height() as usize);
         let p = w * h;
         let image: Vec<f32> = (0..3).flat_map(|c| input.pixels().map(move |px| f32::from(px.0[c]) / 255.0)).collect();
         let mut f = net.head(image.clone(), w, h).unwrap();
-        for k in 0..3 {
+        for k in 0..net.norms.blocks() {
             let pre = net.block(k, f.clone(), w, h).unwrap();
-            add_normalized(&mut f, &pre, p, 2, 1e-5, net.norm(k));
+            add_normalized(&mut f, &pre, net.norms.groups, net.norms.eps, net.norms.norm(k));
         }
         let rgb = net.tail(f, image, w, h).unwrap();
         RgbImage::from_fn(2 * w as u32, 2 * h as u32, |x, y| image::Rgb(std::array::from_fn(|c| crate::math::round_u8(rgb[c * 4 * p + y as usize * 2 * w + x as usize] * 255.0))))
@@ -608,14 +645,13 @@ mod tests {
         assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
     }
 
-    /// The peak is the largest stage: the blocks with many features, the
-    /// tail or the pack with few.
+    /// The peak is the larger stage: the blocks with many features, the
+    /// tail with few.
     #[test]
-    fn the_peak_is_the_largest_stage() {
+    fn the_peak_is_the_larger_stage() {
         let layout = PartLayout { features: 64, head: 2, block: 12, tail: 16 };
-        assert_eq!(peak_bytes(layout, 1000, 1000, 4), 1_000_000 * (12 + 2 * 256));
-        assert_eq!(peak_bytes(PartLayout { features: 16, ..layout }, 10, 10, 4), 100 * (12 + 64 + 192), "the tail");
-        assert_eq!(peak_bytes(PartLayout { features: 8, ..layout }, 10, 10, 4), 100 * (192 + 48), "the pack");
+        assert_eq!(peak_bytes(layout, 1000, 1000, 4), 1_000_000 * (12 + 2 * 256), "the blocks");
+        assert_eq!(peak_bytes(PartLayout { features: 8, ..layout }, 10, 10, 4), 100 * (12 + 32 + 48), "the tail");
     }
 
     /// Norms that do not fit the network are refused before any part runs.

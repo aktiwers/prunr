@@ -1032,11 +1032,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "4xNomos2 RealPLKSR",
         description: "Fast photo upscaler trained on compressed photos. Natural skin and hair texture; can invent texture on flat areas like snow.",
         category: ModelCategory::Upscale,
-        // Phhofm's 4xNomos2_realplksr_dysample from our dynamic-shape
-        // export (his published ONNX is fixed at 256 × 256; on 256 × 256
-        // crops the two agree to the bit at 8 bits), cut at its 28
-        // GroupNorms (head, each block up to its norm, tail, the norms'
-        // weights) so it runs part by part without tile seams.
+        // Cut from our dynamic-shape export of Phhofm's weights (his ONNX is
+        // fixed at 256 × 256): a head, each block up to its norm, a tail
+        // and the norms' weights.
         source: ModelSource::MultiPartOnDemand {
             subdir: "4xNomos2_realplksr_dysample-parts-1.0.0",
             parts: &[
@@ -1082,7 +1080,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        // OpenVINO keeps a memory pool per compiled part: 9.7 GB and 73 s
+        // compiling the 30 parts on an i7-6700 (2026-10), where the CPU
+        // provider held 0.95 GB, compiled nothing, and ran the same
+        // 960×635 image in 67 s against OpenVINO's 55 s.
+        incompatible_eps: &["OpenVINO"],
         working_set_mb: 750,
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1547,8 +1549,9 @@ pub fn remove_retired_files() -> u64 {
 fn remove_retired_in(dir: &std::path::Path, names: &[&str]) -> u64 {
     names.iter().map(|name| {
         let path = dir.join(name);
-        let bytes = std::fs::metadata(&path).map_or(0, |m| if m.is_file() { m.len() } else { 0 });
-        if bytes > 0 && std::fs::remove_file(&path).is_ok() { bytes } else { 0 }
+        std::fs::metadata(&path).ok()
+            .filter(|m| m.is_file() && std::fs::remove_file(&path).is_ok())
+            .map_or(0, |m| m.len())
     }).sum()
 }
 
@@ -2240,10 +2243,11 @@ mod tests {
     fn the_retired_sweep_removes_only_retired_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("old.onnx"), b"old").expect("write");
+        std::fs::write(dir.path().join("empty.onnx"), b"").expect("write");
         std::fs::write(dir.path().join("kept.onnx"), b"kept").expect("write");
         std::fs::create_dir(dir.path().join("old-dir")).expect("mkdir");
-        assert_eq!(remove_retired_in(dir.path(), &["old.onnx", "missing.onnx", "old-dir"]), 3);
-        assert!(!dir.path().join("old.onnx").exists());
+        assert_eq!(remove_retired_in(dir.path(), &["old.onnx", "empty.onnx", "missing.onnx", "old-dir"]), 3);
+        assert!(!dir.path().join("old.onnx").exists() && !dir.path().join("empty.onnx").exists());
         assert!(dir.path().join("kept.onnx").is_file());
         assert!(dir.path().join("old-dir").is_dir(), "a folder is never swept");
     }

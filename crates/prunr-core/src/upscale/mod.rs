@@ -113,12 +113,12 @@ pub fn upscale_rgba_with_engine(
     if let Some(net) = engine.parts() {
         let running = blocks::Running { net, terminate: terminate.map(Arc::as_ref) };
         let rgb = blocks::upscale_by_parts(&running, input, knobs.native_scale, progress)?;
-        let alpha = upscale_alpha_lanczos3(input, rgb.width(), rgb.height());
-        let native = RgbaImage::from_fn(rgb.width(), rgb.height(), |x, y| {
-            let [r, g, b] = rgb.get_pixel(x, y).0;
-            image::Rgba([r, g, b, alpha.get_pixel(x, y).0[0]])
-        });
-        drop((rgb, alpha));
+        let mut native: RgbaImage = image::buffer::ConvertBuffer::convert(&rgb);
+        drop(rgb);
+        if knobs.native_scale == scale {
+            alpha::take_input_alpha(&mut native, input);
+            return Ok(native);
+        }
         return Ok(fit_to_scale(native, input, scale));
     }
     let tile_size = descriptor
@@ -222,10 +222,7 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     }
     let mut out = crate::formats::resize_rgba(&native, w, h, crate::formats::ResizeFilter::Lanczos3);
     drop(native);
-    let alpha = upscale_alpha_lanczos3(input, w, h);
-    for (p, &a) in out.pixels_mut().zip(alpha.as_raw()) {
-        p.0[3] = a;
-    }
+    alpha::take_input_alpha(&mut out, input);
     out
 }
 
