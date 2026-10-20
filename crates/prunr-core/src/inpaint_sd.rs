@@ -845,7 +845,7 @@ fn run_one_tile(
     let noise: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
 
     let scale = req.guidance_scale;
-    let predict = |latent: &[f32], t: i64| {
+    let predict = |latent: &[f32], step: UnetStep| {
         let latent_f16 = ndarray::ArrayView4::from_shape(latent_dim, latent)
             .expect("latent_dim matches the latent's length by construction")
             .mapv(f16::from_f32);
@@ -853,9 +853,9 @@ fn run_one_tile(
             &latent_f16, &mask_latent_f16, &masked_latent_f16,
         );
         match (text_emb_cond_f16.as_ref(), text_emb_uncond_f16.as_ref()) {
-            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, t, cond, uncond, scale),
-            (Some(cond), None) => unet_step(bundle, latent_in_f16, t, Cond::Text(cond)),
-            (None, _) => unet_step(bundle, latent_in_f16, t, Cond::Size(ph, pw)),
+            (Some(cond), Some(uncond)) => cfg_noise_pred(bundle, latent_in_f16, step, cond, uncond, scale),
+            (Some(cond), None) => unet_step(bundle, latent_in_f16, step, Cond::Text(cond)),
+            (None, _) => unet_step(bundle, latent_in_f16, step, Cond::Size(ph, pw)),
         }
     };
     let taesd = progress.preview_edge().and_then(|_| TaesdSession::get().ok());
@@ -907,7 +907,7 @@ fn denoise(
     mut latent: Vec<f32>,
     rng: &mut ChaCha8Rng,
     progress: &crate::progress::Progress,
-    mut predict: impl FnMut(&[f32], i64) -> Result<Array4<f32>, CoreError>,
+    mut predict: impl FnMut(&[f32], UnetStep) -> Result<Array4<f32>, CoreError>,
     mut show: impl FnMut(&[f32]),
     held: Option<&HeldEdge>,
 ) -> Result<Vec<f32>, CoreError> {
@@ -923,13 +923,13 @@ fn denoise(
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let noise_pred = predict(&latent, t)?;
+        let is_final = i + 1 == timesteps.len();
+        let noise_pred = predict(&latent, UnetStep { t, last: is_final })?;
         let np_slice = noise_pred.as_slice().expect("noise_pred: standard layout");
         if progress.preview_edge().is_some() {
             show(&scheduler.x0(&latent, np_slice, i));
         }
         let t_prev = timesteps.get(i + 1).copied().unwrap_or(-1);
-        let is_final = i + 1 == timesteps.len();
         latent = step_array(scheduler, &latent, np_slice, i, t, t_prev, is_final, rng);
         if let Some(h) = held {
             h.hold(&mut latent, scheduler.level(i + 1), (i + 1) as f32 / total as f32);
@@ -1118,14 +1118,14 @@ impl TileTimer {
 fn cfg_noise_pred(
     bundle: &SdSession,
     latent_in: Array4<f16>,
-    t: i64,
+    step: UnetStep,
     cond: &Array3<f16>,
     uncond: &Array3<f16>,
     scale: f32,
 ) -> Result<Array4<f32>, CoreError> {
     use std::sync::atomic::Ordering;
     if !bundle.cfg_fallback_to_sequential.load(Ordering::Relaxed) {
-        match unet_step_batched(bundle, &latent_in, t, cond, uncond) {
+        match unet_step_batched(bundle, &latent_in, step, cond, uncond) {
             Ok(pair) => {
                 let pred_cond = pair.slice(ndarray::s![0..1, .., .., ..]);
                 let pred_uncond = pair.slice(ndarray::s![1..2, .., .., ..]);
@@ -1138,8 +1138,8 @@ fn cfg_noise_pred(
             }
         }
     }
-    let pred_cond = unet_step(bundle, latent_in.clone(), t, Cond::Text(cond))?;
-    let pred_uncond = unet_step(bundle, latent_in, t, Cond::Text(uncond))?;
+    let pred_cond = unet_step(bundle, latent_in.clone(), UnetStep { last: false, ..step }, Cond::Text(cond))?;
+    let pred_uncond = unet_step(bundle, latent_in, step, Cond::Text(uncond))?;
     Ok(cfg_blend(pred_uncond.view(), pred_cond.view(), scale))
 }
 
@@ -1235,6 +1235,11 @@ pub(crate) struct SdSession {
     text_cache: Mutex<Vec<(String, Arc<Array3<f16>>)>>,
     /// Where each part runs, in build order.
     picks: Vec<(&'static str, SessionPick)>,
+    /// The UNet runs on CUDA, where each part keeps its own memory pool:
+    /// the UNet's still holds its loop's peak when the VAE decoder runs
+    /// after it, and a tall crop's decode then ran out of a 12 GB card.
+    /// It hands the spare back after each crop's last step.
+    unet_on_cuda: bool,
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
@@ -1529,6 +1534,7 @@ impl SdSession {
             };
 
         let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
+        let unet_on_cuda = picks.iter().any(|(k, pick)| *k == "unet" && pick.provider == EpKind::Cuda.as_str());
         let mut take = |want: &str| -> Result<Session, String> {
             let pos = parts.iter().position(|(k, _, _)| *k == want)
                 .ok_or_else(|| format!("SD bundle missing built part: {want}"))?;
@@ -1571,6 +1577,7 @@ impl SdSession {
             cfg_fallback_to_sequential: std::sync::atomic::AtomicBool::new(false),
             text_cache: Mutex::new(Vec::new()),
             picks,
+            unet_on_cuda,
         })
     }
 }
@@ -1787,35 +1794,63 @@ fn smoke_test_unet(s: &mut Session, label: &str) -> Result<(), String> {
         Tensor::from_array(Array3::<f16>::zeros((1, CLIP_SEQ_LEN, 768))).map(|t| t.into_dyn())
     }.map_err(|e| format!("{label}: smoke conditioning: {e}"))?;
     let names = take_three_inputs(s, label)?;
-    run_unet(s, &names, Array4::<f16>::zeros((1, 9, l, l)), 0, emb_t)
+    run_unet(s, &names, Array4::<f16>::zeros((1, 9, l, l)), 0, emb_t, false)
         .map(drop)
         .map_err(|e| format!("{label}: smoke {e}"))
 }
 
 /// One UNet run of each batch row of `latent` at timestep `t`.
+/// One UNet call of a crop's loop: its timestep, and whether it is the
+/// loop's last.
+#[derive(Clone, Copy, Debug)]
+struct UnetStep {
+    t: i64,
+    last: bool,
+}
+
+/// `shrink`: the run hands its CUDA pool's spare memory back as it ends.
 fn run_unet<'s>(
     session: &'s mut Session,
     [n0, n1, n2]: &[String; 3],
     latent: Array4<f16>,
     t: i64,
     cond: ort::value::DynValue,
+    shrink: bool,
 ) -> Result<ort::session::SessionOutputs<'s>, String> {
     // Exact in f16: every timestep of SD's 1000-step grid fits the mantissa.
     let ts = ndarray::Array1::<f16>::from_elem(latent.dim().0, f16::from_f32(t as f32));
     let lat_t = Tensor::from_array(latent).map_err(|e| format!("latent tensor: {e}"))?;
     let ts_t = Tensor::from_array(ts).map_err(|e| format!("timestep tensor: {e}"))?;
-    session.run(inputs![
+    let inputs = inputs![
         n0.as_str() => &lat_t,
         n1.as_str() => &ts_t,
         n2.as_str() => &cond,
-    ]).map_err(|e| format!("run: {e}"))
+    ];
+    match shrink.then(shrink_cuda_pool).flatten() {
+        Some(options) => session.run_with_options(inputs, options),
+        None => session.run(inputs),
+    }.map_err(|e| format!("run: {e}"))
+}
+
+/// Run options that shrink CUDA device 0's pool as a run ends; `None`
+/// when the runtime refuses them, and the run goes without.
+fn shrink_cuda_pool() -> Option<&'static ort::session::RunOptions> {
+    static OPTIONS: OnceLock<Option<ort::session::RunOptions>> = OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let mut options = ort::session::RunOptions::new().ok()?;
+        options.set("memory.enable_memory_arena_shrinkage", "gpu:0")
+            .map_err(|e| tracing::warn!(%e, "SD: CUDA pool shrinking unavailable"))
+            .ok()?;
+        Some(options)
+    }).as_ref()
 }
 
 /// `run_unet` on the bundle's UNet, its noise prediction as f32.
-fn unet_run(bundle: &SdSession, latent: Array4<f16>, t: i64, cond: ort::value::DynValue, label: &str) -> Result<Array4<f32>, CoreError> {
+fn unet_run(bundle: &SdSession, latent: Array4<f16>, step: UnetStep, cond: ort::value::DynValue, label: &str) -> Result<Array4<f32>, CoreError> {
     let mut session = bundle.unet.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let outputs = run_unet(&mut session, &bundle.unet_inputs, latent, t, cond)
+    let shrink = step.last && bundle.unet_on_cuda;
+    let outputs = run_unet(&mut session, &bundle.unet_inputs, latent, step.t, cond, shrink)
         .map_err(|e| CoreError::Inference(format!("SD {label}: {e}")))?;
     extract::<ndarray::Ix4>(&outputs[0], label)
 }
@@ -1973,14 +2008,14 @@ enum Cond<'a> {
 fn unet_step(
     bundle: &SdSession,
     latent_9ch_f16: Array4<f16>,
-    t: i64,
+    step: UnetStep,
     cond: Cond<'_>,
 ) -> Result<Array4<f32>, CoreError> {
     let cond_t = match cond {
         Cond::Text(emb) => Tensor::from_array(emb.clone()).map(|t| t.into_dyn()),
         Cond::Size(h, w) => Tensor::from_array(size_ids(h, w)).map(|t| t.into_dyn()),
     }.map_err(|e| CoreError::Inference(format!("SD unet: conditioning tensor: {e}")))?;
-    unet_run(bundle, latent_9ch_f16, t, cond_t, "unet")
+    unet_run(bundle, latent_9ch_f16, step, cond_t, "unet")
 }
 
 /// Cond and uncond stacked on the batch axis, one UNet run per step.
@@ -1989,7 +2024,7 @@ fn unet_step(
 fn unet_step_batched(
     bundle: &SdSession,
     latent_9ch_f16: &Array4<f16>,
-    t: i64,
+    step: UnetStep,
     text_emb_cond_f16: &Array3<f16>,
     text_emb_uncond_f16: &Array3<f16>,
 ) -> Result<Array4<f32>, CoreError> {
@@ -2001,7 +2036,7 @@ fn unet_step_batched(
     ).map_err(|e| CoreError::Inference(format!("SD unet batched: text concat: {e}")))?;
     let emb_t = Tensor::from_array(text_pair)
         .map_err(|e| CoreError::Inference(format!("SD unet batched: text tensor: {e}")))?;
-    unet_run(bundle, latent_pair, t, emb_t.into_dyn(), "unet (batched)")
+    unet_run(bundle, latent_pair, step, emb_t.into_dyn(), "unet (batched)")
 }
 
 // ── f16 / f32 conversion at the ONNX boundary ──────────────────────────
@@ -3051,7 +3086,7 @@ mod tests {
                 let mut scheduler = Scheduler::new_sd15(kind, steps);
                 let mut rng = ChaCha8Rng::seed_from_u64(7);
                 let noise = sample_initial_noise(&mut rng, 8, 8).into_raw_vec_and_offset().0;
-                let predict = |l: &[f32], _: i64| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
+                let predict = |l: &[f32], _: UnetStep| Ok(Array4::from_shape_vec((1, 4, 8, 8), l.iter().map(|v| v * 0.5).collect()).expect("an 8×8 latent"));
                 let mut previews = StepPreviews::new(&image, &mask, (8, 8), prunr_models::SdLatent::Sd15, None, progress);
                 let show = |x0: &[f32]| {
                     if let Some(p) = previews.as_mut() {
@@ -3091,13 +3126,29 @@ mod tests {
         }
     }
 
+    /// The UNet hands back its pool's spare memory once per crop, after
+    /// the loop's last call, so the VAE decoder after it has the room.
+    #[test]
+    fn only_the_last_unet_call_of_a_crop_is_marked_last() {
+        for (kind, steps) in [(SchedulerKind::Lcm, 4), (SchedulerKind::DpmPp2MKarras, 6)] {
+            let mut rng = ChaCha8Rng::seed_from_u64(1);
+            let lasts = std::cell::RefCell::new(Vec::new());
+            let predict = |_: &[f32], step: UnetStep| { lasts.borrow_mut().push(step.last); Ok(Array4::zeros((1, 4, 1, 1))) };
+            denoise(&mut Scheduler::new_sd15(kind, steps), vec![0.0; 4], &mut rng, &crate::progress::Progress::none(), predict, |_| {}, None).expect("denoise");
+            let lasts = lasts.into_inner();
+            assert_eq!(lasts.len(), steps, "{kind:?}");
+            assert_eq!(lasts.iter().filter(|&&l| l).count(), 1, "{kind:?}");
+            assert!(lasts.last().copied().unwrap_or(false), "{kind:?}: the final call");
+        }
+    }
+
     #[test]
     fn a_cancelled_step_loop_stops_before_the_next_unet_call() {
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let progress = crate::progress::Progress::none().with_cancel(flag);
         let mut rng = ChaCha8Rng::seed_from_u64(1);
         let called = std::cell::Cell::new(false);
-        let predict = |_: &[f32], _: i64| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
+        let predict = |_: &[f32], _: UnetStep| { called.set(true); Ok(Array4::zeros((1, 4, 1, 1))) };
         let result = denoise(&mut Scheduler::new_sd15(SchedulerKind::Lcm, 4), vec![0.0; 4], &mut rng, &progress, predict, |_| {}, None);
         assert!(matches!(result, Err(CoreError::Cancelled)) && !called.get());
     }
