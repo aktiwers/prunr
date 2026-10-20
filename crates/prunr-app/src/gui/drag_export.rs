@@ -109,6 +109,26 @@ fn source_stem(source_filename: &str) -> &str {
 }
 
 /// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
+/// `filenames` with each stem once, ignoring case as Windows and macOS
+/// do: a repeat becomes `stem-2`, `stem-3`…, its extension kept, so the
+/// files one save writes from them never share a name.
+pub(crate) fn distinct_filenames<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut taken = std::collections::HashSet::new();
+    filenames.into_iter().map(|name| {
+        let stem = source_stem(name);
+        let mut candidate = stem.to_string();
+        let mut n = 1;
+        while !taken.insert(candidate.to_lowercase()) {
+            n += 1;
+            candidate = format!("{stem}-{n}");
+        }
+        match Path::new(name).extension() {
+            Some(ext) => format!("{candidate}.{}", ext.to_string_lossy()),
+            None => candidate,
+        }
+    }).collect()
+}
+
 pub(crate) fn export_name(source_filename: &str, format: prunr_core::ExportFormat) -> String {
     format!("{}{}", source_stem(source_filename), format.result_suffix())
 }
@@ -192,6 +212,11 @@ impl LayerJob {
 
     pub(crate) fn filename(&self) -> &str {
         &self.filename
+    }
+
+    /// The job writing its files under `filename`'s stem.
+    pub(crate) fn named(self, filename: String) -> Self {
+        Self { filename, ..self }
     }
 
     /// The item kept what layers are made from (they were dropped under
