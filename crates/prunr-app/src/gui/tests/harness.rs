@@ -18,7 +18,7 @@ pub(super) fn harness_builder() -> HarnessBuilder<PrunrApp> {
 
 /// The app as eframe would create it, with its icon font installed.
 pub(super) fn new_app(cc: &eframe::CreationContext<'_>) -> PrunrApp {
-    egui_material_icons::initialize(&cc.egui_ctx);
+    crate::gui::theme::install_fonts(&cc.egui_ctx);
     PrunrApp::new_for_test()
 }
 

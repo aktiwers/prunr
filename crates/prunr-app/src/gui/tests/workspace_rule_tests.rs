@@ -298,18 +298,46 @@ fn user_text_has_no_engineering_words() {
 #[test]
 fn user_text_writes_only_glyphs_the_fonts_have() {
     let ctx = egui::Context::default();
-    egui_material_icons::initialize(&ctx);
+    crate::gui::theme::install_fonts(&ctx);
     let _ = ctx.run_ui(Default::default(), |_| {});
-    let font = egui::FontId::proportional(14.0);
+    let lacks_in = |font: &egui::FontId, c: char| !c.is_ascii() && !ctx.fonts_mut(|f| f.has_glyph(font, c));
+    let (body, mono) = (egui::FontId::proportional(14.0), egui::FontId::monospace(14.0));
+    let lacks = |c: char| lacks_in(&body, c);
     let mut found = Vec::new();
     for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
         for (n, literal) in user_literals(text) {
-            if let Some(c) = literal.chars().find(|&c| !c.is_ascii() && !ctx.fonts_mut(|f| f.has_glyph(&font, c))) {
+            if let Some(c) = unescaped(literal).find(|&c| lacks(c)) {
                 found.push(format!("{rel}:{n}: \"{literal}\" writes {c:?}, which the fonts lack"));
             }
         }
     }
+    // Key text is built from the binding table, not written as a literal;
+    // Settings › Shortcuts shows it in the monospace font.
+    let bindings = crate::gui::views::shortcuts::Bindings::shipped();
+    for action in crate::gui::views::shortcuts::Action::ALL {
+        let text = bindings.display(action);
+        if let Some(c) = text.chars().find(|&c| lacks(c) || lacks_in(&mono, c)) {
+            found.push(format!("the keys of {action:?}, \"{text}\", write {c:?}, which the fonts lack"));
+        }
+    }
     report(found, "glyphs the fonts lack in user text");
+}
+
+/// A literal's characters with its `\u{..}` escapes read as what they
+/// write.
+fn unescaped(literal: &str) -> impl Iterator<Item = char> + '_ {
+    let mut rest = literal;
+    std::iter::from_fn(move || {
+        if let Some(after) = rest.strip_prefix("\\u{") {
+            if let Some((hex, tail)) = after.split_once('}') {
+                rest = tail;
+                return Some(u32::from_str_radix(hex, 16).ok().and_then(char::from_u32).unwrap_or('\u{fffd}'));
+            }
+        }
+        let c = rest.chars().next()?;
+        rest = &rest[c.len_utf8()..];
+        Some(c)
+    })
 }
 
 /// A key named in user text comes from the binding table

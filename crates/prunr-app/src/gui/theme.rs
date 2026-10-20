@@ -1,3 +1,21 @@
+/// The app's fonts: egui's, with the icon font, and the monospace font
+/// behind the body font for the symbols only it has (the arrow keys' ←
+/// and →).
+pub(crate) fn install_fonts(ctx: &egui::Context) {
+    const FALLBACK: &str = "Hack";
+    egui_material_icons::initialize(ctx);
+    if let Some(data) = egui::FontDefinitions::default().font_data.get(FALLBACK) {
+        ctx.add_font(egui::epaint::text::FontInsert::new(
+            "body-fallback",
+            (**data).clone(),
+            vec![egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            }],
+        ));
+    }
+}
+
 /// Whether an egui popup (chip popover, combo box, color picker) is open.
 /// The legacy popup API is the one the chip popovers use; the deprecation
 /// is isolated here.
