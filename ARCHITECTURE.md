@@ -105,7 +105,7 @@ Length-prefixed bincode frames over the child's stdin/stdout (`subprocess/protoc
 | Parent → child | `Init`; work (`ProcessImage`, `RePostProcess`, `AddEdgeInference`, `Inpaint`); `CancelItem`, `Shutdown` |
 | Child → parent | `Ready` / `InitError`; `Report` (any progress update); results / errors per work kind; `RssUpdate`; `Finished` |
 
-Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
+Payloads (image bytes, result RGBA, seg and edge tensors for the Tier 2 caches) go through temp files in `prunr-ipc-{parent pid}`, under `/dev/shm` on Linux (unless it is under 1 GiB, as in a container) and the OS temp dir elsewhere; the reader deletes each file (sweep rules in [Temp File Lifecycle](#temp-file-lifecycle)).
 
 Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-flight ones, which the worker checks before and during inference. A cancelled item shows its own state again (its result, or the photo), not an error, so its caches survive.
 
@@ -527,7 +527,7 @@ Our exports live on this repo's GitHub releases (`models-v1`, `lcm-inpaint-v1.0.
 |-----------|---------|---------|
 | `{temp_dir}/prunr-drag/` | Drag-out PNGs | >10 min at startup; all on exit |
 | `{cache_dir}/prunr-history/{pid}/` | Cold undo history | Emptied on exit; dead PIDs' dirs at startup; never while the session runs |
-| `/dev/shm/prunr-ipc-{pid}/` (Linux), else `{temp_dir}/prunr-ipc-{pid}/` | Subprocess transfer | After read; own dir at startup; dead PIDs' dirs |
+| `/dev/shm/prunr-ipc-{pid}/` (Linux, when it holds 1 GiB), else `{temp_dir}/prunr-ipc-{pid}/` | Subprocess transfer | After read; own dir at startup; dead PIDs' dirs |
 
 The IPC and history dirs are per PID so two instances never sweep each other (`fs_util::sweep_dead_pid_dirs`), and crash recovery deletes only the crashed subprocess's file prefixes, sparing the SD subprocess and the CLI's staged retry inputs.
 
