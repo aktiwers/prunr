@@ -338,9 +338,9 @@ pub fn process_lama(
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
     fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, _, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
-        session.run_tile(tile_rgba, tile_mask).unwrap_or_else(|e| {
-            tracing::error!(%e, "LaMa tile inference failed; leaving tile unchanged");
-            tile_rgba.clone()
+        session.run_tile(tile_rgba, tile_mask).inspect_err(|e| {
+            tracing::error!(%e, ?id, "LaMa tile inference failed; its session is dropped");
+            LamaSession::forget(id, cpu_only);
         })
     }))
 }
@@ -522,6 +522,13 @@ impl LamaSession {
             crate::inpaint_sd::forget_failed(&mut guard, &(id, cpu_only), &slot);
         }
         built.map_err(CoreError::Inference)
+    }
+
+    /// Drop the cached session for `(id, cpu_only)`, so the next stroke
+    /// builds a fresh one; a run under way keeps its own.
+    fn forget(id: prunr_models::ModelId, cpu_only: bool) {
+        let gone = lama_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(id, cpu_only));
+        drop(gone);
     }
 
     fn new_inner(id: prunr_models::ModelId, cpu_only: bool) -> Result<LamaSession, String> {
@@ -886,7 +893,7 @@ pub fn tile_compose<F>(
     mut inpaint_tile: F,
 ) -> Result<RgbaImage, CoreError>
 where
-    F: FnMut(&RgbaImage, &GrayImage) -> RgbaImage,
+    F: FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
 {
     let (w, h) = image.dimensions();
     let mut out = image.clone();
@@ -919,7 +926,7 @@ where
         progress.tile(i as u32, false);
         let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
         let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
-        let painted = inpaint_tile(&tile_rgba, &tile_mask);
+        let painted = inpaint_tile(&tile_rgba, &tile_mask)?;
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox, (w, h));
         let rect = (tile.x, tile.y, tile.w, tile.h);
         progress.tile_preview_part(rect, (w, h), bbox.within(rect), |size, part| tile_fill_preview(tile_rgba, &painted, &tile_mask, size, part));
@@ -1094,7 +1101,7 @@ mod tests {
         mask.put_pixel(100, 100, Luma([255]));
         mask.put_pixel(1100, 500, Luma([255]));
         let sink = std::sync::Arc::new(RecordingSink::default());
-        tile_compose(&img, &mask, &Progress::new(sink.clone()), |t, _| t.clone()).unwrap();
+        tile_compose(&img, &mask, &Progress::new(sink.clone()), |t, _| Ok(t.clone())).unwrap();
         let updates = sink.updates();
         assert_eq!(check_contract(&updates), Ok(()));
         let layout = updates.iter().find_map(|u| match u { ProgressUpdate::Tiles(t) => Some(t.len()), _ => None });
@@ -1102,8 +1109,19 @@ mod tests {
 
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ran = std::cell::Cell::new(false);
-        let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); t.clone() });
+        let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); Ok(t.clone()) });
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
+    }
+
+    /// A tile the model fails on fails the erase: before, the tile came
+    /// back unchanged and an erase that changed nothing reported success.
+    #[test]
+    fn a_failed_tile_fails_the_erase() {
+        let img = RgbaImage::from_pixel(600, 400, Rgba([10, 20, 30, 255]));
+        let mut mask = GrayImage::new(600, 400);
+        mask.put_pixel(100, 100, Luma([255]));
+        let result = tile_compose(&img, &mask, &Progress::none(), |_, _| Err(CoreError::Inference("the run failed".into())));
+        assert!(matches!(result, Err(CoreError::Inference(why)) if why == "the run failed"));
     }
 
     /// Asked for previews, each finished tile is sent once, while it
@@ -1113,7 +1131,7 @@ mod tests {
     #[test]
     fn tile_compose_previews_each_finished_tile_over_the_photo() {
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
-        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        let fill = |t: &RgbaImage, _: &GrayImage| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7])));
         for (w, h) in [(1200, 600), (300, 200)] {
             let img = RgbaImage::from_fn(w, h, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, 40, 200]));
             let mut mask = GrayImage::new(w, h);
@@ -1173,7 +1191,7 @@ mod tests {
         for (x, y) in (150..560).flat_map(|x| (200..230).map(move |y| (x, y))) {
             mask.put_pixel(x, y, Luma([255]));
         }
-        let fill = |t: &RgbaImage, _: &GrayImage| RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7]));
+        let fill = |t: &RgbaImage, _: &GrayImage| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7])));
         let previewed = |progress: &Progress| progress.clone().with_tile_previews(300);
         let sink = std::sync::Arc::new(RecordingSink::default());
         tile_compose(&img, &mask, &previewed(&Progress::new(sink.clone())), fill).unwrap();
@@ -1189,7 +1207,7 @@ mod tests {
             let tile_mask = image::imageops::crop_imm(&mask, t.x, t.y, t.w, t.h).to_image();
             let whole_sink = std::sync::Arc::new(RecordingSink::default());
             let whole_progress = previewed(&Progress::new(whole_sink.clone()));
-            whole_progress.tile_preview(rect, (w, h), |pw, ph| tile_fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask), &tile_mask, (pw, ph), (0, 0, pw, ph)));
+            whole_progress.tile_preview(rect, (w, h), |pw, ph| tile_fill_preview(tile_rgba.clone(), &fill(&tile_rgba, &tile_mask).unwrap(), &tile_mask, (pw, ph), (0, 0, pw, ph)));
             whole_progress.tile_preview(rect, (w, h), |pw, ph| crate::formats::preview_rgba(Cow::Borrowed(&tile_rgba), (pw, ph), (0, 0, pw, ph)));
             let updates = whole_sink.updates();
             let [ProgressUpdate::TilePreview(whole), ProgressUpdate::TilePreview(photo)] = updates.as_slice() else { panic!("{updates:?}") };
@@ -1377,7 +1395,7 @@ mod tests {
             let mut tiles = Vec::new();
             tile_compose(&img, &mask, &Progress::none(), |t, m| {
                 tiles.push((t.dimensions(), mask_bbox(m, 1, 0).unwrap()));
-                t.clone()
+                Ok(t.clone())
             }).unwrap();
             tiles
         };
@@ -1404,7 +1422,7 @@ mod tests {
             for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
                 mask.put_pixel(x, y, Luma([255]));
             }
-            let out = tile_compose(&img, &mask, &Progress::none(), |t, _| RgbaImage::from_pixel(t.width(), t.height(), Rgba([200, 0, 0, 255]))).unwrap();
+            let out = tile_compose(&img, &mask, &Progress::none(), |t, _| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([200, 0, 0, 255])))).unwrap();
             for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
                 assert_eq!(out.get_pixel(x, y).0, [200, 0, 0, 255], "{w}x{h} at ({x}, {y})");
             }
@@ -1591,7 +1609,7 @@ mod tests {
             }
         }
         let mask = GrayImage::new(128, 128); // all-zero
-        let out = tile_compose(&img, &mask, &Progress::none(), |t, _| t.clone()).unwrap();
+        let out = tile_compose(&img, &mask, &Progress::none(), |t, _| Ok(t.clone())).unwrap();
         assert_eq!(out, img);
     }
 
@@ -1796,7 +1814,7 @@ mod tests {
                     }
                 }
             }
-            t
+            Ok(t)
         }).unwrap();
         // Spot-check: every pixel outside the masked region is identical.
         for y in 0..128 {
