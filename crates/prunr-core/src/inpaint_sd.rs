@@ -1644,7 +1644,7 @@ fn build_part_with_ep_ladder(
         return Err(format!(
             "SD inpaint requires GPU acceleration. No compatible GPU \
              execution provider is available; SD on CPU produces \
-             incorrect output. Install OpenVINO Runtime (Settings → \
+             incorrect output. Install OpenVINO Runtime (Settings › \
              Hardware) or {LIGHTER_ERASER_HINT}.",
         ));
     }
