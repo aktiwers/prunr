@@ -152,6 +152,9 @@ impl PrunrApp {
                 SelectionOp::Invert | SelectionOp::Bake { .. } => StepKind::Selection,
             };
             let changed = item.land_selection_state(done.made, done.hash, kind);
+            if let SelectionOp::Merge(stroke) = &done.op {
+                item.note_painted_during_erase(stroke);
+            }
             // A click that added nothing leaves the last retunable one as it was.
             match done.after {
                 AfterLanding::MagicDecode { output, mode, reading } if changed => {

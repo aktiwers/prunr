@@ -92,9 +92,7 @@ impl PrunrApp {
             }
             self.publish_result(item_id, Arc::new(rgba), "inpaint", ctx);
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                // The region is filled: the step shows the result without
-                // its brush marks; undoing it brings both back.
-                item.invalidate_selection();
+                item.clear_filled_marks();
                 item.finish_job();
                 item.note_fill_scale(fill_scale);
             }
@@ -1816,6 +1814,38 @@ mod timeline_contract_tests {
                 }
             }
         }
+    }
+
+    /// A selection painted while an erase fills is the next area: the fill
+    /// takes the marks it was made from and keeps the strokes painted
+    /// meanwhile, whole where they cross its area; an undo of one leaves
+    /// the fill coming and takes that stroke back.
+    #[test]
+    fn strokes_painted_while_an_erase_fills_stay_after_it() {
+        use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+        let ctx = egui::Context::default();
+        let stroke = |cells: &[usize]| {
+            let mut c = vec![0i8; 16];
+            for &i in cells {
+                c[i] = prunr_core::selection::FULL;
+            }
+            Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, c))
+        };
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_erase(None);
+        let run = app.batch.items[0].job_run().expect("an erase");
+        app.queue_selection_op(1, SelectionOp::Merge(stroke(&[5, 6])), AfterLanding::Nothing);
+        app.queue_selection_op(1, SelectionOp::Merge(stroke(&[15])), AfterLanding::Nothing);
+        crate::gui::tests::fixtures::settle_selection_edits(&mut app);
+        app.handle_undo(&ctx);
+        assert!(app.batch.items[0].awaits_run(run), "an undo of a stroke since keeps the erase");
+        app.processor.land_inpaint_for_test(1, run, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(shown(&app), Some(7), "the fill landed");
+        let left = app.batch.items[0].selection_mask.as_ref().expect("the strokes painted meanwhile");
+        let kept: Vec<usize> = (0..16).filter(|&i| left.cells()[i] != 0).collect();
+        assert_eq!(kept, [5, 6], "the stroke across the filled area whole; the undone one gone");
     }
 
     /// An erase lands as one step that shows the filled image without its

@@ -740,16 +740,20 @@ impl PrunrApp {
     /// Undo / redo the images `ids`.
     pub(super) fn step_items(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action, ids: &[u64]) {
         use crate::gui::views::shortcuts::Action;
-        let (step, verb, nothing): (crate::gui::item::StepFn, _, _) = match action {
-            Action::Redo => (BatchItem::redo_step, "redone", "Nothing to redo"),
-            _ => (BatchItem::undo_step, "undone", "Nothing to undo"),
+        let (step, keeps_run, verb, nothing): (crate::gui::item::StepFn, fn(&BatchItem) -> bool, _, _) = match action {
+            Action::Redo => (BatchItem::redo_step, BatchItem::redo_keeps_run, "redone", "Nothing to redo"),
+            _ => (BatchItem::undo_step, BatchItem::undo_keeps_run, "undone", "Nothing to undo"),
         };
         let mut stepped = Vec::new();
         let mut lost = false;
         for &id in ids {
             let Some(idx) = self.batch.index_of(id) else { continue };
             let preset_before = self.batch.items[idx].settings.bg_image_hash;
-            self.cancel_runs_on(id);
+            // A run belongs to the state being left, but strokes painted
+            // while it runs keep it.
+            if !keeps_run(&self.batch.items[idx]) {
+                self.cancel_runs_on(id);
+            }
             self.processor.live_preview.cancel(id);
             let kind = match step(&mut self.batch.items[idx]) {
                 Ok(kind) => kind,
