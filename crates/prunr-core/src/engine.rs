@@ -1077,10 +1077,13 @@ pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep_name: &st
 /// graph it loaded, if any. A cached graph the CPU fails on (damaged, or
 /// written on another machine) is deleted and the session committed again,
 /// from the model: the CPU is the last provider, so a bad cache must not
-/// stop a model loading.
+/// stop a model loading. Running out of memory keeps the graph.
 pub(crate) fn commit_past_bad_cache<T, E: std::fmt::Display>(mut commit: impl FnMut() -> Result<T, (E, Option<PathBuf>)>) -> Result<T, E> {
     let drafted = crate::cache::drafts_attached();
     match commit() {
+        // Out of memory says nothing against the graph, and a retry would
+        // meet the same shortage.
+        Err((error, Some(_))) if crate::ep_compat::is_transient(&error.to_string()) => Err(error),
         Err((error, Some(cached))) => {
             tracing::warn!(%error, cache = %cached.display(), "CPU session failed on its cached graph; building it again");
             clear_suspect_cache(&cached);
@@ -1146,6 +1149,24 @@ mod tests {
         let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("the model loads past its broken cache");
         let used = crate::cache::optimized_model_path(id, CPU_NAME, engine.pick.weights).unwrap();
         assert_ne!(std::fs::read(&used).ok().as_deref(), Some(&b"not a graph"[..]), "the broken graph is gone");
+    }
+
+    /// Running out of memory on a cached graph says nothing against the
+    /// graph: it stays for the next build, and the build is not retried
+    /// into the same shortage.
+    #[test]
+    fn a_cpu_session_out_of_memory_keeps_its_cached_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = dir.path().join("optimized.onnx");
+        std::fs::write(&cached, b"graph").unwrap();
+        let tries = std::cell::Cell::new(0);
+        let built = commit_past_bad_cache(|| {
+            tries.set(tries.get() + 1);
+            Err::<(), _>(("Failed to allocate memory for requested buffer of size 1073741824", Some(cached.clone())))
+        });
+        assert!(built.is_err());
+        assert!(cached.exists(), "the graph stays");
+        assert_eq!(tries.get(), 1);
     }
 
     /// Erasers and models run in parts never land on MIGraphX, which
