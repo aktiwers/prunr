@@ -903,6 +903,15 @@ fn could_not(path: &std::path::Path, what: &str, reason: impl std::fmt::Display)
     format!("{}: could not {what}: {reason}", path.display())
 }
 
+/// An image failed: its spinner says why, or stderr when none shows (the
+/// output is not a terminal).
+fn report_failure(spinner: Option<&ProgressBar>, input: &std::path::Path, what: &str, why: impl std::fmt::Display) {
+    match spinner {
+        Some(pb) => pb.finish_with_message(format!("X {} — {why}", input.display())),
+        None => eprintln!("error: {}", could_not(input, what, why)),
+    }
+}
+
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
 fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
     if out.exists() && !force {
@@ -1004,9 +1013,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                     }
                     Err(e) => {
                         load_fail_count += 1;
-                        if let Some(Some(pb)) = spinners.get(idx) {
-                            pb.finish_with_message(format!("X {} — {e}", input.display()));
-                        }
+                        report_failure(spinners[idx].as_ref(), input, "downscale", e);
                     }
                 }
             }
@@ -1016,9 +1023,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
             }
             None => {
                 load_fail_count += 1;
-                if let Some(Some(pb)) = spinners.get(idx) {
-                    pb.finish_with_message(format!("X {} — not a valid image", input.display()));
-                }
+                report_failure(spinners[idx].as_ref(), input, "read", "not a valid image");
             }
         }
     }
@@ -1115,11 +1120,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
             }
             Err(e) => {
                 fail_count += 1;
-                if let Some(pb) = spinner_opt {
-                    pb.finish_with_message(format!("X {} — {e}", input.display()));
-                } else {
-                    eprintln!("error: {}", could_not(input, "process", e));
-                }
+                report_failure(spinner_opt, input, "process", e);
             }
         }
     }
