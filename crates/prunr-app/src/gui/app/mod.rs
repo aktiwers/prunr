@@ -215,7 +215,10 @@ impl PrunrApp {
         super::history_disk::cleanup_stale();
 
         let (mut settings, settings_note) = Settings::load();
-        settings.active_backend = prunr_core::OrtEngine::detect_active_provider();
+        // The probe runs on its own thread (`gui::run`); a GPU driver that
+        // holds it must not keep the window from opening. Filled in when it
+        // answers (`take_probed_backend`).
+        settings.active_backend = prunr_core::OrtEngine::detected_provider().unwrap_or_default();
         // PRUNR_OPEN_MODEL must apply BEFORE the worker prewarm config below
         // — otherwise the wrong model loads at startup and the first Process
         // click pays a full subprocess respawn (~15 s on this CPU).
@@ -937,6 +940,15 @@ impl PrunrApp {
     /// While the Shortcuts tab waits for a key, this frame's press is the
     /// new chord (Escape cancels, Backspace clears the slot), never a
     /// command. Returns true while capture is active.
+    /// The accelerator the startup probe found, once it has answered.
+    pub(crate) fn take_probed_backend(&mut self) {
+        if self.settings.active_backend.is_empty() {
+            if let Some(provider) = prunr_core::OrtEngine::detected_provider() {
+                self.settings.active_backend = provider;
+            }
+        }
+    }
+
     fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
         use crate::gui::views::shortcuts::{self, Chord};
         // A capture lives on its tab: Settings closed by any way, or
@@ -1141,6 +1153,7 @@ impl eframe::App for PrunrApp {
         let popup_open = super::theme::dismissable_popup_open(ctx);
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
+        self.take_probed_backend();
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
         if !self.handle_hotkey_capture(ctx) {
@@ -1443,6 +1456,17 @@ mod hotkey_capture_tests {
         assert!(captured);
         assert!(app.hotkey_capture.is_none());
         assert!(app.show_settings, "Escape went to the capture field, not to the modal");
+    }
+
+    /// The window opens before the accelerator probe answers; its answer
+    /// is taken when it comes.
+    #[test]
+    fn the_probed_backend_is_taken_when_it_answers() {
+        let mut app = PrunrApp::new_for_test();
+        let probed = prunr_core::OrtEngine::detect_active_provider();
+        app.settings.active_backend = String::new();
+        app.take_probed_backend();
+        assert_eq!(app.settings.active_backend, probed);
     }
 
     /// A capture ends with its tab: with Settings closed (by its window's
