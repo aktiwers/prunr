@@ -659,6 +659,12 @@ impl UpscaleJob<'_> {
         } else {
             img
         };
+        let needed = prunr_core::upscale::needed_bytes(self.model, model_input.width(), model_input.height(), self.scale.factor());
+        let free = prunr_app::hardware::available_ram_bytes_now();
+        if needed > free {
+            use crate::gui::views::format_byte_size;
+            return Err(format!("too large to upscale: needs about {} of free memory, {} is free", format_byte_size(needed), format_byte_size(free)));
+        }
         let progress = prunr_core::Progress::none();
         let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, self.engine, self.model, self.scale.factor(), &progress, None)
             .map_err(|e| format!("upscale failed: {e}"))?;
