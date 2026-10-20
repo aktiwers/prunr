@@ -788,7 +788,7 @@ fn run_each_input(
         if !args.quiet {
             eprintln!("{doing} {}...", input.display());
         }
-        let result = image::open(input)
+        let result = load_image_from_path(input)
             .map_err(|e| could_not(input, "read", e))
             .and_then(|img| run(img.into_rgba8()))
             .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| could_not(&out_path, "save", e)));
@@ -823,14 +823,14 @@ fn run_inpaint(args: &Cli) -> i32 {
         return 1;
     }
 
-    let img = match image::open(input) {
+    let img = match load_image_from_path(input) {
         Ok(i) => i.into_rgba8(),
         Err(e) => {
             eprintln!("error: {}", could_not(input, "read", e));
             return 1;
         }
     };
-    let mask = match image::open(mask_path) {
+    let mask = match load_image_from_path(mask_path) {
         Ok(i) => i.into_luma8(),
         Err(e) => {
             eprintln!("error: {}", could_not(mask_path, "read the mask", e));

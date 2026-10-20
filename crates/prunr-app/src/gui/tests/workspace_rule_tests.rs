@@ -130,6 +130,31 @@ fn colour_bytes_are_rounded_not_truncated() {
     report(found, "colour bytes truncated");
 }
 
+/// Decodes of the app's own images, which carry no EXIF turn.
+const DECODE_ALLOWED: [(&str, &str); 1] = [
+    ("prunr-app/src/gui/mod.rs", "the app icon, built in"),
+];
+
+/// Images are decoded through prunr-core's loaders, which turn a photo
+/// the way its EXIF says: a decode of its own shows a phone's portrait
+/// sideways.
+#[test]
+fn images_decode_through_the_upright_loaders() {
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        if rel.ends_with("prunr-core/src/formats.rs") || DECODE_ALLOWED.iter().any(|(f, _)| rel == *f) {
+            continue;
+        }
+        for (n, line) in production_lines(text) {
+            let code = code_part(line);
+            if ["image::open(", "load_from_memory", "ImageReader::"].iter().any(|p| code.contains(p)) {
+                found.push(format!("{rel}:{n}: use prunr_core::load_image_from_{{path,bytes}} / image_dimensions_from_{{path,bytes}}"));
+            }
+        }
+    }
+    report(found, "images decoded without their EXIF turn");
+}
+
 /// A poisoned lock is taken over, not panicked on: one panicking thread
 /// would otherwise take every later user of the lock down with it.
 #[test]
