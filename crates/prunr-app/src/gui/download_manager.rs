@@ -456,12 +456,10 @@ fn partial_path(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// A partial untouched this long is no live download's: a download writes
-/// every few milliseconds.
-const STALE_PARTIAL: std::time::Duration = std::time::Duration::from_secs(3600);
-
 /// Remove the partials of `dest` an earlier run left (quit mid-download
-/// keeps gigabytes), sparing one another instance is writing now.
+/// keeps gigabytes), sparing one a running instance is writing now: the
+/// suffix names the process writing it, and one without (an older
+/// version's) is no live download's.
 fn sweep_stale_partials(dest: &Path) {
     let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
     let mut prefix = name.to_owned();
@@ -469,12 +467,14 @@ fn sweep_stale_partials(dest: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let file = entry.file_name();
-        let ours = file.as_encoded_bytes().starts_with(prefix.as_encoded_bytes());
-        let stale = entry.metadata().ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > STALE_PARTIAL);
-        if ours && stale {
+        let Some(suffix) = file.as_encoded_bytes().strip_prefix(prefix.as_encoded_bytes()) else { continue };
+        let abandoned = match suffix {
+            [] => true,
+            [b'.', pid @ ..] => std::str::from_utf8(pid).ok().and_then(|p| p.parse::<u32>().ok())
+                .is_some_and(|pid| !crate::fs_util::pid_runs(pid)),
+            _ => false,
+        };
+        if abandoned {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -591,14 +591,16 @@ mod tests {
     }
 
     /// A partial an earlier run left (quit mid-download: gigabytes kept)
-    /// goes when the model is fetched again; one another instance is
-    /// writing now, and other models' files, stay.
+    /// goes when the model is fetched again, however fresh: a retry right
+    /// after a quit must not be refused for the space it holds. One a
+    /// running instance writes stays however old (a laptop asleep for
+    /// hours), and so do other models' files.
     #[test]
     fn a_partial_left_by_an_earlier_run_is_swept() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("big_lama.onnx");
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
-        let file = |name: &str, old: bool| {
+        let file = |name: String, old: bool| {
             let path = dir.path().join(name);
             std::fs::write(&path, b"half").unwrap();
             if old {
@@ -606,8 +608,10 @@ mod tests {
             }
             path
         };
-        let left = [file("big_lama.onnx.partial", true), file("big_lama.onnx.partial.4242", true)];
-        let kept = [file("big_lama.onnx.partial.4343", false), file("migan.onnx.partial.4242", true)];
+        let dead = crate::fs_util::a_free_pid();
+        let live = std::process::id();
+        let left = [file("big_lama.onnx.partial".into(), true), file(format!("big_lama.onnx.partial.{dead}"), false)];
+        let kept = [file(format!("big_lama.onnx.partial.{live}"), true), file(format!("migan.onnx.partial.{dead}"), true)];
         sweep_stale_partials(&dest);
         assert!(left.iter().all(|p| !p.exists()), "an earlier run's partials go");
         assert!(kept.iter().all(|p| p.exists()), "a live download and other models' files stay");
