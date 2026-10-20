@@ -124,7 +124,9 @@ pub(crate) fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: u16) -> [u8; 3] {
 /// when absent. Callers strip their own prefix and decide which lengths
 /// they take.
 pub fn parse_hex_rgba(digits: &str) -> Option<[u8; 4]> {
-    if !matches!(digits.len(), 6 | 8) {
+    // Hex digits only: a byte length counts a multi-byte character twice,
+    // and `from_str_radix` takes a leading '+'.
+    if !matches!(digits.len(), 6 | 8) || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0, 0, 0, 255];
@@ -158,7 +160,7 @@ mod tests {
     fn hex_reads_six_or_eight_digits() {
         assert_eq!(parse_hex_rgba("ff8000"), Some([255, 128, 0, 255]));
         assert_eq!(parse_hex_rgba("FF800080"), Some([255, 128, 0, 128]));
-        for bad in ["", "fff", "ff800", "ff8000f", "ff80000080", "gg8000", "#ff8000"] {
+        for bad in ["", "fff", "ff800", "ff8000f", "ff80000080", "gg8000", "#ff8000", "fé123", "+f+f+f", "+f0000"] {
             assert_eq!(parse_hex_rgba(bad), None, "{bad:?}");
         }
     }
