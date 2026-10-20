@@ -112,28 +112,27 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     // The probe loads exactly the dylib it was handed, bypassing the
     // resolver on purpose, so it cannot go through `ensure_initialized()`.
     #[allow(clippy::disallowed_methods)]
-    let env = ort::init_from(&dylib_path).map_err(ort_err("ort::init_from"))?;
-    if !env.commit() {
-        anyhow::bail!("ort env commit returned false (already committed?)");
-    }
-    println!("OK ort::init_from + commit");
+    let env = ort::init_from(&dylib_path).map_err(ort_err("ort::init_from"))?
+        .build().map_err(ort_err("environment"))?;
+    println!("OK ort::init_from + environment");
 
-    let providers: [&dyn ExecutionProvider; 4] = [
-        &ort::ep::CoreML::default(),
-        &ort::ep::CUDA::default(),
-        &ort::ep::DirectML::default(),
-        &ort::ep::OpenVINO::default(),
+    type Available = fn() -> ort::Result<bool>;
+    let providers: [(&str, Available); 4] = [
+        (ort::ep::CoreML::NAME, ort::ep::CoreML::is_available),
+        (ort::ep::CUDA::NAME, ort::ep::CUDA::is_available),
+        (ort::ep::DirectML::NAME, ort::ep::DirectML::is_available),
+        (ort::ep::OpenVINO::NAME, ort::ep::OpenVINO::is_available),
     ];
     println!("Execution providers compiled into this runtime:");
-    for p in providers {
-        let available = p.is_available().map_err(ort_err("GetAvailableProviders"))?;
-        println!("  {:<28} {}", p.name(), if available { "yes" } else { "no" });
+    for (name, available) in providers {
+        let available = available().map_err(ort_err("GetAvailableProviders"))?;
+        println!("  {name:<28} {}", if available { "yes" } else { "no" });
     }
     for want in &required_eps {
-        let p = providers.iter().find(|p| p.name() == want).ok_or_else(|| anyhow::anyhow!(
-            "--require-ep {want}: not one of {:?}", providers.map(|p| p.name()),
+        let (_, available) = providers.iter().find(|(name, _)| name == want).ok_or_else(|| anyhow::anyhow!(
+            "--require-ep {want}: not one of {:?}", providers.map(|(name, _)| name),
         ))?;
-        if !p.is_available().map_err(ort_err("GetAvailableProviders"))? {
+        if !available().map_err(ort_err("GetAvailableProviders"))? {
             anyhow::bail!("{want} is not compiled into {}", dylib_path.display());
         }
     }
@@ -142,7 +141,7 @@ fn probe_load_dynamic() -> anyhow::Result<()> {
     println!("Building session against bundled Silueta ({} bytes)", silueta.len());
 
     #[allow(clippy::disallowed_methods)] // same reason as the init_from above
-    let mut session = Session::builder().map_err(ort_err("Session::builder"))?
+    let mut session = Session::builder(&env).map_err(ort_err("Session::builder"))?
         .with_optimization_level(GraphOptimizationLevel::Level3).map_err(ort_err("opt level"))?
         .commit_from_memory(&silueta).map_err(ort_err("commit_from_memory"))?;
 

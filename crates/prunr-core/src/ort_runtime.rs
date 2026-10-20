@@ -115,16 +115,21 @@ pub fn runtime_version_from_info(info: &str) -> Option<String> {
     branch.strip_prefix("rel-").map(str::to_string)
 }
 
+/// The process's ORT environment, which every session is built from. ort
+/// allows one per process, so it lives as long as the process.
+static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
+
 /// A session builder on the loaded runtime.
 pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     ensure_initialized().map_err(CoreError::Inference)?;
-    #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded one line above
+    let env = ENV.get().ok_or_else(|| CoreError::Inference("ORT environment missing after load".into()))?;
+    #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded two lines above
     // No spin-waiting between ops: idle ORT threads spinning steal the cores
     // from rayon's tile blending and from a second session running at once.
     // Measured (4-core i7): LaMa 5.2 s -> 3.5 s alone,
     // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
     // an OpenVINO session is unchanged.
-    Session::builder()
+    Session::builder(env)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
         .with_intra_op_spinning(false)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
@@ -190,9 +195,11 @@ fn load_runtime(path: &Path) -> Result<(), String> {
         preload_beside(path, name);
     }
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
-    let env = ort::init_from(path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
-    // false means an env was already committed; ORT is initialised either way.
-    let _ = env.commit();
+    let env = ort::init_from(path)
+        .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?
+        .build()
+        .map_err(|e| format!("ORT environment on {}: {e}", path.display()))?;
+    let _ = ENV.set(env);
     Ok(())
 }
 
