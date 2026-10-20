@@ -63,7 +63,7 @@ pub(super) fn settle(harness: &mut Harness<'_, PrunrApp>) {
 /// made off the UI thread, so in a busy test run a few frames can pass
 /// before it is, and a click before then lands on no image.
 pub(super) fn settle_until_shown(harness: &mut Harness<'_, PrunrApp>) {
-    let shown = |app: &PrunrApp| app.batch.selected_item().is_some_and(|i| i.on_canvas());
+    let shown = |app: &PrunrApp| app.batch.selected_item().is_some_and(|i| i.canvas_texture().is_some());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !shown(harness.state()) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));

@@ -234,9 +234,7 @@ fn draw_modifier_glyph(ui: &egui::Ui, canvas_rect: Rect, (shift, subtract): (boo
 /// `None` with no item, or none with a texture to paint over yet.
 fn brush_target(app: &PrunrApp, canvas_rect: Rect) -> Option<(usize, Rect)> {
     let item = app.batch.selected_item()?;
-    if !item.on_canvas() {
-        return None;
-    }
+    item.canvas_texture()?;
     let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
     Some((app.batch.selected_idx_clamped()?, img_rect))
 }
@@ -686,7 +684,7 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let t = theme::motion_clock(ui.ctx());
 
     let item = app.batch.selected_item();
-    let display_texture = item.and_then(processing_texture);
+    let display_texture = item.and_then(|i| i.canvas_texture());
 
     let painted = display_texture.map(|texture| {
         let tex_size = item.map_or(texture.size_vec2(), |i| i.frame_size());
@@ -720,12 +718,6 @@ fn render_processing_canvas(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         ui.ctx().request_repaint_after(theme::ANIM_FRAME);
     }
     painted
-}
-
-/// What the canvas shows while a run works: the image being edited, the
-/// newest result, whatever the run reads; the photo before there is one.
-fn processing_texture(item: &crate::gui::item::BatchItem) -> Option<&ImageTexture> {
-    item.result_texture.as_ref().or(item.source_texture.as_ref())
 }
 
 /// What the canvas shows for a result. Until a new result's texture
@@ -939,13 +931,13 @@ mod tests {
         let tex = |name: &str| ctx.load_texture(name, egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]), Default::default());
         let mut item = BatchItem::new_for_test();
         item.source_texture = Some(tex("photo").into());
-        assert_eq!(processing_texture(&item).map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
+        assert_eq!(item.canvas_texture().map(|t| t.id()), item.source_texture.as_ref().map(|t| t.id()), "nothing processed yet");
 
         item.land_cut_for_test(Cutter::Model(prunr_core::ModelKind::Silueta), std::sync::Arc::new(image::RgbaImage::new(1, 1)));
         item.result_texture = Some(tex("cut-out").into());
         item.start_cut(None, Cutter::Model(prunr_core::ModelKind::Silueta));
         assert!(item.run_input(crate::gui::item::Engine::Segment).is_none(), "the re-run reads the photo");
-        assert_eq!(processing_texture(&item).map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
+        assert_eq!(item.canvas_texture().map(|t| t.id()), item.result_texture.as_ref().map(|t| t.id()), "and the cut-out stays on screen");
     }
 
     /// A drag's quick frame shows in place of the result; an image held
