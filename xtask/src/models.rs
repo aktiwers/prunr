@@ -186,9 +186,8 @@ mod tests {
     #[test]
     fn no_xtask_row_is_for_a_downloaded_bundle() {
         for spec in MODELS {
-            let source = prunr_models::descriptor(spec.id).map(|d| d.source);
             assert!(
-                !matches!(source, Some(ModelSource::MultiPartOnDemand { .. })),
+                !prunr_models::descriptor(spec.id).is_some_and(|d| matches!(d.source, ModelSource::MultiPartOnDemand { .. })),
                 "xtask row {} is for {:?}, a downloaded bundle",
                 spec.name, spec.id,
             );

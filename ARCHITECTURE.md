@@ -356,7 +356,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 | 4xNomos8kSCHAT-L (fp16) | 4× | 256, ×16 | 32 | Level2 |
 | 4xNomos2 RealPLKSR | 4× | parts, 256 crops | each part's reach | Level3 |
 
-- **Whole-input norms run part by part.** Nomos2 normalizes its features over the whole image (GroupNorm), so tiles toned on their own statistics leave seams no overlap hides (up to 158/255 on a photo). It ships cut at its 28 norms: 30 ONNX parts and the norms' weights. Each part runs crop by crop with a border covering its reach, and each norm takes the whole image's statistics, so the result matches a one-piece run within 2/255 at the RAM of a tiled one. OpenVINO is passed over for it (a memory pool per compiled part: 9.7 GB against the CPU provider's 0.95 GB).
+- **Whole-input norms run part by part.** Nomos2 normalizes its features over the whole image (GroupNorm), so tiles toned on their own statistics leave seams no overlap hides. It ships cut at its norms; each part runs crop by crop with a border covering its reach, and each norm takes the whole image's statistics, so the result matches a one-piece run. The features stay whole, about 0.5 KB per input pixel. OpenVINO is declared incompatible: it keeps a memory pool per compiled part.
 - **Level2 for any model with a tile multiple.** Level3 bakes the first tile's shape into the graph, and the next differently padded tile fails.
 - **Overlap follows window attention, not the tile multiple.** Window-attention models need two windows of overlap to hide seams; CNNs need only their receptive field.
 - **fp16 siblings** download automatically when a GPU EP is active. Dispatch reads the loaded session's input dtype, not the registry flag.

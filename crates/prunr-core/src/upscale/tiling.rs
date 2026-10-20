@@ -33,7 +33,6 @@ pub(super) fn tiled_peak_bytes(in_w: u32, in_h: u32, scale: u32, tile_size: u32)
 use image::{GrayImage, RgbImage, RgbaImage};
 
 use crate::CoreError;
-use super::alpha::upscale_alpha_lanczos3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TilingConfig {
@@ -187,10 +186,7 @@ where
     band.finish_above(out_h, &mut out_img);
     drop(band);
 
-    let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
-    for (px, a) in out_img.pixels_mut().zip(alpha.as_raw()) {
-        px.0[3] = *a;
-    }
+    super::alpha::take_input_alpha(&mut out_img, input);
     Ok(out_img)
 }
 
@@ -464,7 +460,7 @@ mod tests {
                 }
             }
         }
-        let alpha = upscale_alpha_lanczos3(input, out_w, out_h);
+        let alpha = crate::upscale::upscale_alpha_lanczos3(input, out_w, out_h);
         RgbaImage::from_fn(out_w, out_h, |x, y| {
             let i = (y * out_w + x) as usize;
             let inv = 1.0 / wts[i].max(1e-6);

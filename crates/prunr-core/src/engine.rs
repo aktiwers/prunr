@@ -262,17 +262,15 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // each field tunes a provider that only some platforms compile in
 pub(crate) enum EpSite<'a> {
-    /// Segmentation and upscale engines.
-    Engine { threads: usize },
+    /// Segmentation and upscale engines; `part` names one part of a model
+    /// run part by part, so what it keeps of its own (CoreML's compiled
+    /// model) stays apart from the other parts'.
+    Engine { threads: usize, part: Option<&'a str> },
     /// LaMa-class fills.
     Fill { threads: usize },
     /// One part of a Stable Diffusion bundle. `ov_device` pins OpenVINO's
     /// device (bench only).
     SdPart { part: &'a str, ov_device: Option<&'a str> },
-    /// One part of a model run part by part: an engine's settings, with
-    /// what each part keeps of its own (CoreML's compiled model) apart
-    /// from the others'.
-    Part { part: &'a str, threads: usize },
 }
 
 /// OpenVINO's device for engines once the user lets it use the Intel GPU.
@@ -302,7 +300,7 @@ impl EpSite<'_> {
     /// shapes), and under AUTO it ran ~10% slower than the CPU.
     fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
         match self {
-            EpSite::Engine { .. } | EpSite::Part { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
+            EpSite::Engine { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
             EpSite::Fill { .. } => None,
             EpSite::SdPart { ov_device, .. } => *ov_device,
         }
@@ -328,7 +326,7 @@ impl EpKind {
                     // Heuristic conv search for the same reason: exhaustive
                     // benchmarks every new shape, the fixed default
                     // algorithm is often the slowest.
-                    EpSite::Engine { .. } | EpSite::Part { .. } => p
+                    EpSite::Engine { .. } => p
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
                         .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
                         .with_tf32(true)
@@ -342,8 +340,8 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
                 let dir = match site {
-                    EpSite::SdPart { part, .. } | EpSite::Part { part, .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
-                    EpSite::Engine { .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
+                    EpSite::SdPart { part, .. } | EpSite::Engine { part: Some(part), .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
+                    EpSite::Engine { part: None, .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
                 };
                 coreml_provider(dir.as_deref()).build()
             }
@@ -358,7 +356,7 @@ impl EpKind {
                 // Uncapped, OpenVINO's TBB pool takes every logical core
                 // and oversubscribes against rayon (`sched_yield` ~2% of
                 // CLI batch wall time).
-                EpSite::Engine { threads } | EpSite::Fill { threads } | EpSite::Part { threads, .. } => {
+                EpSite::Engine { threads, .. } | EpSite::Fill { threads } => {
                     let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
                     match site.ov_device(intel_gpu_chosen()) {
                         Some(device) => provider.with_device_type(device),
@@ -384,17 +382,6 @@ impl EpKind {
             },
         };
         dispatch.error_on_failure()
-    }
-
-    fn is_openvino(self) -> bool {
-        #[cfg(not(target_os = "macos"))]
-        {
-            self == EpKind::OpenVino
-        }
-        #[cfg(target_os = "macos")]
-        {
-            false
-        }
     }
 
     /// Whether sessions on this provider load and write ORT's
@@ -457,9 +444,15 @@ impl Skip {
     }
 }
 
+/// The CPU provider every session falls back to: no arena, for a lower
+/// memory baseline (the subprocess handles OOM).
+fn cpu_provider() -> ExecutionProviderDispatch {
+    CPU::default().with_arena_allocator(false).build()
+}
+
 /// Whether, and why, the ladder passes `ep` over for these weights.
 fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) || pools_per_part(model, ep) {
+    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
@@ -484,14 +477,6 @@ fn compiles_per_shape(model: prunr_models::ModelId, ep: EpKind) -> bool {
         let _ = (model, ep);
         false
     }
-}
-
-/// OpenVINO keeps a memory pool per compiled part: 9.7 GB and 73 s
-/// compiling Nomos2's 30 parts on an i7-6700 (2026-10), where the CPU
-/// provider held 0.95 GB, compiled nothing, and ran the same 960×635
-/// image in 67 s against OpenVINO's 55 s.
-fn pools_per_part(model: prunr_models::ModelId, ep: EpKind) -> bool {
-    ep.is_openvino() && prunr_models::descriptor(model).is_some_and(|d| d.runs_in_parts())
 }
 
 /// What a walk down the ladder met: each provider that failed, with its
@@ -733,8 +718,8 @@ impl OrtEngine {
             .ok_or_else(|| CoreError::Model(format!("{model:?} is not a known model")))?;
         let kind = ModelKind::try_from(model)
             .map_err(|id| CoreError::Model(format!("{id:?} has no session kind")))?;
-        if let (Some(layout), Some(knobs)) = (descriptor.part_layout(), descriptor.upscale) {
-            let net = crate::upscale::blocks::NetShape { layout, image_input: knobs.input_name };
+        if let Some(prunr_models::UpscaleModelKnobs { parts: Some(layout), input_name, .. }) = descriptor.upscale {
+            let net = crate::upscale::blocks::NetShape { layout, image_input: input_name };
             return Self::build_parts(kind, net, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor));
         }
         Self::build_with(kind, intra_threads, gpu_eps_for(cpu_only), cpu_only, crate::upscale::pick_optimization_level(descriptor))
@@ -770,11 +755,7 @@ impl OrtEngine {
             let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights);
             let started = Instant::now();
             let session = builder
-                .with_execution_providers([
-                    CPU::default()
-                        .with_arena_allocator(false) // lower memory baseline; subprocess handles OOM
-                        .build(),
-                ])
+                .with_execution_providers([cpu_provider()])
                 .map_err(|e| CoreError::Inference(format!("ORT set CPU EP failed: {e}")))?
                 .commit_from_memory(&bytes)
                 .map_err(|e| CoreError::Inference(format!("ORT session creation failed (CPU): {e}")))?;
@@ -800,7 +781,7 @@ impl OrtEngine {
             };
             let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
             let mut built = builder
-                .with_execution_providers([ep.provider(model_id, EpSite::Engine { threads: intra_threads })])
+                .with_execution_providers([ep.provider(model_id, EpSite::Engine { threads: intra_threads, part: None })])
                 .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
@@ -824,29 +805,16 @@ impl OrtEngine {
     /// optimized-graph cache, which keys one graph per model.
     fn build_parts(model: ModelKind, net: crate::upscale::blocks::NetShape, intra_threads: usize, cpu_only: bool, level: GraphOptimizationLevel) -> Result<Self, CoreError> {
         let id: prunr_models::ModelId = model.into();
-        let paths = prunr_models::multi_part_paths(id)
-            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?;
-        let read = |path: &std::path::Path| std::fs::read(path).map_err(|e| CoreError::Inference(format!("{}: {e}", path.display())));
-        let mut onnx = Vec::with_capacity(paths.len());
-        let mut norms = None;
-        for (key, path) in &paths {
-            if *key == prunr_models::PART_NORMS {
-                norms = Some(read(path)?);
-            } else {
-                onnx.push((*key, read(path)?));
-            }
-        }
-        let norms = norms.ok_or_else(|| CoreError::Model(format!("{id:?}: no {} part", prunr_models::PART_NORMS)))?;
-        let norms = crate::upscale::blocks::Norms::parse(&norms, net.layout.features)?;
+        let (onnx, norms) = crate::upscale::blocks::read_parts(id, net.layout.features)?;
         let commit_all = |ep: Option<EpKind>| -> Result<Vec<(&'static str, Session)>, Miss> {
             onnx.iter().map(|(key, bytes)| {
                 let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
                 let (builder, coverage, provider) = match ep {
                     Some(ep) => {
                         let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-                        (builder, coverage, ep.provider(id, EpSite::Part { part: key, threads: intra_threads }))
+                        (builder, coverage, ep.provider(id, EpSite::Engine { threads: intra_threads, part: Some(key) }))
                     }
-                    None => (builder, crate::ep_coverage::CoverageWatch::default(), CPU::default().with_arena_allocator(false).build()),
+                    None => (builder, crate::ep_coverage::CoverageWatch::default(), cpu_provider()),
                 };
                 let mut built = builder.with_execution_providers([provider])
                     .map_err(|e| Miss::Unusable(format!("ORT register {} EP failed: {e}", ep.map_or(CPU_NAME, |ep| ep.as_str()))))?;
@@ -857,15 +825,13 @@ impl OrtEngine {
             }).collect()
         };
         let started = Instant::now();
-        let eps = gpu_eps_for(cpu_only);
-        let (sessions, pick) = match (!eps.is_empty()).then(|| walk_ladder("", id, Weights::Fp32, eps, |ep| commit_all(Some(ep)))) {
-            Some(Ok((sessions, ep, failed))) => (sessions, SessionPick { failed, ..SessionPick::on(ep.as_str()) }),
-            walked => {
-                let failed = match walked { Some(Err(walk)) => walk.failed, _ => Vec::new() };
+        let (sessions, pick) = match walk_ladder("", id, Weights::Fp32, gpu_eps_for(cpu_only), |ep| commit_all(Some(ep))) {
+            Ok((sessions, ep, failed)) => (sessions, SessionPick { failed, ..SessionPick::on(ep.as_str()) }),
+            Err(walk) => {
                 let sessions = commit_all(None).map_err(|miss| CoreError::Inference(match miss {
                     Miss::Unusable(e) | Miss::Failed { error: e, .. } => e,
                 }))?;
-                (sessions, SessionPick { failed, ..SessionPick::on(CPU_NAME) })
+                (sessions, SessionPick { failed: walk.failed, ..SessionPick::on(CPU_NAME) })
             }
         };
         tracing::info!(?model, parts = sessions.len(), provider = %pick.provider, elapsed_ms = started.elapsed().as_millis() as u64, "part sessions committed");
@@ -1116,19 +1082,6 @@ mod tests {
         }
     }
 
-    /// A model run in parts passes OpenVINO over, so the app's view of
-    /// where it runs (`model_runs_on`) matches the engine's; other
-    /// providers still take it.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn parted_models_pass_openvino_over_and_keep_cuda() {
-        for d in prunr_models::REGISTRY.iter() {
-            assert_eq!(pools_per_part(d.id, EpKind::OpenVino), d.runs_in_parts(), "{:?}", d.id);
-            assert!(!pools_per_part(d.id, EpKind::Cuda));
-        }
-        assert_eq!(skip_reason(prunr_models::ModelId::FourXNomos2RealPlksr, Weights::Fp32, EpKind::OpenVino), Some(Skip::Declared));
-    }
-
     /// With Intel graphics on, OpenVINO engines are sized like a GPU's;
     /// without it they share the host CPU.
     #[test]
@@ -1146,7 +1099,7 @@ mod tests {
     #[test]
     fn only_engines_ask_openvino_for_the_gpu_and_only_when_chosen() {
         for chosen in [false, true] {
-            assert_eq!(EpSite::Engine { threads: 4 }.ov_device(chosen), chosen.then_some("AUTO:GPU,CPU"));
+            assert_eq!(EpSite::Engine { threads: 4, part: None }.ov_device(chosen), chosen.then_some("AUTO:GPU,CPU"));
             assert_eq!(EpSite::Fill { threads: 4 }.ov_device(chosen), None);
             assert_eq!(EpSite::SdPart { part: "unet", ov_device: None }.ov_device(chosen), None);
             assert_eq!(EpSite::SdPart { part: "unet", ov_device: Some("GPU") }.ov_device(chosen), Some("GPU"));
@@ -1248,7 +1201,8 @@ mod tests {
             return;
         }
         let sites = [
-            EpSite::Engine { threads: 1 },
+            EpSite::Engine { threads: 1, part: None },
+            EpSite::Engine { threads: 1, part: Some("block01") },
             EpSite::Fill { threads: 1 },
             EpSite::SdPart { part: "unet", ov_device: None },
         ];

@@ -10,6 +10,15 @@ pub fn upscale_alpha_lanczos3(rgba: &RgbaImage, out_w: u32, out_h: u32) -> GrayI
     resize_gray_lanczos3(&alpha, out_w, out_h)
 }
 
+/// Give `out` the alpha of `input`, the image it was upscaled from,
+/// resampled to its size.
+pub(crate) fn take_input_alpha(out: &mut RgbaImage, input: &RgbaImage) {
+    let alpha = upscale_alpha_lanczos3(input, out.width(), out.height());
+    for (p, &a) in out.pixels_mut().zip(alpha.as_raw()) {
+        p.0[3] = a;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
