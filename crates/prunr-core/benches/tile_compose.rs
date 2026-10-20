@@ -37,7 +37,7 @@ pub fn bench(c: &mut Criterion) {
         group.bench_function(label, |b| {
             b.iter(|| {
                 let out = tile_compose(black_box(&image), black_box(&mask), &prunr_core::Progress::none(), |tile_rgba, _tile_mask| {
-                    tile_rgba.clone()
+                    Ok(tile_rgba.clone())
                 })
                 .expect("tile_compose passthrough must not fail");
                 black_box(out);
