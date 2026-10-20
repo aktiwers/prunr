@@ -73,8 +73,9 @@ pub struct PrunrApp {
     pub(crate) show_cli_help: bool,
     pub(crate) show_pipeline_flow: bool,
 
-    // Set by raw_input_hook — egui converts Ctrl+C to Event::Copy before we see it
-    pending_copy: bool,
+    /// Copy and Cut chords, in the order pressed: egui turns them into its
+    /// own events before the shortcut table sees them (`raw_input_hook`).
+    clipboard_chords: Vec<crate::gui::views::shortcuts::Action>,
 
     pub(crate) zoom_state: super::zoom_state::ZoomState,
     pub(crate) brush_state: super::brush_state::BrushState,
@@ -403,7 +404,7 @@ impl PrunrApp {
             system,
             show_cli_help: false,
             show_pipeline_flow: false,
-            pending_copy: false,
+            clipboard_chords: Vec::new(),
             zoom_state: Default::default(),
             brush_state: super::brush_state::BrushState::default(),
             magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
@@ -964,9 +965,8 @@ impl PrunrApp {
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::{self, Action};
         let pressed = shortcuts::pressed(ctx);
-        // Ctrl+C arrives as egui's Copy event, intercepted in raw_input_hook.
-        if std::mem::take(&mut self.pending_copy) {
-            self.perform(Action::Copy, ctx);
+        for action in std::mem::take(&mut self.clipboard_chords) {
+            self.perform(action, ctx);
         }
         for action in Action::ALL {
             if pressed.is(action) {
@@ -1102,23 +1102,27 @@ impl eframe::App for PrunrApp {
         super::history_disk::cleanup_all();
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if let Some(frame) = self.automation.as_mut().and_then(|auto| auto.take_frame()) {
             raw_input.events.extend(frame.events);
             if let Some(modifiers) = frame.modifiers {
                 raw_input.modifiers = modifiers;
             }
         }
-        // egui_winit converts Ctrl+C to Event::Copy. Intercept it so we can
-        // use it for image clipboard copy (egui's Copy is for text widgets).
-        raw_input.events.retain(|event| {
-            if matches!(event, egui::Event::Copy) {
-                self.pending_copy = true;
+        // egui_winit turns Ctrl+C and Ctrl+X into Copy and Cut events for
+        // text widgets; with no text field focused they act on the image.
+        if !crate::gui::views::shortcuts::text_field_focused(ctx) {
+            use crate::gui::views::shortcuts::Action;
+            raw_input.events.retain(|event| {
+                let action = match event {
+                    egui::Event::Copy => Action::Copy,
+                    egui::Event::Cut => Action::Cut,
+                    _ => return true,
+                };
+                self.clipboard_chords.push(action);
                 false
-            } else {
-                true
-            }
-        });
+            });
+        }
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -1468,6 +1472,23 @@ mod field_list_tests {
     /// `PrunrApp` coordinates; it does not own domain state. A new field
     /// does not compile until it is listed here: list it only once the
     /// state-ownership table says no coordinator owns it.
+    /// Ctrl+C and Ctrl+X reach the app as egui's Copy and Cut events: with
+    /// no text field focused they act on the image, in the order pressed,
+    /// and no other event is taken.
+    #[test]
+    fn copy_and_cut_events_act_on_the_image() {
+        use crate::gui::views::shortcuts::Action;
+        let mut app = super::PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput {
+            events: vec![egui::Event::Cut, egui::Event::Text("x".into()), egui::Event::Copy],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(app.clipboard_chords, vec![Action::Cut, Action::Copy]);
+        assert_eq!(raw.events, vec![egui::Event::Text("x".into())]);
+    }
+
     #[test]
     fn every_field_is_a_decision() {
         let app = super::PrunrApp::new_for_test();
@@ -1478,7 +1499,7 @@ mod field_list_tests {
             system: _,
             show_cli_help: _,
             show_pipeline_flow: _,
-            pending_copy: _,
+            clipboard_chords: _,
             zoom_state: _,
             brush_state: _,
             magic_brush_state: _,

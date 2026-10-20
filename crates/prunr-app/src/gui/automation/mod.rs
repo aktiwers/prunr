@@ -332,8 +332,15 @@ impl Automation {
                 let chord = Chord::parse(&chord).ok_or_else(|| format!("unknown chord {chord:?}"))?;
                 let modifiers = chord.modifiers();
                 let key = |pressed| egui::Event::Key { key: chord.key, physical_key: None, pressed, repeat: false, modifiers };
+                // As egui-winit does: these chords arrive as egui's own
+                // events, not as key presses.
+                let press = match (modifiers.command_only(), chord.key) {
+                    (true, egui::Key::C) => egui::Event::Copy,
+                    (true, egui::Key::X) => egui::Event::Cut,
+                    _ => key(true),
+                };
                 self.frames.extend([
-                    InputFrame { events: vec![key(true)], modifiers: Some(modifiers) },
+                    InputFrame { events: vec![press], modifiers: Some(modifiers) },
                     InputFrame { events: vec![key(false)], modifiers: Some(modifiers) },
                     InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) },
                 ]);
