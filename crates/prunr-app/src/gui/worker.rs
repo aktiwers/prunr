@@ -423,7 +423,8 @@ pub enum WorkerResult {
     ChainStart { item_id: u64, run: u64, image: Arc<image::RgbaImage> },
     /// Batch `batch` is over.
     BatchComplete { batch: u64 },
-    Cancelled,
+    /// Batch `batch` stopped for a Cancel.
+    Cancelled { batch: u64 },
     SubprocessRetry {
         reduced_jobs: usize,
         re_queued_count: usize,
@@ -693,7 +694,7 @@ fn run_batch_with_retry(
 
     loop {
         if cancels.is_global_cancelled() {
-            let _ = res_tx.send(WorkerResult::Cancelled);
+            let _ = res_tx.send(WorkerResult::Cancelled { batch: state.batch });
             ctx.request_repaint();
             return live;
         }
@@ -859,7 +860,7 @@ fn run_event_loop(
     while !subprocess_finished {
         if cancels.is_global_cancelled() {
             sent.abandon_spares(false, res_tx);
-            cancel_subprocess(sub, res_tx, ctx);
+            cancel_subprocess(sub, state.batch, res_tx, ctx);
             return EventLoopOutcome::Cancelled;
         }
 
@@ -1196,12 +1197,13 @@ fn report_failed(
 /// prefix-scoped cleanup, and a polite shutdown made Cancel feel laggy.
 fn cancel_subprocess(
     sub: &mut SubprocessManager,
+    batch: u64,
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) {
     sub.kill();
     crate::subprocess::protocol::cleanup_seg_pipeline_temps();
-    let _ = res_tx.send(WorkerResult::Cancelled);
+    let _ = res_tx.send(WorkerResult::Cancelled { batch });
     ctx.request_repaint();
 }
 
