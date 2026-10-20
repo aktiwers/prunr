@@ -136,7 +136,10 @@ pub(crate) fn working_set_mb(model: ModelKind) -> u32 {
 }
 
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
-    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &prunr_core::OrtEngine::detect_active_provider());
+    // Not waiting on the accelerator probe here (the UI thread): until it
+    // answers the engines are counted as on the CPU, the larger figure.
+    let provider = prunr_core::OrtEngine::detected_provider().unwrap_or_else(|| prunr_core::engine::CPU_NAME.to_string());
+    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &provider);
     per_engine_cost(model) * engines
 }
 

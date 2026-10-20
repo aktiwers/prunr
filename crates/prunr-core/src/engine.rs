@@ -36,7 +36,7 @@ pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 
 /// The CPU provider's name: its label, its cache-dir key and the
 /// fallback when no GPU provider is available.
-pub(crate) const CPU_NAME: &str = "CPU";
+pub const CPU_NAME: &str = "CPU";
 
 impl EpKind {
     /// Stable name: also the `ep_compat.json` cache key.
@@ -861,8 +861,7 @@ impl OrtEngine {
     /// first GPU provider the loaded runtime offers, else the CPU. Each
     /// session reports the real one.
     pub fn detect_active_provider() -> String {
-        static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        CACHED.get_or_init(|| {
+        DETECTED_PROVIDER.get_or_init(|| {
             available_gpu_eps()
                 .first()
                 .map(|ep| ep.as_str().to_string())
@@ -870,7 +869,15 @@ impl OrtEngine {
         }).clone()
     }
 
+    /// The probe's answer once it is in, without waiting for it: a GPU
+    /// driver can hold the probe for good.
+    pub fn detected_provider() -> Option<String> {
+        DETECTED_PROVIDER.get().cloned()
+    }
+
 }
+
+static DETECTED_PROVIDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Whether sessions on `provider` run on the host CPU: the CPU provider,
 /// and OpenVINO unless the user let its engines use the Intel GPU.

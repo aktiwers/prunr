@@ -119,7 +119,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            let backend_display = if app.settings.cpu_only() { "CPU only" } else { &app.settings.active_backend };
+            let backend_display = match app.settings.active_backend.as_str() {
+                _ if app.settings.cpu_only() => "CPU only",
+                "" => "Checking",
+                backend => backend,
+            };
             ui.label(
                 RichText::new(format!("Accelerator: {backend_display}"))
                     .monospace()
