@@ -654,7 +654,7 @@ impl PrunrApp {
         seg: Option<crate::gui::worker::CompressedTensor>,
         edges: Option<crate::gui::worker::CompressedEdgeTensors>,
     ) {
-        let Some(recipe_snapshot) = self.processor.take_recipe(batch, item_id) else {
+        let Some((recipe_snapshot, run)) = self.processor.take_recipe(batch, item_id) else {
             tracing::info!(item_id, batch, "a run's answer dropped: its batch no longer awaits the image");
             // The worker is done with the image all the same; the share
             // admission held for it goes back, or the batch never ends.
@@ -665,7 +665,12 @@ impl PrunrApp {
         };
         let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
         self.processor.cut_times.ended(item_id, landed);
-        self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot);
+        // A cancelled cut's image may run something else since.
+        if self.batch.find_by_id(item_id).is_some_and(|i| i.awaits_run(run)) {
+            self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot);
+        } else {
+            tracing::info!(item_id, run, "a cut's answer for a run no longer awaited dropped");
+        }
         // Every answer the batch took frees the image's share of the RAM
         // budget, however it landed.
         self.admission_release_and_admit(item_id);
@@ -757,7 +762,8 @@ impl PrunrApp {
     pub(crate) fn answer_for_test(&mut self, ctx: &egui::Context, item_id: u64, result: Result<prunr_core::ProcessResult, String>) {
         let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
         let Some(recipe) = self.batch.find_by_id(item_id).map(|i| i.settings.current_recipe(model)) else { return };
-        let batch = self.processor.track_dispatch(recipe, [item_id]);
+        let run = self.batch.find_by_id(item_id).and_then(BatchItem::job_run).unwrap_or_default();
+        let batch = self.processor.track_dispatch(recipe, [(item_id, run)]);
         self.on_batch_item_done(ctx, batch, item_id, result, None, None);
     }
 
@@ -2100,7 +2106,7 @@ mod timeline_contract_tests {
         let (first, rx) = app.processor.open_admission(ctrl, |id| batch_items.find_by_id(id).map(crate::gui::item::BatchItem::full_run_work));
         assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1]);
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
-        let batch = app.processor.track_dispatch(recipe, [1]);
+        let batch = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         app.processor.admission_feeds(batch);
         assert!(!app.batch.items[1].is_cutting(), "2 waits for room, not running");
         app.batch.items[0].abandon_job();
@@ -2276,13 +2282,34 @@ mod timeline_contract_tests {
         let (first, rx) = app.processor.open_admission(ctrl, |id| Some(work(id)));
         assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1], "one fits");
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
-        let fed = app.processor.track_dispatch(recipe.clone(), [1]);
+        let fed = app.processor.track_dispatch(recipe.clone(), [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         app.processor.admission_feeds(fed);
-        let _again = app.processor.track_dispatch(recipe, [1]);
+        let _again = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         let answer = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.on_batch_item_done(&ctx, fed, 1, Ok(answer), None, None);
         assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "its share let the next image in");
         assert!(app.processor.take_recipe(fed, 2).is_some(), "into the batch admission feeds, which takes its answer");
+    }
+
+    /// A cut's late answer lands only on the run that asked: after the
+    /// cut was cancelled and a No-model filter run started on the image,
+    /// the cut-out does not take the filter run's place.
+    #[test]
+    fn a_stale_cut_answer_leaves_a_newer_run_alone() {
+        use crate::gui::item::Cutter;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
+        crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
+        let batch = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
+        app.batch.items[0].abandon_job();
+        app.batch.items[0].start_cut(Some(StepKind::Process), Cutter::NoModel);
+        app.batch.items[0].mark_running();
+        let filter = app.batch.items[0].job_run();
+        let answer = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(answer), None, None);
+        assert_eq!(app.batch.items[0].job_run(), filter, "the filter run is still awaited");
+        assert_eq!(shown(&app), Some(1), "the cut-out did not land");
     }
 
     /// The worker's word that a batch was cancelled can come after the
@@ -2294,10 +2321,10 @@ mod timeline_contract_tests {
         let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
         crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
-        let cancelled = app.processor.track_dispatch(recipe.clone(), [1]);
+        let cancelled = app.processor.track_dispatch(recipe.clone(), [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         app.handle_cancel_all_and_reset();
         crate::gui::tests::fixtures::put_in(&mut app.batch.items[0], BatchStatus::Processing);
-        let next = app.processor.track_dispatch(recipe, [1]);
+        let next = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         app.on_cancelled(cancelled);
         let answer = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
         app.on_batch_item_done(&ctx, next, 1, Ok(answer), None, None);
@@ -2316,7 +2343,7 @@ mod timeline_contract_tests {
         item.start_job(Some(StepKind::Process), Engine::Segment);
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         let recipe = item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
-        let batch = app.processor.track_dispatch(recipe, [1]);
+        let batch = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
         app.on_batch_complete(batch);
         assert_eq!(app.batch.items[0].status(), BatchStatus::Done);
         assert!(app.batch.items[0].job.is_none());
@@ -2335,8 +2362,8 @@ mod timeline_contract_tests {
             crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         }
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
-        let first = app.processor.track_dispatch(recipe.clone(), [1]);
-        let queued = app.processor.track_dispatch(recipe, [2]);
+        let first = app.processor.track_dispatch(recipe.clone(), [(1, app.batch.items[0].job_run().unwrap_or_default())]);
+        let queued = app.processor.track_dispatch(recipe, [(2, app.batch.items[1].job_run().unwrap_or_default())]);
         app.on_batch_complete(first);
         assert_eq!(app.batch.items[0].status(), BatchStatus::Done, "its own unanswered image is freed");
         assert_eq!(app.batch.items[1].status(), BatchStatus::Processing, "the queued batch's image waits for its own batch");

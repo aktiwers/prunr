@@ -422,14 +422,16 @@ impl PrunrApp {
         self.processor.cancels.reset();
 
         let current_settings = self.run_settings();
-        let process_ids: std::collections::HashSet<u64> = items.iter()
-            .map(|wi| wi.id)
-            .chain(tier2_items.iter().map(|ti| ti.item_id))
-            .chain(add_edge_items.iter().map(|ai| ai.item_id))
+        // Each answer lands only on the run that asked: a full run names
+        // its own; a cached-tensor rerun is its image's job.
+        let job_run = |id: u64| self.batch.find_by_id(id).and_then(BatchItem::job_run);
+        let runs: Vec<(u64, u64)> = items.iter()
+            .map(|wi| (wi.id, wi.run))
+            .chain(tier2_items.iter().chain(&add_edge_items).filter_map(|w| job_run(w.item_id).map(|run| (w.item_id, run))))
             .collect();
 
         let recipe = current_settings.current_recipe(model);
-        let batch = self.processor.track_dispatch(recipe, process_ids.iter().copied());
+        let batch = self.processor.track_dispatch(recipe, runs);
 
         self.status.pct = 0.0;
         self.status.stage = "Starting".to_string();
@@ -477,7 +479,7 @@ impl PrunrApp {
     pub(super) fn admission_release_and_admit(&mut self, completed_id: u64) {
         let batch = &self.batch;
         let admitted = self.processor.release_and_admit(completed_id, |id| batch.find_by_id(id).map(BatchItem::full_run_work));
-        for id in admitted.sent {
+        for (id, _) in admitted.sent {
             if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.mark_running();
             }
