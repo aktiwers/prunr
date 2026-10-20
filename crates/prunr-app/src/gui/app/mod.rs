@@ -939,6 +939,11 @@ impl PrunrApp {
     /// command. Returns true while capture is active.
     fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
         use crate::gui::views::shortcuts::{self, Chord};
+        // A capture lives on its tab: Settings closed by any way, or
+        // another tab shown, ends it.
+        if !(self.show_settings && self.settings_tab == super::views::settings::SettingsTab::Shortcuts) {
+            self.hotkey_capture = None;
+        }
         let Some((action, slot)) = self.hotkey_capture else { return false };
         let (cancel, clear, chord) = ctx.input(|i| {
             (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Backspace), Chord::from_input(i))
@@ -1419,6 +1424,7 @@ mod hotkey_capture_tests {
     fn escape_during_hotkey_capture_cancels_without_closing_settings() {
         let mut app = PrunrApp::new_for_test();
         app.show_settings = true;
+        app.settings_tab = crate::gui::views::settings::SettingsTab::Shortcuts;
         app.hotkey_capture = Some((Action::Undo, 0));
         let ctx = egui::Context::default();
         let modifiers = egui::Modifiers::NONE;
@@ -1437,6 +1443,32 @@ mod hotkey_capture_tests {
         assert!(captured);
         assert!(app.hotkey_capture.is_none());
         assert!(app.show_settings, "Escape went to the capture field, not to the modal");
+    }
+
+    /// A capture ends with its tab: with Settings closed (by its window's
+    /// own close too) or another tab shown, the next key is a shortcut
+    /// again, not a new binding.
+    #[test]
+    fn a_capture_ends_when_its_tab_is_left() {
+        use crate::gui::views::settings::SettingsTab;
+        for (open, tab) in [(false, SettingsTab::Shortcuts), (true, SettingsTab::Editing)] {
+            let mut app = PrunrApp::new_for_test();
+            app.show_settings = open;
+            app.settings_tab = tab;
+            app.hotkey_capture = Some((Action::Undo, 0));
+            let before = app.bindings.chords(Action::Undo).to_vec();
+            let ctx = egui::Context::default();
+            let modifiers = egui::Modifiers::NONE;
+            ctx.begin_pass(egui::RawInput {
+                modifiers,
+                events: vec![egui::Event::Key { key: egui::Key::K, physical_key: None, pressed: true, repeat: false, modifiers }],
+                ..Default::default()
+            });
+            let captured = app.handle_hotkey_capture(&ctx);
+            let _ = ctx.end_pass();
+            assert!(!captured && app.hotkey_capture.is_none(), "open {open}, {tab:?}");
+            assert_eq!(app.bindings.chords(Action::Undo), before, "no new binding");
+        }
     }
 }
 
