@@ -293,3 +293,16 @@ fn a_worker_of_another_version_stops_at_once() {
         assert_eq!(out.status.code(), Some(75), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
+
+/// A knob given as nan or inf is refused at once, naming the flag, rather
+/// than cutting a clear image or overflowing.
+#[test]
+fn a_knob_that_is_not_a_number_is_refused() {
+    // `=`: a value starting with '-' is otherwise read as a flag.
+    for (flag, value) in [("--gamma", "nan"), ("--feather", "inf"), ("--edge-shift", "-inf"), ("--contrast", "NaN")] {
+        let out = Command::new(CLI_BIN).args(["in.png", &format!("{flag}={value}")]).output().expect("spawn prunr binary");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}: {stderr}");
+        assert!(stderr.contains(flag) && stderr.contains("not a finite number"), "{flag} {value}: {stderr}");
+    }
+}
