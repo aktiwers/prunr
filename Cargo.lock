@@ -4403,7 +4403,6 @@ dependencies = [
  "clap",
  "dirs",
  "drag",
- "dunce",
  "eframe",
  "egui",
  "egui-notify",
@@ -4443,6 +4442,7 @@ version = "0.4.8"
 dependencies = [
  "criterion",
  "dirs",
+ "dunce",
  "fast_image_resize",
  "half",
  "image",

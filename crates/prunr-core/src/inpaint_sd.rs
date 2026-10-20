@@ -1714,7 +1714,8 @@ fn sd_apply_path_cache<'a>(
     if crate::cache::cache_dir_for_part(model_id, ep_name, part).is_none() {
         return (builder, Cow::Borrowed(source_path), None);
     }
-    let (builder, draft) = crate::cache::attach_draft(builder, &cache_path, model_id, ep_name, Some(part));
+    let graph_bytes = std::fs::metadata(source_path).map_or(0, |m| m.len());
+    let (builder, draft) = crate::cache::attach_draft(builder, &cache_path, graph_bytes, model_id, ep_name, Some(part));
     (builder, Cow::Borrowed(source_path), draft)
 }
 

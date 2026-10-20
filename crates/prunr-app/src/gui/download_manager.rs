@@ -429,7 +429,7 @@ fn fetch_into(
 
 /// Why `needed` bytes should not be downloaded into `dir`.
 fn no_room(dir: &Path, needed: u64) -> Option<String> {
-    crate::hardware::free_space_at(dir).and_then(|free| space_refusal(needed, free))
+    prunr_core::sysmem::free_disk_bytes(dir).and_then(|free| space_refusal(needed, free))
 }
 
 /// Why a download of `needed` bytes should not start with `free` bytes
@@ -465,7 +465,7 @@ mod tests {
         assert!(why.starts_with("Not enough disk space"), "{why}");
         assert_eq!(space_refusal(GB, 5 * GB), None);
         assert!(space_refusal(GB, GB).is_some(), "room is left for the system");
-        assert!(crate::hardware::free_space_at(&std::env::temp_dir()).is_some_and(|free| free > 0));
+        assert!(prunr_core::sysmem::free_disk_bytes(&std::env::temp_dir()).is_some_and(|free| free > 0));
     }
 
     /// A download that failed part-way leaves no partial file; one that
