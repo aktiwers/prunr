@@ -78,18 +78,41 @@ pub fn remove_retired_root() -> u64 {
 /// creates the directory.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
-    let key = cache_key(id, crate::ort_runtime::runtime_tag())?;
+    let key = cache_key(id, ep_name, crate::ort_runtime::runtime_tag())?;
     Some(root.join(ep_name.to_ascii_lowercase()).join(key))
 }
 
-/// `<model>-<version>-ort<runtime tag>-v<format>`: an optimized graph is
-/// tied to the ORT build that wrote it.
-fn cache_key(id: ModelId, runtime: Option<&str>) -> Option<String> {
+/// `<model>-<version>-<files>-ort<runtime tag>-v<format>`, then on the CPU
+/// `-<vector extension>`: an optimized graph is tied to the model files it
+/// was built from, the ORT build that wrote it and, on the CPU, the vector
+/// width its layout was chosen for. A download's files are told apart by
+/// their checksums (a re-export may keep its version string); a built-in
+/// model changes only with the app.
+fn cache_key(id: ModelId, ep_name: &str, runtime: Option<&str>) -> Option<String> {
     let descriptor = prunr_models::descriptor(id)?;
-    Some(format!(
-        "{}-{}-ort{}-v{}",
+    let files = prunr_models::content_tag(id)
+        .map_or_else(|| format!("app{}", prunr_models::BUILT_IN_VERSION), |tag| format!("{tag:016x}"));
+    let mut key = format!(
+        "{}-{}-{files}-ort{}-v{}",
         id.stable_name(), descriptor.version, runtime.unwrap_or("unknown"), CACHE_FORMAT_VERSION,
-    ))
+    );
+    if ep_name.eq_ignore_ascii_case(crate::engine::CPU_NAME) {
+        key.push('-');
+        key.push_str(cpu_vector_isa());
+    }
+    Some(key)
+}
+
+/// The CPU a layout-optimized graph was built for: which convolutions its
+/// NCHWc nodes take depends on the block of channels the kernels work in
+/// (16 floats with AVX-512, 8 on other x86 CPUs), so a cache carried to
+/// another machine (a synced profile, a moved VM) is not loaded there.
+fn cpu_vector_isa() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx512f") {
+        return "avx512";
+    }
+    std::env::consts::ARCH
 }
 
 /// Per-`(model, ep)` cache directory, **created** if missing. Use
@@ -485,9 +508,24 @@ mod tests {
         let old = tag_for(Some("1.24.1"), 30_000_000, 1_700_000_000);
         let same_name_new_file = tag_for(None, 31_000_000, 1_760_000_000);
         let other_build = tag_for(None, 30_000_000, 1_760_000_000);
-        assert_ne!(cache_key(ModelId::Silueta, Some(&old)), cache_key(ModelId::Silueta, Some(&same_name_new_file)));
+        assert_ne!(cache_key(ModelId::Silueta, "CPU", Some(&old)), cache_key(ModelId::Silueta, "CPU", Some(&same_name_new_file)));
         assert_ne!(same_name_new_file, other_build, "a build whose info names no version still differs");
         assert!(old.starts_with("1.24.1-"), "{old}");
+    }
+
+    /// The key names what the graph was built from: a download's files (a
+    /// re-export under the same version string gets an entry of its own),
+    /// the app for a built-in model, and on the CPU the vector extension
+    /// the graph's layout was chosen for.
+    #[test]
+    fn the_cache_key_names_the_files_and_the_cpu_it_was_built_for() {
+        let tag = prunr_models::content_tag(ModelId::LaMaFp32).expect("a download");
+        assert!(cache_key(ModelId::LaMaFp32, "OpenVINO", None).unwrap().contains(&format!("-{tag:016x}-")));
+        let built_in = cache_key(ModelId::Silueta, "OpenVINO", None).unwrap();
+        assert!(built_in.contains(&format!("-app{}-", prunr_models::BUILT_IN_VERSION)), "{built_in}");
+        let isa = cpu_vector_isa();
+        assert!(cache_key(ModelId::Silueta, "CPU", None).unwrap().ends_with(&format!("-{isa}")));
+        assert!(!built_in.ends_with(&format!("-{isa}")), "a GPU graph is not laid out for the CPU");
     }
 
     #[test]
