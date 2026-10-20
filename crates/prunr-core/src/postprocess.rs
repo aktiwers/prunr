@@ -162,7 +162,8 @@ fn tensor_to_mask_core(
 
     let norm = SegNormaliser::new(lo, hi, model);
     let uniform_val = norm.uniform;
-    let gamma = mask_settings.gamma;
+    // A gamma that is not a number (a scripted value) cuts as gamma 1.
+    let gamma = if mask_settings.gamma.is_finite() { mask_settings.gamma } else { 1.0 };
 
     let mut mask_buf = vec![0u8; sw * sh];
     let normalize = |raw_val: f32| norm.stretch(raw_val);
@@ -625,9 +626,11 @@ fn apply_mask_inplace(rgba: &mut RgbaImage, mask: &GrayImage) {
 /// bbox (plus the blur margin) when `sigma` is fractional, plus the bbox
 /// scratch of `box_blur`.
 fn feather_mask(mask: &mut GrayImage, sigma: f32) {
-    if sigma <= 0.0 {
+    if sigma.is_nan() || sigma <= 0.0 {
         return;
     }
+    // Past the image's size a blur is the blur of its size.
+    let sigma = sigma.min(mask.width().max(mask.height()) as f32);
     let lo = sigma.floor() as u32;
     let t = sigma - lo as f32;
     if t < 1e-3 {
@@ -730,6 +733,34 @@ mod tests {
     /// Cropping the blur to the mask's reach changes no pixel: the crop
     /// edge, where the box windows are clipped, lies where the whole-image
     /// blur reads only zeros.
+    /// A feather that is not a number leaves the mask; one past the
+    /// image's size blurs as one of its size, without overflow.
+    #[test]
+    fn a_feather_not_a_number_or_past_the_image_is_sound() {
+        let mut m = disc_in_canvas();
+        feather_mask(&mut m, f32::NAN);
+        assert_eq!(m, disc_in_canvas(), "NaN feathers nothing");
+        let mut widest = disc_in_canvas();
+        feather_mask(&mut widest, 96.0);
+        for sigma in [1e30, f32::INFINITY] {
+            let mut m = disc_in_canvas();
+            feather_mask(&mut m, sigma);
+            assert_eq!(m, widest, "{sigma}");
+        }
+    }
+
+    /// A gamma that is not a number cuts as gamma 1, not as a clear mask.
+    #[test]
+    fn a_gamma_not_a_number_cuts_as_one() {
+        let tensor = ndarray::Array4::from_shape_fn((1, 1, 1, 64), |(_, _, _, x)| x as f32 / 63.0 * 8.0 - 4.0);
+        let original = DynamicImage::ImageRgb8(RgbImage::new(64, 1));
+        let mask = |gamma: f32| {
+            let settings = MaskSettings { gamma, ..MaskSettings::default() };
+            tensor_to_mask(tensor.view(), &original, &PostprocessOpts::new(&settings, ModelKind::Silueta))
+        };
+        assert_eq!(mask(f32::NAN), mask(1.0));
+    }
+
     #[test]
     fn the_cropped_blur_equals_the_whole_image_blur() {
         for radius in 1..=6 {

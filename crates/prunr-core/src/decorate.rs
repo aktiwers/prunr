@@ -31,8 +31,8 @@ pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
     let region = Region {
         x: x0.saturating_sub(reach) as usize,
         y: y0.saturating_sub(reach) as usize,
-        w: ((x1 + reach + 1).min(w) - x0.saturating_sub(reach)) as usize,
-        h: ((y1 + reach + 1).min(h) - y0.saturating_sub(reach)) as usize,
+        w: (x1.saturating_add(reach).saturating_add(1).min(w) - x0.saturating_sub(reach)) as usize,
+        h: (y1.saturating_add(reach).saturating_add(1).min(h) - y0.saturating_sub(reach)) as usize,
         stride: w as usize,
     };
     decorate_region(rgba, d, &region);
@@ -214,6 +214,22 @@ fn edt_line(f: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sizes past any image (a hand-edited preset, a scripted value) draw
+    /// what the largest would, and never overflow.
+    #[test]
+    fn a_decoration_past_any_image_is_sound() {
+        let subject = RgbaImage::from_fn(20, 16, |x, y| image::Rgba([90, 60, 40, if (6..14).contains(&x) && (4..12).contains(&y) { 255 } else { 0 }]));
+        for d in [
+            Decoration { outline_width: 1e10, ..Decoration::default() },
+            Decoration { outline_width: f32::INFINITY, ..Decoration::default() },
+            Decoration { shadow: ShadowKind::Drop, shadow_opacity: 0.5, shadow_blur: f32::INFINITY, shadow_distance: f32::INFINITY, ..Decoration::default() },
+            Decoration { shadow: ShadowKind::Soft, shadow_opacity: 0.5, shadow_blur: 1e30, ..Decoration::default() },
+        ] {
+            let mut img = subject.clone();
+            apply_decoration(&mut img, &d);
+        }
+    }
     use crate::types::ShadowKind;
 
     /// An opaque red square in the middle of a transparent canvas.

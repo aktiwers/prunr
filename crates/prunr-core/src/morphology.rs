@@ -21,9 +21,11 @@ const PAR_MIN_ROWS: usize = 512;
 /// Peak working set: two mask-sized planes (24 MB at 4K).
 pub fn shift_mask(mask: &mut GrayImage, shift: f32) {
     let abs = shift.abs();
-    if abs < 0.01 || mask.width() == 0 || mask.height() == 0 {
+    if abs.is_nan() || abs < 0.01 || mask.width() == 0 || mask.height() == 0 {
         return;
     }
+    // Past the image's size a shift erodes or grows it as its size does.
+    let abs = abs.min(mask.width().max(mask.height()) as f32);
     let full = abs.floor() as usize;
     let frac = abs - full as f32;
     // Monomorphised per extremum so the elementwise loops vectorise.
@@ -246,6 +248,21 @@ impl<F: Fn(u8, u8) -> u8 + Copy + Sync> Window<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shift that is not a number leaves the mask; one past the image's
+    /// size works like one of its size: everything eroded or grown.
+    #[test]
+    fn a_shift_not_a_number_or_past_the_image_is_sound() {
+        let disc = GrayImage::from_fn(9, 7, |x, y| image::Luma([if (x as i32 - 4).pow(2) + (y as i32 - 3).pow(2) < 5 { 255 } else { 0 }]));
+        let mut m = disc.clone();
+        shift_mask(&mut m, f32::NAN);
+        assert_eq!(m, disc, "NaN shifts nothing");
+        for (shift, want) in [(1e30, 0u8), (f32::INFINITY, 0), (-1e30, 255), (f32::NEG_INFINITY, 255)] {
+            let mut m = disc.clone();
+            shift_mask(&mut m, shift);
+            assert!(m.pixels().all(|p| p[0] == want), "{shift}");
+        }
+    }
 
     /// A dot grows into a disc: round, not square, and grey levels keep
     /// their maximum.

@@ -14,6 +14,9 @@ const PAR_THRESHOLD: usize = 64 * 64;
 /// Rows per parallel band of the box filter's column pass.
 const BAND_ROWS: usize = 64;
 
+/// The smallest regularization the filter takes; the app's is 1e-4.
+const MIN_EPSILON: f32 = 1e-6;
+
 /// Refine an alpha mask using a guided filter.
 pub fn guided_filter_alpha(
     guide: &RgbaImage,
@@ -23,6 +26,8 @@ pub fn guided_filter_alpha(
 ) -> GrayImage {
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
+    // A zero (or NaN) epsilon divides zero by zero on a flat region.
+    let epsilon = if epsilon >= MIN_EPSILON { epsilon } else { MIN_EPSILON };
 
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
@@ -201,6 +206,20 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An epsilon of zero (a hand-edited preset) on a flat region divides
+    /// zero by zero; it filters as the app's small one does, not into NaN
+    /// bands.
+    #[test]
+    fn a_zero_epsilon_on_a_flat_region_filters_as_a_small_one() {
+        let guide = RgbaImage::from_pixel(16, 12, Rgba([120, 120, 120, 255]));
+        let mask = GrayImage::from_fn(16, 12, |x, _| Luma([if x < 8 { 255 } else { 0 }]));
+        let small = guided_filter_alpha(&guide, &mask, 2, 1e-4);
+        for eps in [0.0, f32::NAN] {
+            let out = guided_filter_alpha(&guide, &mask, 2, eps);
+            assert!(out.pixels().zip(small.pixels()).all(|(a, b)| a[0].abs_diff(b[0]) <= 1), "eps {eps}");
+        }
+    }
     use image::{Luma, Rgba};
 
     /// A guided filter takes variance as mean(g²) − mean(g)². On a big
