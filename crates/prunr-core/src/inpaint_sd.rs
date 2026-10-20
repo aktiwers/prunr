@@ -2615,10 +2615,10 @@ impl DpmPp2MScheduler {
         let sigma_min = log_sigmas[0].exp();
         let sigma_max = log_sigmas[log_sigmas.len() - 1].exp();
         let mut sigmas = compute_karras_sigmas(num_inference, sigma_min, sigma_max);
-        // Terminal sigma_min, not Diffusers' 0 (λ_t = +∞ → d1 = NaN). The
-        // first-order terminal step guards the same; keep both so the
-        // math stays finite if either changes.
-        sigmas.push(sigma_min);
+        // Ends at 0, as Diffusers does: the last step lands on the clean
+        // latent. The schedule already ends at sigma_min, so ending there
+        // again made the last UNet call change nothing.
+        sigmas.push(0.0);
 
         let timesteps: Vec<i64> = sigmas[..num_inference].iter()
             .map(|&sigma| sigma_to_t(sigma, log_sigmas))
@@ -2659,6 +2659,11 @@ impl DpmPp2MScheduler {
         let (alpha_t, sigma_t_e) = sigma_to_alpha_sigma(sigma_t);
 
         let m0 = self.x0(latent, noise_pred, step_idx);
+        // At sigma 0 the first-order update is the clean prediction
+        // itself; its formula would take λ = +∞ to get there.
+        if sigma_t == 0.0 {
+            return m0;
+        }
 
         let lambda_s0 = sigma_to_lambda(sigma_s0);
         let lambda_t = sigma_to_lambda(sigma_t);
@@ -2775,7 +2780,7 @@ impl Scheduler {
 
     /// The (signal, noise) scale of the latent before step `k` (`k` = the
     /// steps run so far): `signal · clean + noise · ε`. After the last
-    /// step, LCM's latent is clean and DPM++'s at its smallest sigma.
+    /// step, either scheduler's latent is clean.
     pub fn level(&self, k: usize) -> (f32, f32) {
         match self {
             Scheduler::Lcm(s) => match s.timesteps.get(k) {
@@ -3290,8 +3295,21 @@ mod tests {
 
         assert_eq!(primed_terminal, fresh_terminal,
             "terminal step must be first-order regardless of prev_model_output");
-        // Terminal sigma is sigma_min, not 0, or the update is ±∞ / NaN.
         assert!(primed_terminal.iter().all(|v| v.is_finite()), "{primed_terminal:?}");
+    }
+
+    /// The last step lands on the clean latent its prediction implies, at
+    /// sigma 0 as in Diffusers (`final_sigmas_type="zero"`). A last step
+    /// from sigma_min to sigma_min ran the UNet and left that noise in.
+    #[test]
+    fn dpmpp2m_last_step_lands_on_the_clean_latent() {
+        let latent = vec![0.5_f32, -0.2, 0.9, 0.0];
+        let noise = vec![0.1_f32, 0.3, -0.4, 0.2];
+        let mut s = DpmPp2MScheduler::new_sd15(8);
+        let _ = s.step(&latent, &noise, 6);
+        let clean = s.x0(&latent, &noise, 7);
+        assert_eq!(s.step(&latent, &noise, 7), clean);
+        assert_eq!(Scheduler::DpmPp2M(DpmPp2MScheduler::new_sd15(8)).level(8), (1.0, 0.0), "clean after the last step, as LCM");
     }
 
     /// First DPM++ step must use first-order math (no prev output)
