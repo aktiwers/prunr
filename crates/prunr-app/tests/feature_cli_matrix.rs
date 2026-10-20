@@ -236,3 +236,32 @@ fn cli_processes_a_file_whose_name_is_not_utf8() {
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_output_decodes(&dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.prunr.png")), "non-UTF-8 name");
 }
+
+/// A batch leaves nothing in its IPC folder, which on Linux is RAM
+/// (`/dev/shm`): the worker writes each run's tensors for a parent that
+/// re-runs from them, and the CLI, which never does, deletes them.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_batch_leaves_no_ipc_files() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let second = dir.path().join("second.png");
+    std::fs::copy(&good, &second).expect("copy fixture");
+    for extra in [&["-m", "silueta"][..], &["-m", "silueta", "--lines"]] {
+        let child = Command::new(CLI_BIN)
+            .args([&good, &second]).arg("-o").arg(dir.path()).arg("-f").args(extra)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
+            .spawn().expect("spawn prunr binary");
+        let pid = child.id();
+        let out = child.wait_with_output().expect("wait on prunr");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+            eprintln!("[cli_ipc_files] SKIP: prerequisite not available");
+            return;
+        }
+        assert!(out.status.success(), "{extra:?}: stderr:\n{stderr}");
+        let ipc = std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
+        let left: Vec<_> = std::fs::read_dir(&ipc).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "{extra:?}: left in {}: {left:?}", ipc.display());
+    }
+}
