@@ -367,10 +367,39 @@ fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
 
 fn resolve_temp_dir_path(pid: u32) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
-    if std::path::Path::new("/dev/shm").is_dir() {
+    if std::path::Path::new("/dev/shm").is_dir() && shm_is_roomy() {
         return std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
     }
     std::env::temp_dir().join(format!("prunr-ipc-{pid}"))
+}
+
+/// A `/dev/shm` this small is a container's (Docker gives 64 MB): one
+/// 24 MP result alone is 96 MB.
+#[cfg(target_os = "linux")]
+const SHM_MIN_BYTES: u64 = 1 << 30;
+
+#[cfg(target_os = "linux")]
+fn shm_is_roomy() -> bool {
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    tmpfs_size(&mounts, "/dev/shm").is_none_or(|bytes| bytes >= SHM_MIN_BYTES)
+}
+
+/// The fixed size of the tmpfs mounted at `at`, from `/proc/mounts`;
+/// `None` when it has none (a share of RAM, the default half).
+#[cfg(any(target_os = "linux", test))]
+fn tmpfs_size(mounts: &str, at: &str) -> Option<u64> {
+    let options = mounts.lines().find_map(|line| {
+        let mut fields = line.split_whitespace().skip(1);
+        (fields.next() == Some(at) && fields.next() == Some("tmpfs")).then(|| fields.next()).flatten()
+    })?;
+    let size = options.split(',').find_map(|o| o.strip_prefix("size="))?;
+    let (digits, shift) = match size.as_bytes().last()? {
+        b'k' | b'K' => (&size[..size.len() - 1], 10),
+        b'm' | b'M' => (&size[..size.len() - 1], 20),
+        b'g' | b'G' => (&size[..size.len() - 1], 30),
+        _ => (size, 0),
+    };
+    digits.parse::<u64>().ok().map(|n| n << shift)
 }
 
 /// Remove every file directly inside `dir`, restricted to files whose name
@@ -882,6 +911,20 @@ mod tests {
         for f in files {
             assert!(!dir.join(f).exists(), "expected {f} swept");
         }
+    }
+
+    /// A tmpfs's size reads from its mount options in any unit; a mount
+    /// with none, or a share of RAM, has no fixed size.
+    #[test]
+    fn a_tmpfs_size_reads_from_its_mount_options() {
+        let mounts = |opts: &str| format!("proc /proc proc rw 0 0\nshm /dev/shm tmpfs rw,nosuid,{opts} 0 0\n");
+        assert_eq!(super::tmpfs_size(&mounts("size=65536k"), "/dev/shm"), Some(64 << 20), "Docker's");
+        assert_eq!(super::tmpfs_size(&mounts("size=2g,mode=1777"), "/dev/shm"), Some(2 << 30));
+        assert_eq!(super::tmpfs_size(&mounts("size=512m"), "/dev/shm"), Some(512 << 20));
+        assert_eq!(super::tmpfs_size(&mounts("size=1000"), "/dev/shm"), Some(1000));
+        assert_eq!(super::tmpfs_size(&mounts("inode64"), "/dev/shm"), None, "a desktop's: half of RAM");
+        assert_eq!(super::tmpfs_size(&mounts("size=50%"), "/dev/shm"), None);
+        assert_eq!(super::tmpfs_size(&mounts("size=64m"), "/run"), None, "another mount");
     }
 
     #[test]
