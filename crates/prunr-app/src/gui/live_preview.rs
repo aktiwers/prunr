@@ -7,8 +7,10 @@
 //! are quick frames; the full-size render goes out on release (`flush`) or
 //! after `SETTLE_AFTER` held still.
 //!
-//! Several dispatches per item can be in flight during a drag;
-//! `drain_results` drops any whose generation isn't the newest.
+//! A drag has one frame per item in flight: tweaks made while it runs
+//! wait and go out together as it lands, so every frame lands however
+//! slow. A settled render goes out at once; `drain_results` drops a
+//! result whose generation isn't the newest (superseded or cancelled).
 //!
 //! **Do not reintroduce per-tweak cancellation.** `postprocess` doesn't
 //! check the cancel token between stages, so the token only gates the
@@ -50,9 +52,8 @@ fn build_masked_base(
     .ok()
 }
 
-/// Throttle cadence during a continuous drag: 150 ms stays above the
-/// ~90 ms baseline and ~240 ms refine_edges cost, so dispatches don't pile
-/// up for the generation filter to discard. Release paths `flush` instead.
+/// Throttle cadence during a continuous drag, and the shortest wait
+/// between its frames. Release paths `flush` instead.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// How long a drag holds still before its full-size render is made, for
@@ -425,6 +426,12 @@ impl LivePreview {
                 Some(p) => (p.kind, p.settled, p.latest_tweak_at),
                 None => continue,
             };
+            // A drag's next frame waits for the one under way, however
+            // slow, or each would be stale by the time it landed; the
+            // tweaks meanwhile go out together. A settled render goes now.
+            if !settled && self.in_flight.contains_key(&id) {
+                continue;
+            }
             tracing::debug!(
                 event = "live_preview_tick_ready",
                 item_id = id,
@@ -1538,6 +1545,26 @@ mod tests {
         assert!(lp.is_busy(), "and is under way");
     }
 
+    /// A drag frame slower than the debounce still lands: the tweaks made
+    /// while it runs wait, and go out together as the next frame once it
+    /// has landed, instead of making it stale.
+    #[test]
+    fn a_slow_drag_frame_lands_and_the_tweaks_after_it_coalesce() {
+        let (clock, mut lp) = dragging();
+        let first = dispatched(&lp).expect("a frame under way").0;
+        for _ in 0..3 {
+            lp.mark_tweak(1, PreviewKind::Mask);
+            clock.advance(DEBOUNCE);
+            lp.tick(|_, _| large());
+            assert_eq!(dispatched(&lp).map(|d| d.0), Some(first), "the frame under way is not superseded");
+        }
+        let landed = land(&mut lp);
+        assert_eq!(landed.iter().map(|r| r.generation).collect::<Vec<_>>(), vec![first], "it lands");
+        lp.tick(|_, _| large());
+        let next = dispatched(&lp).expect("the tweaks go out");
+        assert!(next.0 > first && next.1, "as one quick frame");
+    }
+
     /// Tweaks that keep coming never settle the drag, however long it
     /// lasts: every frame of it is quick.
     #[test]
@@ -1582,6 +1609,19 @@ mod tests {
         }
     }
 
+    /// Drain until the frame under way has landed, as the app's frames do.
+    fn land(lp: &mut LivePreview) -> Vec<PreviewResult> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let landed = lp.drain_results();
+            if !landed.is_empty() {
+                return landed;
+            }
+            assert!(Instant::now() < deadline, "the frame never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// A tweak after the settle starts a new drag: quick frames again,
     /// then its own settle.
     #[test]
@@ -1590,6 +1630,7 @@ mod tests {
         clock.advance(SETTLE_AFTER);
         lp.tick(|_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, false))));
+        land(&mut lp);
         lp.mark_tweak(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE);
         lp.tick(|_, _| large());
