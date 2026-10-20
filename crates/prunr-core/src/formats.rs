@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::path::Path;
 use image::{DynamicImage, GrayImage, ImageReader, RgbaImage};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType as PngFilter};
-use image::ImageEncoder;
+use image::{ImageDecoder, ImageEncoder};
 use image::buffer::ConvertBuffer;
 use fast_image_resize::{images::{Image, ImageRef}, PixelType, ResizeAlg, ResizeOptions, Resizer};
 pub use fast_image_resize::FilterType as ResizeFilter;
@@ -144,7 +144,7 @@ pub fn load_image_from_path(path: &Path) -> Result<DynamicImage, CoreError> {
         let bytes = std::fs::read(path).map_err(CoreError::Io)?;
         return rasterize_svg(&bytes);
     }
-    image::open(path).map_err(CoreError::from)
+    decode_upright(ImageReader::open(path).map_err(CoreError::Io)?)
 }
 
 /// Format by content sniff: SVG first, then the `image` crate's magic
@@ -153,11 +153,35 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     if looks_like_svg(bytes) {
         return rasterize_svg(bytes);
     }
-    ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(CoreError::Io)?
-        .decode()
-        .map_err(CoreError::from)
+    decode_upright(ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(CoreError::Io)?)
+}
+
+/// Decode a raster turned the way its EXIF says, as a viewer shows it:
+/// phones store a portrait sideways with a note to turn it. Under the
+/// same allocation limit `ImageReader::decode` keeps.
+///
+/// Peak: twice the decoded image while a quarter turn copies it.
+fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Result<DynamicImage, CoreError> {
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut limits = image::Limits::default();
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    let mut img = DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
+/// A raster's size as `decode_upright` turns it, from its header.
+fn upright_dimensions<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Option<(u32, u32)> {
+    use image::metadata::Orientation;
+    let mut decoder = reader.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
+    let quarter_turn = matches!(
+        decoder.orientation(),
+        Ok(Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH)
+    );
+    Some(if quarter_turn { (h, w) } else { (w, h) })
 }
 
 fn has_svg_extension(path: &Path) -> bool {
@@ -220,7 +244,7 @@ pub fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
         let (w, h, _) = svg_render_size(&tree);
         return Some((w, h));
     }
-    ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+    upright_dimensions(ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?)
 }
 
 /// The size the file at `path` decodes to: a raster's header only, so the
@@ -231,7 +255,7 @@ pub fn image_dimensions_from_path(path: &Path) -> Option<(u32, u32)> {
         return std::fs::read(path).ok().and_then(|bytes| image_dimensions_from_bytes(&bytes));
     }
     let file = std::fs::File::open(path).ok()?;
-    ImageReader::new(std::io::BufReader::new(file)).with_guessed_format().ok()?.into_dimensions().ok()
+    upright_dimensions(ImageReader::new(std::io::BufReader::new(file)).with_guessed_format().ok()?)
 }
 
 /// Convert premultiplied RGBA bytes (resvg/tiny_skia output) to straight RGBA.
@@ -547,6 +571,49 @@ impl AsRgba for RgbaImage {
 
 #[cfg(test)]
 mod tests {
+
+    /// An EXIF block that says "turn right" (orientation 6): what a phone
+    /// writes for a portrait it stores sideways.
+    fn turn_right_exif() -> Vec<u8> {
+        let mut tiff = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&6u32.to_le_bytes());
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        tiff
+    }
+
+    /// A photo stored sideways with an EXIF turn loads upright, at the
+    /// size it shows, from bytes and from a file, PNG and JPEG alike.
+    #[test]
+    fn a_photo_loads_the_way_its_exif_turns_it() {
+        use image::{GenericImageView, ImageEncoder, Rgb, RgbImage};
+        let mut stored = RgbImage::new(16, 8);
+        stored.put_pixel(0, 0, Rgb([255, 0, 0]));
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_exif_metadata(turn_right_exif()).unwrap();
+        encoder.write_image(stored.as_raw(), 16, 8, image::ExtendedColorType::Rgb8).unwrap();
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut jpeg);
+        encoder.set_exif_metadata(turn_right_exif()).unwrap();
+        encoder.write_image(stored.as_raw(), 16, 8, image::ExtendedColorType::Rgb8).unwrap();
+
+        let upright = load_image_from_bytes(&png).unwrap().to_rgb8();
+        assert_eq!(upright.dimensions(), (8, 16));
+        assert_eq!(*upright.get_pixel(7, 0), Rgb([255, 0, 0]), "the stored top-left turns to the top-right");
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [("turned.png", &png), ("turned.jpg", &jpeg)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(load_image_from_bytes(bytes).unwrap().dimensions(), (8, 16), "{name} from bytes");
+            assert_eq!(load_image_from_path(&path).unwrap().dimensions(), (8, 16), "{name} from a file");
+            assert_eq!(image_dimensions_from_bytes(bytes), Some((8, 16)), "{name}'s size from bytes");
+            assert_eq!(image_dimensions_from_path(&path), Some((8, 16)), "{name}'s size from a file");
+        }
+    }
 
     /// A background already the frame's size is used as it is: the same
     /// layer the resample path made (a same-size Lanczos pass is a copy,
