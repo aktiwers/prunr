@@ -2244,6 +2244,15 @@ impl BatchItem {
     /// A live render landed on the shown step, from `start`, cut by
     /// `cutter` (`None`: it cut nothing).
     pub(crate) fn record_photo_pass(&mut self, start: Option<RunStart>, cutter: Option<Cutter>) {
+        // A render built on another run's result (an erase's fill, an
+        // upscale) leaves that run the step's own, with its seed, region
+        // and kept run; only where the render began is noted.
+        if let Some(start) = start.as_ref() {
+            if let Some(origin) = self.timeline.current_mut().origin.as_mut().filter(|o| o.engine != Engine::Segment) {
+                origin.rendered_from = Some(start.clone());
+                return;
+            }
+        }
         // A pass that cut nothing keeps who cut the step; on a step nobody
         // cut (an erase, the photo) it records that no model did, since an
         // unrecorded cutter reads as the kept segmentation's cut, which may
@@ -2259,13 +2268,15 @@ impl BatchItem {
     }
 
     /// Where a run of `engine` starts (`None`: the original): the shown
-    /// step's own start when the run redoes it, the shown result otherwise.
-    /// Nothing is loaded.
+    /// step's own start when the run redoes it, where the last render
+    /// began for a render on another run's step, the shown result
+    /// otherwise. Nothing is loaded.
     pub(crate) fn run_start(&self, engine: Engine) -> Option<RunStart> {
-        match self.redo_origin(engine) {
-            Some(o) => o.start.clone(),
-            None => self.shown_start(),
+        if let Some(o) = self.redo_origin(engine) {
+            return o.start.clone();
         }
+        let rendered = self.timeline.current().origin.as_ref().and_then(|o| o.rendered_from.clone());
+        rendered.filter(|_| engine == Engine::Segment).or_else(|| self.shown_start())
     }
 
     /// The shown result as a run's start (`None`: the original shows).
@@ -3776,6 +3787,27 @@ mod tests {
         item.record_photo_pass(None, None);
         assert!(!item.shows_cutout(), "a render that cut nothing is no cut-out");
         assert!(matches!(item.render_seg(), (None, None)), "so no render re-cuts it");
+    }
+
+    /// A render on an upscale or colorize step keeps the run's kept run,
+    /// so its Refine or Strength stays on it, and the next render redoes
+    /// from the run's result.
+    #[test]
+    fn a_render_on_a_kept_run_keeps_it() {
+        for engine in [Engine::Upscale, Engine::Colorize] {
+            let mut item = fixture_item(1);
+            item.result_rgba = Some(px(1));
+            item.commit(StepKind::Process);
+            item.record_origin(engine, None, None);
+            item.finish_job_keeping(5);
+            let render_start = item.run_start(Engine::Segment).expect("a render starts from the run's result");
+            item.result_rgba = Some(px(2));
+            item.amend();
+            item.record_photo_pass(Some(render_start.clone()), None);
+            assert_eq!(item.shown_kept_run(), Some(5), "{engine:?}: the kept run stays");
+            let next = item.run_start(Engine::Segment).expect("the next render's start");
+            assert!(Arc::ptr_eq(&next, &render_start), "{engine:?}: the next render redoes from the run's result");
+        }
     }
 
     /// A render that cut nothing on a model's cut keeps that cut: a

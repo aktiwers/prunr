@@ -1786,6 +1786,33 @@ mod timeline_contract_tests {
         assert_eq!(item.shown_seed(), Some(1), "undo shows the fill before");
     }
 
+    /// A No model render landing on a generated fill keeps the fill as the
+    /// step's run: "Try another" still refills its region from the image
+    /// before the erase, Pin seed keeps its seed, and the next render
+    /// redoes from where the first began, not on its own output.
+    #[test]
+    fn a_render_on_a_fill_keeps_try_another_and_its_seed() {
+        let mut app = app_with_processed_item(SettingsModel::SdInpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        let painted = app.batch.items[0].timeline.current().selection.clone().expect("the stroke's region");
+        let item = &mut app.batch.items[0];
+        let erase_start = item.run_start(Engine::Erase).map(|s| s.dims());
+        item.start_erase(Some(7));
+        item.result_rgba = Some(px(10));
+        item.invalidate_selection();
+        item.finish_job();
+        let render_start = item.run_start(Engine::Segment).expect("a render starts from the fill");
+        item.result_rgba = Some(px(30));
+        item.amend();
+        item.record_photo_pass(Some(render_start.clone()), None);
+        let r = item.reroll().expect("the render keeps Try another");
+        assert!(Arc::ptr_eq(&r.region, &painted), "the region painted for the fill");
+        assert_eq!(r.start.as_ref().map(|s| s.dims()), erase_start, "from the image before the erase");
+        assert_eq!(item.shown_seed(), Some(7), "Pin seed keeps the fill's seed");
+        let next = item.run_start(Engine::Segment).expect("the next render's start");
+        assert!(Arc::ptr_eq(&next, &render_start), "the next render redoes from the fill");
+    }
+
     /// "Try another" is offered exactly when the SD eraser is chosen and
     /// the shown step is a generated fill with nothing running on it.
     #[test]
