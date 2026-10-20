@@ -246,6 +246,11 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     if !img_rect.contains(p) {
         return;
     }
+    // Ours replaces the system's (an arrow, or a cross on GNOME), except
+    // over a control floating on the image, which keeps its own.
+    if ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    }
     let r = s.radius.max(MIN_SCREEN_RADIUS_PX);
     let color = if armed {
         theme::mark_color(s.erase)

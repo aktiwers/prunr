@@ -156,6 +156,38 @@ fn the_tool_strip_follows_the_paint_brush() {
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
 }
 
+/// Over the image a brush draws its own cursor, so the system's (an
+/// arrow, or a cross on GNOME) is hidden there and only there: over the
+/// strip floating on the image, and off the image, it shows.
+#[test]
+fn a_brush_over_the_image_hides_the_system_cursor() {
+    for magic in [false, true] {
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            let item = push_test_item(app, 1);
+            item.dimensions = (800, 600);
+            super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            // Encoded already: while it encodes the Magic Brush shows Wait.
+            item.magic_brush_embedding = Some(std::sync::Arc::new(prunr_core::sam::SamEmbedding {
+                image_embed: vec![0.0; 4],
+                high_res_feats_0: vec![0.0; 4],
+                high_res_feats_1: vec![0.0; 4],
+            }));
+            app.batch.select_item(0);
+            if magic { app.magic_brush_state.activate(); } else { app.brush_state.enable(); }
+        }
+        settle_until_shown(&mut h);
+        let cursor = |h: &mut Harness<'_, PrunrApp>, pos| {
+            pointer_to(h, pos);
+            h.step();
+            h.output().platform_output.cursor_icon
+        };
+        assert_eq!(cursor(&mut h, egui::pos2(600.0, 480.0)), egui::CursorIcon::None, "magic {magic}: over the image");
+        assert_ne!(cursor(&mut h, egui::pos2(40.0, 25.0)), egui::CursorIcon::None, "magic {magic}: over the toolbar");
+    }
+}
+
 /// The strip draws on the foreground layer: under an open dialog it
 /// would sit on top of the dialog, so it leaves while one is up.
 #[test]
