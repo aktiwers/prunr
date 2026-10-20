@@ -31,11 +31,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     // The brush authors the selection against the source, so it is live
     // once an image is loaded. A stroke, a Magic Brush click or a focus
     // pick is a step: taken while a run is queued or under way it would
-    // make that run's result stale, so they wait for it.
+    // make that run's result stale, so they wait for it. A Paint Brush
+    // selection while an erase fills keeps the fill (`takes_strokes`).
     let editable = app.batch.selected_item().is_some_and(crate::gui::item::BatchItem::is_idle);
+    let corrects_cutout = app.batch.selected_item().is_some_and(|i| i.corrects_cutout(app.settings.model));
+    let takes_strokes = app.batch.selected_item().is_some_and(|i| i.takes_strokes(corrects_cutout));
     let app_state = app.batch.app_state();
     let model_has_brushes = shows(app.settings.model, Surface::Brushes);
-    let brush_active = model_has_brushes && app.brush_state.is_enabled() && editable;
+    let brush_active = model_has_brushes && app.brush_state.is_enabled() && takes_strokes;
     // Magic Brush is treated as a brush tool for pan-gate purposes: left
     // drag belongs to the brush and pan moves to the secondary (right)
     // button, matching Paint Brush. That holds while the image is still

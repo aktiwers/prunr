@@ -445,6 +445,19 @@ impl MaskArtifact {
         });
     }
 
+    /// The cells within `area` (where it is painted at all), as they are
+    /// here; the rest go. `None` when none is left, or the planes are of
+    /// other sizes.
+    pub fn within(&self, area: &MaskArtifact) -> Option<MaskArtifact> {
+        if (self.width, self.height) != (area.width, area.height) {
+            return None;
+        }
+        let cells: Vec<i8> = self.data.iter().zip(area.data.iter())
+            .map(|(&cell, &a)| if a == 0 { 0 } else { cell })
+            .collect();
+        cells.iter().any(|&c| c != 0).then(|| Self::from_cells(self.width, self.height, cells))
+    }
+
     /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
     pub fn bounds(&self) -> Option<CellRect> {
         if self.is_blank() {
@@ -743,6 +756,18 @@ mod tests {
         assert!(out.get_pixel(2, 1).0[3] > 100 && out.get_pixel(2, 1).0[3] < 155);
         assert_eq!(out.get_pixel(1, 0).0[3], 0, "an unselected pixel inside the bounds is clear");
         assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
+    }
+
+    /// A selection within an area: its cells where the area is painted,
+    /// as they are; the rest go. Nothing left, or a plane of another size,
+    /// is `None`.
+    #[test]
+    fn a_selection_within_an_area_keeps_its_cells_there() {
+        let selection = mask(4, 1, vec![FULL, -FULL, 30, 50]);
+        let area = mask(4, 1, vec![FULL, 0, 5, 0]);
+        assert_eq!(selection.within(&area).expect("cells in the area").cells(), &[FULL, 0, 30, 0]);
+        assert!(selection.within(&mask(4, 1, vec![0; 4])).is_none(), "an empty area");
+        assert!(selection.within(&mask(2, 2, vec![FULL; 4])).is_none(), "planes of other sizes");
     }
 
     /// On an image of another size (an upscale shown) the cut lands where

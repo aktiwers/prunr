@@ -428,6 +428,12 @@ pub(crate) struct Job {
     pub(crate) keep: Option<super::timeline::StoredImage>,
     /// Under way; a cut waits for a worker slot until it starts.
     pub(crate) running: bool,
+    /// When the step it started on was made: an undo or redo to a step
+    /// made since, on the same pixels, leaves the run landable.
+    pub(crate) since: std::time::Instant,
+    /// Where strokes landed while an erase fills: the next area, which
+    /// its landing keeps.
+    pub(crate) painted: Option<Arc<prunr_core::selection::MaskArtifact>>,
 }
 
 /// What "Try another" reruns: the shown fill's start (`None`: the
@@ -1421,6 +1427,52 @@ impl BatchItem {
         same_pixels && self.job_is_current() && self.job.as_ref().is_some_and(|j| j.engine != Engine::Segment && j.step.is_some())
     }
 
+    /// Whether moving to `target` (an undo or redo) leaves the run under way
+    /// landable: a step made since it started, on the pixels it started
+    /// from (strokes painted while an erase fills).
+    fn move_keeps_run(&self, target: &DocState) -> bool {
+        self.keeps_long_run(target) && self.job.as_ref().is_some_and(|j| target.at >= j.since)
+    }
+
+    pub(crate) fn undo_keeps_run(&self) -> bool {
+        self.timeline.previous().is_some_and(|to| self.move_keeps_run(to))
+    }
+
+    pub(crate) fn redo_keeps_run(&self) -> bool {
+        self.timeline.next().is_some_and(|to| self.move_keeps_run(to))
+    }
+
+    /// Whether a Paint Brush stroke may land now. A stroke is a step, so it
+    /// waits for a run on the image, but an erase: a selection painted
+    /// while it fills keeps its pixels and is the next area. A cut-out
+    /// correction changes pixels, so it waits for any run.
+    pub(crate) fn takes_strokes(&self, corrects_cutout: bool) -> bool {
+        self.is_idle() || (!corrects_cutout && self.job.as_ref().is_some_and(|j| j.engine == Engine::Erase))
+    }
+
+    /// A stroke landed: while an erase fills, where it was painted is the
+    /// next area, which the fill's landing keeps.
+    pub(crate) fn note_painted_during_erase(&mut self, stroke: &prunr_core::selection::MaskArtifact) {
+        let Some(job) = self.job.as_mut().filter(|j| j.engine == Engine::Erase) else { return };
+        let painted = match &job.painted {
+            Some(before) => before.add_mask(stroke).unwrap_or_else(|_| (**before).clone()),
+            None => stroke.clone(),
+        };
+        job.painted = Some(Arc::new(painted));
+    }
+
+    /// The fill landed: the marks it was made from go, those painted while
+    /// it ran stay as the next area. Undoing the fill brings both back.
+    pub(crate) fn clear_filled_marks(&mut self) {
+        let painted = self.job.as_ref().and_then(|j| j.painted.as_ref());
+        let next = painted.zip(self.selection_mask.as_ref()).and_then(|(painted, now)| now.within(painted));
+        self.invalidate_selection();
+        if let Some(next) = next {
+            self.selection_hash = Some(next.content_hash());
+            self.selection_mask = Some(Arc::new(next));
+        }
+    }
+
     /// The image leaves or comes on screen: off screen it lets go of its
     /// unpacked neighbour steps, on screen it warms them.
     pub(crate) fn set_on_screen(&mut self, on: bool) {
@@ -1985,11 +2037,20 @@ impl BatchItem {
 
     /// Move to the step `target` names, unless its saved state is gone.
     fn step(&mut self, target: fn(&Timeline) -> Option<&DocState>, moved: fn(&mut Timeline) -> Option<StepKind>) -> Result<StepKind, StepRefused> {
-        if !target(&self.timeline).ok_or(StepRefused::Nothing)?.readable() {
+        let to = target(&self.timeline).ok_or(StepRefused::Nothing)?;
+        if !to.readable() {
             return Err(StepRefused::Lost);
         }
+        let keeps_run = self.move_keeps_run(to);
         let kind = moved(&mut self.timeline).ok_or(StepRefused::Nothing)?;
+        // The run goes on, its preview with it.
+        let kept = if keeps_run { (self.job.take(), self.tile_preview.take()) } else { (None, None) };
         self.restore();
+        if let (Some(mut job), preview) = kept {
+            job.version = self.timeline.version();
+            self.job = Some(job);
+            self.tile_preview = preview;
+        }
         self.warm_neighbour_steps();
         Ok(kind)
     }
@@ -2037,7 +2098,8 @@ impl BatchItem {
     ) {
         // Only a cut queues for a worker slot; other runs start at once.
         let running = engine != Engine::Segment;
-        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running });
+        let since = self.timeline.current().at;
+        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running, since, painted: None });
         self.failure = None;
         self.tile_preview = None;
         self.subject = None;
@@ -2956,6 +3018,46 @@ mod tests {
         assert!(!item.has_unsaved_work());
     }
 
+    fn selection(cell: usize) -> Arc<prunr_core::selection::MaskArtifact> {
+        let mut cells = vec![0i8; 16];
+        cells[cell] = prunr_core::selection::FULL;
+        Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, cells))
+    }
+
+    /// Paint Brush strokes wait for a run on the image, but an erase: a
+    /// selection painted while it fills is the next area, and keeps the
+    /// fill. A cut-out correction changes pixels, so it waits for any run.
+    #[test]
+    fn strokes_wait_for_a_run_but_an_erase() {
+        let mut item = fixture_item(1);
+        assert!(item.takes_strokes(false) && item.takes_strokes(true));
+        item.start_erase(None);
+        assert!(item.takes_strokes(false), "a selection while an erase fills");
+        assert!(!item.takes_strokes(true), "a cut-out correction waits");
+        item.abandon_job();
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        assert!(!item.takes_strokes(false), "an upscale waits as before");
+    }
+
+    /// Undo and redo between strokes painted while an erase fills keep it;
+    /// an undo past where it started leaves it behind.
+    #[test]
+    fn steps_within_an_erase_keep_it_and_one_past_its_start_does_not() {
+        let mut item = fixture_item(1);
+        assert!(item.commit_selection_mask(selection(5), StepKind::Stroke));
+        item.start_erase(None);
+        assert!(item.commit_selection_mask(selection(9), StepKind::Stroke));
+        assert!(item.job_is_current(), "a stroke keeps the erase");
+        assert!(item.undo_keeps_run());
+        item.undo_step().unwrap();
+        assert!(item.job_is_current(), "undoing it too");
+        assert!(item.redo_keeps_run());
+        item.redo_step().unwrap();
+        assert!(item.job_is_current(), "and redoing it");
+        item.undo_step().unwrap();
+        assert!(!item.undo_keeps_run(), "the stroke the erase was made from");
+    }
+
     #[test]
     fn an_image_is_running_while_a_model_works_on_it() {
         let mut item = fixture_item(1);
@@ -3822,10 +3924,13 @@ mod tests {
         }
 
         let mut item = fixture_item(1);
+        item.commit(StepKind::Preset);
         item.start_job(Some(StepKind::Erase), Engine::Erase);
         item.commit(StepKind::Adjust);
         let _ = item.undo_step();
-        assert!(!item.job_is_current(), "an undo");
+        assert!(item.job_is_current(), "an undo back to where the run started");
+        let _ = item.undo_step();
+        assert!(!item.job_is_current(), "an undo past it");
 
         let mut item = fixture_item(1);
         item.start_job(Some(StepKind::Process), Engine::Segment);
