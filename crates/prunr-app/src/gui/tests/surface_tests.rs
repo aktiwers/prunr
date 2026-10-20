@@ -602,7 +602,7 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
             h.step();
         }
         for _ in 0..3 {
-            assert!(paced(delay(&h)), "{status:?}: the next frame is asked for {:?} ahead", delay(&h));
+            assert!(paced(delay(&h)), "{status:?}: the next frame is asked for {:?} ahead, by {:?}", delay(&h), h.ctx.repaint_causes());
             h.step();
         }
     }
